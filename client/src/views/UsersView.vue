@@ -1,5 +1,5 @@
 <template>
-  <div class="users-page">
+  <div class="users-page admin-page page-narrow">
     <div class="page-header">
       <h2>User Management</h2>
     </div>
@@ -52,21 +52,3 @@ onMounted(() => {
 })
 </script>
 
-<style scoped>
-.users-page {
-  max-width: 900px;
-}
-
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 1.5rem;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-}
-
-.page-header h2 {
-  font-size: 1.35rem;
-}
-</style>

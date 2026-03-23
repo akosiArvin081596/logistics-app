@@ -1,5 +1,5 @@
 <template>
-  <div class="investor-dashboard">
+  <div class="investor-dashboard admin-page page-narrow">
     <div class="page-header">
       <h2>Financial &amp; Investor Dashboard</h2>
       <span class="status-pill">{{ statusText }}</span>
@@ -121,32 +121,7 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.investor-dashboard {
-  max-width: 960px;
-}
-
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 1.5rem;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-}
-
-.page-header h2 {
-  font-size: 1.35rem;
-}
-
-.status-pill {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.72rem;
-  padding: 0.3rem 0.65rem;
-  border-radius: 20px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-}
+.investor-dashboard { padding-bottom: 1.5rem; }
 
 .skeleton-block {
   height: 200px;

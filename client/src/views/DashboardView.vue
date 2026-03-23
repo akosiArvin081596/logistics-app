@@ -1,5 +1,5 @@
 <template>
-  <div class="dashboard">
+  <div class="dashboard admin-page">
     <div class="page-header">
       <h2>Operations Dashboard</h2>
       <div class="status-bar">
@@ -145,24 +145,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.dashboard {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
+.dashboard { overflow: hidden; }
 .kpi-grid, .revenue-grid, .page-header { flex-shrink: 0; }
-.page-header h2 { font-size: 1.35rem; }
-.status-bar { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
-.status-pill {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.72rem;
-  padding: 0.3rem 0.65rem;
-  border-radius: 20px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-}
 
 /* skeleton fallback grids */
 .kpi-grid {
@@ -476,40 +460,4 @@ onUnmounted(() => {
 .skeleton-line.lg { height: 1.75rem; width: 60%; }
 .skeleton-line.sm { height: 0.7rem; width: 40%; }
 
-/* Pagination styles */
-:deep(.pagination) {
-  display: flex; align-items: center;
-  justify-content: space-between;
-  padding: 0.75rem 1rem;
-  border-top: 1px solid var(--border);
-  background: var(--surface);
-  flex-wrap: wrap; gap: 0.5rem;
-}
-:deep(.pagination-info) {
-  font-size: 0.78rem; color: var(--text-dim);
-  font-family: 'JetBrains Mono', monospace;
-}
-:deep(.pagination-controls) {
-  display: flex; align-items: center; gap: 0.25rem;
-}
-:deep(.page-btn) {
-  min-width: 32px; height: 32px;
-  display: flex; align-items: center; justify-content: center;
-  border: 1px solid var(--border); border-radius: 6px;
-  background: var(--surface); color: var(--text-dim);
-  font-family: 'DM Sans', sans-serif;
-  font-size: 0.8rem; font-weight: 500;
-  cursor: pointer; transition: all 0.12s;
-}
-:deep(.page-btn:hover:not(:disabled)) { background: var(--surface-hover); color: var(--text); border-color: var(--text-dim); }
-:deep(.page-btn.active) { background: var(--accent); color: #fff; border-color: var(--accent); }
-:deep(.page-btn:disabled) { opacity: 0.4; cursor: not-allowed; }
-:deep(.page-size-select) {
-  padding: 0.3rem 0.5rem;
-  border: 1px solid var(--border); border-radius: 6px;
-  background: var(--surface); color: var(--text);
-  font-family: 'DM Sans', sans-serif;
-  font-size: 0.78rem; cursor: pointer; outline: none;
-  margin-left: 0.5rem;
-}
 </style>
