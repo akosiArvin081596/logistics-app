@@ -108,8 +108,10 @@ watch(
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow-x: auto;
+  overflow: auto;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  flex: 1;
+  min-height: 0;
 }
 table {
   width: 100%;
@@ -117,6 +119,9 @@ table {
 }
 thead {
   background: var(--surface-hover);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 th {
   padding: 0.75rem 1rem;
