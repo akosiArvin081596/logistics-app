@@ -5,37 +5,66 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-npm start        # Run server (node server.js) on port 3000
-npm run dev      # Run with --watch for auto-restart on file changes
+# Backend (Express server)
+npm start            # Run server (node server.js) on port 3000
+npm run dev          # Run with nodemon for auto-restart on file changes
+
+# Frontend (Vue 3 + Vite SPA)
+npm run dev:client   # Start Vite dev server on port 5173 (proxies to Express:3000)
+npm run build:client # Production build to client/dist/
 ```
 
-No build step, test runner, or linter is configured.
+Development requires two terminals: `npm run dev` + `npm run dev:client`. Open http://localhost:5173 during development.
+
+For production: `npm run build:client` then `npm start` — Express serves the built SPA from `client/dist/`.
+
+No test runner or linter is configured.
 
 ## Architecture
 
-Single-server Node.js/Express app using Google Sheets as the database via Sheets API v4.
+### Backend (`server.js`)
+Node.js/Express server using Google Sheets as the primary database via Sheets API v4, with SQLite for local data (users, messages, expenses, investor config).
 
-**Backend (`server.js`)** — Express server with 6 REST endpoints:
+REST endpoints:
 - `GET /api/tabs` — list all sheet tab names
 - `GET /api/data?sheet=&page=&limit=` — read rows (paginated, max 200/page)
 - `POST /api/data?sheet=` — append row (`{ values: [...] }`)
 - `PUT /api/data/:rowIndex?sheet=` — update row by 1-based index
 - `DELETE /api/data/:rowIndex?sheet=` — delete row (shifts rows up)
-- `GET /api/dashboard` — aggregated KPIs, job board, active loads, fleet data from 5 sheets via single `batchGet`
+- `GET /api/dashboard` — aggregated KPIs, job board, active loads, fleet data
+- `GET /api/driver/:name` — driver-specific data
+- `PUT /api/driver/status` — update load status
+- `POST /api/messages`, `PUT /api/messages/read`, `GET /api/messages` — messaging
+- `POST /api/expenses` — expense logging
+- `GET /api/investor`, `PUT /api/investor/config` — investor view
+- Auth: `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/session`, `POST /api/auth/setup`
+- Users: `GET /api/users`, `POST /api/users`, `DELETE /api/users/:id`
 
-Authentication uses a Google service account (`service-account-key.json`) with `googleapis` library. The spreadsheet ID and default sheet name ("Job Tracking") are hardcoded at the top of `server.js`.
+Socket.IO for real-time messaging. Session-based auth with 4 roles: Admin, Dispatcher, Driver, Investor.
 
-**Frontend** — Two single-file vanilla HTML/CSS/JS pages, no framework or build tooling:
+### Frontend (`client/`)
+Vue 3 + Vite SPA with Vue Router and Pinia state management.
 
-`public/dashboard.html` — Operations Dashboard ("Control Tower") with KPI cards, revenue bar, unassigned job board with driver assignment, active loads table, and fleet/driver grid. Auto-refreshes every 60s. Fetches from `/api/dashboard`.
+```
+client/src/
+  main.js              — App bootstrap
+  App.vue              — Root: sidebar + router-view + toast
+  router/index.js      — 6 routes with role-based auth guards
+  stores/              — Pinia stores (auth, dashboard, sheets, driver, messages, investor, users)
+  composables/         — useApi, useSocket, useToast, usePagination
+  components/
+    layout/            — AppSidebar, AppToast
+    shared/            — StatusBadge, PaginationBar, EmptyState, SkeletonLoader, ConfirmModal
+    dashboard/         — KpiGrid, RevenueGrid, JobBoardTab, ActiveLoadsTab, FleetTab, MessagingPanel
+    data-manager/      — DataTable, AddRowModal, SheetTabs
+    driver/            — DriverHeader, BottomNav, LoadCard, StatusStepper, ChatView, ExpenseForm, etc.
+    investor/          — ProductionSection, AssetSection, TaxShieldSection, RecessionSection
+    users/             — AddUserForm, UserTable
+  views/               — LoginView, DashboardView, DataManagerView, DriverView, InvestorView, UsersView
+```
 
-`public/index.html` — Data Manager for CRUD operations on individual sheets. Features:
-- Sidebar navigation auto-populated from sheet tabs via `/api/tabs`
-- Dynamic table rendering with inline editing
-- Driver dropdown fields populated from "Carrier Database" sheet
-- Modal form for adding rows
-- Pagination with configurable page size
-- Toast notifications for feedback
+### Legacy Frontend (`public/`)
+Original vanilla HTML/CSS/JS pages. Kept as fallback — Express serves `client/dist/` if it exists, otherwise `public/`.
 
 ## Key Conventions
 
@@ -44,6 +73,7 @@ Authentication uses a Google service account (`service-account-key.json`) with `
 - **Value format**: POST/PUT bodies use `{ values: ["col1", "col2", ...] }` with `valueInputOption: "USER_ENTERED"` (supports formulas).
 - **Delete mechanism**: Uses Sheets `batchUpdate` with `deleteDimension` (0-indexed internally), not clearing cell values.
 - **Driver fields**: Any column matching `/driver/i` renders as a `<select>` populated from the first driver-like column in "Carrier Database".
+- **Role-based routing**: Admin sees all, Dispatcher sees dashboard+data, Driver sees driver app (no sidebar), Investor sees financial view.
 
 ## Google Sheets API
 

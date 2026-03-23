@@ -120,7 +120,15 @@ app.use(
 		cookie: { maxAge: 24 * 60 * 60 * 1000 },
 	}),
 );
-app.use(express.static(path.join(__dirname, "public")));
+// Serve Vue SPA build (client/dist) if it exists, otherwise fall back to public/
+const fs = require("fs");
+const clientDistPath = path.join(__dirname, "client", "dist");
+const publicPath = path.join(__dirname, "public");
+if (fs.existsSync(clientDistPath)) {
+	app.use(express.static(clientDistPath));
+} else {
+	app.use(express.static(publicPath));
+}
 
 // ============================================================
 // CONFIGURATION — Update these values with your own
@@ -1168,6 +1176,18 @@ app.put("/api/investor/config", requireRole("Admin"), (req, res) => {
 	} catch (error) {
 		console.error("Error updating investor config:", error.message);
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// ============================================================
+// SPA Catch-All — Serve Vue app for all non-API routes
+// ============================================================
+app.get("*", (req, res) => {
+	const spaIndex = path.join(clientDistPath, "index.html");
+	if (fs.existsSync(spaIndex)) {
+		res.sendFile(spaIndex);
+	} else {
+		res.sendFile(path.join(publicPath, "index.html"));
 	}
 });
 

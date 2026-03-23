@@ -2,6 +2,10 @@ node_modules/
 service-account-key.json
 .env
 
+# Vue / Vite
+client/dist/
+client/node_modules/
+
 # Claude
 .claude/
 .claude*
