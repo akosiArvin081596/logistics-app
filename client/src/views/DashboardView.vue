@@ -164,32 +164,31 @@ onUnmounted(() => {
   color: var(--text-dim);
 }
 
+/* skeleton fallback grids */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(4, 1fr);
   gap: 1rem;
-  margin-bottom: 1.25rem;
+  margin-bottom: 1rem;
 }
 .kpi-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 1.25rem;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  padding: 1.1rem 1.25rem;
 }
 
 .revenue-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 1rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1rem;
 }
 .revenue-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 1rem 1.25rem;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  padding: 0.9rem 1.25rem;
 }
 
 .dash-section.fill {
