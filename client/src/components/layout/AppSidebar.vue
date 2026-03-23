@@ -30,14 +30,16 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { useSocket } from '../../composables/useSocket'
 
 const router = useRouter()
 const auth = useAuthStore()
-const { isConnected } = useSocket()
+const { isConnected, connect } = useSocket()
+
+onMounted(() => connect())
 
 const navConfig = {
   Admin: [
