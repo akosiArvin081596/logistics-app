@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Investor Dashboard</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/shared.css" />
+  <style>
+    /* ---- Investor-specific styles ---- */
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+    .section-title {
+      font-size: 0.95rem; font-weight: 700;
+      margin-bottom: 1rem;
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    .section-title .section-icon {
+      width: 28px; height: 28px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.9rem;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem; margin-bottom: 1rem;
+    }
+    .kpi-card {
+      padding: 1rem; border: 1px solid var(--border);
+      border-radius: var(--radius); text-align: center;
+    }
+    .kpi-label { font-size: 0.72rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.4rem; }
+    .kpi-value { font-family: 'JetBrains Mono', monospace; font-size: 1.5rem; font-weight: 700; }
+    .kpi-sub { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.2rem; }
+    .kpi-card.accent { border-color: var(--accent); }
+    .kpi-card.accent .kpi-value { color: var(--accent); }
+    .kpi-card.blue { border-color: var(--blue); }
+    .kpi-card.blue .kpi-value { color: var(--blue); }
+    .chart-bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 0.5rem; border-bottom: 1px solid var(--border); }
+    .chart-bar-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
+    .chart-bar { width: 100%; max-width: 32px; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; transition: height 0.3s; }
+    .chart-label { font-size: 0.55rem; color: var(--text-dim); margin-top: 0.3rem; font-family: 'JetBrains Mono', monospace; }
+    .chart-amount { font-size: 0.55rem; color: var(--text); font-weight: 600; font-family: 'JetBrains Mono', monospace; margin-bottom: 0.2rem; }
+    .progress-container { display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
+    .progress-ring { position: relative; width: 120px; height: 120px; }
+    .progress-ring svg { transform: rotate(-90deg); width: 120px; height: 120px; }
+    .progress-ring .ring-bg { fill: none; stroke: var(--border); stroke-width: 10; }
+    .progress-ring .ring-fill { fill: none; stroke: var(--accent); stroke-width: 10; stroke-linecap: round; transition: stroke-dashoffset 0.5s; }
+    .progress-ring .ring-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-size: 1.3rem; font-weight: 700; color: var(--accent); }
+    .progress-details { flex: 1; min-width: 200px; }
+    .progress-row { display: flex; justify-content: space-between; padding: 0.4rem 0; font-size: 0.85rem; border-bottom: 1px solid var(--bg); }
+    .progress-row:last-child { border-bottom: none; }
+    .progress-label { color: var(--text-dim); }
+    .progress-value { font-weight: 600; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; }
+    .asset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .asset-item { padding: 0.85rem; border: 1px solid var(--border); border-radius: 8px; text-align: center; }
+    .asset-item .asset-label { font-size: 0.72rem; color: var(--text-dim); font-weight: 600; margin-bottom: 0.3rem; }
+    .asset-item .asset-value { font-family: 'JetBrains Mono', monospace; font-size: 1.1rem; font-weight: 700; }
+    .dep-bar-container { margin-top: 1rem; }
+    .dep-bar-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.3rem; }
+    .dep-bar { height: 10px; background: var(--border); border-radius: 5px; overflow: hidden; }
+    .dep-bar-fill { height: 100%; border-radius: 5px; transition: width 0.5s; }
+    .broker-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .broker-table th { text-align: left; padding: 0.5rem 0.4rem; font-weight: 600; color: var(--text-dim); border-bottom: 2px solid var(--border); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .broker-table td { padding: 0.5rem 0.4rem; border-bottom: 1px solid var(--bg); }
+    .broker-table tr:last-child td { border-bottom: none; }
+    .chip-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.65rem; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+    .chip-blue { background: var(--blue-dim); color: var(--blue); }
+    .chip-default { background: var(--bg); color: var(--text-dim); }
+    .vol-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; min-width: 80px; }
+    .vol-bar-fill { height: 100%; background: var(--blue); border-radius: 3px; }
+    .skeleton-block { height: 200px; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+
+<div class="main">
+  <div class="page-header">
+    <h2>Financial & Investor Dashboard</h2>
+    <span class="status-pill" id="lastUpdated">Loading...</span>
+  </div>
+
+  <div id="loadingSkeleton">
+    <div class="skeleton skeleton-block"></div>
+    <div class="skeleton skeleton-block"></div>
+    <div class="skeleton skeleton-block"></div>
+  </div>
+
+  <div id="dashContent" style="display:none">
+    <div class="section">
+      <div class="section-title">
+        <div class="section-icon" style="background:var(--accent-dim);color:var(--accent);">&#9650;</div>
+        Production Performance
+      </div>
+      <div class="kpi-grid" id="productionKPIs"></div>
+      <div class="chart-bars" id="revenueChart"></div>
+      <div style="text-align:center;margin-top:0.3rem;font-size:0.65rem;color:var(--text-dim);">Monthly Revenue</div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">
+        <div class="section-icon" style="background:var(--blue-dim);color:var(--blue);">&#9679;</div>
+        Asset Security Dashboard
+      </div>
+      <div class="asset-grid" id="assetGrid"></div>
+      <div class="dep-bar-container" id="depBar"></div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">
+        <div class="section-icon" style="background:var(--amber-dim);color:var(--amber);">&#9670;</div>
+        Tax Shield Tracker
+      </div>
+      <div class="progress-container" id="taxShield"></div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">
+        <div class="section-icon" style="background:var(--accent-dim);color:var(--accent);">&#9733;</div>
+        Recession-Proof Metrics
+      </div>
+      <div class="kpi-grid" id="recessionKPIs"></div>
+      <table class="broker-table" id="brokerTable">
+        <thead><tr><th>Broker / Shipper</th><th>Loads</th><th>Volume</th><th>Type</th></tr></thead>
+        <tbody id="brokerBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script src="/js/layout.js"></script>
+<script>
+function fmt(n) {
+  return '$' + Number(n).toLocaleString('en-US');
+}
+
+async function loadInvestorData() {
+  try {
+    const res = await fetch('/api/investor');
+    if (!res.ok) throw new Error('Failed');
+    const data = await res.json();
+    renderDashboard(data);
+  } catch (err) {
+    toast('Failed to load data', 'error');
+  }
+}
+
+function renderDashboard(data) {
+  const { production, asset, taxShield, recessionProof } = data;
+
+  document.getElementById('loadingSkeleton').style.display = 'none';
+  document.getElementById('dashContent').style.display = '';
+  document.getElementById('lastUpdated').textContent = 'Read-Only';
+
+  document.getElementById('productionKPIs').innerHTML = `
+    <div class="kpi-card accent">
+      <div class="kpi-label">Avg Daily Revenue</div>
+      <div class="kpi-value">${fmt(production.avgDailyRevenue)}</div>
+      <div class="kpi-sub">over ${production.operatingDays} days</div>
+    </div>
+    <div class="kpi-card accent">
+      <div class="kpi-label">Monthly Investor Payout</div>
+      <div class="kpi-value">${fmt(production.payoutRange.min)}</div>
+      <div class="kpi-sub">to ${fmt(production.payoutRange.max)}/mo</div>
+    </div>
+    <div class="kpi-card blue">
+      <div class="kpi-label">Total Revenue</div>
+      <div class="kpi-value">${fmt(production.totalRevenue)}</div>
+      <div class="kpi-sub">${fmt(production.paidRevenue)} collected</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Completed Loads</div>
+      <div class="kpi-value">${production.completedJobs}</div>
+      <div class="kpi-sub">of ${production.totalJobs} total</div>
+    </div>`;
+
+  const months = production.monthlyData || [];
+  const maxAmt = Math.max(...months.map(m => m.amount), 1);
+  document.getElementById('revenueChart').innerHTML = months.length === 0
+    ? '<div style="width:100%;text-align:center;color:var(--text-dim);font-size:0.82rem;align-self:center;">No monthly data yet</div>'
+    : months.map(m => {
+        const pct = (m.amount / maxAmt) * 100;
+        const label = m.month.split('-')[1];
+        return `<div class="chart-bar-wrap"><div class="chart-amount">${fmt(m.amount)}</div><div class="chart-bar" style="height:${pct}%;"></div><div class="chart-label">${label}</div></div>`;
+      }).join('');
+
+  const depPct = Math.round(((asset.purchasePrice - asset.currentValue) / asset.purchasePrice) * 100);
+  document.getElementById('assetGrid').innerHTML = `
+    <div class="asset-item"><div class="asset-label">Purchase Price</div><div class="asset-value">${fmt(asset.purchasePrice)}</div></div>
+    <div class="asset-item"><div class="asset-label">Current Market Value</div><div class="asset-value" style="color:var(--accent);">${fmt(asset.currentValue)}</div></div>
+    <div class="asset-item"><div class="asset-label">Title Status</div><div class="asset-value" style="color:var(--blue);font-size:0.95rem;">${escapeHtml(asset.titleStatus)}</div></div>
+    <div class="asset-item"><div class="asset-label">Fleet Size</div><div class="asset-value">${asset.totalTrucks}</div></div>`;
+
+  document.getElementById('depBar').innerHTML = `
+    <div class="dep-bar-label"><span>Depreciation (${asset.depreciationYears}yr schedule)</span><span>${depPct}% depreciated &middot; ${fmt(asset.annualDepreciation)}/yr</span></div>
+    <div class="dep-bar"><div class="dep-bar-fill" style="width:${depPct}%;background:var(--amber);"></div></div>`;
+
+  const circumference = 2 * Math.PI * 50;
+  const writeOffPct = taxShield.writeOffPct;
+  const offset = circumference - (writeOffPct / 100) * circumference;
+  document.getElementById('taxShield').innerHTML = `
+    <div class="progress-ring"><svg viewBox="0 0 120 120"><circle class="ring-bg" cx="60" cy="60" r="50" /><circle class="ring-fill" cx="60" cy="60" r="50" stroke-dasharray="${circumference}" stroke-dashoffset="${offset}" /></svg><div class="ring-text">${writeOffPct}%</div></div>
+    <div class="progress-details">
+      <div class="progress-row"><span class="progress-label">Year 1 Write-Off (Sec. 179 + Bonus)</span><span class="progress-value" style="color:var(--accent);">${fmt(taxShield.section179)}</span></div>
+      <div class="progress-row"><span class="progress-label">Purchase Price</span><span class="progress-value">${fmt(asset.purchasePrice)}</span></div>
+      <div class="progress-row"><span class="progress-label">At-Risk Capital Remaining</span><span class="progress-value" style="color:var(--danger);">${fmt(taxShield.atRiskCapital)}</span></div>
+      <div class="progress-row"><span class="progress-label">Tax Shield Coverage</span><span class="progress-value" style="color:var(--accent);">${writeOffPct}%</span></div>
+    </div>`;
+
+  document.getElementById('recessionKPIs').innerHTML = `
+    <div class="kpi-card accent"><div class="kpi-label">Blue-Chip Contract Share</div><div class="kpi-value">${recessionProof.blueChipPct}%</div><div class="kpi-sub">${recessionProof.blueChipJobs} of ${recessionProof.totalJobs} loads</div></div>
+    <div class="kpi-card blue"><div class="kpi-label">Total Broker Partners</div><div class="kpi-value">${recessionProof.topBrokers.length}</div><div class="kpi-sub">top partners by volume</div></div>`;
+
+  const maxBrokerCount = Math.max(...recessionProof.topBrokers.map(b => b.count), 1);
+  document.getElementById('brokerBody').innerHTML = recessionProof.topBrokers.map(b => {
+    const volPct = (b.count / maxBrokerCount) * 100;
+    return `<tr><td>${escapeHtml(b.name)}</td><td style="font-family:'JetBrains Mono',monospace;font-weight:600;">${b.count}</td><td><div class="vol-bar"><div class="vol-bar-fill" style="width:${volPct}%;${b.isBlueChip ? 'background:var(--accent);' : ''}"></div></div></td><td>${b.isBlueChip ? '<span class="chip-badge chip-blue">Blue-Chip</span>' : '<span class="chip-badge chip-default">Standard</span>'}</td></tr>`;
+  }).join('');
+}
+
+Layout.init({
+  page: 'investor',
+  requiredRoles: ['Admin', 'Investor'],
+  onReady: () => loadInvestorData(),
+});
+</script>
+</body>
+</html>

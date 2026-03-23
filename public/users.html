@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>User Management — Dispatch</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/shared.css" />
+  <style>
+    .admin-section-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 700;
+      font-size: 0.88rem;
+      margin-bottom: 1rem;
+    }
+    .admin-section-title .section-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+    }
+    .user-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 0.82rem;
+      margin-top: 0.5rem;
+    }
+    .user-table th {
+      text-align: left;
+      padding: 0.6rem 0.5rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      border-bottom: 2px solid var(--border);
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .user-table td {
+      padding: 0.65rem 0.5rem;
+      border-bottom: 1px solid var(--bg);
+      vertical-align: middle;
+    }
+    .user-table tbody tr { transition: background 0.1s; }
+    .user-table tbody tr:hover { background: var(--bg); }
+    .user-table tbody tr:last-child td { border-bottom: none; }
+    .role-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.2rem 0.6rem;
+      border-radius: 12px;
+      font-size: 0.68rem;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+      letter-spacing: 0.02em;
+    }
+    .role-admin { background: var(--danger-dim); color: var(--danger); }
+    .role-dispatcher { background: var(--blue-dim); color: var(--blue); }
+    .role-driver { background: var(--accent-dim); color: var(--accent); }
+    .role-investor { background: var(--amber-dim); color: var(--amber); }
+    .user-avatar {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.65rem;
+      font-weight: 700;
+      margin-right: 0.5rem;
+      vertical-align: middle;
+    }
+    .user-avatar.av-admin { background: var(--danger-dim); color: var(--danger); }
+    .user-avatar.av-dispatcher { background: var(--blue-dim); color: var(--blue); }
+    .user-avatar.av-driver { background: var(--accent-dim); color: var(--accent); }
+    .user-avatar.av-investor { background: var(--amber-dim); color: var(--amber); }
+    .btn-remove {
+      padding: 0.3rem 0.65rem;
+      font-size: 0.7rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: 500;
+      color: var(--text-dim);
+      transition: all 0.15s;
+    }
+    .btn-remove:hover { background: var(--danger-dim); color: var(--danger); border-color: var(--danger-dim); }
+    .error-msg {
+      color: var(--danger);
+      font-size: 0.78rem;
+      margin-top: 0.5rem;
+      min-height: 1.1em;
+    }
+  </style>
+</head>
+<body>
+
+<div class="main">
+  <div class="page-header">
+    <h2>User Management</h2>
+  </div>
+
+  <!-- Add User Card -->
+  <div class="card">
+    <div class="admin-section-title">
+      <div class="section-dot" style="background:var(--accent);"></div>
+      New User
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Username</label>
+        <input class="form-input" id="newUser" type="text" placeholder="e.g. john.doe" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <input class="form-input" id="newPass" type="password" placeholder="Set password" />
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Role</label>
+        <select class="form-select" id="newRole" onchange="toggleDriverField()">
+          <option value="Admin">Admin</option>
+          <option value="Dispatcher">Dispatcher</option>
+          <option value="Driver" selected>Driver</option>
+          <option value="Investor">Investor</option>
+        </select>
+      </div>
+      <div class="form-group" id="driverNameGroup">
+        <label class="form-label">Driver Name (Carrier DB)</label>
+        <select class="form-select" id="newDriverName">
+          <option value="">-- Select driver --</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Email (optional)</label>
+      <input class="form-input" id="newEmail" type="email" placeholder="user@company.com" />
+    </div>
+    <button class="btn btn-primary" style="width:auto;padding:0.5rem 1.5rem;" onclick="addUser()">Add User</button>
+    <div class="error-msg" id="addUserError"></div>
+  </div>
+
+  <!-- Team Members Card -->
+  <div class="card">
+    <div class="admin-section-title">
+      <div class="section-dot" style="background:var(--blue);"></div>
+      Team Members
+    </div>
+    <div id="userListContainer">
+      <p style="color: var(--text-dim); font-size: 0.82rem;">Loading...</p>
+    </div>
+  </div>
+</div>
+
+<script src="/js/layout.js"></script>
+<script>
+function initials(name) {
+  return (name || '?').split(/[\s._-]+/).map(w => w[0]).join('').toUpperCase().slice(0, 2);
+}
+
+Layout.init({
+  page: 'users',
+  requiredRoles: ['Admin'],
+  onReady: function() {
+    loadDriverNames();
+    loadUsers();
+  }
+});
+
+async function loadDriverNames() {
+  try {
+    const res = await fetch('/api/data?sheet=Carrier Database&limit=200');
+    const json = await res.json();
+    const dCol = json.headers.find(h => /driver/i.test(h)) || json.headers[0];
+    const names = [...new Set(json.data.map(r => (r[dCol] || '').trim()).filter(Boolean))].sort();
+    const sel = document.getElementById('newDriverName');
+    sel.innerHTML = '<option value="">-- Select driver --</option>' +
+      names.map(n => `<option value="${n}">${n}</option>`).join('');
+  } catch {}
+}
+
+async function loadUsers() {
+  try {
+    const res = await fetch('/api/users');
+    const data = await res.json();
+    const users = data.users || [];
+    if (users.length === 0) {
+      document.getElementById('userListContainer').innerHTML =
+        '<p style="color: var(--text-dim); font-size: 0.82rem;">No users yet.</p>';
+      return;
+    }
+    const roleClass = r => ({ Admin: 'role-admin', Dispatcher: 'role-dispatcher', Driver: 'role-driver', Investor: 'role-investor' }[r] || '');
+    const avClass = r => ({ Admin: 'av-admin', Dispatcher: 'av-dispatcher', Driver: 'av-driver', Investor: 'av-investor' }[r] || 'av-driver');
+    document.getElementById('userListContainer').innerHTML = `
+      <table class="user-table">
+        <thead><tr><th>User</th><th>Role</th><th>Linked Driver</th><th></th></tr></thead>
+        <tbody>
+          ${users.map(u => `<tr>
+            <td>
+              <span class="user-avatar ${avClass(u.Role)}">${initials(u.Username)}</span>
+              ${escapeHtml(u.Username || '')}
+            </td>
+            <td><span class="role-badge ${roleClass(u.Role)}">${escapeHtml(u.Role || '')}</span></td>
+            <td style="color:${u.DriverName ? 'var(--text)' : 'var(--text-dim)'};">${escapeHtml(u.DriverName || '—')}</td>
+            <td style="text-align:right;"><button class="btn-remove" onclick="deleteUser(${u.id}, '${(u.Username || '').replace(/'/g, "\\'")}')">Remove</button></td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch {
+    document.getElementById('userListContainer').innerHTML =
+      '<p style="color: var(--danger); font-size: 0.82rem;">Failed to load users.</p>';
+  }
+}
+
+function toggleDriverField() {
+  const role = document.getElementById('newRole').value;
+  document.getElementById('driverNameGroup').style.display = role === 'Driver' ? '' : 'none';
+}
+
+async function addUser() {
+  const username = document.getElementById('newUser').value.trim();
+  const password = document.getElementById('newPass').value;
+  const role = document.getElementById('newRole').value;
+  const driverName = document.getElementById('newDriverName').value;
+  const email = document.getElementById('newEmail').value.trim();
+  const errEl = document.getElementById('addUserError');
+
+  if (!username || !password) { errEl.textContent = 'Username and password required.'; return; }
+  if (role === 'Driver' && !driverName) { errEl.textContent = 'Select a driver name for Driver role.'; return; }
+
+  errEl.textContent = '';
+  try {
+    const res = await fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, role, driverName, email }),
+    });
+    const data = await res.json();
+    if (!res.ok) { errEl.textContent = data.error; return; }
+    toast('User created');
+    document.getElementById('newUser').value = '';
+    document.getElementById('newPass').value = '';
+    document.getElementById('newEmail').value = '';
+    loadUsers();
+  } catch {
+    errEl.textContent = 'Failed to create user.';
+  }
+}
+
+async function deleteUser(id, username) {
+  if (!confirm(`Delete user "${username}"?`)) return;
+  try {
+    const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    toast('User deleted');
+    loadUsers();
+  } catch {
+    toast('Failed to delete user', 'error');
+  }
+}
+</script>
+</body>
+</html>

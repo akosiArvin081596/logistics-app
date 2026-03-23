@@ -1,0 +1,1445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Driver App</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/shared.css" />
+  <style>
+    /* Mobile-specific body overrides */
+    body {
+      font-size: 0.95rem;
+      min-height: 100vh;
+    }
+
+    /* Position toast above bottom nav */
+    .toast-container { bottom: 80px; }
+
+    /* ---- Login Screen ---- */
+    .login-screen {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+    .login-logo {
+      font-size: 1.3rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .login-logo .icon { color: var(--accent); }
+    .login-subtitle {
+      color: var(--text-dim);
+      font-size: 0.8rem;
+      margin-bottom: 1.5rem;
+    }
+    .login-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      width: 100%;
+      max-width: 400px;
+      padding: 1.25rem;
+    }
+    .login-card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      text-align: center;
+    }
+    .driver-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+    .driver-list-btn {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      width: 100%;
+      padding: 0.85rem 1rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-family: inherit;
+      font-size: 0.95rem;
+      font-weight: 500;
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.15s;
+      text-align: left;
+    }
+    .driver-list-btn:hover, .driver-list-btn:active {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .driver-avatar {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      background: var(--accent-dim);
+      color: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 0.85rem;
+      flex-shrink: 0;
+    }
+    .login-loading {
+      text-align: center;
+      color: var(--text-dim);
+      padding: 2rem;
+      font-size: 0.85rem;
+    }
+
+    /* ---- App Shell ---- */
+    .app-shell { display: none; min-height: 100vh; padding-bottom: 68px; }
+    .app-shell.visible { display: block; }
+
+    /* ---- Top Header ---- */
+    .app-header {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0.75rem 1rem;
+      padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .app-header-left {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .app-header-left .logo {
+      color: var(--accent);
+      font-size: 1rem;
+      font-weight: 700;
+    }
+    .app-header-left .driver-name {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      font-weight: 500;
+    }
+    .app-header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .header-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.4rem 0.6rem;
+      font-family: inherit;
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .header-btn:hover { background: var(--surface-hover); }
+    .header-btn.danger { color: var(--danger); border-color: var(--danger-dim); }
+    .header-btn.danger:hover { background: var(--danger-dim); }
+
+    /* ---- Tab Content ---- */
+    .app-content { padding: 1rem; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* ---- Bottom Navigation ---- */
+    .bottom-nav {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      height: calc(60px + env(safe-area-inset-bottom, 0px));
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: stretch;
+      z-index: 40;
+    }
+    .nav-tab {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.15rem;
+      background: none;
+      border: none;
+      font-family: inherit;
+      font-size: 0.65rem;
+      font-weight: 500;
+      color: var(--text-dim);
+      cursor: pointer;
+      transition: color 0.15s;
+      position: relative;
+      padding: 0.4rem 0;
+    }
+    .nav-tab .nav-tab-icon { font-size: 1.2rem; line-height: 1; }
+    .nav-tab.active { color: var(--accent); }
+    .nav-tab .badge {
+      position: absolute;
+      top: 4px; right: 50%; transform: translateX(14px);
+      min-width: 16px; height: 16px;
+      background: var(--danger);
+      color: #fff;
+      font-size: 0.6rem;
+      font-weight: 700;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0 4px;
+    }
+    /* ---- Cards ---- */
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .card-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.35rem 0;
+      font-size: 0.85rem;
+      border-bottom: 1px solid var(--bg);
+    }
+    .card-row:last-child { border-bottom: none; }
+    .card-label { color: var(--text-dim); }
+    .card-value { font-weight: 500; text-align: right; max-width: 60%; word-break: break-word; }
+
+    /* ---- Section Headers ---- */
+    .section-header {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .section-count {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 0.1rem 0.5rem;
+      border-radius: 20px;
+      color: var(--text-dim);
+    }
+
+    /* ---- Empty State (extends shared) ---- */
+    .empty-state .empty-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+
+    /* ---- Status Stepper ---- */
+    .stepper {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 1.25rem 0;
+      position: relative;
+    }
+    .stepper::before {
+      content: '';
+      position: absolute;
+      top: 16px; left: 24px; right: 24px;
+      height: 3px;
+      background: var(--border);
+      z-index: 0;
+    }
+    .step {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.4rem;
+      z-index: 1;
+      flex: 1;
+    }
+    .step-dot {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      border: 3px solid var(--border);
+      background: var(--surface);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.75rem;
+      transition: all 0.2s;
+    }
+    .step.done .step-dot {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .step.current .step-dot {
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 0 0 4px var(--accent-dim);
+    }
+    .step-label {
+      font-size: 0.6rem;
+      color: var(--text-dim);
+      text-align: center;
+      font-weight: 500;
+      max-width: 60px;
+      line-height: 1.2;
+    }
+    .step.done .step-label,
+    .step.current .step-label { color: var(--accent); font-weight: 600; }
+
+    /* ---- Big Action Button ---- */
+    .action-btn {
+      width: 100%;
+      padding: 1rem;
+      border: none;
+      border-radius: var(--radius);
+      font-family: inherit;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      min-height: 56px;
+    }
+    .action-btn.primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    .action-btn.primary:hover { opacity: 0.9; }
+    .action-btn.primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .action-btn.completed-btn {
+      background: var(--accent-dim);
+      color: var(--accent);
+      cursor: default;
+    }
+
+    /* ---- Load Selector ---- */
+    .load-selector {
+      width: 100%;
+      padding: 0.6rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-family: inherit;
+      font-size: 0.85rem;
+      background: var(--surface);
+      color: var(--text);
+      margin-bottom: 1rem;
+      cursor: pointer;
+    }
+
+    /* ---- Chat / Messages ---- */
+    .chat-container {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 200px);
+    }
+    .chat-filter {
+      padding: 0 0 0.75rem;
+    }
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .msg-bubble {
+      max-width: 80%;
+      padding: 0.65rem 0.85rem;
+      border-radius: 12px;
+      font-size: 0.85rem;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    .msg-bubble.sent {
+      align-self: flex-end;
+      background: var(--accent);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .msg-bubble.received {
+      align-self: flex-start;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+    .msg-meta {
+      font-size: 0.65rem;
+      color: var(--text-dim);
+      margin-top: 0.2rem;
+    }
+    .msg-bubble.sent .msg-meta { color: rgba(255,255,255,0.7); }
+    .msg-load-tag {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.6rem;
+      background: rgba(0,0,0,0.08);
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      margin-bottom: 0.3rem;
+      display: inline-block;
+    }
+    .msg-bubble.sent .msg-load-tag { background: rgba(255,255,255,0.2); }
+    .chat-input-bar {
+      display: flex;
+      gap: 0.5rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid var(--border);
+    }
+    .chat-input {
+      flex: 1;
+      padding: 0.65rem 0.85rem;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      font-family: inherit;
+      font-size: 0.85rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .chat-input:focus { border-color: var(--accent); }
+    .send-btn {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      font-size: 1.1rem;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: opacity 0.15s;
+    }
+    .send-btn:hover { opacity: 0.9; }
+    .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ---- Expense Form (extends shared form styles) ---- */
+    .form-group { margin-bottom: 0.85rem; }
+    .photo-preview {
+      margin-top: 0.5rem;
+    }
+    .photo-preview img {
+      max-width: 120px;
+      max-height: 120px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .photo-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      width: 100%;
+      padding: 0.75rem;
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text-dim);
+      font-family: inherit;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .photo-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .expense-card {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .expense-icon {
+      width: 40px; height: 40px;
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem;
+      flex-shrink: 0;
+    }
+    .expense-icon.fuel { background: var(--blue-dim); }
+    .expense-icon.repair { background: var(--danger-dim); }
+    .expense-icon.toll { background: var(--amber-dim); }
+    .expense-icon.food { background: var(--accent-dim); }
+    .expense-icon.other { background: var(--bg); }
+    .expense-details { flex: 1; min-width: 0; }
+    .expense-type { font-weight: 600; font-size: 0.85rem; }
+    .expense-desc {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .expense-amount {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      font-size: 0.9rem;
+      text-align: right;
+    }
+    .expense-status {
+      font-size: 0.65rem;
+      text-align: right;
+      color: var(--text-dim);
+    }
+    .expense-thumb {
+      width: 40px; height: 40px;
+      border-radius: 6px;
+      object-fit: cover;
+      border: 1px solid var(--border);
+      cursor: pointer;
+    }
+
+    /* ---- Kit (Driver Info) ---- */
+    .kit-header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .kit-avatar {
+      width: 56px; height: 56px;
+      border-radius: 50%;
+      background: var(--accent-dim);
+      color: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 1.2rem;
+      flex-shrink: 0;
+    }
+    .kit-name { font-size: 1.1rem; font-weight: 700; }
+    .kit-role { font-size: 0.78rem; color: var(--text-dim); }
+
+    /* ---- Confirm Modal ---- */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 60;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .modal-box {
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      max-width: 340px;
+      width: 100%;
+      text-align: center;
+    }
+    .modal-box h3 {
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+    }
+    .modal-box p {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      margin-bottom: 1.25rem;
+    }
+    .modal-actions {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .modal-btn {
+      flex: 1;
+      padding: 0.7rem;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      transition: all 0.15s;
+    }
+    .modal-btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    /* ---- Skeleton (extends shared) ---- */
+    .skeleton-card { height: 140px; margin-bottom: 0.75rem; }
+  </style>
+</head>
+<body>
+
+<!-- Login is handled by login.html — this page requires an active session -->
+<div class="login-screen" id="loginScreen" style="display:none"></div>
+
+<!-- ============ APP SHELL ============ -->
+<div class="app-shell" id="appShell">
+
+  <!-- Top Header -->
+  <header class="app-header">
+    <div class="app-header-left">
+      <span class="logo">&#11044; Dispatch</span>
+      <span class="driver-name" id="headerDriverName"></span>
+    </div>
+    <div class="app-header-right">
+      <button class="header-btn" onclick="loadDriverData()">&#8635; Refresh</button>
+      <button class="header-btn danger" onclick="logout()">Logout</button>
+    </div>
+  </header>
+
+  <!-- Tab Content -->
+  <main class="app-content">
+
+    <!-- LOADS TAB -->
+    <section class="tab-panel active" id="tab-loads">
+      <div class="section-header">My Loads <span class="section-count" id="loadsCount">0</span></div>
+      <div id="loadsContent">
+        <div class="skeleton skeleton-card"></div>
+        <div class="skeleton skeleton-card"></div>
+      </div>
+    </section>
+
+    <!-- STATUS TAB -->
+    <section class="tab-panel" id="tab-status">
+      <div class="section-header">Status Update</div>
+      <div id="statusContent">
+        <div class="empty-state"><div class="empty-icon">&#128666;</div>No active loads</div>
+      </div>
+    </section>
+
+    <!-- KIT TAB -->
+    <section class="tab-panel" id="tab-kit">
+      <div class="section-header">Driver Kit</div>
+      <div id="kitContent">
+        <div class="skeleton skeleton-card"></div>
+      </div>
+    </section>
+
+    <!-- MESSAGES TAB -->
+    <section class="tab-panel" id="tab-messages">
+      <div id="messagesContent">
+        <div class="chat-container">
+          <div class="chat-filter" style="display:flex;gap:0.5rem;">
+            <select class="load-selector" id="msgRecipient" style="flex:1;">
+              <option value="Dispatch">Dispatch</option>
+            </select>
+            <select class="load-selector" id="msgLoadFilter" onchange="renderMessages()" style="flex:1;">
+              <option value="">All Messages</option>
+            </select>
+          </div>
+          <div class="chat-messages" id="chatMessages"></div>
+          <div class="chat-input-bar">
+            <input class="chat-input" id="chatInput" type="text" placeholder="Type a message..." maxlength="500" />
+            <button class="send-btn" id="sendBtn" onclick="sendMessage()">&#10148;</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- EXPENSES TAB -->
+    <section class="tab-panel" id="tab-expenses">
+      <div class="section-header">Expenses</div>
+      <div id="expensesContent">
+        <!-- Expense Form -->
+        <div class="card" id="expenseFormCard">
+          <div style="font-weight: 600; font-size: 0.9rem; margin-bottom: 0.85rem;">Log Expense</div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Type</label>
+              <select class="form-select" id="expType">
+                <option value="Fuel">Fuel</option>
+                <option value="Repair">Repair</option>
+                <option value="Toll">Toll</option>
+                <option value="Food">Food</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Amount ($)</label>
+              <input class="form-input" id="expAmount" type="number" step="0.01" min="0" placeholder="0.00" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Date</label>
+              <input class="form-input" id="expDate" type="date" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Load</label>
+              <select class="form-select" id="expLoad">
+                <option value="">General</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Description</label>
+            <textarea class="form-textarea" id="expDesc" placeholder="Brief description..." maxlength="300"></textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Receipt Photo</label>
+            <label class="photo-btn" for="expPhoto">&#128247; Capture / Upload Photo</label>
+            <input type="file" id="expPhoto" accept="image/*" capture="camera" style="display:none" onchange="previewPhoto(this)" />
+            <div class="photo-preview" id="photoPreview"></div>
+          </div>
+          <button class="action-btn primary" onclick="submitExpense()">Submit Expense</button>
+        </div>
+
+        <!-- Expense History -->
+        <div class="section-header" style="margin-top: 1rem;">History <span class="section-count" id="expenseCount">0</span></div>
+        <div id="expenseList"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Bottom Navigation -->
+  <nav class="bottom-nav">
+    <button class="nav-tab active" onclick="switchTab('loads')" data-tab="loads">
+      <span class="nav-tab-icon">&#128230;</span>
+      Loads
+    </button>
+    <button class="nav-tab" onclick="switchTab('status')" data-tab="status">
+      <span class="nav-tab-icon">&#128666;</span>
+      Status
+    </button>
+    <button class="nav-tab" onclick="switchTab('kit')" data-tab="kit">
+      <span class="nav-tab-icon">&#128196;</span>
+      Kit
+    </button>
+    <button class="nav-tab" onclick="switchTab('messages')" data-tab="messages">
+      <span class="nav-tab-icon">&#128172;</span>
+      <span class="badge hidden" id="msgBadge">0</span>
+      Messages
+    </button>
+    <button class="nav-tab" onclick="switchTab('expenses')" data-tab="expenses">
+      <span class="nav-tab-icon">&#128176;</span>
+      Expenses
+    </button>
+  </nav>
+</div>
+
+<!-- Confirm Modal -->
+<div class="modal-overlay hidden" id="confirmModal">
+  <div class="modal-box">
+    <h3 id="confirmTitle">Confirm</h3>
+    <p id="confirmMsg">Are you sure?</p>
+    <div class="modal-actions">
+      <button class="modal-btn" onclick="closeConfirm()">Cancel</button>
+      <button class="modal-btn primary" id="confirmOk">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/layout.js"></script>
+<script>
+// ============================================================
+// STATE
+// ============================================================
+const API = '';
+let driverName = localStorage.getItem('driverName') || '';
+let driverData = { loads: [], driverInfo: null, messages: [], expenses: [], headers: {} };
+let currentTab = 'loads';
+let selectedStatusLoad = null;
+let photoBase64 = '';
+let refreshInterval = null;
+let socket = null;
+
+// ============================================================
+// INIT
+// ============================================================
+Layout.init({
+  page: 'driver',
+  requiredRoles: ['Driver', 'Admin'],
+  noSidebar: true,
+  onReady: function(user) {
+    driverName = user.driverName || user.username;
+    localStorage.setItem('driverName', driverName);
+    showApp();
+    loadDriverData();
+  }
+});
+
+// ============================================================
+// HELPERS
+// ============================================================
+function findCol(headers, regex) {
+  return (headers || []).find(h => regex.test(h)) || null;
+}
+
+function statusClass(status) {
+  const s = (status || '').toLowerCase().replace(/\s+/g, '-');
+  const map = {
+    'in-transit': 'status-in-transit',
+    'dispatched': 'status-dispatched',
+    'assigned': 'status-assigned',
+    'picked-up': 'status-picked-up',
+    'at-shipper': 'status-at-shipper',
+    'at-receiver': 'status-at-receiver',
+    'loading': 'status-loading',
+    'unloading': 'status-unloading',
+    'delivered': 'status-delivered',
+    'completed': 'status-completed',
+    'pod-received': 'status-pod-received',
+  };
+  return map[s] || 'status-default';
+}
+
+function formatDate(str) {
+  if (!str) return '—';
+  const d = new Date(str);
+  if (isNaN(d)) return str;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function formatTime(str) {
+  if (!str) return '';
+  const d = new Date(str);
+  if (isNaN(d)) return str;
+  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
+function formatCurrency(val) {
+  const n = parseFloat(String(val || '0').replace(/[$,]/g, ''));
+  if (isNaN(n)) return val || '—';
+  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+
+function initials(name) {
+  return (name || '?').split(/\s+/).map(w => w[0]).join('').toUpperCase().slice(0, 2);
+}
+
+// ============================================================
+// LOGIN
+// ============================================================
+async function loadDriverList() {
+  try {
+    const res = await fetch(`${API}/api/data?sheet=Carrier Database&limit=200`);
+    const json = await res.json();
+    const driverCol = findCol(json.headers, /driver/i) || json.headers[0];
+    const drivers = [...new Set(
+      json.data.map(r => (r[driverCol] || '').trim()).filter(Boolean)
+    )].sort();
+
+    const container = document.getElementById('driverListContainer');
+    if (drivers.length === 0) {
+      container.innerHTML = '<div class="login-loading">No drivers found.</div>';
+      return;
+    }
+    container.innerHTML = `<div class="driver-list">${drivers.map(name =>
+      `<button class="driver-list-btn" onclick="selectDriver('${escapeHtml(name.replace(/'/g, "\\'"))}')">
+        <div class="driver-avatar">${initials(name)}</div>
+        ${escapeHtml(name)}
+      </button>`
+    ).join('')}</div>`;
+  } catch (err) {
+    document.getElementById('driverListContainer').innerHTML =
+      '<div class="login-loading" style="color:var(--danger)">Failed to load drivers. Check connection.</div>';
+  }
+}
+
+function selectDriver(name) {
+  driverName = name;
+  localStorage.setItem('driverName', name);
+  showApp();
+  loadDriverData();
+}
+
+async function logout() {
+  driverName = '';
+  localStorage.removeItem('driverName');
+  if (refreshInterval) clearInterval(refreshInterval);
+  if (socket) { socket.disconnect(); socket = null; }
+  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch {}
+  window.location.href = '/login.html';
+}
+
+function showApp() {
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('appShell').classList.add('visible');
+  document.getElementById('headerDriverName').textContent = driverName;
+  // Set default expense date to today
+  document.getElementById('expDate').value = new Date().toISOString().split('T')[0];
+  // Start auto-refresh
+  if (refreshInterval) clearInterval(refreshInterval);
+  refreshInterval = setInterval(loadDriverData, 30000);
+  // Connect Socket.IO for real-time messages
+  connectSocket();
+}
+
+function connectSocket() {
+  if (socket) socket.disconnect();
+  socket = io();
+  socket.on('connect', () => {
+    socket.emit('register', driverName);
+  });
+  socket.on('new-message', (msg) => {
+    const myName = driverName.toLowerCase();
+    if (msg.from.toLowerCase() === myName || msg.to.toLowerCase() === myName) {
+      // Skip own sends (already added optimistically)
+      if (msg.from.toLowerCase() === myName) return;
+
+      driverData.messages.push({
+        id: msg.id || 0,
+        timestamp: msg.timestamp,
+        from: msg.from,
+        to: msg.to,
+        message: msg.message,
+        loadId: msg.loadId || '',
+        read: currentTab === 'messages' ? 1 : 0,
+      });
+
+      renderMessages();
+      updateMsgBadge();
+
+      // Show toast if not on messages tab
+      if (currentTab !== 'messages') {
+        toast('New message from ' + msg.from);
+      }
+    }
+  });
+}
+
+// ============================================================
+// DATA LOADING
+// ============================================================
+async function loadDriverData() {
+  try {
+    const res = await fetch(`${API}/api/driver/${encodeURIComponent(driverName)}`);
+    if (!res.ok) throw new Error('Failed to fetch');
+    driverData = await res.json();
+    renderAll();
+  } catch (err) {
+    toast('Failed to load data', 'error');
+  }
+}
+
+function renderAll() {
+  renderLoads();
+  renderStatus();
+  renderKit();
+  renderMessages();
+  renderExpenses();
+  updateMsgBadge();
+}
+
+// ============================================================
+// TAB SWITCHING
+// ============================================================
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  document.querySelectorAll('.nav-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+
+  // Mark messages as read when opening messages tab
+  if (tab === 'messages') markMessagesRead();
+}
+
+// ============================================================
+// LOADS TAB
+// ============================================================
+function renderLoads() {
+  const headers = driverData.headers.jobTracking || [];
+  const loads = driverData.loads || [];
+  const statusCol = findCol(headers, /status/i);
+  const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+  const originCol = findCol(headers, /origin|pickup.*city|shipper.*city/i);
+  const destCol = findCol(headers, /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i);
+  const pickupCol = findCol(headers, /pickup.*date|pickup.*appt/i);
+  const delivCol = findCol(headers, /deliv|drop.?off.*date|completion.*date/i);
+  const brokerCol = findCol(headers, /broker/i);
+  const rateCol = findCol(headers, /rate|amount/i);
+
+  document.getElementById('loadsCount').textContent = loads.length;
+
+  if (loads.length === 0) {
+    document.getElementById('loadsContent').innerHTML =
+      '<div class="empty-state"><div class="empty-icon">&#128230;</div>No loads assigned.<br>Check back later.</div>';
+    return;
+  }
+
+  // Sort: active first, then completed
+  const activeRe = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
+  const sorted = [...loads].sort((a, b) => {
+    const aActive = statusCol && activeRe.test((a[statusCol] || '').trim());
+    const bActive = statusCol && activeRe.test((b[statusCol] || '').trim());
+    if (aActive && !bActive) return -1;
+    if (!aActive && bActive) return 1;
+    return 0;
+  });
+
+  document.getElementById('loadsContent').innerHTML = sorted.map(load => {
+    const status = statusCol ? (load[statusCol] || '').trim() : '';
+    const loadId = loadIdCol ? load[loadIdCol] : '';
+    return `<div class="card">
+      <div class="card-header">
+        <span class="card-title">${escapeHtml(loadId || 'Load')}</span>
+        <span class="status-badge ${statusClass(status)}">${escapeHtml(status || 'Unknown')}</span>
+      </div>
+      ${originCol || destCol ? `<div class="card-row"><span class="card-label">Route</span><span class="card-value">${escapeHtml(load[originCol] || '—')} &rarr; ${escapeHtml(load[destCol] || '—')}</span></div>` : ''}
+      ${pickupCol ? `<div class="card-row"><span class="card-label">Pickup</span><span class="card-value">${formatDate(load[pickupCol])}</span></div>` : ''}
+      ${delivCol ? `<div class="card-row"><span class="card-label">Delivery</span><span class="card-value">${formatDate(load[delivCol])}</span></div>` : ''}
+      ${brokerCol ? `<div class="card-row"><span class="card-label">Broker</span><span class="card-value">${escapeHtml(load[brokerCol] || '—')}</span></div>` : ''}
+      ${rateCol ? `<div class="card-row"><span class="card-label">Rate</span><span class="card-value">${formatCurrency(load[rateCol])}</span></div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+// ============================================================
+// STATUS TAB
+// ============================================================
+const STATUS_FLOW = [
+  { value: 'At Shipper', label: 'Arrived at Shipper' },
+  { value: 'Loading', label: 'Loading' },
+  { value: 'In Transit', label: 'In Transit' },
+  { value: 'At Receiver', label: 'Arrived at Receiver' },
+  { value: 'Delivered', label: 'Delivered' },
+];
+
+function renderStatus() {
+  const headers = driverData.headers.jobTracking || [];
+  const loads = driverData.loads || [];
+  const statusCol = findCol(headers, /status/i);
+  const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+  const container = document.getElementById('statusContent');
+
+  // Filter to active (non-completed) loads
+  const completedRe = /^(delivered|completed|pod received)$/i;
+  const activeLoads = statusCol
+    ? loads.filter(l => !completedRe.test((l[statusCol] || '').trim()))
+    : loads;
+
+  if (activeLoads.length === 0) {
+    container.innerHTML = '<div class="empty-state"><div class="empty-icon">&#128666;</div>No active loads to update.</div>';
+    selectedStatusLoad = null;
+    return;
+  }
+
+  // Default to first active load or keep selection
+  if (!selectedStatusLoad || !activeLoads.find(l => l._rowIndex === selectedStatusLoad._rowIndex)) {
+    selectedStatusLoad = activeLoads[0];
+  }
+
+  const loadSelector = activeLoads.length > 1
+    ? `<select class="load-selector" onchange="selectStatusLoad(this.value)">
+        ${activeLoads.map(l => {
+          const id = loadIdCol ? l[loadIdCol] : 'Row ' + l._rowIndex;
+          return `<option value="${l._rowIndex}" ${l._rowIndex === selectedStatusLoad._rowIndex ? 'selected' : ''}>${escapeHtml(id)}</option>`;
+        }).join('')}
+      </select>`
+    : '';
+
+  const currentStatus = statusCol ? (selectedStatusLoad[statusCol] || '').trim() : '';
+  const currentLoadId = loadIdCol ? selectedStatusLoad[loadIdCol] : '';
+
+  // Determine current step index
+  let currentIdx = -1;
+  const normalizedStatus = currentStatus.toLowerCase();
+  // Map "assigned"/"dispatched" to before the flow
+  if (/^(assigned|dispatched)$/i.test(currentStatus)) {
+    currentIdx = -1;
+  } else {
+    currentIdx = STATUS_FLOW.findIndex(s => s.value.toLowerCase() === normalizedStatus);
+  }
+
+  const nextStep = currentIdx < STATUS_FLOW.length - 1 ? STATUS_FLOW[currentIdx + 1] : null;
+  const allDone = currentIdx >= STATUS_FLOW.length - 1;
+
+  // Build stepper
+  const stepperHtml = STATUS_FLOW.map((step, i) => {
+    let cls = '';
+    if (i < currentIdx + 1) cls = 'done';
+    else if (i === currentIdx + 1 && !allDone) cls = 'current';
+    // For completed loads, mark all as done
+    if (allDone && i <= currentIdx) cls = 'done';
+    return `<div class="step ${cls}">
+      <div class="step-dot">${cls === 'done' ? '&#10003;' : i + 1}</div>
+      <div class="step-label">${step.label}</div>
+    </div>`;
+  }).join('');
+
+  const buttonHtml = allDone
+    ? `<button class="action-btn completed-btn" disabled>&#10003; Load Delivered</button>`
+    : nextStep
+      ? `<button class="action-btn primary" onclick="confirmStatusUpdate('${nextStep.value}', '${escapeHtml(nextStep.label)}')">${nextStep.label}</button>`
+      : '';
+
+  container.innerHTML = `
+    ${loadSelector}
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">${escapeHtml(currentLoadId || 'Load')}</span>
+        <span class="status-badge ${statusClass(currentStatus)}">${escapeHtml(currentStatus || 'Unknown')}</span>
+      </div>
+      <div class="stepper">${stepperHtml}</div>
+      ${buttonHtml}
+    </div>
+  `;
+}
+
+function selectStatusLoad(rowIndex) {
+  const loads = driverData.loads || [];
+  selectedStatusLoad = loads.find(l => l._rowIndex === parseInt(rowIndex)) || loads[0];
+  renderStatus();
+}
+
+function confirmStatusUpdate(newStatus, label) {
+  const modal = document.getElementById('confirmModal');
+  document.getElementById('confirmTitle').textContent = 'Update Status';
+  document.getElementById('confirmMsg').textContent = `Set status to "${label}"?`;
+  modal.classList.remove('hidden');
+
+  document.getElementById('confirmOk').onclick = () => {
+    closeConfirm();
+    updateStatus(newStatus);
+  };
+}
+
+function closeConfirm() {
+  document.getElementById('confirmModal').classList.add('hidden');
+}
+
+async function updateStatus(newStatus) {
+  if (!selectedStatusLoad) return;
+  const headers = driverData.headers.jobTracking || [];
+  const statusCol = findCol(headers, /status/i);
+  const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+  if (!statusCol) { toast('Status column not found', 'error'); return; }
+
+  const oldStatus = (selectedStatusLoad[statusCol] || '').trim();
+  const loadId = loadIdCol ? selectedStatusLoad[loadIdCol] : '';
+
+  // Build values array with new status
+  const values = headers.map(h => {
+    if (h === statusCol) return newStatus;
+    return selectedStatusLoad[h] || '';
+  });
+
+  try {
+    const res = await fetch(`${API}/api/driver/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rowIndex: selectedStatusLoad._rowIndex,
+        driverName,
+        loadId,
+        oldStatus,
+        newStatus,
+        values,
+      }),
+    });
+    if (!res.ok) throw new Error('Failed');
+    toast(`Status updated to ${newStatus}`);
+    await loadDriverData();
+  } catch (err) {
+    toast('Failed to update status', 'error');
+  }
+}
+
+// ============================================================
+// KIT TAB
+// ============================================================
+function renderKit() {
+  const info = driverData.driverInfo;
+  const headers = driverData.headers.carrierDB || [];
+  const container = document.getElementById('kitContent');
+
+  if (!info) {
+    container.innerHTML = '<div class="empty-state"><div class="empty-icon">&#128196;</div>No driver profile found.</div>';
+    return;
+  }
+
+  const driverCol = findCol(headers, /driver/i) || headers[0];
+  const name = info[driverCol] || driverName;
+
+  const rows = headers
+    .filter(h => h !== '_rowIndex' && info[h])
+    .map(h => {
+      let val = info[h];
+      // Render URLs as links
+      if (/^https?:\/\//i.test(val)) {
+        val = `<a href="${escapeHtml(val)}" target="_blank" rel="noopener" style="color:var(--accent);word-break:break-all;">${escapeHtml(val)}</a>`;
+      } else {
+        val = escapeHtml(val);
+      }
+      return `<div class="card-row"><span class="card-label">${escapeHtml(h)}</span><span class="card-value">${val}</span></div>`;
+    }).join('');
+
+  container.innerHTML = `<div class="card">
+    <div class="kit-header">
+      <div class="kit-avatar">${initials(name)}</div>
+      <div>
+        <div class="kit-name">${escapeHtml(name)}</div>
+        <div class="kit-role">Driver</div>
+      </div>
+    </div>
+    ${rows}
+  </div>`;
+}
+
+// ============================================================
+// MESSAGES TAB
+// ============================================================
+function renderMessages() {
+  const messages = driverData.messages || [];
+
+  // Populate recipient dropdown
+  const recipientSelect = document.getElementById('msgRecipient');
+  const currentRecipient = recipientSelect.value;
+  const drivers = (driverData.drivers || []).filter(d => d.toLowerCase() !== driverName.toLowerCase());
+  recipientSelect.innerHTML = '<option value="Dispatch">Dispatch</option>' +
+    drivers.map(d => `<option value="${escapeHtml(d)}" ${d === currentRecipient ? 'selected' : ''}>${escapeHtml(d)}</option>`).join('');
+
+  // Populate load filter
+  const loadIds = [...new Set(messages.map(m => m.loadId || '').filter(Boolean))];
+  const filterSelect = document.getElementById('msgLoadFilter');
+  const currentFilter = filterSelect.value;
+  filterSelect.innerHTML = '<option value="">All Messages</option>' +
+    loadIds.map(id => `<option value="${escapeHtml(id)}" ${id === currentFilter ? 'selected' : ''}>${escapeHtml(id)}</option>`).join('');
+
+  // Filter by load
+  let filtered = messages;
+  if (currentFilter) {
+    filtered = messages.filter(m => m.loadId === currentFilter);
+  }
+
+  const chatEl = document.getElementById('chatMessages');
+  if (filtered.length === 0) {
+    chatEl.innerHTML = '<div class="empty-state"><div class="empty-icon">&#128172;</div>No messages yet.<br>Send one below.</div>';
+    return;
+  }
+
+  chatEl.innerHTML = filtered.map(m => {
+    const from = (m.from || '').trim();
+    const isSent = from.toLowerCase() === driverName.toLowerCase();
+    return `<div class="msg-bubble ${isSent ? 'sent' : 'received'}">
+      ${m.loadId ? `<div class="msg-load-tag">${escapeHtml(m.loadId)}</div>` : ''}
+      ${!isSent ? `<div style="font-weight:600;font-size:0.75rem;margin-bottom:0.15rem;">${escapeHtml(from)}</div>` : ''}
+      ${escapeHtml(m.message || '')}
+      <div class="msg-meta">${formatTime(m.timestamp)}</div>
+    </div>`;
+  }).join('');
+
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function updateMsgBadge() {
+  const messages = driverData.messages || [];
+  const unread = messages.filter(m =>
+    (m.to || '').toLowerCase() === driverName.toLowerCase() && !m.read
+  ).length;
+
+  const badge = document.getElementById('msgBadge');
+  if (unread > 0) {
+    badge.textContent = unread > 9 ? '9+' : unread;
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+async function markMessagesRead() {
+  const messages = driverData.messages || [];
+  const unreadIds = messages
+    .filter(m => (m.to || '').toLowerCase() === driverName.toLowerCase() && !m.read)
+    .map(m => m.id);
+
+  if (unreadIds.length === 0) return;
+
+  try {
+    await fetch(`${API}/api/messages/read`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messageIds: unreadIds }),
+    });
+    unreadIds.forEach(id => {
+      const msg = messages.find(m => m.id === id);
+      if (msg) msg.read = 1;
+    });
+    updateMsgBadge();
+  } catch {}
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chatInput');
+  const message = input.value.trim();
+  if (!message) return;
+
+  const recipient = document.getElementById('msgRecipient').value;
+  const loadFilter = document.getElementById('msgLoadFilter').value;
+
+  document.getElementById('sendBtn').disabled = true;
+  try {
+    const res = await fetch(`${API}/api/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: driverName,
+        to: recipient,
+        message,
+        loadId: loadFilter,
+      }),
+    });
+    if (!res.ok) throw new Error('Failed');
+    input.value = '';
+    // Optimistic update
+    driverData.messages.push({
+      id: 0,
+      timestamp: new Date().toISOString(),
+      from: driverName,
+      to: recipient,
+      message,
+      loadId: loadFilter,
+      read: 1,
+    });
+    renderMessages();
+  } catch (err) {
+    toast('Failed to send message', 'error');
+  }
+  document.getElementById('sendBtn').disabled = false;
+}
+
+// Handle Enter key in chat
+document.getElementById('chatInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// ============================================================
+// EXPENSES TAB
+// ============================================================
+function renderExpenses() {
+  const expenses = driverData.expenses || [];
+
+  document.getElementById('expenseCount').textContent = expenses.length;
+
+  // Populate load dropdown for expense form
+  const jobHeaders = driverData.headers.jobTracking || [];
+  const loadIdCol = findCol(jobHeaders, /load.?id|job.?id/i);
+  const loadSelect = document.getElementById('expLoad');
+  const loads = driverData.loads || [];
+  loadSelect.innerHTML = '<option value="">General</option>' +
+    loads.map(l => {
+      const id = loadIdCol ? l[loadIdCol] : '';
+      return id ? `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>` : '';
+    }).join('');
+
+  // Expenses already come sorted DESC from SQLite
+  const listEl = document.getElementById('expenseList');
+
+  if (expenses.length === 0) {
+    listEl.innerHTML = '<div class="empty-state" style="padding:1.5rem;"><div class="empty-icon">&#128176;</div>No expenses logged yet.</div>';
+    return;
+  }
+
+  const typeIcons = { Fuel: '&#9981;', Repair: '&#128295;', Toll: '&#128678;', Food: '&#127828;', Other: '&#128230;' };
+
+  listEl.innerHTML = expenses.map(exp => {
+    const type = exp.type || 'Other';
+    const iconClass = type.toLowerCase();
+
+    return `<div class="card">
+      <div class="expense-card">
+        <div class="expense-icon ${iconClass}">${typeIcons[type] || typeIcons.Other}</div>
+        <div class="expense-details">
+          <div class="expense-type">${escapeHtml(type)}</div>
+          <div class="expense-desc">${escapeHtml(exp.description || exp.date || '')}</div>
+        </div>
+        ${exp.photoData && exp.photoData.startsWith('data:') ? `<img class="expense-thumb" src="${exp.photoData}" alt="Receipt" />` : ''}
+        <div>
+          <div class="expense-amount">${formatCurrency(exp.amount)}</div>
+          <div class="expense-status">${escapeHtml(exp.status || '')}</div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function previewPhoto(input) {
+  const file = input.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const img = new Image();
+    img.onload = () => {
+      // Resize to 200x200 max thumbnail
+      const canvas = document.createElement('canvas');
+      const MAX = 200;
+      let w = img.width, h = img.height;
+      if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+      else { w = Math.round(w * MAX / h); h = MAX; }
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      photoBase64 = canvas.toDataURL('image/jpeg', 0.6);
+
+      document.getElementById('photoPreview').innerHTML =
+        `<img src="${photoBase64}" alt="Preview" />`;
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+async function submitExpense() {
+  const type = document.getElementById('expType').value;
+  const amount = document.getElementById('expAmount').value;
+  const date = document.getElementById('expDate').value;
+  const loadId = document.getElementById('expLoad').value;
+  const description = document.getElementById('expDesc').value.trim();
+
+  if (!amount || parseFloat(amount) <= 0) {
+    toast('Enter a valid amount', 'error');
+    return;
+  }
+  if (!date) {
+    toast('Select a date', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/api/expenses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        driver: driverName,
+        loadId,
+        type,
+        amount,
+        description,
+        date,
+        photoData: photoBase64,
+      }),
+    });
+    if (!res.ok) throw new Error('Failed');
+    toast('Expense submitted');
+
+    // Clear form
+    document.getElementById('expAmount').value = '';
+    document.getElementById('expDesc').value = '';
+    document.getElementById('expPhoto').value = '';
+    document.getElementById('photoPreview').innerHTML = '';
+    photoBase64 = '';
+
+    await loadDriverData();
+  } catch (err) {
+    toast('Failed to submit expense', 'error');
+  }
+}
+</script>
+</body>
+</html>

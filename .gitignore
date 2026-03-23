@@ -1,0 +1,7 @@
+node_modules/
+service-account-key.json
+.env
+
+# Claude
+.claude/
+.claude*

@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dispatch Dashboard</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/shared.css" />
+  <style>
+    /* ---- Page-specific: Status bar ---- */
+    .status-bar {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    /* Modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.2s, visibility 0.2s;
+    }
+    .modal-overlay.open {
+      opacity: 1;
+      visibility: visible;
+    }
+    .modal {
+      background: var(--surface);
+      border-radius: 14px;
+      width: 90%;
+      max-width: 720px;
+      max-height: 85vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+      transform: translateY(12px) scale(0.97);
+      transition: transform 0.2s;
+    }
+    .modal-overlay.open .modal {
+      transform: translateY(0) scale(1);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1.25rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-header h3 {
+      font-size: 1.05rem;
+      font-weight: 700;
+    }
+    .modal-close {
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-dim);
+      font-size: 1.2rem;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+    .modal-close:hover { background: var(--surface-hover); color: var(--text); }
+    .modal-body {
+      padding: 1.5rem;
+    }
+    .modal-form {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    .modal-form .form-field.full-width {
+      grid-column: 1 / -1;
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.6rem;
+      padding: 1rem 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+
+    /* Form fields */
+    .form-field { min-width: 0; }
+    .form-field label {
+      display: block;
+      font-size: 0.75rem;
+      color: #374151;
+      margin-bottom: 0.3rem;
+      font-weight: 600;
+    }
+    .form-field input {
+      width: 100%;
+      padding: 0.55rem 0.75rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.88rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .form-field input::placeholder { color: #9ca3b0; }
+    .form-field input:focus { border-color: var(--accent); }
+    .form-field select {
+      width: 100%;
+      padding: 0.55rem 0.75rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.88rem;
+      outline: none;
+      transition: border-color 0.2s;
+      cursor: pointer;
+    }
+    .form-field select:focus { border-color: var(--accent); }
+    td select {
+      width: 100%;
+      padding: 0.3rem 0.5rem;
+      background: var(--surface);
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.88rem;
+      outline: none;
+    }
+
+    /* Table */
+    .table-wrapper {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow-x: auto;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background: var(--surface-hover); }
+    th {
+      padding: 0.75rem 1rem;
+      text-align: left;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    td {
+      padding: 0.7rem 1rem;
+      font-size: 0.88rem;
+      border-bottom: 1px solid var(--border);
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--surface-hover); }
+    td.actions { white-space: nowrap; display: flex; gap: 0.4rem; }
+
+    /* Editable cell */
+    td input {
+      width: 100%;
+      padding: 0.3rem 0.5rem;
+      background: var(--surface);
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.88rem;
+      outline: none;
+    }
+
+    /* Pagination */
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 0 0 var(--radius) var(--radius);
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .pagination-info {
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .pagination-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+    .page-btn {
+      min-width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text-dim);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+    .page-btn:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); border-color: var(--text-dim); }
+    .page-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .page-btn.arrow { font-size: 0.9rem; }
+    .page-size-select {
+      padding: 0.3rem 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.78rem;
+      cursor: pointer;
+      outline: none;
+      margin-left: 0.5rem;
+    }
+
+    @keyframes slideIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    @keyframes fadeOut { to { opacity: 0; } }
+  </style>
+</head>
+<body>
+
+<!-- Main Content -->
+<div class="main">
+  <div class="page-header">
+    <h2 id="pageTitle">Job Tracking</h2>
+    <div class="status-bar">
+      <span class="status-pill" id="rowCount">0 rows</span>
+      <button class="btn btn-primary" onclick="openModal()">+ Add Row</button>
+    </div>
+  </div>
+
+  <!-- Data Table -->
+  <div class="table-wrapper">
+    <table>
+      <thead id="tableHead"></thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+    <div class="empty-state" id="emptyState" style="display:none;">
+      No data yet. Add your first row above!
+    </div>
+    <div class="pagination" id="pagination" style="display:none;"></div>
+  </div>
+</div>
+
+<!-- Add Row Modal -->
+<div class="modal-overlay" id="modalOverlay" onclick="closeModalOnBackdrop(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Add New Row</h3>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-form" id="addForm"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="addRow()">+ Add Row</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/layout.js"></script>
+<script>
+  const API = "/api/data";
+  let headers = [];
+  let editingRow = null;
+  let currentSheet = "Job Tracking";
+  let driverList = [];
+  let currentPage = 1;
+  let pageSize = 5;
+
+  // Tab icon mapping
+  const tabIcons = {
+    "Job Tracking": "&#9672;",
+    "Job Details": "&#9776;",
+    "Carrier Database": "&#9850;",
+    "Status Logs": "&#9201;",
+    "Payments Table": "&#36;",
+    "Job Tracking Log": "&#9998;",
+    "Carrier History": "&#8634;",
+    "Job Summary Sheet": "&#9638;",
+    "Messages": "&#128172;",
+    "Expenses": "&#128176;"
+  };
+  function getTabIcon(name) {
+    return tabIcons[name] || "&#9642;";
+  }
+
+  // ---- Drivers from Carrier Database ----
+  async function loadDrivers() {
+    try {
+      const res = await fetch(`${API}?sheet=${encodeURIComponent("Carrier Database")}`);
+      const json = await res.json();
+      const driverCol = (json.headers || []).find(h => /driver/i.test(h)) || json.headers[0];
+      if (driverCol) {
+        const names = (json.data || []).map(row => row[driverCol]).filter(Boolean);
+        driverList = [...new Set(names)].sort();
+      }
+    } catch (err) {
+      console.error("Failed to load drivers:", err);
+    }
+  }
+
+  function isDriverField(headerName) {
+    return /^driver$/i.test(headerName.trim());
+  }
+
+  function buildDriverSelect(id, selected) {
+    const esc = s => escapeHtml(s);
+    return `<select id="${id}">
+      <option value="">Select driver</option>
+      ${driverList.map(d => `<option value="${esc(d)}"${d === selected ? ' selected' : ''}>${esc(d)}</option>`).join("")}
+    </select>`;
+  }
+
+  // ---- Tabs ----
+  async function loadTabs() {
+    try {
+      const res = await fetch("/api/tabs");
+      const json = await res.json();
+      renderTabs(json.tabs || []);
+    } catch (err) {
+      console.error("Failed to load tabs:", err);
+    }
+  }
+
+  function renderTabs(tabs) {
+    const extra = document.getElementById("sidebarExtra");
+    if (!extra) return;
+
+    // Ensure the nav-group wrapper exists inside #sidebarExtra
+    let group = document.getElementById("sheetsGroup");
+    if (!group) {
+      group = document.createElement("div");
+      group.className = "nav-group";
+      group.id = "sheetsGroup";
+      group.innerHTML = `
+        <button class="nav-group-toggle" onclick="toggleGroup('sheetsGroup')">
+          Sheets <span class="chevron">&#9660;</span>
+        </button>
+        <div class="nav-children" id="sidebarNav"></div>
+      `;
+      extra.appendChild(group);
+    }
+
+    const nav = document.getElementById("sidebarNav");
+    nav.innerHTML = tabs.map(tab =>
+      `<button class="nav-item${tab === currentSheet ? ' active' : ''}" onclick="switchTab('${tab.replace(/'/g, "\\'")}')">
+        <span class="nav-icon">${getTabIcon(tab)}</span>
+        ${tab}
+      </button>`
+    ).join("");
+  }
+
+  function switchTab(tabName) {
+    currentSheet = tabName;
+    editingRow = null;
+    currentPage = 1;
+    document.querySelectorAll(".nav-item").forEach(btn => {
+      btn.classList.toggle("active", btn.textContent.trim() === tabName);
+    });
+    document.getElementById("pageTitle").textContent = tabName;
+    loadData();
+  }
+
+  // ---- Fetch & Render ----
+  async function loadData() {
+    try {
+      const params = new URLSearchParams({
+        sheet: currentSheet,
+        page: currentPage,
+        limit: pageSize,
+      });
+      const res = await fetch(`${API}?${params}`);
+      const json = await res.json();
+      headers = json.headers || [];
+      renderForm(headers);
+      renderTable(headers, json.data || []);
+      renderPagination(json.page, json.totalPages, json.total);
+      setSidebarStatus("ok", "Connected");
+      document.getElementById("rowCount").textContent = `${json.total || 0} rows`;
+      document.getElementById("pageTitle").textContent = currentSheet;
+    } catch (err) {
+      setSidebarStatus("error", "Disconnected");
+      console.error(err);
+    }
+  }
+
+  function goToPage(page) {
+    currentPage = page;
+    editingRow = null;
+    loadData();
+    document.querySelector('.table-wrapper').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function changePageSize(size) {
+    pageSize = parseInt(size);
+    currentPage = 1;
+    loadData();
+  }
+
+  function renderPagination(page, totalPages, total) {
+    const el = document.getElementById("pagination");
+    if (totalPages <= 1) { el.style.display = "none"; return; }
+    el.style.display = "flex";
+
+    const start = (page - 1) * pageSize + 1;
+    const end = Math.min(page * pageSize, total);
+
+    // Build page buttons with ellipsis
+    let pages = [];
+    const range = 2; // pages around current
+    for (let i = 1; i <= totalPages; i++) {
+      if (i === 1 || i === totalPages || (i >= page - range && i <= page + range)) {
+        pages.push(i);
+      } else if (pages[pages.length - 1] !== '...') {
+        pages.push('...');
+      }
+    }
+
+    el.innerHTML = `
+      <span class="pagination-info">${start}–${end} of ${total}</span>
+      <div class="pagination-controls">
+        <button class="page-btn arrow" onclick="goToPage(1)" ${page <= 1 ? 'disabled' : ''}>&laquo;</button>
+        <button class="page-btn arrow" onclick="goToPage(${page - 1})" ${page <= 1 ? 'disabled' : ''}>&lsaquo;</button>
+        ${pages.map(p =>
+          p === '...'
+            ? `<span class="page-btn" style="border:none;cursor:default;">...</span>`
+            : `<button class="page-btn${p === page ? ' active' : ''}" onclick="goToPage(${p})">${p}</button>`
+        ).join("")}
+        <button class="page-btn arrow" onclick="goToPage(${page + 1})" ${page >= totalPages ? 'disabled' : ''}>&rsaquo;</button>
+        <button class="page-btn arrow" onclick="goToPage(${totalPages})" ${page >= totalPages ? 'disabled' : ''}>&raquo;</button>
+        <select class="page-size-select" onchange="changePageSize(this.value)">
+          ${[5, 10, 25, 50, 100].map(s => `<option value="${s}"${s === pageSize ? ' selected' : ''}>${s} / page</option>`).join("")}
+        </select>
+      </div>
+    `;
+  }
+
+  // ---- Modal ----
+  function openModal() {
+    document.getElementById("modalOverlay").classList.add("open");
+    document.body.style.overflow = "hidden";
+    // Focus first input after render
+    setTimeout(() => {
+      const first = document.querySelector('.modal-form input, .modal-form select');
+      if (first) first.focus();
+    }, 200);
+  }
+
+  function closeModal() {
+    document.getElementById("modalOverlay").classList.remove("open");
+    document.body.style.overflow = "";
+  }
+
+  function closeModalOnBackdrop(e) {
+    if (e.target === e.currentTarget) closeModal();
+  }
+
+  function renderForm(headers) {
+    const form = document.getElementById("addForm");
+    form.innerHTML = headers.map(h => {
+      if (isDriverField(h) && driverList.length > 0) {
+        return `<div class="form-field">
+          <label>${h}</label>
+          ${buildDriverSelect('input-' + h, '')}
+        </div>`;
+      }
+      return `<div class="form-field">
+        <label>${h}</label>
+        <input id="input-${h}" placeholder="Enter ${h.toLowerCase()}" />
+      </div>`;
+    }).join("");
+  }
+
+  function renderTable(headers, data) {
+    const thead = document.getElementById("tableHead");
+    const tbody = document.getElementById("tableBody");
+    const empty = document.getElementById("emptyState");
+
+    thead.innerHTML = `<tr>${headers.map(h => `<th>${h}</th>`).join("")}<th>Actions</th></tr>`;
+
+    if (data.length === 0) {
+      tbody.innerHTML = "";
+      empty.style.display = "block";
+      return;
+    }
+    empty.style.display = "none";
+
+    tbody.innerHTML = data.map(row => {
+      const isEditing = editingRow === row._rowIndex;
+      return `<tr>${headers.map(h => {
+        if (isEditing) {
+          if (isDriverField(h) && driverList.length > 0) {
+            return `<td><select data-header="${h}">
+              <option value="">Select driver</option>
+              ${driverList.map(d => `<option value="${escapeHtml(d)}"${d === row[h] ? ' selected' : ''}>${escapeHtml(d)}</option>`).join("")}
+            </select></td>`;
+          }
+          return `<td><input value="${escapeHtml(row[h])}" data-header="${h}" /></td>`;
+        }
+        return `<td>${escapeHtml(row[h])}</td>`;
+      }).join("")}
+      <td class="actions">
+        ${isEditing
+          ? `<button class="btn btn-primary btn-sm" onclick="saveRow(${row._rowIndex})">Save</button>
+             <button class="btn btn-secondary btn-sm" onclick="cancelEdit()">Cancel</button>`
+          : `<button class="btn btn-secondary btn-sm" onclick="editRow(${row._rowIndex})">Edit</button>
+             ${window._userRole === 'Admin' ? `<button class="btn btn-danger btn-sm" onclick="deleteRow(${row._rowIndex})">Delete</button>` : ''}`
+        }
+      </td></tr>`;
+    }).join("");
+  }
+
+  // ---- CRUD Actions ----
+  async function addRow() {
+    const values = headers.map(h => document.getElementById(`input-${h}`).value);
+    if (values.every(v => !v.trim())) return;
+
+    try {
+      await fetch(`${API}?sheet=${encodeURIComponent(currentSheet)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values }),
+      });
+      headers.forEach(h => document.getElementById(`input-${h}`).value = "");
+      closeModal();
+      toast("Row added successfully", "success");
+      loadData();
+    } catch (err) {
+      toast("Failed to add row", "error");
+    }
+  }
+
+  function editRow(rowIndex) {
+    editingRow = rowIndex;
+    loadData();
+  }
+
+  function cancelEdit() {
+    editingRow = null;
+    loadData();
+  }
+
+  async function saveRow(rowIndex) {
+    const values = headers.map(h => {
+      const el = document.querySelector(`[data-header="${h}"]`);
+      return el ? el.value : "";
+    });
+
+    try {
+      await fetch(`${API}/${rowIndex}?sheet=${encodeURIComponent(currentSheet)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values }),
+      });
+      editingRow = null;
+      toast("Row updated", "success");
+      loadData();
+    } catch (err) {
+      toast("Failed to update row", "error");
+    }
+  }
+
+  async function deleteRow(rowIndex) {
+    if (!confirm("Delete this row?")) return;
+
+    try {
+      await fetch(`${API}/${rowIndex}?sheet=${encodeURIComponent(currentSheet)}`, { method: "DELETE" });
+      toast("Row deleted", "success");
+      loadData();
+    } catch (err) {
+      toast("Failed to delete row", "error");
+    }
+  }
+
+  // ---- Keyboard shortcuts ----
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") closeModal();
+  });
+
+  // ---- Init ----
+  Layout.init({
+    page: 'data',
+    requiredRoles: ['Admin', 'Dispatcher'],
+    onReady: async function(user) {
+      await loadTabs();
+      await loadDrivers();
+      await loadData();
+    }
+  });
+</script>
+</body>
+</html>
