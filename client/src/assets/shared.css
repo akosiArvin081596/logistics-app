@@ -102,7 +102,10 @@ body {
 .main {
   margin-left: var(--sidebar-w);
   padding: 1.5rem 2rem;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .page-header {
   display: flex; align-items: center; justify-content: space-between;
