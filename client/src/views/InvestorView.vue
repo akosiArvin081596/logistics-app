@@ -1,5 +1,5 @@
 <template>
-  <div class="investor-dashboard admin-page page-narrow">
+  <div class="investor-dashboard admin-page">
     <div class="page-header">
       <h2>Financial &amp; Investor Dashboard</h2>
       <span class="status-pill">{{ statusText }}</span>

@@ -120,9 +120,6 @@ body {
   display: flex;
   flex-direction: column;
 }
-.admin-page.page-narrow {
-  max-width: 960px;
-}
 .status-bar {
   display: flex;
   gap: 0.75rem;

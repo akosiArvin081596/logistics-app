@@ -1,5 +1,5 @@
 <template>
-  <div class="users-page admin-page page-narrow">
+  <div class="users-page admin-page">
     <div class="page-header">
       <h2>User Management</h2>
     </div>
