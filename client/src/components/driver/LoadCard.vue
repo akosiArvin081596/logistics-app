@@ -1,39 +1,40 @@
 <template>
-  <div class="card load-card" @click="$emit('select', load)">
-    <div class="card-header">
-      <span class="card-title">{{ loadId || 'Load' }}</span>
-      <div class="card-header-actions">
-        <button class="chat-btn" title="Messages" @click.stop="$emit('chat', { loadId, load })">&#128172;</button>
-        <StatusBadge :status="status" />
+  <div class="load-card" @click="$emit('select', load)">
+    <!-- Top: Load ID + Status -->
+    <div class="card-top">
+      <span class="load-id">{{ loadId || 'Load' }}</span>
+      <StatusBadge :status="status" />
+    </div>
+
+    <!-- Route -->
+    <div v-if="route" class="card-route">
+      <span class="route-icon">&#128205;</span>
+      <span class="route-text">{{ route }}</span>
+    </div>
+
+    <!-- Dates row -->
+    <div v-if="pickupDate || deliveryDate" class="card-dates">
+      <div v-if="pickupDate" class="date-item">
+        <span class="date-icon">&#8593;</span>
+        <span class="date-label">Pickup</span>
+        <span class="date-value">{{ formatDate(pickupDate) }}</span>
+      </div>
+      <div v-if="deliveryDate" class="date-item">
+        <span class="date-icon">&#8595;</span>
+        <span class="date-label">Delivery</span>
+        <span class="date-value">{{ formatDate(deliveryDate) }}</span>
       </div>
     </div>
-    <div v-if="origin || destination" class="card-row">
-      <span class="card-label">Route</span>
-      <span class="card-value">{{ origin || '\u2014' }} &rarr; {{ destination || '\u2014' }}</span>
-    </div>
-    <div v-if="pickupDate" class="card-row">
-      <span class="card-label">Pickup</span>
-      <span class="card-value">{{ formatDate(pickupDate) }}</span>
-    </div>
-    <div v-if="deliveryDate" class="card-row">
-      <span class="card-label">Delivery</span>
-      <span class="card-value">{{ formatDate(deliveryDate) }}</span>
-    </div>
-    <div v-if="brokerName" class="card-row">
-      <span class="card-label">Broker</span>
-      <span class="card-value">{{ brokerName }}</span>
-    </div>
-    <div v-if="brokerEmail" class="card-row">
-      <span class="card-label">Email</span>
-      <span class="card-value">{{ brokerEmail }}</span>
-    </div>
-    <div v-if="brokerPhone" class="card-row">
-      <span class="card-label">Phone</span>
-      <span class="card-value">{{ brokerPhone }}</span>
-    </div>
-    <div v-if="rate" class="card-row">
-      <span class="card-label">Rate</span>
-      <span class="card-value">{{ formatCurrency(rate) }}</span>
+
+    <!-- Broker & bottom actions -->
+    <div class="card-bottom">
+      <div class="broker-info">
+        <template v-if="brokerName">
+          <span class="broker-name">{{ brokerName }}</span>
+          <span v-if="brokerEmail" class="broker-email">{{ brokerEmail }}</span>
+        </template>
+      </div>
+      <button class="chat-btn" title="Messages" @click.stop="$emit('chat', { loadId, load })">&#128172;</button>
     </div>
   </div>
 </template>
@@ -55,19 +56,31 @@ function findCol(headers, regex) {
 
 const statusCol = computed(() => findCol(props.headers, /status/i))
 const loadIdCol = computed(() => findCol(props.headers, /load.?id|job.?id/i))
+const detailsCol = computed(() => findCol(props.headers, /details/i))
 const originCol = computed(() => findCol(props.headers, /origin|pickup.*city|shipper.*city/i))
 const destCol = computed(() => findCol(props.headers, /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i))
 const pickupCol = computed(() => findCol(props.headers, /pickup.*date|pickup.*appt/i))
-const delivCol = computed(() => findCol(props.headers, /deliv|drop.?off.*date|completion.*date/i))
+const delivCol = computed(() => findCol(props.headers, /drop.?off.*date|drop.?off.*appt|deliv.*date|deliv.*appt|completion.*date/i))
 const brokerCol = computed(() => findCol(props.headers, /broker/i))
-const rateCol = computed(() => findCol(props.headers, /rate|amount/i))
 
 const status = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim() : '')
 const loadId = computed(() => loadIdCol.value ? props.load[loadIdCol.value] : '')
-const origin = computed(() => originCol.value ? props.load[originCol.value] : '')
-const destination = computed(() => destCol.value ? props.load[destCol.value] : '')
+
+// Route: prefer Details column (e.g. "Conroe, TX, 77303 - Wilmer, TX, 75146"), fall back to origin/dest
+const route = computed(() => {
+  if (detailsCol.value) {
+    const details = (props.load[detailsCol.value] || '').trim()
+    if (details) return details.replace(/\s*-\s*/, ' → ')
+  }
+  const o = originCol.value ? props.load[originCol.value] : ''
+  const d = destCol.value ? props.load[destCol.value] : ''
+  if (o || d) return `${o || '\u2014'} \u2192 ${d || '\u2014'}`
+  return ''
+})
+
 const pickupDate = computed(() => pickupCol.value ? props.load[pickupCol.value] : '')
 const deliveryDate = computed(() => delivCol.value ? props.load[delivCol.value] : '')
+
 const brokerParsed = computed(() => {
   if (!brokerCol.value) return { name: '', email: '', phone: '' }
   const raw = props.load[brokerCol.value] || ''
@@ -80,91 +93,156 @@ const brokerParsed = computed(() => {
 })
 const brokerName = computed(() => brokerParsed.value.name)
 const brokerEmail = computed(() => brokerParsed.value.email)
-const brokerPhone = computed(() => brokerParsed.value.phone)
-const rate = computed(() => rateCol.value ? props.load[rateCol.value] : '')
 
 function formatDate(str) {
   if (!str) return '\u2014'
   const d = new Date(str)
   if (isNaN(d)) return str
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
-function formatCurrency(val) {
-  const n = parseFloat(String(val || '0').replace(/[$,]/g, ''))
-  if (isNaN(n)) return val || '\u2014'
-  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 </script>
 
 <style scoped>
 .load-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.6rem;
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.load-card:hover {
+.load-card:active {
   border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
 }
 
-.card-header {
+/* Top row: Load ID + Status */
+.card-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.6rem;
 }
 
-.card-header-actions {
+.load-id {
+  font-size: 0.92rem;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: -0.02em;
+}
+
+/* Route */
+.card-route {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border-radius: 8px;
+}
+
+.route-icon {
+  font-size: 0.8rem;
+  flex-shrink: 0;
+  margin-top: 0.05rem;
+}
+
+.route-text {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+/* Dates */
+.card-dates {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.date-item {
+  flex: 1;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.3rem;
+  padding: 0.35rem 0.5rem;
+  background: var(--bg);
+  border-radius: 6px;
+  font-size: 0.72rem;
+}
+
+.date-icon {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.date-label {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.date-value {
+  font-weight: 600;
+  color: var(--text);
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.68rem;
+}
+
+/* Bottom: broker + chat */
+.card-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+}
+
+.broker-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.broker-name {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.broker-email {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-btn {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   border: 1px solid var(--border);
   border-radius: 50%;
   background: var(--surface);
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   transition: background 0.15s, border-color 0.15s;
 }
 
-.chat-btn:hover {
+.chat-btn:active {
   background: var(--accent-dim);
   border-color: var(--accent);
-}
-
-.card-title {
-  font-size: 0.95rem;
-  font-weight: 600;
-  font-family: 'JetBrains Mono', monospace;
-}
-
-.card-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 0.35rem 0;
-  font-size: 0.85rem;
-  border-bottom: 1px solid var(--bg);
-}
-
-.card-row:last-child {
-  border-bottom: none;
-}
-
-.card-label {
-  color: var(--text-dim);
-}
-
-.card-value {
-  font-weight: 500;
-  text-align: right;
-  max-width: 60%;
-  word-break: break-word;
 }
 </style>

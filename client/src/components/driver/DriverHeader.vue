@@ -21,10 +21,14 @@ defineEmits(['refresh', 'logout'])
 
 <style scoped>
 .app-header {
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 40;
-  background: var(--surface);
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
   padding: 0.75rem 1rem;
   padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
