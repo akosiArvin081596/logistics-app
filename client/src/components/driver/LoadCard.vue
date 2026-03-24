@@ -60,7 +60,16 @@ const origin = computed(() => originCol.value ? props.load[originCol.value] : ''
 const destination = computed(() => destCol.value ? props.load[destCol.value] : '')
 const pickupDate = computed(() => pickupCol.value ? props.load[pickupCol.value] : '')
 const deliveryDate = computed(() => delivCol.value ? props.load[delivCol.value] : '')
-const broker = computed(() => brokerCol.value ? props.load[brokerCol.value] : '')
+const broker = computed(() => {
+  if (!brokerCol.value) return ''
+  const raw = props.load[brokerCol.value] || ''
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed.Name || raw
+  } catch {
+    return raw
+  }
+})
 const rate = computed(() => rateCol.value ? props.load[rateCol.value] : '')
 
 function formatDate(str) {

@@ -87,7 +87,7 @@ function cellValue(job, col) {
     const src = phoneSourceCol.value || brokerSourceCol.value
     if (src) {
       const broker = parseBrokerContact(job[src])
-      return broker.phone || job[src] || ''
+      return broker.phone || ''
     }
   }
   return job[col] || ''
