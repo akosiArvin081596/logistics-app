@@ -71,7 +71,7 @@
       <div v-show="activeTab === 'tracking'" class="tab-panel active">
         <TrackingMap :visible="activeTab === 'tracking'" />
       </div>
-      <div v-show="activeTab === 'expenses'" class="tab-panel active">
+      <div v-if="activeTab === 'expenses'" class="tab-panel active">
         <ExpensesTab />
       </div>
       <div v-show="activeTab === 'messages'" class="tab-panel active">
