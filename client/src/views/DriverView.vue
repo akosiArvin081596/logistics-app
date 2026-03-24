@@ -32,6 +32,7 @@
             :load="load"
             :headers="driverStore.headers.jobTracking"
             @select="handleLoadSelect"
+            @chat="handleLoadChat"
           />
         </template>
       </section>
@@ -67,6 +68,14 @@
             :current-status="getLoadStatus(selectedLoad)"
             @update="handleStatusUpdate"
           />
+
+          <DocumentUpload
+            v-if="selectedLoad && /^delivered$/i.test(getLoadStatus(selectedLoad))"
+            :load-id="getLoadId(selectedLoad)"
+            :driver-name="driverName"
+            :row-index="selectedLoad._rowIndex"
+            @uploaded="handleRefresh"
+          />
         </template>
       </section>
 
@@ -88,11 +97,12 @@
       <section v-show="currentTab === 'messages'" class="tab-panel">
         <ChatView
           :messages="driverStore.messages"
-          :drivers="driverStore.drivers"
           :loads="driverStore.loads"
           :driver-name="driverName"
+          :load-id="chatLoadId"
           @send="handleSendMessage"
           @mark-read="handleMarkRead"
+          @change-load="handleChatLoadChange"
         />
       </section>
 
@@ -144,6 +154,8 @@ import { useAuthStore } from '../stores/auth'
 import { useDriverStore } from '../stores/driver'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
+import { useGeolocation } from '../composables/useGeolocation'
+import { useApi } from '../composables/useApi'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -153,6 +165,7 @@ import ChatView from '../components/driver/ChatView.vue'
 import ExpenseForm from '../components/driver/ExpenseForm.vue'
 import ExpenseCard from '../components/driver/ExpenseCard.vue'
 import DriverKit from '../components/driver/DriverKit.vue'
+import DocumentUpload from '../components/driver/DocumentUpload.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 
 const auth = useAuthStore()
@@ -160,9 +173,11 @@ const driverStore = useDriverStore()
 const socket = useSocket()
 const toast = useToast()
 const router = useRouter()
+const geo = useGeolocation(useApi())
 
 const currentTab = ref('loads')
 const selectedStatusRowIndex = ref(null)
+const chatLoadId = ref('')
 let refreshInterval = null
 
 const driverName = computed(() => auth.user?.driverName || auth.user?.username || '')
@@ -217,6 +232,16 @@ function handleLoadSelect(load) {
   selectedStatusRowIndex.value = load._rowIndex
   currentTab.value = 'status'
   driverStore.currentTab = 'status'
+}
+
+function handleLoadChat({ loadId }) {
+  chatLoadId.value = loadId || ''
+  currentTab.value = 'messages'
+  driverStore.currentTab = 'messages'
+}
+
+function handleChatLoadChange(loadId) {
+  chatLoadId.value = loadId
 }
 
 function onStatusLoadChange() {
@@ -274,7 +299,16 @@ async function handleExpenseSubmit(data) {
   }
 }
 
-// Socket.IO for real-time messages
+// Socket.IO for real-time notifications
+function onLoadAssigned(payload) {
+  toast.show(`New load assigned: ${payload.loadId || 'Load'}`)
+  driverStore.loadData()
+}
+
+function onGeofenceTrigger(payload) {
+  toast.show(`Geofence: ${payload.status} for Load ${payload.loadId}`)
+}
+
 function onNewMessage(msg) {
   const myName = driverName.value.toLowerCase()
   const from = (msg.from || '').toLowerCase()
@@ -291,6 +325,23 @@ function onNewMessage(msg) {
     }
   }
 }
+
+// Start/stop GPS tracking based on active loads
+watch(
+  () => driverStore.activeLoads,
+  (active) => {
+    if (active.length > 0) {
+      const firstLoadId = getLoadId(active[0])
+      if (!geo.tracking.value) {
+        geo.start(firstLoadId)
+      } else {
+        geo.updateLoadId(firstLoadId)
+      }
+    } else {
+      geo.stop()
+    }
+  }
+)
 
 // Keep selected status load in sync
 watch(
@@ -330,11 +381,16 @@ onMounted(async () => {
   socket.connect()
   socket.register(driverName.value)
   socket.on('new-message', onNewMessage)
+  socket.on('load-assigned', onLoadAssigned)
+  socket.on('geofence-trigger', onGeofenceTrigger)
 })
 
 onUnmounted(() => {
   if (refreshInterval) clearInterval(refreshInterval)
   socket.off('new-message', onNewMessage)
+  socket.off('load-assigned', onLoadAssigned)
+  socket.off('geofence-trigger', onGeofenceTrigger)
+  geo.stop()
   socket.disconnect()
 })
 </script>

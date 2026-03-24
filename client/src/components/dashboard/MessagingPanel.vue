@@ -1,59 +1,46 @@
 <template>
   <div class="msg-layout">
-    <!-- Sidebar: conversations -->
+    <!-- Sidebar: conversations grouped by driver + load -->
     <div class="msg-sidebar" style="position:relative;">
       <div class="msg-sidebar-header">
         Conversations
-        <button class="msg-new-btn" title="New conversation" @click="showNewOverlay = true">+</button>
       </div>
       <div class="msg-driver-list">
         <div
           v-for="c in store.conversations"
-          :key="c.driver"
-          :class="['msg-driver-item', { active: store.selectedDriver && c.driver.toLowerCase() === store.selectedDriver.toLowerCase() }]"
-          @click="store.selectDriver(c.driver)"
+          :key="c.driver + ':' + c.loadId"
+          :class="['msg-driver-item', { active: isActive(c) }]"
+          @click="selectConversation(c)"
         >
           <div>
             <div>{{ c.driver }}</div>
+            <div v-if="c.loadId" class="msg-load-label">Load {{ c.loadId }}</div>
+            <div v-else class="msg-load-label">Legacy</div>
             <div class="msg-time">{{ formatTime(c.lastTimestamp) }}</div>
           </div>
           <div v-if="c.unread > 0" class="msg-unread">{{ c.unread }}</div>
         </div>
         <EmptyState v-if="store.conversations.length === 0">No conversations yet.</EmptyState>
       </div>
-
-      <!-- New conversation overlay -->
-      <div v-if="showNewOverlay" class="msg-new-overlay">
-        <div class="msg-new-header">
-          New Message
-          <button class="msg-new-btn" title="Cancel" style="background:var(--text-dim);font-size:0.85rem;" @click="showNewOverlay = false">&#10005;</button>
-        </div>
-        <input v-model="newSearch" class="msg-new-search" type="text" placeholder="Search drivers..." />
-        <div class="msg-new-list">
-          <div
-            v-for="d in filteredDrivers"
-            :key="d"
-            class="msg-new-item"
-            @click="startConversation(d)"
-          >
-            {{ d }}
-          </div>
-          <EmptyState v-if="filteredDrivers.length === 0">No drivers found.</EmptyState>
-        </div>
-      </div>
     </div>
 
     <!-- Chat area -->
     <div class="msg-chat">
-      <div class="msg-chat-header">{{ store.selectedDriver || 'Select a conversation' }}</div>
+      <div class="msg-chat-header">
+        <template v-if="store.selectedDriver">
+          {{ store.selectedDriver }}
+          <span v-if="store.selectedLoadId" class="msg-header-load">— Load {{ store.selectedLoadId }}</span>
+        </template>
+        <template v-else>Select a conversation</template>
+      </div>
       <div ref="messagesEl" class="msg-chat-messages">
         <template v-if="store.selectedDriver && store.currentMessages.length > 0">
           <ChatBubble v-for="(m, i) in store.currentMessages" :key="i" :msg="m" />
         </template>
         <EmptyState v-else-if="store.selectedDriver">No messages yet.</EmptyState>
-        <EmptyState v-else>Select a driver from the left to view messages.</EmptyState>
+        <EmptyState v-else>Select a conversation from the left to view messages.</EmptyState>
       </div>
-      <div v-if="store.selectedDriver" class="msg-chat-input">
+      <div v-if="store.selectedDriver && store.selectedLoadId" class="msg-chat-input">
         <input
           v-model="messageInput"
           type="text"
@@ -64,54 +51,46 @@
         />
         <button class="msg-send-btn" @click="sendMessage">&#10148;</button>
       </div>
+      <div v-else-if="store.selectedDriver && !store.selectedLoadId" class="msg-chat-legacy">
+        Legacy conversation — replies require a load context.
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, watch, nextTick } from 'vue'
 import { useMessagesStore } from '../../stores/messages'
 import { useToast } from '../../composables/useToast'
 import ChatBubble from './ChatBubble.vue'
 import EmptyState from '../shared/EmptyState.vue'
 
-const props = defineProps({
-  driverNames: { type: Array, default: () => [] },
-})
-
 const store = useMessagesStore()
 const { show: toast } = useToast()
 
 const messageInput = ref('')
-const showNewOverlay = ref(false)
-const newSearch = ref('')
 const messagesEl = ref(null)
 
-const filteredDrivers = computed(() => {
-  const search = newSearch.value.trim().toLowerCase()
-  const drivers = [...props.driverNames].sort((a, b) => a.localeCompare(b))
-  return search ? drivers.filter((d) => d.toLowerCase().includes(search)) : drivers
-})
+function isActive(c) {
+  return store.selectedDriver &&
+    c.driver.toLowerCase() === store.selectedDriver.toLowerCase() &&
+    c.loadId === store.selectedLoadId
+}
+
+function selectConversation(c) {
+  store.selectConversation(c.driver, c.loadId || '')
+}
 
 function formatTime(ts) {
   const t = new Date(ts)
   return isNaN(t) ? '' : t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
 
-function startConversation(driver) {
-  showNewOverlay.value = false
-  store.selectDriver(driver)
-  const exists = store.conversations.some((c) => c.driver.toLowerCase() === driver.toLowerCase())
-  if (!exists) {
-    store.conversations.unshift({ driver, lastTimestamp: new Date().toISOString(), unread: 0 })
-  }
-}
-
 async function sendMessage() {
   const msg = messageInput.value.trim()
-  if (!msg || !store.selectedDriver) return
+  if (!msg || !store.selectedDriver || !store.selectedLoadId) return
   try {
-    await store.sendMessage(store.selectedDriver, msg)
+    await store.sendMessage(store.selectedDriver, msg, store.selectedLoadId)
     messageInput.value = ''
     scrollToBottom()
   } catch {
@@ -127,3 +106,25 @@ function scrollToBottom() {
 
 watch(() => store.currentMessages.length, scrollToBottom)
 </script>
+
+<style scoped>
+.msg-load-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+
+.msg-header-load {
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.msg-chat-legacy {
+  padding: 0.75rem 1rem;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  text-align: center;
+  border-top: 1px solid var(--border);
+}
+</style>

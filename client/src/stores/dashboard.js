@@ -34,15 +34,14 @@ export const useDashboardStore = defineStore('dashboard', {
     },
 
     async assignDriver(rowIndex, driver, job, headers) {
+      const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
+      const loadId = loadIdCol ? job[loadIdCol] || '' : ''
       const values = headers.map((h) => {
         if (/^driver$/i.test(h)) return driver
-        if (/^status$/i.test(h)) return 'Assigned'
+        if (/^status$/i.test(h)) return 'Dispatched'
         return job[h] || ''
       })
-      await api.put(
-        `/api/data/${rowIndex}?sheet=${encodeURIComponent('Job Tracking')}`,
-        { values }
-      )
+      await api.post('/api/dispatch', { rowIndex, driver, loadId, values })
     },
   },
 })

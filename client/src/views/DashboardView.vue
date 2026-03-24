@@ -41,6 +41,9 @@
         <button :class="['tab-btn', { active: activeTab === 'fleet' }]" @click="activeTab = 'fleet'">
           Fleet & Drivers <span class="count-badge" style="background:var(--blue-dim);color:var(--blue)">{{ store.fleet.length }}</span>
         </button>
+        <button :class="['tab-btn', { active: activeTab === 'tracking' }]" @click="activeTab = 'tracking'">
+          Tracking
+        </button>
         <button :class="['tab-btn', { active: activeTab === 'messages' }]" @click="switchToMessages">
           Messages
           <span v-if="msgStore.totalUnread > 0" class="count-badge danger">{{ msgStore.totalUnread }}</span>
@@ -62,6 +65,9 @@
       <div v-show="activeTab === 'fleet'" class="tab-panel active">
         <FleetTab :fleet="store.fleet" />
       </div>
+      <div v-show="activeTab === 'tracking'" class="tab-panel active">
+        <TrackingMap />
+      </div>
       <div v-show="activeTab === 'messages'" class="tab-panel active">
         <MessagingPanel :driver-names="driverNames" />
       </div>
@@ -81,6 +87,7 @@ import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
 import ActiveLoadsTab from '../components/dashboard/ActiveLoadsTab.vue'
 import FleetTab from '../components/dashboard/FleetTab.vue'
 import MessagingPanel from '../components/dashboard/MessagingPanel.vue'
+import TrackingMap from '../components/dashboard/TrackingMap.vue'
 
 const store = useDashboardStore()
 const msgStore = useMessagesStore()
@@ -123,6 +130,16 @@ function switchToMessages() {
   msgStore.loadConversations()
 }
 
+function onStatusUpdated(payload) {
+  toast(`${payload.driverName}: ${payload.newStatus} — Load ${payload.loadId}`, 'info')
+  refresh()
+}
+
+function onPodUploaded(payload) {
+  toast(`POD uploaded for Load ${payload.loadId} by ${payload.driverName}`, 'success')
+  refresh()
+}
+
 function onNewMessage(msg) {
   msgStore.addIncomingMessage(msg)
 }
@@ -134,6 +151,8 @@ onMounted(() => {
   socket.connect()
   socket.register('dispatch')
   socket.on('new-message', onNewMessage)
+  socket.on('status-updated', onStatusUpdated)
+  socket.on('pod-uploaded', onPodUploaded)
 
   refreshInterval = setInterval(refresh, 60000)
 })
@@ -141,6 +160,8 @@ onMounted(() => {
 onUnmounted(() => {
   clearInterval(refreshInterval)
   socket.off('new-message', onNewMessage)
+  socket.off('status-updated', onStatusUpdated)
+  socket.off('pod-uploaded', onPodUploaded)
 })
 </script>
 
@@ -240,6 +261,7 @@ onUnmounted(() => {
 /* Status badge overrides for dashboard */
 :deep(.status-badge.in-transit) { background: var(--blue-dim); color: var(--blue); }
 :deep(.status-badge.assigned) { background: var(--accent-dim); color: var(--accent); }
+:deep(.status-badge.dispatched) { background: var(--blue-dim); color: var(--blue); }
 :deep(.status-badge.delivered) { background: rgba(16,185,129,0.2); color: #059669; }
 :deep(.status-badge.unassigned) { background: var(--danger-dim); color: var(--danger); }
 :deep(.status-badge.picked-up) { background: var(--amber-dim); color: var(--amber); }

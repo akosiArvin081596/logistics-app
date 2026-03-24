@@ -2,7 +2,10 @@
   <div class="card load-card" @click="$emit('select', load)">
     <div class="card-header">
       <span class="card-title">{{ loadId || 'Load' }}</span>
-      <StatusBadge :status="status" />
+      <div class="card-header-actions">
+        <button class="chat-btn" title="Messages" @click.stop="$emit('chat', { loadId, load })">&#128172;</button>
+        <StatusBadge :status="status" />
+      </div>
     </div>
     <div v-if="origin || destination" class="card-row">
       <span class="card-label">Route</span>
@@ -36,7 +39,7 @@ const props = defineProps({
   headers: { type: Array, default: () => [] },
 })
 
-defineEmits(['select'])
+defineEmits(['select', 'chat'])
 
 function findCol(headers, regex) {
   return (headers || []).find((h) => regex.test(h)) || null
@@ -89,6 +92,31 @@ function formatCurrency(val) {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0.75rem;
+}
+
+.card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.chat-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.chat-btn:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent);
 }
 
 .card-title {

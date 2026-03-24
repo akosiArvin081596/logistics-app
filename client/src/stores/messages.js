@@ -7,6 +7,7 @@ export const useMessagesStore = defineStore('messages', {
   state: () => ({
     conversations: [],
     selectedDriver: null,
+    selectedLoadId: '',
     currentMessages: [],
   }),
 
@@ -24,10 +25,14 @@ export const useMessagesStore = defineStore('messages', {
       }
     },
 
-    async selectDriver(name) {
-      this.selectedDriver = name
+    async selectConversation(driverName, loadId) {
+      this.selectedDriver = driverName
+      this.selectedLoadId = loadId || ''
       try {
-        const data = await api.get(`/api/messages/${encodeURIComponent(name)}`)
+        const query = loadId
+          ? `/api/messages/${encodeURIComponent(driverName)}?loadId=${encodeURIComponent(loadId)}`
+          : `/api/messages/${encodeURIComponent(driverName)}`
+        const data = await api.get(query)
         this.currentMessages = data.messages || []
         // Mark unread as read
         const unreadIds = this.currentMessages
@@ -42,12 +47,17 @@ export const useMessagesStore = defineStore('messages', {
       }
     },
 
-    async sendMessage(driver, message) {
+    // Keep backward compat for old callers
+    async selectDriver(name) {
+      return this.selectConversation(name, '')
+    },
+
+    async sendMessage(driver, message, loadId) {
       await api.post('/api/messages', {
         from: 'Dispatch',
         to: driver,
         message,
-        loadId: '',
+        loadId: loadId || '',
       })
       // Optimistic update
       this.currentMessages.push({
@@ -56,19 +66,19 @@ export const useMessagesStore = defineStore('messages', {
         from: 'Dispatch',
         to: driver,
         message,
-        loadId: '',
+        loadId: loadId || '',
         read: 1,
       })
       this.loadConversations()
     },
 
     addIncomingMessage(msg) {
-      // Refresh conversations
       this.loadConversations()
-      // If viewing this driver's chat, add it
+      // If viewing this driver's chat for this load, add it
       if (
         this.selectedDriver &&
-        msg.from.toLowerCase() === this.selectedDriver.toLowerCase()
+        msg.from.toLowerCase() === this.selectedDriver.toLowerCase() &&
+        (!this.selectedLoadId || msg.loadId === this.selectedLoadId)
       ) {
         this.currentMessages.push({
           id: msg.id || 0,
@@ -79,7 +89,6 @@ export const useMessagesStore = defineStore('messages', {
           loadId: msg.loadId || '',
           read: 1,
         })
-        // Mark as read
         if (msg.id) {
           api.put('/api/messages/read', { messageIds: [msg.id] })
         }

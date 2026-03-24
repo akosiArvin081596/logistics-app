@@ -12,7 +12,8 @@ const props = defineProps({
 const statusClass = computed(() => {
   const s = (props.status || '').trim().toLowerCase()
   if (/in.?transit/.test(s)) return 'in-transit'
-  if (/assigned|dispatched/.test(s)) return 'assigned'
+  if (/dispatched/.test(s)) return 'dispatched'
+  if (/assigned/.test(s)) return 'assigned'
   if (/delivered|completed/.test(s)) return 'delivered'
   if (/picked.?up|at shipper|loading/.test(s)) return 'picked-up'
   if (/unassigned|new|open|pending/.test(s)) return 'unassigned'

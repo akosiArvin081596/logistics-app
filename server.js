@@ -7,11 +7,12 @@ const bcrypt = require("bcryptjs");
 const session = require("express-session");
 const Database = require("better-sqlite3");
 const SqliteStore = require("better-sqlite3-session-store")(session);
+const geolib = require("geolib");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "5mb" }));
 
 // ============================================================
 // SQLite — Local database for app data (messages, users, expenses)
@@ -85,6 +86,35 @@ db.exec(`
 db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_driver ON expenses(driver)`);
 
 db.exec(`
+	CREATE TABLE IF NOT EXISTS documents (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		load_id TEXT NOT NULL,
+		driver TEXT NOT NULL,
+		type TEXT NOT NULL,
+		file_name TEXT NOT NULL,
+		drive_file_id TEXT DEFAULT '',
+		drive_url TEXT DEFAULT '',
+		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS driver_locations (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		driver TEXT NOT NULL,
+		latitude REAL NOT NULL,
+		longitude REAL NOT NULL,
+		accuracy REAL DEFAULT 0,
+		speed REAL DEFAULT 0,
+		heading REAL DEFAULT 0,
+		timestamp TEXT NOT NULL,
+		load_id TEXT DEFAULT ''
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver ON driver_locations(driver)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_ts ON driver_locations(timestamp)`);
+
+db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_config (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL
@@ -142,11 +172,16 @@ const KEY_FILE = "./service-account-key.json"; // Path to your service account J
 // ============================================================
 const auth = new google.auth.GoogleAuth({
 	keyFile: KEY_FILE,
-	scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+	scopes: [
+		"https://www.googleapis.com/auth/spreadsheets",
+		"https://www.googleapis.com/auth/drive.file",
+	],
 });
 
 let sheetsClient = null;
+let driveClient = null;
 const sheetIdCache = new Map();
+const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 
 async function getSheets() {
 	if (!sheetsClient) {
@@ -154,6 +189,14 @@ async function getSheets() {
 		sheetsClient = google.sheets({ version: "v4", auth: authClient });
 	}
 	return sheetsClient;
+}
+
+async function getDrive() {
+	if (!driveClient) {
+		const authClient = await auth.getClient();
+		driveClient = google.drive({ version: "v3", auth: authClient });
+	}
+	return driveClient;
 }
 
 async function getSheetId(sheets, sheetName) {
@@ -452,6 +495,32 @@ app.put("/api/data/:rowIndex", requireRole("Admin", "Dispatcher"), async (req, r
 		});
 	} catch (error) {
 		console.error("Error updating row:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// POST /api/dispatch — Assign driver to a load and notify via Socket.IO
+app.post("/api/dispatch", requireRole("Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const { rowIndex, driver, loadId, values } = req.body;
+		if (!rowIndex || !driver || !values) {
+			return res.status(400).json({ error: "rowIndex, driver, and values required" });
+		}
+
+		const sheets = await getSheets();
+		await sheets.spreadsheets.values.update({
+			spreadsheetId: SPREADSHEET_ID,
+			range: `Job Tracking!A${rowIndex}`,
+			valueInputOption: "USER_ENTERED",
+			requestBody: { values: [values] },
+		});
+
+		// Notify the driver in real-time
+		io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex });
+
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error dispatching load:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
@@ -845,6 +914,9 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 			},
 		});
 
+		// Notify dispatch in real-time
+		io.to("dispatch").emit("status-updated", { loadId, driverName, newStatus });
+
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error updating driver status:", error.message);
@@ -858,6 +930,9 @@ app.post("/api/messages", requireAuth, (req, res) => {
 		const { from, to, message, loadId } = req.body;
 		if (!from || !to || !message) {
 			return res.status(400).json({ error: "from, to, and message required" });
+		}
+		if (!loadId) {
+			return res.status(400).json({ error: "loadId is required" });
 		}
 
 		const timestamp = new Date().toISOString();
@@ -908,15 +983,16 @@ app.put("/api/messages/read", requireAuth, (req, res) => {
 // GET /api/messages — All messages for dispatch view (Admin/Dispatcher)
 app.get("/api/messages", requireRole("Admin", "Dispatcher"), (req, res) => {
 	try {
-		// Get all unique driver conversations (exclude Dispatch-to-Dispatch)
+		// Group conversations by driver + load
 		const conversations = db
 			.prepare(
 				`SELECT
 					CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
+					load_id AS loadId,
 					MAX(timestamp) AS lastTimestamp,
 					SUM(CASE WHEN LOWER("to") = 'dispatch' AND read = 0 THEN 1 ELSE 0 END) AS unread
 				 FROM messages
-				 GROUP BY driver
+				 GROUP BY driver, load_id
 				 ORDER BY lastTimestamp DESC`,
 			)
 			.all();
@@ -933,14 +1009,28 @@ app.get("/api/messages/:driverName", requireRole("Admin", "Dispatcher"), (req, r
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const nameLower = driverName.toLowerCase();
-		const messages = db
-			.prepare(
-				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
-				 FROM messages
-				 WHERE LOWER("from") = ? OR LOWER("to") = ?
-				 ORDER BY id ASC`,
-			)
-			.all(nameLower, nameLower);
+		const loadId = req.query.loadId || "";
+
+		let messages;
+		if (loadId) {
+			messages = db
+				.prepare(
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
+					 FROM messages
+					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?
+					 ORDER BY id ASC`,
+				)
+				.all(nameLower, nameLower, loadId);
+		} else {
+			messages = db
+				.prepare(
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
+					 FROM messages
+					 WHERE LOWER("from") = ? OR LOWER("to") = ?
+					 ORDER BY id ASC`,
+				)
+				.all(nameLower, nameLower);
+		}
 
 		res.json({ messages });
 	} catch (error) {
@@ -969,6 +1059,206 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error logging expense:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// POST /api/documents/upload — Upload POD/BOL document to Google Drive
+app.post("/api/documents/upload", requireAuth, async (req, res) => {
+	try {
+		const { loadId, rowIndex, type, photoData, driverName } = req.body;
+		if (!loadId || !rowIndex || !type || !photoData) {
+			return res.status(400).json({ error: "loadId, rowIndex, type, and photoData required" });
+		}
+
+		const fileName = `${loadId}_${type}.jpg`;
+		let driveFileId = "";
+		let driveUrl = "";
+
+		// Upload to Google Drive if folder configured
+		if (DRIVE_FOLDER_ID) {
+			const drive = await getDrive();
+			const base64Data = photoData.replace(/^data:image\/\w+;base64,/, "");
+			const buffer = Buffer.from(base64Data, "base64");
+			const { Readable } = require("stream");
+
+			const driveResponse = await drive.files.create({
+				requestBody: {
+					name: fileName,
+					parents: [DRIVE_FOLDER_ID],
+				},
+				media: {
+					mimeType: "image/jpeg",
+					body: Readable.from(buffer),
+				},
+				fields: "id, webViewLink",
+			});
+
+			driveFileId = driveResponse.data.id || "";
+			driveUrl = driveResponse.data.webViewLink || "";
+		}
+
+		// Update "POD Uploaded" column in Google Sheet
+		const sheets = await getSheets();
+		const headerResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking!1:1",
+		});
+		const headers = (headerResp.data.values || [[]])[0];
+		const podColIdx = headers.findIndex((h) => /pod.*upload/i.test(h));
+
+		if (podColIdx >= 0) {
+			const colLetter = String.fromCharCode(65 + podColIdx);
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `Job Tracking!${colLetter}${rowIndex}`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: { values: [["Yes"]] },
+			});
+		}
+
+		// Store metadata in SQLite
+		db.prepare(
+			`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url)
+			 VALUES (?, ?, ?, ?, ?, ?)`
+		).run(loadId, driverName || "", type, fileName, driveFileId, driveUrl);
+
+		// Notify dispatch
+		io.to("dispatch").emit("pod-uploaded", { loadId, driverName, driveUrl });
+
+		res.json({ success: true, driveUrl });
+	} catch (error) {
+		console.error("Error uploading document:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// ============================================================
+// GPS TRACKING & GEOFENCING
+// ============================================================
+
+const GEOFENCE_RADIUS = 500; // meters
+
+function checkGeofence(lat, lng, loadData, headers) {
+	// Look for lat/lng columns for origin and destination
+	const originLatCol = headers.find((h) => /origin.*lat|pickup.*lat|shipper.*lat/i.test(h));
+	const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
+	const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
+	const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
+
+	const triggers = [];
+
+	if (originLatCol && originLngCol) {
+		const oLat = parseFloat(loadData[originLatCol]);
+		const oLng = parseFloat(loadData[originLngCol]);
+		if (!isNaN(oLat) && !isNaN(oLng)) {
+			if (geolib.isPointWithinRadius({ latitude: lat, longitude: lng }, { latitude: oLat, longitude: oLng }, GEOFENCE_RADIUS)) {
+				triggers.push("At Shipper");
+			}
+		}
+	}
+
+	if (destLatCol && destLngCol) {
+		const dLat = parseFloat(loadData[destLatCol]);
+		const dLng = parseFloat(loadData[destLngCol]);
+		if (!isNaN(dLat) && !isNaN(dLng)) {
+			if (geolib.isPointWithinRadius({ latitude: lat, longitude: lng }, { latitude: dLat, longitude: dLng }, GEOFENCE_RADIUS)) {
+				triggers.push("At Receiver");
+			}
+		}
+	}
+
+	return triggers;
+}
+
+// POST /api/location — Driver reports location
+app.post("/api/location", requireAuth, async (req, res) => {
+	try {
+		const { latitude, longitude, accuracy, speed, heading, loadId } = req.body;
+		const driverName = req.session?.user?.driverName || req.session?.user?.username || "";
+		if (!latitude || !longitude) {
+			return res.status(400).json({ error: "latitude and longitude required" });
+		}
+
+		const timestamp = new Date().toISOString();
+		db.prepare(
+			`INSERT INTO driver_locations (driver, latitude, longitude, accuracy, speed, heading, timestamp, load_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+		).run(driverName, latitude, longitude, accuracy || 0, speed || 0, heading || 0, timestamp, loadId || "");
+
+		// Broadcast to dispatch
+		io.to("dispatch").emit("location-update", {
+			driver: driverName,
+			latitude, longitude,
+			speed: speed || 0,
+			loadId: loadId || "",
+			timestamp,
+		});
+
+		// Geofence check if loadId is provided
+		let geofenceTriggered = null;
+		if (loadId) {
+			try {
+				const sheets = await getSheets();
+				const headerResp = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: "Job Tracking!1:1",
+				});
+				const headers = (headerResp.data.values || [[]])[0];
+
+				// Find the load row
+				const dataResp = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: "Job Tracking",
+				});
+				const rows = dataResp.data.values || [];
+				for (let i = 1; i < rows.length; i++) {
+					const loadObj = {};
+					headers.forEach((h, idx) => { loadObj[h] = rows[i][idx] || ""; });
+					const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+					if (loadIdCol && loadObj[loadIdCol] === loadId) {
+						const triggers = checkGeofence(latitude, longitude, loadObj, headers);
+						if (triggers.length > 0) {
+							geofenceTriggered = triggers[0];
+							io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
+								loadId,
+								status: geofenceTriggered,
+							});
+							io.to("dispatch").emit("geofence-trigger", {
+								loadId,
+								driver: driverName,
+								status: geofenceTriggered,
+							});
+						}
+						break;
+					}
+				}
+			} catch (geoErr) {
+				console.error("Geofence check error:", geoErr.message);
+			}
+		}
+
+		res.json({ success: true, geofenceTriggered });
+	} catch (error) {
+		console.error("Error storing location:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/locations/latest — Latest position per active driver
+app.get("/api/locations/latest", requireRole("Admin", "Dispatcher"), (req, res) => {
+	try {
+		const locations = db.prepare(
+			`SELECT dl.driver, dl.latitude, dl.longitude, dl.speed, dl.heading, dl.timestamp, dl.load_id AS loadId
+			 FROM driver_locations dl
+			 INNER JOIN (SELECT driver, MAX(id) AS max_id FROM driver_locations GROUP BY driver) latest
+			 ON dl.id = latest.max_id
+			 WHERE dl.timestamp > datetime('now', '-1 hour')`
+		).all();
+
+		res.json({ locations });
+	} catch (error) {
+		console.error("Error fetching locations:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });

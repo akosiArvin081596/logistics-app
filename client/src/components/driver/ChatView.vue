@@ -1,36 +1,30 @@
 <template>
   <div class="chat-container">
-    <!-- Filters -->
+    <!-- Load selector -->
     <div class="chat-filter">
       <select
-        v-model="selectedRecipient"
+        v-model="selectedLoadId"
         class="load-selector"
+        @change="$emit('changeLoad', selectedLoadId)"
       >
-        <option value="Dispatch">Dispatch</option>
+        <option value="" disabled>Select a load to chat</option>
         <option
-          v-for="d in otherDrivers"
-          :key="d"
-          :value="d"
-        >{{ d }}</option>
-      </select>
-      <select
-        v-model="loadFilter"
-        class="load-selector"
-      >
-        <option value="">All Messages</option>
-        <option
-          v-for="id in loadIds"
+          v-for="id in availableLoadIds"
           :key="id"
           :value="id"
-        >{{ id }}</option>
+        >Load {{ id }}</option>
       </select>
     </div>
 
     <!-- Messages -->
     <div ref="chatMessagesEl" class="chat-messages">
-      <EmptyState v-if="filteredMessages.length === 0">
+      <EmptyState v-if="!selectedLoadId">
         <div class="empty-icon">&#128172;</div>
-        No messages yet.<br>Send one below.
+        Select a load above to view messages.
+      </EmptyState>
+      <EmptyState v-else-if="filteredMessages.length === 0">
+        <div class="empty-icon">&#128172;</div>
+        No messages for this load.<br>Send one below.
       </EmptyState>
       <template v-else>
         <div
@@ -38,7 +32,6 @@
           :key="m.id || i"
           :class="['msg-bubble', isSent(m) ? 'sent' : 'received']"
         >
-          <div v-if="m.loadId" class="msg-load-tag">{{ m.loadId }}</div>
           <div v-if="!isSent(m)" class="msg-sender">{{ m.from }}</div>
           {{ m.message }}
           <div class="msg-meta">{{ formatTime(m.timestamp) }}</div>
@@ -47,12 +40,12 @@
     </div>
 
     <!-- Input bar -->
-    <div class="chat-input-bar">
+    <div v-if="selectedLoadId" class="chat-input-bar">
       <input
         v-model="messageText"
         class="chat-input"
         type="text"
-        placeholder="Type a message..."
+        placeholder="Message Dispatch..."
         maxlength="500"
         @keydown.enter.prevent="handleSend"
       />
@@ -71,35 +64,40 @@ import EmptyState from '../shared/EmptyState.vue'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
-  drivers: { type: Array, default: () => [] },
   loads: { type: Array, default: () => [] },
   driverName: { type: String, required: true },
+  loadId: { type: String, default: '' },
 })
 
-const emit = defineEmits(['send', 'markRead'])
+const emit = defineEmits(['send', 'markRead', 'changeLoad'])
 
 const chatMessagesEl = ref(null)
-const selectedRecipient = ref('Dispatch')
-const loadFilter = ref('')
 const messageText = ref('')
 const sending = ref(false)
+const selectedLoadId = ref(props.loadId || '')
 
-const otherDrivers = computed(() =>
-  props.drivers.filter(
-    (d) => d.toLowerCase() !== props.driverName.toLowerCase()
-  )
-)
+// Sync when parent changes loadId (e.g. from LoadCard chat button)
+watch(() => props.loadId, (val) => {
+  if (val) selectedLoadId.value = val
+})
 
-const loadIds = computed(() =>
-  [...new Set(props.messages.map((m) => m.loadId || '').filter(Boolean))]
-)
+// Extract load IDs from the driver's actual loads
+const availableLoadIds = computed(() => {
+  const ids = []
+  for (const load of props.loads) {
+    for (const key of Object.keys(load)) {
+      if (/load.?id|job.?id/i.test(key) && load[key]) {
+        ids.push(String(load[key]))
+        break
+      }
+    }
+  }
+  return [...new Set(ids)]
+})
 
 const filteredMessages = computed(() => {
-  let msgs = props.messages
-  if (loadFilter.value) {
-    msgs = msgs.filter((m) => m.loadId === loadFilter.value)
-  }
-  return msgs
+  if (!selectedLoadId.value) return []
+  return props.messages.filter((m) => m.loadId === selectedLoadId.value)
 })
 
 function isSent(m) {
@@ -115,14 +113,14 @@ function formatTime(str) {
 
 async function handleSend() {
   const msg = messageText.value.trim()
-  if (!msg || sending.value) return
+  if (!msg || sending.value || !selectedLoadId.value) return
 
   sending.value = true
   try {
     emit('send', {
-      recipient: selectedRecipient.value,
+      recipient: 'Dispatch',
       message: msg,
-      loadId: loadFilter.value,
+      loadId: selectedLoadId.value,
     })
     messageText.value = ''
   } finally {
@@ -138,9 +136,9 @@ function scrollToBottom() {
   })
 }
 
-// Mark unread messages as read when visible
 function markUnread() {
-  const unreadIds = props.messages
+  if (!selectedLoadId.value) return
+  const unreadIds = filteredMessages.value
     .filter(
       (m) =>
         (m.to || '').toLowerCase() === props.driverName.toLowerCase() &&
@@ -160,7 +158,7 @@ onMounted(() => {
 })
 
 watch(
-  () => props.messages.length,
+  () => filteredMessages.value.length,
   () => {
     scrollToBottom()
     markUnread()
@@ -239,20 +237,6 @@ watch(
 
 .msg-bubble.sent .msg-meta {
   color: rgba(255, 255, 255, 0.7);
-}
-
-.msg-load-tag {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.6rem;
-  background: rgba(0, 0, 0, 0.08);
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-  margin-bottom: 0.3rem;
-  display: inline-block;
-}
-
-.msg-bubble.sent .msg-load-tag {
-  background: rgba(255, 255, 255, 0.2);
 }
 
 .chat-input-bar {
