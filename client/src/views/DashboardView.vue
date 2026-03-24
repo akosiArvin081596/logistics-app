@@ -66,7 +66,7 @@
         <FleetTab :fleet="store.fleet" />
       </div>
       <div v-show="activeTab === 'tracking'" class="tab-panel active">
-        <TrackingMap />
+        <TrackingMap :visible="activeTab === 'tracking'" />
       </div>
       <div v-show="activeTab === 'messages'" class="tab-panel active">
         <MessagingPanel :driver-names="driverNames" />

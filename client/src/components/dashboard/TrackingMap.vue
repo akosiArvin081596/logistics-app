@@ -36,15 +36,20 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import 'leaflet/dist/leaflet.css'
 import { LMap, LTileLayer, LMarker, LPopup } from '@vue-leaflet/vue-leaflet'
 
+const props = defineProps({
+  visible: { type: Boolean, default: false },
+})
+
 const api = useApi()
 const socket = useSocket()
 
+const mapRef = ref(null)
 const locations = ref([])
 const loading = ref(true)
 
@@ -89,6 +94,17 @@ function formatTime(ts) {
   const d = new Date(ts)
   return isNaN(d) ? ts : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
+
+// Fix tile rendering when tab becomes visible
+watch(() => props.visible, (val) => {
+  if (val) {
+    nextTick(() => {
+      if (mapRef.value?.leafletObject) {
+        mapRef.value.leafletObject.invalidateSize()
+      }
+    })
+  }
+})
 
 onMounted(() => {
   fetchLocations()
