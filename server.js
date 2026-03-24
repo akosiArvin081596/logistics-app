@@ -463,6 +463,23 @@ app.delete("/api/users/:id", requireRole("Admin"), (req, res) => {
 	res.json({ success: true });
 });
 
+// Debug: check a user's role/driverName without auth (read-only, no sensitive data)
+app.get("/api/debug/user/:username", (req, res) => {
+	const username = decodeURIComponent(req.params.username).trim();
+	const user = db
+		.prepare("SELECT id, username, role, driver_name, email, created_at FROM users WHERE LOWER(username) = ?")
+		.get(username.toLowerCase());
+	if (!user) return res.status(404).json({ error: "User not found" });
+	res.json({
+		id: user.id,
+		username: user.username,
+		role: user.role,
+		driverName: user.driver_name || "",
+		email: user.email || "",
+		createdAt: user.created_at,
+	});
+});
+
 // ============================================================
 // CRUD Endpoints (dynamic sheet tab via ?sheet= query param)
 // ============================================================
