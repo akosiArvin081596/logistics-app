@@ -96,7 +96,9 @@ const brokerEmail = computed(() => brokerParsed.value.email)
 
 function formatDate(str) {
   if (!str) return '\u2014'
-  const d = new Date(str)
+  // Strip time ranges like "06:00-18:00" → "06:00" so Date can parse
+  const cleaned = str.replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').trim()
+  const d = new Date(cleaned)
   if (isNaN(d)) return str
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }

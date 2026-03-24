@@ -81,11 +81,13 @@ export const useDriverStore = defineStore('driver', {
       // Search filter
       if (state.filterSearch.trim()) {
         const q = state.filterSearch.trim().toLowerCase()
+        const detailsCol = findCol(headers, /details/i)
         result = result.filter((l) => {
           const fields = [
             loadIdCol && l[loadIdCol],
             originCol && l[originCol],
             destCol && l[destCol],
+            detailsCol && l[detailsCol],
           ].filter(Boolean)
           return fields.some((f) => f.toLowerCase().includes(q))
         })
@@ -101,7 +103,8 @@ export const useDriverStore = defineStore('driver', {
           result = result.filter((l) => {
             const raw = l[dateCol]
             if (!raw) return false
-            const d = new Date(raw)
+            const cleaned = raw.replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').trim()
+            const d = new Date(cleaned)
             if (isNaN(d)) return false
             if (from && d < from) return false
             if (to && d > to) return false
