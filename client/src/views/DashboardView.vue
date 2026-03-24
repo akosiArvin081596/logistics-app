@@ -273,8 +273,8 @@ onUnmounted(() => {
 :deep(.status-badge.unassigned) { background: var(--danger-dim); color: var(--danger); }
 :deep(.status-badge.picked-up) { background: var(--amber-dim); color: var(--amber); }
 
-.assign-cell {
-  display: flex; align-items: center; gap: 0.4rem;
+:deep(.assign-cell) {
+  display: flex; align-items: center; gap: 0.4rem; white-space: nowrap;
 }
 :deep(.assign-cell select) {
   padding: 0.3rem 0.5rem;
