@@ -463,6 +463,38 @@ app.delete("/api/users/:id", requireRole("Admin"), (req, res) => {
 	res.json({ success: true });
 });
 
+// Debug: check what the driver endpoint returns (first 2 loads)
+app.get("/api/debug/driver-view/:driverName", async (req, res) => {
+	try {
+		const driverName = decodeURIComponent(req.params.driverName).trim();
+		const sheets = await getSheets();
+		const response = await sheets.spreadsheets.values.batchGet({
+			spreadsheetId: SPREADSHEET_ID,
+			ranges: ["Job Tracking"],
+		});
+		const rangeData = response.data.valueRanges || [];
+		const rows = (rangeData[0] && rangeData[0].values) || [];
+		if (rows.length === 0) return res.json({ error: "No data" });
+		const headers = rows[0];
+		const driverCol = headers.find((h) => /driver/i.test(h)) || null;
+		const rateRegex = /rate|amount|revenue|pay|charge|price|cost/i;
+		const filteredHeaders = headers.filter((h) => !rateRegex.test(h));
+		const driverColIdx = driverCol ? headers.indexOf(driverCol) : -1;
+		const matching = rows.slice(1).filter((r) => driverColIdx >= 0 && (r[driverColIdx] || "").trim().toLowerCase() === driverName.toLowerCase());
+		const sample = matching.slice(0, 2).map((row) => {
+			const obj = {};
+			filteredHeaders.forEach((h) => {
+				const i = headers.indexOf(h);
+				obj[h] = row[i] || "";
+			});
+			return obj;
+		});
+		res.json({ filteredHeaders, sampleLoads: sample });
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Debug: sample row data to inspect column formats
 app.get("/api/debug/sample-row", async (req, res) => {
 	try {
