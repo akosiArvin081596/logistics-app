@@ -431,14 +431,6 @@ onMounted(async () => {
     toast.show('Failed to load data', 'error')
   }
 
-  // Auto-refresh every 30 seconds
-  refreshInterval = setInterval(async () => {
-    try {
-      await driverStore.loadData()
-    } catch {
-      // silent refresh failure
-    }
-  }, 30000)
 
   // Socket.IO
   socket.connect()
