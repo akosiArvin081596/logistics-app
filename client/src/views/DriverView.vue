@@ -459,7 +459,7 @@ onUnmounted(() => {
 }
 
 .app-content {
-  padding: 1rem;
+  padding: 0.75rem 0.5rem;
 }
 
 .tab-panel {
