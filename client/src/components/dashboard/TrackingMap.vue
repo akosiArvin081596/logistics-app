@@ -26,6 +26,13 @@
               <strong>{{ loc.driver }}</strong>
               <div v-if="loc.loadId">Load: {{ loc.loadId }}</div>
               <div v-if="loc.speed">Speed: {{ Math.round(loc.speed * 2.237) }} mph</div>
+              <div v-if="loc.etaMinutes != null" class="popup-eta">
+                ETA: {{ loc.etaMinutes }} min
+              </div>
+              <span
+                v-if="loc.etaStatus && loc.etaStatus !== 'unknown'"
+                :class="['eta-badge', loc.etaStatus]"
+              >{{ loc.etaStatus === 'on-time' ? 'On Time' : 'Delayed' }}</span>
               <div class="popup-time">{{ formatTime(loc.timestamp) }}</div>
             </div>
           </l-popup>
@@ -145,6 +152,29 @@ onUnmounted(() => {
 .marker-popup div {
   font-size: 0.8rem;
   color: #555;
+}
+
+.popup-eta {
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+
+.eta-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.eta-badge.on-time {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.eta-badge.delayed {
+  background: #fef2f2;
+  color: #dc2626;
 }
 
 .popup-time {

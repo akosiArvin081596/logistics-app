@@ -17,6 +17,9 @@ const statusClass = computed(() => {
   if (/delivered|completed/.test(s)) return 'delivered'
   if (/picked.?up|at shipper|loading/.test(s)) return 'picked-up'
   if (/unassigned|new|open|pending/.test(s)) return 'unassigned'
+  if (/on.?time/.test(s)) return 'on-time'
+  if (/delayed/.test(s)) return 'delayed'
+  if (/at.?receiver/.test(s)) return 'picked-up'
   return 'default'
 })
 </script>

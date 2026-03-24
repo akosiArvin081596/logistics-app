@@ -1221,6 +1221,39 @@ app.post("/api/location", requireAuth, async (req, res) => {
 						const triggers = checkGeofence(latitude, longitude, loadObj, headers);
 						if (triggers.length > 0) {
 							geofenceTriggered = triggers[0];
+							const statusCol = headers.find((h) => /^status$/i.test(h));
+							const currentStatus = statusCol ? (loadObj[statusCol] || "").toLowerCase() : "";
+
+							// Guard: only auto-update if status is a valid predecessor
+							const canUpdate =
+								(geofenceTriggered === "At Shipper" && /^(dispatched|assigned)$/i.test(currentStatus)) ||
+								(geofenceTriggered === "At Receiver" && /^(in transit)$/i.test(currentStatus));
+
+							if (canUpdate && statusCol) {
+								// Update status in sheet
+								const statusColIdx = headers.indexOf(statusCol);
+								const colLetter = String.fromCharCode(65 + (statusColIdx % 26));
+								await sheets.spreadsheets.values.update({
+									spreadsheetId: SPREADSHEET_ID,
+									range: `Job Tracking!${colLetter}${i + 1}`,
+									valueInputOption: "USER_ENTERED",
+									requestBody: { values: [[geofenceTriggered]] },
+								});
+
+								// Log to Status Logs
+								const now = new Date();
+								const logId = `LOG-${now.getTime()}`;
+								const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+								await sheets.spreadsheets.values.append({
+									spreadsheetId: SPREADSHEET_ID,
+									range: "Status Logs",
+									valueInputOption: "USER_ENTERED",
+									requestBody: {
+										values: [[logId, loadId, driverName, dateTime, geofenceTriggered, `Auto-triggered by geofence (was ${currentStatus})`]],
+									},
+								});
+							}
+
 							io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
 								loadId,
 								status: geofenceTriggered,
@@ -1246,8 +1279,8 @@ app.post("/api/location", requireAuth, async (req, res) => {
 	}
 });
 
-// GET /api/locations/latest — Latest position per active driver
-app.get("/api/locations/latest", requireRole("Admin", "Dispatcher"), (req, res) => {
+// GET /api/locations/latest — Latest position per active driver with ETA
+app.get("/api/locations/latest", requireRole("Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const locations = db.prepare(
 			`SELECT dl.driver, dl.latitude, dl.longitude, dl.speed, dl.heading, dl.timestamp, dl.load_id AS loadId
@@ -1256,6 +1289,74 @@ app.get("/api/locations/latest", requireRole("Admin", "Dispatcher"), (req, res) 
 			 ON dl.id = latest.max_id
 			 WHERE dl.timestamp > datetime('now', '-1 hour')`
 		).all();
+
+		// Enrich with ETA data from sheet
+		try {
+			const sheets = await getSheets();
+			const headerResp = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: "Job Tracking!1:1",
+			});
+			const headers = (headerResp.data.values || [[]])[0];
+			const dataResp = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: "Job Tracking",
+			});
+			const rows = dataResp.data.values || [];
+
+			const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+			const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
+			const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
+			const deliveryTimeCol = headers.find((h) => /delivery.*time|drop.*time|delivery.*date|drop.*date/i.test(h));
+
+			if (loadIdCol) {
+				// Build load lookup
+				const loadMap = {};
+				for (let i = 1; i < rows.length; i++) {
+					const obj = {};
+					headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
+					const lid = obj[loadIdCol];
+					if (lid) loadMap[lid] = obj;
+				}
+
+				const DEFAULT_SPEED_MPS = 24.587; // ~55 mph in m/s
+
+				for (const loc of locations) {
+					loc.etaStatus = "unknown";
+					loc.etaMinutes = null;
+					if (!loc.loadId || !loadMap[loc.loadId]) continue;
+					const load = loadMap[loc.loadId];
+
+					if (destLatCol && destLngCol) {
+						const dLat = parseFloat(load[destLatCol]);
+						const dLng = parseFloat(load[destLngCol]);
+						if (!isNaN(dLat) && !isNaN(dLng)) {
+							const distMeters = geolib.getDistance(
+								{ latitude: loc.latitude, longitude: loc.longitude },
+								{ latitude: dLat, longitude: dLng }
+							);
+							const speed = loc.speed > 1 ? loc.speed : DEFAULT_SPEED_MPS;
+							const etaSeconds = distMeters / speed;
+							loc.etaMinutes = Math.round(etaSeconds / 60);
+
+							// Compare against scheduled delivery time
+							if (deliveryTimeCol && load[deliveryTimeCol]) {
+								try {
+									const scheduled = new Date(load[deliveryTimeCol]);
+									if (!isNaN(scheduled)) {
+										const arrival = new Date(Date.now() + etaSeconds * 1000);
+										loc.etaStatus = arrival <= scheduled ? "on-time" : "delayed";
+									}
+								} catch { /* ignore parse error */ }
+							}
+						}
+					}
+				}
+			}
+		} catch (etaErr) {
+			console.error("ETA enrichment error:", etaErr.message);
+			// Still return locations without ETA
+		}
 
 		res.json({ locations });
 	} catch (error) {
