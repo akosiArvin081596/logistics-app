@@ -34,14 +34,59 @@
             {{ user.Email || '\u2014' }}
           </td>
           <td class="created-at">
-            {{ formatDate(user.created_at) }}
+            {{ formatDate(user.CreatedAt) }}
           </td>
           <td style="text-align: right;">
-            <button class="btn-remove" @click="confirmDelete(user)">Remove</button>
+            <div class="action-btns">
+              <button class="btn-edit" @click="openEdit(user)">Edit</button>
+              <button class="btn-remove" @click="confirmDelete(user)">Remove</button>
+            </div>
           </td>
         </tr>
       </tbody>
     </table>
+
+    <!-- Edit Modal -->
+    <Teleport to="body">
+      <div v-if="showEdit" class="confirm-overlay" @click.self="showEdit = false">
+        <div class="confirm-dialog edit-dialog">
+          <h3>Edit User &mdash; {{ editForm.username }}</h3>
+
+          <div class="edit-field">
+            <label>Role</label>
+            <select v-model="editForm.role">
+              <option>Admin</option>
+              <option>Dispatcher</option>
+              <option>Driver</option>
+              <option>Investor</option>
+            </select>
+          </div>
+
+          <div class="edit-field">
+            <label>Linked Driver</label>
+            <select v-model="editForm.driverName">
+              <option value="">None</option>
+              <option v-for="name in driverNames" :key="name" :value="name">{{ name }}</option>
+            </select>
+          </div>
+
+          <div class="edit-field">
+            <label>Email</label>
+            <input v-model="editForm.email" type="email" placeholder="Email" />
+          </div>
+
+          <div class="edit-field">
+            <label>New Password <span class="hint">(leave blank to keep current)</span></label>
+            <input v-model="editForm.password" type="password" placeholder="New password" autocomplete="new-password" />
+          </div>
+
+          <div class="confirm-actions">
+            <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
+            <button class="btn btn-primary" @click="handleSaveEdit">Save</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <ConfirmModal
       :open="showConfirm"
@@ -56,18 +101,43 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, reactive } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 
 defineProps({
   users: { type: Array, default: () => [] },
+  driverNames: { type: Array, default: () => [] },
 })
 
-const emit = defineEmits(['delete'])
+const emit = defineEmits(['delete', 'update'])
 
 const showConfirm = ref(false)
 const pendingUser = ref(null)
+
+const showEdit = ref(false)
+const editForm = reactive({ id: null, username: '', role: '', driverName: '', email: '', password: '' })
+
+function openEdit(user) {
+  editForm.id = user.id
+  editForm.username = user.Username
+  editForm.role = user.Role
+  editForm.driverName = user.DriverName || ''
+  editForm.email = user.Email || ''
+  editForm.password = ''
+  showEdit.value = true
+}
+
+function handleSaveEdit() {
+  const data = {
+    role: editForm.role,
+    driverName: editForm.driverName,
+    email: editForm.email,
+  }
+  if (editForm.password) data.password = editForm.password
+  emit('update', { id: editForm.id, data })
+  showEdit.value = false
+}
 
 function initials(name) {
   return (name || '?')
@@ -270,5 +340,98 @@ function handleConfirmDelete() {
   background: var(--danger-dim);
   color: var(--danger);
   border-color: var(--danger-dim);
+}
+
+.action-btns {
+  display: flex;
+  gap: 0.35rem;
+  justify-content: flex-end;
+}
+
+.btn-edit {
+  padding: 0.3rem 0.65rem;
+  font-size: 0.7rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 500;
+  color: var(--text-dim);
+  transition: all 0.15s;
+}
+
+.btn-edit:hover {
+  background: var(--blue-dim);
+  color: var(--blue);
+  border-color: var(--blue-dim);
+}
+
+/* Edit modal */
+.confirm-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.3);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200;
+}
+
+.confirm-dialog {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  max-width: 420px;
+  width: 90%;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.12);
+}
+
+.confirm-dialog h3 {
+  font-size: 1rem;
+  margin-bottom: 1rem;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+.edit-field {
+  margin-bottom: 0.75rem;
+}
+
+.edit-field label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.3rem;
+}
+
+.edit-field .hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.68rem;
+}
+
+.edit-field select,
+.edit-field input {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.82rem;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.edit-field select:focus,
+.edit-field input:focus {
+  outline: none;
+  border-color: var(--blue);
 }
 </style>

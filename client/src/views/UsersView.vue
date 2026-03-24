@@ -10,7 +10,7 @@
       <SkeletonLoader :rows="4" :cols="5" />
     </template>
     <template v-else>
-      <UserTable :users="store.users" @delete="handleDeleteUser" />
+      <UserTable :users="store.users" :driver-names="store.driverNames" @delete="handleDeleteUser" @update="handleUpdateUser" />
     </template>
   </div>
 </template>
@@ -34,6 +34,15 @@ async function handleAddUser(userData) {
     toast('User created')
   } catch (err) {
     toast(err.message || 'Failed to create user', 'error')
+  }
+}
+
+async function handleUpdateUser({ id, data }) {
+  try {
+    await store.updateUser(id, data)
+    toast('User updated')
+  } catch (err) {
+    toast(err.message || 'Failed to update user', 'error')
   }
 }
 

@@ -53,6 +53,11 @@ export const useUsersStore = defineStore('users', {
       return result
     },
 
+    async updateUser(id, data) {
+      await api.put(`/api/users/${id}`, data)
+      await this.loadUsers()
+    },
+
     async deleteUser(id) {
       await api.del(`/api/users/${id}`)
       await this.loadUsers()

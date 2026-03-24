@@ -412,6 +412,51 @@ app.get("/api/users", requireRole("Admin"), (req, res) => {
 });
 
 // Admin: delete a user
+// Admin: update a user's role, driverName, or email
+app.put("/api/users/:id", requireRole("Admin"), async (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		const { role, driverName, email, password } = req.body;
+
+		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+		if (!user) return res.status(404).json({ error: "User not found" });
+
+		const updates = [];
+		const params = [];
+
+		if (role && ["Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {
+			updates.push("role = ?");
+			params.push(role);
+		}
+		if (driverName !== undefined) {
+			updates.push("driver_name = ?");
+			params.push(driverName);
+		}
+		if (email !== undefined) {
+			updates.push("email = ?");
+			params.push(email);
+		}
+		if (password) {
+			const bcrypt = await import("bcryptjs");
+			const hash = await bcrypt.hash(password, 10);
+			updates.push("password_hash = ?");
+			params.push(hash);
+		}
+
+		if (updates.length === 0) {
+			return res.status(400).json({ error: "No valid fields to update" });
+		}
+
+		params.push(id);
+		db.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error updating user:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 app.delete("/api/users/:id", requireRole("Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	db.prepare("DELETE FROM users WHERE id = ?").run(id);
