@@ -463,6 +463,28 @@ app.delete("/api/users/:id", requireRole("Admin"), (req, res) => {
 	res.json({ success: true });
 });
 
+// Debug: sample row data to inspect column formats
+app.get("/api/debug/sample-row", async (req, res) => {
+	try {
+		const sheets = await getSheets();
+		const response = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking!A1:W3",
+		});
+		const rows = response.data.values || [];
+		if (rows.length < 2) return res.json({ error: "No data" });
+		const headers = rows[0];
+		const samples = rows.slice(1).map((row) => {
+			const obj = {};
+			headers.forEach((h, i) => { obj[h] = row[i] || ""; });
+			return obj;
+		});
+		res.json({ headers, samples });
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Debug: check driver load matching
 app.get("/api/debug/driver-loads/:driverName", async (req, res) => {
 	try {
