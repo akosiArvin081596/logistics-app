@@ -60,8 +60,8 @@ export const useDriverStore = defineStore('driver', {
       const loadIdCol = findCol(headers, /load.?id|job.?id/i)
       const originCol = findCol(headers, /origin|pickup.*city|shipper.*city|pickup.*info/i)
       const destCol = findCol(headers, /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city|drop.*info/i)
-      const pickupDateCol = findCol(headers, /pickup.*date|pickup.*appt/i)
-      const delivDateCol = findCol(headers, /deliv|drop.?off.*date|completion.*date|drop.?off.*appt/i)
+      const pickupDateCol = findCol(headers, /pickup.*date|pickup.*appoint/i)
+      const delivDateCol = findCol(headers, /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint|completion.*date/i)
 
       const activeRe = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i
       const completedRe = /^(delivered|completed|pod received)$/i
