@@ -1,5 +1,10 @@
 <template>
   <div class="load-card" @click="$emit('select', load)">
+    <!-- DEBUG: remove after fixing -->
+    <div style="font-size:0.6rem;color:red;word-break:break-all;margin-bottom:0.3rem;">
+      headers={{ headers.length }} | loadIdCol={{ loadIdCol }} | keys={{ Object.keys(load).slice(0,5).join(',') }}
+    </div>
+
     <!-- Top: Load ID + Status -->
     <div class="card-top">
       <span class="load-id">{{ loadId || 'Load' }}</span>
