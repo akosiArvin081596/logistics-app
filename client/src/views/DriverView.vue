@@ -13,21 +13,63 @@
       <section v-show="currentTab === 'loads'" class="tab-panel">
         <div class="section-header">
           My Loads
-          <span class="section-count">{{ driverStore.sortedLoads.length }}</span>
+          <span class="section-count">{{ driverStore.filteredLoads.length }}</span>
+          <button class="filter-toggle" :class="{ active: showFilters }" @click="showFilters = !showFilters">
+            &#9776; Filter
+          </button>
         </div>
+
+        <!-- Filters -->
+        <div v-show="showFilters" class="load-filters">
+          <div class="filter-row">
+            <div class="filter-group status-pills">
+              <button
+                v-for="opt in statusOptions"
+                :key="opt.value"
+                :class="['pill', { active: driverStore.filterStatus === opt.value }]"
+                @click="driverStore.filterStatus = opt.value"
+              >{{ opt.label }}</button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <input
+              v-model="driverStore.filterSearch"
+              type="text"
+              class="filter-input"
+              placeholder="Search load ID, origin, destination..."
+            />
+          </div>
+          <div class="filter-row date-row">
+            <div class="filter-group">
+              <label class="filter-label">From</label>
+              <input v-model="driverStore.filterDateFrom" type="date" class="filter-input" />
+            </div>
+            <div class="filter-group">
+              <label class="filter-label">To</label>
+              <input v-model="driverStore.filterDateTo" type="date" class="filter-input" />
+            </div>
+          </div>
+          <button v-if="hasActiveFilters" class="clear-filters" @click="clearFilters">Clear filters</button>
+        </div>
+
         <template v-if="driverStore.isLoading">
           <div class="skeleton skeleton-card"></div>
           <div class="skeleton skeleton-card"></div>
         </template>
-        <template v-else-if="driverStore.sortedLoads.length === 0">
+        <template v-else-if="driverStore.filteredLoads.length === 0">
           <EmptyState>
             <div class="empty-icon">&#128230;</div>
-            No loads assigned.<br>Check back later.
+            <template v-if="driverStore.loads.length > 0">
+              No loads match your filters.
+            </template>
+            <template v-else>
+              No loads assigned.<br>Check back later.
+            </template>
           </EmptyState>
         </template>
         <template v-else>
           <LoadCard
-            v-for="load in driverStore.sortedLoads"
+            v-for="load in driverStore.filteredLoads"
             :key="load._rowIndex"
             :load="load"
             :headers="driverStore.headers.jobTracking"
@@ -178,7 +220,28 @@ const geo = useGeolocation(useApi())
 const currentTab = ref('loads')
 const selectedStatusRowIndex = ref(null)
 const chatLoadId = ref('')
+const showFilters = ref(false)
 let refreshInterval = null
+
+const statusOptions = [
+  { label: 'Active', value: 'active' },
+  { label: 'Completed', value: 'completed' },
+  { label: 'All', value: 'all' },
+]
+
+const hasActiveFilters = computed(() =>
+  driverStore.filterStatus !== 'active' ||
+  driverStore.filterSearch.trim() !== '' ||
+  driverStore.filterDateFrom !== '' ||
+  driverStore.filterDateTo !== ''
+)
+
+function clearFilters() {
+  driverStore.filterStatus = 'active'
+  driverStore.filterSearch = ''
+  driverStore.filterDateFrom = ''
+  driverStore.filterDateTo = ''
+}
 
 const driverName = computed(() => auth.user?.driverName || auth.user?.username || '')
 
@@ -448,6 +511,129 @@ onUnmounted(() => {
 .empty-icon {
   font-size: 2rem;
   margin-bottom: 0.5rem;
+}
+
+/* Filter toggle button */
+.filter-toggle {
+  margin-left: auto;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.7rem;
+  font-family: inherit;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.filter-toggle.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Filter panel */
+.load-filters {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.filter-row {
+  margin-bottom: 0.5rem;
+}
+
+.filter-row:last-child {
+  margin-bottom: 0;
+}
+
+.status-pills {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.pill {
+  flex: 1;
+  padding: 0.4rem 0;
+  font-size: 0.72rem;
+  font-family: inherit;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+}
+
+.pill.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.filter-input {
+  width: 100%;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.8rem;
+  background: var(--bg);
+  color: var(--text);
+  box-sizing: border-box;
+}
+
+.filter-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.filter-input::placeholder {
+  color: var(--text-dim);
+}
+
+.date-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.date-row .filter-group {
+  flex: 1;
+}
+
+.filter-label {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.2rem;
+}
+
+.clear-filters {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.35rem;
+  font-size: 0.72rem;
+  font-family: inherit;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.clear-filters:hover {
+  color: var(--danger);
 }
 
 /* Skeleton loading */

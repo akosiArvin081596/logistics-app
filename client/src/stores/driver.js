@@ -15,6 +15,11 @@ export const useDriverStore = defineStore('driver', {
     currentTab: 'loads',
     selectedStatusLoad: null,
     isLoading: true,
+    // Filters
+    filterStatus: 'active',
+    filterSearch: '',
+    filterDateFrom: '',
+    filterDateTo: '',
   }),
 
   getters: {
@@ -47,6 +52,76 @@ export const useDriverStore = defineStore('driver', {
         if (!aActive && bActive) return 1
         return 0
       })
+    },
+
+    filteredLoads(state) {
+      const headers = state.headers.jobTracking
+      const statusCol = findCol(headers, /status/i)
+      const loadIdCol = findCol(headers, /load.?id|job.?id/i)
+      const originCol = findCol(headers, /origin|pickup.*city|shipper.*city|pickup.*info/i)
+      const destCol = findCol(headers, /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city|drop.*info/i)
+      const pickupDateCol = findCol(headers, /pickup.*date|pickup.*appt/i)
+      const delivDateCol = findCol(headers, /deliv|drop.?off.*date|completion.*date|drop.?off.*appt/i)
+
+      const activeRe = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i
+      const completedRe = /^(delivered|completed|pod received)$/i
+
+      let result = [...state.loads]
+
+      // Status filter
+      if (statusCol && state.filterStatus !== 'all') {
+        result = result.filter((l) => {
+          const s = (l[statusCol] || '').trim()
+          if (state.filterStatus === 'active') return !completedRe.test(s)
+          if (state.filterStatus === 'completed') return completedRe.test(s)
+          return true
+        })
+      }
+
+      // Search filter
+      if (state.filterSearch.trim()) {
+        const q = state.filterSearch.trim().toLowerCase()
+        result = result.filter((l) => {
+          const fields = [
+            loadIdCol && l[loadIdCol],
+            originCol && l[originCol],
+            destCol && l[destCol],
+          ].filter(Boolean)
+          return fields.some((f) => f.toLowerCase().includes(q))
+        })
+      }
+
+      // Date range filter
+      if (state.filterDateFrom || state.filterDateTo) {
+        const dateCol = pickupDateCol || delivDateCol
+        if (dateCol) {
+          const from = state.filterDateFrom ? new Date(state.filterDateFrom) : null
+          const to = state.filterDateTo ? new Date(state.filterDateTo) : null
+          if (to) to.setHours(23, 59, 59, 999)
+          result = result.filter((l) => {
+            const raw = l[dateCol]
+            if (!raw) return false
+            const d = new Date(raw)
+            if (isNaN(d)) return false
+            if (from && d < from) return false
+            if (to && d > to) return false
+            return true
+          })
+        }
+      }
+
+      // Sort: active loads first
+      if (statusCol) {
+        result.sort((a, b) => {
+          const aActive = activeRe.test((a[statusCol] || '').trim())
+          const bActive = activeRe.test((b[statusCol] || '').trim())
+          if (aActive && !bActive) return -1
+          if (!aActive && bActive) return 1
+          return 0
+        })
+      }
+
+      return result
     },
   },
 
