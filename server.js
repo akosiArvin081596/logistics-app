@@ -463,6 +463,40 @@ app.delete("/api/users/:id", requireRole("Admin"), (req, res) => {
 	res.json({ success: true });
 });
 
+// Debug: check driver load matching
+app.get("/api/debug/driver-loads/:driverName", async (req, res) => {
+	try {
+		const driverName = decodeURIComponent(req.params.driverName).trim();
+		const sheets = await getSheets();
+		const response = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+		});
+		const rows = (response.data.values) || [];
+		if (rows.length === 0) return res.json({ error: "No data" });
+		const headers = rows[0];
+		const driverCol = headers.find((h) => /driver/i.test(h)) || null;
+		const totalRows = rows.length - 1;
+		const matchingRows = driverCol
+			? rows.slice(1).filter((r) => {
+				const idx = headers.indexOf(driverCol);
+				return (r[idx] || "").trim().toLowerCase() === driverName.toLowerCase();
+			}).length
+			: 0;
+		res.json({
+			headers,
+			driverCol,
+			driverColIndex: driverCol ? headers.indexOf(driverCol) : null,
+			totalRows,
+			matchingRows,
+			searchedFor: driverName,
+			sampleDriverValues: rows.slice(1, 6).map((r) => driverCol ? r[headers.indexOf(driverCol)] || "" : "N/A"),
+		});
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Debug: check a user's role/driverName without auth (read-only, no sensitive data)
 app.get("/api/debug/user/:username", (req, res) => {
 	const username = decodeURIComponent(req.params.username).trim();
