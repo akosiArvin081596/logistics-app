@@ -65,23 +65,28 @@ const jobsRef = computed(() => props.jobs)
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(jobsRef)
 
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null)
+const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
 
 const displayCols = computed(() => {
-  const cols = pickDisplayCols(props.headers, ['load', 'status', 'broker', 'origin', 'pickup', 'destination', 'drop', 'rate', 'amount'])
+  const cols = pickDisplayCols(props.headers, ['load', 'status', 'broker', 'phone', 'origin', 'pickup', 'destination', 'drop', 'rate', 'amount'])
   if (brokerSourceCol.value) {
     const idx = cols.indexOf(brokerSourceCol.value)
     if (idx !== -1) cols.splice(idx, 1, 'Broker Name', 'Broker Email')
+  }
+  if (phoneSourceCol.value) {
+    const idx = cols.indexOf(phoneSourceCol.value)
+    if (idx !== -1) cols.splice(idx, 1, 'Broker Phone')
   }
   return cols
 })
 
 function parseBrokerContact(raw) {
-  if (!raw) return { name: '', email: '' }
+  if (!raw) return { name: '', email: '', phone: '' }
   try {
     const parsed = JSON.parse(raw)
-    return { name: parsed.Name || '', email: parsed.Email || '' }
+    return { name: parsed.Name || '', email: parsed.Email || '', phone: parsed.Phone || '' }
   } catch {
-    return { name: raw, email: '' }
+    return { name: raw, email: '', phone: '' }
   }
 }
 
@@ -89,6 +94,13 @@ function cellValue(job, col) {
   if ((col === 'Broker Name' || col === 'Broker Email') && brokerSourceCol.value) {
     const broker = parseBrokerContact(job[brokerSourceCol.value])
     return col === 'Broker Name' ? broker.name : broker.email
+  }
+  if (col === 'Broker Phone') {
+    const src = phoneSourceCol.value || brokerSourceCol.value
+    if (src) {
+      const broker = parseBrokerContact(job[src])
+      return broker.phone || job[src] || ''
+    }
   }
   return job[col] || ''
 }
