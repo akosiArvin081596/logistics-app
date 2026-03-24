@@ -44,6 +44,9 @@
         <button :class="['tab-btn', { active: activeTab === 'tracking' }]" @click="activeTab = 'tracking'">
           Tracking
         </button>
+        <button :class="['tab-btn', { active: activeTab === 'expenses' }]" @click="activeTab = 'expenses'">
+          Expenses
+        </button>
         <button :class="['tab-btn', { active: activeTab === 'messages' }]" @click="switchToMessages">
           Messages
           <span v-if="msgStore.totalUnread > 0" class="count-badge danger">{{ msgStore.totalUnread }}</span>
@@ -68,6 +71,9 @@
       <div v-show="activeTab === 'tracking'" class="tab-panel active">
         <TrackingMap :visible="activeTab === 'tracking'" />
       </div>
+      <div v-show="activeTab === 'expenses'" class="tab-panel active">
+        <ExpensesTab />
+      </div>
       <div v-show="activeTab === 'messages'" class="tab-panel active">
         <MessagingPanel :driver-names="driverNames" />
       </div>
@@ -88,6 +94,7 @@ import ActiveLoadsTab from '../components/dashboard/ActiveLoadsTab.vue'
 import FleetTab from '../components/dashboard/FleetTab.vue'
 import MessagingPanel from '../components/dashboard/MessagingPanel.vue'
 import TrackingMap from '../components/dashboard/TrackingMap.vue'
+import ExpensesTab from '../components/dashboard/ExpensesTab.vue'
 
 const store = useDashboardStore()
 const msgStore = useMessagesStore()

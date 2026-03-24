@@ -44,6 +44,31 @@
       </div>
     </div>
 
+    <div v-if="form.type === 'Fuel'" class="form-row">
+      <div class="form-group">
+        <label class="form-label">Gallons</label>
+        <input
+          v-model="form.gallons"
+          class="form-input"
+          type="number"
+          step="0.1"
+          min="0"
+          placeholder="0.0"
+        />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Odometer</label>
+        <input
+          v-model="form.odometer"
+          class="form-input"
+          type="number"
+          step="1"
+          min="0"
+          placeholder="Miles"
+        />
+      </div>
+    </div>
+
     <div class="form-group">
       <label class="form-label">Description</label>
       <textarea
@@ -103,6 +128,8 @@ const form = reactive({
   date: new Date().toISOString().split('T')[0],
   loadId: '',
   description: '',
+  gallons: '',
+  odometer: '',
 })
 
 function findCol(headers, regex) {
@@ -168,12 +195,16 @@ async function handleSubmit() {
       description: form.description,
       date: form.date,
       photoData: photoBase64.value,
+      gallons: form.gallons || 0,
+      odometer: form.odometer || 0,
     })
 
     // Reset form
     form.amount = ''
     form.description = ''
     form.loadId = ''
+    form.gallons = ''
+    form.odometer = ''
     photoBase64.value = ''
     photoPreview.value = ''
     if (photoInput.value) photoInput.value.value = ''

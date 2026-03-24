@@ -86,6 +86,42 @@ db.exec(`
 `);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_driver ON expenses(driver)`);
 
+// Migrate: add gallons + odometer columns to expenses table (fuel tracking)
+try {
+	db.prepare("SELECT gallons FROM expenses LIMIT 1").get();
+} catch {
+	db.exec(`ALTER TABLE expenses ADD COLUMN gallons REAL DEFAULT 0`);
+	db.exec(`ALTER TABLE expenses ADD COLUMN odometer REAL DEFAULT 0`);
+}
+
+// Maintenance sinking fund: tracks $800/mo reserve contributions + PM services
+db.exec(`
+	CREATE TABLE IF NOT EXISTS maintenance_fund (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		type TEXT NOT NULL CHECK(type IN ('contribution', 'service')),
+		amount REAL NOT NULL,
+		description TEXT DEFAULT '',
+		truck TEXT DEFAULT '',
+		date TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
+// Compliance fees: 2290, Registration, IFTA quarterly, etc.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS compliance_fees (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		type TEXT NOT NULL,
+		amount REAL NOT NULL,
+		description TEXT DEFAULT '',
+		truck TEXT DEFAULT '',
+		due_date TEXT NOT NULL,
+		paid_date TEXT DEFAULT '',
+		status TEXT DEFAULT 'Pending' CHECK(status IN ('Pending', 'Paid')),
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS documents (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,6 +174,8 @@ if (configCount === 0) {
 		["investor_payout_max", "3100"],
 		["investor_split_pct", "35"],
 		["blue_chip_brokers", "Pepsi,Coca-Cola,PepsiCo,Frito-Lay,Nestle,Procter & Gamble,Unilever,Walmart,Amazon,Target"],
+		["maintenance_fund_monthly", "800"],
+		["fuel_savings_target_pct", "15"],
 	]);
 }
 
@@ -1043,7 +1081,7 @@ app.get("/api/messages/:driverName", requireRole("Admin", "Dispatcher"), (req, r
 // POST /api/expenses — Log a new expense (SQLite)
 app.post("/api/expenses", requireAuth, (req, res) => {
 	try {
-		const { driver, loadId, type, amount, description, date, photoData } =
+		const { driver, loadId, type, amount, description, date, photoData, gallons, odometer } =
 			req.body;
 		if (!driver || !type || !amount || !date) {
 			return res.status(400).json({ error: "Missing required fields" });
@@ -1052,10 +1090,11 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 		const timestamp = new Date().toISOString();
 		const result = db
 			.prepare(
-				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
-			.run(timestamp, driver, loadId || "", type, amount, description || "", date, photoData || "");
+			.run(timestamp, driver, loadId || "", type, amount, description || "", date, photoData || "",
+				parseFloat(gallons) || 0, parseFloat(odometer) || 0);
 
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -1570,6 +1609,341 @@ app.put("/api/investor/config", requireRole("Admin"), (req, res) => {
 		res.status(500).json({ error: error.message });
 	}
 });
+
+// ============================================================
+// EXPENSE & MAINTENANCE TRACKING
+// ============================================================
+
+// GET /api/expenses/fuel-analytics — Fuel cost analytics + compliance
+app.get("/api/expenses/fuel-analytics", requireRole("Admin", "Dispatcher"), (req, res) => {
+	try {
+		const config = {};
+		db.prepare("SELECT key, value FROM investor_config").all()
+			.forEach((r) => (config[r.key] = r.value));
+		const savingsTarget = parseFloat(config.fuel_savings_target_pct) || 15;
+
+		// All fuel expenses
+		const fuelExpenses = db.prepare(
+			`SELECT * FROM expenses WHERE LOWER(type) = 'fuel' ORDER BY date DESC`
+		).all();
+
+		const totalFuelSpend = fuelExpenses.reduce((s, e) => s + (e.amount || 0), 0);
+		const totalGallons = fuelExpenses.reduce((s, e) => s + (e.gallons || 0), 0);
+		const avgCostPerGallon = totalGallons > 0 ? totalFuelSpend / totalGallons : 0;
+
+		// Odometer-based cost per mile
+		const withOdometer = fuelExpenses.filter((e) => e.odometer > 0);
+		let costPerMile = 0;
+		if (withOdometer.length >= 2) {
+			const sorted = [...withOdometer].sort((a, b) => a.odometer - b.odometer);
+			const totalMiles = sorted[sorted.length - 1].odometer - sorted[0].odometer;
+			const milesSpend = sorted.reduce((s, e) => s + (e.amount || 0), 0);
+			costPerMile = totalMiles > 0 ? milesSpend / totalMiles : 0;
+		}
+
+		// Monthly breakdown
+		const monthly = {};
+		fuelExpenses.forEach((e) => {
+			const month = (e.date || "").substring(0, 7);
+			if (!month) return;
+			if (!monthly[month]) monthly[month] = { spend: 0, gallons: 0, count: 0 };
+			monthly[month].spend += e.amount || 0;
+			monthly[month].gallons += e.gallons || 0;
+			monthly[month].count++;
+		});
+		const monthlyData = Object.entries(monthly)
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([month, d]) => ({
+				month,
+				spend: Math.round(d.spend),
+				gallons: Math.round(d.gallons * 10) / 10,
+				avgPerGallon: d.gallons > 0 ? Math.round((d.spend / d.gallons) * 100) / 100 : 0,
+			}));
+
+		// Per-driver breakdown
+		const byDriver = {};
+		fuelExpenses.forEach((e) => {
+			if (!byDriver[e.driver]) byDriver[e.driver] = { spend: 0, gallons: 0 };
+			byDriver[e.driver].spend += e.amount || 0;
+			byDriver[e.driver].gallons += e.gallons || 0;
+		});
+
+		// National avg diesel ~$3.80/gal as baseline
+		const nationalAvg = 3.80;
+		const actualAvg = avgCostPerGallon || nationalAvg;
+		const savingsVsNational = nationalAvg > 0
+			? Math.round(((nationalAvg - actualAvg) / nationalAvg) * 10000) / 100
+			: 0;
+
+		res.json({
+			totalFuelSpend: Math.round(totalFuelSpend),
+			totalGallons: Math.round(totalGallons * 10) / 10,
+			avgCostPerGallon: Math.round(avgCostPerGallon * 100) / 100,
+			costPerMile: Math.round(costPerMile * 100) / 100,
+			savingsTarget,
+			savingsVsNational,
+			onTarget: savingsVsNational >= savingsTarget,
+			monthlyData,
+			byDriver,
+			recentFills: fuelExpenses.slice(0, 20).map((e) => ({
+				id: e.id, driver: e.driver, amount: e.amount,
+				gallons: e.gallons, odometer: e.odometer,
+				date: e.date, loadId: e.load_id,
+			})),
+		});
+	} catch (error) {
+		console.error("Error fetching fuel analytics:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/maintenance-fund — Fund balance, contributions, and service history
+app.get("/api/maintenance-fund", requireRole("Admin", "Dispatcher"), (req, res) => {
+	try {
+		const config = {};
+		db.prepare("SELECT key, value FROM investor_config").all()
+			.forEach((r) => (config[r.key] = r.value));
+		const monthlyTarget = parseFloat(config.maintenance_fund_monthly) || 800;
+
+		const entries = db.prepare(
+			`SELECT * FROM maintenance_fund ORDER BY date DESC`
+		).all();
+
+		const contributions = entries.filter((e) => e.type === "contribution");
+		const services = entries.filter((e) => e.type === "service");
+
+		const totalContributed = contributions.reduce((s, e) => s + e.amount, 0);
+		const totalSpent = services.reduce((s, e) => s + e.amount, 0);
+		const balance = totalContributed - totalSpent;
+
+		// Monthly contribution tracking
+		const monthlyContribs = {};
+		contributions.forEach((e) => {
+			const month = (e.date || "").substring(0, 7);
+			if (!month) return;
+			monthlyContribs[month] = (monthlyContribs[month] || 0) + e.amount;
+		});
+
+		// How many months have met target
+		const monthsMet = Object.values(monthlyContribs).filter((v) => v >= monthlyTarget).length;
+		const totalMonths = Object.keys(monthlyContribs).length || 1;
+
+		res.json({
+			monthlyTarget,
+			balance: Math.round(balance),
+			totalContributed: Math.round(totalContributed),
+			totalSpent: Math.round(totalSpent),
+			complianceRate: Math.round((monthsMet / totalMonths) * 100),
+			entries: entries.map((e) => ({
+				id: e.id, type: e.type, amount: e.amount,
+				description: e.description, truck: e.truck,
+				date: e.date,
+			})),
+		});
+	} catch (error) {
+		console.error("Error fetching maintenance fund:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// POST /api/maintenance-fund — Add contribution or service entry
+app.post("/api/maintenance-fund", requireRole("Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { type, amount, description, truck, date } = req.body;
+		if (!type || !amount || !date) {
+			return res.status(400).json({ error: "type, amount, and date required" });
+		}
+		if (!["contribution", "service"].includes(type)) {
+			return res.status(400).json({ error: "type must be 'contribution' or 'service'" });
+		}
+
+		const result = db.prepare(
+			`INSERT INTO maintenance_fund (type, amount, description, truck, date) VALUES (?, ?, ?, ?, ?)`
+		).run(type, parseFloat(amount), description || "", truck || "", date);
+
+		res.json({ success: true, id: result.lastInsertRowid });
+	} catch (error) {
+		console.error("Error adding maintenance fund entry:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/compliance/fees — Track 2290, Registration, IFTA fees
+app.get("/api/compliance/fees", requireRole("Admin", "Dispatcher"), (req, res) => {
+	try {
+		const fees = db.prepare(
+			`SELECT * FROM compliance_fees ORDER BY due_date DESC`
+		).all();
+
+		const totalDue = fees.filter((f) => f.status === "Pending").reduce((s, f) => s + f.amount, 0);
+		const totalPaid = fees.filter((f) => f.status === "Paid").reduce((s, f) => s + f.amount, 0);
+
+		res.json({
+			fees: fees.map((f) => ({
+				id: f.id, type: f.type, amount: f.amount,
+				description: f.description, truck: f.truck,
+				dueDate: f.due_date, paidDate: f.paid_date,
+				status: f.status,
+			})),
+			totalDue: Math.round(totalDue),
+			totalPaid: Math.round(totalPaid),
+		});
+	} catch (error) {
+		console.error("Error fetching compliance fees:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// POST /api/compliance/fees — Add a compliance fee
+app.post("/api/compliance/fees", requireRole("Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { type, amount, description, truck, dueDate, paidDate, status } = req.body;
+		if (!type || !amount || !dueDate) {
+			return res.status(400).json({ error: "type, amount, and dueDate required" });
+		}
+
+		const result = db.prepare(
+			`INSERT INTO compliance_fees (type, amount, description, truck, due_date, paid_date, status)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`
+		).run(type, parseFloat(amount), description || "", truck || "",
+			dueDate, paidDate || "", status || "Pending");
+
+		res.json({ success: true, id: result.lastInsertRowid });
+	} catch (error) {
+		console.error("Error adding compliance fee:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// PUT /api/compliance/fees/:id — Mark fee as paid
+app.put("/api/compliance/fees/:id", requireRole("Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { paidDate } = req.body;
+		db.prepare(
+			`UPDATE compliance_fees SET status = 'Paid', paid_date = ? WHERE id = ?`
+		).run(paidDate || new Date().toISOString().split("T")[0], req.params.id);
+
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error updating compliance fee:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/compliance/ifta — Calculate miles per state from GPS data
+app.get("/api/compliance/ifta", requireRole("Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { start, end } = req.query;
+		const startDate = start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();
+		const endDate = end || new Date().toISOString();
+
+		// Get all location points in the date range, ordered by driver and timestamp
+		const locations = db.prepare(
+			`SELECT driver, latitude, longitude, speed, timestamp, load_id
+			 FROM driver_locations
+			 WHERE timestamp >= ? AND timestamp <= ?
+			 ORDER BY driver, timestamp ASC`
+		).all(startDate, endDate);
+
+		// Group by driver
+		const byDriver = {};
+		locations.forEach((loc) => {
+			if (!byDriver[loc.driver]) byDriver[loc.driver] = [];
+			byDriver[loc.driver].push(loc);
+		});
+
+		// Calculate miles per state per driver
+		const stateMileage = {};
+		let totalMiles = 0;
+
+		for (const [driver, points] of Object.entries(byDriver)) {
+			for (let i = 1; i < points.length; i++) {
+				const prev = points[i - 1];
+				const curr = points[i];
+
+				// Skip if points are too far apart in time (>30 min = likely separate trips)
+				const timeDiff = new Date(curr.timestamp) - new Date(prev.timestamp);
+				if (timeDiff > 30 * 60 * 1000) continue;
+
+				const distMeters = geolib.getDistance(
+					{ latitude: prev.latitude, longitude: prev.longitude },
+					{ latitude: curr.latitude, longitude: curr.longitude }
+				);
+				const miles = distMeters * 0.000621371;
+
+				// Skip unreasonable distances (GPS drift)
+				if (miles > 50) continue;
+
+				// Determine state from midpoint
+				const midLat = (prev.latitude + curr.latitude) / 2;
+				const midLng = (prev.longitude + curr.longitude) / 2;
+				const state = getStateFromCoords(midLat, midLng);
+
+				if (!stateMileage[state]) stateMileage[state] = { miles: 0, drivers: new Set() };
+				stateMileage[state].miles += miles;
+				stateMileage[state].drivers.add(driver);
+				totalMiles += miles;
+			}
+		}
+
+		const stateData = Object.entries(stateMileage)
+			.map(([state, d]) => ({
+				state,
+				miles: Math.round(d.miles),
+				pct: totalMiles > 0 ? Math.round((d.miles / totalMiles) * 100) : 0,
+				drivers: [...d.drivers],
+			}))
+			.sort((a, b) => b.miles - a.miles);
+
+		res.json({
+			totalMiles: Math.round(totalMiles),
+			startDate,
+			endDate,
+			states: stateData,
+			driverCount: Object.keys(byDriver).length,
+		});
+	} catch (error) {
+		console.error("Error calculating IFTA mileage:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// Simple lat/lng to US state lookup using bounding boxes
+function getStateFromCoords(lat, lng) {
+	// Simplified state boundaries (approximate bounding boxes, checked in order of likely usage)
+	const states = [
+		{ name: "TX", minLat: 25.84, maxLat: 36.5, minLng: -106.65, maxLng: -93.51 },
+		{ name: "OK", minLat: 33.62, maxLat: 37.0, minLng: -103.0, maxLng: -94.43 },
+		{ name: "LA", minLat: 28.93, maxLat: 33.02, minLng: -94.04, maxLng: -88.82 },
+		{ name: "AR", minLat: 33.0, maxLat: 36.5, minLng: -94.62, maxLng: -89.64 },
+		{ name: "NM", minLat: 31.33, maxLat: 37.0, minLng: -109.05, maxLng: -103.0 },
+		{ name: "MS", minLat: 30.17, maxLat: 35.0, minLng: -91.66, maxLng: -88.1 },
+		{ name: "AL", minLat: 30.22, maxLat: 35.01, minLng: -88.47, maxLng: -84.89 },
+		{ name: "TN", minLat: 34.98, maxLat: 36.68, minLng: -90.31, maxLng: -81.65 },
+		{ name: "GA", minLat: 30.36, maxLat: 35.0, minLng: -85.61, maxLng: -80.84 },
+		{ name: "FL", minLat: 24.52, maxLat: 31.0, minLng: -87.63, maxLng: -80.03 },
+		{ name: "MO", minLat: 35.99, maxLat: 40.61, minLng: -95.77, maxLng: -89.1 },
+		{ name: "KS", minLat: 36.99, maxLat: 40.0, minLng: -102.05, maxLng: -94.59 },
+		{ name: "CO", minLat: 36.99, maxLat: 41.0, minLng: -109.05, maxLng: -102.04 },
+		{ name: "AZ", minLat: 31.33, maxLat: 37.0, minLng: -114.82, maxLng: -109.04 },
+		{ name: "CA", minLat: 32.53, maxLat: 42.01, minLng: -124.41, maxLng: -114.13 },
+		{ name: "NV", minLat: 35.0, maxLat: 42.0, minLng: -120.01, maxLng: -114.04 },
+		{ name: "IL", minLat: 36.97, maxLat: 42.51, minLng: -91.51, maxLng: -87.02 },
+		{ name: "IN", minLat: 37.77, maxLat: 41.76, minLng: -88.1, maxLng: -84.78 },
+		{ name: "OH", minLat: 38.4, maxLat: 42.33, minLng: -84.82, maxLng: -80.52 },
+		{ name: "PA", minLat: 39.72, maxLat: 42.27, minLng: -80.52, maxLng: -74.69 },
+		{ name: "NY", minLat: 40.5, maxLat: 45.01, minLng: -79.76, maxLng: -71.86 },
+		{ name: "NC", minLat: 33.84, maxLat: 36.59, minLng: -84.32, maxLng: -75.46 },
+		{ name: "SC", minLat: 32.03, maxLat: 35.22, minLng: -83.35, maxLng: -78.54 },
+		{ name: "VA", minLat: 36.54, maxLat: 39.47, minLng: -83.68, maxLng: -75.24 },
+	];
+	for (const s of states) {
+		if (lat >= s.minLat && lat <= s.maxLat && lng >= s.minLng && lng <= s.maxLng) {
+			return s.name;
+		}
+	}
+	return "Other";
+}
 
 // ============================================================
 // SPA Catch-All — Serve Vue app for all non-API routes
