@@ -19,9 +19,17 @@
       <span class="card-label">Delivery</span>
       <span class="card-value">{{ formatDate(deliveryDate) }}</span>
     </div>
-    <div v-if="broker" class="card-row">
+    <div v-if="brokerName" class="card-row">
       <span class="card-label">Broker</span>
-      <span class="card-value">{{ broker }}</span>
+      <span class="card-value">{{ brokerName }}</span>
+    </div>
+    <div v-if="brokerEmail" class="card-row">
+      <span class="card-label">Email</span>
+      <span class="card-value">{{ brokerEmail }}</span>
+    </div>
+    <div v-if="brokerPhone" class="card-row">
+      <span class="card-label">Phone</span>
+      <span class="card-value">{{ brokerPhone }}</span>
     </div>
     <div v-if="rate" class="card-row">
       <span class="card-label">Rate</span>
@@ -60,16 +68,19 @@ const origin = computed(() => originCol.value ? props.load[originCol.value] : ''
 const destination = computed(() => destCol.value ? props.load[destCol.value] : '')
 const pickupDate = computed(() => pickupCol.value ? props.load[pickupCol.value] : '')
 const deliveryDate = computed(() => delivCol.value ? props.load[delivCol.value] : '')
-const broker = computed(() => {
-  if (!brokerCol.value) return ''
+const brokerParsed = computed(() => {
+  if (!brokerCol.value) return { name: '', email: '', phone: '' }
   const raw = props.load[brokerCol.value] || ''
   try {
     const parsed = JSON.parse(raw)
-    return parsed.Name || raw
+    return { name: parsed.Name || '', email: parsed.Email || '', phone: parsed.Phone || '' }
   } catch {
-    return raw
+    return { name: raw, email: '', phone: '' }
   }
 })
+const brokerName = computed(() => brokerParsed.value.name)
+const brokerEmail = computed(() => brokerParsed.value.email)
+const brokerPhone = computed(() => brokerParsed.value.phone)
 const rate = computed(() => rateCol.value ? props.load[rateCol.value] : '')
 
 function formatDate(str) {

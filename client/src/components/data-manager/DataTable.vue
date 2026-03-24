@@ -30,7 +30,7 @@
                 @input="editValues[h] = $event.target.value"
               />
             </template>
-            <template v-else>{{ row[h] }}</template>
+            <template v-else>{{ displayCell(row[h]) }}</template>
           </td>
 
           <!-- Action buttons -->
@@ -75,6 +75,16 @@ const editValues = reactive({})
 
 function isDriverField(headerName) {
   return /^driver$/i.test(headerName.trim())
+}
+
+function displayCell(val) {
+  if (!val || typeof val !== 'string' || val[0] !== '{') return val || ''
+  try {
+    const parsed = JSON.parse(val)
+    return Object.values(parsed).filter(Boolean).join(' \u2022 ')
+  } catch {
+    return val
+  }
 }
 
 function handleEdit(row) {

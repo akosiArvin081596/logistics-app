@@ -78,6 +78,15 @@ function parseBrokerContact(raw) {
   }
 }
 
+function parseJsonCell(raw) {
+  if (!raw || typeof raw !== 'string' || raw[0] !== '{') return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
 function cellValue(job, col) {
   if ((col === 'Broker Name' || col === 'Broker Email') && brokerSourceCol.value) {
     const broker = parseBrokerContact(job[brokerSourceCol.value])
@@ -90,6 +99,11 @@ function cellValue(job, col) {
       return broker.phone || ''
     }
   }
-  return job[col] || ''
+  const val = job[col] || ''
+  const parsed = parseJsonCell(val)
+  if (parsed) {
+    return parsed.Name || parsed.name || Object.values(parsed).filter(Boolean).join(' \u2022 ')
+  }
+  return val
 }
 </script>
