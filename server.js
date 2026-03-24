@@ -495,6 +495,61 @@ app.get("/api/debug/driver-view/:driverName", async (req, res) => {
 	}
 });
 
+// Debug: analyze empty rows for a driver
+app.get("/api/debug/driver-empty/:driverName", async (req, res) => {
+	try {
+		const driverName = decodeURIComponent(req.params.driverName).trim();
+		const sheets = await getSheets();
+		const response = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+		});
+		const rows = response.data.values || [];
+		if (rows.length < 2) return res.json({ error: "No data" });
+		const headers = rows[0];
+		const driverIdx = headers.findIndex((h) => /driver/i.test(h));
+		const loadIdIdx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
+		const detailsIdx = headers.findIndex((h) => /details/i.test(h));
+		const statusIdx = headers.findIndex((h) => /status/i.test(h));
+
+		let totalForDriver = 0;
+		let emptyLoadId = 0;
+		let emptyDetails = 0;
+		let emptyBoth = 0;
+		const emptySamples = [];
+
+		rows.slice(1).forEach((row, idx) => {
+			if (driverIdx < 0) return;
+			if ((row[driverIdx] || "").trim().toLowerCase() !== driverName.toLowerCase()) return;
+			totalForDriver++;
+			const lid = (row[loadIdIdx] || "").trim();
+			const det = (row[detailsIdx] || "").trim();
+			const st = (row[statusIdx] || "").trim();
+			if (!lid) emptyLoadId++;
+			if (!det) emptyDetails++;
+			if (!lid && !det) {
+				emptyBoth++;
+				if (emptySamples.length < 5) {
+					const obj = { _rowIndex: idx + 2 };
+					headers.forEach((h, i) => { obj[h] = row[i] || ""; });
+					emptySamples.push(obj);
+				}
+			}
+		});
+
+		res.json({
+			driver: driverName,
+			totalForDriver,
+			emptyLoadId,
+			emptyDetails,
+			emptyBoth,
+			emptySamples,
+		});
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Debug: sample row data to inspect column formats
 app.get("/api/debug/sample-row", async (req, res) => {
 	try {
