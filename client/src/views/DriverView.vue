@@ -226,6 +226,7 @@ let refreshInterval = null
 const statusOptions = [
   { label: 'Active', value: 'active' },
   { label: 'Completed', value: 'completed' },
+  { label: 'Empty', value: 'empty' },
   { label: 'All', value: 'all' },
 ]
 

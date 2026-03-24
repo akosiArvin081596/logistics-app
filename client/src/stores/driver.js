@@ -72,8 +72,10 @@ export const useDriverStore = defineStore('driver', {
       if (statusCol && state.filterStatus !== 'all') {
         result = result.filter((l) => {
           const s = (l[statusCol] || '').trim()
-          if (state.filterStatus === 'active') return !completedRe.test(s)
-          if (state.filterStatus === 'completed') return completedRe.test(s)
+          const hasData = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
+          if (state.filterStatus === 'active') return hasData && !completedRe.test(s)
+          if (state.filterStatus === 'completed') return hasData && completedRe.test(s)
+          if (state.filterStatus === 'empty') return !hasData
           return true
         })
       }
