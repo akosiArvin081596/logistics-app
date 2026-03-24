@@ -11,7 +11,7 @@
           <tr v-for="job in paginatedItems" :key="job._rowIndex">
             <td v-for="col in displayCols" :key="col">
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
-              <template v-else>{{ job[col] || '' }}</template>
+              <template v-else>{{ cellValue(job, col) }}</template>
             </td>
           </tr>
         </tbody>
@@ -44,6 +44,8 @@ const props = defineProps({
 const jobsRef = computed(() => props.jobs)
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(jobsRef)
 
+const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null)
+
 const displayCols = computed(() => {
   const keywords = ['load', 'status', 'driver', 'broker', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery']
   const matched = []
@@ -53,6 +55,28 @@ const displayCols = computed(() => {
     if (col) matched.push(col)
   }
   if (matched.length < 3) return props.headers.slice(0, Math.min(8, props.headers.length))
+  if (brokerSourceCol.value) {
+    const idx = matched.indexOf(brokerSourceCol.value)
+    if (idx !== -1) matched.splice(idx, 1, 'Broker Name', 'Broker Email')
+  }
   return matched
 })
+
+function parseBrokerContact(raw) {
+  if (!raw) return { name: '', email: '' }
+  try {
+    const parsed = JSON.parse(raw)
+    return { name: parsed.Name || '', email: parsed.Email || '' }
+  } catch {
+    return { name: raw, email: '' }
+  }
+}
+
+function cellValue(job, col) {
+  if ((col === 'Broker Name' || col === 'Broker Email') && brokerSourceCol.value) {
+    const broker = parseBrokerContact(job[brokerSourceCol.value])
+    return col === 'Broker Name' ? broker.name : broker.email
+  }
+  return job[col] || ''
+}
 </script>
