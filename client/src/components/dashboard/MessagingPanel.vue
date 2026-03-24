@@ -4,6 +4,20 @@
     <div class="msg-sidebar" style="position:relative;">
       <div class="msg-sidebar-header">
         Conversations
+        <button class="new-msg-btn" @click="showNewMsg = !showNewMsg" :title="showNewMsg ? 'Cancel' : 'New message'">
+          {{ showNewMsg ? '&times;' : '+' }}
+        </button>
+      </div>
+      <div v-if="showNewMsg" class="new-msg-form">
+        <select v-model="newDriver" class="new-msg-select" @change="newLoadId = ''">
+          <option value="" disabled>Select driver</option>
+          <option v-for="d in props.driverNames" :key="d" :value="d">{{ d }}</option>
+        </select>
+        <select v-model="newLoadId" class="new-msg-select" :disabled="!newDriver || loadsForDriver.length === 0">
+          <option value="" disabled>{{ !newDriver ? 'Pick driver first' : loadsForDriver.length === 0 ? 'No active loads' : 'Select load' }}</option>
+          <option v-for="id in loadsForDriver" :key="id" :value="id">Load {{ id }}</option>
+        </select>
+        <button class="new-msg-start" :disabled="!newDriver || !newLoadId" @click="startConversation">Open Chat</button>
       </div>
       <div class="msg-driver-list">
         <div
@@ -59,17 +73,50 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { useMessagesStore } from '../../stores/messages'
+import { useDashboardStore } from '../../stores/dashboard'
 import { useToast } from '../../composables/useToast'
 import ChatBubble from './ChatBubble.vue'
 import EmptyState from '../shared/EmptyState.vue'
 
+const props = defineProps({
+  driverNames: { type: Array, default: () => [] },
+})
+
 const store = useMessagesStore()
+const dashStore = useDashboardStore()
 const { show: toast } = useToast()
 
 const messageInput = ref('')
 const messagesEl = ref(null)
+
+// New conversation form state
+const showNewMsg = ref(false)
+const newDriver = ref('')
+const newLoadId = ref('')
+
+const loadsForDriver = computed(() => {
+  if (!newDriver.value) return []
+  const name = newDriver.value.toLowerCase()
+  const ids = new Set()
+  for (const job of dashStore.activeJobs) {
+    const driverKey = Object.keys(job).find((k) => /^driver$/i.test(k))
+    if (driverKey && (job[driverKey] || '').toLowerCase() === name) {
+      const loadKey = Object.keys(job).find((k) => /load.?id|job.?id/i.test(k))
+      if (loadKey && job[loadKey]) ids.add(String(job[loadKey]))
+    }
+  }
+  return [...ids]
+})
+
+function startConversation() {
+  if (!newDriver.value || !newLoadId.value) return
+  store.selectConversation(newDriver.value, newLoadId.value)
+  showNewMsg.value = false
+  newDriver.value = ''
+  newLoadId.value = ''
+}
 
 function isActive(c) {
   return store.selectedDriver &&
@@ -108,6 +155,68 @@ watch(() => store.currentMessages.length, scrollToBottom)
 </script>
 
 <style scoped>
+.msg-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.new-msg-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.new-msg-btn:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.new-msg-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.new-msg-select {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: inherit;
+  font-size: 0.78rem;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.new-msg-start {
+  padding: 0.4rem;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.new-msg-start:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .msg-load-label {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.68rem;
