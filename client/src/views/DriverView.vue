@@ -408,12 +408,12 @@ function onNewMessage(msg) {
   }
 }
 
-// Start/stop GPS tracking based on active loads
+// Start/stop GPS tracking based on working loads (actively in-progress)
 watch(
-  () => driverStore.activeLoads,
-  (active) => {
-    if (active.length > 0) {
-      const firstLoadId = getLoadId(active[0])
+  () => driverStore.workingLoads,
+  (working) => {
+    if (working.length > 0) {
+      const firstLoadId = getLoadId(working[0])
       if (!geo.tracking.value) {
         geo.start(firstLoadId)
       } else {

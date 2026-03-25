@@ -19,6 +19,7 @@
         <l-marker
           v-for="loc in locations"
           :key="loc.driver"
+          :ref="el => setMarkerRef(loc.driver, el)"
           :lat-lng="[loc.latitude, loc.longitude]"
         >
           <l-popup>
@@ -38,6 +39,29 @@
           </l-popup>
         </l-marker>
       </l-map>
+
+      <!-- Driver list panel -->
+      <div class="driver-panel" :class="{ collapsed: panelCollapsed }">
+        <button class="panel-toggle" @click="panelCollapsed = !panelCollapsed">
+          Drivers <span class="panel-count">{{ locations.length }}</span>
+          <span class="panel-chevron" :class="{ open: !panelCollapsed }">&#9662;</span>
+        </button>
+        <div v-show="!panelCollapsed" class="panel-list">
+          <div
+            v-for="loc in locations"
+            :key="loc.driver"
+            :class="['driver-item', { active: selectedDriver === loc.driver }]"
+            @click="focusDriver(loc)"
+          >
+            <span class="driver-dot"></span>
+            <div class="driver-info">
+              <span class="driver-name">{{ loc.driver }}</span>
+              <span v-if="loc.loadId" class="driver-load">{{ loc.loadId }}</span>
+            </div>
+            <span v-if="loc.speed" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -59,6 +83,28 @@ const socket = useSocket()
 const mapRef = ref(null)
 const locations = ref([])
 const loading = ref(true)
+const selectedDriver = ref('')
+const panelCollapsed = ref(false)
+const markerRefs = {}
+
+function setMarkerRef(driver, el) {
+  if (el) markerRefs[driver] = el
+}
+
+function focusDriver(loc) {
+  selectedDriver.value = loc.driver
+  const map = mapRef.value?.leafletObject
+  if (map) {
+    map.flyTo([loc.latitude, loc.longitude], 14, { duration: 1 })
+  }
+  // Open popup after flyTo completes
+  setTimeout(() => {
+    const marker = markerRefs[loc.driver]
+    if (marker?.leafletObject) {
+      marker.leafletObject.openPopup()
+    }
+  }, 1100)
+}
 
 const mapCenter = computed(() => {
   if (locations.value.length === 0) return [39.8283, -98.5795] // US center
@@ -133,6 +179,126 @@ onUnmounted(() => {
 .map-wrap {
   flex: 1;
   min-height: 400px;
+  position: relative;
+}
+
+/* Driver panel */
+.driver-panel {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1000;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(8px);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  min-width: 200px;
+  max-width: 260px;
+  max-height: calc(100% - 20px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #333;
+  cursor: pointer;
+  border-bottom: 1px solid #eee;
+}
+
+.panel-count {
+  font-size: 0.68rem;
+  font-weight: 600;
+  background: #e0e7ff;
+  color: #4338ca;
+  padding: 0.05rem 0.4rem;
+  border-radius: 10px;
+}
+
+.panel-chevron {
+  margin-left: auto;
+  font-size: 0.65rem;
+  color: #999;
+  transition: transform 0.2s;
+  display: inline-block;
+}
+
+.panel-chevron.open {
+  transform: rotate(180deg);
+}
+
+.panel-list {
+  overflow-y: auto;
+  max-height: 320px;
+}
+
+.driver-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  cursor: pointer;
+  transition: background 0.15s;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.driver-item:last-child {
+  border-bottom: none;
+}
+
+.driver-item:hover {
+  background: #f9fafb;
+}
+
+.driver-item.active {
+  background: #eff6ff;
+}
+
+.driver-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  flex-shrink: 0;
+}
+
+.driver-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.driver-name {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.driver-load {
+  font-size: 0.65rem;
+  color: #888;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.driver-speed {
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: #888;
+  flex-shrink: 0;
 }
 
 .tracking-loading,
