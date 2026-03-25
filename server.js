@@ -463,6 +463,8 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 
 // Download SQLite database file (Super Admin only)
 app.get("/api/db/download", requireRole("Super Admin"), (req, res) => {
+	// Checkpoint WAL to ensure all data is in the main db file
+	db.pragma("wal_checkpoint(TRUNCATE)");
 	const dbPath = path.join(__dirname, "app.db");
 	res.download(dbPath, "app.db");
 });
