@@ -14,8 +14,8 @@ export const useUsersStore = defineStore('users', {
     availableDriverNames(state) {
       const taken = new Set(
         state.users
-          .filter(u => u.driverName)
-          .map(u => u.driverName.toLowerCase())
+          .filter(u => u.DriverName)
+          .map(u => u.DriverName.toLowerCase())
       )
       return state.driverNames.filter(n => !taken.has(n.toLowerCase()))
     },
