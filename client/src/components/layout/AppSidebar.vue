@@ -1,7 +1,7 @@
 <template>
   <aside class="sidebar">
     <div class="sidebar-header">
-      <h1><span class="icon">&#11044;</span> LogisX</h1>
+      <h1><img src="/logo.avif" alt="LogisX" class="sidebar-logo" /></h1>
       <p class="subtitle">Logistics Management</p>
     </div>
     <div class="sidebar-section">

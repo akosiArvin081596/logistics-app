@@ -47,7 +47,7 @@ body {
   font-size: 1.1rem; font-weight: 700;
   display: flex; align-items: center; gap: 0.5rem;
 }
-.sidebar-header h1 .icon { color: var(--accent); }
+.sidebar-logo { height: 32px; width: auto; }
 .sidebar-header .subtitle {
   color: var(--text-dim); font-size: 0.72rem; margin-top: 0.25rem;
 }

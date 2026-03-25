@@ -1,7 +1,7 @@
 <template>
   <div class="login-container">
     <div class="login-header">
-      <div class="login-logo"><span class="icon">&#11044;</span> Dispatch</div>
+      <img src="/logo.avif" alt="LogisX" class="login-logo-img" />
       <p class="login-subtitle">Logistics Management</p>
     </div>
 
@@ -131,16 +131,11 @@ async function doLogin() {
   text-align: center;
   margin-bottom: 2rem;
 }
-.login-logo {
-  font-size: 1.6rem;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  margin-bottom: 0.25rem;
+.login-logo-img {
+  max-width: 180px;
+  height: auto;
+  margin-bottom: 0.5rem;
 }
-.login-logo .icon { color: var(--accent); }
 .login-subtitle {
   color: var(--text-dim);
   font-size: 0.82rem;

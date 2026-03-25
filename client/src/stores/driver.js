@@ -16,7 +16,7 @@ export const useDriverStore = defineStore('driver', {
     selectedStatusLoad: null,
     isLoading: true,
     // Filters
-    filterStatus: 'active',
+    loadSubTab: 'active',
     filterSearch: '',
     filterDateFrom: '',
     filterDateTo: '',
@@ -30,6 +30,43 @@ export const useDriverStore = defineStore('driver', {
       return state.loads.filter(
         (l) => !completedRe.test((l[statusCol] || '').trim())
       )
+    },
+
+    workingLoads(state) {
+      const statusCol = findCol(state.headers.jobTracking, /status/i)
+      const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
+      if (!statusCol) return []
+      const workingRe = /^(at shipper|loading|in transit|at receiver)$/i
+      return state.loads.filter((l) => {
+        const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
+        return hasId && workingRe.test((l[statusCol] || '').trim())
+      })
+    },
+
+    pendingLoads(state) {
+      const statusCol = findCol(state.headers.jobTracking, /status/i)
+      const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
+      if (!statusCol) return []
+      const pendingRe = /^(assigned|dispatched|)$/i
+      return state.loads.filter((l) => {
+        const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
+        return hasId && pendingRe.test((l[statusCol] || '').trim())
+      })
+    },
+
+    historicalLoads(state) {
+      const statusCol = findCol(state.headers.jobTracking, /status/i)
+      const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
+      if (!statusCol) return []
+      const completedRe = /^(delivered|completed|pod received)$/i
+      return state.loads.filter((l) => {
+        const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
+        return hasId && completedRe.test((l[statusCol] || '').trim())
+      })
+    },
+
+    hasActiveJob() {
+      return this.workingLoads.length > 0
     },
 
     unreadCount(state) {
@@ -56,29 +93,17 @@ export const useDriverStore = defineStore('driver', {
 
     filteredLoads(state) {
       const headers = state.headers.jobTracking
-      const statusCol = findCol(headers, /status/i)
       const loadIdCol = findCol(headers, /load.?id|job.?id/i)
       const originCol = findCol(headers, /origin|pickup.*city|shipper.*city|pickup.*info/i)
       const destCol = findCol(headers, /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city|drop.*info/i)
       const pickupDateCol = findCol(headers, /pickup.*date|pickup.*appoint/i)
       const delivDateCol = findCol(headers, /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint|completion.*date/i)
 
-      const activeRe = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i
-      const completedRe = /^(delivered|completed|pod received)$/i
-
-      let result = [...state.loads]
-
-      // Status filter
-      if (statusCol && state.filterStatus !== 'all') {
-        result = result.filter((l) => {
-          const s = (l[statusCol] || '').trim()
-          const hasData = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
-          if (state.filterStatus === 'active') return hasData && !completedRe.test(s)
-          if (state.filterStatus === 'completed') return hasData && completedRe.test(s)
-          if (state.filterStatus === 'empty') return !hasData
-          return true
-        })
-      }
+      // Start from the sub-tab category
+      let result
+      if (state.loadSubTab === 'pending') result = [...this.pendingLoads]
+      else if (state.loadSubTab === 'historical') result = [...this.historicalLoads]
+      else result = [...this.workingLoads]
 
       // Search filter
       if (state.filterSearch.trim()) {
@@ -115,17 +140,6 @@ export const useDriverStore = defineStore('driver', {
         }
       }
 
-      // Sort: active loads first
-      if (statusCol) {
-        result.sort((a, b) => {
-          const aActive = activeRe.test((a[statusCol] || '').trim())
-          const bActive = activeRe.test((b[statusCol] || '').trim())
-          if (aActive && !bActive) return -1
-          if (!aActive && bActive) return 1
-          return 0
-        })
-      }
-
       return result
     },
   },
@@ -159,13 +173,12 @@ export const useDriverStore = defineStore('driver', {
       }
     },
 
-    async updateStatus(loadId, newStatus, rowIndex, headers) {
+    async updateStatus(loadId, newStatus, rowIndex) {
       await api.put('/api/driver/status', {
         driverName: this.driverName,
         loadId,
         newStatus,
         rowIndex,
-        allHeaders: headers,
       })
       await this.loadData()
     },

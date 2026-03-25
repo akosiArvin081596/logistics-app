@@ -1,7 +1,16 @@
 <template>
   <div class="card doc-upload">
-    <div class="doc-header">Upload Proof of Delivery</div>
-    <p class="doc-hint">Take a photo of the BOL or receipt for Load {{ loadId }}</p>
+    <div class="doc-header">{{ headerText }}</div>
+    <p class="doc-hint">{{ hintText }}</p>
+
+    <!-- Document type selector -->
+    <select
+      v-if="showTypeSelector"
+      v-model="selectedType"
+      class="type-select"
+    >
+      <option v-for="t in docTypes" :key="t.value" :value="t.value">{{ t.label }}</option>
+    </select>
 
     <label class="photo-btn">
       <input
@@ -13,7 +22,7 @@
         @change="handlePhoto"
       />
       <span v-if="!preview">&#128247; Capture / Upload Photo</span>
-      <img v-else :src="preview" alt="POD preview" class="doc-preview" />
+      <img v-else :src="preview" alt="Preview" class="doc-preview" />
     </label>
 
     <button
@@ -21,13 +30,13 @@
       :disabled="!photoData || uploading"
       @click="handleUpload"
     >
-      {{ uploading ? 'Uploading...' : 'Upload POD' }}
+      {{ uploading ? 'Uploading...' : `Upload ${selectedType}` }}
     </button>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 
@@ -35,6 +44,8 @@ const props = defineProps({
   loadId: { type: String, required: true },
   driverName: { type: String, required: true },
   rowIndex: { type: Number, required: true },
+  docType: { type: String, default: null },
+  showTypeSelector: { type: Boolean, default: true },
 })
 
 const emit = defineEmits(['uploaded'])
@@ -42,10 +53,32 @@ const emit = defineEmits(['uploaded'])
 const api = useApi()
 const toast = useToast()
 
+const docTypes = [
+  { value: 'POD', label: 'Proof of Delivery' },
+  { value: 'Receipt', label: 'Receipt' },
+  { value: 'BOL', label: 'Bill of Lading' },
+  { value: 'Other', label: 'Other Document' },
+]
+
+const selectedType = ref(props.docType || 'POD')
 const fileInput = ref(null)
 const photoData = ref('')
 const preview = ref('')
 const uploading = ref(false)
+
+watch(() => props.docType, (val) => {
+  if (val) selectedType.value = val
+})
+
+const headerText = computed(() => {
+  const labels = { POD: 'Upload Proof of Delivery', Receipt: 'Upload Receipt', BOL: 'Upload Bill of Lading', Other: 'Upload Document' }
+  return labels[selectedType.value] || 'Upload Document'
+})
+
+const hintText = computed(() => {
+  if (selectedType.value === 'Receipt') return `Take a photo of the receipt for Load ${props.loadId}`
+  return `Take a photo or upload a file for Load ${props.loadId}`
+})
 
 function handlePhoto(event) {
   const file = event.target.files[0]
@@ -86,17 +119,17 @@ async function handleUpload() {
     await api.post('/api/documents/upload', {
       loadId: props.loadId,
       rowIndex: props.rowIndex,
-      type: 'POD',
+      docType: selectedType.value,
       photoData: photoData.value,
       driverName: props.driverName,
     })
-    toast.show('POD uploaded successfully')
-    emit('uploaded')
+    toast.show(`${selectedType.value} uploaded successfully`)
+    emit('uploaded', { type: selectedType.value })
     photoData.value = ''
     preview.value = ''
     if (fileInput.value) fileInput.value.value = ''
   } catch {
-    toast.show('Failed to upload POD', 'error')
+    toast.show('Failed to upload document', 'error')
   } finally {
     uploading.value = false
   }
@@ -104,9 +137,7 @@ async function handleUpload() {
 </script>
 
 <style scoped>
-.doc-upload {
-  margin-top: 1rem;
-}
+.doc-upload { margin-top: 1rem; }
 
 .doc-header {
   font-weight: 600;
@@ -118,6 +149,19 @@ async function handleUpload() {
   font-size: 0.82rem;
   color: var(--text-dim);
   margin-bottom: 0.75rem;
+}
+
+.type-select {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  background: var(--surface);
+  color: var(--text);
+  margin-bottom: 0.75rem;
+  cursor: pointer;
 }
 
 .photo-btn {
@@ -136,9 +180,7 @@ async function handleUpload() {
   overflow: hidden;
 }
 
-.photo-btn:hover {
-  border-color: var(--accent);
-}
+.photo-btn:hover { border-color: var(--accent); }
 
 .doc-preview {
   max-width: 100%;

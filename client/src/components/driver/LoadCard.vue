@@ -37,9 +37,6 @@
 <script setup>
 import { computed } from 'vue'
 import StatusBadge from '../shared/StatusBadge.vue'
-import { useAuthStore } from '../../stores/auth'
-
-const auth = useAuthStore()
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -59,16 +56,14 @@ const originCol = computed(() => findCol(props.headers, /origin|pickup.*city|shi
 const destCol = computed(() => findCol(props.headers, /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i))
 const pickupCol = computed(() => findCol(props.headers, /pickup.*date|pickup.*appoint/i))
 const delivCol = computed(() => findCol(props.headers, /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint|completion.*date/i))
-const brokerCol = computed(() => findCol(props.headers, /broker/i))
 
 const status = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim() : '')
 const loadId = computed(() => loadIdCol.value ? props.load[loadIdCol.value] : '')
 
-// Route: prefer Details column (e.g. "Conroe, TX, 77303 - Wilmer, TX, 75146"), fall back to origin/dest
 const route = computed(() => {
   if (detailsCol.value) {
     const details = (props.load[detailsCol.value] || '').trim()
-    if (details) return details.replace(/\s*-\s*/, ' → ')
+    if (details) return details.replace(/\s*-\s*/, ' \u2192 ')
   }
   const o = originCol.value ? props.load[originCol.value] : ''
   const d = destCol.value ? props.load[destCol.value] : ''
@@ -79,22 +74,8 @@ const route = computed(() => {
 const pickupDate = computed(() => pickupCol.value ? props.load[pickupCol.value] : '')
 const deliveryDate = computed(() => delivCol.value ? props.load[delivCol.value] : '')
 
-const brokerParsed = computed(() => {
-  if (!brokerCol.value) return { name: '', email: '', phone: '' }
-  const raw = props.load[brokerCol.value] || ''
-  try {
-    const parsed = JSON.parse(raw)
-    return { name: parsed.Name || '', email: parsed.Email || '', phone: parsed.Phone || '' }
-  } catch {
-    return { name: raw, email: '', phone: '' }
-  }
-})
-const brokerName = computed(() => brokerParsed.value.name)
-const brokerEmail = computed(() => brokerParsed.value.email)
-
 function formatDate(str) {
   if (!str) return '\u2014'
-  // Strip time ranges like "06:00-18:00" → "06:00" so Date can parse
   const cleaned = str.replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').trim()
   const d = new Date(cleaned)
   if (isNaN(d)) return str
@@ -118,7 +99,6 @@ function formatDate(str) {
   box-shadow: 0 0 0 2px var(--accent-dim);
 }
 
-/* Top row: Load ID + Status */
 .card-top {
   display: flex;
   align-items: center;
@@ -133,7 +113,6 @@ function formatDate(str) {
   letter-spacing: -0.02em;
 }
 
-/* Route */
 .card-route {
   display: flex;
   align-items: flex-start;
@@ -144,25 +123,10 @@ function formatDate(str) {
   border-radius: 8px;
 }
 
-.route-icon {
-  font-size: 0.8rem;
-  flex-shrink: 0;
-  margin-top: 0.05rem;
-}
+.route-icon { font-size: 0.8rem; flex-shrink: 0; margin-top: 0.05rem; }
+.route-text { font-size: 0.8rem; font-weight: 500; color: var(--text); line-height: 1.35; }
 
-.route-text {
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--text);
-  line-height: 1.35;
-}
-
-/* Dates */
-.card-dates {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 0.6rem;
-}
+.card-dates { display: flex; gap: 0.5rem; margin-bottom: 0.6rem; }
 
 .date-item {
   flex: 1;
@@ -175,74 +139,24 @@ function formatDate(str) {
   font-size: 0.72rem;
 }
 
-.date-icon {
-  font-size: 0.7rem;
-  font-weight: 700;
-  color: var(--accent);
-}
-
-.date-label {
-  color: var(--text-dim);
-  font-weight: 500;
-}
-
+.date-icon { font-size: 0.7rem; font-weight: 700; color: var(--accent); }
+.date-label { color: var(--text-dim); font-weight: 500; }
 .date-value {
-  font-weight: 600;
-  color: var(--text);
-  margin-left: auto;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.68rem;
+  font-weight: 600; color: var(--text); margin-left: auto;
+  font-family: 'JetBrains Mono', monospace; font-size: 0.68rem;
 }
 
-/* Bottom: broker + chat */
-.card-bottom {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-}
+.card-bottom { display: flex; align-items: flex-end; justify-content: space-between; }
 
-.broker-info {
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-  min-width: 0;
-  flex: 1;
-}
-
-.broker-name {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.broker-email {
-  font-size: 0.68rem;
-  color: var(--text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+.broker-info { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; flex: 1; }
 
 .chat-btn {
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--border);
-  border-radius: 50%;
-  background: var(--surface);
-  font-size: 0.9rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: background 0.15s, border-color 0.15s;
+  width: 34px; height: 34px;
+  border: 1px solid var(--border); border-radius: 50%;
+  background: var(--surface); font-size: 0.9rem; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; transition: background 0.15s, border-color 0.15s;
 }
 
-.chat-btn:active {
-  background: var(--accent-dim);
-  border-color: var(--accent);
-}
+.chat-btn:active { background: var(--accent-dim); border-color: var(--accent); }
 </style>

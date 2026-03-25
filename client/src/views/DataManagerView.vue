@@ -12,6 +12,13 @@
       <h2>{{ store.currentSheet }}</h2>
       <div class="status-bar">
         <span class="status-pill">{{ store.total }} rows</span>
+        <input
+          class="search-input"
+          type="text"
+          placeholder="Search..."
+          :value="store.searchQuery"
+          @input="onSearch($event.target.value)"
+        />
         <button class="btn btn-primary" @click="showModal = true">+ Add Row</button>
       </div>
     </div>
@@ -62,10 +69,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useSheetsStore } from '../stores/sheets'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
+import { useSocket } from '../composables/useSocket'
 import SheetTabs from '../components/data-manager/SheetTabs.vue'
 import DataTable from '../components/data-manager/DataTable.vue'
 import AddRowModal from '../components/data-manager/AddRowModal.vue'
@@ -75,9 +83,32 @@ import ConfirmModal from '../components/shared/ConfirmModal.vue'
 const store = useSheetsStore()
 const auth = useAuthStore()
 const { show: toast } = useToast()
+const socket = useSocket()
 
 const showModal = ref(false)
 const deleteTarget = ref(null)
+let searchTimer = null
+
+function onSearch(value) {
+  store.searchQuery = value
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => store.setSearch(value), 300)
+}
+
+function onStatusUpdated(payload) {
+  toast(`${payload.driverName} updated Load ${payload.loadId} to "${payload.newStatus}"`, 'success')
+  store.loadData()
+}
+
+function onLoadAssigned(payload) {
+  toast(`Load ${payload.loadId || ''} assigned to ${payload.driverName || 'driver'}`, 'success')
+  store.loadData()
+}
+
+function onPodUploaded(payload) {
+  toast(`POD uploaded for Load ${payload.loadId || ''}`, 'success')
+  store.loadData()
+}
 
 onMounted(async () => {
   try {
@@ -86,6 +117,18 @@ onMounted(async () => {
   } catch {
     toast('Failed to load data', 'error')
   }
+
+  socket.connect()
+  socket.register('dispatch')
+  socket.on('status-updated', onStatusUpdated)
+  socket.on('load-assigned', onLoadAssigned)
+  socket.on('pod-uploaded', onPodUploaded)
+})
+
+onUnmounted(() => {
+  socket.off('status-updated', onStatusUpdated)
+  socket.off('load-assigned', onLoadAssigned)
+  socket.off('pod-uploaded', onPodUploaded)
 })
 
 function handleEdit(rowIndex) {
@@ -133,5 +176,19 @@ async function confirmDelete() {
 
 <style scoped>
 .status-pill { text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; font-size: 0.7rem; }
+.search-input {
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.82rem;
+  background: var(--surface);
+  color: var(--text);
+  min-width: 180px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--text-dim); }
 :deep(.pagination) { border-radius: 0 0 var(--radius) var(--radius); }
 </style>

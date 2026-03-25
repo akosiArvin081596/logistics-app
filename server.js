@@ -9,6 +9,7 @@ const session = require("express-session");
 const Database = require("better-sqlite3");
 const SqliteStore = require("better-sqlite3-session-store")(session);
 const geolib = require("geolib");
+const PDFDocument = require("pdfkit");
 
 const app = express();
 const server = http.createServer(app);
@@ -138,6 +139,13 @@ db.exec(`
 		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
+
+// Migrate: add ocr_text column to documents table
+try {
+	db.prepare("SELECT ocr_text FROM documents LIMIT 1").get();
+} catch {
+	db.exec(`ALTER TABLE documents ADD COLUMN ocr_text TEXT DEFAULT ''`);
+}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_locations (
@@ -711,13 +719,21 @@ app.get("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) 
 
 		// First row = headers, rest = data
 		const headers = rows[0];
-		const allData = rows.slice(1).map((row, index) => {
+		let allData = rows.slice(1).map((row, index) => {
 			const obj = { _rowIndex: index + 2 }; // Sheet rows are 1-indexed, +1 for header
 			headers.forEach((header, i) => {
 				obj[header] = row[i] || "";
 			});
 			return obj;
 		});
+
+		// Search filter
+		const search = (req.query.search || "").trim().toLowerCase();
+		if (search) {
+			allData = allData.filter((row) =>
+				headers.some((h) => (row[h] || "").toLowerCase().includes(search)),
+			);
+		}
 
 		const total = allData.length;
 		const totalPages = Math.ceil(total / limit);
@@ -1193,6 +1209,31 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			)
 			.all(nameLower);
 
+		// Count uploaded documents per load (total + POD-specific)
+		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
+		const loadIds = loads
+			.map((l) => (loadIdCol ? l[loadIdCol] : ""))
+			.filter(Boolean);
+		const docCounts = {};
+		const podCounts = {};
+		if (loadIds.length) {
+			const placeholders = loadIds.map(() => "?").join(",");
+			const docs = db
+				.prepare(
+					`SELECT load_id, COUNT(*) as count, SUM(CASE WHEN type = 'POD' THEN 1 ELSE 0 END) as pod_count FROM documents WHERE load_id IN (${placeholders}) GROUP BY load_id`,
+				)
+				.all(...loadIds);
+			docs.forEach((d) => {
+				docCounts[d.load_id] = d.count;
+				podCounts[d.load_id] = d.pod_count;
+			});
+		}
+		loads.forEach((load) => {
+			const lid = loadIdCol ? load[loadIdCol] : "";
+			load._docCount = docCounts[lid] || 0;
+			load._podCount = podCounts[lid] || 0;
+		});
+
 		// Strip rate/revenue columns for Driver role
 		let filteredLoads = loads;
 		let filteredHeaders = jobTracking.headers;
@@ -1245,23 +1286,78 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 // PUT /api/driver/status — Update load status + log to Status Logs
 app.put("/api/driver/status", requireAuth, async (req, res) => {
 	try {
-		const { rowIndex, driverName, loadId, oldStatus, newStatus, values } =
-			req.body;
+		const { rowIndex, driverName, loadId, newStatus } = req.body;
 		const sheets = await getSheets();
 
-		// Update the Job Tracking row
-		await sheets.spreadsheets.values.update({
+		// Read headers to find the status and date columns dynamically
+		const headerRes = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
-			range: `Job Tracking!A${rowIndex}`,
-			valueInputOption: "USER_ENTERED",
-			requestBody: { values: [values] },
+			range: "Job Tracking!1:1",
+		});
+		const headers = (headerRes.data.values || [])[0] || [];
+
+		const statusIdx = headers.findIndex((h) => /status/i.test(h));
+		const dateIdx = headers.findIndex((h) => /status.*update.*date|update.*date/i.test(h));
+
+		if (statusIdx === -1) {
+			return res.status(400).json({ error: "Status column not found in sheet" });
+		}
+
+		// Enforce one active job at a time: block transition to "At Shipper" if another load is active
+		if (/^at shipper$/i.test(newStatus)) {
+			const driverCol = headers.findIndex((h) => /driver/i.test(h));
+			if (driverCol !== -1) {
+				const allRows = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: "Job Tracking",
+				});
+				const allData = (allRows.data.values || []).slice(1);
+				const activeRe = /^(at shipper|loading|in transit|at receiver)$/i;
+				const hasActive = allData.some((row, i) => {
+					const rIdx = i + 2;
+					if (rIdx === rowIndex) return false;
+					const drv = (row[driverCol] || "").trim().toLowerCase();
+					const sts = (row[statusIdx] || "").trim();
+					return drv === driverName.toLowerCase() && activeRe.test(sts);
+				});
+				if (hasActive) {
+					return res.status(409).json({
+						error: "You already have an active job. Complete it before starting another.",
+					});
+				}
+			}
+		}
+
+		// Read current row to get old status for logging
+		const rowRes = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: `Job Tracking!A${rowIndex}:${String.fromCharCode(65 + headers.length - 1)}${rowIndex}`,
+		});
+		const currentRow = (rowRes.data.values || [])[0] || [];
+		const oldStatus = currentRow[statusIdx] || "";
+
+		// Build batch update for status column + date column
+		const now = new Date();
+		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		const colLetter = (idx) => String.fromCharCode(65 + idx);
+
+		const updateData = [
+			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[newStatus]] },
+		];
+		if (dateIdx !== -1) {
+			updateData.push({ range: `Job Tracking!${colLetter(dateIdx)}${rowIndex}`, values: [[dateTime]] });
+		}
+
+		await sheets.spreadsheets.values.batchUpdate({
+			spreadsheetId: SPREADSHEET_ID,
+			requestBody: {
+				valueInputOption: "USER_ENTERED",
+				data: updateData,
+			},
 		});
 
 		// Append log entry to Status Logs
-		// Columns: Log ID | Job ID | Carrier Name | Date and Time | Status Update | Notes
-		const now = new Date();
 		const logId = `LOG-${now.getTime()}`;
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
 		await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: "Status Logs",
@@ -1421,23 +1517,77 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 	}
 });
 
-// POST /api/documents/upload — Upload POD/BOL document to Google Drive
+// Helper: convert image buffer to PDF buffer
+function imageToPdf(imageBuffer) {
+	return new Promise((resolve, reject) => {
+		const doc = new PDFDocument({ autoFirstPage: false });
+		const chunks = [];
+		doc.on("data", (chunk) => chunks.push(chunk));
+		doc.on("end", () => resolve(Buffer.concat(chunks)));
+		doc.on("error", reject);
+		const img = doc.openImage(imageBuffer);
+		doc.addPage({ size: [img.width, img.height] });
+		doc.image(img, 0, 0);
+		doc.end();
+	});
+}
+
+// Helper: OCR text extraction for receipts
+async function extractReceiptText(imageBuffer) {
+	try {
+		const Tesseract = require("tesseract.js");
+		const {
+			data: { text },
+		} = await Tesseract.recognize(imageBuffer, "eng");
+		return text.trim();
+	} catch (err) {
+		console.error("OCR failed:", err.message);
+		return "";
+	}
+}
+
+// GET /api/documents/:loadId — Fetch all documents for a load
+app.get("/api/documents/:loadId", requireAuth, (req, res) => {
+	try {
+		const loadId = decodeURIComponent(req.params.loadId);
+		const docs = db
+			.prepare(
+				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, uploaded_at, ocr_text
+				 FROM documents WHERE load_id = ? ORDER BY uploaded_at DESC`,
+			)
+			.all(loadId);
+		res.json({ documents: docs });
+	} catch (error) {
+		console.error("Error fetching documents:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// POST /api/documents/upload — Upload document to Google Drive as PDF
 app.post("/api/documents/upload", requireAuth, async (req, res) => {
 	try {
-		const { loadId, rowIndex, type, photoData, driverName } = req.body;
-		if (!loadId || !rowIndex || !type || !photoData) {
-			return res.status(400).json({ error: "loadId, rowIndex, type, and photoData required" });
+		const { loadId, rowIndex, photoData, driverName } = req.body;
+		const docType = req.body.docType || req.body.type || "POD";
+		if (!loadId || !rowIndex || !photoData) {
+			return res
+				.status(400)
+				.json({ error: "loadId, rowIndex, and photoData required" });
 		}
 
-		const fileName = `${loadId}_${type}.jpg`;
+		const base64Data = photoData.replace(/^data:image\/\w+;base64,/, "");
+		const imageBuffer = Buffer.from(base64Data, "base64");
+
+		// Convert image to PDF
+		const pdfBuffer = await imageToPdf(imageBuffer);
+		const timestamp = Date.now();
+		const fileName = `${loadId}_${docType}_${timestamp}.pdf`;
+
 		let driveFileId = "";
 		let driveUrl = "";
 
-		// Upload to Google Drive if folder configured
+		// Upload PDF to Google Drive
 		if (DRIVE_FOLDER_ID) {
 			const drive = await getDrive();
-			const base64Data = photoData.replace(/^data:image\/\w+;base64,/, "");
-			const buffer = Buffer.from(base64Data, "base64");
 			const { Readable } = require("stream");
 
 			const driveResponse = await drive.files.create({
@@ -1446,8 +1596,8 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 					parents: [DRIVE_FOLDER_ID],
 				},
 				media: {
-					mimeType: "image/jpeg",
-					body: Readable.from(buffer),
+					mimeType: "application/pdf",
+					body: Readable.from(pdfBuffer),
 				},
 				fields: "id, webViewLink",
 			});
@@ -1456,35 +1606,57 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 			driveUrl = driveResponse.data.webViewLink || "";
 		}
 
-		// Update "POD Uploaded" column in Google Sheet
-		const sheets = await getSheets();
-		const headerResp = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking!1:1",
-		});
-		const headers = (headerResp.data.values || [[]])[0];
-		const podColIdx = headers.findIndex((h) => /pod.*upload/i.test(h));
-
-		if (podColIdx >= 0) {
-			const colLetter = String.fromCharCode(65 + podColIdx);
-			await sheets.spreadsheets.values.update({
+		// Mark sheet column only for POD uploads
+		if (docType === "POD") {
+			const sheets = await getSheets();
+			const headerResp = await sheets.spreadsheets.values.get({
 				spreadsheetId: SPREADSHEET_ID,
-				range: `Job Tracking!${colLetter}${rowIndex}`,
-				valueInputOption: "USER_ENTERED",
-				requestBody: { values: [["Yes"]] },
+				range: "Job Tracking!1:1",
 			});
+			const headers = (headerResp.data.values || [[]])[0];
+			const podColIdx = headers.findIndex((h) =>
+				/pod.*upload|^documents$/i.test(h),
+			);
+			if (podColIdx >= 0) {
+				const colLetter = String.fromCharCode(65 + podColIdx);
+				await sheets.spreadsheets.values.update({
+					spreadsheetId: SPREADSHEET_ID,
+					range: `Job Tracking!${colLetter}${rowIndex}`,
+					valueInputOption: "USER_ENTERED",
+					requestBody: { values: [["Yes"]] },
+				});
+			}
+		}
+
+		// OCR for receipts
+		let ocrText = "";
+		if (docType === "Receipt") {
+			ocrText = await extractReceiptText(imageBuffer);
 		}
 
 		// Store metadata in SQLite
 		db.prepare(
-			`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url)
-			 VALUES (?, ?, ?, ?, ?, ?)`
-		).run(loadId, driverName || "", type, fileName, driveFileId, driveUrl);
+			`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, ocr_text)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			loadId,
+			driverName || "",
+			docType,
+			fileName,
+			driveFileId,
+			driveUrl,
+			ocrText,
+		);
 
 		// Notify dispatch
-		io.to("dispatch").emit("pod-uploaded", { loadId, driverName, driveUrl });
+		io.to("dispatch").emit("pod-uploaded", {
+			loadId,
+			driverName,
+			driveUrl,
+			docType,
+		});
 
-		res.json({ success: true, driveUrl });
+		res.json({ success: true, driveUrl, ocrText });
 	} catch (error) {
 		console.error("Error uploading document:", error.message);
 		res.status(500).json({ error: error.message });

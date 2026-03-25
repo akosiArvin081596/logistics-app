@@ -1,11 +1,10 @@
 <template>
   <header class="app-header">
     <div class="app-header-left">
-      <span class="logo">&#11044; Dispatch</span>
+      <img src="/logo.avif" alt="LogisX" class="header-logo" />
       <span class="driver-name-label">{{ driverName }}</span>
     </div>
     <div class="app-header-right">
-      <button class="header-btn" @click="$emit('refresh')">&#8635; Refresh</button>
       <button class="header-btn danger" @click="$emit('logout')">Logout</button>
     </div>
   </header>
@@ -16,7 +15,7 @@ defineProps({
   driverName: { type: String, default: '' },
 })
 
-defineEmits(['refresh', 'logout'])
+defineEmits(['logout'])
 </script>
 
 <style scoped>
@@ -43,10 +42,9 @@ defineEmits(['refresh', 'logout'])
   gap: 0.5rem;
 }
 
-.app-header-left .logo {
-  color: var(--accent);
-  font-size: 1rem;
-  font-weight: 700;
+.header-logo {
+  height: 28px;
+  width: auto;
 }
 
 .driver-name-label {

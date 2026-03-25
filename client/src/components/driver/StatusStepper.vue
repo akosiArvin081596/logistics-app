@@ -24,17 +24,29 @@
         </div>
       </div>
 
-      <!-- Action button -->
-      <button
-        v-if="allDone"
-        class="action-btn completed-btn"
-        disabled
-      >&#10003; Load Delivered</button>
-      <button
-        v-else-if="nextStep"
-        class="action-btn primary"
-        @click="showConfirm = true"
-      >{{ nextStep.label }}</button>
+      <!-- Upload gate: require POD before allowing "Delivered" -->
+      <div v-if="requiresUpload" class="upload-hint">
+        Upload a Proof of Delivery in the <strong>Documents</strong> section before marking as Delivered.
+      </div>
+
+      <!-- Blocked: another job is active -->
+      <div v-else-if="blocked" class="blocked-hint">
+        Complete your current active job before starting a new one.
+      </div>
+
+      <!-- Normal action button -->
+      <template v-else>
+        <button
+          v-if="allDone"
+          class="action-btn completed-btn"
+          disabled
+        >&#10003; Load Delivered</button>
+        <button
+          v-else-if="nextStep"
+          class="action-btn primary"
+          @click="showConfirm = true"
+        >{{ nextStep.label }}</button>
+      </template>
     </div>
 
     <!-- Confirm modal -->
@@ -58,6 +70,8 @@ const props = defineProps({
   load: { type: Object, required: true },
   headers: { type: Array, default: () => [] },
   currentStatus: { type: String, default: '' },
+  driverName: { type: String, default: '' },
+  blocked: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['update'])
@@ -92,6 +106,12 @@ const allDone = computed(() => currentIdx.value >= statusFlow.length - 1)
 const nextStep = computed(() => {
   if (allDone.value) return null
   return statusFlow[currentIdx.value + 1] || null
+})
+
+// Gate: require document upload before allowing "Delivered"
+const requiresUpload = computed(() => {
+  if (!nextStep.value) return false
+  return nextStep.value.value === 'Delivered' && (props.load._podCount || 0) === 0
 })
 
 function stepState(i) {
@@ -190,6 +210,28 @@ function onConfirm() {
 .step.current .step-label {
   color: var(--accent);
   font-weight: 600;
+}
+
+/* Blocked / Upload hints */
+.blocked-hint {
+  text-align: center;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  padding: 0.75rem;
+  background: var(--bg);
+  border-radius: var(--radius);
+  line-height: 1.4;
+}
+
+.upload-hint {
+  text-align: center;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  padding: 0.75rem;
+  background: var(--bg);
+  border-radius: var(--radius);
+  margin-bottom: 0.75rem;
+  line-height: 1.4;
 }
 
 /* Action buttons */

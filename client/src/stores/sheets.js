@@ -15,6 +15,7 @@ export const useSheetsStore = defineStore('sheets', {
     totalPages: 0,
     driverList: [],
     editingRow: null,
+    searchQuery: '',
     isLoading: false,
   }),
 
@@ -52,6 +53,9 @@ export const useSheetsStore = defineStore('sheets', {
           page: this.page,
           limit: this.pageSize,
         })
+        if (this.searchQuery.trim()) {
+          params.set('search', this.searchQuery.trim())
+        }
         const json = await api.get(`/api/data?${params}`)
         this.headers = json.headers || []
         this.data = json.data || []
@@ -89,9 +93,17 @@ export const useSheetsStore = defineStore('sheets', {
       await this.loadData()
     },
 
+    setSearch(query) {
+      this.searchQuery = query
+      this.page = 1
+      this.editingRow = null
+      this.loadData()
+    },
+
     switchSheet(name) {
       this.currentSheet = name
       this.page = 1
+      this.searchQuery = ''
       this.editingRow = null
       this.loadData()
     },

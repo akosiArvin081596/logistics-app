@@ -3,7 +3,6 @@
     <!-- Header -->
     <DriverHeader
       :driver-name="driverName"
-      @refresh="handleRefresh"
       @logout="handleLogout"
     />
 
@@ -11,71 +10,88 @@
     <main class="app-content">
       <!-- LOADS TAB -->
       <section v-show="currentTab === 'loads'" class="tab-panel">
-        <div class="section-header">
-          My Loads
-          <span class="section-count">{{ driverStore.filteredLoads.length }}</span>
-          <button class="filter-toggle" :class="{ active: showFilters }" @click="showFilters = !showFilters">
-            &#9776; Filter
-          </button>
-        </div>
+        <!-- Load Detail Page -->
+        <LoadDetail
+          v-if="detailLoad"
+          :load="detailLoad"
+          :headers="driverStore.headers.jobTracking"
+          :driver-name="driverName"
+          :has-active-job="driverStore.hasActiveJob"
+          @back="detailRowIndex = null"
+          @status-update="handleStatusUpdate"
+          @uploaded="handleRefresh"
+        />
 
-        <!-- Filters -->
-        <div v-show="showFilters" class="load-filters">
-          <div class="filter-row">
-            <div class="filter-group status-pills">
-              <button
-                v-for="opt in statusOptions"
-                :key="opt.value"
-                :class="['pill', { active: driverStore.filterStatus === opt.value }]"
-                @click="driverStore.filterStatus = opt.value"
-              >{{ opt.label }}</button>
-            </div>
-          </div>
-          <div class="filter-row">
-            <input
-              v-model="driverStore.filterSearch"
-              type="text"
-              class="filter-input"
-              placeholder="Search load ID, origin, destination..."
-            />
-          </div>
-          <div class="filter-row date-row">
-            <div class="filter-group">
-              <label class="filter-label">From</label>
-              <input v-model="driverStore.filterDateFrom" type="date" class="filter-input" />
-            </div>
-            <div class="filter-group">
-              <label class="filter-label">To</label>
-              <input v-model="driverStore.filterDateTo" type="date" class="filter-input" />
-            </div>
-          </div>
-          <button v-if="hasActiveFilters" class="clear-filters" @click="clearFilters">Clear filters</button>
-        </div>
-
-        <template v-if="driverStore.isLoading">
-          <div class="skeleton skeleton-card"></div>
-          <div class="skeleton skeleton-card"></div>
-        </template>
-        <template v-else-if="driverStore.filteredLoads.length === 0">
-          <EmptyState>
-            <div class="empty-icon">&#128230;</div>
-            <template v-if="driverStore.loads.length > 0">
-              No loads match your filters.
-            </template>
-            <template v-else>
-              No loads assigned.<br>Check back later.
-            </template>
-          </EmptyState>
-        </template>
+        <!-- Load List -->
         <template v-else>
-          <LoadCard
-            v-for="load in driverStore.filteredLoads"
-            :key="load._rowIndex"
-            :load="load"
-            :headers="driverStore.headers.jobTracking"
-            @select="handleLoadSelect"
-            @chat="handleLoadChat"
-          />
+          <!-- Sub-tab bar -->
+          <div class="load-sub-tabs">
+            <button
+              v-for="tab in subTabs"
+              :key="tab.value"
+              :class="['sub-tab', { active: driverStore.loadSubTab === tab.value }]"
+              @click="driverStore.loadSubTab = tab.value"
+            >
+              {{ tab.label }}
+              <span class="sub-tab-count">{{ subTabCount(tab.value) }}</span>
+            </button>
+          </div>
+
+          <!-- Search & date filters -->
+          <div class="section-header">
+            <span class="section-count">{{ driverStore.filteredLoads.length }} results</span>
+            <button class="filter-toggle" :class="{ active: showFilters }" @click="showFilters = !showFilters">
+              &#9776; Filter
+            </button>
+          </div>
+
+          <div v-show="showFilters" class="load-filters">
+            <div class="filter-row">
+              <input
+                v-model="driverStore.filterSearch"
+                type="text"
+                class="filter-input"
+                placeholder="Search load ID, origin, destination..."
+              />
+            </div>
+            <div class="filter-row date-row">
+              <div class="filter-group">
+                <label class="filter-label">From</label>
+                <input v-model="driverStore.filterDateFrom" type="date" class="filter-input" />
+              </div>
+              <div class="filter-group">
+                <label class="filter-label">To</label>
+                <input v-model="driverStore.filterDateTo" type="date" class="filter-input" />
+              </div>
+            </div>
+            <button v-if="hasActiveFilters" class="clear-filters" @click="clearFilters">Clear filters</button>
+          </div>
+
+          <template v-if="driverStore.isLoading">
+            <div class="skeleton skeleton-card"></div>
+            <div class="skeleton skeleton-card"></div>
+          </template>
+          <template v-else-if="driverStore.filteredLoads.length === 0">
+            <EmptyState>
+              <div class="empty-icon">&#128230;</div>
+              <template v-if="driverStore.loads.length > 0">
+                No loads in this category.
+              </template>
+              <template v-else>
+                No loads assigned.<br>Check back later.
+              </template>
+            </EmptyState>
+          </template>
+          <template v-else>
+            <LoadCard
+              v-for="load in driverStore.filteredLoads"
+              :key="load._rowIndex"
+              :load="load"
+              :headers="driverStore.headers.jobTracking"
+              @select="handleLoadSelect"
+              @chat="handleLoadChat"
+            />
+          </template>
         </template>
       </section>
 
@@ -108,16 +124,10 @@
             :load="selectedLoad"
             :headers="driverStore.headers.jobTracking"
             :current-status="getLoadStatus(selectedLoad)"
+            :driver-name="driverName"
             @update="handleStatusUpdate"
           />
 
-          <DocumentUpload
-            v-if="selectedLoad && /^delivered$/i.test(getLoadStatus(selectedLoad))"
-            :load-id="getLoadId(selectedLoad)"
-            :driver-name="driverName"
-            :row-index="selectedLoad._rowIndex"
-            @uploaded="handleRefresh"
-          />
         </template>
       </section>
 
@@ -202,6 +212,7 @@ import { useApi } from '../composables/useApi'
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
 import LoadCard from '../components/driver/LoadCard.vue'
+import LoadDetail from '../components/driver/LoadDetail.vue'
 import StatusStepper from '../components/driver/StatusStepper.vue'
 import ChatView from '../components/driver/ChatView.vue'
 import ExpenseForm from '../components/driver/ExpenseForm.vue'
@@ -221,30 +232,41 @@ const currentTab = ref('loads')
 const selectedStatusRowIndex = ref(null)
 const chatLoadId = ref('')
 const showFilters = ref(false)
+const detailRowIndex = ref(null)
 let refreshInterval = null
 
-const statusOptions = [
+const subTabs = [
   { label: 'Active', value: 'active' },
-  { label: 'Completed', value: 'completed' },
-  { label: 'Empty', value: 'empty' },
-  { label: 'All', value: 'all' },
+  { label: 'Pending', value: 'pending' },
+  { label: 'Historical', value: 'historical' },
 ]
 
+function subTabCount(tab) {
+  if (tab === 'active') return driverStore.workingLoads.length
+  if (tab === 'pending') return driverStore.pendingLoads.length
+  if (tab === 'historical') return driverStore.historicalLoads.length
+  return 0
+}
+
 const hasActiveFilters = computed(() =>
-  driverStore.filterStatus !== 'active' ||
   driverStore.filterSearch.trim() !== '' ||
   driverStore.filterDateFrom !== '' ||
   driverStore.filterDateTo !== ''
 )
 
 function clearFilters() {
-  driverStore.filterStatus = 'active'
   driverStore.filterSearch = ''
   driverStore.filterDateFrom = ''
   driverStore.filterDateTo = ''
 }
 
 const driverName = computed(() => auth.user?.driverName || auth.user?.username || '')
+
+// Load detail page (shown when a load card is tapped)
+const detailLoad = computed(() => {
+  if (!detailRowIndex.value) return null
+  return driverStore.loads.find(l => l._rowIndex === detailRowIndex.value) || null
+})
 
 // Selected load for status tab
 const selectedLoad = computed(() => {
@@ -291,11 +313,8 @@ function handleTabSwitch(tab) {
   }
 }
 
-// Load select on loads tab
 function handleLoadSelect(load) {
-  selectedStatusRowIndex.value = load._rowIndex
-  currentTab.value = 'status'
-  driverStore.currentTab = 'status'
+  detailRowIndex.value = load._rowIndex
 }
 
 function handleLoadChat({ loadId }) {
@@ -330,12 +349,11 @@ async function handleLogout() {
 }
 
 async function handleStatusUpdate({ newStatus, load }) {
-  const headers = driverStore.headers.jobTracking
-  const loadIdCol = findCol(headers, /load.?id|job.?id/i)
+  const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
   const loadId = loadIdCol ? load[loadIdCol] : ''
 
   try {
-    await driverStore.updateStatus(loadId, newStatus, load._rowIndex, headers)
+    await driverStore.updateStatus(loadId, newStatus, load._rowIndex)
     toast.show(`Status updated to ${newStatus}`)
   } catch {
     toast.show('Failed to update status', 'error')
@@ -467,6 +485,55 @@ onUnmounted(() => {
   /* v-show handles visibility */
 }
 
+/* Sub-tab bar */
+.load-sub-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+  background: var(--bg);
+  border-radius: var(--radius);
+  padding: 0.25rem;
+}
+
+.sub-tab {
+  flex: 1;
+  padding: 0.55rem 0;
+  font-size: 0.78rem;
+  font-family: inherit;
+  font-weight: 600;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+}
+
+.sub-tab.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.sub-tab-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  background: var(--border);
+  padding: 0.05rem 0.35rem;
+  border-radius: 10px;
+  color: var(--text-dim);
+}
+
+.sub-tab.active .sub-tab-count {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
 /* Section headers */
 .section-header {
   font-size: 0.95rem;
@@ -545,31 +612,6 @@ onUnmounted(() => {
   margin-bottom: 0;
 }
 
-.status-pills {
-  display: flex;
-  gap: 0.35rem;
-}
-
-.pill {
-  flex: 1;
-  padding: 0.4rem 0;
-  font-size: 0.72rem;
-  font-family: inherit;
-  font-weight: 600;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: all 0.15s;
-  text-align: center;
-}
-
-.pill.active {
-  background: var(--accent-dim);
-  color: var(--accent);
-  border-color: var(--accent);
-}
 
 .filter-input {
   width: 100%;
