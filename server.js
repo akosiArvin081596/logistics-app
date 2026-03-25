@@ -469,6 +469,29 @@ app.get("/api/db/download", requireRole("Super Admin"), (req, res) => {
 	res.download(dbPath, "app.db");
 });
 
+// Database diagnosis — list tables and query any table (Super Admin only)
+app.get("/api/db/tables", requireRole("Super Admin"), (req, res) => {
+	const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
+	const result = {};
+	for (const { name } of tables) {
+		const count = db.prepare(`SELECT COUNT(*) as count FROM "${name}"`).get();
+		result[name] = count.count;
+	}
+	res.json({ tables: result });
+});
+
+app.get("/api/db/query/:table", requireRole("Super Admin"), (req, res) => {
+	const table = req.params.table;
+	// Validate table name exists to prevent injection
+	const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
+	if (!exists) return res.status(404).json({ error: "Table not found" });
+	const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+	const offset = parseInt(req.query.offset) || 0;
+	const rows = db.prepare(`SELECT * FROM "${table}" LIMIT ? OFFSET ?`).all(limit, offset);
+	const count = db.prepare(`SELECT COUNT(*) as total FROM "${table}"`).get();
+	res.json({ table, total: count.total, limit, offset, rows });
+});
+
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	db.prepare("DELETE FROM users WHERE id = ?").run(id);
