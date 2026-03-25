@@ -463,10 +463,16 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 
 // Download SQLite database file (Super Admin only)
 app.get("/api/db/download", requireRole("Super Admin"), (req, res) => {
-	// Checkpoint WAL to ensure all data is in the main db file
-	db.pragma("wal_checkpoint(TRUNCATE)");
-	const dbPath = path.join(__dirname, "app.db");
-	res.download(dbPath, "app.db");
+	// Backup to a temp file to capture WAL contents
+	const fs = require("fs");
+	const tmpPath = path.join(__dirname, "app_backup.db");
+	db.backup(tmpPath).then(() => {
+		res.download(tmpPath, "app.db", () => {
+			try { fs.unlinkSync(tmpPath); } catch {}
+		});
+	}).catch((err) => {
+		res.status(500).json({ error: err.message });
+	});
 });
 
 // Database diagnosis — list tables and query any table (Super Admin only)
