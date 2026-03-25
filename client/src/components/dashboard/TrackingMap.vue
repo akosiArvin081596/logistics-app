@@ -26,6 +26,7 @@
             <div class="marker-popup">
               <strong>{{ loc.driver }}</strong>
               <div v-if="loc.loadId">Load: {{ loc.loadId }}</div>
+              <div class="popup-coords">{{ loc.latitude.toFixed(5) }}, {{ loc.longitude.toFixed(5) }}</div>
               <div v-if="loc.speed">Speed: {{ Math.round(loc.speed * 2.237) }} mph</div>
               <div v-if="loc.etaMinutes != null" class="popup-eta">
                 ETA: {{ loc.etaMinutes }} min
@@ -56,6 +57,7 @@
             <span class="driver-dot"></span>
             <div class="driver-info">
               <span class="driver-name">{{ loc.driver }}</span>
+              <span class="driver-coords">{{ loc.latitude.toFixed(5) }}, {{ loc.longitude.toFixed(5) }}</span>
               <span v-if="loc.loadId" class="driver-load">{{ loc.loadId }}</span>
             </div>
             <span v-if="loc.speed" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
@@ -288,6 +290,12 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
+.driver-coords {
+  font-size: 0.6rem;
+  color: #999;
+  font-family: 'JetBrains Mono', monospace;
+}
+
 .driver-load {
   font-size: 0.65rem;
   color: #888;
@@ -318,6 +326,12 @@ onUnmounted(() => {
 .marker-popup div {
   font-size: 0.8rem;
   color: #555;
+}
+
+.popup-coords {
+  font-size: 0.72rem;
+  color: #888;
+  font-family: 'JetBrains Mono', monospace;
 }
 
 .popup-eta {

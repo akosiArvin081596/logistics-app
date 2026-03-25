@@ -4,7 +4,7 @@
       <h2>User Management</h2>
     </div>
 
-    <AddUserForm :driver-names="store.driverNames" @submit="handleAddUser" />
+    <AddUserForm :driver-names="store.availableDriverNames" @submit="handleAddUser" />
 
     <template v-if="store.isLoading">
       <SkeletonLoader :rows="4" :cols="5" />

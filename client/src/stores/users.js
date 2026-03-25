@@ -10,6 +10,17 @@ export const useUsersStore = defineStore('users', {
     isLoading: false,
   }),
 
+  getters: {
+    availableDriverNames(state) {
+      const taken = new Set(
+        state.users
+          .filter(u => u.driverName)
+          .map(u => u.driverName.toLowerCase())
+      )
+      return state.driverNames.filter(n => !taken.has(n.toLowerCase()))
+    },
+  },
+
   actions: {
     async loadUsers() {
       this.isLoading = true
