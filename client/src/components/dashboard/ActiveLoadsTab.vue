@@ -35,6 +35,9 @@ import { usePagination } from '../../composables/usePagination'
 import StatusBadge from '../shared/StatusBadge.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
+import { useAuthStore } from '../../stores/auth'
+
+const auth = useAuthStore()
 
 const props = defineProps({
   jobs: { type: Array, required: true },
@@ -58,12 +61,24 @@ const displayCols = computed(() => {
   if (matched.length < 3) return props.headers.slice(0, Math.min(8, props.headers.length))
   if (brokerSourceCol.value) {
     const idx = matched.indexOf(brokerSourceCol.value)
-    if (idx !== -1) matched.splice(idx, 1, 'Broker Name', 'Broker Email')
+    if (idx !== -1) {
+      if (auth.isAdmin) {
+        matched.splice(idx, 1, 'Broker Name', 'Broker Email')
+      } else {
+        matched.splice(idx, 1, 'Broker Name')
+      }
+    }
   }
   // Replace phone column with virtual "Broker Phone" if it contains JSON
   if (phoneSourceCol.value) {
     const idx = matched.indexOf(phoneSourceCol.value)
-    if (idx !== -1) matched.splice(idx, 1, 'Broker Phone')
+    if (idx !== -1) {
+      if (auth.isAdmin) {
+        matched.splice(idx, 1, 'Broker Phone')
+      } else {
+        matched.splice(idx, 1)
+      }
+    }
   }
   return matched
 })

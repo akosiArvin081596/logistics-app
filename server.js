@@ -681,7 +681,12 @@ app.get("/api/data", requireRole("Admin", "Dispatcher"), async (req, res) => {
 		const total = allData.length;
 		const totalPages = Math.ceil(total / limit);
 		const start = (page - 1) * limit;
-		const data = allData.slice(start, start + limit);
+		let data = allData.slice(start, start + limit);
+
+		// Sanitize broker contact data for non-Admin roles
+		if (req.session.user.role !== "Admin") {
+			data = sanitizeBrokerColumns(headers, data);
+		}
 
 		res.json({ headers, data, sheet: sheetName, total, page, limit, totalPages });
 	} catch (error) {
@@ -724,6 +729,27 @@ app.put("/api/data/:rowIndex", requireRole("Admin", "Dispatcher"), async (req, r
 		const { values } = req.body;
 
 		const sheets = await getSheets();
+
+		// For non-Admin users, preserve original broker/phone column values
+		// so sanitized data doesn't overwrite the full JSON
+		if (req.session.user.role !== "Admin") {
+			const headerRes = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `${sheetName}!1:1`,
+			});
+			const headers = (headerRes.data.values && headerRes.data.values[0]) || [];
+			const currentRowRes = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `${sheetName}!A${rowIndex}`,
+			});
+			const currentValues = (currentRowRes.data.values && currentRowRes.data.values[0]) || [];
+			headers.forEach((h, i) => {
+				if (/broker|phone|contact/i.test(h) && currentValues[i] && i < values.length) {
+					values[i] = currentValues[i];
+				}
+			});
+		}
+
 		const response = await sheets.spreadsheets.values.update({
 			spreadsheetId: SPREADSHEET_ID,
 			range: `${sheetName}!A${rowIndex}`,
@@ -970,6 +996,14 @@ app.get("/api/dashboard", requireRole("Admin", "Dispatcher"), async (req, res) =
 			};
 		});
 
+		// Sanitize broker contact data for non-Admin roles
+		const respUnassigned = req.session.user.role !== "Admin"
+			? sanitizeBrokerColumns(jobTracking.headers, unassignedJobs)
+			: unassignedJobs;
+		const respActive = req.session.user.role !== "Admin"
+			? sanitizeBrokerColumns(jobTracking.headers, activeJobs)
+			: activeJobs;
+
 		res.json({
 			timestamp: new Date().toISOString(),
 			kpis: {
@@ -984,9 +1018,9 @@ app.get("/api/dashboard", requireRole("Admin", "Dispatcher"), async (req, res) =
 					pending: Math.round(revPending * 100) / 100,
 				},
 			},
-			unassignedJobs,
+			unassignedJobs: respUnassigned,
 			jobTrackingHeaders: jobTracking.headers,
-			activeJobs,
+			activeJobs: respActive,
 			fleet,
 			drivers: driverList,
 		});
@@ -1013,6 +1047,39 @@ function parseSheet(valueRange) {
 		return obj;
 	});
 	return { headers, data };
+}
+
+function sanitizeBrokerContact(value) {
+	if (!value || typeof value !== "string") return value;
+	const trimmed = value.trim();
+	if (!trimmed.startsWith("{")) return value;
+	try {
+		const parsed = JSON.parse(trimmed);
+		return JSON.stringify({ Name: parsed.Name || parsed.name || "" });
+	} catch {
+		return value;
+	}
+}
+
+function sanitizeBrokerColumns(headers, rows) {
+	const brokerCol = (headers || []).find((h) => /broker/i.test(h)) || null;
+	const phoneCol = (headers || []).find((h) => /phone|contact/i.test(h)) || null;
+	if (!brokerCol && !phoneCol) return rows;
+	return rows.map((row) => {
+		const cleaned = { ...row };
+		if (brokerCol && cleaned[brokerCol]) {
+			cleaned[brokerCol] = sanitizeBrokerContact(cleaned[brokerCol]);
+		}
+		if (phoneCol && cleaned[phoneCol]) {
+			const val = (cleaned[phoneCol] || "").trim();
+			if (val.startsWith("{")) {
+				cleaned[phoneCol] = sanitizeBrokerContact(val);
+			} else {
+				cleaned[phoneCol] = "";
+			}
+		}
+		return cleaned;
+	});
 }
 
 function findCol(headers, regex) {
@@ -1101,6 +1168,11 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 				hiddenCols.forEach((col) => delete cleaned[col]);
 				return cleaned;
 			});
+		}
+
+		// Sanitize broker contact data for non-Admin roles
+		if (req.session.user.role !== "Admin") {
+			filteredLoads = sanitizeBrokerColumns(filteredHeaders, filteredLoads);
 		}
 
 		// Build list of all driver names for recipient picker

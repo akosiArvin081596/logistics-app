@@ -44,6 +44,7 @@
 import { computed, reactive } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useToast } from '../../composables/useToast'
+import { useAuthStore } from '../../stores/auth'
 import StatusBadge from '../shared/StatusBadge.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
@@ -58,6 +59,7 @@ const props = defineProps({
 
 const emit = defineEmits(['assign'])
 const { show: toast } = useToast()
+const auth = useAuthStore()
 
 const assignSelections = reactive({})
 
@@ -71,11 +73,23 @@ const displayCols = computed(() => {
   const cols = pickDisplayCols(props.headers, ['load', 'status', 'broker', 'phone', 'origin', 'pickup', 'destination', 'drop', 'rate', 'amount'])
   if (brokerSourceCol.value) {
     const idx = cols.indexOf(brokerSourceCol.value)
-    if (idx !== -1) cols.splice(idx, 1, 'Broker Name', 'Broker Email')
+    if (idx !== -1) {
+      if (auth.isAdmin) {
+        cols.splice(idx, 1, 'Broker Name', 'Broker Email')
+      } else {
+        cols.splice(idx, 1, 'Broker Name')
+      }
+    }
   }
   if (phoneSourceCol.value) {
     const idx = cols.indexOf(phoneSourceCol.value)
-    if (idx !== -1) cols.splice(idx, 1, 'Broker Phone')
+    if (idx !== -1) {
+      if (auth.isAdmin) {
+        cols.splice(idx, 1, 'Broker Phone')
+      } else {
+        cols.splice(idx, 1)
+      }
+    }
   }
   return cols
 })

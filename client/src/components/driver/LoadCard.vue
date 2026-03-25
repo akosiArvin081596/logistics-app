@@ -31,7 +31,7 @@
       <div class="broker-info">
         <template v-if="brokerName">
           <span class="broker-name">{{ brokerName }}</span>
-          <span v-if="brokerEmail" class="broker-email">{{ brokerEmail }}</span>
+          <span v-if="brokerEmail && auth.isAdmin" class="broker-email">{{ brokerEmail }}</span>
         </template>
       </div>
       <button class="chat-btn" title="Messages" @click.stop="$emit('chat', { loadId, load })">&#128172;</button>
@@ -42,6 +42,9 @@
 <script setup>
 import { computed } from 'vue'
 import StatusBadge from '../shared/StatusBadge.vue'
+import { useAuthStore } from '../../stores/auth'
+
+const auth = useAuthStore()
 
 const props = defineProps({
   load: { type: Object, required: true },
