@@ -7,8 +7,8 @@ export function useGeolocation(api) {
 
   let intervalId = null
   let activeLoadId = ''
-  const INTERVAL_ACTIVE = 5 * 60 * 1000   // 5 minutes
-  const INTERVAL_BACKGROUND = 15 * 60 * 1000 // 15 minutes
+  const INTERVAL_ACTIVE = 30 * 1000       // 30 seconds
+  const INTERVAL_BACKGROUND = 2 * 60 * 1000 // 2 minutes
 
   function getInterval() {
     return document.hidden ? INTERVAL_BACKGROUND : INTERVAL_ACTIVE
@@ -40,7 +40,7 @@ export function useGeolocation(api) {
       (err) => {
         error.value = err.message
       },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     )
   }
 
