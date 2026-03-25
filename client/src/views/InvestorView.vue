@@ -20,7 +20,7 @@
       <RecessionSection :recession-proof="store.recessionProof" />
 
       <!-- Config Editor (Admin only) -->
-      <div v-if="authStore.isAdmin && store.config" class="section config-section">
+      <div v-if="authStore.isSuperAdmin && store.config" class="section config-section">
         <div class="section-title">
           <div class="section-icon" style="background: var(--blue-dim); color: var(--blue);">&#9881;</div>
           Investor Configuration

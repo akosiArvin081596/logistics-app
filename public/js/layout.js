@@ -8,7 +8,7 @@ const Layout = {
 
   // ---- Nav config per role ----
   _navItems: {
-    Admin: [
+    'Super Admin': [
       { href: '/dashboard.html', icon: '&#9635;', label: 'Dashboard', page: 'dashboard' },
       { href: '/driver.html', icon: '&#128666;', label: 'Driver App', page: 'driver' },
       { href: '/investor.html', icon: '&#128200;', label: 'Investor View', page: 'investor' },
@@ -27,7 +27,7 @@ const Layout = {
 
   // ---- Role-based redirect targets ----
   _roleHome: {
-    Admin: '/dashboard.html',
+    'Super Admin': '/dashboard.html',
     Dispatcher: '/dashboard.html',
     Driver: '/driver.html',
     Investor: '/investor.html',
@@ -87,7 +87,7 @@ const Layout = {
 
   // ---- Render sidebar (called by init or manually) ----
   _renderSidebar(activePage) {
-    const role = this.user ? this.user.role : 'Admin';
+    const role = this.user ? this.user.role : 'Super Admin';
     const items = this._navItems[role] || [];
 
     // Remove existing sidebar if any

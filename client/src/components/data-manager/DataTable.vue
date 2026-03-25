@@ -42,7 +42,7 @@
             <template v-else>
               <button class="btn btn-secondary btn-sm" @click="handleEdit(row)">Edit</button>
               <button
-                v-if="userRole === 'Admin'"
+                v-if="userRole === 'Super Admin'"
                 class="btn btn-danger btn-sm"
                 @click="$emit('delete', row._rowIndex)"
               >Delete</button>

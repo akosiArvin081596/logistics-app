@@ -74,7 +74,7 @@ const displayCols = computed(() => {
   if (brokerSourceCol.value) {
     const idx = cols.indexOf(brokerSourceCol.value)
     if (idx !== -1) {
-      if (auth.isAdmin) {
+      if (auth.isSuperAdmin) {
         cols.splice(idx, 1, 'Broker Name', 'Broker Email')
       } else {
         cols.splice(idx, 1, 'Broker Name')
@@ -84,7 +84,7 @@ const displayCols = computed(() => {
   if (phoneSourceCol.value) {
     const idx = cols.indexOf(phoneSourceCol.value)
     if (idx !== -1) {
-      if (auth.isAdmin) {
+      if (auth.isSuperAdmin) {
         cols.splice(idx, 1, 'Broker Phone')
       } else {
         cols.splice(idx, 1)

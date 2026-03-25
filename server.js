@@ -41,17 +41,17 @@ db.exec(`
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		username TEXT NOT NULL UNIQUE,
 		password_hash TEXT NOT NULL,
-		role TEXT NOT NULL CHECK(role IN ('Admin', 'Dispatcher', 'Driver', 'Investor')),
+		role TEXT NOT NULL CHECK(role IN ('Super Admin', 'Dispatcher', 'Driver', 'Investor')),
 		driver_name TEXT DEFAULT '',
 		email TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
 
-// Migrate: rebuild users table if CHECK constraint is outdated (missing Investor role)
+// Migrate: rebuild users table if CHECK constraint is outdated
 try {
-	db.prepare("INSERT INTO users (username, password_hash, role) VALUES ('__test__', '__test__', 'Investor')").run();
-	db.prepare("DELETE FROM users WHERE username = '__test__'").run();
+	db.prepare("INSERT INTO users (username, password_hash, role) VALUES ('__test_sa__', '__test__', 'Super Admin')").run();
+	db.prepare("DELETE FROM users WHERE username = '__test_sa__'").run();
 } catch {
 	db.exec(`
 		ALTER TABLE users RENAME TO users_old;
@@ -59,14 +59,18 @@ try {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			username TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
-			role TEXT NOT NULL CHECK(role IN ('Admin', 'Dispatcher', 'Driver', 'Investor')),
+			role TEXT NOT NULL CHECK(role IN ('Super Admin', 'Dispatcher', 'Driver', 'Investor')),
 			driver_name TEXT DEFAULT '',
 			email TEXT DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
-		INSERT INTO users SELECT * FROM users_old;
+		INSERT INTO users SELECT id, username, password_hash,
+			CASE role WHEN 'Admin' THEN 'Super Admin' ELSE role END,
+			driver_name, email, created_at FROM users_old;
 		DROP TABLE users_old;
 	`);
+	// Clear sessions so users re-login with updated roles
+	try { db.exec("DELETE FROM sessions"); } catch {}
 }
 
 db.exec(`
@@ -252,7 +256,7 @@ async function getSheetId(sheets, sheetName) {
 // ============================================================
 // AUTH — Session-based authentication with roles (SQLite)
 // ============================================================
-// Roles: Admin (full access), Dispatcher (no delete), Driver (own data only, no rate/revenue)
+// Roles: Super Admin (full access), Admin (dispatch, no broker/financial), Driver (own data only, no rate/revenue), Investor (financial view)
 
 function requireAuth(req, res, next) {
 	if (!req.session.user)
@@ -291,17 +295,17 @@ app.post("/api/auth/setup", async (req, res) => {
 
 		const hash = await bcrypt.hash(password, 10);
 		db.prepare(
-			"INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (?, ?, 'Admin', '', ?)",
+			"INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (?, ?, 'Super Admin', '', ?)",
 		).run(username, hash, email || "");
 
 		req.session.user = {
 			username,
-			role: "Admin",
+			role: "Super Admin",
 			driverName: "",
 			email: email || "",
 		};
 
-		res.json({ success: true, role: "Admin" });
+		res.json({ success: true, role: "Super Admin" });
 	} catch (error) {
 		console.error("Error during setup:", error.message);
 		res.status(500).json({ error: error.message });
@@ -366,13 +370,13 @@ app.get("/api/auth/session", (req, res) => {
 });
 
 // Admin: create a new user
-app.post("/api/users", requireRole("Admin"), async (req, res) => {
+app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { username, password, role, driverName, email } = req.body;
 		if (!username || !password || !role) {
 			return res.status(400).json({ error: "Username, password, and role required" });
 		}
-		if (!["Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {
+		if (!["Super Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {
 			return res.status(400).json({ error: "Invalid role" });
 		}
 
@@ -396,7 +400,7 @@ app.post("/api/users", requireRole("Admin"), async (req, res) => {
 });
 
 // Admin: list all users (without password hashes)
-app.get("/api/users", requireRole("Admin"), (req, res) => {
+app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
 		.prepare("SELECT id, username, role, driver_name, email, created_at FROM users")
 		.all()
@@ -413,7 +417,7 @@ app.get("/api/users", requireRole("Admin"), (req, res) => {
 
 // Admin: delete a user
 // Admin: update a user's role, driverName, or email
-app.put("/api/users/:id", requireRole("Admin"), async (req, res) => {
+app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
 		const { role, driverName, email, password } = req.body;
@@ -424,7 +428,7 @@ app.put("/api/users/:id", requireRole("Admin"), async (req, res) => {
 		const updates = [];
 		const params = [];
 
-		if (role && ["Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {
+		if (role && ["Super Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {
 			updates.push("role = ?");
 			params.push(role);
 		}
@@ -457,7 +461,13 @@ app.put("/api/users/:id", requireRole("Admin"), async (req, res) => {
 	}
 });
 
-app.delete("/api/users/:id", requireRole("Admin"), (req, res) => {
+// Download SQLite database file (Super Admin only)
+app.get("/api/db/download", requireRole("Super Admin"), (req, res) => {
+	const dbPath = path.join(__dirname, "app.db");
+	res.download(dbPath, "app.db");
+});
+
+app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	db.prepare("DELETE FROM users WHERE id = ?").run(id);
 	res.json({ success: true });
@@ -651,7 +661,7 @@ app.get("/api/tabs", requireAuth, async (req, res) => {
 });
 
 // READ — Get rows from a sheet tab (supports pagination via ?page=&limit=)
-app.get("/api/data", requireRole("Admin", "Dispatcher"), async (req, res) => {
+app.get("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const sheetName = getSheetName(req);
 		const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -684,7 +694,7 @@ app.get("/api/data", requireRole("Admin", "Dispatcher"), async (req, res) => {
 		let data = allData.slice(start, start + limit);
 
 		// Sanitize broker contact data for non-Admin roles
-		if (req.session.user.role !== "Admin") {
+		if (req.session.user.role !== "Super Admin") {
 			data = sanitizeBrokerColumns(headers, data);
 		}
 
@@ -696,7 +706,7 @@ app.get("/api/data", requireRole("Admin", "Dispatcher"), async (req, res) => {
 });
 
 // CREATE — Append a new row
-app.post("/api/data", requireRole("Admin", "Dispatcher"), async (req, res) => {
+app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const sheetName = getSheetName(req);
 		const { values } = req.body; // values = array of cell values
@@ -722,7 +732,7 @@ app.post("/api/data", requireRole("Admin", "Dispatcher"), async (req, res) => {
 });
 
 // UPDATE — Update a specific row
-app.put("/api/data/:rowIndex", requireRole("Admin", "Dispatcher"), async (req, res) => {
+app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const sheetName = getSheetName(req);
 		const rowIndex = parseInt(req.params.rowIndex);
@@ -732,7 +742,7 @@ app.put("/api/data/:rowIndex", requireRole("Admin", "Dispatcher"), async (req, r
 
 		// For non-Admin users, preserve original broker/phone column values
 		// so sanitized data doesn't overwrite the full JSON
-		if (req.session.user.role !== "Admin") {
+		if (req.session.user.role !== "Super Admin") {
 			const headerRes = await sheets.spreadsheets.values.get({
 				spreadsheetId: SPREADSHEET_ID,
 				range: `${sheetName}!1:1`,
@@ -770,7 +780,7 @@ app.put("/api/data/:rowIndex", requireRole("Admin", "Dispatcher"), async (req, r
 });
 
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
-app.post("/api/dispatch", requireRole("Admin", "Dispatcher"), async (req, res) => {
+app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const { rowIndex, driver, loadId, values } = req.body;
 		if (!rowIndex || !driver || !values) {
@@ -796,7 +806,7 @@ app.post("/api/dispatch", requireRole("Admin", "Dispatcher"), async (req, res) =
 });
 
 // DELETE — Clear a row (shifts content up by deleting the row) — Admin only
-app.delete("/api/data/:rowIndex", requireRole("Admin"), async (req, res) => {
+app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const sheetName = getSheetName(req);
 		const rowIndex = parseInt(req.params.rowIndex);
@@ -833,7 +843,7 @@ app.delete("/api/data/:rowIndex", requireRole("Admin"), async (req, res) => {
 // ============================================================
 // DASHBOARD — Aggregated data from multiple sheets
 // ============================================================
-app.get("/api/dashboard", requireRole("Admin", "Dispatcher"), async (req, res) => {
+app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const sheets = await getSheets();
 
@@ -997,10 +1007,10 @@ app.get("/api/dashboard", requireRole("Admin", "Dispatcher"), async (req, res) =
 		});
 
 		// Sanitize broker contact data for non-Admin roles
-		const respUnassigned = req.session.user.role !== "Admin"
+		const respUnassigned = req.session.user.role !== "Super Admin"
 			? sanitizeBrokerColumns(jobTracking.headers, unassignedJobs)
 			: unassignedJobs;
-		const respActive = req.session.user.role !== "Admin"
+		const respActive = req.session.user.role !== "Super Admin"
 			? sanitizeBrokerColumns(jobTracking.headers, activeJobs)
 			: activeJobs;
 
@@ -1171,7 +1181,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		}
 
 		// Sanitize broker contact data for non-Admin roles
-		if (req.session.user.role !== "Admin") {
+		if (req.session.user.role !== "Super Admin") {
 			filteredLoads = sanitizeBrokerColumns(filteredHeaders, filteredLoads);
 		}
 
@@ -1297,7 +1307,7 @@ app.put("/api/messages/read", requireAuth, (req, res) => {
 });
 
 // GET /api/messages — All messages for dispatch view (Admin/Dispatcher)
-app.get("/api/messages", requireRole("Admin", "Dispatcher"), (req, res) => {
+app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		// Group conversations by driver + load
 		const conversations = db
@@ -1321,7 +1331,7 @@ app.get("/api/messages", requireRole("Admin", "Dispatcher"), (req, res) => {
 });
 
 // GET /api/messages/:driverName — Messages for a specific driver (Admin/Dispatcher)
-app.get("/api/messages/:driverName", requireRole("Admin", "Dispatcher"), (req, res) => {
+app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const nameLower = driverName.toLowerCase();
@@ -1596,7 +1606,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 });
 
 // GET /api/locations/latest — Latest position per active driver with ETA
-app.get("/api/locations/latest", requireRole("Admin", "Dispatcher"), async (req, res) => {
+app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const locations = db.prepare(
 			`SELECT dl.driver, dl.latitude, dl.longitude, dl.speed, dl.heading, dl.timestamp, dl.load_id AS loadId
@@ -1686,7 +1696,7 @@ app.get("/api/locations/latest", requireRole("Admin", "Dispatcher"), async (req,
 // ============================================================
 
 // GET /api/investor — Aggregated financial data for investor view
-app.get("/api/investor", requireRole("Admin", "Investor"), async (req, res) => {
+app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const sheets = await getSheets();
 
@@ -1870,7 +1880,7 @@ app.get("/api/investor", requireRole("Admin", "Investor"), async (req, res) => {
 });
 
 // PUT /api/investor/config — Admin: update investor config
-app.put("/api/investor/config", requireRole("Admin"), (req, res) => {
+app.put("/api/investor/config", requireRole("Super Admin"), (req, res) => {
 	try {
 		const updates = req.body; // { key: value, ... }
 		const stmt = db.prepare(
@@ -1892,7 +1902,7 @@ app.put("/api/investor/config", requireRole("Admin"), (req, res) => {
 // ============================================================
 
 // GET /api/expenses/fuel-analytics — Fuel cost analytics + compliance
-app.get("/api/expenses/fuel-analytics", requireRole("Admin", "Dispatcher"), (req, res) => {
+app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const config = {};
 		db.prepare("SELECT key, value FROM investor_config").all()
@@ -1975,7 +1985,7 @@ app.get("/api/expenses/fuel-analytics", requireRole("Admin", "Dispatcher"), (req
 });
 
 // GET /api/maintenance-fund — Fund balance, contributions, and service history
-app.get("/api/maintenance-fund", requireRole("Admin", "Dispatcher"), (req, res) => {
+app.get("/api/maintenance-fund", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const config = {};
 		db.prepare("SELECT key, value FROM investor_config").all()
@@ -2024,7 +2034,7 @@ app.get("/api/maintenance-fund", requireRole("Admin", "Dispatcher"), (req, res) 
 });
 
 // POST /api/maintenance-fund — Add contribution or service entry
-app.post("/api/maintenance-fund", requireRole("Admin", "Dispatcher"), (req, res) => {
+app.post("/api/maintenance-fund", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { type, amount, description, truck, date } = req.body;
 		if (!type || !amount || !date) {
@@ -2046,7 +2056,7 @@ app.post("/api/maintenance-fund", requireRole("Admin", "Dispatcher"), (req, res)
 });
 
 // GET /api/compliance/fees — Track 2290, Registration, IFTA fees
-app.get("/api/compliance/fees", requireRole("Admin", "Dispatcher"), (req, res) => {
+app.get("/api/compliance/fees", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const fees = db.prepare(
 			`SELECT * FROM compliance_fees ORDER BY due_date DESC`
@@ -2072,7 +2082,7 @@ app.get("/api/compliance/fees", requireRole("Admin", "Dispatcher"), (req, res) =
 });
 
 // POST /api/compliance/fees — Add a compliance fee
-app.post("/api/compliance/fees", requireRole("Admin", "Dispatcher"), (req, res) => {
+app.post("/api/compliance/fees", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { type, amount, description, truck, dueDate, paidDate, status } = req.body;
 		if (!type || !amount || !dueDate) {
@@ -2093,7 +2103,7 @@ app.post("/api/compliance/fees", requireRole("Admin", "Dispatcher"), (req, res) 
 });
 
 // PUT /api/compliance/fees/:id — Mark fee as paid
-app.put("/api/compliance/fees/:id", requireRole("Admin", "Dispatcher"), (req, res) => {
+app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { paidDate } = req.body;
 		db.prepare(
@@ -2108,7 +2118,7 @@ app.put("/api/compliance/fees/:id", requireRole("Admin", "Dispatcher"), (req, re
 });
 
 // GET /api/compliance/ifta — Calculate miles per state from GPS data
-app.get("/api/compliance/ifta", requireRole("Admin", "Dispatcher"), (req, res) => {
+app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { start, end } = req.query;
 		const startDate = start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();

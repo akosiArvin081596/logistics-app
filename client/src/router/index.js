@@ -7,6 +7,9 @@ import DataManagerView from '../views/DataManagerView.vue'
 import DriverView from '../views/DriverView.vue'
 import InvestorView from '../views/InvestorView.vue'
 import UsersView from '../views/UsersView.vue'
+import TrackingView from '../views/TrackingView.vue'
+import ExpensesView from '../views/ExpensesView.vue'
+import MessagesView from '../views/MessagesView.vue'
 
 const routes = [
   {
@@ -19,31 +22,49 @@ const routes = [
     path: '/dashboard',
     name: 'dashboard',
     component: DashboardView,
-    meta: { roles: ['Admin', 'Dispatcher'] },
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
+    path: '/tracking',
+    name: 'tracking',
+    component: TrackingView,
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
+    path: '/expenses',
+    name: 'expenses',
+    component: ExpensesView,
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
+    path: '/messages',
+    name: 'messages',
+    component: MessagesView,
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
     path: '/data',
     name: 'data-manager',
     component: DataManagerView,
-    meta: { roles: ['Admin', 'Dispatcher'] },
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
     path: '/driver',
     name: 'driver',
     component: DriverView,
-    meta: { roles: ['Driver', 'Admin'], noSidebar: true },
+    meta: { roles: ['Driver', 'Super Admin'], noSidebar: true },
   },
   {
     path: '/investor',
     name: 'investor',
     component: InvestorView,
-    meta: { roles: ['Admin', 'Investor'] },
+    meta: { roles: ['Super Admin', 'Investor'] },
   },
   {
     path: '/users',
     name: 'users',
     component: UsersView,
-    meta: { roles: ['Admin'] },
+    meta: { roles: ['Super Admin'] },
   },
   {
     path: '/',

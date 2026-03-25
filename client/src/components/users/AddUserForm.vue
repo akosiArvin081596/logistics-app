@@ -30,7 +30,7 @@
       <div class="form-group">
         <label class="form-label">Role</label>
         <select v-model="form.role" class="form-select">
-          <option value="Admin">Admin</option>
+          <option value="Super Admin">Super Admin</option>
           <option value="Dispatcher">Dispatcher</option>
           <option value="Driver">Driver</option>
           <option value="Investor">Investor</option>

@@ -760,7 +760,7 @@ let socket = null;
 // ============================================================
 Layout.init({
   page: 'driver',
-  requiredRoles: ['Driver', 'Admin'],
+  requiredRoles: ['Driver', 'Super Admin'],
   noSidebar: true,
   onReady: function(user) {
     driverName = user.driverName || user.username;

@@ -11,13 +11,13 @@ export const useAuthStore = defineStore('auth', {
   }),
 
   getters: {
-    isAdmin: (s) => s.user?.role === 'Admin',
+    isSuperAdmin: (s) => s.user?.role === 'Super Admin',
     isDispatcher: (s) => s.user?.role === 'Dispatcher',
     isDriver: (s) => s.user?.role === 'Driver',
     isInvestor: (s) => s.user?.role === 'Investor',
     roleHome: (s) => {
       const map = {
-        Admin: '/dashboard',
+        'Super Admin': '/dashboard',
         Dispatcher: '/dashboard',
         Driver: '/driver',
         Investor: '/investor',
@@ -54,7 +54,7 @@ export const useAuthStore = defineStore('auth', {
 
     async setup(username, password, email) {
       const data = await api.post('/api/auth/setup', { username, password, email })
-      this.user = data.user || { username, role: 'Admin' }
+      this.user = data.user || { username, role: 'Super Admin' }
       this.isAuthenticated = true
       return this.user
     },

@@ -26,14 +26,9 @@
       </div>
     </div>
 
-    <!-- Broker & bottom actions -->
+    <!-- Bottom actions -->
     <div class="card-bottom">
-      <div class="broker-info">
-        <template v-if="brokerName">
-          <span class="broker-name">{{ brokerName }}</span>
-          <span v-if="brokerEmail && auth.isAdmin" class="broker-email">{{ brokerEmail }}</span>
-        </template>
-      </div>
+      <div class="broker-info"></div>
       <button class="chat-btn" title="Messages" @click.stop="$emit('chat', { loadId, load })">&#128172;</button>
     </div>
   </div>

@@ -41,16 +41,6 @@
         <button :class="['tab-btn', { active: activeTab === 'fleet' }]" @click="activeTab = 'fleet'">
           Fleet & Drivers <span class="count-badge" style="background:var(--blue-dim);color:var(--blue)">{{ store.fleet.length }}</span>
         </button>
-        <button :class="['tab-btn', { active: activeTab === 'tracking' }]" @click="activeTab = 'tracking'">
-          Tracking
-        </button>
-        <button :class="['tab-btn', { active: activeTab === 'expenses' }]" @click="activeTab = 'expenses'">
-          Expenses
-        </button>
-        <button :class="['tab-btn', { active: activeTab === 'messages' }]" @click="switchToMessages">
-          Messages
-          <span v-if="msgStore.totalUnread > 0" class="count-badge danger">{{ msgStore.totalUnread }}</span>
-        </button>
       </div>
 
       <div v-show="activeTab === 'jobBoard'" class="tab-panel active">
@@ -68,15 +58,6 @@
       <div v-show="activeTab === 'fleet'" class="tab-panel active">
         <FleetTab :fleet="store.fleet" />
       </div>
-      <div v-show="activeTab === 'tracking'" class="tab-panel active">
-        <TrackingMap :visible="activeTab === 'tracking'" />
-      </div>
-      <div v-if="activeTab === 'expenses'" class="tab-panel active">
-        <ExpensesTab />
-      </div>
-      <div v-show="activeTab === 'messages'" class="tab-panel active">
-        <MessagingPanel :driver-names="driverNames" />
-      </div>
     </div>
   </div>
 </template>
@@ -84,7 +65,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useDashboardStore } from '../stores/dashboard'
-import { useMessagesStore } from '../stores/messages'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
 import KpiGrid from '../components/dashboard/KpiGrid.vue'
@@ -92,12 +72,8 @@ import RevenueGrid from '../components/dashboard/RevenueGrid.vue'
 import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
 import ActiveLoadsTab from '../components/dashboard/ActiveLoadsTab.vue'
 import FleetTab from '../components/dashboard/FleetTab.vue'
-import MessagingPanel from '../components/dashboard/MessagingPanel.vue'
-import TrackingMap from '../components/dashboard/TrackingMap.vue'
-import ExpensesTab from '../components/dashboard/ExpensesTab.vue'
 
 const store = useDashboardStore()
-const msgStore = useMessagesStore()
 const { show: toast } = useToast()
 const socket = useSocket()
 
@@ -108,10 +84,6 @@ const lastUpdated = computed(() => {
   if (!store.timestamp) return 'Loading...'
   return 'Updated ' + new Date(store.timestamp).toLocaleTimeString()
 })
-
-const driverNames = computed(() =>
-  store.fleet.map((f) => f.Driver || '').filter(Boolean)
-)
 
 async function refresh() {
   try {
@@ -132,11 +104,6 @@ async function handleAssign({ rowIndex, driver, job }) {
   }
 }
 
-function switchToMessages() {
-  activeTab.value = 'messages'
-  msgStore.loadConversations()
-}
-
 function onStatusUpdated(payload) {
   toast(`${payload.driverName}: ${payload.newStatus} — Load ${payload.loadId}`, 'info')
   refresh()
@@ -147,17 +114,11 @@ function onPodUploaded(payload) {
   refresh()
 }
 
-function onNewMessage(msg) {
-  msgStore.addIncomingMessage(msg)
-}
-
 onMounted(() => {
   refresh()
-  msgStore.loadConversations()
 
   socket.connect()
   socket.register('dispatch')
-  socket.on('new-message', onNewMessage)
   socket.on('status-updated', onStatusUpdated)
   socket.on('pod-uploaded', onPodUploaded)
 
@@ -166,7 +127,6 @@ onMounted(() => {
 
 onUnmounted(() => {
   clearInterval(refreshInterval)
-  socket.off('new-message', onNewMessage)
   socket.off('status-updated', onStatusUpdated)
   socket.off('pod-uploaded', onPodUploaded)
 })
@@ -309,181 +269,6 @@ onUnmounted(() => {
 .driver-status.available { background: var(--accent-dim); color: var(--accent); }
 .fleet-card .fleet-stat { font-size: 0.75rem; color: var(--text-dim); }
 .fleet-card .load-id { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--blue); margin-top: 0.25rem; }
-
-/* Messaging panel styles */
-:deep(.msg-layout) {
-  display: grid;
-  grid-template-columns: 240px 1fr;
-  height: 420px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-:deep(.msg-sidebar) {
-  border-right: 1px solid var(--border);
-  overflow-y: auto;
-  background: var(--bg);
-}
-:deep(.msg-sidebar-header) {
-  padding: 0.75rem 1rem;
-  font-weight: 600;
-  font-size: 0.82rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-:deep(.msg-new-btn) {
-  width: 26px; height: 26px;
-  border: none;
-  background: var(--accent);
-  color: #fff;
-  border-radius: 50%;
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-:deep(.msg-new-overlay) {
-  position: absolute;
-  inset: 0;
-  background: var(--surface);
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
-}
-:deep(.msg-new-header) {
-  padding: 0.75rem 1rem;
-  font-weight: 600;
-  font-size: 0.82rem;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-:deep(.msg-new-search) {
-  margin: 0.5rem;
-  padding: 0.45rem 0.65rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-family: inherit;
-  font-size: 0.8rem;
-  outline: none;
-}
-:deep(.msg-new-item) {
-  padding: 0.55rem 1rem;
-  cursor: pointer;
-  font-size: 0.82rem;
-  border-bottom: 1px solid var(--border);
-  transition: background 0.1s;
-}
-:deep(.msg-new-item:hover) { background: var(--surface-hover); }
-:deep(.msg-driver-item) {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.6rem 1rem;
-  cursor: pointer;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.82rem;
-  transition: background 0.1s;
-}
-:deep(.msg-driver-item:hover) { background: var(--surface-hover); }
-:deep(.msg-driver-item.active) { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
-:deep(.msg-unread) {
-  min-width: 18px; height: 18px;
-  background: var(--danger);
-  color: #fff;
-  font-size: 0.6rem;
-  font-weight: 700;
-  border-radius: 9px;
-  display: flex; align-items: center; justify-content: center;
-  padding: 0 5px;
-}
-:deep(.msg-time) {
-  font-size: 0.65rem;
-  color: var(--text-dim);
-  font-family: 'JetBrains Mono', monospace;
-}
-:deep(.msg-chat) {
-  display: flex;
-  flex-direction: column;
-  background: var(--surface);
-}
-:deep(.msg-chat-header) {
-  padding: 0.75rem 1rem;
-  font-weight: 600;
-  font-size: 0.85rem;
-  border-bottom: 1px solid var(--border);
-}
-:deep(.msg-chat-messages) {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0.75rem 1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-:deep(.msg-bubble) {
-  max-width: 70%;
-  padding: 0.5rem 0.75rem;
-  border-radius: 10px;
-  font-size: 0.82rem;
-  line-height: 1.4;
-  word-break: break-word;
-}
-:deep(.msg-bubble.sent) {
-  align-self: flex-end;
-  background: var(--accent);
-  color: #fff;
-  border-bottom-right-radius: 3px;
-}
-:deep(.msg-bubble.received) {
-  align-self: flex-start;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-bottom-left-radius: 3px;
-}
-:deep(.msg-bubble .msg-meta) { font-size: 0.6rem; margin-top: 0.15rem; opacity: 0.7; }
-:deep(.msg-bubble .msg-load-tag) {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.58rem;
-  background: rgba(0,0,0,0.08);
-  padding: 0.05rem 0.35rem;
-  border-radius: 3px;
-  margin-bottom: 0.2rem;
-  display: inline-block;
-}
-:deep(.msg-bubble.sent .msg-load-tag) { background: rgba(255,255,255,0.2); }
-:deep(.msg-chat-input) {
-  display: flex;
-  gap: 0.5rem;
-  padding: 0.6rem 1rem;
-  border-top: 1px solid var(--border);
-}
-:deep(.msg-input) {
-  flex: 1;
-  padding: 0.5rem 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  font-family: inherit;
-  font-size: 0.82rem;
-  outline: none;
-}
-:deep(.msg-input:focus) { border-color: var(--accent); }
-:deep(.msg-send-btn) {
-  width: 36px; height: 36px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  font-size: 0.95rem;
-  cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-}
 
 .skeleton-line { height: 0.85rem; margin-bottom: 0.4rem; }
 .skeleton-line.lg { height: 1.75rem; width: 60%; }

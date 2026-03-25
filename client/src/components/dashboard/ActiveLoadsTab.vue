@@ -62,7 +62,7 @@ const displayCols = computed(() => {
   if (brokerSourceCol.value) {
     const idx = matched.indexOf(brokerSourceCol.value)
     if (idx !== -1) {
-      if (auth.isAdmin) {
+      if (auth.isSuperAdmin) {
         matched.splice(idx, 1, 'Broker Name', 'Broker Email')
       } else {
         matched.splice(idx, 1, 'Broker Name')
@@ -73,7 +73,7 @@ const displayCols = computed(() => {
   if (phoneSourceCol.value) {
     const idx = matched.indexOf(phoneSourceCol.value)
     if (idx !== -1) {
-      if (auth.isAdmin) {
+      if (auth.isSuperAdmin) {
         matched.splice(idx, 1, 'Broker Phone')
       } else {
         matched.splice(idx, 1)

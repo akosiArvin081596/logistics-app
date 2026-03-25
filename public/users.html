@@ -123,7 +123,7 @@
       <div class="form-group">
         <label class="form-label">Role</label>
         <select class="form-select" id="newRole" onchange="toggleDriverField()">
-          <option value="Admin">Admin</option>
+          <option value="Super Admin">Super Admin</option>
           <option value="Dispatcher">Dispatcher</option>
           <option value="Driver" selected>Driver</option>
           <option value="Investor">Investor</option>
@@ -164,7 +164,7 @@ function initials(name) {
 
 Layout.init({
   page: 'users',
-  requiredRoles: ['Admin'],
+  requiredRoles: ['Super Admin'],
   onReady: function() {
     loadDriverNames();
     loadUsers();
@@ -193,8 +193,8 @@ async function loadUsers() {
         '<p style="color: var(--text-dim); font-size: 0.82rem;">No users yet.</p>';
       return;
     }
-    const roleClass = r => ({ Admin: 'role-admin', Dispatcher: 'role-dispatcher', Driver: 'role-driver', Investor: 'role-investor' }[r] || '');
-    const avClass = r => ({ Admin: 'av-admin', Dispatcher: 'av-dispatcher', Driver: 'av-driver', Investor: 'av-investor' }[r] || 'av-driver');
+    const roleClass = r => ({ 'Super Admin': 'role-super-admin', Dispatcher: 'role-dispatcher', Driver: 'role-driver', Investor: 'role-investor' }[r] || '');
+    const avClass = r => ({ 'Super Admin': 'av-super-admin', Dispatcher: 'av-dispatcher', Driver: 'av-driver', Investor: 'av-investor' }[r] || 'av-driver');
     document.getElementById('userListContainer').innerHTML = `
       <table class="user-table">
         <thead><tr><th>User</th><th>Role</th><th>Linked Driver</th><th></th></tr></thead>

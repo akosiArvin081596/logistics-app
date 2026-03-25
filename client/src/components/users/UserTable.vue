@@ -55,7 +55,7 @@
           <div class="edit-field">
             <label>Role</label>
             <select v-model="editForm.role">
-              <option>Admin</option>
+              <option>Super Admin</option>
               <option>Dispatcher</option>
               <option>Driver</option>
               <option>Investor</option>
@@ -149,14 +149,14 @@ function initials(name) {
 }
 
 const roleClassMap = {
-  Admin: 'role-admin',
+  'Super Admin': 'role-super-admin',
   Dispatcher: 'role-dispatcher',
   Driver: 'role-driver',
   Investor: 'role-investor',
 }
 
 const avatarClassMap = {
-  Admin: 'av-admin',
+  'Super Admin': 'av-super-admin',
   Dispatcher: 'av-dispatcher',
   Driver: 'av-driver',
   Investor: 'av-investor',
@@ -265,7 +265,7 @@ function handleConfirmDelete() {
   vertical-align: middle;
 }
 
-.user-avatar.av-admin {
+.user-avatar.av-super-admin {
   background: var(--danger-dim);
   color: var(--danger);
 }
@@ -297,7 +297,7 @@ function handleConfirmDelete() {
   letter-spacing: 0.02em;
 }
 
-.role-admin {
+.role-super-admin {
   background: var(--danger-dim);
   color: var(--danger);
 }

@@ -531,7 +531,7 @@
           ? `<button class="btn btn-primary btn-sm" onclick="saveRow(${row._rowIndex})">Save</button>
              <button class="btn btn-secondary btn-sm" onclick="cancelEdit()">Cancel</button>`
           : `<button class="btn btn-secondary btn-sm" onclick="editRow(${row._rowIndex})">Edit</button>
-             ${window._userRole === 'Admin' ? `<button class="btn btn-danger btn-sm" onclick="deleteRow(${row._rowIndex})">Delete</button>` : ''}`
+             ${window._userRole === 'Super Admin' ? `<button class="btn btn-danger btn-sm" onclick="deleteRow(${row._rowIndex})">Delete</button>` : ''}`
         }
       </td></tr>`;
     }).join("");
@@ -607,7 +607,7 @@
   // ---- Init ----
   Layout.init({
     page: 'data',
-    requiredRoles: ['Admin', 'Dispatcher'],
+    requiredRoles: ['Super Admin', 'Dispatcher'],
     onReady: async function(user) {
       await loadTabs();
       await loadDrivers();

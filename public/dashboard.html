@@ -1221,7 +1221,7 @@ function initDashSocket() {
 // ---- Init via shared Layout ----
 Layout.init({
   page: 'dashboard',
-  requiredRoles: ['Admin', 'Dispatcher'],
+  requiredRoles: ['Super Admin', 'Dispatcher'],
   onReady: function(user) {
     refreshDashboard();
     loadConversations();

@@ -8,7 +8,7 @@
     <!-- SETUP FORM (first-time) -->
     <div v-if="showSetup" class="card">
       <h2>First-Time Setup</h2>
-      <p class="card-desc">Create your admin account to get started.</p>
+      <p class="card-desc">Create your super admin account to get started.</p>
       <div class="form-group">
         <label class="form-label">Username</label>
         <input v-model="setupForm.username" class="form-input" type="text" placeholder="Choose a username" autocomplete="username" />
@@ -21,7 +21,7 @@
         <label class="form-label">Email (optional)</label>
         <input v-model="setupForm.email" class="form-input" type="email" placeholder="you@company.com" />
       </div>
-      <button class="btn btn-primary" :disabled="setupLoading" @click="doSetup">Create Admin Account</button>
+      <button class="btn btn-primary" :disabled="setupLoading" @click="doSetup">Create Super Admin Account</button>
       <div class="error-msg">{{ setupError }}</div>
     </div>
 

@@ -42,8 +42,11 @@ const { isConnected, connect } = useSocket()
 onMounted(() => connect())
 
 const navConfig = {
-  Admin: [
+  'Super Admin': [
     { to: '/dashboard', icon: '&#9635;', label: 'Dashboard' },
+    { to: '/tracking', icon: '&#128205;', label: 'Tracking' },
+    { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
+    { to: '/messages', icon: '&#128172;', label: 'Messages' },
     { to: '/driver', icon: '&#128666;', label: 'Driver App' },
     { to: '/investor', icon: '&#128200;', label: 'Investor View' },
     { to: '/users', icon: '&#9881;', label: 'User Management' },
@@ -51,6 +54,9 @@ const navConfig = {
   ],
   Dispatcher: [
     { to: '/dashboard', icon: '&#9635;', label: 'Dashboard' },
+    { to: '/tracking', icon: '&#128205;', label: 'Tracking' },
+    { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
+    { to: '/messages', icon: '&#128172;', label: 'Messages' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
   ],
   Investor: [
