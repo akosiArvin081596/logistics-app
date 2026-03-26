@@ -596,8 +596,7 @@ onUnmounted(() => {
 
 .app-content {
   padding: 0.75rem 0.5rem;
-  overflow-y: auto;
-  height: calc(100vh - 52px - 68px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  padding-bottom: 1rem;
 }
 
 .tab-panel {
