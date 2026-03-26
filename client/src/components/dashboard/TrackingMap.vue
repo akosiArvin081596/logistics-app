@@ -47,7 +47,7 @@
           color="#9ca3af"
           :weight="5"
           :opacity="0.5"
-          :dash-array="'10, 10'"
+          dashArray="10, 10"
         />
 
         <!-- Driver's actual GPS trail -->
