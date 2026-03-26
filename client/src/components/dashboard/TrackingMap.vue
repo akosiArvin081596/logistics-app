@@ -44,7 +44,7 @@
         <l-polyline
           v-if="routePoints.length >= 2"
           :lat-lngs="routePoints"
-          color="#6366f1"
+          color="#000000"
           :weight="6"
           :opacity="0.7"
           dashArray="12, 8"
