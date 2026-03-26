@@ -8,21 +8,52 @@
         </div>
         <div class="modal-body">
           <div class="modal-form">
-            <div v-for="h in headers" :key="h" class="form-field">
-              <label>{{ h }}</label>
-              <select
-                v-if="isDriverField(h) && driverList.length"
-                v-model="formValues[h]"
-              >
-                <option value="">Select driver</option>
-                <option v-for="d in driverList" :key="d" :value="d">{{ d }}</option>
-              </select>
-              <input
-                v-else
-                v-model="formValues[h]"
-                :placeholder="`Enter ${h.toLowerCase()}`"
-              />
+            <!-- Origin location picker -->
+            <div v-if="hasOriginCoords" class="form-field location-field">
+              <label>Origin Location</label>
+              <div class="location-picker-row">
+                <span v-if="formValues[originLatCol]" class="location-summary">
+                  {{ formValues[originCityCol] || `${formValues[originLatCol]}, ${formValues[originLngCol]}` }}
+                </span>
+                <span v-else class="location-placeholder">No location selected</span>
+                <button type="button" class="btn btn-secondary btn-sm" @click="openPicker('origin')">
+                  Pick on Map
+                </button>
+              </div>
             </div>
+
+            <!-- Destination location picker -->
+            <div v-if="hasDestCoords" class="form-field location-field">
+              <label>Destination Location</label>
+              <div class="location-picker-row">
+                <span v-if="formValues[destLatCol]" class="location-summary">
+                  {{ formValues[destCityCol] || `${formValues[destLatCol]}, ${formValues[destLngCol]}` }}
+                </span>
+                <span v-else class="location-placeholder">No location selected</span>
+                <button type="button" class="btn btn-secondary btn-sm" @click="openPicker('destination')">
+                  Pick on Map
+                </button>
+              </div>
+            </div>
+
+            <!-- Regular form fields -->
+            <template v-for="h in headers" :key="h">
+              <div v-if="!hiddenCoordHeaders.has(h)" class="form-field">
+                <label>{{ h }}</label>
+                <select
+                  v-if="isDriverField(h) && driverList.length"
+                  v-model="formValues[h]"
+                >
+                  <option value="">Select driver</option>
+                  <option v-for="d in driverList" :key="d" :value="d">{{ d }}</option>
+                </select>
+                <input
+                  v-else
+                  v-model="formValues[h]"
+                  :placeholder="`Enter ${h.toLowerCase()}`"
+                />
+              </div>
+            </template>
           </div>
         </div>
         <div class="modal-footer">
@@ -32,10 +63,20 @@
       </div>
     </div>
   </Teleport>
+
+  <LocationPickerModal
+    :open="pickerOpen"
+    :label="pickerTarget === 'origin' ? 'Origin' : 'Destination'"
+    :initial-lat="pickerInitialLat"
+    :initial-lng="pickerInitialLng"
+    @confirm="onLocationPicked"
+    @close="pickerOpen = false"
+  />
 </template>
 
 <script setup>
-import { reactive, watch } from 'vue'
+import { reactive, ref, computed, watch } from 'vue'
+import LocationPickerModal from './LocationPickerModal.vue'
 
 const props = defineProps({
   headers: { type: Array, required: true },
@@ -46,16 +87,72 @@ const props = defineProps({
 const emit = defineEmits(['submit', 'close'])
 
 const formValues = reactive({})
+const pickerOpen = ref(false)
+const pickerTarget = ref('origin')
+
+// Column detection (same regex patterns as DriverRouteMap.vue / LoadCard.vue)
+function findCol(regex) {
+  return (props.headers || []).find((h) => regex.test(h)) || null
+}
+
+const originLatCol = computed(() => findCol(/origin.*lat|pickup.*lat|shipper.*lat/i))
+const originLngCol = computed(() => findCol(/origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i))
+const destLatCol = computed(() => findCol(/dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i))
+const destLngCol = computed(() => findCol(/dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i))
+const originCityCol = computed(() => findCol(/origin|pickup.*city|shipper.*city/i))
+const destCityCol = computed(() => findCol(/dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i))
+
+const hasOriginCoords = computed(() => !!originLatCol.value && !!originLngCol.value)
+const hasDestCoords = computed(() => !!destLatCol.value && !!destLngCol.value)
+
+const hiddenCoordHeaders = computed(() => {
+  const set = new Set()
+  if (hasOriginCoords.value) {
+    set.add(originLatCol.value)
+    set.add(originLngCol.value)
+  }
+  if (hasDestCoords.value) {
+    set.add(destLatCol.value)
+    set.add(destLngCol.value)
+  }
+  return set
+})
+
+const pickerInitialLat = computed(() => {
+  const col = pickerTarget.value === 'origin' ? originLatCol.value : destLatCol.value
+  return col ? parseFloat(formValues[col]) : NaN
+})
+const pickerInitialLng = computed(() => {
+  const col = pickerTarget.value === 'origin' ? originLngCol.value : destLngCol.value
+  return col ? parseFloat(formValues[col]) : NaN
+})
 
 function isDriverField(headerName) {
   return /^driver$/i.test(headerName.trim())
+}
+
+function openPicker(target) {
+  pickerTarget.value = target
+  pickerOpen.value = true
+}
+
+function onLocationPicked({ lat, lng, displayName }) {
+  if (pickerTarget.value === 'origin') {
+    if (originLatCol.value) formValues[originLatCol.value] = String(lat.toFixed(6))
+    if (originLngCol.value) formValues[originLngCol.value] = String(lng.toFixed(6))
+    if (originCityCol.value && displayName) formValues[originCityCol.value] = displayName
+  } else {
+    if (destLatCol.value) formValues[destLatCol.value] = String(lat.toFixed(6))
+    if (destLngCol.value) formValues[destLngCol.value] = String(lng.toFixed(6))
+    if (destCityCol.value && displayName) formValues[destCityCol.value] = displayName
+  }
+  pickerOpen.value = false
 }
 
 function handleSubmit() {
   const values = props.headers.map((h) => formValues[h] || '')
   if (values.every((v) => !v.trim())) return
   emit('submit', values)
-  // Clear form after submit
   props.headers.forEach((h) => {
     formValues[h] = ''
   })
@@ -79,7 +176,6 @@ watch(
       props.headers.forEach((h) => {
         formValues[h] = ''
       })
-      // Focus first input after render
       setTimeout(() => {
         const first = document.querySelector('.modal-form input, .modal-form select')
         if (first) first.focus()
@@ -206,5 +302,37 @@ watch(
 }
 .form-field select:focus {
   border-color: var(--accent);
+}
+
+/* Location picker fields */
+.location-field {
+  grid-column: 1 / -1;
+}
+.location-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.location-summary {
+  flex: 1;
+  font-size: 0.82rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.location-placeholder {
+  flex: 1;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.btn-sm {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.78rem;
+  white-space: nowrap;
 }
 </style>
