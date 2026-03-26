@@ -2024,7 +2024,12 @@ async function getRoute(from, to) {
 		if (!resp.ok) return null;
 		const data = await resp.json();
 		if (data.code !== "Ok" || !data.routes || data.routes.length === 0) return null;
-		return data.routes[0].geometry.coordinates.map(([lng, lat]) => ({ latitude: lat, longitude: lng }));
+		const r = data.routes[0];
+		return {
+			points: r.geometry.coordinates.map(([lng, lat]) => ({ latitude: lat, longitude: lng })),
+			distanceKm: Math.round(r.distance / 100) / 10,
+			durationMin: Math.round(r.duration / 60),
+		};
 	} catch (err) {
 		console.error("OSRM route error:", err.message);
 		return null;
@@ -2163,7 +2168,14 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 			route = await getRoute(origin, destination);
 		}
 
-		res.json({ trail: snapped || trail, route, origin, destination });
+		res.json({
+			trail: snapped || trail,
+			route: route ? route.points : null,
+			distanceKm: route ? route.distanceKm : null,
+			etaMinutes: route ? route.durationMin : null,
+			origin,
+			destination,
+		});
 	} catch (error) {
 		console.error("Error fetching trail:", error.message);
 		res.status(500).json({ error: error.message });

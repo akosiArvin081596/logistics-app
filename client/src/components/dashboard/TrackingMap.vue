@@ -28,13 +28,12 @@
               <div v-if="loc.loadId">Load: {{ loc.loadId }}</div>
               <div class="popup-coords">{{ loc.latitude.toFixed(5) }}, {{ loc.longitude.toFixed(5) }}</div>
               <div v-if="loc.speed">Speed: {{ Math.round(loc.speed * 2.237) }} mph</div>
-              <div v-if="loc.etaMinutes != null" class="popup-eta">
-                ETA: {{ loc.etaMinutes }} min
+              <div v-if="selectedDriver === loc.driver && routeDistance != null" class="popup-eta">
+                Distance: {{ routeDistance }} km
               </div>
-              <span
-                v-if="loc.etaStatus && loc.etaStatus !== 'unknown'"
-                :class="['eta-badge', loc.etaStatus]"
-              >{{ loc.etaStatus === 'on-time' ? 'On Time' : 'Delayed' }}</span>
+              <div v-if="selectedDriver === loc.driver && routeEta != null" class="popup-eta">
+                ETA: {{ routeEta }} min
+              </div>
               <div class="popup-time">{{ formatTime(loc.timestamp) }}</div>
             </div>
           </l-popup>
@@ -128,6 +127,8 @@ const routePoints = ref([])
 const originLatLng = ref(null)
 const destLatLng = ref(null)
 const trailLoadId = ref('')
+const routeDistance = ref(null)
+const routeEta = ref(null)
 
 // Custom icons for origin (green) and destination (red)
 const originIcon = L.divIcon({
@@ -153,6 +154,8 @@ async function fetchTrail(driverName, loadId) {
   originLatLng.value = null
   destLatLng.value = null
   trailLoadId.value = ''
+  routeDistance.value = null
+  routeEta.value = null
   if (!driverName || !loadId) return
   try {
     const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(driverName)}&loadId=${encodeURIComponent(loadId)}`)
@@ -160,6 +163,8 @@ async function fetchTrail(driverName, loadId) {
     routePoints.value = (data.route || []).map(p => [p.latitude, p.longitude])
     if (data.origin) originLatLng.value = [data.origin.latitude, data.origin.longitude]
     if (data.destination) destLatLng.value = [data.destination.latitude, data.destination.longitude]
+    routeDistance.value = data.distanceKm
+    routeEta.value = data.etaMinutes
     trailLoadId.value = loadId
 
     // Fit map bounds to show entire route
@@ -199,6 +204,8 @@ function focusAll() {
   originLatLng.value = null
   destLatLng.value = null
   trailLoadId.value = ''
+  routeDistance.value = null
+  routeEta.value = null
 }
 
 const mapCenter = computed(() => {
