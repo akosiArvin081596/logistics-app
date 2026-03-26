@@ -154,6 +154,7 @@ const dropoffFields = computed(() => {
 <style scoped>
 .load-detail {
   padding: 0 0.25rem;
+  padding-bottom: 120px;
 }
 
 .detail-topbar {
