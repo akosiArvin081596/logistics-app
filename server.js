@@ -841,7 +841,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex, driver, loadId, values } = req.body;
+		const { rowIndex, driver, loadId, values, origin, destination } = req.body;
 		if (!rowIndex || !driver || !values) {
 			return res.status(400).json({ error: "rowIndex, driver, and values required" });
 		}
@@ -855,7 +855,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		});
 
 		// Notify the driver in real-time
-		io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex });
+		io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '' });
 
 		res.json({ success: true });
 	} catch (error) {

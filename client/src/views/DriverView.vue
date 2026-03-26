@@ -1,5 +1,12 @@
 <template>
   <div class="driver-app">
+    <!-- Load Assigned Notification -->
+    <LoadAssignedBanner
+      :notification="assignedNotification"
+      @dismiss="dismissAssignedBanner"
+      @view-load="viewAssignedLoad"
+    />
+
     <!-- Header -->
     <DriverHeader
       :driver-name="driverName"
@@ -220,6 +227,7 @@ import ExpenseForm from '../components/driver/ExpenseForm.vue'
 import ExpenseCard from '../components/driver/ExpenseCard.vue'
 import DriverKit from '../components/driver/DriverKit.vue'
 import DocumentUpload from '../components/driver/DocumentUpload.vue'
+import LoadAssignedBanner from '../components/driver/LoadAssignedBanner.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 
 const auth = useAuthStore()
@@ -234,6 +242,7 @@ const selectedStatusRowIndex = ref(null)
 const chatLoadId = ref('')
 const showFilters = ref(false)
 const detailRowIndex = ref(null)
+const assignedNotification = ref(null)
 let refreshInterval = null
 
 const subTabs = [
@@ -384,8 +393,27 @@ async function handleExpenseSubmit(data) {
 
 // Socket.IO for real-time notifications
 function onLoadAssigned(payload) {
-  toast.show(`New load assigned: ${payload.loadId || 'Load'}`)
+  assignedNotification.value = {
+    loadId: payload.loadId || 'Load',
+    origin: payload.origin || '',
+    destination: payload.destination || '',
+    rowIndex: payload.rowIndex
+  }
   driverStore.loadData()
+}
+
+function dismissAssignedBanner() {
+  assignedNotification.value = null
+}
+
+function viewAssignedLoad() {
+  const ri = assignedNotification.value?.rowIndex
+  assignedNotification.value = null
+  if (ri) {
+    currentTab.value = 'loads'
+    driverStore.loadSubTab = 'active'
+    detailRowIndex.value = ri
+  }
 }
 
 function onGeofenceTrigger(payload) {
