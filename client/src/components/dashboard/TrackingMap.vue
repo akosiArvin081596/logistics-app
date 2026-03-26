@@ -181,6 +181,8 @@ watch(() => props.visible, (val) => {
 })
 
 onMounted(() => {
+  socket.connect()
+  socket.register('dispatch')
   fetchLocations()
   socket.on('location-update', onLocationUpdate)
 })
