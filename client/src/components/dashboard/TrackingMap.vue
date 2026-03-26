@@ -39,6 +39,25 @@
             </div>
           </l-popup>
         </l-marker>
+
+        <!-- Route trail polyline -->
+        <l-polyline
+          v-if="trailPoints.length >= 2"
+          :lat-lngs="trailPoints"
+          color="#4338ca"
+          :weight="4"
+          :opacity="0.7"
+        />
+
+        <!-- Origin marker (green) -->
+        <l-marker v-if="originLatLng" :lat-lng="originLatLng" :icon="originIcon">
+          <l-popup><div class="marker-popup"><strong>Origin (Shipper)</strong></div></l-popup>
+        </l-marker>
+
+        <!-- Destination marker (red) -->
+        <l-marker v-if="destLatLng" :lat-lng="destLatLng" :icon="destIcon">
+          <l-popup><div class="marker-popup"><strong>Destination (Receiver)</strong></div></l-popup>
+        </l-marker>
       </l-map>
 
       <!-- Driver list panel -->
@@ -83,7 +102,8 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import 'leaflet/dist/leaflet.css'
-import { LMap, LTileLayer, LMarker, LPopup } from '@vue-leaflet/vue-leaflet'
+import { LMap, LTileLayer, LMarker, LPopup, LPolyline } from '@vue-leaflet/vue-leaflet'
+import L from 'leaflet'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -99,8 +119,56 @@ const selectedDriver = ref('')
 const panelCollapsed = ref(false)
 const markerRefs = {}
 
+// Trail state
+const trailPoints = ref([])
+const originLatLng = ref(null)
+const destLatLng = ref(null)
+const trailLoadId = ref('')
+
+// Custom icons for origin (green) and destination (red)
+const originIcon = L.divIcon({
+  className: 'endpoint-icon origin-icon',
+  html: '<div class="endpoint-dot" style="background:#16a34a;"></div>',
+  iconSize: [18, 18],
+  iconAnchor: [9, 9],
+})
+const destIcon = L.divIcon({
+  className: 'endpoint-icon dest-icon',
+  html: '<div class="endpoint-dot" style="background:#dc2626;"></div>',
+  iconSize: [18, 18],
+  iconAnchor: [9, 9],
+})
+
 function setMarkerRef(driver, el) {
   if (el) markerRefs[driver] = el
+}
+
+async function fetchTrail(driverName, loadId) {
+  trailPoints.value = []
+  originLatLng.value = null
+  destLatLng.value = null
+  trailLoadId.value = ''
+  if (!driverName || !loadId) return
+  try {
+    const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(driverName)}&loadId=${encodeURIComponent(loadId)}`)
+    trailPoints.value = (data.trail || []).map(p => [p.latitude, p.longitude])
+    if (data.origin) originLatLng.value = [data.origin.latitude, data.origin.longitude]
+    if (data.destination) destLatLng.value = [data.destination.latitude, data.destination.longitude]
+    trailLoadId.value = loadId
+
+    // Fit map bounds to show entire route
+    const map = mapRef.value?.leafletObject
+    if (map && trailPoints.value.length > 0) {
+      const allPoints = [...trailPoints.value]
+      if (originLatLng.value) allPoints.push(originLatLng.value)
+      if (destLatLng.value) allPoints.push(destLatLng.value)
+      if (allPoints.length >= 2) {
+        map.fitBounds(allPoints, { padding: [40, 40], animate: false })
+      }
+    }
+  } catch {
+    // silent — trail is supplementary
+  }
 }
 
 function focusDriver(loc) {
@@ -115,10 +183,15 @@ function focusDriver(loc) {
       marker.leafletObject.openPopup()
     }
   })
+  fetchTrail(loc.driver, loc.loadId)
 }
 
 function focusAll() {
   selectedDriver.value = '__all__'
+  trailPoints.value = []
+  originLatLng.value = null
+  destLatLng.value = null
+  trailLoadId.value = ''
 }
 
 const mapCenter = computed(() => {
@@ -174,6 +247,16 @@ function onLocationUpdate(payload) {
     locations.value[idx] = entry
   } else {
     locations.value.push(entry)
+  }
+
+  // Extend trail in real-time if this update is for the selected driver/load
+  if (
+    selectedDriver.value === payload.driver &&
+    trailLoadId.value &&
+    payload.loadId === trailLoadId.value &&
+    trailPoints.value.length > 0
+  ) {
+    trailPoints.value = [...trailPoints.value, [payload.latitude, payload.longitude]]
   }
 }
 
@@ -404,5 +487,20 @@ onUnmounted(() => {
   font-size: 0.7rem;
   color: #999;
   margin-top: 0.2rem;
+}
+</style>
+
+<style>
+/* Unscoped — Leaflet injects divIcon outside scoped scope */
+.endpoint-icon {
+  background: none !important;
+  border: none !important;
+}
+.endpoint-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
 }
 </style>

@@ -162,6 +162,7 @@ db.exec(`
 `);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver ON driver_locations(driver)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_ts ON driver_locations(timestamp)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_load_id ON driver_locations(load_id)`);
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_config (
@@ -1834,6 +1835,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const rows = dataResp.data.values || [];
 
 			const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+			const originLatCol = headers.find((h) => /origin.*lat|pickup.*lat|shipper.*lat/i.test(h));
+			const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
 			const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
 			const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
 			const deliveryTimeCol = headers.find((h) => /delivery.*time|drop.*time|delivery.*date|drop.*date/i.test(h));
@@ -1856,10 +1859,22 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					if (!loc.loadId || !loadMap[loc.loadId]) continue;
 					const load = loadMap[loc.loadId];
 
+					// Attach origin coordinates
+					if (originLatCol && originLngCol) {
+						const oLat = parseFloat(load[originLatCol]);
+						const oLng = parseFloat(load[originLngCol]);
+						if (!isNaN(oLat) && !isNaN(oLng)) {
+							loc.originLat = oLat;
+							loc.originLng = oLng;
+						}
+					}
+
 					if (destLatCol && destLngCol) {
 						const dLat = parseFloat(load[destLatCol]);
 						const dLng = parseFloat(load[destLngCol]);
 						if (!isNaN(dLat) && !isNaN(dLng)) {
+							loc.destLat = dLat;
+							loc.destLng = dLng;
 							const distMeters = geolib.getDistance(
 								{ latitude: loc.latitude, longitude: loc.longitude },
 								{ latitude: dLat, longitude: dLng }
@@ -1890,6 +1905,106 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		res.json({ locations });
 	} catch (error) {
 		console.error("Error fetching locations:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/locations/trail — GPS trail for a specific driver/load
+app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const { driver, loadId } = req.query;
+		if (!driver) {
+			return res.status(400).json({ error: "driver query param required" });
+		}
+
+		// Query location history
+		let rawPoints;
+		if (loadId) {
+			rawPoints = db.prepare(
+				`SELECT latitude, longitude, speed, timestamp
+				 FROM driver_locations
+				 WHERE driver = ? AND load_id = ?
+				 ORDER BY timestamp ASC`
+			).all(driver, loadId);
+		} else {
+			rawPoints = db.prepare(
+				`SELECT latitude, longitude, speed, timestamp
+				 FROM driver_locations
+				 WHERE driver = ? AND timestamp > datetime('now', '-24 hours')
+				 ORDER BY timestamp ASC`
+			).all(driver);
+		}
+
+		// Simplify: skip consecutive points < 50m apart, always keep first and last
+		const simplified = [];
+		for (let i = 0; i < rawPoints.length; i++) {
+			if (i === 0 || i === rawPoints.length - 1) {
+				simplified.push(rawPoints[i]);
+				continue;
+			}
+			const prev = simplified[simplified.length - 1];
+			const dist = geolib.getDistance(
+				{ latitude: prev.latitude, longitude: prev.longitude },
+				{ latitude: rawPoints[i].latitude, longitude: rawPoints[i].longitude }
+			);
+			if (dist >= 50) {
+				simplified.push(rawPoints[i]);
+			}
+		}
+
+		// Cap at 2000 points
+		const trail = simplified.length > 2000 ? simplified.slice(-2000) : simplified;
+
+		// Look up origin/destination from sheet
+		let origin = null;
+		let destination = null;
+		if (loadId) {
+			try {
+				const sheets = await getSheets();
+				const headerResp = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: "Job Tracking!1:1",
+				});
+				const headers = (headerResp.data.values || [[]])[0];
+				const dataResp = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: "Job Tracking",
+				});
+				const rows = dataResp.data.values || [];
+
+				const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+				const originLatCol = headers.find((h) => /origin.*lat|pickup.*lat|shipper.*lat/i.test(h));
+				const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
+				const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
+				const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
+
+				if (loadIdCol) {
+					for (let i = 1; i < rows.length; i++) {
+						const obj = {};
+						headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
+						if (obj[loadIdCol] === loadId) {
+							if (originLatCol && originLngCol) {
+								const oLat = parseFloat(obj[originLatCol]);
+								const oLng = parseFloat(obj[originLngCol]);
+								if (!isNaN(oLat) && !isNaN(oLng)) origin = { latitude: oLat, longitude: oLng };
+							}
+							if (destLatCol && destLngCol) {
+								const dLat = parseFloat(obj[destLatCol]);
+								const dLng = parseFloat(obj[destLngCol]);
+								if (!isNaN(dLat) && !isNaN(dLng)) destination = { latitude: dLat, longitude: dLng };
+							}
+							break;
+						}
+					}
+				}
+			} catch (sheetErr) {
+				console.error("Trail sheet lookup error:", sheetErr.message);
+			}
+		}
+
+		res.json({ trail, origin, destination });
+	} catch (error) {
+		console.error("Error fetching trail:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
