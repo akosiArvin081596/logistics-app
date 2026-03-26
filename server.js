@@ -11,6 +11,17 @@ const SqliteStore = require("better-sqlite3-session-store")(session);
 const geolib = require("geolib");
 const PDFDocument = require("pdfkit");
 
+// Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
+function colLetter(idx) {
+	let result = "";
+	let n = idx;
+	while (n >= 0) {
+		result = String.fromCharCode(65 + (n % 26)) + result;
+		n = Math.floor(n / 26) - 1;
+	}
+	return result;
+}
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
@@ -1332,7 +1343,7 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 		// Read current row to get old status for logging
 		const rowRes = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
-			range: `Job Tracking!A${rowIndex}:${String.fromCharCode(65 + headers.length - 1)}${rowIndex}`,
+			range: `Job Tracking!A${rowIndex}:${colLetter(headers.length - 1)}${rowIndex}`,
 		});
 		const currentRow = (rowRes.data.values || [])[0] || [];
 		const oldStatus = currentRow[statusIdx] || "";
@@ -1340,8 +1351,6 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 		// Build batch update for status column + date column
 		const now = new Date();
 		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
-		const colLetter = (idx) => String.fromCharCode(65 + idx);
-
 		const updateData = [
 			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[newStatus]] },
 		];
@@ -1619,10 +1628,10 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 				/pod.*upload|^documents$/i.test(h),
 			);
 			if (podColIdx >= 0) {
-				const colLetter = String.fromCharCode(65 + podColIdx);
+				const podColLetter = colLetter(podColIdx);
 				await sheets.spreadsheets.values.update({
 					spreadsheetId: SPREADSHEET_ID,
-					range: `Job Tracking!${colLetter}${rowIndex}`,
+					range: `Job Tracking!${podColLetter}${rowIndex}`,
 					valueInputOption: "USER_ENTERED",
 					requestBody: { values: [["Yes"]] },
 				});
@@ -1762,10 +1771,10 @@ app.post("/api/location", requireAuth, async (req, res) => {
 							if (canUpdate && statusCol) {
 								// Update status in sheet
 								const statusColIdx = headers.indexOf(statusCol);
-								const colLetter = String.fromCharCode(65 + (statusColIdx % 26));
+								const statusColLetter = colLetter(statusColIdx);
 								await sheets.spreadsheets.values.update({
 									spreadsheetId: SPREADSHEET_ID,
-									range: `Job Tracking!${colLetter}${i + 1}`,
+									range: `Job Tracking!${statusColLetter}${i + 1}`,
 									valueInputOption: "USER_ENTERED",
 									requestBody: { values: [[geofenceTriggered]] },
 								});
