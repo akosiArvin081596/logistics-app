@@ -5,77 +5,103 @@ export function useGeolocation(api) {
   const error = ref(null)
   const tracking = ref(false)
 
-  let intervalId = null
+  let watchId = null
   let activeLoadId = ''
-  const INTERVAL_ACTIVE = 15 * 1000       // 15 seconds
-  const INTERVAL_BACKGROUND = 60 * 1000   // 1 minute
+  let lastReported = null
+  let lastReportTime = 0
+  let heartbeatId = null
 
-  function getInterval() {
-    return document.hidden ? INTERVAL_BACKGROUND : INTERVAL_ACTIVE
+  const MIN_DISTANCE = 50        // meters — only report if moved this far
+  const MIN_INTERVAL = 10 * 1000 // 10s — don't report more often than this
+  const HEARTBEAT = 60 * 1000    // 60s — send a ping even when stationary
+
+  function distanceMeters(a, b) {
+    const R = 6371000
+    const toRad = (d) => (d * Math.PI) / 180
+    const dLat = toRad(b.latitude - a.latitude)
+    const dLng = toRad(b.longitude - a.longitude)
+    const s =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLng / 2) ** 2
+    return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s))
   }
 
-  async function reportPosition() {
-    if (!navigator.geolocation) {
-      error.value = 'Geolocation not supported'
-      return
-    }
+  function shouldReport(pos) {
+    const now = Date.now()
+    // Always report first position
+    if (!lastReported) return true
+    // Respect minimum interval
+    if (now - lastReportTime < MIN_INTERVAL) return false
+    // Report if heartbeat elapsed (driver stationary but still online)
+    if (now - lastReportTime >= HEARTBEAT) return true
+    // Report if moved enough
+    return distanceMeters(lastReported, pos) >= MIN_DISTANCE
+  }
 
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const data = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy: pos.coords.accuracy || 0,
-          speed: pos.coords.speed || 0,
-          heading: pos.coords.heading || 0,
-          loadId: activeLoadId,
-        }
-        lastPosition.value = data
-        try {
-          await api.post('/api/location', data)
-        } catch (err) {
-          // Silent fail — don't disrupt driver experience
-        }
-      },
-      (err) => {
-        error.value = err.message
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-    )
+  async function sendReport(data) {
+    lastReported = { latitude: data.latitude, longitude: data.longitude }
+    lastReportTime = Date.now()
+    try {
+      await api.post('/api/location', data)
+    } catch {
+      // Silent fail
+    }
+  }
+
+  function onPosition(pos) {
+    const data = {
+      latitude: pos.coords.latitude,
+      longitude: pos.coords.longitude,
+      accuracy: pos.coords.accuracy || 0,
+      speed: pos.coords.speed || 0,
+      heading: pos.coords.heading || 0,
+      loadId: activeLoadId,
+    }
+    lastPosition.value = data
+
+    if (shouldReport(data)) sendReport(data)
+  }
+
+  function onError(err) {
+    error.value = err.message
   }
 
   function start(loadId) {
     if (tracking.value) stop()
     activeLoadId = loadId || ''
     tracking.value = true
+    lastReported = null
+    lastReportTime = 0
 
-    // Report immediately
-    reportPosition()
+    // Use watchPosition — browser calls back only when position changes
+    watchId = navigator.geolocation.watchPosition(onPosition, onError, {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 5000,
+    })
 
-    // Then on interval
-    intervalId = setInterval(reportPosition, getInterval())
-
-    // Adjust interval when tab visibility changes
-    document.addEventListener('visibilitychange', onVisibilityChange)
+    // Heartbeat fallback for stationary drivers
+    heartbeatId = setInterval(() => {
+      if (lastPosition.value && Date.now() - lastReportTime >= HEARTBEAT) {
+        sendReport({ ...lastPosition.value, loadId: activeLoadId })
+      }
+    }, HEARTBEAT)
   }
 
   function stop() {
     tracking.value = false
-    if (intervalId) {
-      clearInterval(intervalId)
-      intervalId = null
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId)
+      watchId = null
     }
-    document.removeEventListener('visibilitychange', onVisibilityChange)
+    if (heartbeatId) {
+      clearInterval(heartbeatId)
+      heartbeatId = null
+    }
   }
 
   function updateLoadId(loadId) {
     activeLoadId = loadId || ''
-  }
-
-  function onVisibilityChange() {
-    if (!tracking.value) return
-    if (intervalId) clearInterval(intervalId)
-    intervalId = setInterval(reportPosition, getInterval())
   }
 
   onUnmounted(stop)
