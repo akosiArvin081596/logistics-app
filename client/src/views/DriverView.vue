@@ -218,6 +218,23 @@
 </template>
 
 <script setup>
+import 'vant/es/tabbar/style'
+import 'vant/es/tabbar-item/style'
+import 'vant/es/badge/style'
+import 'vant/es/collapse/style'
+import 'vant/es/collapse-item/style'
+import 'vant/es/cell/style'
+import 'vant/es/cell-group/style'
+import 'vant/es/button/style'
+import 'vant/es/empty/style'
+import 'vant/es/form/style'
+import 'vant/es/field/style'
+import 'vant/es/uploader/style'
+import 'vant/es/picker/style'
+import 'vant/es/popup/style'
+import 'vant/es/nav-bar/style'
+import 'vant/es/steps/style'
+import 'vant/es/step/style'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'

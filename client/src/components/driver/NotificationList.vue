@@ -2,41 +2,45 @@
   <div class="notification-list">
     <div class="notif-header">
       <h2>Notifications</h2>
-      <button
+      <van-button
         v-if="unreadIds.length"
-        class="mark-all-btn"
+        type="primary"
+        plain
+        size="mini"
         @click="$emit('mark-all-read')"
-      >Mark all read</button>
+      >Mark all read</van-button>
     </div>
 
-    <div v-if="!notifications.length" class="notif-empty">
-      <span class="notif-empty-icon">&#128276;</span>
-      <p>No notifications yet</p>
-    </div>
+    <van-empty v-if="!notifications.length" description="No notifications yet" image="default" />
 
-    <div v-else class="notif-items">
-      <div
+    <van-cell-group v-else :border="false" class="notif-group">
+      <van-cell
         v-for="n in notifications"
         :key="n.id"
-        :class="['notif-item', { unread: !n.read }]"
+        :class="{ unread: !n.read }"
+        clickable
         @click="$emit('tap', n)"
       >
-        <div class="notif-icon-wrap">
-          <span class="notif-icon" v-html="typeIcon(n.type)"></span>
-          <span v-if="!n.read" class="notif-dot"></span>
-        </div>
-        <div class="notif-content">
-          <div class="notif-title">{{ n.title }}</div>
-          <div v-if="n.body" class="notif-body">{{ n.body }}</div>
-          <div class="notif-time">{{ formatTime(n.createdAt) }}</div>
-        </div>
-      </div>
-    </div>
+        <template #icon>
+          <van-badge :dot="!n.read">
+            <span class="notif-icon" v-html="typeIcon(n.type)"></span>
+          </van-badge>
+        </template>
+        <template #title>
+          <span class="notif-title">{{ n.title }}</span>
+        </template>
+        <template #label>
+          <span v-if="n.body" class="notif-body">{{ n.body }}</span>
+          <span class="notif-time">{{ formatTime(n.createdAt) }}</span>
+        </template>
+      </van-cell>
+    </van-cell-group>
   </div>
 </template>
 
 <script setup>
 import { computed } from 'vue'
+import { Cell as VanCell, CellGroup as VanCellGroup, Badge as VanBadge, Button as VanButton, Empty as VanEmpty } from 'vant'
 
 const props = defineProps({
   notifications: { type: Array, default: () => [] },
@@ -70,7 +74,7 @@ function formatTime(ts) {
 
 <style scoped>
 .notification-list {
-  padding: 0 1rem 1rem;
+  padding: 0 0.5rem;
 }
 .notif-header {
   display: flex;
@@ -82,87 +86,33 @@ function formatTime(ts) {
   font-size: 1.1rem;
   font-weight: 700;
 }
-.mark-all-btn {
-  background: none;
-  border: none;
-  color: var(--accent);
-  font-size: 0.78rem;
-  font-weight: 600;
-  cursor: pointer;
-  font-family: inherit;
-}
-.notif-empty {
-  text-align: center;
-  padding: 3rem 1rem;
-  color: var(--text-dim);
-}
-.notif-empty-icon {
-  font-size: 2.5rem;
-  display: block;
-  margin-bottom: 0.5rem;
-}
-.notif-empty p {
-  font-size: 0.88rem;
-}
-.notif-items {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.notif-item {
-  display: flex;
-  gap: 0.75rem;
-  padding: 0.75rem;
-  background: var(--surface);
+.notif-group {
   border-radius: var(--radius);
-  border: 1px solid var(--border);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.notif-item:active {
-  background: var(--surface-hover);
-}
-.notif-item.unread {
-  background: var(--blue-dim);
-  border-color: rgba(59, 130, 246, 0.15);
-}
-.notif-icon-wrap {
-  position: relative;
-  flex-shrink: 0;
+  overflow: hidden;
 }
 .notif-icon {
-  font-size: 1.4rem;
-  line-height: 1;
-}
-.notif-dot {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  width: 8px;
-  height: 8px;
-  background: var(--blue);
-  border-radius: 50%;
-}
-.notif-content {
-  flex: 1;
-  min-width: 0;
+  font-size: 1.3rem;
+  margin-right: 0.5rem;
 }
 .notif-title {
   font-size: 0.85rem;
   font-weight: 600;
-  color: var(--text);
 }
 .notif-body {
+  display: block;
   font-size: 0.78rem;
   color: var(--text-dim);
-  margin-top: 0.15rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .notif-time {
+  display: block;
   font-size: 0.7rem;
   color: var(--text-dim);
-  margin-top: 0.3rem;
+  margin-top: 0.15rem;
+}
+.unread {
+  background: var(--blue-dim) !important;
 }
 </style>

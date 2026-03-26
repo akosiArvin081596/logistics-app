@@ -1,111 +1,105 @@
 <template>
-  <div class="card expense-form-card">
-    <div class="form-title">Log Expense</div>
+  <van-form @submit="handleSubmit" class="expense-form">
+    <van-cell-group inset>
+      <div class="form-title">Log Expense</div>
 
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">Type</label>
-        <select v-model="form.type" class="form-select">
-          <option value="Fuel">Fuel</option>
-          <option value="Repair">Repair</option>
-          <option value="Toll">Toll</option>
-          <option value="Food">Food</option>
-          <option value="Other">Other</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Amount ($)</label>
-        <input
-          v-model="form.amount"
-          class="form-input"
-          type="number"
-          step="0.01"
-          min="0"
-          placeholder="0.00"
+      <van-field
+        v-model="form.type"
+        is-link
+        readonly
+        label="Type"
+        :placeholder="form.type"
+        @click="showTypePicker = true"
+      />
+      <van-popup v-model:show="showTypePicker" round position="bottom">
+        <van-picker
+          :columns="typeColumns"
+          @cancel="showTypePicker = false"
+          @confirm="onTypePick"
         />
-      </div>
-    </div>
+      </van-popup>
 
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">Date</label>
-        <input v-model="form.date" class="form-input" type="date" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">Load</label>
-        <select v-model="form.loadId" class="form-select">
-          <option value="">General</option>
-          <option
-            v-for="id in loadIdOptions"
-            :key="id"
-            :value="id"
-          >{{ id }}</option>
-        </select>
-      </div>
-    </div>
+      <van-field
+        v-model="form.amount"
+        type="number"
+        label="Amount ($)"
+        placeholder="0.00"
+        :rules="[{ required: true, message: 'Enter amount' }]"
+      />
 
-    <div v-if="form.type === 'Fuel'" class="form-row">
-      <div class="form-group">
-        <label class="form-label">Gallons</label>
-        <input
+      <van-field
+        v-model="form.date"
+        type="date"
+        label="Date"
+        :rules="[{ required: true, message: 'Select date' }]"
+      />
+
+      <van-field
+        v-model="form.loadId"
+        is-link
+        readonly
+        label="Load"
+        :placeholder="form.loadId || 'General'"
+        @click="showLoadPicker = true"
+      />
+      <van-popup v-model:show="showLoadPicker" round position="bottom">
+        <van-picker
+          :columns="loadColumns"
+          @cancel="showLoadPicker = false"
+          @confirm="onLoadPick"
+        />
+      </van-popup>
+
+      <template v-if="form.type === 'Fuel'">
+        <van-field
           v-model="form.gallons"
-          class="form-input"
           type="number"
-          step="0.1"
-          min="0"
+          label="Gallons"
           placeholder="0.0"
         />
-      </div>
-      <div class="form-group">
-        <label class="form-label">Odometer</label>
-        <input
+        <van-field
           v-model="form.odometer"
-          class="form-input"
           type="number"
-          step="1"
-          min="0"
+          label="Odometer"
           placeholder="Miles"
         />
-      </div>
-    </div>
+      </template>
 
-    <div class="form-group">
-      <label class="form-label">Description</label>
-      <textarea
+      <van-field
         v-model="form.description"
-        class="form-textarea"
+        type="textarea"
+        label="Description"
         placeholder="Brief description..."
-        maxlength="300"
-      ></textarea>
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Receipt Photo</label>
-      <label class="photo-btn" for="expPhotoInput">&#128247; Capture / Upload Photo</label>
-      <input
-        id="expPhotoInput"
-        ref="photoInput"
-        type="file"
-        accept="image/*"
-        capture="camera"
-        style="display: none"
-        @change="handlePhoto"
+        :maxlength="300"
+        show-word-limit
+        rows="2"
+        autosize
       />
-      <div v-if="photoPreview" class="photo-preview">
-        <img :src="photoPreview" alt="Preview" />
-      </div>
-    </div>
 
-    <button
-      class="action-btn primary"
-      :disabled="submitting"
-      @click="handleSubmit"
-    >Submit Expense</button>
-  </div>
+      <van-field label="Receipt Photo">
+        <template #input>
+          <van-uploader
+            v-model="fileList"
+            :max-count="1"
+            :after-read="handlePhoto"
+            accept="image/*"
+            capture="camera"
+          />
+        </template>
+      </van-field>
+    </van-cell-group>
+
+    <div class="form-submit">
+      <van-button round block type="primary" native-type="submit" :loading="submitting">
+        Submit Expense
+      </van-button>
+    </div>
+  </van-form>
 </template>
 
 <script setup>
 import { ref, reactive, computed } from 'vue'
+import { Form as VanForm, Field as VanField, CellGroup as VanCellGroup, Button as VanButton, Uploader as VanUploader, Picker as VanPicker, Popup as VanPopup } from 'vant'
 import { useToast } from '../../composables/useToast'
 
 const props = defineProps({
@@ -117,10 +111,11 @@ const props = defineProps({
 const emit = defineEmits(['submit'])
 
 const toast = useToast()
-const photoInput = ref(null)
-const photoPreview = ref('')
-const photoBase64 = ref('')
 const submitting = ref(false)
+const fileList = ref([])
+const photoBase64 = ref('')
+const showTypePicker = ref(false)
+const showLoadPicker = ref(false)
 
 const form = reactive({
   type: 'Fuel',
@@ -132,6 +127,14 @@ const form = reactive({
   odometer: '',
 })
 
+const typeColumns = [
+  { text: 'Fuel', value: 'Fuel' },
+  { text: 'Repair', value: 'Repair' },
+  { text: 'Toll', value: 'Toll' },
+  { text: 'Food', value: 'Food' },
+  { text: 'Other', value: 'Other' },
+]
+
 function findCol(headers, regex) {
   return (headers || []).find((h) => regex.test(h)) || null
 }
@@ -139,15 +142,25 @@ function findCol(headers, regex) {
 const loadIdOptions = computed(() => {
   const loadIdCol = findCol(props.headers, /load.?id|job.?id/i)
   if (!loadIdCol) return []
-  return props.loads
-    .map((l) => l[loadIdCol])
-    .filter(Boolean)
+  return props.loads.map((l) => l[loadIdCol]).filter(Boolean)
 })
 
-function handlePhoto(event) {
-  const file = event.target.files[0]
-  if (!file) return
+const loadColumns = computed(() => [
+  { text: 'General', value: '' },
+  ...loadIdOptions.value.map((id) => ({ text: id, value: id })),
+])
 
+function onTypePick({ selectedOptions }) {
+  form.type = selectedOptions[0].value
+  showTypePicker.value = false
+}
+
+function onLoadPick({ selectedOptions }) {
+  form.loadId = selectedOptions[0].value
+  showLoadPicker.value = false
+}
+
+function handlePhoto(file) {
   const reader = new FileReader()
   reader.onload = (e) => {
     const img = new Image()
@@ -156,32 +169,22 @@ function handlePhoto(event) {
       const MAX = 200
       let w = img.width
       let h = img.height
-      if (w > h) {
-        h = Math.round((h * MAX) / w)
-        w = MAX
-      } else {
-        w = Math.round((w * MAX) / h)
-        h = MAX
-      }
+      if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
+      else { w = Math.round((w * MAX) / h); h = MAX }
       canvas.width = w
       canvas.height = h
       canvas.getContext('2d').drawImage(img, 0, 0, w, h)
       photoBase64.value = canvas.toDataURL('image/jpeg', 0.6)
-      photoPreview.value = photoBase64.value
     }
     img.src = e.target.result
   }
-  reader.readAsDataURL(file)
+  reader.readAsDataURL(file.file)
 }
 
-async function handleSubmit() {
+function handleSubmit() {
   const amount = parseFloat(form.amount)
   if (!amount || amount <= 0) {
     toast.show('Enter a valid amount', 'error')
-    return
-  }
-  if (!form.date) {
-    toast.show('Select a date', 'error')
     return
   }
 
@@ -199,15 +202,13 @@ async function handleSubmit() {
       odometer: form.odometer || 0,
     })
 
-    // Reset form
     form.amount = ''
     form.description = ''
     form.loadId = ''
     form.gallons = ''
     form.odometer = ''
     photoBase64.value = ''
-    photoPreview.value = ''
-    if (photoInput.value) photoInput.value.value = ''
+    fileList.value = []
   } finally {
     submitting.value = false
   }
@@ -215,73 +216,15 @@ async function handleSubmit() {
 </script>
 
 <style scoped>
+.expense-form {
+  margin-bottom: 1rem;
+}
 .form-title {
   font-weight: 600;
   font-size: 0.9rem;
-  margin-bottom: 0.85rem;
+  padding: 0.85rem 1rem 0.5rem;
 }
-
-.form-group {
-  margin-bottom: 0.85rem;
-}
-
-.photo-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  width: 100%;
+.form-submit {
   padding: 0.75rem;
-  border: 2px dashed var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.photo-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.photo-preview {
-  margin-top: 0.5rem;
-}
-
-.photo-preview img {
-  max-width: 120px;
-  max-height: 120px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-}
-
-.action-btn {
-  width: 100%;
-  padding: 1rem;
-  border: none;
-  border-radius: var(--radius);
-  font-family: inherit;
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s;
-  min-height: 56px;
-}
-
-.action-btn.primary {
-  background: var(--accent);
-  color: #fff;
-}
-
-.action-btn.primary:hover {
-  opacity: 0.9;
-}
-
-.action-btn.primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 </style>

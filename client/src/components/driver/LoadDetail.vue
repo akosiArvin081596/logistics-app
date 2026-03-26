@@ -2,7 +2,7 @@
   <div class="load-detail">
     <!-- Top bar with back button -->
     <div class="detail-topbar">
-      <button class="back-btn" @click="$emit('back')">&#8592; Back</button>
+      <van-button size="small" @click="$emit('back')">&#8592; Back</van-button>
       <span class="topbar-title">{{ loadId || 'Load Details' }}</span>
       <StatusBadge :status="status" />
     </div>
@@ -13,99 +13,72 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
-    <!-- Route Map -->
-    <div class="accordion-card" style="margin-bottom: 0.75rem;">
-      <div class="accordion-item">
-        <button class="accordion-header" @click="toggle('map')">
-          <span class="accordion-title">Route Map</span>
-          <span class="accordion-chevron" :class="{ open: openSections.has('map') }">&#9662;</span>
-        </button>
-        <div v-show="openSections.has('map')" class="accordion-body">
-          <DriverRouteMap
-            :load="load"
-            :headers="headers"
-            :driver-position="driverPosition"
+    <!-- Route Map (separate collapse) -->
+    <van-collapse v-model="openSections" class="detail-collapse" :border="false">
+      <van-collapse-item title="Route Map" name="map">
+        <DriverRouteMap
+          :load="load"
+          :headers="headers"
+          :driver-position="driverPosition"
+        />
+      </van-collapse-item>
+    </van-collapse>
+
+    <!-- Main accordion sections -->
+    <van-collapse v-model="openSections" class="detail-collapse" :border="false">
+      <van-collapse-item title="Pickup Details" name="pickup">
+        <template v-if="pickupFields.length">
+          <van-cell
+            v-for="f in pickupFields"
+            :key="f.header"
+            :title="f.label"
+            :value="f.value || '\u2014'"
+            :border="true"
           />
-        </div>
-      </div>
-    </div>
+        </template>
+        <van-empty v-else description="No pickup details available" image="search" :image-size="60" />
+      </van-collapse-item>
 
-    <!-- Accordion sections -->
-    <div class="accordion-card">
-      <!-- Pickup Details -->
-      <div class="accordion-item">
-        <button class="accordion-header" @click="toggle('pickup')">
-          <span class="accordion-title">Pickup Details</span>
-          <span class="accordion-chevron" :class="{ open: openSections.has('pickup') }">&#9662;</span>
-        </button>
-        <div v-show="openSections.has('pickup')" class="accordion-body">
-          <template v-if="pickupFields.length">
-            <div v-for="f in pickupFields" :key="f.header" class="field-row">
-              <div class="field-label">{{ f.label }}</div>
-              <div class="field-value">{{ f.value || '\u2014' }}</div>
-            </div>
-          </template>
-          <div v-else class="field-empty">No pickup details available</div>
-        </div>
-      </div>
-
-      <!-- Drop-off Details -->
-      <div class="accordion-item">
-        <button class="accordion-header" @click="toggle('dropoff')">
-          <span class="accordion-title">Drop-off Details</span>
-          <span class="accordion-chevron" :class="{ open: openSections.has('dropoff') }">&#9662;</span>
-        </button>
-        <div v-show="openSections.has('dropoff')" class="accordion-body">
-          <template v-if="dropoffFields.length">
-            <div v-for="f in dropoffFields" :key="f.header" class="field-row">
-              <div class="field-label">{{ f.label }}</div>
-              <div class="field-value">{{ f.value || '\u2014' }}</div>
-            </div>
-          </template>
-          <div v-else class="field-empty">No drop-off details available</div>
-        </div>
-      </div>
-
-      <!-- Documents -->
-      <div class="accordion-item">
-        <button class="accordion-header" @click="toggle('documents')">
-          <span class="accordion-title">Documents</span>
-          <span class="accordion-chevron" :class="{ open: openSections.has('documents') }">&#9662;</span>
-        </button>
-        <div v-show="openSections.has('documents')" class="accordion-body">
-          <DocumentUpload
-            :load-id="loadId"
-            :driver-name="driverName"
-            :row-index="load._rowIndex"
-            @uploaded="onDocUploaded"
+      <van-collapse-item title="Drop-off Details" name="dropoff">
+        <template v-if="dropoffFields.length">
+          <van-cell
+            v-for="f in dropoffFields"
+            :key="f.header"
+            :title="f.label"
+            :value="f.value || '\u2014'"
+            :border="true"
           />
-          <DocumentList ref="docListRef" :load-id="loadId" />
-        </div>
-      </div>
+        </template>
+        <van-empty v-else description="No drop-off details available" image="search" :image-size="60" />
+      </van-collapse-item>
 
-      <!-- Status Update -->
-      <div class="accordion-item">
-        <button class="accordion-header" @click="toggle('status')">
-          <span class="accordion-title">Status Update</span>
-          <span class="accordion-chevron" :class="{ open: openSections.has('status') }">&#9662;</span>
-        </button>
-        <div v-show="openSections.has('status')" class="accordion-body accordion-body--status">
-          <StatusStepper
-            :load="load"
-            :headers="headers"
-            :current-status="status"
-            :driver-name="driverName"
-            :blocked="hasActiveJob && isPending"
-            @update="$emit('status-update', $event)"
-          />
-        </div>
-      </div>
-    </div>
+      <van-collapse-item title="Documents" name="documents">
+        <DocumentUpload
+          :load-id="loadId"
+          :driver-name="driverName"
+          :row-index="load._rowIndex"
+          @uploaded="onDocUploaded"
+        />
+        <DocumentList ref="docListRef" :load-id="loadId" />
+      </van-collapse-item>
+
+      <van-collapse-item title="Status Update" name="status">
+        <StatusStepper
+          :load="load"
+          :headers="headers"
+          :current-status="status"
+          :driver-name="driverName"
+          :blocked="hasActiveJob && isPending"
+          @update="$emit('status-update', $event)"
+        />
+      </van-collapse-item>
+    </van-collapse>
   </div>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
+import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
 import StatusBadge from '../shared/StatusBadge.vue'
 import StatusStepper from './StatusStepper.vue'
 import DocumentUpload from './DocumentUpload.vue'
@@ -122,22 +95,12 @@ const props = defineProps({
 
 const emit = defineEmits(['back', 'status-update', 'uploaded'])
 
-const openSections = ref(new Set(['map']))
+const openSections = ref(['map'])
 const docListRef = ref(null)
 
 function onDocUploaded() {
   if (docListRef.value) docListRef.value.refresh()
   emit('uploaded')
-}
-
-function toggle(section) {
-  if (openSections.value.has(section)) {
-    openSections.value.delete(section)
-  } else {
-    openSections.value.add(section)
-  }
-  // trigger reactivity
-  openSections.value = new Set(openSections.value)
 }
 
 function findCol(headers, regex) {
@@ -165,7 +128,6 @@ const route = computed(() => {
   return ''
 })
 
-// Pickup detail fields
 const pickupFields = computed(() => {
   const exclude = /lat|lng|lon/i
   return props.headers
@@ -177,7 +139,6 @@ const pickupFields = computed(() => {
     }))
 })
 
-// Drop-off detail fields
 const dropoffFields = computed(() => {
   const exclude = /lat|lng|lon/i
   return props.headers
@@ -192,33 +153,14 @@ const dropoffFields = computed(() => {
 
 <style scoped>
 .load-detail {
-  padding: 0 0.5rem;
+  padding: 0 0.25rem;
 }
 
-/* Top bar */
 .detail-topbar {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   margin-bottom: 0.75rem;
-}
-
-.back-btn {
-  padding: 0.4rem 0.6rem;
-  font-size: 0.8rem;
-  font-family: inherit;
-  font-weight: 600;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-  transition: background 0.15s;
-  flex-shrink: 0;
-}
-
-.back-btn:active {
-  background: var(--bg);
 }
 
 .topbar-title {
@@ -232,7 +174,6 @@ const dropoffFields = computed(() => {
   white-space: nowrap;
 }
 
-/* Route banner */
 .route-banner {
   display: flex;
   align-items: flex-start;
@@ -255,109 +196,29 @@ const dropoffFields = computed(() => {
   line-height: 1.35;
 }
 
-/* Accordion card */
-.accordion-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
+.detail-collapse {
+  margin-bottom: 0.75rem;
   border-radius: var(--radius);
   overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
 }
 
-.accordion-item {
-  border-bottom: 1px solid var(--border);
+.detail-collapse :deep(.van-collapse-item__content) {
+  padding: 0;
 }
 
-.accordion-item:last-child {
-  border-bottom: none;
-}
-
-.accordion-header {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.85rem 1rem;
-  background: none;
-  border: none;
-  font-family: inherit;
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: var(--text);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.accordion-header:active {
-  background: var(--bg);
-}
-
-.accordion-chevron {
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  transition: transform 0.2s;
-  display: inline-block;
-}
-
-.accordion-chevron.open {
-  transform: rotate(180deg);
-}
-
-.accordion-body {
-  padding: 0 1rem 0.85rem;
-}
-
-/* Override global .card for embedded components */
-.accordion-body :deep(.doc-upload) {
+.detail-collapse :deep(.doc-upload) {
   margin-top: 0;
   background: transparent;
   border: none;
-  padding: 0;
+  padding: 0.5rem;
   margin-bottom: 0;
 }
 
-.accordion-body--status :deep(.card) {
+.detail-collapse :deep(.card) {
   background: transparent;
   border: none;
   padding: 0;
   margin-bottom: 0;
   box-shadow: none;
-}
-
-/* Detail field rows */
-.field-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  padding: 0.5rem 0;
-  border-bottom: 1px solid var(--bg);
-  gap: 0.75rem;
-}
-
-.field-row:last-child {
-  border-bottom: none;
-}
-
-.field-label {
-  font-size: 0.78rem;
-  font-weight: 500;
-  color: var(--text-dim);
-  flex-shrink: 0;
-  min-width: 80px;
-}
-
-.field-value {
-  font-size: 0.82rem;
-  font-weight: 500;
-  color: var(--text);
-  text-align: right;
-  word-break: break-word;
-}
-
-.field-empty {
-  text-align: center;
-  color: var(--text-dim);
-  font-size: 0.8rem;
-  padding: 0.5rem 0;
 }
 </style>
