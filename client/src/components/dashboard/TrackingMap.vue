@@ -50,14 +50,6 @@
           dashArray="12, 8"
         />
 
-        <!-- Driver's actual GPS trail -->
-        <l-polyline
-          v-if="trailPoints.length >= 2"
-          :lat-lngs="trailPoints"
-          color="#4338ca"
-          :weight="4"
-          :opacity="0.8"
-        />
 
         <!-- Origin marker (green) -->
         <l-marker v-if="originLatLng" :lat-lng="originLatLng" :icon="originIcon">
