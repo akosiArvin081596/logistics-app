@@ -18,7 +18,7 @@
         />
         <l-marker
           v-for="loc in visibleLocations"
-          :key="loc.driver"
+          :key="loc.driver + '-' + selectedDriver"
           :ref="el => setMarkerRef(loc.driver, el)"
           :lat-lng="[loc.latitude, loc.longitude]"
         >
