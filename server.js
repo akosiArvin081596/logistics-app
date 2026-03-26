@@ -2177,6 +2177,10 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 			if (currentPos) {
 				route = await getRoute(currentPos, destination);
 			}
+			// Fallback: route from origin to destination if driver position route fails
+			if (!route && origin) {
+				route = await getRoute(origin, destination);
+			}
 		}
 
 		res.json({
