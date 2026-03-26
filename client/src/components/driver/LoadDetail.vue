@@ -122,7 +122,7 @@ const props = defineProps({
 
 const emit = defineEmits(['back', 'status-update', 'uploaded'])
 
-const openSections = ref(new Set())
+const openSections = ref(new Set(['map']))
 const docListRef = ref(null)
 
 function onDocUploaded() {

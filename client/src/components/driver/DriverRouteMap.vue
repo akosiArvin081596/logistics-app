@@ -13,6 +13,7 @@
           :center="mapCenter"
           :use-global-leaflet="false"
           style="height: 100%; width: 100%;"
+          @ready="onMapReady"
         >
           <l-tile-layer
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -125,6 +126,14 @@ const driverIcon = L.divIcon({
   iconSize: [20, 20],
   iconAnchor: [10, 10],
 })
+
+function onMapReady() {
+  setTimeout(() => {
+    if (mapRef.value?.leafletObject) {
+      mapRef.value.leafletObject.invalidateSize()
+    }
+  }, 200)
+}
 
 async function fetchRoute() {
   routePoints.value = []
