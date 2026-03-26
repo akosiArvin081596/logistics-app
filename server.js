@@ -1970,6 +1970,18 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			return res.status(404).json({ error: "No load ID column found in sheet" });
 		}
 
+		// Check for new columns that don't exist yet
+		const newCols = Object.keys(updates).filter((k) => !headers.includes(k));
+		if (newCols.length > 0) {
+			headers.push(...newCols);
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `Job Tracking!A1`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: { values: [headers] },
+			});
+		}
+
 		for (let i = 1; i < rows.length; i++) {
 			const obj = {};
 			headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
