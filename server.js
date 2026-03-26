@@ -1945,6 +1945,63 @@ app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 	}
 });
 
+// PUT /api/load/:loadId — Update specific fields of a load by load ID
+app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const { loadId } = req.params;
+		const updates = req.body; // { "Column Name": "value", ... }
+		if (!updates || Object.keys(updates).length === 0) {
+			return res.status(400).json({ error: "Request body with column updates required" });
+		}
+
+		const sheets = await getSheets();
+		const headerResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking!1:1",
+		});
+		const headers = (headerResp.data.values || [[]])[0];
+		const dataResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+		});
+		const rows = dataResp.data.values || [];
+		const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+		if (!loadIdCol) {
+			return res.status(404).json({ error: "No load ID column found in sheet" });
+		}
+
+		for (let i = 1; i < rows.length; i++) {
+			const obj = {};
+			headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
+			if (obj[loadIdCol] === loadId) {
+				// Apply updates to the row
+				const updatedRow = headers.map((h, idx) => {
+					if (updates.hasOwnProperty(h)) return updates[h];
+					return rows[i][idx] || "";
+				});
+
+				await sheets.spreadsheets.values.update({
+					spreadsheetId: SPREADSHEET_ID,
+					range: `Job Tracking!A${i + 1}`,
+					valueInputOption: "USER_ENTERED",
+					requestBody: { values: [updatedRow] },
+				});
+
+				// Return updated load
+				const result = {};
+				headers.forEach((h, idx) => { result[h] = updatedRow[idx]; });
+				result._rowIndex = i + 1;
+				return res.json({ success: true, load: result });
+			}
+		}
+
+		res.status(404).json({ error: `Load ${loadId} not found` });
+	} catch (error) {
+		console.error("Error updating load:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Snap GPS points to roads using OSRM Match API
 async function snapToRoads(points) {
 	if (!points || points.length < 2) return null;
