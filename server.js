@@ -2162,10 +2162,15 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 		// Snap trail to roads via OSRM
 		const snapped = await snapToRoads(trail);
 
-		// Get planned route from origin to destination
+		// Get planned route from driver's current position to destination
 		let route = null;
-		if (origin && destination) {
-			route = await getRoute(origin, destination);
+		if (destination) {
+			const currentPos = trail.length > 0
+				? { latitude: trail[trail.length - 1].latitude, longitude: trail[trail.length - 1].longitude }
+				: origin;
+			if (currentPos) {
+				route = await getRoute(currentPos, destination);
+			}
 		}
 
 		res.json({
@@ -2178,6 +2183,30 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 		});
 	} catch (error) {
 		console.error("Error fetching trail:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/route — Lightweight rerouting: get driving route between two points
+app.get("/api/route", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const { fromLat, fromLng, toLat, toLng } = req.query;
+		if (!fromLat || !fromLng || !toLat || !toLng) {
+			return res.status(400).json({ error: "fromLat, fromLng, toLat, toLng required" });
+		}
+		const from = { latitude: parseFloat(fromLat), longitude: parseFloat(fromLng) };
+		const to = { latitude: parseFloat(toLat), longitude: parseFloat(toLng) };
+		const route = await getRoute(from, to);
+		if (!route) {
+			return res.status(500).json({ error: "Could not compute route" });
+		}
+		res.json({
+			route: route.points,
+			distanceKm: route.distanceKm,
+			etaMinutes: route.durationMin,
+		});
+	} catch (error) {
+		console.error("Error computing route:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });

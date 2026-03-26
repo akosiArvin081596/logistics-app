@@ -197,6 +197,36 @@ function focusDriver(loc) {
   fetchTrail(loc.driver, loc.loadId)
 }
 
+let lastRerouteTime = 0
+
+async function checkOffRoute(lat, lng) {
+  // Rate-limit: max once every 30 seconds
+  if (Date.now() - lastRerouteTime < 30000) return
+
+  // Find minimum distance from driver to any point on the route
+  const driverPos = L.latLng(lat, lng)
+  let minDist = Infinity
+  for (const pt of routePoints.value) {
+    const d = driverPos.distanceTo(L.latLng(pt[0], pt[1]))
+    if (d < minDist) minDist = d
+    if (d < 100) return // still on route, no need to check further
+  }
+
+  // Off-route: recalculate from current position to destination
+  if (minDist >= 100 && destLatLng.value) {
+    lastRerouteTime = Date.now()
+    try {
+      const [toLat, toLng] = destLatLng.value
+      const data = await api.get(`/api/route?fromLat=${lat}&fromLng=${lng}&toLat=${toLat}&toLng=${toLng}`)
+      routePoints.value = (data.route || []).map(p => [p.latitude, p.longitude])
+      routeDistance.value = data.distanceKm
+      routeEta.value = data.etaMinutes
+    } catch {
+      // silent
+    }
+  }
+}
+
 function focusAll() {
   selectedDriver.value = '__all__'
   trailPoints.value = []
@@ -271,6 +301,15 @@ function onLocationUpdate(payload) {
     trailPoints.value.length > 0
   ) {
     trailPoints.value = [...trailPoints.value, [payload.latitude, payload.longitude]]
+  }
+
+  // Auto-reroute if driver is off the planned route
+  if (
+    selectedDriver.value === payload.driver &&
+    routePoints.value.length >= 2 &&
+    destLatLng.value
+  ) {
+    checkOffRoute(payload.latitude, payload.longitude)
   }
 }
 
