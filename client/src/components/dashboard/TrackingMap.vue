@@ -130,6 +130,60 @@ const trailLoadId = ref('')
 const routeDistance = ref(null)
 const routeEta = ref(null)
 
+// Animation state
+const activeAnimations = {}
+
+// ---- Smooth marker animation via requestAnimationFrame ----
+function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 800) {
+  if (activeAnimations[driver]) cancelAnimationFrame(activeAnimations[driver])
+  const start = performance.now()
+
+  function frame(now) {
+    const t = Math.min((now - start) / duration, 1)
+    const eased = t * (2 - t) // ease-out quadratic
+    const loc = locations.value.find((l) => l.driver === driver)
+    if (loc) {
+      loc.latitude = fromLat + (toLat - fromLat) * eased
+      loc.longitude = fromLng + (toLng - fromLng) * eased
+    }
+    if (t < 1) activeAnimations[driver] = requestAnimationFrame(frame)
+    else delete activeAnimations[driver]
+  }
+
+  activeAnimations[driver] = requestAnimationFrame(frame)
+}
+
+// ---- Client-side road snapping (project GPS onto route polyline) ----
+function closestPointOnSegment(p, a, b) {
+  const dx = b[0] - a[0]
+  const dy = b[1] - a[1]
+  if (dx === 0 && dy === 0) return a
+  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)))
+  return [a[0] + t * dx, a[1] + t * dy]
+}
+
+function distSq(a, b) {
+  const dx = a[0] - b[0]
+  const dy = a[1] - b[1]
+  return dx * dx + dy * dy
+}
+
+function snapToRoute(point, route) {
+  if (route.length < 2) return null
+  let minDist = Infinity
+  let closest = null
+  for (let i = 0; i < route.length - 1; i++) {
+    const snapped = closestPointOnSegment(point, route[i], route[i + 1])
+    const d = distSq(point, snapped)
+    if (d < minDist) {
+      minDist = d
+      closest = snapped
+    }
+  }
+  // ~0.002 degrees ≈ 200m — only snap if reasonably close to route
+  return minDist < 0.002 * 0.002 ? closest : null
+}
+
 // Custom icons for origin (green) and destination (red)
 const originIcon = L.divIcon({
   className: 'endpoint-icon origin-icon',
@@ -265,21 +319,41 @@ async function fetchLocations() {
 }
 
 function onLocationUpdate(payload) {
+  let targetLat = payload.latitude
+  let targetLng = payload.longitude
+
+  // Snap to route if we have one for this driver
+  if (
+    selectedDriver.value === payload.driver &&
+    routePoints.value.length >= 2
+  ) {
+    const snapped = snapToRoute([targetLat, targetLng], routePoints.value)
+    if (snapped) {
+      targetLat = snapped[0]
+      targetLng = snapped[1]
+    }
+  }
+
   const idx = locations.value.findIndex(
     (l) => l.driver.toLowerCase() === payload.driver.toLowerCase()
   )
-  const entry = {
-    driver: payload.driver,
-    latitude: payload.latitude,
-    longitude: payload.longitude,
-    speed: payload.speed || 0,
-    loadId: payload.loadId || '',
-    timestamp: payload.timestamp,
-  }
   if (idx >= 0) {
-    locations.value[idx] = entry
+    const old = locations.value[idx]
+    // Animate from current display position to new (snapped) position
+    animateMarker(payload.driver, old.latitude, old.longitude, targetLat, targetLng)
+    // Update non-position fields immediately
+    locations.value[idx].speed = payload.speed || 0
+    locations.value[idx].loadId = payload.loadId || ''
+    locations.value[idx].timestamp = payload.timestamp
   } else {
-    locations.value.push(entry)
+    locations.value.push({
+      driver: payload.driver,
+      latitude: targetLat,
+      longitude: targetLng,
+      speed: payload.speed || 0,
+      loadId: payload.loadId || '',
+      timestamp: payload.timestamp,
+    })
   }
 
   // Extend trail in real-time if this update is for the selected driver/load
@@ -328,6 +402,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   socket.off('location-update', onLocationUpdate)
+  Object.values(activeAnimations).forEach(cancelAnimationFrame)
 })
 </script>
 
