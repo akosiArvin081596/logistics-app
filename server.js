@@ -1850,23 +1850,22 @@ app.post("/api/location", requireAuth, async (req, res) => {
 										values: [[logId, loadId, driverName, dateTime, geofenceTriggered, `Auto-triggered by geofence (was ${currentStatus})`]],
 									},
 								});
+								insertNotification.run(
+									driverName.trim().toLowerCase(), 'geofence',
+									`Geofence: ${geofenceTriggered}`,
+									`Load ${loadId}`,
+									JSON.stringify({ loadId, status: geofenceTriggered })
+								);
+								io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
+									loadId,
+									status: geofenceTriggered,
+								});
+								io.to("dispatch").emit("geofence-trigger", {
+									loadId,
+									driver: driverName,
+									status: geofenceTriggered,
+								});
 							}
-
-							insertNotification.run(
-								driverName.trim().toLowerCase(), 'geofence',
-								`Geofence: ${geofenceTriggered}`,
-								`Load ${loadId}`,
-								JSON.stringify({ loadId, status: geofenceTriggered })
-							);
-							io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
-								loadId,
-								status: geofenceTriggered,
-							});
-							io.to("dispatch").emit("geofence-trigger", {
-								loadId,
-								driver: driverName,
-								status: geofenceTriggered,
-							});
 						}
 						break;
 					}
