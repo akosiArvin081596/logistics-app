@@ -2014,6 +2014,23 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 	}
 });
 
+// Get driving route between two points using OSRM Route API
+async function getRoute(from, to) {
+	if (!from || !to) return null;
+	try {
+		const coords = `${from.longitude},${from.latitude};${to.longitude},${to.latitude}`;
+		const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+		const resp = await fetch(url);
+		if (!resp.ok) return null;
+		const data = await resp.json();
+		if (data.code !== "Ok" || !data.routes || data.routes.length === 0) return null;
+		return data.routes[0].geometry.coordinates.map(([lng, lat]) => ({ latitude: lat, longitude: lng }));
+	} catch (err) {
+		console.error("OSRM route error:", err.message);
+		return null;
+	}
+}
+
 // Snap GPS points to roads using OSRM Match API
 async function snapToRoads(points) {
 	if (!points || points.length < 2) return null;
@@ -2139,7 +2156,14 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 
 		// Snap trail to roads via OSRM
 		const snapped = await snapToRoads(trail);
-		res.json({ trail: snapped || trail, origin, destination });
+
+		// Get planned route from origin to destination
+		let route = null;
+		if (origin && destination) {
+			route = await getRoute(origin, destination);
+		}
+
+		res.json({ trail: snapped || trail, route, origin, destination });
 	} catch (error) {
 		console.error("Error fetching trail:", error.message);
 		res.status(500).json({ error: error.message });

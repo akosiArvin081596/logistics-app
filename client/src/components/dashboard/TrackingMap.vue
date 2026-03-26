@@ -40,13 +40,23 @@
           </l-popup>
         </l-marker>
 
-        <!-- Route trail polyline -->
+        <!-- Planned route (origin to destination) -->
+        <l-polyline
+          v-if="routePoints.length >= 2"
+          :lat-lngs="routePoints"
+          color="#9ca3af"
+          :weight="5"
+          :opacity="0.5"
+          :dash-array="'10, 10'"
+        />
+
+        <!-- Driver's actual GPS trail -->
         <l-polyline
           v-if="trailPoints.length >= 2"
           :lat-lngs="trailPoints"
           color="#4338ca"
           :weight="4"
-          :opacity="0.7"
+          :opacity="0.8"
         />
 
         <!-- Origin marker (green) -->
@@ -121,6 +131,7 @@ const markerRefs = {}
 
 // Trail state
 const trailPoints = ref([])
+const routePoints = ref([])
 const originLatLng = ref(null)
 const destLatLng = ref(null)
 const trailLoadId = ref('')
@@ -145,6 +156,7 @@ function setMarkerRef(driver, el) {
 
 async function fetchTrail(driverName, loadId) {
   trailPoints.value = []
+  routePoints.value = []
   originLatLng.value = null
   destLatLng.value = null
   trailLoadId.value = ''
@@ -152,16 +164,17 @@ async function fetchTrail(driverName, loadId) {
   try {
     const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(driverName)}&loadId=${encodeURIComponent(loadId)}`)
     trailPoints.value = (data.trail || []).map(p => [p.latitude, p.longitude])
+    routePoints.value = (data.route || []).map(p => [p.latitude, p.longitude])
     if (data.origin) originLatLng.value = [data.origin.latitude, data.origin.longitude]
     if (data.destination) destLatLng.value = [data.destination.latitude, data.destination.longitude]
     trailLoadId.value = loadId
 
     // Fit map bounds to show entire route
     const map = mapRef.value?.leafletObject
-    if (map && trailPoints.value.length > 0) {
-      const allPoints = [...trailPoints.value]
-      if (originLatLng.value) allPoints.push(originLatLng.value)
-      if (destLatLng.value) allPoints.push(destLatLng.value)
+    const allPoints = [...trailPoints.value, ...routePoints.value]
+    if (originLatLng.value) allPoints.push(originLatLng.value)
+    if (destLatLng.value) allPoints.push(destLatLng.value)
+    if (map && allPoints.length >= 2) {
       if (allPoints.length >= 2) {
         map.fitBounds(allPoints, { padding: [40, 40], animate: false })
       }
@@ -189,6 +202,7 @@ function focusDriver(loc) {
 function focusAll() {
   selectedDriver.value = '__all__'
   trailPoints.value = []
+  routePoints.value = []
   originLatLng.value = null
   destLatLng.value = null
   trailLoadId.value = ''
