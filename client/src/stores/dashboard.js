@@ -35,10 +35,12 @@ export const useDashboardStore = defineStore('dashboard', {
 
     async assignDriver(rowIndex, driver, job, headers) {
       const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
+      const statusCol = headers.find((h) => /status/i.test(h))
+      const driverCol = headers.find((h) => /^driver$/i.test(h))
       const loadId = loadIdCol ? job[loadIdCol] || '' : ''
       const values = headers.map((h) => {
-        if (/^driver$/i.test(h)) return driver
-        if (/^status$/i.test(h)) return 'Dispatched'
+        if (h === driverCol) return driver
+        if (h === statusCol) return 'Dispatched'
         return job[h] || ''
       })
       await api.post('/api/dispatch', { rowIndex, driver, loadId, values })
