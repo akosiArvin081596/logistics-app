@@ -145,7 +145,16 @@ async function fetchRoute() {
   if (!from) return
 
   try {
-    const data = await api.get(`/api/route?fromLat=${from[0]}&fromLng=${from[1]}&toLat=${destLatLng.value[0]}&toLng=${destLatLng.value[1]}`)
+    let data
+    try {
+      data = await api.get(`/api/route?fromLat=${from[0]}&fromLng=${from[1]}&toLat=${destLatLng.value[0]}&toLng=${destLatLng.value[1]}`)
+    } catch {
+      // Fallback: route from origin to destination if driver position route fails
+      if (originLatLng.value && from !== originLatLng.value) {
+        data = await api.get(`/api/route?fromLat=${originLatLng.value[0]}&fromLng=${originLatLng.value[1]}&toLat=${destLatLng.value[0]}&toLng=${destLatLng.value[1]}`)
+      }
+    }
+    if (!data) return
     routePoints.value = (data.route || []).map(p => [p.latitude, p.longitude])
     distanceKm.value = data.distanceKm
     etaMinutes.value = data.etaMinutes
@@ -156,7 +165,6 @@ async function fetchRoute() {
         const allPoints = [...routePoints.value]
         if (originLatLng.value) allPoints.push(originLatLng.value)
         if (destLatLng.value) allPoints.push(destLatLng.value)
-        if (driverLatLng.value) allPoints.push(driverLatLng.value)
         map.fitBounds(allPoints, { padding: [30, 30], animate: false })
       }
     })
