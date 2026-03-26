@@ -135,7 +135,9 @@ function onMapReady() {
   }, 200)
 }
 
-async function fetchRoute() {
+let initialFitDone = false
+
+async function fetchRoute(fitBounds = false) {
   routePoints.value = []
   distanceKm.value = null
   etaMinutes.value = null
@@ -159,15 +161,19 @@ async function fetchRoute() {
     distanceKm.value = data.distanceKm
     etaMinutes.value = data.etaMinutes
 
-    nextTick(() => {
-      const map = mapRef.value?.leafletObject
-      if (map && routePoints.value.length >= 2) {
-        const allPoints = [...routePoints.value]
-        if (originLatLng.value) allPoints.push(originLatLng.value)
-        if (destLatLng.value) allPoints.push(destLatLng.value)
-        map.fitBounds(allPoints, { padding: [30, 30], animate: false })
-      }
-    })
+    // Only fit bounds on initial load, not on reroutes
+    if (fitBounds && !initialFitDone) {
+      initialFitDone = true
+      nextTick(() => {
+        const map = mapRef.value?.leafletObject
+        if (map && routePoints.value.length >= 2) {
+          const allPoints = [...routePoints.value]
+          if (originLatLng.value) allPoints.push(originLatLng.value)
+          if (destLatLng.value) allPoints.push(destLatLng.value)
+          map.fitBounds(allPoints, { padding: [30, 30], animate: false })
+        }
+      })
+    }
   } catch {
     // silent
   }
@@ -179,7 +185,7 @@ watch(() => props.driverPosition, (pos) => {
   if (!pos || !destLatLng.value) return
   if (!lastRoutePos) {
     lastRoutePos = pos
-    fetchRoute()
+    fetchRoute(true)
     return
   }
   const dist = L.latLng(pos.latitude, pos.longitude).distanceTo(
@@ -192,7 +198,7 @@ watch(() => props.driverPosition, (pos) => {
 }, { deep: true })
 
 onMounted(() => {
-  if (hasCoords.value) fetchRoute()
+  if (hasCoords.value) fetchRoute(true)
 })
 </script>
 
