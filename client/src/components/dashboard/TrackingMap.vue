@@ -104,20 +104,17 @@ function setMarkerRef(driver, el) {
 }
 
 function focusDriver(loc) {
+  selectedDriver.value = loc.driver
   const map = mapRef.value?.leafletObject
   if (map) {
-    map.flyTo([loc.latitude, loc.longitude], 16, { duration: 1 })
+    map.setView([loc.latitude, loc.longitude], 16, { animate: false })
   }
-  // Set selection and open popup after flyTo completes
-  setTimeout(() => {
-    selectedDriver.value = loc.driver
-    nextTick(() => {
-      const marker = markerRefs[loc.driver]
-      if (marker?.leafletObject) {
-        marker.leafletObject.openPopup()
-      }
-    })
-  }, 1100)
+  nextTick(() => {
+    const marker = markerRefs[loc.driver]
+    if (marker?.leafletObject) {
+      marker.leafletObject.openPopup()
+    }
+  })
 }
 
 function focusAll() {
@@ -125,7 +122,7 @@ function focusAll() {
   const map = mapRef.value?.leafletObject
   if (map && locations.value.length > 0) {
     const bounds = locations.value.map(l => [l.latitude, l.longitude])
-    map.flyToBounds(bounds, { padding: [40, 40], duration: 1, maxZoom: 12 })
+    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 12, animate: false })
   }
 }
 
