@@ -44,10 +44,10 @@
         <l-polyline
           v-if="routePoints.length >= 2"
           :lat-lngs="routePoints"
-          color="#9ca3af"
-          :weight="5"
-          :opacity="0.5"
-          dashArray="10, 10"
+          color="#6366f1"
+          :weight="6"
+          :opacity="0.6"
+          dashArray="12, 8"
         />
 
         <!-- Driver's actual GPS trail -->
