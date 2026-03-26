@@ -238,11 +238,7 @@ function focusAll() {
   routeEta.value = null
 }
 
-const mapCenter = computed(() => {
-  if (locations.value.length === 0) return [39.8283, -98.5795] // US center
-  const first = locations.value[0]
-  return [first.latitude, first.longitude]
-})
+const mapCenter = ref([39.8283, -98.5795]) // set once after first fetch
 
 function updateMarkerVisibility() {
   const map = mapRef.value?.leafletObject
@@ -268,6 +264,10 @@ async function fetchLocations() {
   try {
     const data = await api.get('/api/locations/latest')
     locations.value = data.locations || []
+    // Set initial center once
+    if (locations.value.length > 0) {
+      mapCenter.value = [locations.value[0].latitude, locations.value[0].longitude]
+    }
   } catch {
     // silent
   } finally {
