@@ -49,6 +49,24 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_from ON messages("from")`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_to ON messages("to")`);
 
 db.exec(`
+	CREATE TABLE IF NOT EXISTS notifications (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		driver_name TEXT NOT NULL,
+		type TEXT NOT NULL,
+		title TEXT NOT NULL,
+		body TEXT DEFAULT '',
+		metadata TEXT DEFAULT '{}',
+		read INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_notifications_driver ON notifications(driver_name)`);
+
+const insertNotification = db.prepare(
+	`INSERT INTO notifications (driver_name, type, title, body, metadata) VALUES (?, ?, ?, ?, ?)`
+);
+
+db.exec(`
 	CREATE TABLE IF NOT EXISTS users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		username TEXT NOT NULL UNIQUE,
@@ -854,8 +872,15 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			requestBody: { values: [values] },
 		});
 
-		// Notify the driver in real-time
-		io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '' });
+		// Persist notification and notify the driver in real-time
+		const route = [origin, destination].filter(Boolean).join(' → ') || '';
+		const notifResult = insertNotification.run(
+			driver.trim().toLowerCase(), 'load-assigned',
+			`New Load Assigned: ${loadId || 'Load'}`,
+			route,
+			JSON.stringify({ loadId, rowIndex, origin: origin || '', destination: destination || '' })
+		);
+		io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
 
 		res.json({ success: true });
 	} catch (error) {
@@ -1210,6 +1235,17 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			)
 			.all(nameLower, nameLower);
 
+		// Notifications from SQLite
+		const driverNotifications = db
+			.prepare(
+				`SELECT id, type, title, body, metadata, read, created_at AS createdAt
+				 FROM notifications
+				 WHERE driver_name = ?
+				 ORDER BY id DESC
+				 LIMIT 100`,
+			)
+			.all(nameLower);
+
 		// Expenses from SQLite
 		const driverExpenses = db
 			.prepare(
@@ -1282,6 +1318,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			loads: filteredLoads,
 			driverInfo: driverInfo || null,
 			messages: driverMessages,
+			notifications: driverNotifications,
 			expenses: driverExpenses,
 			drivers: carrierDriverNames,
 			headers: {
@@ -1406,6 +1443,14 @@ app.post("/api/messages", requireAuth, (req, res) => {
 			)
 			.run(timestamp, from, to, message, loadId || "");
 
+		// Persist notification for recipient
+		insertNotification.run(
+			to.trim().toLowerCase(), 'message',
+			`New message from ${from}`,
+			message.length > 100 ? message.substring(0, 100) + '...' : message,
+			JSON.stringify({ from, to, loadId: loadId || '' })
+		);
+
 		// Broadcast via Socket.IO for real-time delivery
 		io.emit("new-message", {
 			id: result.lastInsertRowid,
@@ -1439,6 +1484,20 @@ app.put("/api/messages/read", requireAuth, (req, res) => {
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error marking messages read:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// PUT /api/notifications/read — Mark notifications as read
+app.put("/api/notifications/read", requireAuth, (req, res) => {
+	try {
+		const { ids } = req.body;
+		if (!ids || !ids.length) return res.json({ success: true });
+		const placeholders = ids.map(() => "?").join(",");
+		db.prepare(`UPDATE notifications SET read = 1 WHERE id IN (${placeholders})`).run(...ids);
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error marking notifications read:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
@@ -1793,6 +1852,12 @@ app.post("/api/location", requireAuth, async (req, res) => {
 								});
 							}
 
+							insertNotification.run(
+								driverName.trim().toLowerCase(), 'geofence',
+								`Geofence: ${geofenceTriggered}`,
+								`Load ${loadId}`,
+								JSON.stringify({ loadId, status: geofenceTriggered })
+							);
 							io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
 								loadId,
 								status: geofenceTriggered,

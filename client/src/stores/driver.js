@@ -9,6 +9,7 @@ export const useDriverStore = defineStore('driver', {
     loads: [],
     driverInfo: null,
     messages: [],
+    notifications: [],
     expenses: [],
     drivers: [],
     headers: { jobTracking: [], carrierDB: [] },
@@ -75,6 +76,10 @@ export const useDriverStore = defineStore('driver', {
           (m.to || '').toLowerCase() === state.driverName.toLowerCase() &&
           !m.read
       ).length
+    },
+
+    unreadNotifCount(state) {
+      return state.notifications.filter((n) => !n.read).length
     },
 
     sortedLoads(state) {
@@ -155,6 +160,7 @@ export const useDriverStore = defineStore('driver', {
         this.loads = data.loads || []
         this.driverInfo = data.driverInfo || null
         this.messages = data.messages || []
+        this.notifications = data.notifications || []
         this.expenses = data.expenses || []
         this.drivers = data.drivers || []
         this.headers = data.headers || { jobTracking: [], carrierDB: [] }
@@ -218,6 +224,23 @@ export const useDriverStore = defineStore('driver', {
     async submitExpense(data) {
       await api.post('/api/expenses', data)
       await this.loadData()
+    },
+
+    async markNotificationsRead(ids) {
+      if (!ids || ids.length === 0) return
+      try {
+        await api.put('/api/notifications/read', { ids })
+        ids.forEach((id) => {
+          const n = this.notifications.find((n) => n.id === id)
+          if (n) n.read = 1
+        })
+      } catch {
+        // ignore
+      }
+    },
+
+    addNotification(notif) {
+      this.notifications.unshift(notif)
     },
 
     addIncomingMessage(msg) {

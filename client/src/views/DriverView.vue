@@ -153,6 +153,15 @@
         </template>
       </section>
 
+      <!-- NOTIFICATIONS TAB -->
+      <section v-show="currentTab === 'notifications'" class="tab-panel">
+        <NotificationList
+          :notifications="driverStore.notifications"
+          @tap="handleNotificationTap"
+          @mark-all-read="handleMarkAllNotifRead"
+        />
+      </section>
+
       <!-- MESSAGES TAB -->
       <section v-show="currentTab === 'messages'" class="tab-panel">
         <ChatView
@@ -202,6 +211,7 @@
     <BottomNav
       :current-tab="currentTab"
       :unread-count="driverStore.unreadCount"
+      :unread-notif-count="driverStore.unreadNotifCount"
       @switch="handleTabSwitch"
     />
   </div>
@@ -228,6 +238,7 @@ import ExpenseCard from '../components/driver/ExpenseCard.vue'
 import DriverKit from '../components/driver/DriverKit.vue'
 import DocumentUpload from '../components/driver/DocumentUpload.vue'
 import LoadAssignedBanner from '../components/driver/LoadAssignedBanner.vue'
+import NotificationList from '../components/driver/NotificationList.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 
 const auth = useAuthStore()
@@ -308,6 +319,15 @@ function handleTabSwitch(tab) {
   currentTab.value = tab
   driverStore.currentTab = tab
 
+  if (tab === 'notifications') {
+    const unreadIds = driverStore.notifications
+      .filter((n) => !n.read)
+      .map((n) => n.id)
+    if (unreadIds.length > 0) {
+      driverStore.markNotificationsRead(unreadIds)
+    }
+  }
+
   if (tab === 'messages') {
     const unreadIds = driverStore.messages
       .filter(
@@ -321,6 +341,29 @@ function handleTabSwitch(tab) {
       driverStore.markMessagesRead(unreadIds)
     }
   }
+}
+
+function handleNotificationTap(notif) {
+  if (!notif.read) driverStore.markNotificationsRead([notif.id])
+  try {
+    const meta = JSON.parse(notif.metadata || '{}')
+    if (notif.type === 'load-assigned' && meta.rowIndex) {
+      currentTab.value = 'loads'
+      driverStore.loadSubTab = 'active'
+      detailRowIndex.value = meta.rowIndex
+    } else if (notif.type === 'message') {
+      currentTab.value = 'messages'
+    }
+  } catch {
+    // ignore parse errors
+  }
+}
+
+function handleMarkAllNotifRead() {
+  const unreadIds = driverStore.notifications
+    .filter((n) => !n.read)
+    .map((n) => n.id)
+  if (unreadIds.length > 0) driverStore.markNotificationsRead(unreadIds)
 }
 
 function handleLoadSelect(load) {
@@ -399,6 +442,16 @@ function onLoadAssigned(payload) {
     destination: payload.destination || '',
     rowIndex: payload.rowIndex
   }
+  const route = [payload.origin, payload.destination].filter(Boolean).join(' \u2192 ')
+  driverStore.addNotification({
+    id: payload.notificationId || Date.now(),
+    type: 'load-assigned',
+    title: `New Load Assigned: ${payload.loadId || 'Load'}`,
+    body: route,
+    metadata: JSON.stringify(payload),
+    read: 0,
+    createdAt: new Date().toISOString(),
+  })
   driverStore.loadData()
 }
 
@@ -418,6 +471,15 @@ function viewAssignedLoad() {
 
 function onGeofenceTrigger(payload) {
   toast.show(`Geofence: ${payload.status} for Load ${payload.loadId}`)
+  driverStore.addNotification({
+    id: Date.now(),
+    type: 'geofence',
+    title: `Geofence: ${payload.status}`,
+    body: `Load ${payload.loadId}`,
+    metadata: JSON.stringify(payload),
+    read: 0,
+    createdAt: new Date().toISOString(),
+  })
 }
 
 function onNewMessage(msg) {
@@ -430,6 +492,15 @@ function onNewMessage(msg) {
     if (from === myName) return
 
     driverStore.addIncomingMessage(msg)
+    driverStore.addNotification({
+      id: Date.now(),
+      type: 'message',
+      title: `New message from ${msg.from}`,
+      body: msg.message.length > 100 ? msg.message.substring(0, 100) + '...' : msg.message,
+      metadata: JSON.stringify({ from: msg.from, to: msg.to, loadId: msg.loadId || '' }),
+      read: 0,
+      createdAt: new Date().toISOString(),
+    })
 
     if (currentTab.value !== 'messages') {
       toast.show('New message from ' + msg.from)

@@ -11,6 +11,10 @@
         v-if="tab.key === 'messages' && unreadCount > 0"
         class="badge"
       >{{ unreadCount > 9 ? '9+' : unreadCount }}</span>
+      <span
+        v-if="tab.key === 'notifications' && unreadNotifCount > 0"
+        class="badge"
+      >{{ unreadNotifCount > 9 ? '9+' : unreadNotifCount }}</span>
       {{ tab.label }}
     </button>
   </nav>
@@ -20,6 +24,7 @@
 defineProps({
   currentTab: { type: String, default: 'loads' },
   unreadCount: { type: Number, default: 0 },
+  unreadNotifCount: { type: Number, default: 0 },
 })
 
 defineEmits(['switch'])
@@ -27,6 +32,7 @@ defineEmits(['switch'])
 const tabs = [
   { key: 'loads', label: 'Loads', icon: '&#128230;' },
   { key: 'status', label: 'Status', icon: '&#128666;' },
+  { key: 'notifications', label: 'Alerts', icon: '&#128276;' },
   { key: 'kit', label: 'Kit', icon: '&#128196;' },
   { key: 'messages', label: 'Messages', icon: '&#128172;' },
   { key: 'expenses', label: 'Expenses', icon: '&#128176;' },
