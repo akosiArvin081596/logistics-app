@@ -17,8 +17,8 @@
           attribution="&copy; OpenStreetMap contributors"
         />
         <l-marker
-          v-for="loc in visibleLocations"
-          :key="loc.driver + '-' + selectedDriver"
+          v-for="loc in locations"
+          :key="loc.driver"
           :ref="el => setMarkerRef(loc.driver, el)"
           :lat-lng="[loc.latitude, loc.longitude]"
         >
@@ -135,9 +135,24 @@ const mapCenter = computed(() => {
   return [first.latitude, first.longitude]
 })
 
-const visibleLocations = computed(() => {
-  if (!selectedDriver.value || selectedDriver.value === '__all__') return locations.value
-  return locations.value.filter(l => l.driver === selectedDriver.value)
+function updateMarkerVisibility() {
+  const map = mapRef.value?.leafletObject
+  if (!map) return
+  const sel = selectedDriver.value
+  const showAll = !sel || sel === '__all__'
+  for (const [driver, ref] of Object.entries(markerRefs)) {
+    const layer = ref?.leafletObject
+    if (!layer) continue
+    if (showAll || driver === sel) {
+      if (!map.hasLayer(layer)) map.addLayer(layer)
+    } else {
+      if (map.hasLayer(layer)) map.removeLayer(layer)
+    }
+  }
+}
+
+watch(selectedDriver, () => {
+  nextTick(updateMarkerVisibility)
 })
 
 async function fetchLocations() {
