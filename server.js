@@ -1935,7 +1935,7 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 			).all(driver);
 		}
 
-		// Simplify: skip consecutive points < 50m apart, always keep first and last
+		// Simplify: skip consecutive points < 10m apart, always keep first and last
 		const simplified = [];
 		for (let i = 0; i < rawPoints.length; i++) {
 			if (i === 0 || i === rawPoints.length - 1) {
@@ -1947,7 +1947,7 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 				{ latitude: prev.latitude, longitude: prev.longitude },
 				{ latitude: rawPoints[i].latitude, longitude: rawPoints[i].longitude }
 			);
-			if (dist >= 50) {
+			if (dist >= 10) {
 				simplified.push(rawPoints[i]);
 			}
 		}

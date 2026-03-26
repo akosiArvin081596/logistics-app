@@ -7,8 +7,8 @@ export function useGeolocation(api) {
 
   let intervalId = null
   let activeLoadId = ''
-  const INTERVAL_ACTIVE = 30 * 1000       // 30 seconds
-  const INTERVAL_BACKGROUND = 2 * 60 * 1000 // 2 minutes
+  const INTERVAL_ACTIVE = 15 * 1000       // 15 seconds
+  const INTERVAL_BACKGROUND = 60 * 1000   // 1 minute
 
   function getInterval() {
     return document.hidden ? INTERVAL_BACKGROUND : INTERVAL_ACTIVE
