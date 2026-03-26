@@ -1909,6 +1909,72 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 	}
 });
 
+// GET /api/load/:loadId — Look up a specific load from Job Tracking sheet
+app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const { loadId } = req.params;
+		const sheets = await getSheets();
+		const headerResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking!1:1",
+		});
+		const headers = (headerResp.data.values || [[]])[0];
+		const dataResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+		});
+		const rows = dataResp.data.values || [];
+		const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+		if (!loadIdCol) {
+			return res.status(404).json({ error: "No load ID column found in sheet" });
+		}
+
+		for (let i = 1; i < rows.length; i++) {
+			const obj = {};
+			headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
+			if (obj[loadIdCol] === loadId) {
+				obj._rowIndex = i + 1;
+				return res.json({ load: obj });
+			}
+		}
+
+		res.status(404).json({ error: `Load ${loadId} not found` });
+	} catch (error) {
+		console.error("Error fetching load:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// Snap GPS points to roads using OSRM Match API
+async function snapToRoads(points) {
+	if (!points || points.length < 2) return null;
+	try {
+		const BATCH_SIZE = 100;
+		let allSnapped = [];
+		for (let i = 0; i < points.length; i += BATCH_SIZE - 1) {
+			const batch = points.slice(i, i + BATCH_SIZE);
+			if (batch.length < 2) break;
+			const coords = batch.map(p => `${p.longitude},${p.latitude}`).join(";");
+			const radiuses = batch.map(() => "25").join(";");
+			const url = `https://router.project-osrm.org/match/v1/driving/${coords}?overview=full&geometries=geojson&radiuses=${radiuses}`;
+			const resp = await fetch(url);
+			if (!resp.ok) return null;
+			const data = await resp.json();
+			if (data.code !== "Ok" || !data.matchings || data.matchings.length === 0) return null;
+			for (const matching of data.matchings) {
+				const geomCoords = matching.geometry?.coordinates || [];
+				for (const [lng, lat] of geomCoords) {
+					allSnapped.push({ latitude: lat, longitude: lng });
+				}
+			}
+		}
+		return allSnapped.length >= 2 ? allSnapped : null;
+	} catch (err) {
+		console.error("OSRM snap error:", err.message);
+		return null;
+	}
+}
+
 // GET /api/locations/trail — GPS trail for a specific driver/load
 app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
@@ -2002,7 +2068,9 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 			}
 		}
 
-		res.json({ trail, origin, destination });
+		// Snap trail to roads via OSRM
+		const snapped = await snapToRoads(trail);
+		res.json({ trail: snapped || trail, origin, destination });
 	} catch (error) {
 		console.error("Error fetching trail:", error.message);
 		res.status(500).json({ error: error.message });
