@@ -119,11 +119,6 @@ function focusDriver(loc) {
 
 function focusAll() {
   selectedDriver.value = '__all__'
-  const map = mapRef.value?.leafletObject
-  if (map && locations.value.length > 0) {
-    const bounds = locations.value.map(l => [l.latitude, l.longitude])
-    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 12, animate: false })
-  }
 }
 
 const mapCenter = computed(() => {
