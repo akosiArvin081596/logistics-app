@@ -17,7 +17,7 @@
           attribution="&copy; OpenStreetMap contributors"
         />
         <l-marker
-          v-for="loc in locations"
+          v-for="loc in visibleLocations"
           :key="loc.driver"
           :ref="el => setMarkerRef(loc.driver, el)"
           :lat-lng="[loc.latitude, loc.longitude]"
@@ -131,6 +131,11 @@ const mapCenter = computed(() => {
   if (locations.value.length === 0) return [39.8283, -98.5795] // US center
   const first = locations.value[0]
   return [first.latitude, first.longitude]
+})
+
+const visibleLocations = computed(() => {
+  if (!selectedDriver.value || selectedDriver.value === '__all__') return locations.value
+  return locations.value.filter(l => l.driver === selectedDriver.value)
 })
 
 async function fetchLocations() {
