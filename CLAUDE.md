@@ -46,7 +46,13 @@ Single-file Node.js/Express server (~2000 lines) using Google Sheets as the prim
 
 **SQLite** (`app.db`, WAL mode): `users`, `messages`, `expenses`, `maintenance_fund`, `compliance_fees`, `documents`, `driver_locations`, `investor_config`. Session store also in SQLite.
 
-**Schema migrations**: On boot, server checks for missing columns/constraints and adds them with `ALTER TABLE`. Example: adding `gallons`/`odometer` columns to expenses, or expanding the role CHECK constraint to include Investor.
+**Schema migrations**: On boot, server runs two types of migrations:
+- `ALTER TABLE ... ADD COLUMN` for adding new columns (e.g., `gallons`/`odometer` on expenses, `ocr_text` on documents). Checks for existing columns first.
+- **Rename-recreate** for CHECK constraint changes: when the role constraint needs updating (e.g., adding "Investor"), the code does a test insert in a try-catch; on failure, it renames the table, creates a new one with the updated constraint, migrates data, drops the old, and clears all sessions to force re-login.
+
+**Notable libraries**:
+- **pdfkit**: Converts base64 camera photos to PDF buffers for POD uploads to Google Drive (`imageToPdf()` helper).
+- **tesseract.js**: OCR on receipt photos during expense submission (`extractReceiptText()`). Errors are silently swallowed — OCR failure never blocks expense creation.
 
 REST endpoints:
 - `GET /api/tabs` — list all sheet tab names
@@ -80,47 +86,62 @@ REST endpoints:
 
 Clients emit `register` with their name to join a socket room.
 
+**Status progression & guards**: Status updates (`PUT /api/driver/status`) enforce a one-active-job constraint — a driver cannot transition to "At Shipper" if they already have another load in an active state (`at shipper|loading|in transit|at receiver`), returning 409 Conflict. Every status change is logged to the "Status Logs" sheet with a `LOG-{timestamp}` entry, old→new status, and reason. The update uses `batchUpdate` to atomically set both the status column and corresponding date column.
+
 Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth middleware: `requireAuth` (401), `requireRole(...roles)` (403). First-time setup creates the initial Super Admin via `POST /api/auth/setup`.
+
+**Role-based data sanitization**: `PUT /api/data/:rowIndex` preserves broker and phone contact columns for non-Super Admin users (values are read from the sheet and spliced back in before writing). `GET /api/data` strips financial columns for Driver role.
+
+**Error handling**: All endpoints use try-catch with generic 500 JSON responses. Geofence check errors inside `POST /api/location` are caught and logged but never fail the location response. No explicit rate limiting — relies on Google Sheets' 300 req/min limit and pagination max of 200 rows.
 
 ### Frontend (`client/`)
 Vue 3 + Vite SPA with Vue Router, Pinia stores, and Leaflet for maps. Socket.IO client for real-time updates.
 
-Key directories: `stores/` (auth, dashboard, sheets, driver, messages, investor, users), `composables/` (useApi, useSocket, useToast, usePagination, useGeolocation), `components/` (layout, shared, dashboard, data-manager, driver, investor, users), `views/` (6 view components).
+Key directories: `stores/` (auth, dashboard, sheets, driver, messages, investor, users), `composables/` (useApi, useSocket, useToast, usePagination, useGeolocation), `components/` (layout, shared, dashboard, data-manager, driver, investor, users), `views/` (9 view components).
 
-**useApi**: Simple fetch wrapper with `get/post/put/del` methods, relative URLs, throws on non-200.
+**Vite proxy** (`client/vite.config.js`): `/api` and `/socket.io` (with `ws: true`) both proxy to `http://localhost:3000`.
 
-**useSocket**: Global singleton socket — `connect()`, `register(name)`, `emit()`, `on()`, `off()`. Reuses existing connection if already connected.
+**Composable singletons**: `useApi()`, `useSocket()`, and `useToast()` are module-level singletons, not per-component instances. Each Pinia store instantiates `const api = useApi()` at module scope. `useSocket` maintains a single global socket connection.
 
-**Routing** (6 routes with role-based guards):
+**useGeolocation**: Smart GPS reporting — 30s interval when tab is active, 2m when hidden (via `document.visibilitychange`). Reports to `POST /api/location` with loadId. Silently swallows API errors to avoid disrupting the driver.
+
+**Optimistic updates**: Both `driver` and `messages` stores append messages locally before the API request completes.
+
+**Routing** (9 routes with role-based guards):
 - `/login` — public (redirects authenticated users to role home)
 - `/dashboard` — Super Admin, Dispatcher
+- `/tracking` — Super Admin, Dispatcher
+- `/expenses` — Super Admin, Dispatcher
+- `/messages` — Super Admin, Dispatcher
 - `/data` — Super Admin, Dispatcher
 - `/driver` — Driver, Super Admin (no sidebar)
 - `/investor` — Super Admin, Investor
 - `/users` — Super Admin only
 
-Auth guard calls `checkSession()` on first navigation, then checks role against route meta.
+Auth guard calls `checkSession()` on first navigation only (blocks until resolved), then subsequent navigations use cached `isAuthenticated` state. Unauthorized users redirect to `auth.roleHome` (Driver → `/driver`, Dispatcher → `/dashboard`, Investor → `/investor`).
 
 ### Legacy Frontend (`public/`)
 Original vanilla HTML/CSS/JS pages. Kept as fallback — Express serves `client/dist/` if it exists, otherwise `public/`.
 
 ## Key Conventions
 
-- **Row indexing**: Row 1 = headers, row 2+ = data. API uses 1-based row indices. Each data object includes `_rowIndex`. DELETE internally converts to 0-indexed for Sheets `batchUpdate` `deleteDimension`.
+- **Row indexing**: Row 1 = headers, row 2+ = data. API uses 1-based row indices. Each data object includes `_rowIndex`. DELETE internally converts to 0-indexed for Sheets `batchUpdate` `deleteDimension` (`startIndex: rowIndex - 1`).
 - **Sheet selection**: All data endpoints accept `?sheet=` query param; defaults to "Job Tracking".
 - **Value format**: POST/PUT bodies use `{ values: ["col1", "col2", ...] }` with `valueInputOption: "USER_ENTERED"` (supports formulas).
-- **Column detection via regex**: Headers are matched with patterns — `/driver/i` for driver columns, `/rate|amount|revenue|pay|charge|price|cost/i` for financial columns (hidden from Driver role), `/status/i` for status, `/origin.*lat|pickup.*lat/i` and `/dest.*lat|delivery.*lat/i` for coordinates.
+- **Column detection via regex**: Both backend and frontend match headers dynamically with regex patterns — `/driver/i` for driver columns, `/rate|amount|revenue|pay|charge|price|cost/i` for financial columns (hidden from Driver role), `/status/i` for status, `/load.?id|job.?id/i` for load IDs, `/origin.*lat|pickup.*lat/i` and `/dest.*lat|delivery.*lat/i` for coordinates. This makes the system flexible to different sheet column names.
 - **Driver fields**: Any column matching `/driver/i` renders as a `<select>` populated from the first driver-like column in "Carrier Database".
 - **Role-based routing**: Super Admin sees all, Dispatcher sees dashboard+data (no broker/financial info), Driver sees driver app (no sidebar), Investor sees financial view.
-- **Geofence logic**: `POST /api/location` uses `geolib.isPointWithinRadius()` with a **500m threshold**. Auto-advances status only when current status matches the expected predecessor (e.g., "Dispatched" → "At Shipper", "In Transit" → "At Receiver"). Logs to "Status Logs" sheet.
+- **Geofence logic**: `POST /api/location` uses `geolib.isPointWithinRadius()` with a **500m threshold**. Auto-advances status only when current status matches the expected predecessor (e.g., "Dispatched"/"Assigned" → "At Shipper", "In Transit" → "At Receiver"). Geofence errors are caught silently. Logs to "Status Logs" sheet.
 - **ETA calculation**: Uses `geolib.getDistance()` to destination. Default speed: 24.587 m/s (~55 mph) when GPS speed is unreliable. Compares ETA vs scheduled delivery to flag "on-time" / "delayed".
 - **IFTA state matching**: Hardcoded bounding boxes for ~24 US states (TX, OK, LA, AR, NM, MS, AL, TN, GA, FL, MO, KS, CO, AZ, CA, NV, IL, IN, OH, PA, NY, NC, SC, VA) to classify driver GPS pings by state.
-- **Sheet ID caching**: Google Sheet tab GIDs are cached in a `Map` in memory to avoid repeated API lookups.
+- **Sheet ID caching**: Google Sheet tab GIDs are cached in a `Map` in memory to avoid repeated API lookups. Lazy-initialized via `getSheetId()`.
+- **No transactions**: Multi-step operations (update sheet + append log + emit socket) are not atomic. Network failures mid-operation can leave data inconsistent.
 
 ## Google APIs
 
 - **Sheets API v4**: Primary database. Rate limit 300 req/min. `valueInputOption: "USER_ENTERED"`.
-- **Drive API v3**: Document/POD uploads to a shared folder (`GOOGLE_DRIVE_FOLDER_ID` env var).
+- **Drive API v3**: Document/POD uploads to a shared folder (`GOOGLE_DRIVE_FOLDER_ID` env var). Photos are converted to PDF via pdfkit before upload.
 - Scopes: `spreadsheets`, `drive.file`
 - Service account: `sheets-bot@logistics-app-491014.iam.gserviceaccount.com`
 - Spreadsheet and Drive folder must be shared with this email as Editor.
+- API clients (`sheetsClient`, `driveClient`) are lazy-initialized singletons via `getSheets()` / `getDrive()`.

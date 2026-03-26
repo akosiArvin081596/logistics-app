@@ -49,6 +49,16 @@
         </button>
         <div v-show="!panelCollapsed" class="panel-list">
           <div
+            :class="['driver-item all-item', { active: selectedDriver === '__all__' }]"
+            @click="focusAll"
+          >
+            <span class="driver-dot all-dot"></span>
+            <div class="driver-info">
+              <span class="driver-name">All Drivers</span>
+              <span class="driver-coords">Show all locations</span>
+            </div>
+          </div>
+          <div
             v-for="loc in locations"
             :key="loc.driver"
             :class="['driver-item', { active: selectedDriver === loc.driver }]"
@@ -106,6 +116,15 @@ function focusDriver(loc) {
       marker.leafletObject.openPopup()
     }
   }, 1100)
+}
+
+function focusAll() {
+  selectedDriver.value = '__all__'
+  const map = mapRef.value?.leafletObject
+  if (map && locations.value.length > 0) {
+    const bounds = locations.value.map(l => [l.latitude, l.longitude])
+    map.flyToBounds(bounds, { padding: [40, 40], duration: 1, maxZoom: 12 })
+  }
 }
 
 const mapCenter = computed(() => {
@@ -256,6 +275,14 @@ onUnmounted(() => {
 
 .driver-item:last-child {
   border-bottom: none;
+}
+
+.all-item {
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.all-dot {
+  background: #6366f1 !important;
 }
 
 .driver-item:hover {
