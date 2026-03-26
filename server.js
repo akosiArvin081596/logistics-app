@@ -2188,7 +2188,7 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 });
 
 // GET /api/route — Lightweight rerouting: get driving route between two points
-app.get("/api/route", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async (req, res) => {
 	try {
 		const { fromLat, fromLng, toLat, toLng } = req.query;
 		if (!fromLat || !fromLng || !toLat || !toLng) {

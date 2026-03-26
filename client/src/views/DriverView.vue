@@ -17,6 +17,7 @@
           :headers="driverStore.headers.jobTracking"
           :driver-name="driverName"
           :has-active-job="driverStore.hasActiveJob"
+          :driver-position="geo.lastPosition.value"
           @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"

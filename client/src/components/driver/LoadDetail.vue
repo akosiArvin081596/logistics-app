@@ -13,6 +13,23 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
+    <!-- Route Map -->
+    <div class="accordion-card" style="margin-bottom: 0.75rem;">
+      <div class="accordion-item">
+        <button class="accordion-header" @click="toggle('map')">
+          <span class="accordion-title">Route Map</span>
+          <span class="accordion-chevron" :class="{ open: openSections.has('map') }">&#9662;</span>
+        </button>
+        <div v-show="openSections.has('map')" class="accordion-body">
+          <DriverRouteMap
+            :load="load"
+            :headers="headers"
+            :driver-position="driverPosition"
+          />
+        </div>
+      </div>
+    </div>
+
     <!-- Accordion sections -->
     <div class="accordion-card">
       <!-- Pickup Details -->
@@ -93,12 +110,14 @@ import StatusBadge from '../shared/StatusBadge.vue'
 import StatusStepper from './StatusStepper.vue'
 import DocumentUpload from './DocumentUpload.vue'
 import DocumentList from './DocumentList.vue'
+import DriverRouteMap from './DriverRouteMap.vue'
 
 const props = defineProps({
   load: { type: Object, required: true },
   headers: { type: Array, default: () => [] },
   driverName: { type: String, default: '' },
   hasActiveJob: { type: Boolean, default: false },
+  driverPosition: { type: Object, default: null },
 })
 
 const emit = defineEmits(['back', 'status-update', 'uploaded'])
