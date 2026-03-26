@@ -2168,9 +2168,6 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 			}
 		}
 
-		// Snap trail to roads via OSRM
-		const snapped = await snapToRoads(trail);
-
 		// Get planned route from driver's current position to destination
 		let route = null;
 		if (destination) {
@@ -2183,7 +2180,7 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 		}
 
 		res.json({
-			trail: snapped || trail,
+			trail,
 			route: route ? route.points : null,
 			distanceKm: route ? route.distanceKm : null,
 			etaMinutes: route ? route.durationMin : null,
