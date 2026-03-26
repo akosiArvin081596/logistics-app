@@ -166,17 +166,6 @@ async function fetchTrail(driverName, loadId) {
     routeDistance.value = data.distanceKm
     routeEta.value = data.etaMinutes
     trailLoadId.value = loadId
-
-    // Fit map bounds to show entire route
-    const map = mapRef.value?.leafletObject
-    const allPoints = [...trailPoints.value, ...routePoints.value]
-    if (originLatLng.value) allPoints.push(originLatLng.value)
-    if (destLatLng.value) allPoints.push(destLatLng.value)
-    if (map && allPoints.length >= 2) {
-      if (allPoints.length >= 2) {
-        map.fitBounds(allPoints, { padding: [40, 40], animate: false })
-      }
-    }
   } catch {
     // silent — trail is supplementary
   }
