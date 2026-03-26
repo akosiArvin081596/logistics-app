@@ -590,7 +590,7 @@ onUnmounted(() => {
 .driver-app {
   min-height: 100vh;
   padding-top: calc(52px + env(safe-area-inset-top, 0px));
-  padding-bottom: 68px;
+  padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px));
   font-size: 0.95rem;
 }
 
