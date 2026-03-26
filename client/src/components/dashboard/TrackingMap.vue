@@ -46,8 +46,9 @@
           :lat-lngs="routePoints"
           color="#6366f1"
           :weight="6"
-          :opacity="0.6"
+          :opacity="0.7"
           dashArray="12, 8"
+          className="route-animate"
         />
 
 
@@ -508,5 +509,12 @@ onUnmounted(() => {
   border-radius: 50%;
   border: 3px solid #fff;
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+}
+.route-animate {
+  animation: route-blink 1.5s ease-in-out infinite;
+}
+@keyframes route-blink {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 0.25; }
 }
 </style>
