@@ -1773,14 +1773,20 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 		if (!loadId || !rowIndex || !photoData) {
 			return res
 				.status(400)
-				.json({ error: "loadId, rowIndex, and photoData required" });
+				.json({ error: "Please capture a photo before uploading." });
 		}
 
 		const base64Data = photoData.replace(/^data:image\/\w+;base64,/, "");
 		const imageBuffer = Buffer.from(base64Data, "base64");
 
 		// Convert image to PDF
-		const pdfBuffer = await imageToPdf(imageBuffer);
+		let pdfBuffer;
+		try {
+			pdfBuffer = await imageToPdf(imageBuffer);
+		} catch (pdfErr) {
+			console.error("Image-to-PDF error:", pdfErr.message);
+			return res.status(400).json({ error: "The photo could not be processed. Please try taking a new photo." });
+		}
 		const timestamp = Date.now();
 		const fileName = `${loadId}_${docType}_${timestamp}.pdf`;
 
@@ -1789,44 +1795,53 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 
 		// Upload PDF to Google Drive
 		if (DRIVE_FOLDER_ID) {
-			const drive = await getDrive();
-			const { Readable } = require("stream");
+			try {
+				const drive = await getDrive();
+				const { Readable } = require("stream");
 
-			const driveResponse = await drive.files.create({
-				requestBody: {
-					name: fileName,
-					parents: [DRIVE_FOLDER_ID],
-				},
-				media: {
-					mimeType: "application/pdf",
-					body: Readable.from(pdfBuffer),
-				},
-				fields: "id, webViewLink",
-			});
+				const driveResponse = await drive.files.create({
+					requestBody: {
+						name: fileName,
+						parents: [DRIVE_FOLDER_ID],
+					},
+					media: {
+						mimeType: "application/pdf",
+						body: Readable.from(pdfBuffer),
+					},
+					fields: "id, webViewLink",
+				});
 
-			driveFileId = driveResponse.data.id || "";
-			driveUrl = driveResponse.data.webViewLink || "";
+				driveFileId = driveResponse.data.id || "";
+				driveUrl = driveResponse.data.webViewLink || "";
+			} catch (driveErr) {
+				console.error("Google Drive upload error:", driveErr.message);
+				return res.status(500).json({ error: "Upload to cloud storage failed. Please try again." });
+			}
 		}
 
-		// Mark sheet column only for POD uploads
+		// Mark sheet column only for POD uploads (non-critical — don't block upload)
 		if (docType === "POD") {
-			const sheets = await getSheets();
-			const headerResp = await sheets.spreadsheets.values.get({
-				spreadsheetId: SPREADSHEET_ID,
-				range: "Job Tracking!1:1",
-			});
-			const headers = (headerResp.data.values || [[]])[0];
-			const podColIdx = headers.findIndex((h) =>
-				/pod.*upload|^documents$/i.test(h),
-			);
-			if (podColIdx >= 0) {
-				const podColLetter = colLetter(podColIdx);
-				await sheets.spreadsheets.values.update({
+			try {
+				const sheets = await getSheets();
+				const headerResp = await sheets.spreadsheets.values.get({
 					spreadsheetId: SPREADSHEET_ID,
-					range: `Job Tracking!${podColLetter}${rowIndex}`,
-					valueInputOption: "USER_ENTERED",
-					requestBody: { values: [["Yes"]] },
+					range: "Job Tracking!1:1",
 				});
+				const headers = (headerResp.data.values || [[]])[0];
+				const podColIdx = headers.findIndex((h) =>
+					/pod.*upload|^documents$/i.test(h),
+				);
+				if (podColIdx >= 0) {
+					const podColLetter = colLetter(podColIdx);
+					await sheets.spreadsheets.values.update({
+						spreadsheetId: SPREADSHEET_ID,
+						range: `Job Tracking!${podColLetter}${rowIndex}`,
+						valueInputOption: "USER_ENTERED",
+						requestBody: { values: [["Yes"]] },
+					});
+				}
+			} catch (sheetErr) {
+				console.error("Sheet POD column update error (non-critical):", sheetErr.message);
 			}
 		}
 
@@ -1837,18 +1852,23 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 		}
 
 		// Store metadata in SQLite
-		db.prepare(
-			`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, ocr_text)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		).run(
-			loadId,
-			driverName || "",
-			docType,
-			fileName,
-			driveFileId,
-			driveUrl,
-			ocrText,
-		);
+		try {
+			db.prepare(
+				`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, ocr_text)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			).run(
+				loadId,
+				driverName || "",
+				docType,
+				fileName,
+				driveFileId,
+				driveUrl,
+				ocrText,
+			);
+		} catch (dbErr) {
+			console.error("SQLite insert error:", dbErr.message);
+			return res.status(500).json({ error: "Document was uploaded but could not be saved. Please try again." });
+		}
 
 		// Notify dispatch
 		io.to("dispatch").emit("pod-uploaded", {
@@ -1861,7 +1881,7 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 		res.json({ success: true, driveUrl, ocrText });
 	} catch (error) {
 		console.error("Error uploading document:", error.message);
-		res.status(500).json({ error: error.message });
+		res.status(500).json({ error: "Something went wrong. Please try again or contact dispatch." });
 	}
 });
 
@@ -3036,6 +3056,17 @@ io.on("connection", (socket) => {
 
 // Live reload: broadcast to all clients when server restarts (via --watch)
 setTimeout(() => io.emit("reload"), 500);
+
+// JSON payload too large error handler
+app.use((err, req, res, next) => {
+	if (err.type === "entity.too.large") {
+		return res.status(413).json({ error: "The photo is too large. Please try a smaller image." });
+	}
+	if (err.type === "entity.parse.failed") {
+		return res.status(400).json({ error: "Invalid request. Please try again." });
+	}
+	next(err);
+});
 
 // ============================================================
 // Start Server
