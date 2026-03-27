@@ -1776,17 +1776,20 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 	}
 });
 
-// Helper: convert image buffer to PDF buffer
-function imageToPdf(imageBuffer) {
+// Helper: convert image buffer(s) to PDF buffer (supports multi-page)
+function imageToPdf(imageBuffers) {
+	const buffers = Array.isArray(imageBuffers) ? imageBuffers : [imageBuffers];
 	return new Promise((resolve, reject) => {
 		const doc = new PDFDocument({ autoFirstPage: false });
 		const chunks = [];
 		doc.on("data", (chunk) => chunks.push(chunk));
 		doc.on("end", () => resolve(Buffer.concat(chunks)));
 		doc.on("error", reject);
-		const img = doc.openImage(imageBuffer);
-		doc.addPage({ size: [img.width, img.height] });
-		doc.image(img, 0, 0);
+		for (const buf of buffers) {
+			const img = doc.openImage(buf);
+			doc.addPage({ size: [img.width, img.height] });
+			doc.image(img, 0, 0);
+		}
 		doc.end();
 	});
 }
@@ -1833,13 +1836,17 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 				.json({ error: "Please capture a photo before uploading." });
 		}
 
-		const base64Data = photoData.replace(/^data:image\/\w+;base64,/, "");
-		const imageBuffer = Buffer.from(base64Data, "base64");
+		// Support single string or array of base64 images
+		const photoArray = Array.isArray(photoData) ? photoData : [photoData];
+		const imageBuffers = photoArray.map(p => {
+			const base64 = p.replace(/^data:image\/\w+;base64,/, "");
+			return Buffer.from(base64, "base64");
+		});
 
-		// Convert image to PDF
+		// Convert image(s) to multi-page PDF
 		let pdfBuffer;
 		try {
-			pdfBuffer = await imageToPdf(imageBuffer);
+			pdfBuffer = await imageToPdf(imageBuffers);
 		} catch (pdfErr) {
 			console.error("Image-to-PDF error:", pdfErr.message);
 			return res.status(400).json({ error: "The photo could not be processed. Please try taking a new photo." });
@@ -1918,7 +1925,7 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 		// OCR for receipts
 		let ocrText = "";
 		if (docType === "Receipt") {
-			ocrText = await extractReceiptText(imageBuffer);
+			ocrText = await extractReceiptText(imageBuffers[0]);
 		}
 
 		// Store metadata in SQLite
