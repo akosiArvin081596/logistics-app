@@ -4,6 +4,7 @@ export function useGeolocation(api) {
   const lastPosition = ref(null)
   const error = ref(null)
   const tracking = ref(false)
+  const distanceWarning = ref(null)
 
   let watchId = null
   let activeLoadId = ''
@@ -42,7 +43,8 @@ export function useGeolocation(api) {
     lastReported = { latitude: data.latitude, longitude: data.longitude }
     lastReportTime = Date.now()
     try {
-      await api.post('/api/location', data)
+      const resp = await api.post('/api/location', data)
+      distanceWarning.value = resp.distanceWarning || null
     } catch {
       // Silent fail
     }
@@ -106,5 +108,5 @@ export function useGeolocation(api) {
 
   onUnmounted(stop)
 
-  return { lastPosition, error, tracking, start, stop, updateLoadId }
+  return { lastPosition, error, tracking, distanceWarning, start, stop, updateLoadId }
 }

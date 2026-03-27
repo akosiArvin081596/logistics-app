@@ -7,6 +7,18 @@
       @view-load="viewAssignedLoad"
     />
 
+    <!-- Distance Warning Banner -->
+    <div v-if="geo.distanceWarning.value" class="distance-warning">
+      <div class="warning-icon">&#9888;</div>
+      <div class="warning-content">
+        <div class="warning-title">
+          {{ geo.distanceWarning.value.type === 'far-from-pickup' ? 'Far from Pickup' : 'Far from Delivery' }}
+        </div>
+        <div class="warning-message">{{ geo.distanceWarning.value.message }}</div>
+      </div>
+      <button class="warning-dismiss" @click="geo.distanceWarning.value = null">&times;</button>
+    </div>
+
     <!-- Header -->
     <DriverHeader
       :driver-name="driverName"
@@ -592,6 +604,57 @@ onUnmounted(() => {
   padding-top: calc(52px + env(safe-area-inset-top, 0px));
   padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px));
   font-size: 0.95rem;
+}
+
+/* Distance Warning Banner */
+.distance-warning {
+  position: fixed;
+  top: calc(52px + env(safe-area-inset-top, 0px));
+  left: 0;
+  right: 0;
+  z-index: 150;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.75rem 1rem;
+  background: #fef2f2;
+  border-bottom: 2px solid #fca5a5;
+  color: #991b1b;
+  animation: slideDown 0.3s ease-out;
+}
+@keyframes slideDown {
+  from { transform: translateY(-100%); }
+  to { transform: translateY(0); }
+}
+.warning-icon {
+  font-size: 1.3rem;
+  flex-shrink: 0;
+}
+.warning-content {
+  flex: 1;
+  min-width: 0;
+}
+.warning-title {
+  font-weight: 700;
+  font-size: 0.82rem;
+}
+.warning-message {
+  font-size: 0.75rem;
+  color: #b91c1c;
+  margin-top: 0.1rem;
+}
+.warning-dismiss {
+  border: none;
+  background: none;
+  font-size: 1.2rem;
+  color: #991b1b;
+  cursor: pointer;
+  padding: 0.25rem;
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+.warning-dismiss:hover {
+  opacity: 1;
 }
 
 .app-content {

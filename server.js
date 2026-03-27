@@ -1796,6 +1796,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 
 		// Geofence check if loadId is provided
 		let geofenceTriggered = null;
+		let distanceWarning = null;
 		if (loadId) {
 			try {
 				const sheets = await getSheets();
@@ -1867,6 +1868,59 @@ app.post("/api/location", requireAuth, async (req, res) => {
 								});
 							}
 						}
+
+						// Distance warning — check if driver is far from relevant point
+						const warnStatusCol = headers.find((h) => /^status$/i.test(h));
+						const warnStatus = warnStatusCol ? (loadObj[warnStatusCol] || "").toLowerCase() : "";
+						const originLatCol = headers.find((h) => /origin.*lat|pickup.*lat|shipper.*lat/i.test(h));
+						const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
+						const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
+						const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
+						const originCityCol = headers.find((h) => /origin|pickup.*city|shipper.*city/i.test(h));
+						const destCityCol = headers.find((h) => /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h));
+						const FAR_THRESHOLD = 500000; // 500 km
+
+						const notPickedUp = /^(dispatched|assigned|)$/i.test(warnStatus);
+						const inTransit = /^(in transit)$/i.test(warnStatus);
+
+						if (notPickedUp && originLatCol && originLngCol) {
+							const oLat = parseFloat(loadObj[originLatCol]);
+							const oLng = parseFloat(loadObj[originLngCol]);
+							if (!isNaN(oLat) && !isNaN(oLng)) {
+								const dist = geolib.getDistance({ latitude, longitude }, { latitude: oLat, longitude: oLng });
+								if (dist > FAR_THRESHOLD) {
+									const distMiles = Math.round(dist / 1609.34);
+									const pickupName = originCityCol ? (loadObj[originCityCol] || "") : "";
+									distanceWarning = {
+										type: "far-from-pickup",
+										distanceMiles: distMiles,
+										targetLat: oLat,
+										targetLng: oLng,
+										targetName: pickupName || "Pickup Location",
+										message: `You are ${distMiles.toLocaleString()} miles from pickup${pickupName ? " (" + pickupName + ")" : ""}. Please verify your route.`,
+									};
+								}
+							}
+						} else if (inTransit && destLatCol && destLngCol) {
+							const dLat = parseFloat(loadObj[destLatCol]);
+							const dLng = parseFloat(loadObj[destLngCol]);
+							if (!isNaN(dLat) && !isNaN(dLng)) {
+								const dist = geolib.getDistance({ latitude, longitude }, { latitude: dLat, longitude: dLng });
+								if (dist > FAR_THRESHOLD) {
+									const distMiles = Math.round(dist / 1609.34);
+									const deliveryName = destCityCol ? (loadObj[destCityCol] || "") : "";
+									distanceWarning = {
+										type: "far-from-delivery",
+										distanceMiles: distMiles,
+										targetLat: dLat,
+										targetLng: dLng,
+										targetName: deliveryName || "Delivery Location",
+										message: `You are ${distMiles.toLocaleString()} miles from delivery${deliveryName ? " (" + deliveryName + ")" : ""}. Please verify your route.`,
+									};
+								}
+							}
+						}
+
 						break;
 					}
 				}
@@ -1875,7 +1929,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 			}
 		}
 
-		res.json({ success: true, geofenceTriggered });
+		res.json({ success: true, geofenceTriggered, distanceWarning });
 	} catch (error) {
 		console.error("Error storing location:", error.message);
 		res.status(500).json({ error: error.message });
