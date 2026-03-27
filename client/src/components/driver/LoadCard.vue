@@ -26,6 +26,15 @@
       </div>
     </div>
 
+    <!-- Accept/Decline actions for pending loads -->
+    <div v-if="pending && !accepted" class="card-actions">
+      <button class="action-btn decline" @click.stop="$emit('decline', load)">Decline</button>
+      <button class="action-btn accept" @click.stop="$emit('accept', load)">Accept</button>
+    </div>
+    <div v-else-if="pending && accepted" class="accepted-badge">
+      Accepted
+    </div>
+
     <!-- Bottom actions -->
     <div class="card-bottom">
       <div class="broker-info"></div>
@@ -41,9 +50,11 @@ import StatusBadge from '../shared/StatusBadge.vue'
 const props = defineProps({
   load: { type: Object, required: true },
   headers: { type: Array, default: () => [] },
+  pending: { type: Boolean, default: false },
+  accepted: { type: Boolean, default: false },
 })
 
-defineEmits(['select', 'chat'])
+defineEmits(['select', 'chat', 'accept', 'decline'])
 
 function findCol(headers, regex) {
   return (headers || []).find((h) => regex.test(h)) || null
@@ -144,6 +155,44 @@ function formatDate(str) {
 .date-value {
   font-weight: 600; color: var(--text); margin-left: auto;
   font-family: 'JetBrains Mono', monospace; font-size: 0.68rem;
+}
+
+/* Accept/Decline actions */
+.card-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.action-btn {
+  flex: 1;
+  padding: 0.55rem;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.action-btn:active { opacity: 0.8; }
+.action-btn.accept {
+  background: var(--accent, #6366f1);
+  color: #fff;
+  border: none;
+}
+.action-btn.decline {
+  background: var(--surface);
+  color: var(--danger, #ef4444);
+  border: 1px solid var(--danger, #ef4444);
+}
+.accepted-badge {
+  text-align: center;
+  padding: 0.4rem;
+  margin-bottom: 0.6rem;
+  background: #ecfdf5;
+  color: #059669;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: 6px;
 }
 
 .card-bottom { display: flex; align-items: flex-end; justify-content: space-between; }

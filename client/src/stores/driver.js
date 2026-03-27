@@ -13,6 +13,7 @@ export const useDriverStore = defineStore('driver', {
     expenses: [],
     drivers: [],
     headers: { jobTracking: [], carrierDB: [] },
+    acceptedLoadIds: new Set(),
     currentTab: 'loads',
     selectedStatusLoad: null,
     isLoading: true,
@@ -69,6 +70,10 @@ export const useDriverStore = defineStore('driver', {
 
     hasActiveJob() {
       return this.workingLoads.length > 0
+    },
+
+    isLoadAccepted(state) {
+      return (loadId) => state.acceptedLoadIds.has(loadId)
     },
 
     unreadCount(state) {
@@ -159,6 +164,14 @@ export const useDriverStore = defineStore('driver', {
           `/api/driver/${encodeURIComponent(this.driverName)}`
         )
         this.loads = data.loads || []
+        // Build accepted set from _accepted flag
+        const lidCol = findCol(data.headers?.jobTracking || [], /load.?id|job.?id/i)
+        this.acceptedLoadIds = new Set(
+          this.loads
+            .filter(l => l._accepted)
+            .map(l => lidCol ? (l[lidCol] || '') : '')
+            .filter(Boolean)
+        )
         this.driverInfo = data.driverInfo || null
         this.messages = data.messages || []
         this.notifications = data.notifications || []
@@ -178,6 +191,19 @@ export const useDriverStore = defineStore('driver', {
       } finally {
         this.isLoading = false
       }
+    },
+
+    async respondToLoad(loadId, rowIndex, response) {
+      await api.post('/api/driver/respond', {
+        loadId,
+        rowIndex,
+        response,
+        driverName: this.driverName,
+      })
+      if (response === 'accepted') {
+        this.acceptedLoadIds.add(loadId)
+      }
+      await this.loadData()
     },
 
     async updateStatus(loadId, newStatus, rowIndex) {

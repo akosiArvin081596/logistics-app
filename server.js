@@ -84,6 +84,23 @@ const insertDispatchNotification = db.prepare(
 );
 
 db.exec(`
+	CREATE TABLE IF NOT EXISTS load_responses (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		load_id TEXT NOT NULL,
+		row_index INTEGER NOT NULL,
+		driver_name TEXT NOT NULL,
+		response TEXT NOT NULL CHECK(response IN ('accepted', 'declined')),
+		responded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_load_responses_driver ON load_responses(driver_name)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_load_responses_load ON load_responses(load_id, driver_name)`);
+
+const insertLoadResponse = db.prepare(
+	`INSERT INTO load_responses (load_id, row_index, driver_name, response) VALUES (?, ?, ?, ?)`
+);
+
+db.exec(`
 	CREATE TABLE IF NOT EXISTS users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		username TEXT NOT NULL UNIQUE,
@@ -1039,6 +1056,116 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin", "Dispatcher"), async
 	}
 });
 
+// POST /api/driver/respond — Driver accepts or declines a load assignment
+app.post("/api/driver/respond", requireAuth, async (req, res) => {
+	try {
+		const { loadId, rowIndex, response, driverName } = req.body;
+		if (!loadId || !rowIndex || !response || !driverName) {
+			return res.status(400).json({ error: "loadId, rowIndex, response, and driverName required" });
+		}
+		if (!["accepted", "declined"].includes(response)) {
+			return res.status(400).json({ error: "response must be 'accepted' or 'declined'" });
+		}
+
+		// Check for duplicate response
+		const existing = db.prepare(
+			`SELECT id FROM load_responses WHERE load_id = ? AND driver_name = ? ORDER BY responded_at DESC LIMIT 1`
+		).get(loadId, driverName.trim().toLowerCase());
+		if (existing) {
+			return res.status(409).json({ error: "You have already responded to this load" });
+		}
+
+		// Insert response
+		insertLoadResponse.run(loadId, rowIndex, driverName.trim().toLowerCase(), response);
+
+		const sheets = await getSheets();
+		const now = new Date();
+		const logId = `LOG-${now.getTime()}`;
+		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+
+		if (response === "accepted") {
+			// Log to Status Logs
+			await sheets.spreadsheets.values.append({
+				spreadsheetId: SPREADSHEET_ID,
+				range: "Status Logs",
+				valueInputOption: "USER_ENTERED",
+				requestBody: {
+					values: [[logId, loadId, driverName, dateTime, "Accepted", "Driver confirmed assignment"]],
+				},
+			});
+
+			// Notify dispatch
+			insertDispatchNotification.run(
+				'load-accepted',
+				`${driverName} accepted Load ${loadId}`,
+				`Driver confirmed assignment`,
+				JSON.stringify({ loadId, driverName, rowIndex })
+			);
+			io.to("dispatch").emit("load-accepted", { loadId, driverName, rowIndex });
+			io.to("dispatch").emit("dispatch-notification", {
+				type: 'load-accepted',
+				title: `${driverName} accepted Load ${loadId}`,
+				body: `Driver confirmed assignment`,
+			});
+		} else {
+			// Decline: clear driver and set Unassigned
+			const headerResp = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: "Job Tracking!1:1",
+			});
+			const headers = (headerResp.data.values || [[]])[0];
+			const driverColIdx = headers.findIndex((h) => /^driver$/i.test(h));
+			const statusColIdx = headers.findIndex((h) => /status/i.test(h));
+
+			if (driverColIdx !== -1) {
+				await sheets.spreadsheets.values.update({
+					spreadsheetId: SPREADSHEET_ID,
+					range: `Job Tracking!${colLetter(driverColIdx)}${rowIndex}`,
+					valueInputOption: "USER_ENTERED",
+					requestBody: { values: [[""]] },
+				});
+			}
+			if (statusColIdx !== -1) {
+				await sheets.spreadsheets.values.update({
+					spreadsheetId: SPREADSHEET_ID,
+					range: `Job Tracking!${colLetter(statusColIdx)}${rowIndex}`,
+					valueInputOption: "USER_ENTERED",
+					requestBody: { values: [["Unassigned"]] },
+				});
+			}
+
+			// Log to Status Logs
+			await sheets.spreadsheets.values.append({
+				spreadsheetId: SPREADSHEET_ID,
+				range: "Status Logs",
+				valueInputOption: "USER_ENTERED",
+				requestBody: {
+					values: [[logId, loadId, driverName, dateTime, "Unassigned", "Driver declined assignment"]],
+				},
+			});
+
+			// Notify dispatch
+			insertDispatchNotification.run(
+				'load-declined',
+				`${driverName} declined Load ${loadId}`,
+				`Load returned to Job Board`,
+				JSON.stringify({ loadId, driverName, rowIndex })
+			);
+			io.to("dispatch").emit("load-declined", { loadId, driverName, rowIndex });
+			io.to("dispatch").emit("dispatch-notification", {
+				type: 'load-declined',
+				title: `${driverName} declined Load ${loadId}`,
+				body: `Load returned to Job Board`,
+			});
+		}
+
+		res.json({ success: true, response });
+	} catch (error) {
+		console.error("Error responding to load:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // DELETE — Clear a row (shifts content up by deleting the row) — Admin only
 app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) => {
 	try {
@@ -1454,6 +1581,18 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		if (req.session.user.role !== "Super Admin") {
 			filteredLoads = sanitizeBrokerColumns(filteredHeaders, filteredLoads);
 		}
+
+		// Attach _accepted flag from load_responses
+		const nameLower = driverName.toLowerCase();
+		const acceptedRows = db.prepare(
+			`SELECT load_id FROM load_responses WHERE driver_name = ? AND response = 'accepted'`
+		).all(nameLower);
+		const acceptedSet = new Set(acceptedRows.map(r => r.load_id));
+		const loadIdCol = jobTracking.headers.find((h) => /load.?id|job.?id/i.test(h));
+		filteredLoads.forEach((load) => {
+			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
+			load._accepted = acceptedSet.has(lid);
+		});
 
 		// Build list of all driver names for recipient picker
 		const carrierDriverNames = [

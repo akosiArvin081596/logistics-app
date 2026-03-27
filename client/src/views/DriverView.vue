@@ -108,8 +108,12 @@
               :key="load._rowIndex"
               :load="load"
               :headers="driverStore.headers.jobTracking"
+              :pending="driverStore.loadSubTab === 'pending'"
+              :accepted="isLoadAccepted(load)"
               @select="handleLoadSelect"
               @chat="handleLoadChat"
+              @accept="handleAcceptLoad"
+              @decline="handleDeclineLoad"
             />
           </template>
         </template>
@@ -227,6 +231,18 @@
       :unread-notif-count="driverStore.unreadNotifCount"
       @switch="handleTabSwitch"
     />
+
+    <!-- Decline confirmation overlay -->
+    <div v-if="showDeclineConfirm" class="confirm-overlay" @click.self="showDeclineConfirm = false">
+      <div class="confirm-dialog">
+        <div class="confirm-title">Decline Load?</div>
+        <div class="confirm-msg">This load will be returned to the dispatch board.</div>
+        <div class="confirm-actions">
+          <button class="confirm-btn cancel" @click="showDeclineConfirm = false">Cancel</button>
+          <button class="confirm-btn danger" @click="confirmDecline">Decline</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -408,6 +424,46 @@ function handleMarkAllNotifRead() {
     .filter((n) => !n.read)
     .map((n) => n.id)
   if (unreadIds.length > 0) driverStore.markNotificationsRead(unreadIds)
+}
+
+function isLoadAccepted(load) {
+  const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
+  const lid = loadIdCol ? (load[loadIdCol] || '') : ''
+  return driverStore.isLoadAccepted(lid)
+}
+
+async function handleAcceptLoad(load) {
+  const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
+  const lid = loadIdCol ? (load[loadIdCol] || '') : ''
+  try {
+    await driverStore.respondToLoad(lid, load._rowIndex, 'accepted')
+    toast.show('Load accepted')
+  } catch {
+    toast.show('Failed to accept load', 'error')
+  }
+}
+
+const showDeclineConfirm = ref(false)
+const declineTarget = ref(null)
+
+function handleDeclineLoad(load) {
+  declineTarget.value = load
+  showDeclineConfirm.value = true
+}
+
+async function confirmDecline() {
+  showDeclineConfirm.value = false
+  const load = declineTarget.value
+  if (!load) return
+  const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
+  const lid = loadIdCol ? (load[loadIdCol] || '') : ''
+  try {
+    await driverStore.respondToLoad(lid, load._rowIndex, 'declined')
+    toast.show('Load declined')
+  } catch {
+    toast.show('Failed to decline load', 'error')
+  }
+  declineTarget.value = null
 }
 
 function handleLoadSelect(load) {
@@ -921,5 +977,58 @@ onUnmounted(() => {
 /* Toast position override for bottom nav */
 :deep(.toast-container) {
   bottom: 80px;
+}
+
+/* Decline confirmation overlay */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+.confirm-dialog {
+  background: var(--surface, #fff);
+  border-radius: 14px;
+  padding: 1.5rem;
+  max-width: 320px;
+  width: 100%;
+}
+.confirm-title {
+  font-weight: 700;
+  font-size: 1rem;
+  margin-bottom: 0.5rem;
+}
+.confirm-msg {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 1.25rem;
+  line-height: 1.4;
+}
+.confirm-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.confirm-btn {
+  flex: 1;
+  padding: 0.6rem;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.confirm-btn.cancel {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.confirm-btn.danger {
+  background: var(--danger, #ef4444);
+  color: #fff;
+  border: none;
 }
 </style>
