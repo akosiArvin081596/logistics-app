@@ -128,8 +128,8 @@ async function handleUpload() {
     photoData.value = ''
     preview.value = ''
     if (fileInput.value) fileInput.value.value = ''
-  } catch {
-    toast.show('Failed to upload document', 'error')
+  } catch (err) {
+    toast.show(err.message || 'Failed to upload document', 'error')
   } finally {
     uploading.value = false
   }

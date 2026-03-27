@@ -25,7 +25,7 @@ function colLetter(idx) {
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "20mb" }));
 
 // ============================================================
 // SQLite — Local database for app data (messages, users, expenses)
