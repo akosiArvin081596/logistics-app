@@ -1,7 +1,10 @@
 <template>
   <div class="route-map-wrap">
-    <div v-if="!hasCoords" class="map-empty">No route coordinates available</div>
-    <template v-else-if="waitingForGps">
+    <!-- Waiting for GPS -->
+    <template v-if="!driverLatLng && !hasCoords">
+      <div class="map-empty">No route coordinates available</div>
+    </template>
+    <template v-else-if="!driverLatLng && hasCoords">
       <div class="map-container gps-waiting">
         <div class="gps-overlay">
           <div class="gps-spinner"></div>
@@ -9,11 +12,13 @@
         </div>
       </div>
     </template>
+    <!-- Map: driver location only OR full route -->
     <template v-else>
-      <div class="map-info" v-if="distanceKm != null || etaMinutes != null">
+      <div class="map-info" v-if="hasCoords && (distanceKm != null || etaMinutes != null)">
         <span v-if="distanceKm != null" class="info-item">{{ distanceKm }} km</span>
         <span v-if="etaMinutes != null" class="info-item">{{ etaMinutes }} min ETA</span>
       </div>
+      <div v-if="!hasCoords" class="map-label">Your Current Location</div>
       <div class="map-container">
         <l-map
           ref="mapRef"
@@ -28,9 +33,9 @@
             attribution="&copy; OpenStreetMap contributors"
           />
 
-          <!-- Planned route -->
+          <!-- Planned route (only when active load) -->
           <l-polyline
-            v-if="routePoints.length >= 2"
+            v-if="hasCoords && routePoints.length >= 2"
             :lat-lngs="routePoints"
             color="#000000"
             :weight="5"
@@ -40,12 +45,12 @@
           />
 
           <!-- Origin marker (green) -->
-          <l-marker v-if="originLatLng" :lat-lng="originLatLng" :icon="originIcon">
+          <l-marker v-if="hasCoords && originLatLng" :lat-lng="originLatLng" :icon="originIcon">
             <l-popup><div><strong>Pickup</strong></div></l-popup>
           </l-marker>
 
           <!-- Destination marker (red) -->
-          <l-marker v-if="destLatLng" :lat-lng="destLatLng" :icon="destIcon">
+          <l-marker v-if="hasCoords && destLatLng" :lat-lng="destLatLng" :icon="destIcon">
             <l-popup><div><strong>Drop-off</strong></div></l-popup>
           </l-marker>
 
@@ -247,6 +252,12 @@ onMounted(() => {
   color: var(--text-dim);
   font-size: 0.8rem;
   padding: 1rem 0;
+}
+.map-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 0.4rem;
 }
 .gps-waiting {
   display: flex;
