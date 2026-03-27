@@ -188,8 +188,8 @@
         <div class="section-header">Expenses</div>
 
         <ExpenseForm
-          v-if="driverStore.loads.length > 0"
-          :loads="driverStore.loads"
+          v-if="driverStore.activeLoads.length > 0"
+          :loads="driverStore.activeLoads"
           :driver-name="driverName"
           :headers="driverStore.headers.jobTracking"
           @submit="handleExpenseSubmit"
