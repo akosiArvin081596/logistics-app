@@ -188,16 +188,11 @@
         <div class="section-header">Expenses</div>
 
         <ExpenseForm
-          v-if="driverStore.activeLoads.length > 0"
-          :loads="driverStore.activeLoads"
+          :loads="driverStore.loads"
           :driver-name="driverName"
           :headers="driverStore.headers.jobTracking"
           @submit="handleExpenseSubmit"
         />
-        <EmptyState v-else>
-          <div class="empty-icon">&#128176;</div>
-          No active loads. Expenses must be linked to a load.
-        </EmptyState>
 
         <div class="section-header" style="margin-top: 1rem;">
           History

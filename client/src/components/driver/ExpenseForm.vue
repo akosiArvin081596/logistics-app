@@ -1,5 +1,9 @@
 <template>
-  <van-form @submit="handleSubmit" class="expense-form">
+  <div v-if="loadColumns.length === 0" class="no-loads-msg">
+    <div class="empty-icon">&#128176;</div>
+    <div>No active loads. Expenses must be linked to a load.</div>
+  </div>
+  <van-form v-else @submit="handleSubmit" class="expense-form">
     <van-cell-group inset>
       <div class="form-title">Log Expense</div>
 
@@ -230,5 +234,15 @@ function handleSubmit() {
 }
 .form-submit {
   padding: 0.75rem;
+}
+.no-loads-msg {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+.no-loads-msg .empty-icon {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
 }
 </style>
