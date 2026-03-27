@@ -106,7 +106,11 @@ const driverLatLng = computed(() => {
   return [props.driverPosition.latitude, props.driverPosition.longitude]
 })
 
-const hasCoords = computed(() => destLatLng.value != null)
+const statusCol = computed(() => (props.headers || []).find(h => /^status$/i.test(h)) || null)
+const loadStatus = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim().toLowerCase() : '')
+const isDelivered = computed(() => /^(delivered|completed|pod received)$/i.test(loadStatus.value))
+
+const hasCoords = computed(() => destLatLng.value != null && !isDelivered.value)
 const waitingForGps = computed(() => hasCoords.value && !driverLatLng.value)
 
 const mapCenter = computed(() => {
