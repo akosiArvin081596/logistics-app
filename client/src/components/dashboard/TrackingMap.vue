@@ -232,17 +232,9 @@ async function focusDriver(loc) {
   selectedDriver.value = loc.driver
   const map = mapRef.value?.leafletObject
 
-  await fetchTrail(loc.driver, loc.loadId)
-
-  await nextTick()
-
-  // Fit bounds to route + driver position so the full polyline is visible
-  if (map && routePoints.value.length >= 2) {
-    const allPts = [...routePoints.value, [loc.latitude, loc.longitude]]
-    const bounds = L.latLngBounds(allPts.map(p => L.latLng(p[0], p[1])))
-    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: false })
-  } else if (map) {
-    map.setView([loc.latitude, loc.longitude], 14, { animate: false })
+  // Zoom to driver immediately so the map responds on click
+  if (map) {
+    map.setView([loc.latitude, loc.longitude], 14, { animate: true })
   }
 
   nextTick(() => {
@@ -251,6 +243,16 @@ async function focusDriver(loc) {
       marker.leafletObject.openPopup()
     }
   })
+
+  // Then fetch route and widen bounds if available
+  await fetchTrail(loc.driver, loc.loadId)
+
+  if (map && routePoints.value.length >= 2) {
+    await nextTick()
+    const allPts = [...routePoints.value, [loc.latitude, loc.longitude]]
+    const bounds = L.latLngBounds(allPts.map(p => L.latLng(p[0], p[1])))
+    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: true })
+  }
 }
 
 let lastRerouteTime = 0
