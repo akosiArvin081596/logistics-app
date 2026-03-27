@@ -48,10 +48,11 @@ export const useDriverStore = defineStore('driver', {
       const statusCol = findCol(state.headers.jobTracking, /status/i)
       const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
       if (!statusCol) return []
-      const pendingRe = /^(assigned|dispatched|)$/i
+      const pendingRe = /^(assigned|dispatched)$/i
       return state.loads.filter((l) => {
         const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
-        return hasId && pendingRe.test((l[statusCol] || '').trim())
+        const status = (l[statusCol] || '').trim()
+        return hasId && status && pendingRe.test(status)
       })
     },
 
