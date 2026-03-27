@@ -1587,9 +1587,9 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			`SELECT load_id FROM load_responses WHERE driver_name = ? AND response = 'accepted'`
 		).all(nameLower);
 		const acceptedSet = new Set(acceptedRows.map(r => r.load_id));
-		const loadIdCol = jobTracking.headers.find((h) => /load.?id|job.?id/i.test(h));
+		const acceptLoadIdCol = jobTracking.headers.find((h) => /load.?id|job.?id/i.test(h));
 		filteredLoads.forEach((load) => {
-			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
+			const lid = acceptLoadIdCol ? (load[acceptLoadIdCol] || "") : "";
 			load._accepted = acceptedSet.has(lid);
 		});
 
