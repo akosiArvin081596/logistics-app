@@ -187,12 +187,17 @@
       <section v-show="currentTab === 'expenses'" class="tab-panel">
         <div class="section-header">Expenses</div>
 
-        <ExpenseForm
-          :loads="driverStore.loads"
-          :driver-name="driverName"
-          :headers="driverStore.headers.jobTracking"
-          @submit="handleExpenseSubmit"
-        />
+        <template v-if="driverStore.activeLoads.length > 0">
+          <ExpenseForm
+            :loads="driverStore.activeLoads"
+            :driver-name="driverName"
+            :headers="driverStore.headers.jobTracking"
+            @submit="handleExpenseSubmit"
+          />
+        </template>
+        <EmptyState v-else>
+          No active loads.
+        </EmptyState>
 
         <div class="section-header" style="margin-top: 1rem;">
           History

@@ -1,9 +1,5 @@
 <template>
-  <div v-if="loadColumns.length === 0" class="no-loads-msg">
-    <div class="empty-icon">&#128176;</div>
-    <div>No active loads. Expenses must be linked to a load.</div>
-  </div>
-  <van-form v-else @submit="handleSubmit" class="expense-form">
+  <van-form @submit="handleSubmit" class="expense-form">
     <van-cell-group inset>
       <div class="form-title">Log Expense</div>
 
