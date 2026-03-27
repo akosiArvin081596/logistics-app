@@ -1,6 +1,14 @@
 <template>
   <div class="route-map-wrap">
     <div v-if="!hasCoords" class="map-empty">No route coordinates available</div>
+    <template v-else-if="waitingForGps">
+      <div class="map-container gps-waiting">
+        <div class="gps-overlay">
+          <div class="gps-spinner"></div>
+          <span>Locating your position...</span>
+        </div>
+      </div>
+    </template>
     <template v-else>
       <div class="map-info" v-if="distanceKm != null || etaMinutes != null">
         <span v-if="distanceKm != null" class="info-item">{{ distanceKm }} km</span>
@@ -99,6 +107,7 @@ const driverLatLng = computed(() => {
 })
 
 const hasCoords = computed(() => destLatLng.value != null)
+const waitingForGps = computed(() => hasCoords.value && !driverLatLng.value)
 
 const mapCenter = computed(() => {
   if (driverLatLng.value) return driverLatLng.value
@@ -166,11 +175,14 @@ async function fetchRoute(fitBounds = false) {
       initialFitDone = true
       nextTick(() => {
         const map = mapRef.value?.leafletObject
-        if (map && routePoints.value.length >= 2) {
+        if (map) {
           const allPoints = [...routePoints.value]
           if (originLatLng.value) allPoints.push(originLatLng.value)
           if (destLatLng.value) allPoints.push(destLatLng.value)
-          map.fitBounds(allPoints, { padding: [30, 30], animate: false })
+          if (driverLatLng.value) allPoints.push(driverLatLng.value)
+          if (allPoints.length >= 2) {
+            map.fitBounds(allPoints, { padding: [30, 30], animate: false })
+          }
         }
       })
     }
@@ -198,7 +210,9 @@ watch(() => props.driverPosition, (pos) => {
 }, { deep: true })
 
 onMounted(() => {
-  if (hasCoords.value) fetchRoute(true)
+  // Only fetch route on mount if driver position is already available
+  // Otherwise the watcher will handle it when GPS arrives
+  if (hasCoords.value && driverLatLng.value) fetchRoute(true)
 })
 </script>
 
@@ -229,5 +243,32 @@ onMounted(() => {
   color: var(--text-dim);
   font-size: 0.8rem;
   padding: 1rem 0;
+}
+.gps-waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg, #f5f6fa);
+  border: 1px solid var(--border, #e5e7eb);
+}
+.gps-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+.gps-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border, #e5e7eb);
+  border-top-color: var(--accent, #6366f1);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 </style>
