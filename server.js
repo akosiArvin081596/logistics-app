@@ -1876,8 +1876,8 @@ app.post("/api/location", requireAuth, async (req, res) => {
 						const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
 						const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
 						const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
-						const originCityCol = headers.find((h) => /origin|pickup.*city|shipper.*city/i.test(h));
-						const destCityCol = headers.find((h) => /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h));
+						const originCityCol = headers.find((h) => /origin|pickup.*city|shipper.*city/i.test(h) && !/lat|lng|lon/i.test(h));
+						const destCityCol = headers.find((h) => (/dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h)) && !/lat|lng|lon/i.test(h));
 						const FAR_THRESHOLD = 500000; // 500 km
 
 						const notPickedUp = /^(dispatched|assigned|)$/i.test(warnStatus);
