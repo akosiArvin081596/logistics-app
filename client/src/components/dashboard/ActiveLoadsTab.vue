@@ -135,8 +135,9 @@ const sectionPatterns = [
   { title: 'Route', test: /origin|pickup|shipper|dest|drop|receiver|delivery|consignee|city|state|zip|address|location/i, wide: /address/i },
   { title: 'Schedule', test: /date|time|pickup.*date|delivery.*date|appointment|eta|scheduled/i },
   { title: 'Financials', test: /rate|amount|revenue|pay|charge|price|cost|invoice|total/i },
-  { title: 'Broker / Contact', test: /broker|phone|email|contact|customer|client/i, wide: /email/i },
 ]
+
+const hiddenCols = /broker|phone|email|contact/i
 
 const loadIdValue = computed(() => {
   if (!selectedJob.value) return ''
@@ -154,6 +155,10 @@ const detailSections = computed(() => {
   if (!selectedJob.value) return []
   const used = new Set()
   const sections = []
+
+  for (const col of props.headers) {
+    if (hiddenCols.test(col)) used.add(col)
+  }
 
   for (const sp of sectionPatterns) {
     const fields = []
