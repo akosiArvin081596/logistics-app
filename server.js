@@ -68,6 +68,22 @@ const insertNotification = db.prepare(
 );
 
 db.exec(`
+	CREATE TABLE IF NOT EXISTS dispatch_notifications (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		type TEXT NOT NULL,
+		title TEXT NOT NULL,
+		body TEXT DEFAULT '',
+		metadata TEXT DEFAULT '{}',
+		read INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
+const insertDispatchNotification = db.prepare(
+	`INSERT INTO dispatch_notifications (type, title, body, metadata) VALUES (?, ?, ?, ?)`
+);
+
+db.exec(`
 	CREATE TABLE IF NOT EXISTS users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		username TEXT NOT NULL UNIQUE,
@@ -1550,6 +1566,17 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 
 		// Notify dispatch in real-time
 		io.to("dispatch").emit("status-updated", { loadId, driverName, newStatus });
+		insertDispatchNotification.run(
+			'status-updated',
+			`${driverName}: ${newStatus}`,
+			`Load ${loadId}`,
+			JSON.stringify({ loadId, driverName, newStatus })
+		);
+		io.to("dispatch").emit("dispatch-notification", {
+			type: 'status-updated',
+			title: `${driverName}: ${newStatus}`,
+			body: `Load ${loadId}`,
+		});
 
 		res.json({ success: true });
 	} catch (error) {
@@ -1632,6 +1659,38 @@ app.put("/api/notifications/read", requireAuth, (req, res) => {
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error marking notifications read:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/dispatch-notifications — Fetch dispatch notifications
+app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const notifications = db.prepare(
+			`SELECT id, type, title, body, metadata, read, created_at AS createdAt
+			 FROM dispatch_notifications ORDER BY id DESC LIMIT 200`
+		).all();
+		const unreadCount = db.prepare(
+			`SELECT COUNT(*) AS count FROM dispatch_notifications WHERE read = 0`
+		).get().count;
+		res.json({ notifications, unreadCount });
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// PUT /api/dispatch-notifications/read — Mark dispatch notifications as read
+app.put("/api/dispatch-notifications/read", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { ids } = req.body;
+		if (ids && ids.length) {
+			const placeholders = ids.map(() => "?").join(",");
+			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE id IN (${placeholders})`).run(...ids);
+		} else {
+			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE read = 0`).run();
+		}
+		res.json({ success: true });
+	} catch (error) {
 		res.status(500).json({ error: error.message });
 	}
 });
@@ -1891,6 +1950,17 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 			driveUrl,
 			docType,
 		});
+		insertDispatchNotification.run(
+			'pod-uploaded',
+			`${docType} uploaded by ${driverName || 'driver'}`,
+			`Load ${loadId}`,
+			JSON.stringify({ loadId, driverName, docType })
+		);
+		io.to("dispatch").emit("dispatch-notification", {
+			type: 'pod-uploaded',
+			title: `${docType} uploaded by ${driverName || 'driver'}`,
+			body: `Load ${loadId}`,
+		});
 
 		res.json({ success: true, driveUrl, ocrText });
 	} catch (error) {
@@ -2032,6 +2102,17 @@ app.post("/api/location", requireAuth, async (req, res) => {
 									loadId,
 									driver: driverName,
 									status: geofenceTriggered,
+								});
+								insertDispatchNotification.run(
+									'geofence',
+									`${driverName}: ${geofenceTriggered}`,
+									`Load ${loadId} — auto-triggered by geofence`,
+									JSON.stringify({ loadId, driverName, status: geofenceTriggered })
+								);
+								io.to("dispatch").emit("dispatch-notification", {
+									type: 'geofence',
+									title: `${driverName}: ${geofenceTriggered}`,
+									body: `Load ${loadId} — auto-triggered by geofence`,
 								});
 							}
 						}

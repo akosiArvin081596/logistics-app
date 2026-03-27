@@ -10,6 +10,7 @@ import UsersView from '../views/UsersView.vue'
 import TrackingView from '../views/TrackingView.vue'
 import ExpensesView from '../views/ExpensesView.vue'
 import MessagesView from '../views/MessagesView.vue'
+import NotificationsView from '../views/NotificationsView.vue'
 
 const routes = [
   {
@@ -40,6 +41,12 @@ const routes = [
     path: '/messages',
     name: 'messages',
     component: MessagesView,
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
+    path: '/notifications',
+    name: 'notifications',
+    component: NotificationsView,
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {

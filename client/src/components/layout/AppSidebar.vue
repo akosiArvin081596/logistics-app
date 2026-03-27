@@ -14,6 +14,7 @@
       >
         <span class="nav-icon" v-html="item.icon"></span>
         {{ item.label }}
+        <span v-if="item.to === '/notifications' && notifStore.unreadCount > 0" class="nav-badge">{{ notifStore.unreadCount }}</span>
       </router-link>
       <div id="sidebarExtra"></div>
     </div>
@@ -34,17 +35,25 @@ import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { useSocket } from '../../composables/useSocket'
+import { useDispatchNotificationsStore } from '../../stores/dispatchNotifications'
 
 const router = useRouter()
 const auth = useAuthStore()
 const { isConnected, connect } = useSocket()
+const notifStore = useDispatchNotificationsStore()
 
-onMounted(() => connect())
+onMounted(() => {
+  connect()
+  if (auth.user?.role === 'Super Admin' || auth.user?.role === 'Dispatcher') {
+    notifStore.fetch()
+  }
+})
 
 const navConfig = {
   'Super Admin': [
     { to: '/dashboard', icon: '&#9635;', label: 'Dashboard' },
     { to: '/tracking', icon: '&#128205;', label: 'Tracking' },
+    { to: '/notifications', icon: '&#128276;', label: 'Notifications' },
     { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
     { to: '/messages', icon: '&#128172;', label: 'Messages' },
     { to: '/driver', icon: '&#128666;', label: 'Driver App' },
@@ -55,6 +64,7 @@ const navConfig = {
   Dispatcher: [
     { to: '/dashboard', icon: '&#9635;', label: 'Dashboard' },
     { to: '/tracking', icon: '&#128205;', label: 'Tracking' },
+    { to: '/notifications', icon: '&#128276;', label: 'Notifications' },
     { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
     { to: '/messages', icon: '&#128172;', label: 'Messages' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
@@ -72,3 +82,18 @@ async function handleLogout() {
   router.push('/login')
 }
 </script>
+
+<style scoped>
+.nav-badge {
+  margin-left: auto;
+  background: var(--danger, #ef4444);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  min-width: 18px;
+  text-align: center;
+}
+</style>
