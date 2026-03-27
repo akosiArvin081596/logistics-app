@@ -404,9 +404,20 @@ async function fetchLocations() {
   try {
     const data = await api.get('/api/locations/latest')
     locations.value = data.locations || []
-    // Set initial center once
+    // Fit map to online drivers on initial load
     if (locations.value.length > 0) {
-      mapCenter.value = [locations.value[0].latitude, locations.value[0].longitude]
+      const online = locations.value.filter(loc => isOnline(loc))
+      const pts = (online.length > 0 ? online : locations.value).map(l => [l.latitude, l.longitude])
+      mapCenter.value = pts[0]
+      await nextTick()
+      const map = mapRef.value?.leafletObject
+      if (map) {
+        if (pts.length === 1) {
+          map.setView(pts[0], 10, { animate: false })
+        } else {
+          map.fitBounds(L.latLngBounds(pts.map(p => L.latLng(p[0], p[1]))), { padding: [50, 50], maxZoom: 12, animate: false })
+        }
+      }
     }
   } catch {
     // silent
