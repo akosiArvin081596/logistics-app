@@ -85,13 +85,16 @@
             :class="['driver-item', { active: selectedDriver === loc.driver }]"
             @click="focusDriver(loc)"
           >
-            <span class="driver-dot"></span>
+            <span :class="['driver-dot', isOnline(loc) ? 'online' : 'offline']"></span>
             <div class="driver-info">
               <span class="driver-name">{{ loc.driver }}</span>
-              <span class="driver-coords">{{ loc.latitude.toFixed(5) }}, {{ loc.longitude.toFixed(5) }}</span>
+              <span class="driver-meta">
+                <span :class="['status-text', isOnline(loc) ? 'online' : 'offline']">{{ isOnline(loc) ? 'Online' : 'Offline' }}</span>
+                <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
+              </span>
               <span v-if="loc.loadId" class="driver-load">{{ loc.loadId }}</span>
             </div>
-            <span v-if="loc.speed" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
+            <span v-if="loc.speed && isOnline(loc)" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
           </div>
         </div>
       </div>
@@ -291,6 +294,27 @@ function focusAll() {
   routeEta.value = null
 }
 
+// Online/offline detection (5-minute threshold)
+const now = ref(Date.now())
+let nowInterval = null
+const ONLINE_THRESHOLD = 5 * 60 * 1000 // 5 minutes
+
+function isOnline(loc) {
+  if (!loc.timestamp) return false
+  return now.value - new Date(loc.timestamp).getTime() < ONLINE_THRESHOLD
+}
+
+function timeAgo(ts) {
+  if (!ts) return ''
+  const diff = now.value - new Date(ts).getTime()
+  if (diff < 60000) return 'just now'
+  const mins = Math.floor(diff / 60000)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
+}
+
 const mapCenter = ref([39.8283, -98.5795]) // set once after first fetch
 
 function updateMarkerVisibility() {
@@ -408,11 +432,13 @@ onMounted(() => {
   socket.register('dispatch')
   fetchLocations()
   socket.on('location-update', onLocationUpdate)
+  nowInterval = setInterval(() => { now.value = Date.now() }, 30000)
 })
 
 onUnmounted(() => {
   socket.off('location-update', onLocationUpdate)
   Object.values(activeAnimations).forEach(cancelAnimationFrame)
+  clearInterval(nowInterval)
 })
 </script>
 
@@ -523,8 +549,15 @@ onUnmounted(() => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #22c55e;
+  background: #9ca3af;
   flex-shrink: 0;
+}
+.driver-dot.online {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+}
+.driver-dot.offline {
+  background: #9ca3af;
 }
 
 .driver-info {
@@ -543,9 +576,26 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-.driver-coords {
+.driver-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.status-text {
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.status-text.online {
+  color: #16a34a;
+}
+.status-text.offline {
+  color: #9ca3af;
+}
+.driver-ago {
   font-size: 0.6rem;
-  color: #999;
+  color: #aaa;
   font-family: 'JetBrains Mono', monospace;
 }
 
