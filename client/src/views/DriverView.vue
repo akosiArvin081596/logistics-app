@@ -549,7 +549,7 @@ function onNewMessage(msg) {
   }
 }
 
-// Start/stop GPS tracking based on working loads (actively in-progress)
+// Start GPS tracking when driver app loads, update loadId based on working loads
 watch(
   () => driverStore.workingLoads,
   (working) => {
@@ -561,9 +561,15 @@ watch(
         geo.updateLoadId(firstLoadId)
       }
     } else {
-      geo.stop()
+      // No active loads — keep tracking but clear loadId
+      if (!geo.tracking.value) {
+        geo.start('')
+      } else {
+        geo.updateLoadId('')
+      }
     }
-  }
+  },
+  { immediate: true }
 )
 
 // Keep selected status load in sync
