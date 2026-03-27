@@ -53,7 +53,13 @@
         />
       </div>
       <div v-show="activeTab === 'activeLoads'" class="tab-panel active">
-        <ActiveLoadsTab :jobs="store.activeJobs" :headers="store.headers" />
+        <ActiveLoadsTab
+          :jobs="store.activeJobs"
+          :headers="store.headers"
+          :drivers="store.drivers"
+          @reassign="handleReassign"
+          @cancel="handleCancel"
+        />
       </div>
       <div v-show="activeTab === 'fleet'" class="tab-panel active">
         <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />
@@ -101,6 +107,28 @@ async function handleAssign({ rowIndex, driver, job }) {
     refresh()
   } catch {
     toast('Failed to assign driver', 'error')
+  }
+}
+
+async function handleReassign({ rowIndex, newDriver, job }) {
+  try {
+    await store.reassignDriver(rowIndex, newDriver, job, store.headers)
+    const loadIdCol = store.headers.find((h) => /load.?id|job.?id/i.test(h))
+    toast(`Load ${loadIdCol ? job[loadIdCol] : ''} reassigned to ${newDriver}`, 'success')
+    refresh()
+  } catch {
+    toast('Failed to reassign driver', 'error')
+  }
+}
+
+async function handleCancel({ rowIndex, job }) {
+  try {
+    await store.cancelLoad(rowIndex, job, store.headers)
+    const loadIdCol = store.headers.find((h) => /load.?id|job.?id/i.test(h))
+    toast(`Load ${loadIdCol ? job[loadIdCol] : ''} assignment cancelled`, 'success')
+    refresh()
+  } catch {
+    toast('Failed to cancel assignment', 'error')
   }
 }
 

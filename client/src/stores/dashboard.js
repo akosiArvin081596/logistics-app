@@ -60,5 +60,21 @@ export const useDashboardStore = defineStore('dashboard', {
       })
       await api.post('/api/dispatch', { rowIndex, driver, loadId, origin, destination, values })
     },
+
+    async reassignDriver(rowIndex, newDriver, job, headers) {
+      const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
+      const driverCol = headers.find((h) => /^driver$/i.test(h))
+      const loadId = loadIdCol ? job[loadIdCol] || '' : ''
+      const oldDriver = driverCol ? job[driverCol] || '' : ''
+      await api.post('/api/dispatch/reassign', { rowIndex, newDriver, loadId, oldDriver })
+    },
+
+    async cancelLoad(rowIndex, job, headers) {
+      const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
+      const driverCol = headers.find((h) => /^driver$/i.test(h))
+      const loadId = loadIdCol ? job[loadIdCol] || '' : ''
+      const driver = driverCol ? job[driverCol] || '' : ''
+      await api.post('/api/dispatch/cancel', { rowIndex, loadId, driver })
+    },
   },
 })

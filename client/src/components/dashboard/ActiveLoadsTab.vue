@@ -5,6 +5,7 @@
         <thead>
           <tr>
             <th v-for="col in displayCols" :key="col">{{ col }}</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -12,6 +13,20 @@
             <td v-for="col in displayCols" :key="col">
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
               <template v-else>{{ cellValue(job, col) }}</template>
+            </td>
+            <td @click.stop>
+              <div class="action-cell">
+                <select v-model="reassignSelections[job._rowIndex]" class="action-select">
+                  <option value="">Reassign...</option>
+                  <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
+                </select>
+                <button
+                  v-if="reassignSelections[job._rowIndex]"
+                  class="btn btn-primary btn-sm"
+                  @click="confirmReassign(job)"
+                >Reassign</button>
+                <button class="btn btn-danger btn-sm" @click="confirmCancel(job)">Cancel</button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -66,7 +81,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, reactive } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import StatusBadge from '../shared/StatusBadge.vue'
 import EmptyState from '../shared/EmptyState.vue'
@@ -75,12 +90,31 @@ import PaginationBar from '../shared/PaginationBar.vue'
 const props = defineProps({
   jobs: { type: Array, required: true },
   headers: { type: Array, required: true },
+  drivers: { type: Array, default: () => [] },
 })
+
+const emit = defineEmits(['reassign', 'cancel'])
 
 const jobsRef = computed(() => props.jobs)
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(jobsRef)
 
 const selectedJob = ref(null)
+const reassignSelections = reactive({})
+
+function confirmReassign(job) {
+  const newDriver = reassignSelections[job._rowIndex]
+  if (!newDriver) return
+  if (confirm(`Reassign this load to ${newDriver}?`)) {
+    emit('reassign', { rowIndex: job._rowIndex, newDriver, job })
+    reassignSelections[job._rowIndex] = ''
+  }
+}
+
+function confirmCancel(job) {
+  if (confirm('Cancel this assignment? The load will be moved back to the Job Board.')) {
+    emit('cancel', { rowIndex: job._rowIndex, job })
+  }
+}
 
 function openDetail(job) {
   selectedJob.value = job
@@ -342,5 +376,40 @@ const detailSections = computed(() => {
   .modal-body {
     padding: 1rem;
   }
+}
+
+.action-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+.action-select {
+  padding: 0.25rem 0.4rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.78rem;
+  outline: none;
+  min-width: 110px;
+}
+.btn-sm {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-danger {
+  background: var(--danger, #ef4444);
+  color: #fff;
 }
 </style>

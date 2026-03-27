@@ -889,6 +889,139 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 	}
 });
 
+// POST /api/dispatch/reassign — Reassign a load to a different driver
+app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const { rowIndex, newDriver, loadId, oldDriver } = req.body;
+		if (!rowIndex || !newDriver) {
+			return res.status(400).json({ error: "rowIndex and newDriver required" });
+		}
+
+		const sheets = await getSheets();
+		const headerResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking!1:1",
+		});
+		const headers = (headerResp.data.values || [[]])[0];
+		const driverCol = headers.findIndex((h) => /^driver$/i.test(h));
+		if (driverCol === -1) {
+			return res.status(400).json({ error: "Driver column not found" });
+		}
+
+		// Update driver cell
+		const driverColLetter = colLetter(driverCol);
+		await sheets.spreadsheets.values.update({
+			spreadsheetId: SPREADSHEET_ID,
+			range: `Job Tracking!${driverColLetter}${rowIndex}`,
+			valueInputOption: "USER_ENTERED",
+			requestBody: { values: [[newDriver]] },
+		});
+
+		// Log to Status Logs
+		const now = new Date();
+		const logId = `LOG-${now.getTime()}`;
+		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		await sheets.spreadsheets.values.append({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Status Logs",
+			valueInputOption: "USER_ENTERED",
+			requestBody: {
+				values: [[logId, loadId || "", newDriver, dateTime, "Reassigned", `Reassigned from ${oldDriver || "unknown"} to ${newDriver}`]],
+			},
+		});
+
+		// Notify new driver
+		insertNotification.run(
+			newDriver.trim().toLowerCase(), 'load-assigned',
+			`Load Reassigned: ${loadId || 'Load'}`,
+			`Previously assigned to ${oldDriver || 'another driver'}`,
+			JSON.stringify({ loadId, rowIndex })
+		);
+		io.to(newDriver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex });
+
+		// Notify old driver
+		if (oldDriver) {
+			insertNotification.run(
+				oldDriver.trim().toLowerCase(), 'load-assigned',
+				`Load Removed: ${loadId || 'Load'}`,
+				`Reassigned to ${newDriver}`,
+				JSON.stringify({ loadId, rowIndex })
+			);
+		}
+
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error reassigning load:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// POST /api/dispatch/cancel — Cancel a load assignment (set back to Unassigned)
+app.post("/api/dispatch/cancel", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const { rowIndex, loadId, driver } = req.body;
+		if (!rowIndex) {
+			return res.status(400).json({ error: "rowIndex required" });
+		}
+
+		const sheets = await getSheets();
+		const headerResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking!1:1",
+		});
+		const headers = (headerResp.data.values || [[]])[0];
+		const driverColIdx = headers.findIndex((h) => /^driver$/i.test(h));
+		const statusColIdx = headers.findIndex((h) => /^status$/i.test(h));
+
+		// Clear driver and set status to Unassigned
+		const requests = [];
+		if (driverColIdx !== -1) {
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `Job Tracking!${colLetter(driverColIdx)}${rowIndex}`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: { values: [[""]] },
+			});
+		}
+		if (statusColIdx !== -1) {
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `Job Tracking!${colLetter(statusColIdx)}${rowIndex}`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: { values: [["Unassigned"]] },
+			});
+		}
+
+		// Log to Status Logs
+		const now = new Date();
+		const logId = `LOG-${now.getTime()}`;
+		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		await sheets.spreadsheets.values.append({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Status Logs",
+			valueInputOption: "USER_ENTERED",
+			requestBody: {
+				values: [[logId, loadId || "", driver || "", dateTime, "Unassigned", `Assignment cancelled (was ${driver || "unknown"})`]],
+			},
+		});
+
+		// Notify driver
+		if (driver) {
+			insertNotification.run(
+				driver.trim().toLowerCase(), 'load-assigned',
+				`Load Cancelled: ${loadId || 'Load'}`,
+				'Your assignment has been cancelled by dispatch',
+				JSON.stringify({ loadId, rowIndex })
+			);
+		}
+
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error cancelling load:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // DELETE — Clear a row (shifts content up by deleting the row) — Admin only
 app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) => {
 	try {
