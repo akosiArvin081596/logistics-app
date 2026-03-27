@@ -42,20 +42,35 @@
     <Teleport to="body">
       <div v-if="selectedJob" class="modal-overlay" @click.self="selectedJob = null">
         <div class="detail-modal">
+          <!-- Header with Load ID + Status -->
           <div class="modal-header">
-            <h3>Load Details</h3>
+            <div class="modal-title-row">
+              <h3>{{ loadIdValue || 'Load Details' }}</h3>
+              <StatusBadge v-if="statusValue" :status="statusValue" />
+            </div>
             <button class="modal-close" @click="selectedJob = null">&times;</button>
           </div>
+
           <div class="modal-body">
-            <div class="detail-grid">
-              <div v-for="col in headers" :key="col" class="detail-field">
-                <span class="detail-label">{{ col }}</span>
-                <span class="detail-value">
-                  <StatusBadge v-if="/status/i.test(col) && selectedJob[col]" :status="selectedJob[col]" />
-                  <template v-else>{{ detailValue(selectedJob, col) || '—' }}</template>
-                </span>
+            <!-- Grouped sections -->
+            <template v-for="section in detailSections" :key="section.title">
+              <div v-if="section.fields.length" class="detail-section">
+                <div class="section-label">{{ section.title }}</div>
+                <div class="section-card">
+                  <div
+                    v-for="field in section.fields"
+                    :key="field.col"
+                    :class="['card-row', { 'full-width': field.wide }]"
+                  >
+                    <span class="field-label">{{ field.col }}</span>
+                    <span class="field-value">
+                      <StatusBadge v-if="/status/i.test(field.col) && field.value" :status="field.value" />
+                      <template v-else>{{ field.value || '—' }}</template>
+                    </span>
+                  </div>
+                </div>
               </div>
-            </div>
+            </template>
           </div>
         </div>
       </div>
@@ -99,6 +114,58 @@ function detailValue(job, col) {
   }
   return val
 }
+
+// Section grouping patterns
+const sectionPatterns = [
+  { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },
+  { title: 'Route', test: /origin|pickup|shipper|dest|drop|receiver|delivery|consignee|city|state|zip|address|location/i, wide: /address/i },
+  { title: 'Schedule', test: /date|time|pickup.*date|delivery.*date|appointment|eta|scheduled/i },
+  { title: 'Financials', test: /rate|amount|revenue|pay|charge|price|cost|invoice|total/i },
+  { title: 'Broker / Contact', test: /broker|phone|email|contact|customer|client/i, wide: /email/i },
+]
+
+const loadIdValue = computed(() => {
+  if (!selectedJob.value) return ''
+  const col = props.headers.find(h => /load.?id|job.?id/i.test(h))
+  return col ? selectedJob.value[col] || '' : ''
+})
+
+const statusValue = computed(() => {
+  if (!selectedJob.value) return ''
+  const col = props.headers.find(h => /^status$/i.test(h) || /load.*status/i.test(h))
+  return col ? selectedJob.value[col] || '' : ''
+})
+
+const detailSections = computed(() => {
+  if (!selectedJob.value) return []
+  const used = new Set()
+  const sections = []
+
+  for (const sp of sectionPatterns) {
+    const fields = []
+    for (const col of props.headers) {
+      if (used.has(col)) continue
+      if (sp.test.test(col)) {
+        used.add(col)
+        fields.push({ col, value: detailValue(selectedJob.value, col), wide: sp.wide ? sp.wide.test(col) : false })
+      }
+    }
+    sections.push({ title: sp.title, fields })
+  }
+
+  // Remaining fields go into "Other Details"
+  const remaining = []
+  for (const col of props.headers) {
+    if (used.has(col)) continue
+    const val = detailValue(selectedJob.value, col)
+    remaining.push({ col, value: val, wide: false })
+  }
+  if (remaining.length) {
+    sections.push({ title: 'Other Details', fields: remaining })
+  }
+
+  return sections.filter(s => s.fields.length > 0)
+})
 
 const jobsRef = computed(() => props.jobs)
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(jobsRef)
@@ -183,39 +250,53 @@ function assign(job) {
   background: var(--surface-hover, rgba(0, 0, 0, 0.04));
 }
 
+/* Modal overlay */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(0, 0, 0, 0.4);
   z-index: 200;
   display: flex;
   align-items: center;
   justify-content: center;
+  backdrop-filter: blur(2px);
 }
 .detail-modal {
-  background: var(--surface);
-  border-radius: 14px;
-  width: 90%;
-  max-width: 640px;
+  background: var(--bg, #f5f6fa);
+  border-radius: 16px;
+  width: 92%;
+  max-width: 680px;
   max-height: 85vh;
-  overflow-y: auto;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
-  animation: modalIn 0.2s ease-out;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.18);
+  animation: modalIn 0.25s ease-out;
 }
 @keyframes modalIn {
-  from { transform: translateY(12px) scale(0.97); opacity: 0; }
+  from { transform: translateY(16px) scale(0.96); opacity: 0; }
   to { transform: translateY(0) scale(1); opacity: 1; }
 }
+
+/* Header */
 .modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 1.25rem 1.5rem;
+  background: var(--surface, #fff);
   border-bottom: 1px solid var(--border);
+  border-radius: 16px 16px 0 0;
+  flex-shrink: 0;
+}
+.modal-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
 }
 .modal-header h3 {
-  font-size: 1.05rem;
+  font-size: 1.1rem;
   font-weight: 700;
+  margin: 0;
 }
 .modal-close {
   width: 32px;
@@ -227,42 +308,96 @@ function assign(job) {
   border-radius: 8px;
   background: transparent;
   color: var(--text-dim);
-  font-size: 1.2rem;
+  font-size: 1.3rem;
   cursor: pointer;
   transition: all 0.12s;
+  flex-shrink: 0;
 }
 .modal-close:hover {
-  background: var(--surface-hover);
+  background: var(--surface-hover, rgba(0,0,0,0.06));
   color: var(--text);
 }
+
+/* Body */
 .modal-body {
-  padding: 1.5rem;
+  padding: 1.25rem 1.5rem 1.5rem;
+  overflow-y: auto;
+  flex: 1;
 }
-.detail-grid {
+
+/* Sections */
+.detail-section {
+  margin-bottom: 1.25rem;
+}
+.detail-section:last-child {
+  margin-bottom: 0;
+}
+.section-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-dim, #8b8fa3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 0.5rem;
+  padding-left: 0.15rem;
+}
+.section-card {
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 1rem;
+  overflow: hidden;
 }
-.detail-field {
+.card-row {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.15rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  min-width: 0;
 }
-.detail-label {
-  font-size: 0.7rem;
+.card-row.full-width {
+  grid-column: 1 / -1;
+}
+/* Remove bottom border from last row(s) */
+.section-card .card-row:last-child,
+.section-card .card-row:nth-last-child(2):nth-child(odd) {
+  border-bottom: none;
+}
+.field-label {
+  font-size: 0.68rem;
   font-weight: 600;
-  color: var(--text-dim);
+  color: var(--text-dim, #8b8fa3);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.02em;
+  line-height: 1;
 }
-.detail-value {
+.field-value {
   font-size: 0.88rem;
-  color: var(--text);
+  font-weight: 500;
+  color: var(--text, #1a1a2e);
   word-break: break-word;
+  line-height: 1.35;
 }
+
 @media (max-width: 480px) {
-  .detail-grid {
+  .detail-modal {
+    width: 96%;
+    max-height: 90vh;
+    border-radius: 14px;
+  }
+  .modal-header {
+    border-radius: 14px 14px 0 0;
+  }
+  .section-card {
     grid-template-columns: 1fr;
+  }
+  .card-row.full-width {
+    grid-column: 1;
+  }
+  .modal-body {
+    padding: 1rem;
   }
 }
 </style>
