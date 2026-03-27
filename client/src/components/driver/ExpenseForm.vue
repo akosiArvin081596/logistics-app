@@ -39,7 +39,8 @@
         is-link
         readonly
         label="Load"
-        :placeholder="form.loadId || 'General'"
+        :placeholder="form.loadId || 'Select load'"
+        :rules="[{ required: true, message: 'Select a load' }]"
         @click="showLoadPicker = true"
       />
       <van-popup v-model:show="showLoadPicker" round position="bottom">
@@ -145,10 +146,9 @@ const loadIdOptions = computed(() => {
   return props.loads.map((l) => l[loadIdCol]).filter(Boolean)
 })
 
-const loadColumns = computed(() => [
-  { text: 'General', value: '' },
-  ...loadIdOptions.value.map((id) => ({ text: id, value: id })),
-])
+const loadColumns = computed(() =>
+  loadIdOptions.value.map((id) => ({ text: id, value: id }))
+)
 
 function onTypePick({ selectedOptions }) {
   form.type = selectedOptions[0].value
@@ -182,6 +182,10 @@ function handlePhoto(file) {
 }
 
 function handleSubmit() {
+  if (!form.loadId) {
+    toast.show('Select a load for this expense', 'error')
+    return
+  }
   const amount = parseFloat(form.amount)
   if (!amount || amount <= 0) {
     toast.show('Enter a valid amount', 'error')
