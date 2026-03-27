@@ -109,8 +109,8 @@
       </template>
     </div>
 
-    <!-- MAINTENANCE SINKING FUND -->
-    <div v-show="activeSubTab === 'maintenance'" class="sub-panel">
+    <!-- MAINTENANCE SINKING FUND (Super Admin only) -->
+    <div v-show="activeSubTab === 'maintenance' && auth.isSuperAdmin" class="sub-panel">
       <template v-if="maintLoading">
         <div class="skeleton skeleton-card"></div>
       </template>
@@ -187,8 +187,8 @@
       </template>
     </div>
 
-    <!-- IFTA / COMPLIANCE -->
-    <div v-show="activeSubTab === 'ifta'" class="sub-panel">
+    <!-- IFTA / COMPLIANCE (Super Admin only) -->
+    <div v-show="activeSubTab === 'ifta' && auth.isSuperAdmin" class="sub-panel">
       <template v-if="iftaLoading">
         <div class="skeleton skeleton-card"></div>
       </template>
@@ -298,18 +298,24 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
+import { useAuthStore } from '../../stores/auth'
 
 const api = useApi()
 const { show: toast } = useToast()
+const auth = useAuthStore()
 
-const subTabs = [
+const allSubTabs = [
   { key: 'fuel', label: 'Fuel Logs' },
-  { key: 'maintenance', label: 'Maintenance Fund' },
-  { key: 'ifta', label: 'IFTA / Compliance' },
+  { key: 'maintenance', label: 'Maintenance Fund', adminOnly: true },
+  { key: 'ifta', label: 'IFTA / Compliance', adminOnly: true },
 ]
+
+const subTabs = computed(() =>
+  allSubTabs.filter(t => !t.adminOnly || auth.isSuperAdmin)
+)
 
 const activeSubTab = ref('fuel')
 
@@ -424,8 +430,10 @@ async function markFeePaid(id) {
 
 onMounted(() => {
   loadFuel()
-  loadMaintenance()
-  loadIfta()
+  if (auth.isSuperAdmin) {
+    loadMaintenance()
+    loadIfta()
+  }
 })
 </script>
 
