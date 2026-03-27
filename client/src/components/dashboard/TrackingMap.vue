@@ -501,16 +501,38 @@ watch(() => props.visible, (val) => {
   }
 })
 
+function onStatusUpdated(payload) {
+  // Clear route if the selected driver's load was delivered/completed
+  const deliveredStatuses = /^(delivered|completed|pod received)$/i
+  if (
+    payload.newStatus &&
+    deliveredStatuses.test(payload.newStatus) &&
+    selectedDriver.value === payload.driverName
+  ) {
+    routePoints.value = []
+    originLatLng.value = null
+    destLatLng.value = null
+    trailPoints.value = []
+    trailLoadId.value = ''
+    routeDistance.value = null
+    routeEta.value = null
+  }
+  // Refresh locations to get updated loadId
+  fetchLocations()
+}
+
 onMounted(() => {
   socket.connect()
   socket.register('dispatch')
   fetchLocations()
   socket.on('location-update', onLocationUpdate)
-  nowInterval = setInterval(() => { now.value = Date.now() }, 30000)
+  socket.on('status-updated', onStatusUpdated)
+  nowInterval = setInterval(() => { now.value = Date.now() }, 10000)
 })
 
 onUnmounted(() => {
   socket.off('location-update', onLocationUpdate)
+  socket.off('status-updated', onStatusUpdated)
   Object.values(activeAnimations).forEach(cancelAnimationFrame)
   clearInterval(nowInterval)
 })
