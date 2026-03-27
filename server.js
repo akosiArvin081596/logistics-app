@@ -2187,13 +2187,59 @@ app.post("/api/location", requireAuth, async (req, res) => {
 // GET /api/locations/latest — Latest position per active driver with ETA
 app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const locations = db.prepare(
+		// Get latest GPS position per driver (no time filter — show all)
+		const gpsLocations = db.prepare(
 			`SELECT dl.driver, dl.latitude, dl.longitude, dl.speed, dl.heading, dl.timestamp, dl.load_id AS loadId
 			 FROM driver_locations dl
 			 INNER JOIN (SELECT driver, MAX(id) AS max_id FROM driver_locations GROUP BY driver) latest
-			 ON dl.id = latest.max_id
-			 WHERE dl.timestamp > datetime('now', '-1 hour')`
+			 ON dl.id = latest.max_id`
 		).all();
+
+		// Get all drivers from Carrier Database to include those who never reported GPS
+		let allDriverNames = [];
+		try {
+			const sheets = await getSheets();
+			const carrierResp = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: "Carrier Database",
+			});
+			const cRows = carrierResp.data.values || [];
+			if (cRows.length > 1) {
+				const cHeaders = cRows[0];
+				const driverCol = cHeaders.find((h) => /driver/i.test(h)) || cHeaders[0];
+				const driverColIdx = cHeaders.indexOf(driverCol);
+				for (let i = 1; i < cRows.length; i++) {
+					const name = (cRows[i][driverColIdx] || "").trim();
+					if (name) allDriverNames.push(name);
+				}
+			}
+		} catch { /* silent */ }
+
+		// Merge: GPS drivers + carrier drivers with no GPS
+		const gpsMap = {};
+		for (const loc of gpsLocations) gpsMap[loc.driver.toLowerCase()] = loc;
+
+		const locations = [];
+		const seen = new Set();
+		for (const loc of gpsLocations) {
+			locations.push(loc);
+			seen.add(loc.driver.toLowerCase());
+		}
+		for (const name of allDriverNames) {
+			if (!seen.has(name.toLowerCase())) {
+				locations.push({
+					driver: name,
+					latitude: null,
+					longitude: null,
+					speed: 0,
+					heading: 0,
+					timestamp: null,
+					loadId: '',
+					noGps: true,
+				});
+				seen.add(name.toLowerCase());
+			}
+		}
 
 		// Enrich with ETA data from sheet
 		try {

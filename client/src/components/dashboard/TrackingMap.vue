@@ -17,7 +17,7 @@
           attribution="&copy; OpenStreetMap contributors"
         />
         <l-marker
-          v-for="loc in locations"
+          v-for="loc in locationsWithGps"
           :key="loc.driver"
           :ref="el => setMarkerRef(loc.driver, el)"
           :lat-lng="[loc.latitude, loc.longitude]"
@@ -95,13 +95,16 @@
           <div
             v-for="loc in locations"
             :key="loc.driver"
-            :class="['driver-item', { active: selectedDriver === loc.driver }]"
-            @click="focusDriver(loc)"
+            :class="['driver-item', { active: selectedDriver === loc.driver, 'no-gps': loc.noGps }]"
+            @click="!loc.noGps && focusDriver(loc)"
           >
-            <span :class="['driver-dot', isOnline(loc) ? 'online' : 'offline']"></span>
+            <span :class="['driver-dot', loc.noGps ? 'no-gps' : isOnline(loc) ? 'online' : 'offline']"></span>
             <div class="driver-info">
               <span class="driver-name">{{ loc.driver }}</span>
-              <span class="driver-meta">
+              <span v-if="loc.noGps" class="driver-meta">
+                <span class="status-text no-gps">No location data</span>
+              </span>
+              <span v-else class="driver-meta">
                 <span :class="['status-text', isOnline(loc) ? 'online' : 'offline']">{{ isOnline(loc) ? 'Online' : 'Offline' }}</span>
                 <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
               </span>
@@ -337,8 +340,9 @@ async function focusAll() {
   await nextTick()
   const map = mapRef.value?.leafletObject
   if (!map) return
-  if (locations.value.length === 0) return
-  const allPts = locations.value.map(loc => [loc.latitude, loc.longitude])
+  const withGps = locationsWithGps.value
+  if (withGps.length === 0) return
+  const allPts = withGps.map(loc => [loc.latitude, loc.longitude])
   // Include destinations from routes
   for (const r of allRoutes.value) {
     if (r.dest) allPts.push(r.dest)
@@ -368,7 +372,8 @@ function timeAgo(ts) {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
-const onlineCount = computed(() => locations.value.filter(loc => isOnline(loc)).length)
+const locationsWithGps = computed(() => locations.value.filter(loc => !loc.noGps && loc.latitude != null))
+const onlineCount = computed(() => locationsWithGps.value.filter(loc => isOnline(loc)).length)
 
 const mapCenter = ref([39.8283, -98.5795]) // set once after first fetch
 
@@ -402,9 +407,10 @@ async function fetchLocations() {
   try {
     const data = await api.get('/api/locations/latest')
     locations.value = data.locations || []
-    // Fit map to online drivers on initial load
-    if (locations.value.length > 0) {
-      const pts = locations.value.map(l => [l.latitude, l.longitude])
+    // Fit map to drivers with GPS on initial load
+    const withGps = locations.value.filter(l => !l.noGps && l.latitude != null)
+    if (withGps.length > 0) {
+      const pts = withGps.map(l => [l.latitude, l.longitude])
       mapCenter.value = pts[0]
       await nextTick()
       const map = mapRef.value?.leafletObject
@@ -651,6 +657,16 @@ onUnmounted(() => {
 }
 .driver-dot.offline {
   background: #9ca3af;
+}
+.driver-dot.no-gps {
+  background: #d1d5db;
+}
+.driver-item.no-gps {
+  opacity: 0.6;
+  cursor: default;
+}
+.status-text.no-gps {
+  color: #d1d5db;
 }
 
 .driver-info {
