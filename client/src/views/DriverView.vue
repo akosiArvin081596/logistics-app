@@ -187,9 +187,9 @@
       <section v-show="currentTab === 'expenses'" class="tab-panel">
         <div class="section-header">Expenses</div>
 
-        <template v-if="driverStore.workingLoads.length > 0 || driverStore.pendingLoads.length > 0">
+        <template v-if="driverStore.workingLoads.length > 0">
           <ExpenseForm
-            :loads="[...driverStore.workingLoads, ...driverStore.pendingLoads]"
+            :loads="driverStore.workingLoads"
             :driver-name="driverName"
             :headers="driverStore.headers.jobTracking"
             @submit="handleExpenseSubmit"
