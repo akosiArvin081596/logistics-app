@@ -26,6 +26,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 app.use(express.json({ limit: "20mb" }));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // ============================================================
 // SQLite — Local database for app data (messages, users, expenses)
@@ -1793,7 +1794,7 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 		let driveFileId = "";
 		let driveUrl = "";
 
-		// Upload PDF to Google Drive
+		// Upload PDF to Google Drive (fall back to local disk if Drive fails)
 		if (DRIVE_FOLDER_ID) {
 			try {
 				const drive = await getDrive();
@@ -1814,8 +1815,21 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 				driveFileId = driveResponse.data.id || "";
 				driveUrl = driveResponse.data.webViewLink || "";
 			} catch (driveErr) {
-				console.error("Google Drive upload error:", driveErr.message);
-				return res.status(500).json({ error: "Upload to cloud storage failed. Please try again." });
+				console.error("Google Drive upload error (falling back to local):", driveErr.message);
+				// Fall through to local storage below
+			}
+		}
+
+		// Fallback: save to local disk if Drive upload didn't produce a URL
+		if (!driveUrl) {
+			try {
+				const uploadsDir = path.join(__dirname, "uploads");
+				if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+				fs.writeFileSync(path.join(uploadsDir, fileName), pdfBuffer);
+				driveUrl = `/uploads/${fileName}`;
+			} catch (localErr) {
+				console.error("Local file save error:", localErr.message);
+				return res.status(500).json({ error: "Could not save the document. Please try again." });
 			}
 		}
 
