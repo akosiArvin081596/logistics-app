@@ -1583,7 +1583,6 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		}
 
 		// Attach _accepted flag from load_responses
-		const nameLower = driverName.toLowerCase();
 		const acceptedRows = db.prepare(
 			`SELECT load_id FROM load_responses WHERE driver_name = ? AND response = 'accepted'`
 		).all(nameLower);
