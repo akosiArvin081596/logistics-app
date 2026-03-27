@@ -1592,9 +1592,6 @@ app.post("/api/messages", requireAuth, (req, res) => {
 		if (!from || !to || !message) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
-		if (!loadId) {
-			return res.status(400).json({ error: "loadId is required" });
-		}
 
 		const timestamp = new Date().toISOString();
 		const result = db

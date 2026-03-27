@@ -178,10 +178,8 @@
           :messages="driverStore.messages"
           :loads="driverStore.loads"
           :driver-name="driverName"
-          :load-id="chatLoadId"
           @send="handleSendMessage"
           @mark-read="handleMarkRead"
-          @change-load="handleChatLoadChange"
         />
       </section>
 
