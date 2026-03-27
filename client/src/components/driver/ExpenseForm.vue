@@ -146,8 +146,13 @@ function findCol(headers, regex) {
 
 const loadIdOptions = computed(() => {
   const loadIdCol = findCol(props.headers, /load.?id|job.?id/i)
+  const statusCol = findCol(props.headers, /status/i)
   if (!loadIdCol) return []
-  return props.loads.map((l) => l[loadIdCol]).filter(Boolean)
+  const completedRe = /^(delivered|completed|pod received|cancelled)$/i
+  return props.loads
+    .filter((l) => !statusCol || !completedRe.test((l[statusCol] || '').trim()))
+    .map((l) => l[loadIdCol])
+    .filter(Boolean)
 })
 
 const loadColumns = computed(() =>
