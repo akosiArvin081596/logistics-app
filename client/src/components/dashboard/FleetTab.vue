@@ -49,7 +49,10 @@
                 </div>
                 <div class="card-row">
                   <span class="field-label">Current Load</span>
-                  <span class="field-value">{{ selected.CurrentLoad || '—' }}</span>
+                  <span class="field-value">
+                    <a v-if="selected.CurrentLoad" class="load-link" @click.stop="openLoadDetail">{{ selected.CurrentLoad }}</a>
+                    <template v-else>—</template>
+                  </span>
                 </div>
               </div>
             </div>
@@ -79,26 +82,137 @@
         </div>
       </div>
     </Teleport>
+
+    <!-- Load Detail Modal -->
+    <Teleport to="body">
+      <div v-if="selectedLoad" class="modal-overlay load-overlay" @click.self="selectedLoad = null">
+        <div class="detail-modal load-modal">
+          <div class="modal-header">
+            <div class="modal-title-row">
+              <h3>{{ selectedLoadId || 'Load Details' }}</h3>
+              <StatusBadge v-if="selectedLoadStatus" :status="selectedLoadStatus" />
+            </div>
+            <button class="modal-close" @click="selectedLoad = null">&times;</button>
+          </div>
+          <div class="modal-body">
+            <template v-for="section in loadSections" :key="section.title">
+              <div v-if="section.fields.length" class="detail-section">
+                <div class="section-label">{{ section.title }}</div>
+                <div class="section-card">
+                  <div
+                    v-for="field in section.fields"
+                    :key="field.col"
+                    :class="['card-row', { 'full-width': field.wide }]"
+                  >
+                    <span class="field-label">{{ field.col }}</span>
+                    <span class="field-value">
+                      <StatusBadge v-if="/status/i.test(field.col) && field.value" :status="field.value" />
+                      <template v-else>{{ field.value || '—' }}</template>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
 import { ref, computed } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
+import StatusBadge from '../shared/StatusBadge.vue'
 
-defineProps({
+const props = defineProps({
   fleet: { type: Array, required: true },
+  activeJobs: { type: Array, default: () => [] },
+  headers: { type: Array, default: () => [] },
 })
 
 const selected = ref(null)
+const selectedLoad = ref(null)
 
 function openDetail(f) {
   selected.value = f
 }
 
+function openLoadDetail() {
+  if (!selected.value?.CurrentLoad || !props.headers.length) return
+  const loadIdCol = props.headers.find(h => /load.?id|job.?id/i.test(h))
+  if (!loadIdCol) return
+  const job = props.activeJobs.find(j => (j[loadIdCol] || '').trim() === selected.value.CurrentLoad.trim())
+  if (job) {
+    selectedLoad.value = job
+  }
+}
+
 const initials = computed(() => {
   if (!selected.value?.Driver) return '?'
   return selected.value.Driver.split(/\s+/).map(w => w[0]).join('').toUpperCase().slice(0, 2)
+})
+
+// Load detail helpers
+function parseJsonCell(raw) {
+  if (!raw || typeof raw !== 'string' || raw[0] !== '{') return null
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+function loadDetailValue(job, col) {
+  const val = job[col] || ''
+  const parsed = parseJsonCell(val)
+  if (parsed) {
+    return Object.entries(parsed).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(', ')
+  }
+  return val
+}
+
+const sectionPatterns = [
+  { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },
+  { title: 'Route', test: /origin|pickup|shipper|dest|drop|receiver|delivery|consignee|city|state|zip|address|location/i, wide: /address/i },
+  { title: 'Schedule', test: /date|time|pickup.*date|delivery.*date|appointment|eta|scheduled/i },
+  { title: 'Financials', test: /rate|amount|revenue|pay|charge|price|cost|invoice|total/i },
+  { title: 'Broker / Contact', test: /broker|phone|email|contact|customer|client/i, wide: /email/i },
+]
+
+const selectedLoadId = computed(() => {
+  if (!selectedLoad.value) return ''
+  const col = props.headers.find(h => /load.?id|job.?id/i.test(h))
+  return col ? selectedLoad.value[col] || '' : ''
+})
+
+const selectedLoadStatus = computed(() => {
+  if (!selectedLoad.value) return ''
+  const col = props.headers.find(h => /^status$/i.test(h) || /load.*status/i.test(h))
+  return col ? selectedLoad.value[col] || '' : ''
+})
+
+const loadSections = computed(() => {
+  if (!selectedLoad.value) return []
+  const used = new Set()
+  const sections = []
+
+  for (const sp of sectionPatterns) {
+    const fields = []
+    for (const col of props.headers) {
+      if (used.has(col)) continue
+      if (sp.test.test(col)) {
+        used.add(col)
+        fields.push({ col, value: loadDetailValue(selectedLoad.value, col), wide: sp.wide ? sp.wide.test(col) : false })
+      }
+    }
+    sections.push({ title: sp.title, fields })
+  }
+
+  const remaining = []
+  for (const col of props.headers) {
+    if (used.has(col)) continue
+    remaining.push({ col, value: loadDetailValue(selectedLoad.value, col), wide: false })
+  }
+  if (remaining.length) sections.push({ title: 'Other Details', fields: remaining })
+
+  return sections.filter(s => s.fields.length > 0)
 })
 </script>
 
@@ -325,6 +439,26 @@ const initials = computed(() => {
   font-size: 1.25rem;
   font-weight: 700;
   font-family: 'JetBrains Mono', monospace;
+}
+.load-link {
+  color: var(--blue, #3b82f6);
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  padding: 0.1rem 0.4rem;
+  background: var(--blue-dim, #dbeafe);
+  border-radius: 4px;
+  transition: opacity 0.15s;
+}
+.load-link:hover {
+  opacity: 0.8;
+}
+.load-overlay {
+  z-index: 210;
+}
+.load-modal {
+  max-width: 680px;
 }
 
 @media (max-width: 480px) {

@@ -56,7 +56,7 @@
         <ActiveLoadsTab :jobs="store.activeJobs" :headers="store.headers" />
       </div>
       <div v-show="activeTab === 'fleet'" class="tab-panel active">
-        <FleetTab :fleet="store.fleet" />
+        <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />
       </div>
     </div>
   </div>
