@@ -337,9 +337,8 @@ async function focusAll() {
   await nextTick()
   const map = mapRef.value?.leafletObject
   if (!map) return
-  const onlineLocs = locations.value.filter(loc => isOnline(loc))
-  if (onlineLocs.length === 0) return
-  const allPts = onlineLocs.map(loc => [loc.latitude, loc.longitude])
+  if (locations.value.length === 0) return
+  const allPts = locations.value.map(loc => [loc.latitude, loc.longitude])
   // Include destinations from routes
   for (const r of allRoutes.value) {
     if (r.dest) allPts.push(r.dest)
@@ -383,8 +382,7 @@ function updateMarkerVisibility() {
     if (!layer) continue
     let show = false
     if (showAll) {
-      const loc = locations.value.find(l => l.driver === driver)
-      show = loc ? isOnline(loc) : false
+      show = true
     } else {
       show = driver === sel
     }
@@ -406,8 +404,7 @@ async function fetchLocations() {
     locations.value = data.locations || []
     // Fit map to online drivers on initial load
     if (locations.value.length > 0) {
-      const online = locations.value.filter(loc => isOnline(loc))
-      const pts = (online.length > 0 ? online : locations.value).map(l => [l.latitude, l.longitude])
+      const pts = locations.value.map(l => [l.latitude, l.longitude])
       mapCenter.value = pts[0]
       await nextTick()
       const map = mapRef.value?.leafletObject
