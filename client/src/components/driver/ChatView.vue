@@ -1,8 +1,13 @@
 <template>
   <div class="chat-container">
-    <!-- Current load indicator -->
-    <div v-if="currentLoadId" class="chat-load-banner">
-      Current Load: <strong>{{ currentLoadId }}</strong>
+    <!-- Chat header -->
+    <div class="chat-header">
+      <div class="chat-avatar">D</div>
+      <div class="chat-header-info">
+        <span class="chat-recipient">Dispatch</span>
+        <span v-if="currentLoadId" class="chat-load-tag">Load {{ currentLoadId }}</span>
+        <span v-else class="chat-load-tag">General</span>
+      </div>
     </div>
 
     <!-- Messages -->
@@ -153,13 +158,40 @@ watch(
   height: calc(100vh - 200px);
 }
 
-.chat-load-banner {
-  padding: 0.45rem 0.75rem;
-  background: var(--accent-dim, #e0e7ff);
-  color: var(--accent, #6366f1);
-  font-size: 0.75rem;
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   margin-bottom: 0.5rem;
+}
+.chat-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent, #6366f1);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+.chat-header-info {
+  display: flex;
+  flex-direction: column;
+}
+.chat-recipient {
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+.chat-load-tag {
+  font-size: 0.7rem;
+  color: var(--text-dim);
 }
 
 .chat-messages {
