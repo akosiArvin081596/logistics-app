@@ -14,7 +14,7 @@
             <template v-if="editingRow === row._rowIndex">
               <!-- Driver column: render select -->
               <select
-                v-if="isDriverField(h) && driverList.length"
+                v-if="isDriverField(h) && driverList.length && props.currentSheet !== 'Carrier Database'"
                 :data-header="h"
                 :value="editValues[h]"
                 @input="editValues[h] = $event.target.value"
@@ -66,6 +66,7 @@ const props = defineProps({
   data: { type: Array, required: true },
   editingRow: { type: Number, default: null },
   driverList: { type: Array, default: () => [] },
+  currentSheet: { type: String, default: '' },
   userRole: { type: String, default: '' },
 })
 

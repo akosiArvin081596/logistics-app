@@ -29,6 +29,7 @@
       :data="store.data"
       :editing-row="store.editingRow"
       :driver-list="store.driverList"
+      :current-sheet="store.currentSheet"
       :user-role="auth.user?.role"
       @edit="handleEdit"
       @save="handleSave"
@@ -50,6 +51,7 @@
     <AddRowModal
       :headers="store.headers"
       :driver-list="store.driverList"
+      :current-sheet="store.currentSheet"
       :open="showModal"
       @submit="handleAdd"
       @close="showModal = false"

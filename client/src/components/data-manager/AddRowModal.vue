@@ -41,7 +41,7 @@
               <div v-if="!hiddenCoordHeaders.has(h)" class="form-field">
                 <label>{{ h }}</label>
                 <select
-                  v-if="isDriverField(h) && driverList.length"
+                  v-if="isDriverField(h) && driverList.length && props.currentSheet !== 'Carrier Database'"
                   v-model="formValues[h]"
                 >
                   <option value="">Select driver</option>
@@ -81,6 +81,7 @@ import LocationPickerModal from './LocationPickerModal.vue'
 const props = defineProps({
   headers: { type: Array, required: true },
   driverList: { type: Array, default: () => [] },
+  currentSheet: { type: String, default: '' },
   open: { type: Boolean, default: false },
 })
 
