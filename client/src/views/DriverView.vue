@@ -318,9 +318,9 @@ const detailLoad = computed(() => {
   return driverStore.loads.find(l => l._rowIndex === detailRowIndex.value) || null
 })
 
-// Current active load for status tab (first working load)
+// Current active load for status tab (only working loads — not pending/delivered)
 const currentActiveLoad = computed(() => {
-  return driverStore.workingLoads[0] || driverStore.activeLoads[0] || null
+  return driverStore.workingLoads[0] || null
 })
 
 const statusDocListRef = ref(null)
