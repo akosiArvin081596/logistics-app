@@ -61,7 +61,7 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.investor-dashboard { padding-bottom: 1.5rem; }
+.investor-dashboard { padding-bottom: 3rem; }
 
 .skeleton-block {
   height: 200px;
