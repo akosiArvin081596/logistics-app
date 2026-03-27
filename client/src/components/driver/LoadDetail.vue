@@ -32,9 +32,18 @@
             v-for="f in pickupFields"
             :key="f.header"
             :title="f.label"
-            :value="f.value || '\u2014'"
             :border="true"
-          />
+          >
+            <template #value>
+              <div class="cell-value-row">
+                <span>{{ f.value || '\u2014' }}</span>
+                <button v-if="isAddress(f.header) && f.value" class="copy-btn" @click.stop="copyText(f.value)">
+                  <span v-if="copiedField === f.header" class="copied-text">Copied</span>
+                  <span v-else class="copy-icon">&#128203;</span>
+                </button>
+              </div>
+            </template>
+          </van-cell>
         </template>
         <van-empty v-else description="No pickup details available" image="search" :image-size="60" />
       </van-collapse-item>
@@ -45,9 +54,18 @@
             v-for="f in dropoffFields"
             :key="f.header"
             :title="f.label"
-            :value="f.value || '\u2014'"
             :border="true"
-          />
+          >
+            <template #value>
+              <div class="cell-value-row">
+                <span>{{ f.value || '\u2014' }}</span>
+                <button v-if="isAddress(f.header) && f.value" class="copy-btn" @click.stop="copyText(f.value)">
+                  <span v-if="copiedField === f.header" class="copied-text">Copied</span>
+                  <span v-else class="copy-icon">&#128203;</span>
+                </button>
+              </div>
+            </template>
+          </van-cell>
         </template>
         <van-empty v-else description="No drop-off details available" image="search" :image-size="60" />
       </van-collapse-item>
@@ -77,6 +95,23 @@ const props = defineProps({
 const emit = defineEmits(['back', 'status-update', 'uploaded'])
 
 const openSections = ref(['map'])
+const copiedField = ref(null)
+
+function isAddress(header) {
+  return /address|addr|location/i.test(header)
+}
+
+function copyText(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    // Find which field was copied to show "Copied" feedback
+    const all = [...pickupFields.value, ...dropoffFields.value]
+    const field = all.find(f => f.value === text)
+    if (field) {
+      copiedField.value = field.header
+      setTimeout(() => { copiedField.value = null }, 1500)
+    }
+  })
+}
 
 function findCol(headers, regex) {
   return (headers || []).find((h) => regex.test(h)) || null
@@ -196,5 +231,31 @@ const dropoffFields = computed(() => {
   padding: 0;
   margin-bottom: 0;
   box-shadow: none;
+}
+
+.cell-value-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+.copy-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0.15rem;
+  font-size: 0.85rem;
+  line-height: 1;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+.copy-btn:hover {
+  opacity: 1;
+}
+.copied-text {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: #16a34a;
 }
 </style>
