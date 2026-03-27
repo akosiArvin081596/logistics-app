@@ -118,36 +118,34 @@
       <!-- STATUS TAB -->
       <section v-show="currentTab === 'status'" class="tab-panel">
         <div class="section-header">Status Update</div>
-        <template v-if="driverStore.activeLoads.length === 0">
+        <template v-if="!currentActiveLoad">
           <EmptyState>
             <div class="empty-icon">&#128666;</div>
             No active loads to update.
           </EmptyState>
         </template>
         <template v-else>
-          <!-- Load selector for multiple active loads -->
-          <select
-            v-if="driverStore.activeLoads.length > 1"
-            v-model="selectedStatusRowIndex"
-            class="load-selector"
-            @change="onStatusLoadChange"
-          >
-            <option
-              v-for="l in driverStore.activeLoads"
-              :key="l._rowIndex"
-              :value="l._rowIndex"
-            >{{ getLoadId(l) }}</option>
-          </select>
+          <div class="status-load-header">
+            <span class="status-load-id">{{ getLoadId(currentActiveLoad) }}</span>
+            <StatusBadge :status="getLoadStatus(currentActiveLoad)" />
+          </div>
 
           <StatusStepper
-            v-if="selectedLoad"
-            :load="selectedLoad"
+            :load="currentActiveLoad"
             :headers="driverStore.headers.jobTracking"
-            :current-status="getLoadStatus(selectedLoad)"
+            :current-status="getLoadStatus(currentActiveLoad)"
             :driver-name="driverName"
             @update="handleStatusUpdate"
           />
 
+          <div class="status-section-divider">Documents</div>
+          <DocumentUpload
+            :load-id="getLoadId(currentActiveLoad)"
+            :driver-name="driverName"
+            :row-index="currentActiveLoad._rowIndex"
+            @uploaded="onStatusDocUploaded"
+          />
+          <DocumentList ref="statusDocListRef" :load-id="getLoadId(currentActiveLoad)" />
         </template>
       </section>
 
@@ -266,9 +264,11 @@ import ExpenseForm from '../components/driver/ExpenseForm.vue'
 import ExpenseCard from '../components/driver/ExpenseCard.vue'
 import DriverKit from '../components/driver/DriverKit.vue'
 import DocumentUpload from '../components/driver/DocumentUpload.vue'
+import DocumentList from '../components/driver/DocumentList.vue'
 import LoadAssignedBanner from '../components/driver/LoadAssignedBanner.vue'
 import NotificationList from '../components/driver/NotificationList.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
+import StatusBadge from '../components/shared/StatusBadge.vue'
 
 const auth = useAuthStore()
 const driverStore = useDriverStore()
@@ -318,7 +318,19 @@ const detailLoad = computed(() => {
   return driverStore.loads.find(l => l._rowIndex === detailRowIndex.value) || null
 })
 
-// Selected load for status tab
+// Current active load for status tab (first working load)
+const currentActiveLoad = computed(() => {
+  return driverStore.workingLoads[0] || driverStore.activeLoads[0] || null
+})
+
+const statusDocListRef = ref(null)
+
+function onStatusDocUploaded() {
+  if (statusDocListRef.value) statusDocListRef.value.refresh()
+  handleRefresh()
+}
+
+// Selected load for status tab (kept for compatibility)
 const selectedLoad = computed(() => {
   if (!selectedStatusRowIndex.value && driverStore.activeLoads.length > 0) {
     return driverStore.activeLoads[0]
@@ -736,6 +748,32 @@ onUnmounted(() => {
 }
 
 /* Load selector */
+.status-load-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 1rem;
+}
+.status-load-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+.status-section-divider {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  padding-left: 0.1rem;
+}
+
 .load-selector {
   width: 100%;
   padding: 0.6rem 0.75rem;

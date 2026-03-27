@@ -53,24 +53,7 @@
       </van-collapse-item>
 
       <van-collapse-item title="Documents" name="documents">
-        <DocumentUpload
-          :load-id="loadId"
-          :driver-name="driverName"
-          :row-index="load._rowIndex"
-          @uploaded="onDocUploaded"
-        />
-        <DocumentList ref="docListRef" :load-id="loadId" />
-      </van-collapse-item>
-
-      <van-collapse-item title="Status Update" name="status">
-        <StatusStepper
-          :load="load"
-          :headers="headers"
-          :current-status="status"
-          :driver-name="driverName"
-          :blocked="hasActiveJob && isPending"
-          @update="$emit('status-update', $event)"
-        />
+        <DocumentList :load-id="loadId" />
       </van-collapse-item>
     </van-collapse>
   </div>
@@ -80,8 +63,6 @@
 import { computed, ref } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
 import StatusBadge from '../shared/StatusBadge.vue'
-import StatusStepper from './StatusStepper.vue'
-import DocumentUpload from './DocumentUpload.vue'
 import DocumentList from './DocumentList.vue'
 import DriverRouteMap from './DriverRouteMap.vue'
 
@@ -96,12 +77,6 @@ const props = defineProps({
 const emit = defineEmits(['back', 'status-update', 'uploaded'])
 
 const openSections = ref(['map'])
-const docListRef = ref(null)
-
-function onDocUploaded() {
-  if (docListRef.value) docListRef.value.refresh()
-  emit('uploaded')
-}
 
 function findCol(headers, regex) {
   return (headers || []).find((h) => regex.test(h)) || null
