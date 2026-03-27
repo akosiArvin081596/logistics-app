@@ -39,9 +39,9 @@
           </l-popup>
         </l-marker>
 
-        <!-- Planned route (origin to destination) -->
+        <!-- Single driver route (when one driver selected) -->
         <l-polyline
-          v-if="routePoints.length >= 2"
+          v-if="selectedDriver !== '__all__' && routePoints.length >= 2"
           :lat-lngs="routePoints"
           color="#000000"
           :weight="6"
@@ -49,17 +49,30 @@
           dashArray="12, 8"
           className="route-animate"
         />
-
-
-        <!-- Origin marker (green) -->
-        <l-marker v-if="originLatLng" :lat-lng="originLatLng" :icon="originIcon">
+        <l-marker v-if="selectedDriver !== '__all__' && originLatLng" :lat-lng="originLatLng" :icon="originIcon">
           <l-popup><div class="marker-popup"><strong>Origin (Shipper)</strong></div></l-popup>
         </l-marker>
-
-        <!-- Destination marker (red) -->
-        <l-marker v-if="destLatLng" :lat-lng="destLatLng" :icon="destIcon">
+        <l-marker v-if="selectedDriver !== '__all__' && destLatLng" :lat-lng="destLatLng" :icon="destIcon">
           <l-popup><div class="marker-popup"><strong>Destination (Receiver)</strong></div></l-popup>
         </l-marker>
+
+        <!-- All drivers routes (when "All Drivers" selected) -->
+        <template v-if="selectedDriver === '__all__'">
+          <template v-for="r in allRoutes" :key="r.driver">
+            <l-polyline
+              v-if="r.route.length >= 2"
+              :lat-lngs="r.route"
+              :color="r.color"
+              :weight="4"
+              :opacity="0.7"
+              dashArray="10, 6"
+              className="route-animate"
+            />
+            <l-marker v-if="r.dest" :lat-lng="r.dest" :icon="destIcon">
+              <l-popup><div class="marker-popup"><strong>{{ r.driver }} — Destination</strong></div></l-popup>
+            </l-marker>
+          </template>
+        </template>
       </l-map>
 
       <!-- Driver list panel -->
@@ -76,7 +89,7 @@
             <span class="driver-dot all-dot"></span>
             <div class="driver-info">
               <span class="driver-name">All Drivers</span>
-              <span class="driver-coords">Show all locations</span>
+              <span class="driver-coords">{{ onlineCount }} online — show all routes</span>
             </div>
           </div>
           <div
@@ -124,7 +137,7 @@ const selectedDriver = ref('')
 const panelCollapsed = ref(false)
 const markerRefs = {}
 
-// Trail state
+// Trail state (single driver)
 const trailPoints = ref([])
 const routePoints = ref([])
 const originLatLng = ref(null)
@@ -132,6 +145,10 @@ const destLatLng = ref(null)
 const trailLoadId = ref('')
 const routeDistance = ref(null)
 const routeEta = ref(null)
+
+// All-drivers route state
+const allRoutes = ref([])
+const ROUTE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#65a30d']
 
 // Animation state
 const activeAnimations = {}
@@ -230,6 +247,7 @@ async function fetchTrail(driverName, loadId) {
 
 async function focusDriver(loc) {
   selectedDriver.value = loc.driver
+  allRoutes.value = []
   const map = mapRef.value?.leafletObject
 
   // Zoom to driver immediately so the map responds on click
@@ -285,8 +303,9 @@ async function checkOffRoute(lat, lng) {
   }
 }
 
-function focusAll() {
+async function focusAll() {
   selectedDriver.value = '__all__'
+  // Clear single-driver state
   trailPoints.value = []
   routePoints.value = []
   originLatLng.value = null
@@ -294,6 +313,39 @@ function focusAll() {
   trailLoadId.value = ''
   routeDistance.value = null
   routeEta.value = null
+
+  // Fetch routes for all online drivers with a load
+  const onlineWithLoad = locations.value.filter(loc => isOnline(loc) && loc.loadId)
+  const routes = await Promise.all(
+    onlineWithLoad.map(async (loc, i) => {
+      try {
+        const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(loc.driver)}&loadId=${encodeURIComponent(loc.loadId)}`)
+        return {
+          driver: loc.driver,
+          route: (data.route || []).map(p => [p.latitude, p.longitude]),
+          dest: data.destination ? [data.destination.latitude, data.destination.longitude] : null,
+          color: ROUTE_COLORS[i % ROUTE_COLORS.length],
+        }
+      } catch {
+        return null
+      }
+    })
+  )
+  allRoutes.value = routes.filter(r => r && r.route.length >= 2)
+
+  // Fit bounds to all online drivers
+  await nextTick()
+  const map = mapRef.value?.leafletObject
+  if (!map) return
+  const onlineLocs = locations.value.filter(loc => isOnline(loc))
+  if (onlineLocs.length === 0) return
+  const allPts = onlineLocs.map(loc => [loc.latitude, loc.longitude])
+  // Include destinations from routes
+  for (const r of allRoutes.value) {
+    if (r.dest) allPts.push(r.dest)
+  }
+  const bounds = L.latLngBounds(allPts.map(p => L.latLng(p[0], p[1])))
+  map.fitBounds(bounds, { padding: [50, 50], maxZoom: 12, animate: true })
 }
 
 // Online/offline detection (5-minute threshold)
@@ -317,6 +369,8 @@ function timeAgo(ts) {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
+const onlineCount = computed(() => locations.value.filter(loc => isOnline(loc)).length)
+
 const mapCenter = ref([39.8283, -98.5795]) // set once after first fetch
 
 function updateMarkerVisibility() {
@@ -327,7 +381,14 @@ function updateMarkerVisibility() {
   for (const [driver, ref] of Object.entries(markerRefs)) {
     const layer = ref?.leafletObject
     if (!layer) continue
-    if (showAll || driver === sel) {
+    let show = false
+    if (showAll) {
+      const loc = locations.value.find(l => l.driver === driver)
+      show = loc ? isOnline(loc) : false
+    } else {
+      show = driver === sel
+    }
+    if (show) {
       if (!map.hasLayer(layer)) map.addLayer(layer)
     } else {
       if (map.hasLayer(layer)) map.removeLayer(layer)
