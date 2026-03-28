@@ -30,13 +30,14 @@
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
             <td @click.stop>
-              <div class="assign-cell">
+              <div v-if="!hideAssign(job)" class="assign-cell">
                 <select v-model="assignSelections[job._rowIndex]">
                   <option value="">Select driver</option>
                   <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
                 </select>
                 <button class="btn btn-primary btn-sm" @click="assign(job)">Assign</button>
               </div>
+              <span v-else class="text-dim">&mdash;</span>
             </td>
           </tr>
         </tbody>
@@ -136,6 +137,15 @@ const auth = useAuthStore()
 
 const assignSelections = reactive({})
 const selectedJob = ref(null)
+
+const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || null)
+
+function hideAssign(job) {
+  if (statusCol.value && /^completed$/i.test((job[statusCol.value] || '').trim())) return true
+  const warn = missingData(job)
+  if (warn.includes('Missing pickup location') || warn.includes('Missing delivery location')) return true
+  return false
+}
 
 function openDetail(job) {
   selectedJob.value = job
