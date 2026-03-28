@@ -1,6 +1,6 @@
 <template>
   <div class="kpi-grid">
-    <div class="kpi-card accent">
+    <div class="kpi-card accent clickable" @click="emit('card-click', 'active')">
       <div class="kpi-icon">🚛</div>
       <div class="kpi-body">
         <div class="kpi-label">Active Loads</div>
@@ -8,7 +8,7 @@
         <div class="kpi-sub">Currently in progress</div>
       </div>
     </div>
-    <div class="kpi-card danger">
+    <div class="kpi-card danger clickable" @click="emit('card-click', 'unassigned')">
       <div class="kpi-icon">⚠️</div>
       <div class="kpi-body">
         <div class="kpi-label">Unassigned</div>
@@ -16,7 +16,7 @@
         <div class="kpi-sub">Waiting for dispatch</div>
       </div>
     </div>
-    <div class="kpi-card blue">
+    <div class="kpi-card blue clickable" @click="emit('card-click', 'completed')">
       <div class="kpi-icon">✅</div>
       <div class="kpi-body">
         <div class="kpi-label">Completed</div>
@@ -24,7 +24,7 @@
         <div class="kpi-sub">{{ kpis.completedThisWeek }} this week</div>
       </div>
     </div>
-    <div class="kpi-card amber">
+    <div class="kpi-card amber clickable" @click="emit('card-click', 'fleet')">
       <div class="kpi-icon">🚐</div>
       <div class="kpi-body">
         <div class="kpi-label">Fleet Utilization</div>
@@ -41,6 +41,8 @@ import { computed } from 'vue'
 const props = defineProps({
   kpis: { type: Object, required: true },
 })
+
+const emit = defineEmits(['card-click'])
 
 const fu = computed(() => props.kpis.fleetUtilization || { assigned: 0, total: 0 })
 </script>
@@ -68,6 +70,14 @@ const fu = computed(() => props.kpis.fleetUtilization || { assigned: 0, total: 0
 .kpi-card.danger { border-left-color: var(--danger); }
 .kpi-card.blue   { border-left-color: var(--blue); }
 .kpi-card.amber  { border-left-color: var(--amber); }
+.kpi-card.clickable {
+  cursor: pointer;
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+.kpi-card.clickable:hover {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  transform: translateY(-1px);
+}
 
 .kpi-icon {
   font-size: 1.4rem;

@@ -71,6 +71,17 @@
                 </div>
               </div>
             </template>
+
+            <!-- Route Map -->
+            <div class="detail-section">
+              <div class="section-label">Route Map</div>
+              <DriverRouteMap
+                :load="selectedJob"
+                :headers="headers"
+                :driver-position="null"
+                dispatch-mode
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -87,6 +98,7 @@ import StatusBadge from '../shared/StatusBadge.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import SkeletonLoader from '../shared/SkeletonLoader.vue'
+import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
 const props = defineProps({
   jobs: { type: Array, required: true },

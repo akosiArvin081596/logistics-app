@@ -893,17 +893,53 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex, driver, loadId, values, origin, destination } = req.body;
-		if (!rowIndex || !driver || !values) {
-			return res.status(400).json({ error: "rowIndex, driver, and values required" });
+		const { rowIndex, driver, loadId, origin, destination } = req.body;
+		if (!rowIndex || !driver) {
+			return res.status(400).json({ error: "rowIndex and driver required" });
 		}
 
 		const sheets = await getSheets();
+		const headerResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking!1:1",
+		});
+		const headers = (headerResp.data.values || [[]])[0];
+		const driverColIdx = headers.findIndex((h) => /driver/i.test(h));
+		const statusColIdx = headers.findIndex((h) => /status/i.test(h));
+
+		if (driverColIdx === -1) {
+			return res.status(400).json({ error: "Driver column not found" });
+		}
+
+		// Update driver cell
 		await sheets.spreadsheets.values.update({
 			spreadsheetId: SPREADSHEET_ID,
-			range: `Job Tracking!A${rowIndex}`,
+			range: `Job Tracking!${colLetter(driverColIdx)}${rowIndex}`,
 			valueInputOption: "USER_ENTERED",
-			requestBody: { values: [values] },
+			requestBody: { values: [[driver]] },
+		});
+
+		// Update status cell to Dispatched
+		if (statusColIdx !== -1) {
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `Job Tracking!${colLetter(statusColIdx)}${rowIndex}`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: { values: [["Dispatched"]] },
+			});
+		}
+
+		// Log to Status Logs
+		const now = new Date();
+		const logId = `LOG-${now.getTime()}`;
+		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		await sheets.spreadsheets.values.append({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Status Logs",
+			valueInputOption: "USER_ENTERED",
+			requestBody: {
+				values: [[logId, loadId || "", driver, dateTime, "Dispatched", `Assigned to ${driver}`]],
+			},
 		});
 
 		// Persist notification and notify the driver in real-time
@@ -915,6 +951,19 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			JSON.stringify({ loadId, rowIndex, origin: origin || '', destination: destination || '' })
 		);
 		io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
+
+		// Notify dispatch team
+		insertDispatchNotification.run(
+			'load-assigned',
+			`Assigned ${driver} to Load ${loadId || 'N/A'}`,
+			route,
+			JSON.stringify({ loadId, driver, rowIndex })
+		);
+		io.to("dispatch").emit("dispatch-notification", {
+			type: 'load-assigned',
+			title: `Assigned ${driver} to Load ${loadId || 'N/A'}`,
+			body: route,
+		});
 
 		res.json({ success: true });
 	} catch (error) {
@@ -937,7 +986,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			range: "Job Tracking!1:1",
 		});
 		const headers = (headerResp.data.values || [[]])[0];
-		const driverCol = headers.findIndex((h) => /^driver$/i.test(h));
+		const driverCol = headers.findIndex((h) => /driver/i.test(h));
 		if (driverCol === -1) {
 			return res.status(400).json({ error: "Driver column not found" });
 		}
@@ -983,6 +1032,19 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			);
 		}
 
+		// Notify dispatch team
+		insertDispatchNotification.run(
+			'load-reassigned',
+			`Reassigned Load ${loadId || 'N/A'} to ${newDriver}`,
+			`Previously ${oldDriver || 'unknown'}`,
+			JSON.stringify({ loadId, newDriver, oldDriver, rowIndex })
+		);
+		io.to("dispatch").emit("dispatch-notification", {
+			type: 'load-reassigned',
+			title: `Reassigned Load ${loadId || 'N/A'} to ${newDriver}`,
+			body: `Previously ${oldDriver || 'unknown'}`,
+		});
+
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error reassigning load:", error.message);
@@ -1004,8 +1066,8 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin", "Dispatcher"), async
 			range: "Job Tracking!1:1",
 		});
 		const headers = (headerResp.data.values || [[]])[0];
-		const driverColIdx = headers.findIndex((h) => /^driver$/i.test(h));
-		const statusColIdx = headers.findIndex((h) => /^status$/i.test(h));
+		const driverColIdx = headers.findIndex((h) => /driver/i.test(h));
+		const statusColIdx = headers.findIndex((h) => /status/i.test(h));
 
 		// Clear driver and set status to Unassigned
 		const requests = [];
@@ -1048,6 +1110,19 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin", "Dispatcher"), async
 				JSON.stringify({ loadId, rowIndex })
 			);
 		}
+
+		// Notify dispatch team
+		insertDispatchNotification.run(
+			'load-cancelled',
+			`Cancelled Load ${loadId || 'N/A'}`,
+			`Was assigned to ${driver || 'unknown'}`,
+			JSON.stringify({ loadId, driver, rowIndex })
+		);
+		io.to("dispatch").emit("dispatch-notification", {
+			type: 'load-cancelled',
+			title: `Cancelled Load ${loadId || 'N/A'}`,
+			body: `Was assigned to ${driver || 'unknown'}`,
+		});
 
 		res.json({ success: true });
 	} catch (error) {
@@ -1374,6 +1449,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const respActive = req.session.user.role !== "Super Admin"
 			? sanitizeBrokerColumns(jobTracking.headers, activeJobs)
 			: activeJobs;
+		const respCompleted = req.session.user.role !== "Super Admin"
+			? sanitizeBrokerColumns(jobTracking.headers, completedJobs)
+			: completedJobs;
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -1392,6 +1470,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			unassignedJobs: respUnassigned,
 			jobTrackingHeaders: jobTracking.headers,
 			activeJobs: respActive,
+			completedJobs: respCompleted,
 			fleet,
 			drivers: driverList,
 		});

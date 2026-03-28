@@ -5,7 +5,6 @@
         <thead>
           <tr>
             <th v-for="col in displayCols" :key="col">{{ col }}</th>
-            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -14,35 +13,10 @@
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
-            <td @click.stop>
-              <div class="action-cell">
-                <select v-model="statusSelections[job._rowIndex]" class="action-select">
-                  <option value="">Update Status...</option>
-                  <option v-for="s in statusOptions" :key="s" :value="s">{{ s }}</option>
-                </select>
-                <button
-                  v-if="statusSelections[job._rowIndex]"
-                  class="btn btn-primary btn-sm"
-                  @click="confirmStatusUpdate(job)"
-                >Update</button>
-              </div>
-              <div class="action-cell" style="margin-top:0.3rem">
-                <select v-model="reassignSelections[job._rowIndex]" class="action-select">
-                  <option value="">Reassign...</option>
-                  <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
-                </select>
-                <button
-                  v-if="reassignSelections[job._rowIndex]"
-                  class="btn btn-primary btn-sm"
-                  @click="confirmReassign(job)"
-                >Reassign</button>
-                <button class="btn btn-danger btn-sm" @click="confirmCancel(job)">Cancel</button>
-              </div>
-            </td>
           </tr>
         </tbody>
       </table>
-      <EmptyState v-else>No active loads right now.</EmptyState>
+      <EmptyState v-else>No completed loads.</EmptyState>
     </div>
     <PaginationBar
       :page="page"
@@ -55,14 +29,14 @@
 
     <!-- Load Detail Modal -->
     <Teleport to="body">
-      <div v-if="selectedJob" class="modal-overlay" @click.self="closeDetail">
+      <div v-if="selectedJob" class="modal-overlay" @click.self="selectedJob = null">
         <div class="detail-modal">
           <div class="modal-header">
             <div class="modal-title-row">
               <h3>{{ loadIdValue || 'Load Details' }}</h3>
               <StatusBadge v-if="statusValue" :status="statusValue" />
             </div>
-            <button class="modal-close" @click="closeDetail">&times;</button>
+            <button class="modal-close" @click="selectedJob = null">&times;</button>
           </div>
 
           <div class="modal-body">
@@ -78,7 +52,7 @@
                     <span class="field-label">{{ field.col }}</span>
                     <span class="field-value">
                       <StatusBadge v-if="/status/i.test(field.col) && field.value" :status="field.value" />
-                      <template v-else>{{ field.value || '—' }}</template>
+                      <template v-else>{{ field.value || '\u2014' }}</template>
                     </span>
                   </div>
                 </div>
@@ -91,7 +65,7 @@
               <DriverRouteMap
                 :load="selectedJob"
                 :headers="headers"
-                :driver-position="selectedDriverPosition"
+                :driver-position="null"
                 dispatch-mode
               />
             </div>
@@ -103,86 +77,32 @@
 </template>
 
 <script setup>
-import { computed, ref, reactive } from 'vue'
+import { computed, ref } from 'vue'
 import { usePagination } from '../../composables/usePagination'
-import { useApi } from '../../composables/useApi'
 import StatusBadge from '../shared/StatusBadge.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
-const api = useApi()
-
 const props = defineProps({
   jobs: { type: Array, required: true },
   headers: { type: Array, required: true },
-  drivers: { type: Array, default: () => [] },
 })
-
-const emit = defineEmits(['reassign', 'cancel', 'status-update'])
 
 const jobsRef = computed(() => props.jobs)
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(jobsRef)
 
-const statusOptions = ['At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
-
 const selectedJob = ref(null)
-const selectedDriverPosition = ref(null)
-const reassignSelections = reactive({})
-const statusSelections = reactive({})
 
-function confirmReassign(job) {
-  const newDriver = reassignSelections[job._rowIndex]
-  if (!newDriver) return
-  if (confirm(`Reassign this load to ${newDriver}?`)) {
-    emit('reassign', { rowIndex: job._rowIndex, newDriver, job })
-    reassignSelections[job._rowIndex] = ''
-  }
-}
-
-function confirmCancel(job) {
-  if (confirm('Cancel this assignment? The load will be moved back to the Job Board.')) {
-    emit('cancel', { rowIndex: job._rowIndex, job })
-  }
-}
-
-function confirmStatusUpdate(job) {
-  const newStatus = statusSelections[job._rowIndex]
-  if (!newStatus) return
-  if (confirm(`Update status to "${newStatus}"?`)) {
-    emit('status-update', { rowIndex: job._rowIndex, newStatus, job })
-    statusSelections[job._rowIndex] = ''
-  }
-}
-
-function closeDetail() {
-  selectedJob.value = null
-  selectedDriverPosition.value = null
-}
-
-async function openDetail(job) {
+function openDetail(job) {
   selectedJob.value = job
-  selectedDriverPosition.value = null
-  const driverCol = props.headers.find(h => /driver/i.test(h))
-  const driverName = driverCol ? (job[driverCol] || '').trim() : ''
-  if (driverName) {
-    try {
-      const data = await api.get('/api/locations/latest')
-      const loc = (data.locations || []).find(
-        l => l.driver.toLowerCase() === driverName.toLowerCase() && l.latitude
-      )
-      if (loc) {
-        selectedDriverPosition.value = { latitude: loc.latitude, longitude: loc.longitude }
-      }
-    } catch { /* silent */ }
-  }
 }
 
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null)
 const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
 
 const displayCols = computed(() => {
-  const keywords = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery']
+  const keywords = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery', 'date']
   const matched = []
   for (const kw of keywords) {
     const re = new RegExp(kw, 'i')
@@ -221,7 +141,6 @@ function detailValue(job, col) {
   return val
 }
 
-// Section grouping patterns
 const sectionPatterns = [
   { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },
   { title: 'Route', test: /origin|pickup|shipper|dest|drop|receiver|delivery|consignee|city|state|zip|address|location/i, wide: /address/i },
@@ -286,7 +205,6 @@ const detailSections = computed(() => {
   background: var(--surface-hover, rgba(0, 0, 0, 0.04));
 }
 
-/* Modal overlay */
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -313,7 +231,6 @@ const detailSections = computed(() => {
   to { transform: translateY(0) scale(1); opacity: 1; }
 }
 
-/* Header */
 .modal-header {
   display: flex;
   align-items: center;
@@ -354,14 +271,12 @@ const detailSections = computed(() => {
   color: var(--text);
 }
 
-/* Body */
 .modal-body {
   padding: 1.25rem 1.5rem 1.5rem;
   overflow-y: auto;
   flex: 1;
 }
 
-/* Sections */
 .detail-section {
   margin-bottom: 1.25rem;
 }
@@ -434,40 +349,5 @@ const detailSections = computed(() => {
   .modal-body {
     padding: 1rem;
   }
-}
-
-.action-cell {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  white-space: nowrap;
-}
-.action-select {
-  padding: 0.25rem 0.4rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  font-family: 'DM Sans', sans-serif;
-  font-size: 0.78rem;
-  outline: none;
-  min-width: 110px;
-}
-.btn-sm {
-  padding: 0.25rem 0.55rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-family: inherit;
-}
-.btn-primary {
-  background: var(--accent);
-  color: #fff;
-}
-.btn-danger {
-  background: var(--danger, #ef4444);
-  color: #fff;
 }
 </style>

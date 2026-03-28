@@ -4,7 +4,7 @@
     <template v-if="!driverLatLng && !hasCoords">
       <div class="map-empty">No route coordinates available</div>
     </template>
-    <template v-else-if="!driverLatLng && hasCoords">
+    <template v-else-if="!driverLatLng && hasCoords && !dispatchMode">
       <div class="map-container gps-waiting">
         <div class="gps-overlay">
           <div class="gps-spinner"></div>
@@ -12,7 +12,7 @@
         </div>
       </div>
     </template>
-    <!-- Map: driver location only OR full route -->
+    <!-- Map: driver location, dispatch mode, OR full route -->
     <template v-else>
       <div class="map-info" v-if="hasCoords && (distanceKm != null || etaMinutes != null)">
         <span v-if="distanceKm != null" class="info-item">{{ distanceKm }} km</span>
@@ -75,6 +75,7 @@ const props = defineProps({
   load: { type: Object, required: true },
   headers: { type: Array, default: () => [] },
   driverPosition: { type: Object, default: null },
+  dispatchMode: { type: Boolean, default: false },
 })
 
 const api = useApi()
@@ -115,7 +116,7 @@ const statusCol = computed(() => (props.headers || []).find(h => /^status$/i.tes
 const loadStatus = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim().toLowerCase() : '')
 const isDelivered = computed(() => /^(delivered|completed|pod received)$/i.test(loadStatus.value))
 
-const hasCoords = computed(() => destLatLng.value != null && !isDelivered.value)
+const hasCoords = computed(() => destLatLng.value != null && (!isDelivered.value || props.dispatchMode))
 const waitingForGps = computed(() => hasCoords.value && !driverLatLng.value)
 
 const mapCenter = computed(() => {
@@ -219,9 +220,11 @@ watch(() => props.driverPosition, (pos) => {
 }, { deep: true })
 
 onMounted(() => {
-  // Only fetch route on mount if driver position is already available
-  // Otherwise the watcher will handle it when GPS arrives
-  if (hasCoords.value && driverLatLng.value) fetchRoute(true)
+  if (props.dispatchMode && hasCoords.value) {
+    fetchRoute(true)
+  } else if (hasCoords.value && driverLatLng.value) {
+    fetchRoute(true)
+  }
 })
 </script>
 

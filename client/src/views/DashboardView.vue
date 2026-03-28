@@ -10,7 +10,7 @@
 
     <!-- KPI Cards -->
     <template v-if="store.kpis">
-      <KpiGrid :kpis="store.kpis" />
+      <KpiGrid :kpis="store.kpis" @card-click="handleKpiClick" />
       <RevenueGrid :revenue="store.revenue" />
     </template>
     <template v-else>
@@ -38,6 +38,9 @@
         <button :class="['tab-btn', { active: activeTab === 'activeLoads' }]" @click="activeTab = 'activeLoads'">
           Active Loads <span class="count-badge">{{ store.activeJobs.length }}</span>
         </button>
+        <button :class="['tab-btn', { active: activeTab === 'completed' }]" @click="activeTab = 'completed'">
+          Completed <span class="count-badge" style="background:rgba(16,185,129,0.15);color:#059669">{{ store.completedJobs.length }}</span>
+        </button>
         <button :class="['tab-btn', { active: activeTab === 'fleet' }]" @click="activeTab = 'fleet'">
           Fleet & Drivers <span class="count-badge" style="background:var(--blue-dim);color:var(--blue)">{{ store.fleet.length }}</span>
         </button>
@@ -59,6 +62,13 @@
           :drivers="store.drivers"
           @reassign="handleReassign"
           @cancel="handleCancel"
+          @status-update="handleStatusUpdate"
+        />
+      </div>
+      <div v-show="activeTab === 'completed'" class="tab-panel active">
+        <CompletedLoadsTab
+          :jobs="store.completedJobs"
+          :headers="store.headers"
         />
       </div>
       <div v-show="activeTab === 'fleet'" class="tab-panel active">
@@ -78,6 +88,7 @@ import RevenueGrid from '../components/dashboard/RevenueGrid.vue'
 import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
 import ActiveLoadsTab from '../components/dashboard/ActiveLoadsTab.vue'
 import FleetTab from '../components/dashboard/FleetTab.vue'
+import CompletedLoadsTab from '../components/dashboard/CompletedLoadsTab.vue'
 
 const store = useDashboardStore()
 const { show: toast } = useToast()
@@ -90,6 +101,11 @@ const lastUpdated = computed(() => {
   if (!store.timestamp) return 'Loading...'
   return 'Updated ' + new Date(store.timestamp).toLocaleTimeString()
 })
+
+function handleKpiClick(key) {
+  const tabMap = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }
+  activeTab.value = tabMap[key] || activeTab.value
+}
 
 async function refresh() {
   try {
@@ -129,6 +145,20 @@ async function handleCancel({ rowIndex, job }) {
     refresh()
   } catch {
     toast('Failed to cancel assignment', 'error')
+  }
+}
+
+async function handleStatusUpdate({ rowIndex, newStatus, job }) {
+  try {
+    const loadIdCol = store.headers.find((h) => /load.?id|job.?id/i.test(h))
+    const driverCol = store.headers.find((h) => /driver/i.test(h))
+    const loadId = loadIdCol ? job[loadIdCol] || '' : ''
+    const driverName = driverCol ? job[driverCol] || '' : ''
+    await store.updateStatus(rowIndex, driverName, loadId, newStatus)
+    toast(`Status updated to ${newStatus}`, 'success')
+    refresh()
+  } catch {
+    toast('Failed to update status', 'error')
   }
 }
 
