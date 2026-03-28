@@ -46,17 +46,34 @@
 
           <!-- Origin marker (green) -->
           <l-marker v-if="hasCoords && originLatLng" :lat-lng="originLatLng" :icon="originIcon">
-            <l-popup><div><strong>Pickup</strong></div></l-popup>
+            <l-popup>
+              <div class="marker-popup">
+                <strong>Pickup</strong>
+                <div v-if="originAddr" class="popup-address">{{ originAddr }}</div>
+                <div v-if="dispatchMode && loadIdValue" class="popup-detail">{{ loadIdValue }}</div>
+              </div>
+            </l-popup>
           </l-marker>
 
           <!-- Destination marker (red) -->
           <l-marker v-if="hasCoords && destLatLng" :lat-lng="destLatLng" :icon="destIcon">
-            <l-popup><div><strong>Drop-off</strong></div></l-popup>
+            <l-popup>
+              <div class="marker-popup">
+                <strong>Drop-off</strong>
+                <div v-if="destAddr" class="popup-address">{{ destAddr }}</div>
+                <div v-if="dispatchMode && loadIdValue" class="popup-detail">{{ loadIdValue }}</div>
+              </div>
+            </l-popup>
           </l-marker>
 
           <!-- Driver position (blue) -->
           <l-marker v-if="driverLatLng" :lat-lng="driverLatLng" :icon="driverIcon">
-            <l-popup><div><strong>You are here</strong></div></l-popup>
+            <l-popup>
+              <div class="marker-popup">
+                <strong>{{ dispatchMode && driverName ? driverName : 'You are here' }}</strong>
+                <div v-if="dispatchMode && loadIdValue" class="popup-detail">{{ loadIdValue }}</div>
+              </div>
+            </l-popup>
           </l-marker>
         </l-map>
       </div>
@@ -118,6 +135,17 @@ const isDelivered = computed(() => /^(delivered|completed|pod received)$/i.test(
 
 const hasCoords = computed(() => destLatLng.value != null && (!isDelivered.value || props.dispatchMode))
 const waitingForGps = computed(() => hasCoords.value && !driverLatLng.value)
+
+// Address columns (for popup display)
+const originAddrCol = computed(() => (props.headers || []).find(h => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon/i.test(h)) || null)
+const destAddrCol = computed(() => (props.headers || []).find(h => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null)
+const loadIdCol = computed(() => findCol(/load.?id|job.?id/i))
+const driverColName = computed(() => findCol(/driver/i))
+
+const originAddr = computed(() => originAddrCol.value ? props.load[originAddrCol.value] || '' : '')
+const destAddr = computed(() => destAddrCol.value ? props.load[destAddrCol.value] || '' : '')
+const loadIdValue = computed(() => loadIdCol.value ? props.load[loadIdCol.value] || '' : '')
+const driverName = computed(() => driverColName.value ? props.load[driverColName.value] || '' : '')
 
 const mapCenter = computed(() => {
   if (driverLatLng.value) return driverLatLng.value
@@ -249,6 +277,24 @@ onMounted(() => {
   background: var(--bg);
   padding: 0.25rem 0.6rem;
   border-radius: 6px;
+}
+.marker-popup {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+.marker-popup strong {
+  display: block;
+  margin-bottom: 0.1rem;
+}
+.popup-address {
+  font-size: 0.8rem;
+  color: #444;
+}
+.popup-detail {
+  font-size: 0.72rem;
+  color: #888;
+  font-family: 'JetBrains Mono', monospace;
 }
 .map-empty {
   text-align: center;

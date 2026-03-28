@@ -50,10 +50,10 @@
           className="route-animate"
         />
         <l-marker v-if="selectedDriver !== '__all__' && originLatLng" :lat-lng="originLatLng" :icon="originIcon">
-          <l-popup><div class="marker-popup"><strong>Origin (Shipper)</strong></div></l-popup>
+          <l-popup><div class="marker-popup"><strong>Pickup</strong><div v-if="originAddress" class="popup-address">{{ originAddress }}</div></div></l-popup>
         </l-marker>
         <l-marker v-if="selectedDriver !== '__all__' && destLatLng" :lat-lng="destLatLng" :icon="destIcon">
-          <l-popup><div class="marker-popup"><strong>Destination (Receiver)</strong></div></l-popup>
+          <l-popup><div class="marker-popup"><strong>Drop-off</strong><div v-if="destAddress" class="popup-address">{{ destAddress }}</div></div></l-popup>
         </l-marker>
 
         <!-- All drivers routes (when "All Drivers" selected) -->
@@ -145,6 +145,8 @@ const trailPoints = ref([])
 const routePoints = ref([])
 const originLatLng = ref(null)
 const destLatLng = ref(null)
+const originAddress = ref('')
+const destAddress = ref('')
 const trailLoadId = ref('')
 const routeDistance = ref(null)
 const routeEta = ref(null)
@@ -230,6 +232,8 @@ async function fetchTrail(driverName, loadId) {
   routePoints.value = []
   originLatLng.value = null
   destLatLng.value = null
+  originAddress.value = ''
+  destAddress.value = ''
   trailLoadId.value = ''
   routeDistance.value = null
   routeEta.value = null
@@ -238,8 +242,14 @@ async function fetchTrail(driverName, loadId) {
     const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(driverName)}&loadId=${encodeURIComponent(loadId)}`)
     trailPoints.value = (data.trail || []).map(p => [p.latitude, p.longitude])
     routePoints.value = (data.route || []).map(p => [p.latitude, p.longitude])
-    if (data.origin) originLatLng.value = [data.origin.latitude, data.origin.longitude]
-    if (data.destination) destLatLng.value = [data.destination.latitude, data.destination.longitude]
+    if (data.origin) {
+      originLatLng.value = [data.origin.latitude, data.origin.longitude]
+      originAddress.value = data.origin.address || ''
+    }
+    if (data.destination) {
+      destLatLng.value = [data.destination.latitude, data.destination.longitude]
+      destAddress.value = data.destination.address || ''
+    }
     routeDistance.value = data.distanceKm
     routeEta.value = data.etaMinutes
     trailLoadId.value = loadId
@@ -515,6 +525,8 @@ function onStatusUpdated(payload) {
     routePoints.value = []
     originLatLng.value = null
     destLatLng.value = null
+    originAddress.value = ''
+    destAddress.value = ''
     trailPoints.value = []
     trailLoadId.value = ''
     routeDistance.value = null
@@ -767,6 +779,12 @@ onUnmounted(() => {
 .eta-badge.delayed {
   background: #fef2f2;
   color: #dc2626;
+}
+
+.popup-address {
+  font-size: 0.8rem;
+  color: #444;
+  margin-top: 0.15rem;
 }
 
 .popup-time {

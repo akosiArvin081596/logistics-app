@@ -1,6 +1,19 @@
 <template>
   <div>
-    <div class="table-scroll">
+    <div class="view-toggle">
+      <button :class="['toggle-btn', { active: viewMode === 'list' }]" @click="viewMode = 'list'">List</button>
+      <button :class="['toggle-btn', { active: viewMode === 'map' }]" @click="viewMode = 'map'">Map</button>
+    </div>
+
+    <LoadsMapView
+      v-show="viewMode === 'map'"
+      :loads="jobs"
+      :headers="headers"
+      category="unassigned"
+      :visible="viewMode === 'map'"
+    />
+
+    <div v-show="viewMode === 'list'" class="table-scroll">
       <SkeletonLoader v-if="loading" />
       <table v-else-if="jobs.length > 0">
         <thead>
@@ -30,6 +43,7 @@
       <EmptyState v-else>All loads are assigned.</EmptyState>
     </div>
     <PaginationBar
+      v-show="viewMode === 'list'"
       :page="page"
       :page-size="pageSize"
       :total="jobs.length"
@@ -90,7 +104,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useToast } from '../../composables/useToast'
 import { useAuthStore } from '../../stores/auth'
@@ -99,12 +113,20 @@ import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import SkeletonLoader from '../shared/SkeletonLoader.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
+import LoadsMapView from './LoadsMapView.vue'
 
 const props = defineProps({
   jobs: { type: Array, required: true },
   drivers: { type: Array, required: true },
   headers: { type: Array, required: true },
   loading: { type: Boolean, default: false },
+  showMap: { type: Number, default: 0 },
+})
+
+const viewMode = ref('list')
+
+watch(() => props.showMap, (val) => {
+  if (val > 0) viewMode.value = 'map'
 })
 
 const emit = defineEmits(['assign'])
@@ -261,6 +283,32 @@ function assign(job) {
 </script>
 
 <style scoped>
+.view-toggle {
+  display: flex;
+  gap: 0;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.toggle-btn {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--border);
+  background: transparent;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.toggle-btn:first-child { border-radius: 5px 0 0 5px; }
+.toggle-btn:last-child { border-radius: 0 5px 5px 0; border-left: none; }
+.toggle-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
 .clickable-row {
   cursor: pointer;
   transition: background 0.15s;

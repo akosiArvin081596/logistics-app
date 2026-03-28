@@ -1318,6 +1318,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const carrierDB = parseSheet(rangeData[1]);
 		const payments = parseSheet(rangeData[2]);
 		const carrierHistory = parseSheet(rangeData[3]);
+		const jobSummary = parseSheet(rangeData[4]);
 
 		// Identify key columns
 		const statusCol = findCol(jobTracking.headers, /status/i);
@@ -1356,6 +1357,25 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 				completedStatuses.test((r[statusCol] || "").trim()),
 		);
 
+		// Also pull completed loads from Job Summary Sheet
+		const summaryStatusCol = findCol(jobSummary.headers, /status/i);
+		const summaryLoadIdCol = findCol(jobSummary.headers, /load.?id|job.?id/i);
+		const summaryCompletedJobs = jobSummary.data.filter(
+			(r) => summaryStatusCol && completedStatuses.test((r[summaryStatusCol] || "").trim()),
+		);
+
+		// Merge, de-duplicate by load ID (Job Tracking takes priority)
+		const existingLoadIds = new Set(
+			completedJobs
+				.map((r) => (loadIdCol ? (r[loadIdCol] || "").trim().toLowerCase() : ""))
+				.filter(Boolean),
+		);
+		const extraCompleted = summaryCompletedJobs.filter((r) => {
+			const id = summaryLoadIdCol ? (r[summaryLoadIdCol] || "").trim().toLowerCase() : "";
+			return id && !existingLoadIds.has(id);
+		});
+		const allCompletedJobs = [...completedJobs, ...extraCompleted];
+
 		// Date boundaries
 		const now = new Date();
 		const weekStart = new Date(now);
@@ -1365,15 +1385,20 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		weekStart.setHours(0, 0, 0, 0);
 		const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-		const completedThisWeek = completedJobs.filter((r) => {
-			if (!delivDateCol) return false;
-			const d = new Date(r[delivDateCol]);
+		// Find delivery date column across both sheets
+		const summaryDelivDateCol = findCol(jobSummary.headers, /deliv|drop.?off.*date|completion.*date/i);
+
+		const completedThisWeek = allCompletedJobs.filter((r) => {
+			const dCol = r[delivDateCol] != null ? delivDateCol : summaryDelivDateCol;
+			if (!dCol) return false;
+			const d = new Date(r[dCol]);
 			return !isNaN(d) && d >= weekStart && d <= now;
 		}).length;
 
-		const completedThisMonth = completedJobs.filter((r) => {
-			if (!delivDateCol) return false;
-			const d = new Date(r[delivDateCol]);
+		const completedThisMonth = allCompletedJobs.filter((r) => {
+			const dCol = r[delivDateCol] != null ? delivDateCol : summaryDelivDateCol;
+			if (!dCol) return false;
+			const d = new Date(r[dCol]);
 			return !isNaN(d) && d >= monthStart && d <= now;
 		}).length;
 
@@ -1434,11 +1459,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 						? currentLoad[loadIdCol]
 						: ""
 					: "",
-				CompletedLoads: completedJobs.filter(
-					(j) =>
-						driverCol &&
-						(j[driverCol] || "").trim() === name,
-				).length,
+				CompletedLoads: allCompletedJobs.filter((j) => {
+					const jDriverCol = driverCol || findCol(jobSummary.headers, /driver/i);
+					return jDriverCol && (j[jDriverCol] || "").trim() === name;
+				}).length,
 			};
 		});
 
@@ -1449,9 +1473,11 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const respActive = req.session.user.role !== "Super Admin"
 			? sanitizeBrokerColumns(jobTracking.headers, activeJobs)
 			: activeJobs;
+		// Merge headers from both sheets for completed loads display
+		const completedHeaders = [...new Set([...jobTracking.headers, ...jobSummary.headers])];
 		const respCompleted = req.session.user.role !== "Super Admin"
-			? sanitizeBrokerColumns(jobTracking.headers, completedJobs)
-			: completedJobs;
+			? sanitizeBrokerColumns(completedHeaders, allCompletedJobs)
+			: allCompletedJobs;
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -1469,6 +1495,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			},
 			unassignedJobs: respUnassigned,
 			jobTrackingHeaders: jobTracking.headers,
+			completedHeaders,
 			activeJobs: respActive,
 			completedJobs: respCompleted,
 			fleet,
@@ -2777,6 +2804,10 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 				const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
 				const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
 
+				// Find address/city columns for origin and destination
+				const originAddrCol = headers.find((h) => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon/i.test(h));
+				const destAddrCol = headers.find((h) => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h));
+
 				if (loadIdCol) {
 					for (let i = 1; i < rows.length; i++) {
 						const obj = {};
@@ -2792,6 +2823,8 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 								const dLng = parseFloat(obj[destLngCol]);
 								if (!isNaN(dLat) && !isNaN(dLng)) destination = { latitude: dLat, longitude: dLng };
 							}
+							if (origin && originAddrCol) origin.address = obj[originAddrCol] || "";
+							if (destination && destAddrCol) destination.address = obj[destAddrCol] || "";
 							break;
 						}
 					}

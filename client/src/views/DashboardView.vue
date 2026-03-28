@@ -52,6 +52,7 @@
           :drivers="store.drivers"
           :headers="store.headers"
           :loading="store.isLoading"
+          :show-map="activeTab === 'jobBoard' ? mapTrigger : 0"
           @assign="handleAssign"
         />
       </div>
@@ -60,6 +61,7 @@
           :jobs="store.activeJobs"
           :headers="store.headers"
           :drivers="store.drivers"
+          :show-map="activeTab === 'activeLoads' ? mapTrigger : 0"
           @reassign="handleReassign"
           @cancel="handleCancel"
           @status-update="handleStatusUpdate"
@@ -68,7 +70,8 @@
       <div v-show="activeTab === 'completed'" class="tab-panel active">
         <CompletedLoadsTab
           :jobs="store.completedJobs"
-          :headers="store.headers"
+          :headers="store.completedHeaders"
+          :show-map="activeTab === 'completed' ? mapTrigger : 0"
         />
       </div>
       <div v-show="activeTab === 'fleet'" class="tab-panel active">
@@ -95,6 +98,7 @@ const { show: toast } = useToast()
 const socket = useSocket()
 
 const activeTab = ref('jobBoard')
+const mapTrigger = ref(0)
 let refreshInterval = null
 
 const lastUpdated = computed(() => {
@@ -105,6 +109,7 @@ const lastUpdated = computed(() => {
 function handleKpiClick(key) {
   const tabMap = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }
   activeTab.value = tabMap[key] || activeTab.value
+  if (key !== 'fleet') mapTrigger.value++
 }
 
 async function refresh() {

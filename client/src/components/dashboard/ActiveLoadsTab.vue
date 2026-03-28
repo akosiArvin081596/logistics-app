@@ -1,6 +1,20 @@
 <template>
   <div>
-    <div class="table-scroll">
+    <div class="view-toggle">
+      <button :class="['toggle-btn', { active: viewMode === 'list' }]" @click="viewMode = 'list'">List</button>
+      <button :class="['toggle-btn', { active: viewMode === 'map' }]" @click="switchToMap">Map</button>
+    </div>
+
+    <LoadsMapView
+      v-show="viewMode === 'map'"
+      :loads="jobs"
+      :headers="headers"
+      category="active"
+      :driver-locations="driverLocations"
+      :visible="viewMode === 'map'"
+    />
+
+    <div v-show="viewMode === 'list'" class="table-scroll">
       <table v-if="jobs.length > 0">
         <thead>
           <tr>
@@ -45,6 +59,7 @@
       <EmptyState v-else>No active loads right now.</EmptyState>
     </div>
     <PaginationBar
+      v-show="viewMode === 'list'"
       :page="page"
       :page-size="pageSize"
       :total="jobs.length"
@@ -103,13 +118,14 @@
 </template>
 
 <script setup>
-import { computed, ref, reactive } from 'vue'
+import { computed, ref, reactive, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
 import StatusBadge from '../shared/StatusBadge.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
+import LoadsMapView from './LoadsMapView.vue'
 
 const api = useApi()
 
@@ -117,6 +133,26 @@ const props = defineProps({
   jobs: { type: Array, required: true },
   headers: { type: Array, required: true },
   drivers: { type: Array, default: () => [] },
+  showMap: { type: Number, default: 0 },
+})
+
+const viewMode = ref('list')
+const driverLocations = ref([])
+
+async function fetchDriverLocations() {
+  try {
+    const data = await api.get('/api/locations/latest')
+    driverLocations.value = data.locations || []
+  } catch { /* silent */ }
+}
+
+function switchToMap() {
+  viewMode.value = 'map'
+  fetchDriverLocations()
+}
+
+watch(() => props.showMap, (val) => {
+  if (val > 0) switchToMap()
 })
 
 const emit = defineEmits(['reassign', 'cancel', 'status-update'])
@@ -278,6 +314,32 @@ const detailSections = computed(() => {
 </script>
 
 <style scoped>
+.view-toggle {
+  display: flex;
+  gap: 0;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.toggle-btn {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--border);
+  background: transparent;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.toggle-btn:first-child { border-radius: 5px 0 0 5px; }
+.toggle-btn:last-child { border-radius: 0 5px 5px 0; border-left: none; }
+.toggle-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
 .clickable-row {
   cursor: pointer;
   transition: background 0.15s;
