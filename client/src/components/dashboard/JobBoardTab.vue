@@ -23,8 +23,9 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="clickable-row" @click="openDetail(job)">
-            <td v-for="col in displayCols" :key="col">
+          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="clickable-row" :class="{ 'warning-row': missingData(job) }" @click="openDetail(job)">
+            <td v-for="(col, idx) in displayCols" :key="col">
+              <span v-if="idx === 0 && missingData(job)" class="row-warning" :title="missingData(job)">&#9888;</span>
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
@@ -208,6 +209,28 @@ const detailSections = computed(() => {
   return sections.filter(s => s.fields.length > 0)
 })
 
+// Detect address/coordinate columns for missing data warnings
+const pickupAddrCol = computed(() => props.headers.find(h => /pickup.*addr/i.test(h)) || null)
+const dropoffAddrCol = computed(() => props.headers.find(h => /drop.*addr/i.test(h)) || null)
+const originLatCol = computed(() => props.headers.find(h => /origin.*lat|pickup.*lat|shipper.*lat/i.test(h)) || null)
+const destLatCol = computed(() => props.headers.find(h => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h)) || null)
+
+function missingData(job) {
+  const warnings = []
+  const pickupAddr = pickupAddrCol.value ? (job[pickupAddrCol.value] || '').trim() : ''
+  const dropoffAddr = dropoffAddrCol.value ? (job[dropoffAddrCol.value] || '').trim() : ''
+  const oLat = originLatCol.value ? (job[originLatCol.value] || '').trim() : ''
+  const dLat = destLatCol.value ? (job[destLatCol.value] || '').trim() : ''
+
+  if (!pickupAddr && !oLat) warnings.push('Missing pickup location')
+  else if (!oLat) warnings.push('Missing pickup coordinates')
+
+  if (!dropoffAddr && !dLat) warnings.push('Missing delivery location')
+  else if (!dLat) warnings.push('Missing delivery coordinates')
+
+  return warnings.length ? warnings.join('; ') : ''
+}
+
 const jobsRef = computed(() => props.jobs)
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(jobsRef)
 
@@ -315,6 +338,18 @@ function assign(job) {
 }
 .clickable-row:hover {
   background: var(--surface-hover, rgba(0, 0, 0, 0.04));
+}
+.warning-row {
+  background: rgba(234, 179, 8, 0.06);
+}
+.warning-row:hover {
+  background: rgba(234, 179, 8, 0.12) !important;
+}
+.row-warning {
+  color: #d97706;
+  font-size: 0.9rem;
+  margin-right: 0.35rem;
+  cursor: help;
 }
 
 /* Modal overlay */
