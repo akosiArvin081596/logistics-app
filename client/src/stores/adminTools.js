@@ -8,9 +8,11 @@ export const useAdminToolsStore = defineStore('adminTools', {
     duplicates: null,
     driverMismatches: null,
     orphans: null,
+    staleLocations: null,
     scanningDuplicates: false,
     scanningMismatches: false,
     scanningOrphans: false,
+    scanningStaleLocations: false,
   }),
 
   actions: {
@@ -47,6 +49,19 @@ export const useAdminToolsStore = defineStore('adminTools', {
 
     async fixDriverName(oldName, newName) {
       return await api.put('/api/admin/fix-driver-name', { oldName, newName })
+    },
+
+    async scanStaleLocations() {
+      this.scanningStaleLocations = true
+      try {
+        this.staleLocations = await api.get('/api/admin/scan-stale-locations')
+      } finally {
+        this.scanningStaleLocations = false
+      }
+    },
+
+    async fixStaleLocation(driver, oldLoadId, newLoadId) {
+      return await api.post('/api/admin/fix-stale-locations', { driver, oldLoadId, newLoadId })
     },
   },
 })

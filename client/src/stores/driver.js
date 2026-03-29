@@ -39,10 +39,13 @@ export const useDriverStore = defineStore('driver', {
       const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
       if (!statusCol) return []
       const workingRe = /^(assigned|at shipper|loading|in transit|at receiver)$/i
-      return state.loads.filter((l) => {
+      const filtered = state.loads.filter((l) => {
         const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
         return hasId && workingRe.test((l[statusCol] || '').trim())
       })
+      // Sort by _rowIndex descending so the most recently added load is first,
+      // preventing old loads with stale statuses from being picked for GPS tracking
+      return filtered.sort((a, b) => (b._rowIndex || 0) - (a._rowIndex || 0))
     },
 
     pendingLoads(state) {

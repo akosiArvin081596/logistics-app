@@ -143,6 +143,66 @@
         </div>
       </div>
     </div>
+
+    <!-- Tool 4: Stale Location Data -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <div class="section-dot" style="background: var(--accent);"></div>
+          Stale Location Data
+        </div>
+        <button class="btn btn-primary btn-sm" :disabled="store.scanningStaleLocations" @click="runStaleScan">
+          {{ store.scanningStaleLocations ? 'Scanning...' : 'Scan' }}
+        </button>
+      </div>
+
+      <div v-if="store.staleLocations" class="card-body">
+        <div class="scan-summary">
+          <span class="summary-item" :class="store.staleLocations.issues.length > 0 ? 'danger' : 'ok'">
+            {{ store.staleLocations.issues.length }} issue{{ store.staleLocations.issues.length !== 1 ? 's' : '' }} found
+          </span>
+        </div>
+
+        <div v-if="store.staleLocations.issues.length === 0" class="scan-empty">All GPS pings match their loads in Google Sheets.</div>
+
+        <div v-else class="stale-list">
+          <div v-for="issue in store.staleLocations.issues" :key="issue.driver + issue.sqliteLoadId" class="stale-item">
+            <div class="stale-header">
+              <span class="stale-driver">{{ issue.driver }}</span>
+              <span class="stale-pings">{{ issue.pings }} GPS pings</span>
+            </div>
+            <div class="stale-details">
+              <div class="detail-row">
+                <span class="detail-label">SQLite load_id:</span>
+                <span class="mono">{{ issue.sqliteLoadId }}</span>
+                <span :class="['dup-status', statusClass(issue.sheetStatus)]">{{ issue.sheetStatus }}</span>
+              </div>
+              <div v-if="issue.sheetDetails" class="detail-row">
+                <span class="detail-label">Sheet route:</span>
+                <span>{{ issue.sheetDetails }}</span>
+              </div>
+              <div v-if="issue.avgLat" class="detail-row">
+                <span class="detail-label">GPS avg position:</span>
+                <span class="mono">{{ issue.avgLat }}, {{ issue.avgLng }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Time range:</span>
+                <span>{{ formatDate(issue.firstPing) }} — {{ formatDate(issue.lastPing) }}</span>
+              </div>
+              <div class="stale-problems">
+                <span v-for="p in issue.problems" :key="p" class="issue-tag">{{ p }}</span>
+              </div>
+            </div>
+            <div v-if="issue.suggestedLoadId" class="stale-actions">
+              <button class="btn btn-primary btn-xs" @click="fixStale(issue)">
+                Retag {{ issue.pings }} pings → {{ issue.suggestedLoadId }}
+              </button>
+              <span v-if="issue.suggestedDetails" class="stale-suggested-detail">{{ issue.suggestedDetails }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -217,6 +277,33 @@ async function removeRow(group, row) {
   } catch {
     toast('Failed to remove row', 'error')
   }
+}
+
+async function runStaleScan() {
+  try {
+    await store.scanStaleLocations()
+    const count = store.staleLocations.issues.length
+    toast(count > 0 ? `Found ${count} stale location issue${count !== 1 ? 's' : ''}` : 'No stale location data')
+  } catch {
+    toast('Scan failed', 'error')
+  }
+}
+
+async function fixStale(issue) {
+  if (!confirm(`Retag ${issue.pings} GPS pings for ${issue.driver} from load ${issue.sqliteLoadId} to ${issue.suggestedLoadId}?`)) return
+  try {
+    const result = await store.fixStaleLocation(issue.driver, issue.sqliteLoadId, issue.suggestedLoadId)
+    toast(`Updated ${result.updated} location records`)
+    await runStaleScan()
+  } catch {
+    toast('Failed to fix stale locations', 'error')
+  }
+}
+
+function formatDate(ts) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  return isNaN(d) ? ts : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
 }
 
 async function fixName(oldName, newName) {
@@ -511,6 +598,60 @@ async function fixName(oldName, newName) {
 
 .orphan-count {
   color: var(--text-dim);
+}
+
+/* Stale locations */
+.stale-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  border-left: 3px solid var(--danger);
+  padding: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+
+.stale-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.stale-driver {
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+
+.stale-pings {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.stale-details {
+  font-size: 0.78rem;
+}
+
+.stale-problems {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+
+.stale-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.stale-suggested-detail {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
 }
 
 /* Buttons */

@@ -837,6 +837,132 @@ app.post("/api/admin/remove-rows", requireRole("Super Admin"), async (req, res) 
 	}
 });
 
+// Admin: scan for stale load_ids in driver_locations (GPS tagged to wrong load)
+app.get("/api/admin/scan-stale-locations", requireRole("Super Admin"), async (req, res) => {
+	try {
+		// Get all location groups from SQLite
+		const locGroups = db.prepare(
+			`SELECT driver, load_id, COUNT(*) AS pings,
+			        MIN(timestamp) AS firstPing, MAX(timestamp) AS lastPing,
+			        AVG(latitude) AS avgLat, AVG(longitude) AS avgLng
+			 FROM driver_locations
+			 WHERE load_id != ''
+			 GROUP BY driver, load_id`
+		).all();
+
+		if (locGroups.length === 0) return res.json({ issues: [] });
+
+		// Fetch Job Tracking from Google Sheets
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const rows = resp.data.values || [];
+		if (rows.length < 2) return res.json({ issues: [] });
+
+		const headers = rows[0];
+		const loadIdIdx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
+		const statusIdx = headers.findIndex((h) => /status/i.test(h));
+		const driverIdx = headers.findIndex((h) => /^driver$/i.test(h));
+		const oLatIdx = headers.findIndex((h) => /origin.*lat/i.test(h));
+		const oLngIdx = headers.findIndex((h) => /origin.*l(on|ng)/i.test(h));
+		const dLatIdx = headers.findIndex((h) => /dest.*lat/i.test(h));
+		const dLngIdx = headers.findIndex((h) => /dest.*l(on|ng)/i.test(h));
+		const detailsIdx = headers.findIndex((h) => /^details$/i.test(h));
+
+		// Build sheet lookup: loadId → { status, driver, origin, dest, details }
+		const sheetLoads = {};
+		const activeRe = /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i;
+		const driverActiveLoads = {}; // driver → most recent active loadId from sheet
+		for (let i = 1; i < rows.length; i++) {
+			const lid = (rows[i][loadIdIdx] || "").trim().replace(/^#/, "");
+			if (!lid) continue;
+			const status = (rows[i][statusIdx] || "").trim();
+			const driver = (rows[i][driverIdx] || "").trim();
+			const oLat = parseFloat(rows[i][oLatIdx] || "");
+			const oLng = parseFloat(rows[i][oLngIdx] || "");
+			const dLat = parseFloat(rows[i][dLatIdx] || "");
+			const dLng = parseFloat(rows[i][dLngIdx] || "");
+			const details = (rows[i][detailsIdx] || "").trim();
+			sheetLoads[lid] = { status: status || "(empty)", driver, oLat, oLng, dLat, dLng, details };
+			if (driver && activeRe.test(status)) {
+				driverActiveLoads[driver.toLowerCase()] = lid;
+			}
+		}
+
+		const issues = [];
+		for (const group of locGroups) {
+			const problems = [];
+			const sheetLoad = sheetLoads[group.load_id];
+			const activeLoad = driverActiveLoads[(group.driver || "").toLowerCase()];
+
+			// Check 1: load_id doesn't exist in sheet
+			if (!sheetLoad) {
+				problems.push("Load ID not found in Google Sheets");
+			} else {
+				// Check 2: GPS coordinates far from both origin and dest
+				if (!isNaN(sheetLoad.oLat) && !isNaN(sheetLoad.dLat) && group.avgLat) {
+					const distToOrigin = geolib.getDistance(
+						{ latitude: group.avgLat, longitude: group.avgLng },
+						{ latitude: sheetLoad.oLat, longitude: sheetLoad.oLng }
+					);
+					const distToDest = geolib.getDistance(
+						{ latitude: group.avgLat, longitude: group.avgLng },
+						{ latitude: sheetLoad.dLat, longitude: sheetLoad.dLng }
+					);
+					const minDist = Math.min(distToOrigin, distToDest);
+					if (minDist > 500000) { // > 500km from both origin and dest
+						problems.push(`GPS avg (${group.avgLat.toFixed(4)}, ${group.avgLng.toFixed(4)}) is ${Math.round(minDist / 1000)}km from nearest load point`);
+					}
+				}
+			}
+
+			// Check 3: driver has a different active load in the sheet
+			if (activeLoad && activeLoad !== group.load_id) {
+				const activeDetails = sheetLoads[activeLoad]?.details || "";
+				problems.push(`Driver's active load in sheet is ${activeLoad}${activeDetails ? " (" + activeDetails + ")" : ""}`);
+			}
+
+			if (problems.length > 0) {
+				issues.push({
+					driver: group.driver,
+					sqliteLoadId: group.load_id,
+					pings: group.pings,
+					firstPing: group.firstPing,
+					lastPing: group.lastPing,
+					avgLat: group.avgLat ? +group.avgLat.toFixed(5) : null,
+					avgLng: group.avgLng ? +group.avgLng.toFixed(5) : null,
+					sheetStatus: sheetLoad?.status || "not found",
+					sheetDetails: sheetLoad?.details || "",
+					suggestedLoadId: activeLoad || null,
+					suggestedDetails: activeLoad && sheetLoads[activeLoad] ? sheetLoads[activeLoad].details : "",
+					problems,
+				});
+			}
+		}
+
+		res.json({ issues });
+	} catch (error) {
+		console.error("Error scanning stale locations:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// Admin: fix stale load_id in driver_locations
+app.post("/api/admin/fix-stale-locations", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const { driver, oldLoadId, newLoadId } = req.body;
+		if (!driver || !oldLoadId || !newLoadId) {
+			return res.status(400).json({ error: "driver, oldLoadId, and newLoadId required" });
+		}
+		const result = db.prepare(
+			"UPDATE driver_locations SET load_id = ? WHERE driver = ? AND load_id = ?"
+		).run(newLoadId, driver, oldLoadId);
+		res.json({ updated: result.changes });
+	} catch (error) {
+		console.error("Error fixing stale locations:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Debug: check what the driver endpoint returns (first 2 loads)
 app.get("/api/debug/driver-view/:driverName", async (req, res) => {
 	try {
@@ -2806,11 +2932,37 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					if (lid) loadMap[lid] = obj;
 				}
 
+				// Build map of each driver's current active load from the sheet
+				// so we can override stale load_ids stored in SQLite
+				const statusCol = headers.find((h) => /status/i.test(h));
+				const driverCol = headers.find((h) => /^driver$/i.test(h));
+				const activeRe = /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i;
+				const driverActiveLoadMap = {};
+				if (statusCol && driverCol && loadIdCol) {
+					for (let i = 1; i < rows.length; i++) {
+						const obj = {};
+						headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
+						const name = (obj[driverCol] || "").trim();
+						const status = (obj[statusCol] || "").trim();
+						const lid = (obj[loadIdCol] || "").trim().replace(/^#/, "");
+						if (name && lid && activeRe.test(status)) {
+							driverActiveLoadMap[name.toLowerCase()] = lid;
+						}
+					}
+				}
+
 				const DEFAULT_SPEED_MPS = 24.587; // ~55 mph in m/s
 
 				for (const loc of locations) {
 					loc.etaStatus = "unknown";
 					loc.etaMinutes = null;
+
+					// Override stale load_id: prefer the driver's active load from Google Sheets
+					const sheetActiveLoad = driverActiveLoadMap[(loc.driver || "").toLowerCase()];
+					if (sheetActiveLoad && loc.loadId !== sheetActiveLoad && loadMap[sheetActiveLoad]) {
+						loc.loadId = sheetActiveLoad;
+					}
+
 					if (!loc.loadId || !loadMap[loc.loadId]) continue;
 					const load = loadMap[loc.loadId];
 
