@@ -68,6 +68,9 @@
               dashArray="10, 6"
               className="route-animate"
             />
+            <l-marker v-if="r.origin" :lat-lng="r.origin" :icon="originIcon">
+              <l-popup><div class="marker-popup"><strong>{{ r.driver }} — Pickup</strong></div></l-popup>
+            </l-marker>
             <l-marker v-if="r.dest" :lat-lng="r.dest" :icon="destIcon">
               <l-popup><div class="marker-popup"><strong>{{ r.driver }} — Destination</strong></div></l-popup>
             </l-marker>
@@ -95,22 +98,49 @@
           <div
             v-for="loc in locations"
             :key="loc.driver"
-            :class="['driver-item', { active: selectedDriver === loc.driver, 'no-gps': loc.noGps }]"
-            @click="!loc.noGps && focusDriver(loc)"
+            class="driver-item-wrap"
           >
-            <span :class="['driver-dot', loc.noGps ? 'no-gps' : isOnline(loc) ? 'online' : 'offline']"></span>
-            <div class="driver-info">
-              <span class="driver-name">{{ loc.driver }}</span>
-              <span v-if="loc.noGps" class="driver-meta">
-                <span class="status-text no-gps">No location data</span>
-              </span>
-              <span v-else class="driver-meta">
-                <span :class="['status-text', isOnline(loc) ? 'online' : 'offline']">{{ isOnline(loc) ? 'Online' : 'Offline' }}</span>
-                <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
-              </span>
-              <span v-if="loc.loadId" class="driver-load">{{ loc.loadId }}</span>
+            <div
+              :class="['driver-item', { active: selectedDriver === loc.driver, 'no-gps': loc.noGps }]"
+              @click="!loc.noGps && focusDriver(loc)"
+            >
+              <span :class="['driver-dot', loc.noGps ? 'no-gps' : isOnline(loc) ? 'online' : 'offline']"></span>
+              <div class="driver-info">
+                <span class="driver-name">{{ loc.driver }}</span>
+                <span v-if="loc.noGps" class="driver-meta">
+                  <span class="status-text no-gps">No location data</span>
+                </span>
+                <span v-else class="driver-meta">
+                  <span :class="['status-text', isOnline(loc) ? 'online' : 'offline']">{{ isOnline(loc) ? 'Online' : 'Offline' }}</span>
+                  <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
+                </span>
+                <span v-if="loc.loadId" class="driver-load">{{ loc.loadId }}</span>
+              </div>
+              <span v-if="loc.speed && isOnline(loc)" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
             </div>
-            <span v-if="loc.speed && isOnline(loc)" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
+            <!-- Route accordion: expands when driver is selected -->
+            <div v-if="selectedDriver === loc.driver && (originLatLng || destLatLng)" class="route-accordion">
+              <div v-if="originLatLng" class="route-point">
+                <div class="route-point-header">
+                  <span class="route-point-dot pickup"></span>
+                  <span class="route-point-label">Pickup (A)</span>
+                </div>
+                <div v-if="originAddress" class="route-point-address">{{ originAddress }}</div>
+                <div class="route-point-coords">{{ originLatLng[0].toFixed(5) }}, {{ originLatLng[1].toFixed(5) }}</div>
+              </div>
+              <div v-if="destLatLng" class="route-point">
+                <div class="route-point-header">
+                  <span class="route-point-dot dropoff"></span>
+                  <span class="route-point-label">Drop-off (B)</span>
+                </div>
+                <div v-if="destAddress" class="route-point-address">{{ destAddress }}</div>
+                <div class="route-point-coords">{{ destLatLng[0].toFixed(5) }}, {{ destLatLng[1].toFixed(5) }}</div>
+              </div>
+              <div v-if="routeDistance != null || routeEta != null" class="route-summary">
+                <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} km</span>
+                <span v-if="routeEta != null" class="route-stat">{{ routeEta }} min ETA</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -336,6 +366,7 @@ async function focusAll() {
         return {
           driver: loc.driver,
           route: (data.route || []).map(p => [p.latitude, p.longitude]),
+          origin: data.origin ? [data.origin.latitude, data.origin.longitude] : null,
           dest: data.destination ? [data.destination.latitude, data.destination.longitude] : null,
           color: ROUTE_COLORS[i % ROUTE_COLORS.length],
         }
@@ -344,7 +375,7 @@ async function focusAll() {
       }
     })
   )
-  allRoutes.value = routes.filter(r => r && r.route.length >= 2)
+  allRoutes.value = routes.filter(r => r && (r.route.length >= 2 || r.origin || r.dest))
 
   // Fit bounds to all online drivers
   await nextTick()
@@ -353,8 +384,9 @@ async function focusAll() {
   const withGps = locationsWithGps.value
   if (withGps.length === 0) return
   const allPts = withGps.map(loc => [loc.latitude, loc.longitude])
-  // Include destinations from routes
+  // Include origins and destinations from routes
   for (const r of allRoutes.value) {
+    if (r.origin) allPts.push(r.origin)
     if (r.dest) allPts.push(r.dest)
   }
   const bounds = L.latLngBounds(allPts.map(p => L.latLng(p[0], p[1])))
@@ -731,6 +763,94 @@ onUnmounted(() => {
   font-weight: 500;
   color: #888;
   flex-shrink: 0;
+}
+
+/* Route accordion */
+.driver-item-wrap {
+  border-bottom: 1px solid #f3f4f6;
+}
+.driver-item-wrap:last-child {
+  border-bottom: none;
+}
+.driver-item-wrap .driver-item {
+  border-bottom: none;
+}
+
+.route-accordion {
+  padding: 0.4rem 0.75rem 0.6rem 1.6rem;
+  background: #f8fafc;
+  border-top: 1px dashed #e5e7eb;
+  animation: accordion-open 0.2s ease-out;
+}
+
+@keyframes accordion-open {
+  from { opacity: 0; max-height: 0; }
+  to { opacity: 1; max-height: 300px; }
+}
+
+.route-point {
+  margin-bottom: 0.45rem;
+}
+
+.route-point-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.1rem;
+}
+
+.route-point-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.route-point-dot.pickup {
+  background: #16a34a;
+}
+
+.route-point-dot.dropoff {
+  background: #dc2626;
+}
+
+.route-point-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #555;
+}
+
+.route-point-address {
+  font-size: 0.72rem;
+  color: #333;
+  line-height: 1.3;
+  margin-left: 1.1rem;
+}
+
+.route-point-coords {
+  font-size: 0.62rem;
+  color: #999;
+  font-family: 'JetBrains Mono', monospace;
+  margin-left: 1.1rem;
+}
+
+.route-summary {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid #e5e7eb;
+}
+
+.route-stat {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #4338ca;
+  background: #e0e7ff;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
 }
 
 .tracking-loading,
