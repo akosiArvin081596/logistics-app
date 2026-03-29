@@ -424,24 +424,27 @@ async function toggleLoad(al, loc) {
   expandedLoadId.value = al.loadId
   driverRoutes.value = []
   routePoints.value = []
-  originLatLng.value = null
-  destLatLng.value = null
+
+  const oLat = Number(al.originLat)
+  const oLng = Number(al.originLng)
+  const dLat = Number(al.destLat)
+  const dLng = Number(al.destLng)
+  const hasOrigin = isFinite(oLat) && isFinite(oLng)
+  const hasDest = isFinite(dLat) && isFinite(dLng)
+
+  // Set marker refs so the green/red dots appear on the map
+  originLatLng.value = hasOrigin ? [oLat, oLng] : null
+  originAddress.value = al.pickupAddress || ''
+  destLatLng.value = hasDest ? [dLat, dLng] : null
+  destAddress.value = al.dropoffAddress || ''
 
   const map = mapRef.value?.leafletObject
   if (map) {
     map.stop()
-    console.log('[toggleLoad] al coords:', { originLat: al.originLat, originLng: al.originLng, destLat: al.destLat, destLng: al.destLng })
-    const oLat = Number(al.originLat)
-    const oLng = Number(al.originLng)
-    const dLat = Number(al.destLat)
-    const dLng = Number(al.destLng)
-    const hasOrigin = isFinite(oLat) && isFinite(oLng)
-    const hasDest = isFinite(dLat) && isFinite(dLng)
-    console.log('[toggleLoad] parsed:', { oLat, oLng, dLat, dLng, hasOrigin, hasDest })
     if (hasOrigin && hasDest) {
       try {
         map.fitBounds([[oLat, oLng], [dLat, dLng]], { padding: [50, 50], maxZoom: 14, animate: false })
-      } catch (e) { console.error('[toggleLoad] fitBounds failed:', e) }
+      } catch { /* silent */ }
     } else if (hasOrigin) {
       map.setView([oLat, oLng], 14, { animate: false })
     } else if (hasDest) {
