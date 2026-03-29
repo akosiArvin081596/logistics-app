@@ -1929,7 +1929,7 @@ app.post("/api/messages", requireAuth, (req, res) => {
 			.run(timestamp, from, to, message, loadId || "");
 
 		// Persist notification for recipient
-		insertNotification.run(
+		const msgNotif = insertNotification.run(
 			to.trim().toLowerCase(), 'message',
 			`New message from ${from}`,
 			message.length > 100 ? message.substring(0, 100) + '...' : message,
@@ -1939,6 +1939,7 @@ app.post("/api/messages", requireAuth, (req, res) => {
 		// Broadcast via Socket.IO for real-time delivery
 		io.emit("new-message", {
 			id: result.lastInsertRowid,
+			notificationId: msgNotif.lastInsertRowid,
 			timestamp,
 			from,
 			to,
@@ -2419,7 +2420,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 										values: [[logId, loadId, driverName, dateTime, geofenceTriggered, `Auto-triggered by geofence (was ${currentStatus})`]],
 									},
 								});
-								insertNotification.run(
+								const geoNotif = insertNotification.run(
 									driverName.trim().toLowerCase(), 'geofence',
 									`Geofence: ${geofenceTriggered}`,
 									`Load ${loadId}`,
@@ -2428,6 +2429,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 								io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
 									loadId,
 									status: geofenceTriggered,
+									notificationId: geoNotif.lastInsertRowid,
 								});
 								io.to("dispatch").emit("geofence-trigger", {
 									loadId,

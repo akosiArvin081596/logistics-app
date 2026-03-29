@@ -573,7 +573,7 @@ function onGeofenceTrigger(payload) {
   if (!isMounted) return
   toast.show(`Geofence: ${payload.status} for Load ${payload.loadId}`)
   driverStore.addNotification({
-    id: Date.now(),
+    id: payload.notificationId || Date.now(),
     type: 'geofence',
     title: `Geofence: ${payload.status}`,
     body: `Load ${payload.loadId}`,
@@ -595,7 +595,7 @@ function onNewMessage(msg) {
 
     driverStore.addIncomingMessage(msg)
     driverStore.addNotification({
-      id: Date.now(),
+      id: msg.notificationId || Date.now(),
       type: 'message',
       title: `New message from ${msg.from}`,
       body: msg.message.length > 100 ? msg.message.substring(0, 100) + '...' : msg.message,
