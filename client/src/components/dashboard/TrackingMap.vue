@@ -135,7 +135,6 @@
                   <span :class="['status-text', isOnline(loc) ? 'online' : 'offline']">{{ isOnline(loc) ? 'Online' : 'Offline' }}</span>
                   <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
                 </span>
-                <span v-if="loc.loadId" class="driver-load">{{ loc.loadId }}</span>
               </div>
               <span v-if="loc.speed && isOnline(loc)" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
             </div>
