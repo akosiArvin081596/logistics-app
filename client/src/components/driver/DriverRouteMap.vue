@@ -147,12 +147,12 @@ const destAddr = computed(() => destAddrCol.value ? props.load[destAddrCol.value
 const loadIdValue = computed(() => loadIdCol.value ? props.load[loadIdCol.value] || '' : '')
 const driverName = computed(() => driverColName.value ? props.load[driverColName.value] || '' : '')
 
-const mapCenter = computed(() => {
-  if (driverLatLng.value) return driverLatLng.value
-  if (originLatLng.value) return originLatLng.value
-  if (destLatLng.value) return destLatLng.value
+// Static initial center — does not reactively recenter the map on GPS updates
+const mapCenter = ref((() => {
+  const dPos = props.driverPosition
+  if (dPos) return [dPos.latitude, dPos.longitude]
   return [8.95, 125.53]
-})
+})())
 
 // Custom icons
 const originIcon = L.divIcon({
