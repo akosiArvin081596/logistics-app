@@ -2940,8 +2940,9 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				const pickupAddrCol = headers.find((h) => /pickup.*addr|origin.*addr|shipper.*addr/i.test(h));
 				const dropoffAddrCol = headers.find((h) => /drop.*addr|dest.*addr|receiver.*addr|delivery.*addr/i.test(h));
 				const activeRe = /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i;
-				const driverActiveLoadMap = {};   // driver → first active loadId (for override)
-				const driverActiveLoadsMap = {};  // driver → all active loads with details
+				const workingRe = /^(assigned|at shipper|loading|in transit|at receiver)$/i;
+				const driverActiveLoadMap = {};   // driver → first active loadId (for override, includes dispatched)
+				const driverActiveLoadsMap = {};  // driver → working loads for panel (matches driver app's Active tab)
 				if (statusCol && driverCol && loadIdCol) {
 					for (let i = 1; i < rows.length; i++) {
 						const obj = {};
@@ -2949,9 +2950,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						const name = (obj[driverCol] || "").trim();
 						const status = (obj[statusCol] || "").trim();
 						const lid = (obj[loadIdCol] || "").trim().replace(/^#/, "");
-						if (name && lid && activeRe.test(status)) {
-							const key = name.toLowerCase();
+						if (!name || !lid) continue;
+						const key = name.toLowerCase();
+						if (activeRe.test(status)) {
 							driverActiveLoadMap[key] = lid;
+						}
+						if (workingRe.test(status)) {
 							if (!driverActiveLoadsMap[key]) driverActiveLoadsMap[key] = [];
 							const entry = { loadId: lid, status, details: detailsCol ? (obj[detailsCol] || "") : "" };
 							if (pickupAddrCol) entry.pickupAddress = obj[pickupAddrCol] || "";
