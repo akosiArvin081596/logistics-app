@@ -518,16 +518,19 @@ async function checkOffRoute(lat, lng) {
   }
 
   // Off-route: recalculate from current position to destination
+  // Only update if new route succeeds — never clear the existing route
   if (minDist >= 100 && destLatLng.value) {
     lastRerouteTime = Date.now()
     try {
       const [toLat, toLng] = destLatLng.value
       const data = await api.get(`/api/route?fromLat=${lat}&fromLng=${lng}&toLat=${toLat}&toLng=${toLng}`)
-      routePoints.value = (data.route || []).map(p => [p.latitude, p.longitude])
-      routeDistance.value = data.distanceKm
-      routeEta.value = data.etaMinutes
+      if (data.route && data.route.length >= 2) {
+        routePoints.value = data.route.map(p => [p.latitude, p.longitude])
+        routeDistance.value = data.distanceKm
+        routeEta.value = data.etaMinutes
+      }
     } catch {
-      // silent
+      // silent — keep existing route
     }
   }
 }
