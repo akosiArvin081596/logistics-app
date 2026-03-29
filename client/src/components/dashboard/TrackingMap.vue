@@ -450,19 +450,26 @@ async function toggleLoad(al, loc) {
   // Expand: show single load route, hide multi-route
   expandedLoadId.value = al.loadId
   driverRoutes.value = []
-  await fetchTrail(loc.driver, al.loadId)
 
+  // Immediately fit to the load's known coordinates (don't wait for trail API)
   const map = mapRef.value?.leafletObject
   if (map) {
+    const immediatePts = []
+    if (al.originLat) immediatePts.push([al.originLat, al.originLng])
+    if (al.destLat) immediatePts.push([al.destLat, al.destLng])
+    safeFitBounds(map, immediatePts, { padding: [50, 50], maxZoom: 14, animate: true })
+  }
+
+  // Then fetch the route polyline in the background
+  await fetchTrail(loc.driver, al.loadId)
+
+  // Re-fit with full route data if available
+  if (map && routePoints.value.length >= 2) {
     await nextTick()
     const allPts = []
-    // Use fetchTrail results, fall back to activeLoad coords from server
-    const origin = originLatLng.value || (al.originLat ? [al.originLat, al.originLng] : null)
-    const dest = destLatLng.value || (al.destLat ? [al.destLat, al.destLng] : null)
-    if (origin) allPts.push(origin)
-    if (dest) allPts.push(dest)
-    if (routePoints.value.length >= 2) allPts.push(...routePoints.value)
-    // Fit to the two points + route, showing the full load route
+    if (originLatLng.value) allPts.push(originLatLng.value)
+    if (destLatLng.value) allPts.push(destLatLng.value)
+    allPts.push(...routePoints.value)
     safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 14, animate: true })
   }
 }
