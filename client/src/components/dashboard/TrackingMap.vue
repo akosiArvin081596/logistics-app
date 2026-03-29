@@ -25,7 +25,7 @@
           <l-popup>
             <div class="marker-popup">
               <strong>{{ loc.driver }}</strong>
-              <div v-if="loc.loadId">Load: {{ loc.loadId }}</div>
+              <div v-if="inTransitLoad(loc)">Load: {{ inTransitLoad(loc) }}</div>
               <div class="popup-coords">{{ loc.latitude.toFixed(5) }}, {{ loc.longitude.toFixed(5) }}</div>
               <div v-if="loc.speed">Speed: {{ Math.round(loc.speed * 2.237) }} mph</div>
               <div v-if="selectedDriver === loc.driver && routeDistance != null" class="popup-eta">
@@ -135,6 +135,7 @@
                   <span :class="['status-text', isOnline(loc) ? 'online' : 'offline']">{{ isOnline(loc) ? 'Online' : 'Offline' }}</span>
                   <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
                 </span>
+                <span v-if="inTransitLoad(loc)" class="driver-load">{{ inTransitLoad(loc) }}</span>
               </div>
               <span v-if="loc.speed && isOnline(loc)" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
             </div>
@@ -555,6 +556,11 @@ async function focusAll() {
 const now = ref(Date.now())
 let nowInterval = null
 const ONLINE_THRESHOLD = 5 * 60 * 1000 // 5 minutes
+
+function inTransitLoad(loc) {
+  const al = (loc.activeLoads || []).find(l => /^in transit$/i.test(l.status))
+  return al ? al.loadId : ''
+}
 
 function isOnline(loc) {
   if (!loc.timestamp) return false
