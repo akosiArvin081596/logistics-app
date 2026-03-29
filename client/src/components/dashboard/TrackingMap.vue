@@ -118,28 +118,49 @@
               </div>
               <span v-if="loc.speed && isOnline(loc)" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
             </div>
-            <!-- Route accordion: expands when driver is selected -->
-            <div v-if="selectedDriver === loc.driver && (originLatLng || destLatLng)" class="route-accordion">
-              <div v-if="originLatLng" class="route-point">
-                <div class="route-point-header">
-                  <span class="route-point-dot pickup"></span>
-                  <span class="route-point-label">Pickup (A)</span>
+            <!-- Level 1: Active loads list (expands when driver is selected) -->
+            <div v-if="selectedDriver === loc.driver && loc.activeLoads && loc.activeLoads.length > 0" class="loads-accordion">
+              <div
+                v-for="al in loc.activeLoads"
+                :key="al.loadId"
+                class="load-entry"
+              >
+                <div
+                  :class="['load-entry-header', { active: expandedLoadId === al.loadId }]"
+                  @click.stop="toggleLoad(al, loc)"
+                >
+                  <span class="load-entry-id">{{ al.loadId }}</span>
+                  <span class="load-entry-status">{{ al.status }}</span>
+                  <span class="load-entry-chevron" :class="{ open: expandedLoadId === al.loadId }">&#9662;</span>
                 </div>
-                <div v-if="originAddress" class="route-point-address">{{ originAddress }}</div>
-                <div class="route-point-coords">{{ originLatLng[0].toFixed(5) }}, {{ originLatLng[1].toFixed(5) }}</div>
-              </div>
-              <div v-if="destLatLng" class="route-point">
-                <div class="route-point-header">
-                  <span class="route-point-dot dropoff"></span>
-                  <span class="route-point-label">Drop-off (B)</span>
+                <div v-if="al.details" class="load-entry-details">{{ al.details }}</div>
+                <!-- Level 2: Point A/B details (expands when load is clicked) -->
+                <div v-if="expandedLoadId === al.loadId" class="route-accordion">
+                  <div v-if="al.originLat" class="route-point">
+                    <div class="route-point-header">
+                      <span class="route-point-dot pickup"></span>
+                      <span class="route-point-label">Pickup (A)</span>
+                    </div>
+                    <div v-if="al.pickupAddress" class="route-point-address">{{ al.pickupAddress }}</div>
+                    <div class="route-point-coords">{{ al.originLat.toFixed(5) }}, {{ al.originLng.toFixed(5) }}</div>
+                  </div>
+                  <div v-if="al.destLat" class="route-point">
+                    <div class="route-point-header">
+                      <span class="route-point-dot dropoff"></span>
+                      <span class="route-point-label">Drop-off (B)</span>
+                    </div>
+                    <div v-if="al.dropoffAddress" class="route-point-address">{{ al.dropoffAddress }}</div>
+                    <div class="route-point-coords">{{ al.destLat.toFixed(5) }}, {{ al.destLng.toFixed(5) }}</div>
+                  </div>
+                  <div v-if="routeDistance != null || routeEta != null" class="route-summary">
+                    <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} km</span>
+                    <span v-if="routeEta != null" class="route-stat">{{ routeEta }} min ETA</span>
+                  </div>
                 </div>
-                <div v-if="destAddress" class="route-point-address">{{ destAddress }}</div>
-                <div class="route-point-coords">{{ destLatLng[0].toFixed(5) }}, {{ destLatLng[1].toFixed(5) }}</div>
               </div>
-              <div v-if="routeDistance != null || routeEta != null" class="route-summary">
-                <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} km</span>
-                <span v-if="routeEta != null" class="route-stat">{{ routeEta }} min ETA</span>
-              </div>
+            </div>
+            <div v-else-if="selectedDriver === loc.driver && (!loc.activeLoads || loc.activeLoads.length === 0)" class="loads-accordion">
+              <div class="no-active-loads">No active loads</div>
             </div>
           </div>
         </div>
@@ -167,6 +188,7 @@ const mapRef = ref(null)
 const locations = ref([])
 const loading = ref(true)
 const selectedDriver = ref('')
+const expandedLoadId = ref('')
 const panelCollapsed = ref(false)
 const markerRefs = {}
 
@@ -290,6 +312,7 @@ async function fetchTrail(driverName, loadId) {
 
 async function focusDriver(loc) {
   selectedDriver.value = loc.driver
+  expandedLoadId.value = ''
   allRoutes.value = []
   const map = mapRef.value?.leafletObject
 
@@ -305,9 +328,27 @@ async function focusDriver(loc) {
     }
   })
 
-  // Then fetch route and widen bounds if available
-  await fetchTrail(loc.driver, loc.loadId)
+  // Auto-expand and fetch route if driver has exactly one active load
+  if (loc.activeLoads && loc.activeLoads.length === 1) {
+    await toggleLoad(loc.activeLoads[0], loc)
+  } else {
+    // Clear any previous route when switching drivers
+    await fetchTrail(null, null)
+  }
+}
 
+async function toggleLoad(al, loc) {
+  if (expandedLoadId.value === al.loadId) {
+    // Collapse: clear route
+    expandedLoadId.value = ''
+    await fetchTrail(null, null)
+    return
+  }
+
+  expandedLoadId.value = al.loadId
+  await fetchTrail(loc.driver, al.loadId)
+
+  const map = mapRef.value?.leafletObject
   if (map && routePoints.value.length >= 2) {
     await nextTick()
     const allPts = [...routePoints.value, [loc.latitude, loc.longitude]]
@@ -348,6 +389,7 @@ async function checkOffRoute(lat, lng) {
 
 async function focusAll() {
   selectedDriver.value = '__all__'
+  expandedLoadId.value = ''
   // Clear single-driver state
   trailPoints.value = []
   routePoints.value = []
@@ -765,7 +807,7 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-/* Route accordion */
+/* Loads & route accordion */
 .driver-item-wrap {
   border-bottom: 1px solid #f3f4f6;
 }
@@ -776,10 +818,78 @@ onUnmounted(() => {
   border-bottom: none;
 }
 
-.route-accordion {
-  padding: 0.4rem 0.75rem 0.6rem 1.6rem;
+.loads-accordion {
   background: #f8fafc;
   border-top: 1px dashed #e5e7eb;
+  animation: accordion-open 0.2s ease-out;
+}
+
+.load-entry {
+  border-bottom: 1px solid #f0f1f3;
+}
+.load-entry:last-child {
+  border-bottom: none;
+}
+
+.load-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.75rem 0.4rem 1.4rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.load-entry-header:hover {
+  background: #eef2ff;
+}
+.load-entry-header.active {
+  background: #e0e7ff;
+}
+
+.load-entry-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #333;
+}
+
+.load-entry-status {
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: #4338ca;
+  background: #e0e7ff;
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+}
+
+.load-entry-chevron {
+  margin-left: auto;
+  font-size: 0.55rem;
+  color: #999;
+  transition: transform 0.2s;
+}
+.load-entry-chevron.open {
+  transform: rotate(180deg);
+}
+
+.load-entry-details {
+  font-size: 0.68rem;
+  color: #888;
+  padding: 0 0.75rem 0.3rem 1.4rem;
+  margin-top: -0.2rem;
+}
+
+.no-active-loads {
+  font-size: 0.72rem;
+  color: #aaa;
+  text-align: center;
+  padding: 0.5rem 0;
+}
+
+.route-accordion {
+  padding: 0.4rem 0.75rem 0.6rem 1.8rem;
   animation: accordion-open 0.2s ease-out;
 }
 

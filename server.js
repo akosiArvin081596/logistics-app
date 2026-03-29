@@ -2932,12 +2932,16 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					if (lid) loadMap[lid] = obj;
 				}
 
-				// Build map of each driver's current active load from the sheet
-				// so we can override stale load_ids stored in SQLite
+				// Build map of each driver's active loads from the sheet
+				// Used to override stale load_ids and provide load details in the panel
 				const statusCol = headers.find((h) => /status/i.test(h));
 				const driverCol = headers.find((h) => /^driver$/i.test(h));
+				const detailsCol = headers.find((h) => /^details$/i.test(h));
+				const pickupAddrCol = headers.find((h) => /pickup.*addr|origin.*addr|shipper.*addr/i.test(h));
+				const dropoffAddrCol = headers.find((h) => /drop.*addr|dest.*addr|receiver.*addr|delivery.*addr/i.test(h));
 				const activeRe = /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i;
-				const driverActiveLoadMap = {};
+				const driverActiveLoadMap = {};   // driver → first active loadId (for override)
+				const driverActiveLoadsMap = {};  // driver → all active loads with details
 				if (statusCol && driverCol && loadIdCol) {
 					for (let i = 1; i < rows.length; i++) {
 						const obj = {};
@@ -2946,7 +2950,23 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						const status = (obj[statusCol] || "").trim();
 						const lid = (obj[loadIdCol] || "").trim().replace(/^#/, "");
 						if (name && lid && activeRe.test(status)) {
-							driverActiveLoadMap[name.toLowerCase()] = lid;
+							const key = name.toLowerCase();
+							driverActiveLoadMap[key] = lid;
+							if (!driverActiveLoadsMap[key]) driverActiveLoadsMap[key] = [];
+							const entry = { loadId: lid, status, details: detailsCol ? (obj[detailsCol] || "") : "" };
+							if (pickupAddrCol) entry.pickupAddress = obj[pickupAddrCol] || "";
+							if (dropoffAddrCol) entry.dropoffAddress = obj[dropoffAddrCol] || "";
+							if (originLatCol && originLngCol) {
+								const oLat = parseFloat(obj[originLatCol]);
+								const oLng = parseFloat(obj[originLngCol]);
+								if (!isNaN(oLat) && !isNaN(oLng)) { entry.originLat = oLat; entry.originLng = oLng; }
+							}
+							if (destLatCol && destLngCol) {
+								const dLat = parseFloat(obj[destLatCol]);
+								const dLng = parseFloat(obj[destLngCol]);
+								if (!isNaN(dLat) && !isNaN(dLng)) { entry.destLat = dLat; entry.destLng = dLng; }
+							}
+							driverActiveLoadsMap[key].push(entry);
 						}
 					}
 				}
@@ -2957,8 +2977,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.etaStatus = "unknown";
 					loc.etaMinutes = null;
 
+					// Attach all active loads for this driver
+					const driverKey = (loc.driver || "").toLowerCase();
+					loc.activeLoads = driverActiveLoadsMap[driverKey] || [];
+
 					// Override stale load_id: prefer the driver's active load from Google Sheets
-					const sheetActiveLoad = driverActiveLoadMap[(loc.driver || "").toLowerCase()];
+					const sheetActiveLoad = driverActiveLoadMap[driverKey];
 					if (sheetActiveLoad && loc.loadId !== sheetActiveLoad && loadMap[sheetActiveLoad]) {
 						loc.loadId = sheetActiveLoad;
 					}
