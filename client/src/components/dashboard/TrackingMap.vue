@@ -157,7 +157,7 @@
                 <div v-if="al.details" class="load-entry-details">{{ al.details }}</div>
                 <!-- Level 2: Point A/B details (expands when load is clicked) -->
                 <div v-if="expandedLoadId === al.loadId" class="route-accordion">
-                  <div v-if="al.originLat" class="route-point">
+                  <div v-if="al.originLat" class="route-point clickable" @click.stop="focusPoint(al.originLat, al.originLng)">
                     <div class="route-point-header">
                       <span class="route-point-dot pickup"></span>
                       <span class="route-point-label">Pickup (A)</span>
@@ -165,7 +165,7 @@
                     <div v-if="al.pickupAddress" class="route-point-address">{{ al.pickupAddress }}</div>
                     <div class="route-point-coords">{{ al.originLat.toFixed(5) }}, {{ al.originLng.toFixed(5) }}</div>
                   </div>
-                  <div v-if="al.destLat" class="route-point">
+                  <div v-if="al.destLat" class="route-point clickable" @click.stop="focusPoint(al.destLat, al.destLng)">
                     <div class="route-point-header">
                       <span class="route-point-dot dropoff"></span>
                       <span class="route-point-label">Drop-off (B)</span>
@@ -330,6 +330,13 @@ async function fetchTrail(driverName, loadId) {
     trailLoadId.value = loadId
   } catch {
     // silent — trail is supplementary
+  }
+}
+
+function focusPoint(lat, lng) {
+  const map = mapRef.value?.leafletObject
+  if (map) {
+    map.setView([lat, lng], 15, { animate: true })
   }
 }
 
@@ -965,6 +972,18 @@ onUnmounted(() => {
 
 .route-point {
   margin-bottom: 0.45rem;
+}
+
+.route-point.clickable {
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0.25rem 0.35rem;
+  margin-left: -0.35rem;
+  transition: background 0.15s;
+}
+
+.route-point.clickable:hover {
+  background: #e0e7ff;
 }
 
 .route-point-header {
