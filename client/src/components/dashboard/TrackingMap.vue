@@ -451,6 +451,24 @@ async function toggleLoad(al, loc) {
       map.setView([dLat, dLng], 14, { animate: false })
     }
   }
+
+  // Fetch route polyline in background (straight-line fallback if OSRM fails)
+  if (hasOrigin && hasDest) {
+    const gen = focusGeneration
+    try {
+      const data = await api.get(`/api/route?fromLat=${oLat}&fromLng=${oLng}&toLat=${dLat}&toLng=${dLng}`)
+      if (gen !== focusGeneration) return
+      if (data.route && data.route.length >= 2) {
+        routePoints.value = data.route.map(p => [p.latitude, p.longitude])
+      } else {
+        // Straight-line fallback
+        routePoints.value = [[oLat, oLng], [dLat, dLng]]
+      }
+    } catch {
+      if (gen !== focusGeneration) return
+      routePoints.value = [[oLat, oLng], [dLat, dLng]]
+    }
+  }
 }
 
 let lastRerouteTime = 0
