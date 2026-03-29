@@ -424,6 +424,17 @@ async function toggleLoad(al, loc) {
     expandedLoadId.value = ''
     await fetchTrail(null, null)
     await fetchDriverRoutes(loc)
+    // Re-fit to driver + all routes
+    const map = mapRef.value?.leafletObject
+    if (map && driverRoutes.value.length > 0) {
+      await nextTick()
+      const allPts = [[loc.latitude, loc.longitude]]
+      for (const r of driverRoutes.value) {
+        if (r.origin) allPts.push(r.origin)
+        if (r.dest) allPts.push(r.dest)
+      }
+      safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 12, animate: true })
+    }
     return
   }
 
@@ -433,10 +444,18 @@ async function toggleLoad(al, loc) {
   await fetchTrail(loc.driver, al.loadId)
 
   const map = mapRef.value?.leafletObject
-  if (map && routePoints.value.length >= 2) {
+  if (map) {
     await nextTick()
-    const allPts = [...routePoints.value, [loc.latitude, loc.longitude]]
-    safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 14, animate: true })
+    const allPts = []
+    if (originLatLng.value) allPts.push(originLatLng.value)
+    if (destLatLng.value) allPts.push(destLatLng.value)
+    if (routePoints.value.length >= 2) allPts.push(...routePoints.value)
+    // Fit to the two points + route, showing the full load route
+    if (allPts.length >= 2) {
+      safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 14, animate: true })
+    } else if (allPts.length === 1) {
+      map.setView(allPts[0], 14, { animate: true })
+    }
   }
 }
 
