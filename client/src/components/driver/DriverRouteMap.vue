@@ -257,6 +257,15 @@ watch(() => props.driverPosition, (pos) => {
   }
 }, { deep: true })
 
+function focusOn(lat, lng) {
+  const map = mapRef.value?.leafletObject
+  if (map) {
+    map.setView([lat, lng], 15, { animate: true })
+  }
+}
+
+defineExpose({ focusOn })
+
 onMounted(() => {
   if (props.dispatchMode && hasCoords.value) {
     fetchRoute(true)

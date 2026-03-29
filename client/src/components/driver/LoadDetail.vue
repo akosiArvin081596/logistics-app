@@ -17,6 +17,7 @@
     <van-collapse v-model="openSections" class="detail-collapse" :border="false">
       <van-collapse-item title="Route Map" name="map">
         <DriverRouteMap
+          ref="routeMapRef"
           :load="load"
           :headers="headers"
           :driver-position="driverPosition"
@@ -37,6 +38,9 @@
             <template #value>
               <div class="cell-value-row">
                 <span>{{ f.value || '\u2014' }}</span>
+                <button v-if="isAddress(f.header) && f.value && pickupCoords" class="copy-btn" @click.stop="focusMapOn(pickupCoords)">
+                  <span class="map-icon">&#128205;</span>
+                </button>
                 <button v-if="isAddress(f.header) && f.value" class="copy-btn" @click.stop="copyText(f.value)">
                   <span v-if="copiedField === f.header" class="copied-text">Copied</span>
                   <span v-else class="copy-icon">&#128203;</span>
@@ -59,6 +63,9 @@
             <template #value>
               <div class="cell-value-row">
                 <span>{{ f.value || '\u2014' }}</span>
+                <button v-if="isAddress(f.header) && f.value && dropoffCoords" class="copy-btn" @click.stop="focusMapOn(dropoffCoords)">
+                  <span class="map-icon">&#128205;</span>
+                </button>
                 <button v-if="isAddress(f.header) && f.value" class="copy-btn" @click.stop="copyText(f.value)">
                   <span v-if="copiedField === f.header" class="copied-text">Copied</span>
                   <span v-else class="copy-icon">&#128203;</span>
@@ -96,9 +103,37 @@ const emit = defineEmits(['back', 'status-update', 'uploaded'])
 
 const openSections = ref(['map'])
 const copiedField = ref(null)
+const routeMapRef = ref(null)
 
 function isAddress(header) {
   return /address|addr|location/i.test(header)
+}
+
+const pickupCoords = computed(() => {
+  const latCol = (props.headers || []).find(h => /origin.*lat|pickup.*lat|shipper.*lat/i.test(h))
+  const lngCol = (props.headers || []).find(h => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h))
+  if (!latCol || !lngCol) return null
+  const lat = parseFloat(props.load[latCol])
+  const lng = parseFloat(props.load[lngCol])
+  return !isNaN(lat) && !isNaN(lng) ? [lat, lng] : null
+})
+
+const dropoffCoords = computed(() => {
+  const latCol = (props.headers || []).find(h => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h))
+  const lngCol = (props.headers || []).find(h => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h))
+  if (!latCol || !lngCol) return null
+  const lat = parseFloat(props.load[latCol])
+  const lng = parseFloat(props.load[lngCol])
+  return !isNaN(lat) && !isNaN(lng) ? [lat, lng] : null
+})
+
+function focusMapOn(coords) {
+  if (!openSections.value.includes('map')) {
+    openSections.value = [...openSections.value, 'map']
+  }
+  setTimeout(() => {
+    routeMapRef.value?.focusOn(coords[0], coords[1])
+  }, 150)
 }
 
 function copyText(text) {
@@ -120,8 +155,8 @@ function findCol(headers, regex) {
 const statusCol = computed(() => findCol(props.headers, /status/i))
 const loadIdCol = computed(() => findCol(props.headers, /load.?id|job.?id/i))
 const detailsCol = computed(() => findCol(props.headers, /details/i))
-const originCol = computed(() => findCol(props.headers, /origin|pickup.*city|shipper.*city/i))
-const destCol = computed(() => findCol(props.headers, /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i))
+const originCol = computed(() => (props.headers || []).find(h => /origin|pickup.*city|shipper.*city/i.test(h) && !/lat|lng|lon/i.test(h)) || null)
+const destCol = computed(() => (props.headers || []).find(h => /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null)
 
 const status = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim() : '')
 const loadId = computed(() => loadIdCol.value ? props.load[loadIdCol.value] : '')
@@ -257,5 +292,9 @@ const dropoffFields = computed(() => {
   font-size: 0.65rem;
   font-weight: 600;
   color: #16a34a;
+}
+.map-icon {
+  font-size: 0.85rem;
+  line-height: 1;
 }
 </style>
