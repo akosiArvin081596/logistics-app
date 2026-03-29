@@ -612,7 +612,17 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			});
 		}
 
-		res.json({ fixed: updates.length, oldName, newName });
+		// Also fix SQLite tables
+		const oldLower = oldName.trim().toLowerCase();
+		const newLower = newName.trim().toLowerCase();
+		const sqlFixes = {};
+		sqlFixes.notifications = db.prepare("UPDATE notifications SET driver_name = ? WHERE driver_name = ?").run(newLower, oldLower).changes;
+		sqlFixes.expenses = db.prepare("UPDATE expenses SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.load_responses = db.prepare("UPDATE load_responses SET driver_name = ? WHERE driver_name = ?").run(newLower, oldLower).changes;
+		sqlFixes.messages_from = db.prepare("UPDATE messages SET \"from\" = ? WHERE LOWER(\"from\") = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.messages_to = db.prepare("UPDATE messages SET \"to\" = ? WHERE LOWER(\"to\") = ?").run(newName.trim(), oldLower).changes;
+
+		res.json({ fixed: updates.length, oldName, newName, sqlite: sqlFixes });
 	} catch (error) {
 		console.error("Error fixing driver name:", error.message);
 		res.status(500).json({ error: error.message });
