@@ -190,7 +190,10 @@ async function fetchRoute(fitBounds = false) {
   etaMinutes.value = null
   if (!destLatLng.value) return
 
-  const from = driverLatLng.value || originLatLng.value
+  // Before pickup: route from origin (A) to destination (B)
+  // After pickup: route from driver position to destination (B)
+  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+  const from = pickedUp && driverLatLng.value ? driverLatLng.value : originLatLng.value
   if (!from) return
 
   try {
@@ -198,20 +201,19 @@ async function fetchRoute(fitBounds = false) {
     try {
       data = await api.get(`/api/route?fromLat=${from[0]}&fromLng=${from[1]}&toLat=${destLatLng.value[0]}&toLng=${destLatLng.value[1]}`)
     } catch {
-      // Fallback: route from origin to destination if driver position route fails
-      if (originLatLng.value && from !== originLatLng.value) {
+      // silent
+    }
+    // If route failed or returned null, try origin → destination as fallback
+    if ((!data || !data.route) && originLatLng.value && from !== originLatLng.value) {
+      try {
         data = await api.get(`/api/route?fromLat=${originLatLng.value[0]}&fromLng=${originLatLng.value[1]}&toLat=${destLatLng.value[0]}&toLng=${destLatLng.value[1]}`)
+      } catch {
+        // silent
       }
     }
     if (!data) return
     if (data.route && data.route.length >= 2) {
       routePoints.value = data.route.map(p => [p.latitude, p.longitude])
-    } else {
-      // Fallback: straight line when OSRM can't compute (e.g. cross-ocean)
-      const pts = []
-      if (originLatLng.value) pts.push(originLatLng.value)
-      if (destLatLng.value) pts.push(destLatLng.value)
-      if (pts.length >= 2) routePoints.value = pts
     }
     distanceKm.value = data.distanceKm
     etaMinutes.value = data.etaMinutes
