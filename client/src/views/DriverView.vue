@@ -43,7 +43,7 @@
         />
 
         <!-- Load List -->
-        <template v-else>
+        <div v-else>
           <!-- Sub-tab bar -->
           <div class="load-sub-tabs">
             <button
@@ -87,11 +87,11 @@
             <button v-if="hasActiveFilters" class="clear-filters" @click="clearFilters">Clear filters</button>
           </div>
 
-          <template v-if="driverStore.isLoading">
+          <div v-if="driverStore.isLoading" class="loading-skeletons">
             <div class="skeleton skeleton-card"></div>
             <div class="skeleton skeleton-card"></div>
-          </template>
-          <template v-else-if="driverStore.filteredLoads.length === 0">
+          </div>
+          <div v-else-if="driverStore.filteredLoads.length === 0">
             <EmptyState>
               <div class="empty-icon">&#128230;</div>
               <template v-if="driverStore.loads.length > 0">
@@ -101,8 +101,8 @@
                 No loads assigned.<br>Check back later.
               </template>
             </EmptyState>
-          </template>
-          <template v-else>
+          </div>
+          <div v-else class="load-cards">
             <LoadCard
               v-for="load in driverStore.filteredLoads"
               :key="load._rowIndex"
@@ -115,20 +115,20 @@
               @accept="handleAcceptLoad"
               @decline="handleDeclineLoad"
             />
-          </template>
-        </template>
+          </div>
+        </div>
       </section>
 
       <!-- STATUS TAB -->
       <section v-if="currentTab === 'status'" class="tab-panel">
         <div class="section-header">Status Update</div>
-        <template v-if="!currentActiveLoad">
+        <div v-if="!currentActiveLoad">
           <EmptyState>
             <div class="empty-icon">&#128666;</div>
             No active loads to update.
           </EmptyState>
-        </template>
-        <template v-else>
+        </div>
+        <div v-else>
           <div class="status-load-header">
             <span class="status-load-id">{{ getLoadId(currentActiveLoad) }}</span>
             <StatusBadge :status="getLoadStatus(currentActiveLoad)" />
@@ -150,21 +150,20 @@
             @uploaded="onStatusDocUploaded"
           />
           <DocumentList ref="statusDocListRef" :load-id="getLoadId(currentActiveLoad)" />
-        </template>
+        </div>
       </section>
 
       <!-- KIT TAB -->
       <section v-if="currentTab === 'kit'" class="tab-panel">
         <div class="section-header">Driver Kit</div>
-        <template v-if="driverStore.isLoading">
+        <div v-if="driverStore.isLoading">
           <div class="skeleton skeleton-card"></div>
-        </template>
-        <template v-else>
-          <DriverKit
-            :driver-info="driverStore.driverInfo"
-            :headers="driverStore.headers.carrierDB"
-          />
-        </template>
+        </div>
+        <DriverKit
+          v-else
+          :driver-info="driverStore.driverInfo"
+          :headers="driverStore.headers.carrierDB"
+        />
       </section>
 
       <!-- NOTIFICATIONS TAB -->
@@ -191,14 +190,13 @@
       <section v-if="currentTab === 'expenses'" class="tab-panel">
         <div class="section-header">Expenses</div>
 
-        <template v-if="driverStore.workingLoads.length > 0">
-          <ExpenseForm
-            :loads="driverStore.workingLoads"
-            :driver-name="driverName"
-            :headers="driverStore.headers.jobTracking"
-            @submit="handleExpenseSubmit"
-          />
-        </template>
+        <ExpenseForm
+          v-if="driverStore.workingLoads.length > 0"
+          :loads="driverStore.workingLoads"
+          :driver-name="driverName"
+          :headers="driverStore.headers.jobTracking"
+          @submit="handleExpenseSubmit"
+        />
         <EmptyState v-else>
           No active loads.
         </EmptyState>
@@ -208,19 +206,19 @@
           <span class="section-count">{{ driverStore.expenses.length }}</span>
         </div>
 
-        <template v-if="driverStore.expenses.length === 0">
+        <div v-if="driverStore.expenses.length === 0">
           <EmptyState>
             <div class="empty-icon">&#128176;</div>
             No expenses logged yet.
           </EmptyState>
-        </template>
-        <template v-else>
+        </div>
+        <div v-else class="expense-list">
           <ExpenseCard
             v-for="(exp, i) in driverStore.expenses"
             :key="exp.id || i"
             :expense="exp"
           />
-        </template>
+        </div>
       </section>
     </main>
 
