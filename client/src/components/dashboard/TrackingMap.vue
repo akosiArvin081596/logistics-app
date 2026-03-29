@@ -286,13 +286,22 @@ function snapToRoute(point, route) {
 
 // Safe fitBounds — validates coordinates to avoid "Bounds are not valid" errors
 function safeFitBounds(map, points, options = {}) {
-  const valid = points.filter(p => p && p.length >= 2 && isFinite(p[0]) && isFinite(p[1]))
-  if (valid.length === 0) return
-  if (valid.length === 1) {
-    map.setView(valid[0], options.maxZoom || 12, { animate: true })
-    return
-  }
-  map.fitBounds(L.latLngBounds(valid.map(p => L.latLng(p[0], p[1]))), options)
+  try {
+    const valid = points.filter(p =>
+      Array.isArray(p) && p.length >= 2 &&
+      typeof p[0] === 'number' && typeof p[1] === 'number' &&
+      isFinite(p[0]) && isFinite(p[1]) &&
+      Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180
+    )
+    if (valid.length === 0) return
+    if (valid.length === 1) {
+      map.setView(valid[0], options.maxZoom || 12, { animate: true })
+      return
+    }
+    const bounds = L.latLngBounds(valid.map(p => L.latLng(p[0], p[1])))
+    if (!bounds.isValid()) return
+    map.fitBounds(bounds, options)
+  } catch { /* silent — prevent Leaflet errors from breaking the UI */ }
 }
 
 // Custom icons for origin (green) and destination (red)
