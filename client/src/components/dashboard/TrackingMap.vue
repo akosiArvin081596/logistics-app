@@ -637,19 +637,24 @@ watch(selectedDriver, () => {
   nextTick(updateMarkerVisibility)
 })
 
+let initialFetchDone = false
+
 async function fetchLocations() {
   try {
     const data = await api.get('/api/locations/latest')
     locations.value = data.locations || []
-    // Fit map to drivers with GPS on initial load
-    const withGps = locations.value.filter(l => !l.noGps && l.latitude != null)
-    if (withGps.length > 0) {
-      const pts = withGps.map(l => [l.latitude, l.longitude])
-      mapCenter.value = pts[0]
-      await nextTick()
-      const map = mapRef.value?.leafletObject
-      if (map) {
-        safeFitBounds(map, pts, { padding: [50, 50], maxZoom: 12, animate: false })
+    // Only fit map on the very first load, not on refreshes
+    if (!initialFetchDone) {
+      initialFetchDone = true
+      const withGps = locations.value.filter(l => !l.noGps && l.latitude != null)
+      if (withGps.length > 0) {
+        const pts = withGps.map(l => [l.latitude, l.longitude])
+        mapCenter.value = pts[0]
+        await nextTick()
+        const map = mapRef.value?.leafletObject
+        if (map) {
+          safeFitBounds(map, pts, { padding: [50, 50], maxZoom: 12, animate: false })
+        }
       }
     }
   } catch {
