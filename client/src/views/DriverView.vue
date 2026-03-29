@@ -8,7 +8,7 @@
     />
 
     <!-- Distance Warning Banner -->
-    <div v-if="activeDistanceWarning" class="distance-warning">
+    <div v-if="activeDistanceWarning && detailLoad" class="distance-warning">
       <div class="warning-icon">&#9888;</div>
       <div class="warning-content">
         <div class="warning-title">
@@ -341,11 +341,11 @@ const currentActiveLoad = computed(() => {
   return driverStore.workingLoads[0] || null
 })
 
-// Client-side distance warning — computed from GPS position and first working load's coordinates
+// Client-side distance warning — computed from GPS position and the currently viewed load
 const FAR_THRESHOLD_KM = 500
 const clientDistanceWarning = computed(() => {
   const pos = geo.lastPosition.value
-  const load = currentActiveLoad.value
+  const load = detailLoad.value
   if (!pos || !load) return null
   const headers = driverStore.headers.jobTracking
   const statusCol = findCol(headers, /status/i)
@@ -522,6 +522,7 @@ async function confirmDecline() {
 
 function handleLoadSelect(load) {
   detailRowIndex.value = load._rowIndex
+  distanceWarningDismissed.value = false
 }
 
 function handleLoadChat({ loadId }) {
