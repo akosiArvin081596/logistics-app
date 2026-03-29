@@ -9,7 +9,7 @@ const isConnected = ref(false)
 export function useSocket() {
   function connect() {
     if (socket) return
-    socket = io()
+    socket = io({ transports: ['polling'] })
     socket.on('connect', () => {
       isConnected.value = true
       if (registeredName) socket.emit('register', registeredName)

@@ -28,7 +28,7 @@
     <!-- Main content area -->
     <main class="app-content">
       <!-- LOADS TAB -->
-      <section v-show="currentTab === 'loads'" class="tab-panel">
+      <section v-if="currentTab === 'loads'" class="tab-panel">
         <!-- Load Detail Page -->
         <LoadDetail
           v-if="detailLoad"
@@ -120,7 +120,7 @@
       </section>
 
       <!-- STATUS TAB -->
-      <section v-show="currentTab === 'status'" class="tab-panel">
+      <section v-if="currentTab === 'status'" class="tab-panel">
         <div class="section-header">Status Update</div>
         <template v-if="!currentActiveLoad">
           <EmptyState>
@@ -154,7 +154,7 @@
       </section>
 
       <!-- KIT TAB -->
-      <section v-show="currentTab === 'kit'" class="tab-panel">
+      <section v-if="currentTab === 'kit'" class="tab-panel">
         <div class="section-header">Driver Kit</div>
         <template v-if="driverStore.isLoading">
           <div class="skeleton skeleton-card"></div>
@@ -168,7 +168,7 @@
       </section>
 
       <!-- NOTIFICATIONS TAB -->
-      <section v-show="currentTab === 'notifications'" class="tab-panel">
+      <section v-if="currentTab === 'notifications'" class="tab-panel">
         <NotificationList
           :notifications="driverStore.notifications"
           @tap="handleNotificationTap"
@@ -177,7 +177,7 @@
       </section>
 
       <!-- MESSAGES TAB -->
-      <section v-show="currentTab === 'messages'" class="tab-panel">
+      <section v-if="currentTab === 'messages'" class="tab-panel">
         <ChatView
           :messages="driverStore.messages"
           :loads="driverStore.loads"
@@ -188,7 +188,7 @@
       </section>
 
       <!-- EXPENSES TAB -->
-      <section v-show="currentTab === 'expenses'" class="tab-panel">
+      <section v-if="currentTab === 'expenses'" class="tab-panel">
         <div class="section-header">Expenses</div>
 
         <template v-if="driverStore.workingLoads.length > 0">
