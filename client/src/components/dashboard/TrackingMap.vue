@@ -49,6 +49,11 @@
           dashArray="12, 8"
           className="route-animate"
         />
+        <l-marker
+          v-if="selectedDriver !== '__all__' && expandedLoadId && routePoints.length >= 2 && routeDistance != null"
+          :lat-lng="routeMidpoint"
+          :icon="distanceIcon"
+        />
         <l-marker v-if="selectedDriver !== '__all__' && expandedLoadId && originLatLng" :lat-lng="originLatLng" :icon="originIcon">
           <l-popup><div class="marker-popup"><strong>Pickup</strong><div v-if="originAddress" class="popup-address">{{ originAddress }}</div></div></l-popup>
         </l-marker>
@@ -325,6 +330,20 @@ const destIcon = L.divIcon({
   iconAnchor: [9, 9],
 })
 
+const routeMidpoint = computed(() => {
+  const pts = routePoints.value
+  if (pts.length < 2) return [0, 0]
+  const mid = Math.floor(pts.length / 2)
+  return pts[mid]
+})
+
+const distanceIcon = computed(() => L.divIcon({
+  className: 'distance-label-icon',
+  html: `<div class="distance-label">${routeDistance.value != null ? routeDistance.value + ' km' : ''}</div>`,
+  iconSize: [80, 24],
+  iconAnchor: [40, 12],
+}))
+
 function setMarkerRef(driver, el) {
   if (el) markerRefs[driver] = el
 }
@@ -473,6 +492,7 @@ async function toggleLoad(al, loc) {
       } else {
         routePoints.value = [[oLat, oLng], [dLat, dLng]]
       }
+      routeDistance.value = data.distanceKm || null
     } catch {
       if (gen !== focusGeneration) return
       routePoints.value = [[oLat, oLng], [dLat, dLng]]
@@ -1205,5 +1225,21 @@ onUnmounted(() => {
 @keyframes route-blink {
   0%, 100% { opacity: 0.7; }
   50% { opacity: 0.25; }
+}
+.distance-label-icon {
+  background: none !important;
+  border: none !important;
+}
+.distance-label {
+  background: #fff;
+  color: #333;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  white-space: nowrap;
+  text-align: center;
 }
 </style>
