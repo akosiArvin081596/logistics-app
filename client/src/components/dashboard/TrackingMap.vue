@@ -173,7 +173,8 @@
                     <div v-if="al.dropoffAddress" class="route-point-address">{{ al.dropoffAddress }}</div>
                     <div class="route-point-coords">{{ al.destLat.toFixed(5) }}, {{ al.destLng.toFixed(5) }}</div>
                   </div>
-                  <div v-if="routeDistance != null || routeEta != null" class="route-summary">
+                  <div v-if="fetchingRoute" class="route-loading">Getting route...</div>
+                  <div v-else-if="routeDistance != null || routeEta != null" class="route-summary">
                     <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} km</span>
                     <span v-if="routeEta != null" class="route-stat">{{ routeEta }} min ETA</span>
                   </div>
@@ -211,6 +212,7 @@ const loading = ref(true)
 const selectedDriver = ref('')
 const expandedLoadId = ref('')
 let focusGeneration = 0  // incremented on each focus action to cancel stale async fits
+const fetchingRoute = ref(false)
 const panelCollapsed = ref(false)
 const markerRefs = {}
 
@@ -417,6 +419,9 @@ async function toggleLoad(al, loc) {
     routePoints.value = []
     originLatLng.value = null
     destLatLng.value = null
+    routeDistance.value = null
+    routeEta.value = null
+    fetchingRoute.value = false
     return
   }
 
@@ -455,18 +460,22 @@ async function toggleLoad(al, loc) {
   // Fetch route polyline in background (straight-line fallback if OSRM fails)
   if (hasOrigin && hasDest) {
     const gen = focusGeneration
+    fetchingRoute.value = true
     try {
       const data = await api.get(`/api/route?fromLat=${oLat}&fromLng=${oLng}&toLat=${dLat}&toLng=${dLng}`)
       if (gen !== focusGeneration) return
       if (data.route && data.route.length >= 2) {
         routePoints.value = data.route.map(p => [p.latitude, p.longitude])
       } else {
-        // Straight-line fallback
         routePoints.value = [[oLat, oLng], [dLat, dLng]]
       }
+      routeDistance.value = data.distanceKm || null
+      routeEta.value = data.etaMinutes || null
     } catch {
       if (gen !== focusGeneration) return
       routePoints.value = [[oLat, oLng], [dLat, dLng]]
+    } finally {
+      fetchingRoute.value = false
     }
   }
 }
@@ -1071,6 +1080,19 @@ onUnmounted(() => {
   color: #999;
   font-family: 'JetBrains Mono', monospace;
   margin-left: 1.1rem;
+}
+
+.route-loading {
+  font-size: 0.68rem;
+  color: #6366f1;
+  font-weight: 500;
+  margin-top: 0.35rem;
+  animation: pulse-text 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-text {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 .route-summary {
