@@ -393,99 +393,52 @@ async function fetchDriverRoutes(loc) {
 }
 
 async function focusDriver(loc) {
-  const gen = ++focusGeneration
+  ++focusGeneration
   selectedDriver.value = loc.driver
   expandedLoadId.value = ''
   allRoutes.value = []
   driverRoutes.value = []
-  await fetchTrail(null, null)
+  routePoints.value = []
+  originLatLng.value = null
+  destLatLng.value = null
+
   const map = mapRef.value?.leafletObject
-
-  // Zoom to driver immediately so the map responds on click
-  if (map) {
-    map.setView([loc.latitude, loc.longitude], 14, { animate: true })
-  }
-
-  nextTick(() => {
-    const marker = markerRefs[loc.driver]
-    if (marker?.leafletObject) {
-      marker.leafletObject.openPopup()
-    }
-  })
-
-  // Fetch all active load routes for this driver
-  await fetchDriverRoutes(loc)
-  if (gen !== focusGeneration) return  // user clicked something else, abort
-
-  // Fit bounds to all route points + driver position
-  if (map && driverRoutes.value.length > 0) {
-    await nextTick()
-    const allPts = [[loc.latitude, loc.longitude]]
-    for (const r of driverRoutes.value) {
-      if (r.origin) allPts.push(r.origin)
-      if (r.dest) allPts.push(r.dest)
-      allPts.push(...r.route)
-    }
-    safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 12, animate: true })
+  if (map && loc.latitude) {
+    map.setView([loc.latitude, loc.longitude], 12, { animate: false })
   }
 }
 
 async function toggleLoad(al, loc) {
-  const gen = ++focusGeneration  // cancel any pending focusDriver fits
+  ++focusGeneration
 
   if (expandedLoadId.value === al.loadId) {
-    // Collapse: restore all-routes view
+    // Collapse
     expandedLoadId.value = ''
-    await fetchTrail(null, null)
-    if (gen !== focusGeneration) return
-    await fetchDriverRoutes(loc)
-    if (gen !== focusGeneration) return
-    // Re-fit to driver + all routes
-    const map = mapRef.value?.leafletObject
-    if (map && driverRoutes.value.length > 0) {
-      await nextTick()
-      const allPts = [[loc.latitude, loc.longitude]]
-      for (const r of driverRoutes.value) {
-        if (r.origin) allPts.push(r.origin)
-        if (r.dest) allPts.push(r.dest)
-      }
-      safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 12, animate: true })
-    }
+    routePoints.value = []
+    originLatLng.value = null
+    destLatLng.value = null
     return
   }
 
-  // Expand: show single load route, hide multi-route
+  // Expand: fit to Point A and B
   expandedLoadId.value = al.loadId
   driverRoutes.value = []
+  routePoints.value = []
+  originLatLng.value = null
+  destLatLng.value = null
 
-  // Immediately fit to the load's known coordinates (don't wait for trail API)
   const map = mapRef.value?.leafletObject
   if (map) {
-    // Stop any ongoing animation from focusDriver before fitting
     map.stop()
-    const immediatePts = []
-    if (al.originLat != null) immediatePts.push([al.originLat, al.originLng])
-    if (al.destLat != null) immediatePts.push([al.destLat, al.destLng])
-    if (immediatePts.length >= 2) {
-      const bounds = L.latLngBounds(immediatePts.map(p => L.latLng(p[0], p[1])))
+    const pts = []
+    if (al.originLat != null) pts.push([al.originLat, al.originLng])
+    if (al.destLat != null) pts.push([al.destLat, al.destLng])
+    if (pts.length >= 2) {
+      const bounds = L.latLngBounds(pts.map(p => L.latLng(p[0], p[1])))
       if (bounds.isValid()) map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: false })
-    } else if (immediatePts.length === 1) {
-      map.setView(immediatePts[0], 14, { animate: false })
+    } else if (pts.length === 1) {
+      map.setView(pts[0], 14, { animate: false })
     }
-  }
-
-  // Then fetch the route polyline in the background
-  await fetchTrail(loc.driver, al.loadId)
-  if (gen !== focusGeneration) return  // user clicked something else, abort
-
-  // Re-fit with full route data if available
-  if (map && routePoints.value.length >= 2) {
-    await nextTick()
-    const allPts = []
-    if (originLatLng.value) allPts.push(originLatLng.value)
-    if (destLatLng.value) allPts.push(destLatLng.value)
-    allPts.push(...routePoints.value)
-    safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 14, animate: true })
   }
 }
 
