@@ -430,14 +430,22 @@ async function toggleLoad(al, loc) {
   const map = mapRef.value?.leafletObject
   if (map) {
     map.stop()
-    const pts = []
-    if (al.originLat != null) pts.push([al.originLat, al.originLng])
-    if (al.destLat != null) pts.push([al.destLat, al.destLng])
-    if (pts.length >= 2) {
-      const bounds = L.latLngBounds(pts.map(p => L.latLng(p[0], p[1])))
-      if (bounds.isValid()) map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: false })
-    } else if (pts.length === 1) {
-      map.setView(pts[0], 14, { animate: false })
+    console.log('[toggleLoad] al coords:', { originLat: al.originLat, originLng: al.originLng, destLat: al.destLat, destLng: al.destLng })
+    const oLat = Number(al.originLat)
+    const oLng = Number(al.originLng)
+    const dLat = Number(al.destLat)
+    const dLng = Number(al.destLng)
+    const hasOrigin = isFinite(oLat) && isFinite(oLng)
+    const hasDest = isFinite(dLat) && isFinite(dLng)
+    console.log('[toggleLoad] parsed:', { oLat, oLng, dLat, dLng, hasOrigin, hasDest })
+    if (hasOrigin && hasDest) {
+      try {
+        map.fitBounds([[oLat, oLng], [dLat, dLng]], { padding: [50, 50], maxZoom: 14, animate: false })
+      } catch (e) { console.error('[toggleLoad] fitBounds failed:', e) }
+    } else if (hasOrigin) {
+      map.setView([oLat, oLng], 14, { animate: false })
+    } else if (hasDest) {
+      map.setView([dLat, dLng], 14, { animate: false })
     }
   }
 }
