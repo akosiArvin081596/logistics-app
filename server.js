@@ -2582,7 +2582,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 					const loadObj = {};
 					headers.forEach((h, idx) => { loadObj[h] = rows[i][idx] || ""; });
 					const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
-					const rowStatusCol = headers.find((h) => /^status$/i.test(h));
+					const rowStatusCol = headers.find((h) => /status/i.test(h));
 					const rowStatus = rowStatusCol ? (loadObj[rowStatusCol] || "").trim().toLowerCase() : "";
 					// Skip completed/delivered rows to avoid matching stale duplicates
 					if (/^(delivered|completed|pod received|canceled)$/i.test(rowStatus)) continue;
@@ -2590,7 +2590,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 						const triggers = checkGeofence(latitude, longitude, loadObj, headers);
 						if (triggers.length > 0) {
 							geofenceTriggered = triggers[0];
-							const statusCol = headers.find((h) => /^status$/i.test(h));
+							const statusCol = headers.find((h) => /status/i.test(h));
 							const currentStatus = statusCol ? (loadObj[statusCol] || "").toLowerCase() : "";
 
 							// Guard: only auto-update if status is a valid predecessor
@@ -2652,7 +2652,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 						}
 
 						// Distance warning — check if driver is far from relevant point
-						const warnStatusCol = headers.find((h) => /^status$/i.test(h));
+						const warnStatusCol = headers.find((h) => /status/i.test(h));
 						const warnStatus = warnStatusCol ? (loadObj[warnStatusCol] || "").toLowerCase() : "";
 						const originLatCol = headers.find((h) => /origin.*lat|pickup.*lat|shipper.*lat/i.test(h));
 						const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
