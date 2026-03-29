@@ -646,6 +646,8 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		sqlFixes.messages_from = db.prepare("UPDATE messages SET \"from\" = ? WHERE LOWER(\"from\") = ?").run(newName.trim(), oldLower).changes;
 		sqlFixes.messages_to = db.prepare("UPDATE messages SET \"to\" = ? WHERE LOWER(\"to\") = ?").run(newName.trim(), oldLower).changes;
 		sqlFixes.users = db.prepare("UPDATE users SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.dispatch_notif_title = db.prepare("UPDATE dispatch_notifications SET title = REPLACE(title, ?, ?) WHERE title LIKE ?").run(oldName.trim(), newName.trim(), `%${oldName.trim()}%`).changes;
+		sqlFixes.dispatch_notif_body = db.prepare("UPDATE dispatch_notifications SET body = REPLACE(body, ?, ?) WHERE body LIKE ?").run(oldName.trim(), newName.trim(), `%${oldName.trim()}%`).changes;
 
 		res.json({ fixed: updates.length, oldName, newName, sqlite: sqlFixes });
 	} catch (error) {
