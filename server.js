@@ -576,6 +576,49 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	res.json({ success: true });
 });
 
+// Admin: bulk-rename a misspelled driver name in Job Tracking sheet
+app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const { oldName, newName } = req.body;
+		if (!oldName || !newName) return res.status(400).json({ error: "oldName and newName required" });
+
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+		});
+		const rows = resp.data.values || [];
+		if (rows.length === 0) return res.json({ fixed: 0 });
+
+		const headers = rows[0];
+		const driverColIdx = headers.findIndex((h) => /driver/i.test(h));
+		if (driverColIdx === -1) return res.status(400).json({ error: "Driver column not found" });
+
+		const colLtr = String.fromCharCode(65 + driverColIdx);
+		const updates = [];
+		for (let i = 1; i < rows.length; i++) {
+			if ((rows[i][driverColIdx] || "").trim().toLowerCase() === oldName.trim().toLowerCase()) {
+				updates.push({
+					range: `Job Tracking!${colLtr}${i + 1}`,
+					values: [[newName.trim()]],
+				});
+			}
+		}
+
+		if (updates.length > 0) {
+			await sheets.spreadsheets.values.batchUpdate({
+				spreadsheetId: SPREADSHEET_ID,
+				requestBody: { valueInputOption: "USER_ENTERED", data: updates },
+			});
+		}
+
+		res.json({ fixed: updates.length, oldName, newName });
+	} catch (error) {
+		console.error("Error fixing driver name:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Debug: check what the driver endpoint returns (first 2 loads)
 app.get("/api/debug/driver-view/:driverName", async (req, res) => {
 	try {
@@ -893,10 +936,14 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex, driver, loadId, origin, destination } = req.body;
-		if (!rowIndex || !driver) {
+		const { rowIndex, driver: rawDriver, loadId, origin, destination } = req.body;
+		if (!rowIndex || !rawDriver) {
 			return res.status(400).json({ error: "rowIndex and driver required" });
 		}
+
+		// Normalize driver name against users table to prevent misspelling mismatches
+		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawDriver.trim());
+		const driver = userMatch ? userMatch.driver_name : rawDriver.trim();
 
 		const sheets = await getSheets();
 		const headerResp = await sheets.spreadsheets.values.get({
@@ -1432,14 +1479,13 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			else revPending += amt;
 		});
 
-		// Driver list
-		const driverList = [
-			...new Set(
-				carrierDB.data
-					.map((r) => (r[carrierDriverCol] || "").trim())
-					.filter(Boolean),
-			),
-		].sort();
+		// Driver list (case-insensitive dedup to prevent misspelling duplicates)
+		const driverMap = new Map();
+		carrierDB.data.forEach((r) => {
+			const name = (r[carrierDriverCol] || "").trim();
+			if (name && !driverMap.has(name.toLowerCase())) driverMap.set(name.toLowerCase(), name);
+		});
+		const driverList = [...driverMap.values()].sort();
 
 		// Fleet details
 		const fleet = carrierDB.data.map((r) => {
