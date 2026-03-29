@@ -3150,25 +3150,32 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 });
 
 // Get driving route between two points using OSRM Route API
-async function getRoute(from, to) {
+async function getRoute(from, to, retries = 2) {
 	if (!from || !to) return null;
-	try {
-		const coords = `${from.longitude},${from.latitude};${to.longitude},${to.latitude}`;
-		const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
-		const resp = await fetch(url);
-		if (!resp.ok) return null;
-		const data = await resp.json();
-		if (data.code !== "Ok" || !data.routes || data.routes.length === 0) return null;
-		const r = data.routes[0];
-		return {
-			points: r.geometry.coordinates.map(([lng, lat]) => ({ latitude: lat, longitude: lng })),
-			distanceKm: Math.round(r.distance / 100) / 10,
-			durationMin: Math.round(r.duration / 60),
-		};
-	} catch (err) {
-		console.error("OSRM route error:", err.message);
-		return null;
+	for (let attempt = 0; attempt <= retries; attempt++) {
+		try {
+			const coords = `${from.longitude},${from.latitude};${to.longitude},${to.latitude}`;
+			const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+			const resp = await fetch(url);
+			if (!resp.ok) {
+				if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
+				return null;
+			}
+			const data = await resp.json();
+			if (data.code !== "Ok" || !data.routes || data.routes.length === 0) return null; // unroutable, no retry
+			const r = data.routes[0];
+			return {
+				points: r.geometry.coordinates.map(([lng, lat]) => ({ latitude: lat, longitude: lng })),
+				distanceKm: Math.round(r.distance / 100) / 10,
+				durationMin: Math.round(r.duration / 60),
+			};
+		} catch (err) {
+			console.error(`OSRM route error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
+			if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
+			return null;
+		}
 	}
+	return null;
 }
 
 // Snap GPS points to roads using OSRM Match API
