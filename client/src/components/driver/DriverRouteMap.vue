@@ -204,7 +204,15 @@ async function fetchRoute(fitBounds = false) {
       }
     }
     if (!data) return
-    routePoints.value = (data.route || []).map(p => [p.latitude, p.longitude])
+    if (data.route && data.route.length >= 2) {
+      routePoints.value = data.route.map(p => [p.latitude, p.longitude])
+    } else {
+      // Fallback: straight line when OSRM can't compute (e.g. cross-ocean)
+      const pts = []
+      if (originLatLng.value) pts.push(originLatLng.value)
+      if (destLatLng.value) pts.push(destLatLng.value)
+      if (pts.length >= 2) routePoints.value = pts
+    }
     distanceKm.value = data.distanceKm
     etaMinutes.value = data.etaMinutes
 
