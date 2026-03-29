@@ -447,15 +447,14 @@ async function toggleLoad(al, loc) {
   if (map) {
     await nextTick()
     const allPts = []
-    if (originLatLng.value) allPts.push(originLatLng.value)
-    if (destLatLng.value) allPts.push(destLatLng.value)
+    // Use fetchTrail results, fall back to activeLoad coords from server
+    const origin = originLatLng.value || (al.originLat ? [al.originLat, al.originLng] : null)
+    const dest = destLatLng.value || (al.destLat ? [al.destLat, al.destLng] : null)
+    if (origin) allPts.push(origin)
+    if (dest) allPts.push(dest)
     if (routePoints.value.length >= 2) allPts.push(...routePoints.value)
     // Fit to the two points + route, showing the full load route
-    if (allPts.length >= 2) {
-      safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 14, animate: true })
-    } else if (allPts.length === 1) {
-      map.setView(allPts[0], 14, { animate: true })
-    }
+    safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 14, animate: true })
   }
 }
 
