@@ -141,7 +141,7 @@ const selectedJob = ref(null)
 const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || null)
 
 function hideAssign(job) {
-  if (statusCol.value && /^completed$/i.test((job[statusCol.value] || '').trim())) return true
+  if (statusCol.value && /^(completed|canceled)$/i.test((job[statusCol.value] || '').trim())) return true
   const warn = missingData(job)
   if (warn.includes('Missing pickup location') || warn.includes('Missing delivery location')) return true
   return false

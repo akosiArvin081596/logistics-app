@@ -303,6 +303,7 @@ const showFilters = ref(false)
 const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
 let refreshInterval = null
+let isMounted = false
 
 const subTabs = [
   { label: 'Active', value: 'active' },
@@ -536,6 +537,7 @@ async function handleExpenseSubmit(data) {
 
 // Socket.IO for real-time notifications
 function onLoadAssigned(payload) {
+  if (!isMounted) return
   assignedNotification.value = {
     loadId: payload.loadId || 'Load',
     origin: payload.origin || '',
@@ -570,6 +572,7 @@ function viewAssignedLoad() {
 }
 
 function onGeofenceTrigger(payload) {
+  if (!isMounted) return
   toast.show(`Geofence: ${payload.status} for Load ${payload.loadId}`)
   driverStore.addNotification({
     id: Date.now(),
@@ -583,6 +586,7 @@ function onGeofenceTrigger(payload) {
 }
 
 function onNewMessage(msg) {
+  if (!isMounted) return
   const myName = driverName.value.toLowerCase()
   const from = (msg.from || '').toLowerCase()
   const to = (msg.to || '').toLowerCase()
@@ -649,6 +653,7 @@ watch(
 )
 
 onMounted(async () => {
+  isMounted = true
   driverStore.driverName = driverName.value
   try {
     await driverStore.loadData()
@@ -656,6 +661,10 @@ onMounted(async () => {
     toast.show('Failed to load data', 'error')
   }
 
+  // Periodic refresh fallback (in case socket events are missed)
+  refreshInterval = setInterval(() => {
+    if (isMounted) driverStore.loadData().catch(() => {})
+  }, 60_000)
 
   // Socket.IO
   socket.connect()
@@ -666,6 +675,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  isMounted = false
   if (refreshInterval) clearInterval(refreshInterval)
   socket.off('new-message', onNewMessage)
   socket.off('load-assigned', onLoadAssigned)
