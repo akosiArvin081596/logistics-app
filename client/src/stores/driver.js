@@ -158,11 +158,13 @@ export const useDriverStore = defineStore('driver', {
   actions: {
     async loadData() {
       if (!this.driverName) return
+      if (this._loadingPromise) return this._loadingPromise
       this.isLoading = true
+      this._loadingPromise = api.get(
+        `/api/driver/${encodeURIComponent(this.driverName)}`
+      )
       try {
-        const data = await api.get(
-          `/api/driver/${encodeURIComponent(this.driverName)}`
-        )
+        const data = await this._loadingPromise
         this.loads = data.loads || []
         // Build accepted set from _accepted flag
         const lidCol = findCol(data.headers?.jobTracking || [], /load.?id|job.?id/i)
@@ -189,6 +191,7 @@ export const useDriverStore = defineStore('driver', {
       } catch {
         throw new Error('Failed to load driver data')
       } finally {
+        this._loadingPromise = null
         this.isLoading = false
       }
     },
