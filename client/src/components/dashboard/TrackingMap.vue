@@ -284,6 +284,17 @@ function snapToRoute(point, route) {
   return minDist < 0.002 * 0.002 ? closest : null
 }
 
+// Safe fitBounds — validates coordinates to avoid "Bounds are not valid" errors
+function safeFitBounds(map, points, options = {}) {
+  const valid = points.filter(p => p && p.length >= 2 && isFinite(p[0]) && isFinite(p[1]))
+  if (valid.length === 0) return
+  if (valid.length === 1) {
+    map.setView(valid[0], options.maxZoom || 12, { animate: true })
+    return
+  }
+  map.fitBounds(L.latLngBounds(valid.map(p => L.latLng(p[0], p[1]))), options)
+}
+
 // Custom icons for origin (green) and destination (red)
 const originIcon = L.divIcon({
   className: 'endpoint-icon origin-icon',
@@ -349,11 +360,16 @@ async function fetchDriverRoutes(loc) {
     loads.map(async (al, i) => {
       try {
         const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(loc.driver)}&loadId=${encodeURIComponent(al.loadId)}`)
+        const origin = data.origin ? [data.origin.latitude, data.origin.longitude] : null
+        const dest = data.destination ? [data.destination.latitude, data.destination.longitude] : null
+        let route = (data.route || []).map(p => [p.latitude, p.longitude])
+        // Fallback: straight line between origin and dest if OSRM can't compute a route
+        if (route.length < 2 && origin && dest) route = [origin, dest]
         return {
           loadId: al.loadId,
-          route: (data.route || []).map(p => [p.latitude, p.longitude]),
-          origin: data.origin ? [data.origin.latitude, data.origin.longitude] : null,
-          dest: data.destination ? [data.destination.latitude, data.destination.longitude] : null,
+          route,
+          origin,
+          dest,
           originAddress: data.origin?.address || al.pickupAddress || '',
           destAddress: data.destination?.address || al.dropoffAddress || '',
           color: ROUTE_COLORS[i % ROUTE_COLORS.length],
@@ -398,10 +414,7 @@ async function focusDriver(loc) {
       if (r.dest) allPts.push(r.dest)
       allPts.push(...r.route)
     }
-    if (allPts.length >= 2) {
-      const bounds = L.latLngBounds(allPts.map(p => L.latLng(p[0], p[1])))
-      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 12, animate: true })
-    }
+    safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 12, animate: true })
   }
 }
 
@@ -423,8 +436,7 @@ async function toggleLoad(al, loc) {
   if (map && routePoints.value.length >= 2) {
     await nextTick()
     const allPts = [...routePoints.value, [loc.latitude, loc.longitude]]
-    const bounds = L.latLngBounds(allPts.map(p => L.latLng(p[0], p[1])))
-    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: true })
+    safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 14, animate: true })
   }
 }
 
@@ -503,8 +515,7 @@ async function focusAll() {
     if (r.origin) allPts.push(r.origin)
     if (r.dest) allPts.push(r.dest)
   }
-  const bounds = L.latLngBounds(allPts.map(p => L.latLng(p[0], p[1])))
-  map.fitBounds(bounds, { padding: [50, 50], maxZoom: 12, animate: true })
+  safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 12, animate: true })
 }
 
 // Online/offline detection (5-minute threshold)
@@ -571,11 +582,7 @@ async function fetchLocations() {
       await nextTick()
       const map = mapRef.value?.leafletObject
       if (map) {
-        if (pts.length === 1) {
-          map.setView(pts[0], 10, { animate: false })
-        } else {
-          map.fitBounds(L.latLngBounds(pts.map(p => L.latLng(p[0], p[1]))), { padding: [50, 50], maxZoom: 12, animate: false })
-        }
+        safeFitBounds(map, pts, { padding: [50, 50], maxZoom: 12, animate: false })
       }
     }
   } catch {

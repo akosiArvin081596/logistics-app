@@ -228,8 +228,11 @@ async function fetchRoute(fitBounds = false) {
           if (originLatLng.value) allPoints.push(originLatLng.value)
           if (destLatLng.value) allPoints.push(destLatLng.value)
           if (driverLatLng.value) allPoints.push(driverLatLng.value)
-          if (allPoints.length >= 2) {
-            map.fitBounds(allPoints, { padding: [30, 30], animate: false })
+          const valid = allPoints.filter(p => p && p.length >= 2 && isFinite(p[0]) && isFinite(p[1]))
+          if (valid.length >= 2) {
+            map.fitBounds(valid, { padding: [30, 30], animate: false })
+          } else if (valid.length === 1) {
+            map.setView(valid[0], 12, { animate: false })
           }
         }
       })
