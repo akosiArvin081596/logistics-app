@@ -2975,7 +2975,9 @@ app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async 
 		const to = { latitude: parseFloat(toLat), longitude: parseFloat(toLng) };
 		const route = await getRoute(from, to);
 		if (!route) {
-			return res.status(500).json({ error: "Could not compute route" });
+			// Return empty route instead of 500 (e.g. cross-ocean routes OSRM can't compute)
+			const distKm = Math.round(geolib.getDistance(from, to) / 100) / 10;
+			return res.json({ route: null, distanceKm: distKm, etaMinutes: null, fallback: true });
 		}
 		res.json({
 			route: route.points,
