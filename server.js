@@ -605,6 +605,30 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			}
 		}
 
+		// Also fix Carrier Database sheet
+		const carrierResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Carrier Database",
+		});
+		const carrierRows = carrierResp.data.values || [];
+		if (carrierRows.length > 0) {
+			const carrierHeaders = carrierRows[0];
+			const carrierDriverIdx = carrierHeaders.findIndex((h) => /driver/i.test(h));
+			if (carrierDriverIdx === -1 && carrierHeaders.length > 0) {
+				// Fall back to first column if no driver header
+			}
+			const cIdx = carrierDriverIdx !== -1 ? carrierDriverIdx : 0;
+			const cColLtr = String.fromCharCode(65 + cIdx);
+			for (let i = 1; i < carrierRows.length; i++) {
+				if ((carrierRows[i][cIdx] || "").trim().toLowerCase() === oldName.trim().toLowerCase()) {
+					updates.push({
+						range: `Carrier Database!${cColLtr}${i + 1}`,
+						values: [[newName.trim()]],
+					});
+				}
+			}
+		}
+
 		if (updates.length > 0) {
 			await sheets.spreadsheets.values.batchUpdate({
 				spreadsheetId: SPREADSHEET_ID,
@@ -621,6 +645,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		sqlFixes.load_responses = db.prepare("UPDATE load_responses SET driver_name = ? WHERE driver_name = ?").run(newLower, oldLower).changes;
 		sqlFixes.messages_from = db.prepare("UPDATE messages SET \"from\" = ? WHERE LOWER(\"from\") = ?").run(newName.trim(), oldLower).changes;
 		sqlFixes.messages_to = db.prepare("UPDATE messages SET \"to\" = ? WHERE LOWER(\"to\") = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.users = db.prepare("UPDATE users SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
 
 		res.json({ fixed: updates.length, oldName, newName, sqlite: sqlFixes });
 	} catch (error) {
