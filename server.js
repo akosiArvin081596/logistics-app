@@ -2401,6 +2401,10 @@ app.post("/api/location", requireAuth, async (req, res) => {
 					const loadObj = {};
 					headers.forEach((h, idx) => { loadObj[h] = rows[i][idx] || ""; });
 					const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+					const rowStatusCol = headers.find((h) => /^status$/i.test(h));
+					const rowStatus = rowStatusCol ? (loadObj[rowStatusCol] || "").trim().toLowerCase() : "";
+					// Skip completed/delivered rows to avoid matching stale duplicates
+					if (/^(delivered|completed|pod received|canceled)$/i.test(rowStatus)) continue;
 					if (loadIdCol && loadObj[loadIdCol] === loadId) {
 						const triggers = checkGeofence(latitude, longitude, loadObj, headers);
 						if (triggers.length > 0) {
