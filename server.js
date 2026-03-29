@@ -3275,24 +3275,36 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 				const destAddrCol = headers.find((h) => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h));
 
 				if (loadIdCol) {
+					const statusCol = headers.find((h) => /status/i.test(h));
+					const completedRe = /^(delivered|completed|pod received|canceled)$/i;
+					// Collect all matching rows, prefer active over completed
+					let bestMatch = null;
 					for (let i = 1; i < rows.length; i++) {
 						const obj = {};
 						headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
-						if (obj[loadIdCol] === loadId) {
-							if (originLatCol && originLngCol) {
-								const oLat = parseFloat(obj[originLatCol]);
-								const oLng = parseFloat(obj[originLngCol]);
-								if (!isNaN(oLat) && !isNaN(oLng)) origin = { latitude: oLat, longitude: oLng };
+						const lid = (obj[loadIdCol] || "").trim().replace(/^#/, "");
+						if (lid === loadId || obj[loadIdCol] === loadId) {
+							const status = statusCol ? (obj[statusCol] || "").trim() : "";
+							if (!completedRe.test(status)) {
+								bestMatch = obj;
+								break; // Active row found — use it
 							}
-							if (destLatCol && destLngCol) {
-								const dLat = parseFloat(obj[destLatCol]);
-								const dLng = parseFloat(obj[destLngCol]);
-								if (!isNaN(dLat) && !isNaN(dLng)) destination = { latitude: dLat, longitude: dLng };
-							}
-							if (origin && originAddrCol) origin.address = obj[originAddrCol] || "";
-							if (destination && destAddrCol) destination.address = obj[destAddrCol] || "";
-							break;
+							if (!bestMatch) bestMatch = obj; // Fallback to first match
 						}
+					}
+					if (bestMatch) {
+						if (originLatCol && originLngCol) {
+							const oLat = parseFloat(bestMatch[originLatCol]);
+							const oLng = parseFloat(bestMatch[originLngCol]);
+							if (!isNaN(oLat) && !isNaN(oLng)) origin = { latitude: oLat, longitude: oLng };
+						}
+						if (destLatCol && destLngCol) {
+							const dLat = parseFloat(bestMatch[destLatCol]);
+							const dLng = parseFloat(bestMatch[destLngCol]);
+							if (!isNaN(dLat) && !isNaN(dLng)) destination = { latitude: dLat, longitude: dLng };
+						}
+						if (origin && originAddrCol) origin.address = bestMatch[originAddrCol] || "";
+						if (destination && destAddrCol) destination.address = bestMatch[destAddrCol] || "";
 					}
 				}
 			} catch (sheetErr) {
