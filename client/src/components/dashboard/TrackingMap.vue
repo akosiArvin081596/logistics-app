@@ -28,11 +28,8 @@
               <div v-if="inTransitLoad(loc)">Load: {{ inTransitLoad(loc) }}</div>
               <div class="popup-coords">{{ loc.latitude.toFixed(5) }}, {{ loc.longitude.toFixed(5) }}</div>
               <div v-if="loc.speed">Speed: {{ Math.round(loc.speed * 2.237) }} mph</div>
-              <div v-if="selectedDriver === loc.driver && routeDistance != null" class="popup-eta">
-                Distance: {{ routeDistance }} km
-              </div>
-              <div v-if="selectedDriver === loc.driver && routeEta != null" class="popup-eta">
-                ETA: {{ routeEta }} min
+              <div v-if="selectedDriver === loc.driver && originLatLng && expandedLoadId" class="popup-eta">
+                {{ driverToPickupKm(loc) }} km to Pickup
               </div>
               <div class="popup-time">{{ formatTime(loc.timestamp) }}</div>
             </div>
@@ -587,6 +584,16 @@ async function focusAll() {
 const now = ref(Date.now())
 let nowInterval = null
 const ONLINE_THRESHOLD = 5 * 60 * 1000 // 5 minutes
+
+function driverToPickupKm(loc) {
+  if (!originLatLng.value || !loc.latitude) return '—'
+  const R = 6371
+  const toRad = d => d * Math.PI / 180
+  const dLat = toRad(originLatLng.value[0] - loc.latitude)
+  const dLng = toRad(originLatLng.value[1] - loc.longitude)
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(loc.latitude)) * Math.cos(toRad(originLatLng.value[0])) * Math.sin(dLng / 2) ** 2
+  return (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(1)
+}
 
 function inTransitLoad(loc) {
   const al = (loc.activeLoads || []).find(l => /^in transit$/i.test(l.status))
