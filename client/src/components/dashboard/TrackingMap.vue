@@ -461,10 +461,17 @@ async function toggleLoad(al, loc) {
   // Immediately fit to the load's known coordinates (don't wait for trail API)
   const map = mapRef.value?.leafletObject
   if (map) {
+    // Stop any ongoing animation from focusDriver before fitting
+    map.stop()
     const immediatePts = []
-    if (al.originLat) immediatePts.push([al.originLat, al.originLng])
-    if (al.destLat) immediatePts.push([al.destLat, al.destLng])
-    safeFitBounds(map, immediatePts, { padding: [50, 50], maxZoom: 14, animate: true })
+    if (al.originLat != null) immediatePts.push([al.originLat, al.originLng])
+    if (al.destLat != null) immediatePts.push([al.destLat, al.destLng])
+    if (immediatePts.length >= 2) {
+      const bounds = L.latLngBounds(immediatePts.map(p => L.latLng(p[0], p[1])))
+      if (bounds.isValid()) map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: false })
+    } else if (immediatePts.length === 1) {
+      map.setView(immediatePts[0], 14, { animate: false })
+    }
   }
 
   // Then fetch the route polyline in the background
