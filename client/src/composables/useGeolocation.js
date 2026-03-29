@@ -44,7 +44,13 @@ export function useGeolocation(api) {
     lastReportTime = Date.now()
     try {
       const resp = await api.post('/api/location', data)
-      distanceWarning.value = resp.distanceWarning || null
+      // Only update warning when server returns one, or when server confirms driver is now close
+      if (resp.distanceWarning) {
+        distanceWarning.value = resp.distanceWarning
+      } else if (distanceWarning.value && data.loadId === activeLoadId) {
+        // Driver is now within range for the tracked load — clear warning
+        distanceWarning.value = null
+      }
     } catch {
       // Silent fail
     }
