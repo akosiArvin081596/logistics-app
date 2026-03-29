@@ -1243,13 +1243,29 @@ app.post("/api/driver/respond", requireAuth, async (req, res) => {
 		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
 
 		if (response === "accepted") {
+			// Update Job Status to "Assigned" in the sheet
+			const headerResp2 = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: "Job Tracking!1:1",
+			});
+			const headers2 = (headerResp2.data.values || [[]])[0];
+			const statusColIdx2 = headers2.findIndex((h) => /status/i.test(h));
+			if (statusColIdx2 !== -1) {
+				await sheets.spreadsheets.values.update({
+					spreadsheetId: SPREADSHEET_ID,
+					range: `Job Tracking!${String.fromCharCode(65 + statusColIdx2)}${rowIndex}`,
+					valueInputOption: "USER_ENTERED",
+					requestBody: { values: [["Assigned"]] },
+				});
+			}
+
 			// Log to Status Logs
 			await sheets.spreadsheets.values.append({
 				spreadsheetId: SPREADSHEET_ID,
 				range: "Status Logs",
 				valueInputOption: "USER_ENTERED",
 				requestBody: {
-					values: [[logId, loadId, driverName, dateTime, "Accepted", "Driver confirmed assignment"]],
+					values: [[logId, loadId, driverName, dateTime, "Assigned", "Driver confirmed assignment"]],
 				},
 			});
 
