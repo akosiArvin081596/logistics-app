@@ -130,7 +130,7 @@
           >
             <div
               :class="['driver-item', { active: selectedDriver === loc.driver, 'no-gps': loc.noGps }]"
-              @click="!loc.noGps && focusDriver(loc)"
+              @click="!loc.noGps && (selectedDriver === loc.driver ? collapseDriver() : focusDriver(loc))"
             >
               <span :class="['driver-dot', loc.noGps ? 'no-gps' : isOnline(loc) ? 'online' : 'offline']"></span>
               <div class="driver-info">
@@ -412,6 +412,18 @@ async function fetchDriverRoutes(loc) {
     })
   )
   driverRoutes.value = routes.filter(r => r && (r.route.length >= 2 || r.origin || r.dest))
+}
+
+function collapseDriver() {
+  ++focusGeneration
+  selectedDriver.value = ''
+  expandedLoadId.value = ''
+  driverRoutes.value = []
+  routePoints.value = []
+  originLatLng.value = null
+  destLatLng.value = null
+  routeDistance.value = null
+  fetchingRoute.value = false
 }
 
 async function focusDriver(loc) {
