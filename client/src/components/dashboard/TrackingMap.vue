@@ -39,9 +39,9 @@
           </l-popup>
         </l-marker>
 
-        <!-- Single driver route (when one driver selected) -->
+        <!-- Single load route (when a specific load is expanded) -->
         <l-polyline
-          v-if="selectedDriver !== '__all__' && routePoints.length >= 2"
+          v-if="selectedDriver !== '__all__' && expandedLoadId && routePoints.length >= 2"
           :lat-lngs="routePoints"
           color="#000000"
           :weight="6"
@@ -49,12 +49,33 @@
           dashArray="12, 8"
           className="route-animate"
         />
-        <l-marker v-if="selectedDriver !== '__all__' && originLatLng" :lat-lng="originLatLng" :icon="originIcon">
+        <l-marker v-if="selectedDriver !== '__all__' && expandedLoadId && originLatLng" :lat-lng="originLatLng" :icon="originIcon">
           <l-popup><div class="marker-popup"><strong>Pickup</strong><div v-if="originAddress" class="popup-address">{{ originAddress }}</div></div></l-popup>
         </l-marker>
-        <l-marker v-if="selectedDriver !== '__all__' && destLatLng" :lat-lng="destLatLng" :icon="destIcon">
+        <l-marker v-if="selectedDriver !== '__all__' && expandedLoadId && destLatLng" :lat-lng="destLatLng" :icon="destIcon">
           <l-popup><div class="marker-popup"><strong>Drop-off</strong><div v-if="destAddress" class="popup-address">{{ destAddress }}</div></div></l-popup>
         </l-marker>
+
+        <!-- All active load routes for selected driver (when no specific load expanded) -->
+        <template v-if="selectedDriver !== '__all__' && !expandedLoadId && driverRoutes.length > 0">
+          <template v-for="r in driverRoutes" :key="r.loadId">
+            <l-polyline
+              v-if="r.route.length >= 2"
+              :lat-lngs="r.route"
+              :color="r.color"
+              :weight="4"
+              :opacity="0.7"
+              dashArray="10, 6"
+              className="route-animate"
+            />
+            <l-marker v-if="r.origin" :lat-lng="r.origin" :icon="originIcon">
+              <l-popup><div class="marker-popup"><strong>{{ r.loadId }} — Pickup</strong><div v-if="r.originAddress" class="popup-address">{{ r.originAddress }}</div></div></l-popup>
+            </l-marker>
+            <l-marker v-if="r.dest" :lat-lng="r.dest" :icon="destIcon">
+              <l-popup><div class="marker-popup"><strong>{{ r.loadId }} — Drop-off</strong><div v-if="r.destAddress" class="popup-address">{{ r.destAddress }}</div></div></l-popup>
+            </l-marker>
+          </template>
+        </template>
 
         <!-- All drivers routes (when "All Drivers" selected) -->
         <template v-if="selectedDriver === '__all__'">
@@ -205,6 +226,8 @@ const routeEta = ref(null)
 
 // All-drivers route state
 const allRoutes = ref([])
+// Single-driver multi-load route state (when driver selected but no load expanded)
+const driverRoutes = ref([])
 const ROUTE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#65a30d']
 
 // Animation state
@@ -310,10 +333,38 @@ async function fetchTrail(driverName, loadId) {
   }
 }
 
+async function fetchDriverRoutes(loc) {
+  driverRoutes.value = []
+  const loads = loc.activeLoads || []
+  if (loads.length === 0) return
+
+  const routes = await Promise.all(
+    loads.map(async (al, i) => {
+      try {
+        const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(loc.driver)}&loadId=${encodeURIComponent(al.loadId)}`)
+        return {
+          loadId: al.loadId,
+          route: (data.route || []).map(p => [p.latitude, p.longitude]),
+          origin: data.origin ? [data.origin.latitude, data.origin.longitude] : null,
+          dest: data.destination ? [data.destination.latitude, data.destination.longitude] : null,
+          originAddress: data.origin?.address || al.pickupAddress || '',
+          destAddress: data.destination?.address || al.dropoffAddress || '',
+          color: ROUTE_COLORS[i % ROUTE_COLORS.length],
+        }
+      } catch {
+        return null
+      }
+    })
+  )
+  driverRoutes.value = routes.filter(r => r && (r.route.length >= 2 || r.origin || r.dest))
+}
+
 async function focusDriver(loc) {
   selectedDriver.value = loc.driver
   expandedLoadId.value = ''
   allRoutes.value = []
+  driverRoutes.value = []
+  await fetchTrail(null, null)
   const map = mapRef.value?.leafletObject
 
   // Zoom to driver immediately so the map responds on click
@@ -328,24 +379,37 @@ async function focusDriver(loc) {
     }
   })
 
-  // Auto-expand and fetch route if driver has exactly one active load
-  if (loc.activeLoads && loc.activeLoads.length === 1) {
-    await toggleLoad(loc.activeLoads[0], loc)
-  } else {
-    // Clear any previous route when switching drivers
-    await fetchTrail(null, null)
+  // Fetch all active load routes for this driver
+  await fetchDriverRoutes(loc)
+
+  // Fit bounds to all route points + driver position
+  if (map && driverRoutes.value.length > 0) {
+    await nextTick()
+    const allPts = [[loc.latitude, loc.longitude]]
+    for (const r of driverRoutes.value) {
+      if (r.origin) allPts.push(r.origin)
+      if (r.dest) allPts.push(r.dest)
+      allPts.push(...r.route)
+    }
+    if (allPts.length >= 2) {
+      const bounds = L.latLngBounds(allPts.map(p => L.latLng(p[0], p[1])))
+      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 12, animate: true })
+    }
   }
 }
 
 async function toggleLoad(al, loc) {
   if (expandedLoadId.value === al.loadId) {
-    // Collapse: clear route
+    // Collapse: restore all-routes view
     expandedLoadId.value = ''
     await fetchTrail(null, null)
+    await fetchDriverRoutes(loc)
     return
   }
 
+  // Expand: show single load route, hide multi-route
   expandedLoadId.value = al.loadId
+  driverRoutes.value = []
   await fetchTrail(loc.driver, al.loadId)
 
   const map = mapRef.value?.leafletObject
@@ -390,6 +454,7 @@ async function checkOffRoute(lat, lng) {
 async function focusAll() {
   selectedDriver.value = '__all__'
   expandedLoadId.value = ''
+  driverRoutes.value = []
   // Clear single-driver state
   trailPoints.value = []
   routePoints.value = []
