@@ -656,6 +656,187 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 	}
 });
 
+// Admin: scan for duplicate load IDs in Job Tracking
+app.get("/api/admin/scan-duplicates", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const rows = resp.data.values || [];
+		if (rows.length < 2) return res.json({ total: 0, dangerous: 0, groups: [] });
+
+		const headers = rows[0];
+		const loadIdIdx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
+		const statusIdx = headers.findIndex((h) => /status/i.test(h));
+		const driverIdx = headers.findIndex((h) => /^driver$/i.test(h));
+		const oLatIdx = headers.findIndex((h) => /origin.*lat/i.test(h));
+
+		const byId = {};
+		for (let i = 1; i < rows.length; i++) {
+			const rawId = (rows[i][loadIdIdx] || "").trim();
+			if (!rawId) continue;
+			const norm = rawId.replace(/^#/, "");
+			if (!byId[norm]) byId[norm] = [];
+			byId[norm].push({
+				row: i + 1,
+				rawId,
+				status: (rows[i][statusIdx] || "").trim() || "(empty)",
+				driver: (rows[i][driverIdx] || "").trim() || "(no driver)",
+				oLat: (rows[i][oLatIdx] || "").trim() || "",
+			});
+		}
+
+		const groups = Object.entries(byId)
+			.filter(([, r]) => r.length > 1)
+			.map(([loadId, rws]) => {
+				const statuses = new Set(rws.map((r) => r.status.toLowerCase()));
+				const dangerous = statuses.size > 1;
+				return { loadId, dangerous, rows: rws };
+			})
+			.sort((a, b) => (b.dangerous ? 1 : 0) - (a.dangerous ? 1 : 0));
+
+		res.json({ total: groups.length, dangerous: groups.filter((g) => g.dangerous).length, groups });
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// Admin: scan for driver name mismatches across Carrier DB, Job Tracking, and SQLite
+app.get("/api/admin/scan-driver-mismatches", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.batchGet({
+			spreadsheetId: SPREADSHEET_ID,
+			ranges: ["Job Tracking", "Carrier Database"],
+		});
+		const rangeData = resp.data.valueRanges || [];
+		const jtRows = (rangeData[0]?.values || []);
+		const cdRows = (rangeData[1]?.values || []);
+
+		const jtHeaders = jtRows[0] || [];
+		const cdHeaders = cdRows[0] || [];
+		const jtDriverIdx = jtHeaders.findIndex((h) => /^driver$/i.test(h));
+		const cdDriverIdx = cdHeaders.findIndex((h) => /driver/i.test(h));
+		if (cdDriverIdx === -1) cdHeaders[0]; // fallback
+
+		// Collect names from each source
+		const carrierNames = new Map();
+		cdRows.slice(1).forEach((r) => {
+			const name = (r[cdDriverIdx !== -1 ? cdDriverIdx : 0] || "").trim();
+			if (name) carrierNames.set(name.toLowerCase(), name);
+		});
+
+		const sheetNames = new Map();
+		jtRows.slice(1).forEach((r) => {
+			const name = (r[jtDriverIdx] || "").trim();
+			if (!name) return;
+			const key = name.toLowerCase();
+			if (!sheetNames.has(key)) sheetNames.set(key, { canonical: name, count: 0, variants: new Set() });
+			sheetNames.get(key).count++;
+			sheetNames.get(key).variants.add(name);
+		});
+
+		const users = db.prepare("SELECT username, driver_name, role FROM users WHERE role = 'Driver'").all();
+		const userMap = new Map();
+		users.forEach((u) => {
+			if (u.driver_name) userMap.set(u.driver_name.toLowerCase(), { username: u.username, driverName: u.driver_name });
+		});
+
+		// Cross-reference
+		const allKeys = new Set([...carrierNames.keys(), ...sheetNames.keys(), ...userMap.keys()]);
+		const mismatches = [];
+		for (const key of allKeys) {
+			const carrier = carrierNames.get(key);
+			const sheet = sheetNames.get(key);
+			const user = userMap.get(key);
+			const issues = [];
+
+			if (carrier && sheet && carrier !== sheet.canonical) issues.push(`Case mismatch: Carrier "${carrier}" vs Sheet "${sheet.canonical}"`);
+			if (sheet && !user) issues.push("No driver user account");
+			if (carrier && !user) issues.push("In Carrier DB but no user account");
+			if (user && !carrier) issues.push("Has user account but not in Carrier DB");
+			if (sheet && sheet.variants.size > 1) issues.push(`Multiple variants in sheet: ${[...sheet.variants].join(", ")}`);
+
+			if (issues.length > 0) {
+				mismatches.push({
+					name: carrier || sheet?.canonical || user?.driverName || key,
+					carrierName: carrier || null,
+					sheetName: sheet?.canonical || null,
+					sheetCount: sheet?.count || 0,
+					userAccount: user?.username || null,
+					userDriverName: user?.driverName || null,
+					issues,
+				});
+			}
+		}
+
+		res.json({ mismatches });
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// Admin: scan SQLite tables for orphaned driver names
+app.get("/api/admin/scan-orphans", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const users = db.prepare("SELECT driver_name FROM users WHERE role = 'Driver' AND driver_name != ''").all();
+		const knownNames = new Set(users.map((u) => u.driver_name.toLowerCase()));
+
+		const tables = [
+			{ name: "notifications", col: "driver_name", query: "SELECT driver_name AS name, COUNT(*) AS count FROM notifications GROUP BY driver_name" },
+			{ name: "expenses", col: "driver", query: "SELECT driver AS name, COUNT(*) AS count FROM expenses GROUP BY driver" },
+			{ name: "messages_from", col: "from", query: 'SELECT "from" AS name, COUNT(*) AS count FROM messages GROUP BY "from"' },
+			{ name: "messages_to", col: "to", query: 'SELECT "to" AS name, COUNT(*) AS count FROM messages GROUP BY "to"' },
+			{ name: "load_responses", col: "driver_name", query: "SELECT driver_name AS name, COUNT(*) AS count FROM load_responses GROUP BY driver_name" },
+			{ name: "dispatch_notifications", col: "title", query: "SELECT 'dispatch' AS name, COUNT(*) AS count FROM dispatch_notifications" },
+		];
+
+		const orphans = [];
+		for (const t of tables) {
+			if (t.name === "dispatch_notifications") continue; // title-based, skip
+			const rows = db.prepare(t.query).all();
+			const orphaned = rows.filter((r) => r.name && !knownNames.has(r.name.toLowerCase()));
+			if (orphaned.length > 0) {
+				orphans.push({ table: t.name, column: t.col, records: orphaned });
+			}
+		}
+
+		res.json({ orphans, knownDrivers: users.map((u) => u.driver_name) });
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// Admin: batch delete specific rows from a sheet (for removing stale duplicates)
+app.post("/api/admin/remove-rows", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const { sheet, rowIndices } = req.body;
+		if (!sheet || !rowIndices || !rowIndices.length) {
+			return res.status(400).json({ error: "sheet and rowIndices required" });
+		}
+
+		const sheets = await getSheets();
+		const sheetId = await getSheetId(sheets, sheet);
+
+		// Sort descending so deletions don't shift indices
+		const sorted = [...rowIndices].sort((a, b) => b - a);
+		const requests = sorted.map((rowIndex) => ({
+			deleteDimension: {
+				range: { sheetId, dimension: "ROWS", startIndex: rowIndex - 1, endIndex: rowIndex },
+			},
+		}));
+
+		await sheets.spreadsheets.batchUpdate({
+			spreadsheetId: SPREADSHEET_ID,
+			requestBody: { requests },
+		});
+
+		res.json({ deleted: sorted.length });
+	} catch (error) {
+		console.error("Error removing rows:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Debug: check what the driver endpoint returns (first 2 loads)
 app.get("/api/debug/driver-view/:driverName", async (req, res) => {
 	try {

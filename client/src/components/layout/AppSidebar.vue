@@ -59,6 +59,7 @@ const navConfig = {
     { to: '/driver', icon: '&#128666;', label: 'Driver App' },
     { to: '/investor', icon: '&#128200;', label: 'Investor View' },
     { to: '/users', icon: '&#9881;', label: 'User Management' },
+    { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
   ],
   Dispatcher: [

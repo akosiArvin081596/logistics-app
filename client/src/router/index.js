@@ -11,6 +11,7 @@ import TrackingView from '../views/TrackingView.vue'
 import ExpensesView from '../views/ExpensesView.vue'
 import MessagesView from '../views/MessagesView.vue'
 import NotificationsView from '../views/NotificationsView.vue'
+import AdminToolsView from '../views/AdminToolsView.vue'
 
 const routes = [
   {
@@ -71,6 +72,12 @@ const routes = [
     path: '/users',
     name: 'users',
     component: UsersView,
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/admin/tools',
+    name: 'admin-tools',
+    component: AdminToolsView,
     meta: { roles: ['Super Admin'] },
   },
   {
