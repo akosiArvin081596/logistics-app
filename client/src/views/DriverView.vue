@@ -8,15 +8,15 @@
     />
 
     <!-- Distance Warning Banner -->
-    <div v-if="geo.distanceWarning.value" class="distance-warning">
+    <div v-if="activeDistanceWarning" class="distance-warning">
       <div class="warning-icon">&#9888;</div>
       <div class="warning-content">
         <div class="warning-title">
-          {{ geo.distanceWarning.value.type === 'far-from-pickup' ? 'Far from Pickup' : 'Far from Delivery' }}
+          {{ activeDistanceWarning.type === 'far-from-pickup' ? 'Far from Pickup' : 'Far from Delivery' }}
         </div>
-        <div class="warning-message">{{ geo.distanceWarning.value.message }}</div>
+        <div class="warning-message">{{ activeDistanceWarning.message }}</div>
       </div>
-      <button class="warning-dismiss" @click="geo.distanceWarning.value = null">&times;</button>
+      <button class="warning-dismiss" @click="distanceWarningDismissed = true">&times;</button>
     </div>
 
     <!-- Header -->
@@ -339,6 +339,61 @@ const detailLoad = computed(() => {
 // Current active load for status tab (only working loads — not pending/delivered)
 const currentActiveLoad = computed(() => {
   return driverStore.workingLoads[0] || null
+})
+
+// Client-side distance warning — computed from GPS position and first working load's coordinates
+const FAR_THRESHOLD_KM = 500
+const clientDistanceWarning = computed(() => {
+  const pos = geo.lastPosition.value
+  const load = currentActiveLoad.value
+  if (!pos || !load) return null
+  const headers = driverStore.headers.jobTracking
+  const statusCol = findCol(headers, /status/i)
+  const status = statusCol ? (load[statusCol] || '').trim().toLowerCase() : ''
+  const notPickedUp = /^(dispatched|assigned)$/i.test(status)
+  const inTransit = /^(in transit)$/i.test(status)
+  if (!notPickedUp && !inTransit) return null
+
+  const oLatCol = findCol(headers, /origin.*lat|pickup.*lat/i)
+  const oLngCol = findCol(headers, /origin.*l(on|ng)|pickup.*l(on|ng)/i)
+  const dLatCol = findCol(headers, /dest.*lat|drop.*lat|delivery.*lat/i)
+  const dLngCol = findCol(headers, /dest.*l(on|ng)|drop.*l(on|ng)|delivery.*l(on|ng)/i)
+  const loadIdCol = findCol(headers, /load.?id|job.?id/i)
+
+  let targetLat, targetLng, type
+  if (notPickedUp && oLatCol && oLngCol) {
+    targetLat = parseFloat(load[oLatCol])
+    targetLng = parseFloat(load[oLngCol])
+    type = 'far-from-pickup'
+  } else if (inTransit && dLatCol && dLngCol) {
+    targetLat = parseFloat(load[dLatCol])
+    targetLng = parseFloat(load[dLngCol])
+    type = 'far-from-delivery'
+  }
+  if (!targetLat || !targetLng || isNaN(targetLat) || isNaN(targetLng)) return null
+
+  // Haversine distance
+  const R = 6371
+  const toRad = d => d * Math.PI / 180
+  const dLat = toRad(targetLat - pos.latitude)
+  const dLng = toRad(targetLng - pos.longitude)
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(pos.latitude)) * Math.cos(toRad(targetLat)) * Math.sin(dLng/2)**2
+  const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+
+  if (distKm < FAR_THRESHOLD_KM) return null
+  const distMiles = Math.round(distKm * 0.621371)
+  const loadId = loadIdCol ? load[loadIdCol] || '' : ''
+  return {
+    type,
+    distanceMiles: distMiles,
+    message: `You are ${distMiles.toLocaleString()} miles from ${type === 'far-from-pickup' ? 'pickup' : 'delivery'} (Load ${loadId}). Please verify your route.`,
+  }
+})
+
+const distanceWarningDismissed = ref(false)
+const activeDistanceWarning = computed(() => {
+  if (distanceWarningDismissed.value) return null
+  return clientDistanceWarning.value || geo.distanceWarning.value
 })
 
 const statusDocListRef = ref(null)
