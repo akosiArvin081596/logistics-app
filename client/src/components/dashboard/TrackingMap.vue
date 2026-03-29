@@ -99,6 +99,11 @@
         </template>
       </l-map>
 
+      <!-- Route loading overlay -->
+      <div v-if="fetchingRoute" class="route-overlay">
+        <div class="route-overlay-content">Getting route...</div>
+      </div>
+
       <!-- Driver list panel -->
       <div class="driver-panel" :class="{ collapsed: panelCollapsed }">
         <button class="panel-toggle" @click="panelCollapsed = !panelCollapsed">
@@ -173,8 +178,7 @@
                     <div v-if="al.dropoffAddress" class="route-point-address">{{ al.dropoffAddress }}</div>
                     <div class="route-point-coords">{{ al.destLat.toFixed(5) }}, {{ al.destLng.toFixed(5) }}</div>
                   </div>
-                  <div v-if="fetchingRoute" class="route-loading">Getting route...</div>
-                  <div v-else-if="routeDistance != null || routeEta != null" class="route-summary">
+                  <div v-if="routeDistance != null || routeEta != null" class="route-summary">
                     <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} km</span>
                     <span v-if="routeEta != null" class="route-stat">{{ routeEta }} min ETA</span>
                   </div>
@@ -469,8 +473,6 @@ async function toggleLoad(al, loc) {
       } else {
         routePoints.value = [[oLat, oLng], [dLat, dLng]]
       }
-      routeDistance.value = data.distanceKm || null
-      routeEta.value = data.etaMinutes || null
     } catch {
       if (gen !== focusGeneration) return
       routePoints.value = [[oLat, oLng], [dLat, dLng]]
@@ -1082,17 +1084,28 @@ onUnmounted(() => {
   margin-left: 1.1rem;
 }
 
-.route-loading {
-  font-size: 0.68rem;
-  color: #6366f1;
-  font-weight: 500;
-  margin-top: 0.35rem;
-  animation: pulse-text 1.2s ease-in-out infinite;
+.route-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.5);
+  pointer-events: none;
 }
 
-@keyframes pulse-text {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+.route-overlay-content {
+  background: #fff;
+  padding: 0.5rem 1.2rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #4338ca;
 }
 
 .route-summary {
