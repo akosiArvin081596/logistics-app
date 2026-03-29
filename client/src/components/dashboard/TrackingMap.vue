@@ -210,6 +210,7 @@ const locations = ref([])
 const loading = ref(true)
 const selectedDriver = ref('')
 const expandedLoadId = ref('')
+let focusGeneration = 0  // incremented on each focus action to cancel stale async fits
 const panelCollapsed = ref(false)
 const markerRefs = {}
 
@@ -392,6 +393,7 @@ async function fetchDriverRoutes(loc) {
 }
 
 async function focusDriver(loc) {
+  const gen = ++focusGeneration
   selectedDriver.value = loc.driver
   expandedLoadId.value = ''
   allRoutes.value = []
@@ -413,6 +415,7 @@ async function focusDriver(loc) {
 
   // Fetch all active load routes for this driver
   await fetchDriverRoutes(loc)
+  if (gen !== focusGeneration) return  // user clicked something else, abort
 
   // Fit bounds to all route points + driver position
   if (map && driverRoutes.value.length > 0) {
@@ -428,11 +431,15 @@ async function focusDriver(loc) {
 }
 
 async function toggleLoad(al, loc) {
+  const gen = ++focusGeneration  // cancel any pending focusDriver fits
+
   if (expandedLoadId.value === al.loadId) {
     // Collapse: restore all-routes view
     expandedLoadId.value = ''
     await fetchTrail(null, null)
+    if (gen !== focusGeneration) return
     await fetchDriverRoutes(loc)
+    if (gen !== focusGeneration) return
     // Re-fit to driver + all routes
     const map = mapRef.value?.leafletObject
     if (map && driverRoutes.value.length > 0) {
@@ -462,6 +469,7 @@ async function toggleLoad(al, loc) {
 
   // Then fetch the route polyline in the background
   await fetchTrail(loc.driver, al.loadId)
+  if (gen !== focusGeneration) return  // user clicked something else, abort
 
   // Re-fit with full route data if available
   if (map && routePoints.value.length >= 2) {
