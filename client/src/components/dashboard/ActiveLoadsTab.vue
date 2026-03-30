@@ -30,8 +30,8 @@
             </td>
             <td @click.stop>
               <div class="action-cell">
-                <select v-model="statusSelections[job._rowIndex]" class="action-select">
-                  <option value="">{{ getCurrentStatus(job) || 'Update Status...' }}</option>
+                <select :value="statusSelections[job._rowIndex] || ''" @change="statusSelections[job._rowIndex] = $event.target.value" class="action-select">
+                  <option value="" disabled selected>{{ getCurrentStatus(job) || 'Update Status...' }}</option>
                   <option v-for="s in statusOptions" :key="s" :value="s">{{ s }}</option>
                 </select>
                 <button
@@ -41,8 +41,8 @@
                 >Update</button>
               </div>
               <div class="action-cell" style="margin-top:0.3rem">
-                <select v-model="reassignSelections[job._rowIndex]" class="action-select">
-                  <option value="">{{ getCurrentDriver(job) || 'Reassign...' }}</option>
+                <select :value="reassignSelections[job._rowIndex] || ''" @change="reassignSelections[job._rowIndex] = $event.target.value" class="action-select">
+                  <option value="" disabled selected>{{ getCurrentDriver(job) || 'Reassign...' }}</option>
                   <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
                 </select>
                 <button
