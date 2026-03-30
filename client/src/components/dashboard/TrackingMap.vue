@@ -109,7 +109,7 @@
       <!-- Driver list panel -->
       <div class="driver-panel" :class="{ collapsed: panelCollapsed }">
         <button class="panel-toggle" @click="panelCollapsed = !panelCollapsed">
-          Drivers <span class="panel-count">{{ locations.length }}</span>
+          Active Loads <span class="panel-count">{{ activeLocations.length }}</span>
           <span class="panel-chevron" :class="{ open: !panelCollapsed }">&#9662;</span>
         </button>
         <div v-show="!panelCollapsed" class="panel-list">
@@ -124,7 +124,7 @@
             </div>
           </div>
           <div
-            v-for="loc in locations"
+            v-for="loc in activeLocations"
             :key="loc.driver"
             class="driver-item-wrap"
           >
@@ -157,7 +157,7 @@
                   :class="['load-entry-header', { active: expandedLoadId === al.loadId }]"
                   @click.stop="toggleLoad(al, loc)"
                 >
-                  <span class="load-entry-id">{{ al.loadId }}</span>
+                  <span class="load-entry-id load-entry-id-link" @click.stop="navigateToLoad(al.loadId)">{{ al.loadId }}</span>
                   <span class="load-entry-status">{{ al.status }}</span>
                   <span class="load-entry-chevron" :class="{ open: expandedLoadId === al.loadId }">&#9662;</span>
                 </div>
@@ -199,8 +199,10 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
+import { useSheetsStore } from '../../stores/sheets'
 import 'leaflet/dist/leaflet.css'
 import { LMap, LTileLayer, LMarker, LPopup, LPolyline } from '@vue-leaflet/vue-leaflet'
 import L from 'leaflet'
@@ -211,6 +213,8 @@ const props = defineProps({
 
 const api = useApi()
 const socket = useSocket()
+const router = useRouter()
+const sheetsStore = useSheetsStore()
 
 const mapRef = ref(null)
 const locations = ref([])
@@ -641,6 +645,13 @@ function timeAgo(ts) {
 
 const locationsWithGps = computed(() => locations.value.filter(loc => !loc.noGps && loc.latitude != null))
 const onlineCount = computed(() => locationsWithGps.value.filter(loc => isOnline(loc)).length)
+const activeLocations = computed(() => locations.value.filter(loc => loc.activeLoads && loc.activeLoads.length > 0))
+
+function navigateToLoad(loadId) {
+  sheetsStore.currentSheet = 'Job Tracking'
+  sheetsStore.setSearch(loadId)
+  router.push('/data')
+}
 
 const mapCenter = ref([39.8283, -98.5795]) // set once after first fetch
 
@@ -1035,6 +1046,15 @@ onUnmounted(() => {
   font-size: 0.72rem;
   font-weight: 600;
   color: #333;
+}
+.load-entry-id-link {
+  cursor: pointer;
+  color: #2563eb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.load-entry-id-link:hover {
+  color: #1d4ed8;
 }
 
 .load-entry-status {
