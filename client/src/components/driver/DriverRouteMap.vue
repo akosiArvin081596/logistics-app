@@ -147,15 +147,15 @@ const destAddr = computed(() => destAddrCol.value ? props.load[destAddrCol.value
 const loadIdValue = computed(() => loadIdCol.value ? props.load[loadIdCol.value] || '' : '')
 const driverName = computed(() => driverColName.value ? props.load[driverColName.value] || '' : '')
 
-// Static initial center — computed from available coords, no hardcoded fallback
+// Static initial center — route coords take priority over driver position
 const mapCenter = ref((() => {
-  const dPos = props.driverPosition
-  if (dPos) return [dPos.latitude, dPos.longitude]
   const o = originLatLng.value
   const d = destLatLng.value
   if (o && d) return [(o[0] + d[0]) / 2, (o[1] + d[1]) / 2]
   if (o) return o
   if (d) return d
+  const dPos = props.driverPosition
+  if (dPos) return [dPos.latitude, dPos.longitude]
   return [0, 0]
 })())
 
@@ -204,20 +204,18 @@ function safeFitBounds(map, points, options = {}) {
 }
 
 function onMapReady() {
-  setTimeout(() => {
-    const map = mapRef.value?.leafletObject
-    if (!map) return
-    map.invalidateSize()
-    if (!initialFitDone) {
-      const pts = []
-      if (originLatLng.value) pts.push(originLatLng.value)
-      if (destLatLng.value) pts.push(destLatLng.value)
-      if (driverLatLng.value) pts.push(driverLatLng.value)
-      if (safeFitBounds(map, pts, { padding: [30, 30], maxZoom: 14, animate: false })) {
-        initialFitDone = true
-      }
+  const map = mapRef.value?.leafletObject
+  if (!map) return
+  map.invalidateSize()
+  // Fit to origin+dest immediately (like tracking page), driver marker appears wherever it falls
+  if (!initialFitDone) {
+    const pts = []
+    if (originLatLng.value) pts.push(originLatLng.value)
+    if (destLatLng.value) pts.push(destLatLng.value)
+    if (safeFitBounds(map, pts, { padding: [50, 50], maxZoom: 14, animate: false })) {
+      initialFitDone = true
     }
-  }, 50)
+  }
 }
 
 let initialFitDone = false
@@ -264,8 +262,7 @@ async function fetchRoute(fitBounds = false) {
           const allPoints = [...routePoints.value]
           if (originLatLng.value) allPoints.push(originLatLng.value)
           if (destLatLng.value) allPoints.push(destLatLng.value)
-          if (driverLatLng.value) allPoints.push(driverLatLng.value)
-          if (safeFitBounds(map, allPoints, { padding: [30, 30], maxZoom: 14, animate: false })) {
+          if (safeFitBounds(map, allPoints, { padding: [50, 50], maxZoom: 14, animate: false })) {
             initialFitDone = true
           }
         }
