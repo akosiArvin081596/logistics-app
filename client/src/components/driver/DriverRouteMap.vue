@@ -176,8 +176,28 @@ const driverIcon = L.divIcon({
 
 function onMapReady() {
   setTimeout(() => {
-    if (mapRef.value?.leafletObject) {
-      mapRef.value.leafletObject.invalidateSize()
+    const map = mapRef.value?.leafletObject
+    if (!map) return
+    map.invalidateSize()
+    // If initial fitBounds failed due to timing, retry now that map is ready
+    if (!initialFitDone && hasCoords.value) {
+      const allPoints = [...routePoints.value]
+      if (originLatLng.value) allPoints.push(originLatLng.value)
+      if (destLatLng.value) allPoints.push(destLatLng.value)
+      if (driverLatLng.value) allPoints.push(driverLatLng.value)
+      try {
+        const valid = allPoints.filter(p => Array.isArray(p) && p.length >= 2 && isFinite(p[0]) && isFinite(p[1]) && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180)
+        if (valid.length >= 2) {
+          const bounds = L.latLngBounds(valid.map(p => L.latLng(p[0], p[1])))
+          if (bounds.isValid()) {
+            map.fitBounds(bounds, { padding: [30, 30], animate: false })
+            initialFitDone = true
+          }
+        } else if (valid.length === 1) {
+          map.setView(valid[0], 12, { animate: false })
+          initialFitDone = true
+        }
+      } catch { /* silent */ }
     }
   }, 200)
 }
@@ -220,7 +240,6 @@ async function fetchRoute(fitBounds = false) {
 
     // Only fit bounds on initial load, not on reroutes
     if (fitBounds && !initialFitDone) {
-      initialFitDone = true
       nextTick(() => {
         const map = mapRef.value?.leafletObject
         if (map) {
@@ -232,9 +251,13 @@ async function fetchRoute(fitBounds = false) {
             const valid = allPoints.filter(p => Array.isArray(p) && p.length >= 2 && isFinite(p[0]) && isFinite(p[1]) && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180)
             if (valid.length >= 2) {
               const bounds = L.latLngBounds(valid.map(p => L.latLng(p[0], p[1])))
-              if (bounds.isValid()) map.fitBounds(bounds, { padding: [30, 30], animate: false })
+              if (bounds.isValid()) {
+                map.fitBounds(bounds, { padding: [30, 30], animate: false })
+                initialFitDone = true
+              }
             } else if (valid.length === 1) {
               map.setView(valid[0], 12, { animate: false })
+              initialFitDone = true
             }
           } catch { /* silent */ }
         }
