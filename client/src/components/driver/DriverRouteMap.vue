@@ -22,7 +22,7 @@
       <div class="map-container">
         <l-map
           ref="mapRef"
-          :zoom="14"
+          :zoom="initialZoom"
           :center="mapCenter"
           :use-global-leaflet="false"
           style="height: 100%; width: 100%;"
@@ -147,12 +147,22 @@ const destAddr = computed(() => destAddrCol.value ? props.load[destAddrCol.value
 const loadIdValue = computed(() => loadIdCol.value ? props.load[loadIdCol.value] || '' : '')
 const driverName = computed(() => driverColName.value ? props.load[driverColName.value] || '' : '')
 
-// Static initial center — does not reactively recenter the map on GPS updates
+// Static initial center — computed from available coords, no hardcoded fallback
 const mapCenter = ref((() => {
   const dPos = props.driverPosition
   if (dPos) return [dPos.latitude, dPos.longitude]
-  return [8.95, 125.53]
+  const o = originLatLng.value
+  const d = destLatLng.value
+  if (o && d) return [(o[0] + d[0]) / 2, (o[1] + d[1]) / 2]
+  if (o) return o
+  if (d) return d
+  return [0, 0]
 })())
+
+const initialZoom = computed(() => {
+  if (originLatLng.value && destLatLng.value) return 5
+  return 12
+})
 
 // Custom icons
 const originIcon = L.divIcon({
@@ -174,32 +184,40 @@ const driverIcon = L.divIcon({
   iconAnchor: [10, 10],
 })
 
+function safeFitBounds(map, points, options = {}) {
+  try {
+    const valid = points.filter(p =>
+      Array.isArray(p) && p.length >= 2 &&
+      isFinite(p[0]) && isFinite(p[1]) &&
+      Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180
+    )
+    if (valid.length === 0) return false
+    if (valid.length === 1) {
+      map.setView(valid[0], options.maxZoom || 12, { animate: options.animate ?? false })
+      return true
+    }
+    const bounds = L.latLngBounds(valid.map(p => L.latLng(p[0], p[1])))
+    if (!bounds.isValid()) return false
+    map.fitBounds(bounds, options)
+    return true
+  } catch { return false }
+}
+
 function onMapReady() {
   setTimeout(() => {
     const map = mapRef.value?.leafletObject
     if (!map) return
     map.invalidateSize()
-    // If initial fitBounds failed due to timing, retry now that map is ready
-    if (!initialFitDone && hasCoords.value) {
-      const allPoints = [...routePoints.value]
-      if (originLatLng.value) allPoints.push(originLatLng.value)
-      if (destLatLng.value) allPoints.push(destLatLng.value)
-      if (driverLatLng.value) allPoints.push(driverLatLng.value)
-      try {
-        const valid = allPoints.filter(p => Array.isArray(p) && p.length >= 2 && isFinite(p[0]) && isFinite(p[1]) && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180)
-        if (valid.length >= 2) {
-          const bounds = L.latLngBounds(valid.map(p => L.latLng(p[0], p[1])))
-          if (bounds.isValid()) {
-            map.fitBounds(bounds, { padding: [30, 30], animate: false })
-            initialFitDone = true
-          }
-        } else if (valid.length === 1) {
-          map.setView(valid[0], 12, { animate: false })
-          initialFitDone = true
-        }
-      } catch { /* silent */ }
+    if (!initialFitDone) {
+      const pts = []
+      if (originLatLng.value) pts.push(originLatLng.value)
+      if (destLatLng.value) pts.push(destLatLng.value)
+      if (driverLatLng.value) pts.push(driverLatLng.value)
+      if (safeFitBounds(map, pts, { padding: [30, 30], maxZoom: 14, animate: false })) {
+        initialFitDone = true
+      }
     }
-  }, 200)
+  }, 50)
 }
 
 let initialFitDone = false
@@ -247,19 +265,9 @@ async function fetchRoute(fitBounds = false) {
           if (originLatLng.value) allPoints.push(originLatLng.value)
           if (destLatLng.value) allPoints.push(destLatLng.value)
           if (driverLatLng.value) allPoints.push(driverLatLng.value)
-          try {
-            const valid = allPoints.filter(p => Array.isArray(p) && p.length >= 2 && isFinite(p[0]) && isFinite(p[1]) && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180)
-            if (valid.length >= 2) {
-              const bounds = L.latLngBounds(valid.map(p => L.latLng(p[0], p[1])))
-              if (bounds.isValid()) {
-                map.fitBounds(bounds, { padding: [30, 30], animate: false })
-                initialFitDone = true
-              }
-            } else if (valid.length === 1) {
-              map.setView(valid[0], 12, { animate: false })
-              initialFitDone = true
-            }
-          } catch { /* silent */ }
+          if (safeFitBounds(map, allPoints, { padding: [30, 30], maxZoom: 14, animate: false })) {
+            initialFitDone = true
+          }
         }
       })
     }
