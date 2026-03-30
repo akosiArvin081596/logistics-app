@@ -319,6 +319,10 @@ async function fixName(oldName, newName) {
 </script>
 
 <style scoped>
+.admin-page {
+  flex: 0 0 auto;
+}
+
 .page-desc {
   font-size: 0.82rem;
   color: var(--text-dim);
@@ -334,6 +338,7 @@ async function fixName(oldName, newName) {
   border-radius: var(--radius);
   margin-bottom: 1.25rem;
   overflow: hidden;
+  flex-shrink: 0;
 }
 
 .card-header {
