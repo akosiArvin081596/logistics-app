@@ -388,8 +388,8 @@ async function fetchDriverRoutes(loc) {
   const loads = loc.activeLoads || []
   if (loads.length === 0) return
 
-  // Step 1: Show points immediately from known coords
-  const immediate = []
+  // Show points immediately from known coords with straight-line routes
+  const routes = []
   for (let i = 0; i < loads.length; i++) {
     const al = loads[i]
     const oLat = Number(al.originLat), oLng = Number(al.originLng)
@@ -397,7 +397,7 @@ async function fetchDriverRoutes(loc) {
     const origin = isFinite(oLat) && isFinite(oLng) ? [oLat, oLng] : null
     const dest = isFinite(dLat) && isFinite(dLng) ? [dLat, dLng] : null
     if (!origin && !dest) continue
-    immediate.push({
+    routes.push({
       loadId: al.loadId,
       route: origin && dest ? [origin, dest] : [],
       origin,
@@ -407,22 +407,20 @@ async function fetchDriverRoutes(loc) {
       color: ROUTE_COLORS[i % ROUTE_COLORS.length],
     })
   }
-  driverRoutes.value = immediate
+  driverRoutes.value = routes
 
-  // Step 2: Fetch actual driving routes from OSRM in background
-  const updated = await Promise.all(
-    immediate.map(async (r) => {
-      if (!r.origin || !r.dest) return r
-      try {
-        const data = await api.get(`/api/route?fromLat=${r.origin[0]}&fromLng=${r.origin[1]}&toLat=${r.dest[0]}&toLng=${r.dest[1]}`)
-        if (data.route && data.route.length >= 2) {
-          return { ...r, route: data.route.map(p => [p.latitude, p.longitude]) }
-        }
-      } catch { /* keep straight line */ }
-      return r
-    })
-  )
-  driverRoutes.value = updated
+  // Fetch actual driving routes from OSRM and replace straight lines
+  for (let i = 0; i < routes.length; i++) {
+    const r = routes[i]
+    if (!r.origin || !r.dest) continue
+    try {
+      const data = await api.get(`/api/route?fromLat=${r.origin[0]}&fromLng=${r.origin[1]}&toLat=${r.dest[0]}&toLng=${r.dest[1]}`)
+      if (data.route && data.route.length >= 2) {
+        routes[i] = { ...r, route: data.route.map(p => [p.latitude, p.longitude]) }
+        driverRoutes.value = [...routes]  // trigger reactivity
+      }
+    } catch { /* keep straight line */ }
+  }
 }
 
 function collapseDriver() {
