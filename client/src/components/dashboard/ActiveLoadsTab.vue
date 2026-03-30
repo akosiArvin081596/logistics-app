@@ -31,7 +31,7 @@
             <td @click.stop>
               <div class="action-cell">
                 <select v-model="statusSelections[job._rowIndex]" class="action-select">
-                  <option value="">Update Status...</option>
+                  <option value="">{{ getCurrentStatus(job) || 'Update Status...' }}</option>
                   <option v-for="s in statusOptions" :key="s" :value="s">{{ s }}</option>
                 </select>
                 <button
@@ -42,7 +42,7 @@
               </div>
               <div class="action-cell" style="margin-top:0.3rem">
                 <select v-model="reassignSelections[job._rowIndex]" class="action-select">
-                  <option value="">Reassign...</option>
+                  <option value="">{{ getCurrentDriver(job) || 'Reassign...' }}</option>
                   <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
                 </select>
                 <button
@@ -166,6 +166,16 @@ const selectedJob = ref(null)
 const selectedDriverPosition = ref(null)
 const reassignSelections = reactive({})
 const statusSelections = reactive({})
+
+const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || '')
+const driverCol = computed(() => props.headers.find(h => /driver/i.test(h)) || '')
+
+function getCurrentStatus(job) {
+  return statusCol.value ? (job[statusCol.value] || '') : ''
+}
+function getCurrentDriver(job) {
+  return driverCol.value ? (job[driverCol.value] || '') : ''
+}
 
 function confirmReassign(job) {
   const newDriver = reassignSelections[job._rowIndex]

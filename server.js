@@ -1494,12 +1494,17 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin", "Dispatcher"), async
 
 		// Notify driver
 		if (driver) {
-			insertNotification.run(
+			const cancelNotif = insertNotification.run(
 				driver.trim().toLowerCase(), 'load-assigned',
 				`Load Cancelled: ${loadId || 'Load'}`,
 				'Your assignment has been cancelled by dispatch',
 				JSON.stringify({ loadId, rowIndex })
 			);
+			io.to(driver.trim().toLowerCase()).emit("load-cancelled", {
+				loadId,
+				rowIndex,
+				notificationId: cancelNotif.lastInsertRowid,
+			});
 		}
 
 		// Notify dispatch team

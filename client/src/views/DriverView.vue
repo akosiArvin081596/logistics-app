@@ -623,6 +623,21 @@ function viewAssignedLoad() {
   }
 }
 
+function onLoadCancelled(payload) {
+  if (!isMounted) return
+  toast.show(`Load ${payload.loadId || ''} has been cancelled by dispatch`)
+  driverStore.addNotification({
+    id: payload.notificationId || Date.now(),
+    type: 'load-cancelled',
+    title: `Load Cancelled: ${payload.loadId || 'Load'}`,
+    body: 'Your assignment has been cancelled by dispatch',
+    metadata: JSON.stringify(payload),
+    read: 0,
+    createdAt: new Date().toISOString(),
+  })
+  driverStore.loadData()
+}
+
 function onGeofenceTrigger(payload) {
   if (!isMounted) return
   toast.show(`Geofence: ${payload.status} for Load ${payload.loadId}`)
@@ -718,6 +733,7 @@ onMounted(async () => {
   socket.register(driverName.value)
   socket.on('new-message', onNewMessage)
   socket.on('load-assigned', onLoadAssigned)
+  socket.on('load-cancelled', onLoadCancelled)
   socket.on('geofence-trigger', onGeofenceTrigger)
 })
 
@@ -725,6 +741,7 @@ onUnmounted(() => {
   isMounted = false
   socket.off('new-message', onNewMessage)
   socket.off('load-assigned', onLoadAssigned)
+  socket.off('load-cancelled', onLoadCancelled)
   socket.off('geofence-trigger', onGeofenceTrigger)
   geo.stop()
   socket.disconnect()
