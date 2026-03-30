@@ -455,17 +455,15 @@ async function focusDriver(loc) {
   }
 
   // Fetch all active load routes in background
-  console.log('[focusDriver] activeLoads:', loc.activeLoads?.length, loc.activeLoads)
   if (loc.activeLoads && loc.activeLoads.length > 0) {
     fetchingRoute.value = true
     await fetchDriverRoutes(loc)
     fetchingRoute.value = false
-    console.log('[focusDriver] driverRoutes after fetch:', driverRoutes.value.length, driverRoutes.value)
     if (gen !== focusGeneration) return
 
-    // Fit to driver + all route points
+    // Fit to all route origins and destinations (exclude driver GPS to avoid cross-continent bounds)
     if (map && driverRoutes.value.length > 0) {
-      const allPts = [[loc.latitude, loc.longitude]]
+      const allPts = []
       for (const r of driverRoutes.value) {
         if (r.origin) allPts.push(r.origin)
         if (r.dest) allPts.push(r.dest)
