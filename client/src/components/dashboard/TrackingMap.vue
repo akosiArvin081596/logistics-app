@@ -455,10 +455,12 @@ async function focusDriver(loc) {
   }
 
   // Fetch all active load routes in background
+  console.log('[focusDriver] activeLoads:', loc.activeLoads?.length, loc.activeLoads)
   if (loc.activeLoads && loc.activeLoads.length > 0) {
     fetchingRoute.value = true
     await fetchDriverRoutes(loc)
     fetchingRoute.value = false
+    console.log('[focusDriver] driverRoutes after fetch:', driverRoutes.value.length, driverRoutes.value)
     if (gen !== focusGeneration) return
 
     // Fit to driver + all route points
