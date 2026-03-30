@@ -297,7 +297,7 @@ let sheetsClient = null;
 let driveClient = null;
 const sheetIdCache = new Map();
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
-const OSRM_BASE_URL = process.env.OSRM_BASE_URL || "https://router.project-osrm.org";
+const ORS_API_KEY = process.env.ORS_API_KEY || "";
 
 async function getSheets() {
 	if (!sheetsClient) {
@@ -3155,31 +3155,35 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 	}
 });
 
-// Get driving route between two points using OSRM Route API
+// Get driving route between two points using OpenRouteService Directions API
 async function getRoute(from, to, retries = 2) {
 	if (!from || !to) return null;
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		try {
-			const coords = `${from.longitude},${from.latitude};${to.longitude},${to.latitude}`;
-			const url = `${OSRM_BASE_URL}/route/v1/driving/${coords}?overview=full&geometries=geojson`;
 			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), 8000);
-			const resp = await fetch(url, { signal: controller.signal });
+			const timeout = setTimeout(() => controller.abort(), 10000);
+			const resp = await fetch("https://api.openrouteservice.org/v2/directions/driving-car/geojson", {
+				method: "POST",
+				headers: { "Authorization": ORS_API_KEY, "Content-Type": "application/json" },
+				body: JSON.stringify({ coordinates: [[from.longitude, from.latitude], [to.longitude, to.latitude]] }),
+				signal: controller.signal,
+			});
 			clearTimeout(timeout);
 			if (!resp.ok) {
 				if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
 				return null;
 			}
 			const data = await resp.json();
-			if (data.code !== "Ok" || !data.routes || data.routes.length === 0) return null; // unroutable, no retry
-			const r = data.routes[0];
+			if (!data.features || data.features.length === 0) return null;
+			const feature = data.features[0];
+			const summary = feature.properties?.summary;
 			return {
-				points: r.geometry.coordinates.map(([lng, lat]) => ({ latitude: lat, longitude: lng })),
-				distanceKm: Math.round(r.distance / 100) / 10,
-				durationMin: Math.round(r.duration / 60),
+				points: feature.geometry.coordinates.map(([lng, lat]) => ({ latitude: lat, longitude: lng })),
+				distanceKm: Math.round(summary.distance / 100) / 10,
+				durationMin: Math.round(summary.duration / 60),
 			};
 		} catch (err) {
-			console.error(`OSRM route error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
+			console.error(`ORS route error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
 			if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
 			return null;
 		}
@@ -3198,7 +3202,7 @@ async function snapToRoads(points) {
 			if (batch.length < 2) break;
 			const coords = batch.map(p => `${p.longitude},${p.latitude}`).join(";");
 			const radiuses = batch.map(() => "25").join(";");
-			const url = `${OSRM_BASE_URL}/match/v1/driving/${coords}?overview=full&geometries=geojson&radiuses=${radiuses}`;
+			const url = `https://router.project-osrm.org/match/v1/driving/${coords}?overview=full&geometries=geojson&radiuses=${radiuses}`;
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), 8000);
 			const resp = await fetch(url, { signal: controller.signal });

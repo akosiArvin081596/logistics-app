@@ -31,7 +31,7 @@ Required files at project root:
 ```
 GOOGLE_DRIVE_FOLDER_ID=<Drive folder ID for POD uploads — optional, uploads skip Drive if empty>
 PORT=3000  # optional, defaults to 3000
-OSRM_BASE_URL=http://localhost:5000  # optional, defaults to public router.project-osrm.org
+ORS_API_KEY=<OpenRouteService API key — required for routing/directions>
 ```
 
 Hardcoded values in `server.js` (change if forking):
