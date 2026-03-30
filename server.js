@@ -3046,6 +3046,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						if (!isNaN(dLat) && !isNaN(dLng)) {
 							loc.destLat = dLat;
 							loc.destLng = dLng;
+							if (loc.latitude == null || loc.longitude == null) continue;
 							const distMeters = geolib.getDistance(
 								{ latitude: loc.latitude, longitude: loc.longitude },
 								{ latitude: dLat, longitude: dLng }
@@ -3408,6 +3409,7 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 
 // GET /api/route — Lightweight rerouting: get driving route between two points
 app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async (req, res) => {
+	res.set('Cache-Control', 'no-store');
 	try {
 		const { fromLat, fromLng, toLat, toLng } = req.query;
 		if (!fromLat || !fromLng || !toLat || !toLng) {
