@@ -104,6 +104,27 @@
               </div>
             </template>
 
+            <!-- Documents -->
+            <div class="detail-section">
+              <div class="section-label">Documents</div>
+              <div class="section-card" style="display:block">
+                <div v-if="loadingDocs" class="doc-status">Loading documents...</div>
+                <div v-else-if="loadDocs.length === 0" class="doc-status">No documents attached</div>
+                <div v-else class="doc-items">
+                  <div v-for="doc in loadDocs" :key="doc.id" class="doc-row">
+                    <div class="doc-row-left">
+                      <span :class="['doc-type-badge', `badge-${doc.type.toLowerCase()}`]">{{ doc.type }}</span>
+                      <div class="doc-info">
+                        <span class="doc-filename">{{ doc.file_name }}</span>
+                        <span class="doc-date">{{ formatDocDate(doc.uploaded_at) }}</span>
+                      </div>
+                    </div>
+                    <button v-if="doc.drive_url" class="doc-view-btn" @click="openPdfViewer(doc)">View</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- Route Map -->
             <div class="detail-section">
               <div class="section-label">Route Map</div>
@@ -114,6 +135,27 @@
                 dispatch-mode
               />
             </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- PDF Viewer Modal -->
+    <Teleport to="body">
+      <div v-if="pdfDoc" class="pdf-overlay" @click.self="pdfDoc = null">
+        <div class="pdf-modal">
+          <div class="pdf-header">
+            <div class="pdf-title">
+              <span :class="['doc-type-badge', `badge-${pdfDoc.type.toLowerCase()}`]">{{ pdfDoc.type }}</span>
+              <span>{{ pdfDoc.file_name }}</span>
+            </div>
+            <div class="pdf-actions">
+              <a :href="pdfDoc.drive_url" target="_blank" rel="noopener" class="pdf-open-btn">Open in New Tab</a>
+              <button class="modal-close" @click="pdfDoc = null">&times;</button>
+            </div>
+          </div>
+          <div class="pdf-body">
+            <iframe :src="pdfEmbedUrl" class="pdf-frame" allowfullscreen></iframe>
           </div>
         </div>
       </div>
@@ -181,6 +223,9 @@ const selectedJob = ref(null)
 const selectedDriverPosition = ref(null)
 const reassignSelections = reactive({})
 const statusSelections = reactive({})
+const loadDocs = ref([])
+const loadingDocs = ref(false)
+const pdfDoc = ref(null)
 
 const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || '')
 const driverCol = computed(() => props.headers.find(h => /driver/i.test(h)) || '')
@@ -224,20 +269,58 @@ function closeDetail() {
 async function openDetail(job) {
   selectedJob.value = job
   selectedDriverPosition.value = null
+  loadDocs.value = []
+  loadingDocs.value = true
+
   const driverCol = props.headers.find(h => /driver/i.test(h))
   const driverName = driverCol ? (job[driverCol] || '').trim() : ''
+
+  // Fetch driver location and documents in parallel
+  const lidCol = props.headers.find(h => /load.?id|job.?id/i.test(h))
+  const loadId = lidCol ? (job[lidCol] || '').trim() : ''
+
+  const promises = []
   if (driverName) {
-    try {
-      const data = await api.get('/api/locations/latest')
-      const loc = (data.locations || []).find(
-        l => l.driver.toLowerCase() === driverName.toLowerCase() && l.latitude
-      )
-      if (loc) {
-        selectedDriverPosition.value = { latitude: loc.latitude, longitude: loc.longitude }
-      }
-    } catch { /* silent */ }
+    promises.push(
+      api.get('/api/locations/latest').then(data => {
+        const loc = (data.locations || []).find(
+          l => l.driver.toLowerCase() === driverName.toLowerCase() && l.latitude
+        )
+        if (loc) selectedDriverPosition.value = { latitude: loc.latitude, longitude: loc.longitude }
+      }).catch(() => {})
+    )
   }
+  if (loadId) {
+    promises.push(
+      api.get(`/api/documents/${encodeURIComponent(loadId)}`).then(res => {
+        loadDocs.value = res.documents || []
+      }).catch(() => {})
+    )
+  }
+  await Promise.all(promises)
+  loadingDocs.value = false
 }
+
+function formatDocDate(str) {
+  if (!str) return ''
+  const d = new Date(str)
+  if (isNaN(d)) return str
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+function openPdfViewer(doc) {
+  pdfDoc.value = doc
+}
+
+const pdfEmbedUrl = computed(() => {
+  if (!pdfDoc.value) return ''
+  const url = pdfDoc.value.drive_url
+  const driveMatch = url.match(/drive\.google\.com\/file\/d\/([^/]+)/)
+  if (driveMatch) {
+    return `https://drive.google.com/file/d/${driveMatch[1]}/preview`
+  }
+  return url
+})
 
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null)
 const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
@@ -525,6 +608,158 @@ const detailSections = computed(() => {
   line-height: 1.35;
 }
 
+/* Documents */
+.doc-status {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding: 0.75rem 1rem;
+}
+.doc-items {
+  display: flex;
+  flex-direction: column;
+}
+.doc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  gap: 0.5rem;
+}
+.doc-row:last-child { border-bottom: none; }
+.doc-row-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1;
+}
+.doc-type-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.badge-pod { background: #dcfce7; color: #166534; }
+.badge-receipt { background: #fef9c3; color: #854d0e; }
+.badge-bol { background: #dbeafe; color: #1e40af; }
+.badge-other { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border); }
+.doc-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.doc-filename {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.doc-date {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+}
+.doc-view-btn {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-family: inherit;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  transition: background 0.12s;
+}
+.doc-view-btn:hover {
+  background: rgba(0, 0, 0, 0.04);
+  text-decoration: underline;
+}
+
+/* PDF Viewer Modal */
+.pdf-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(3px);
+}
+.pdf-modal {
+  background: var(--bg, #f5f6fa);
+  border-radius: 14px;
+  width: 94%;
+  max-width: 900px;
+  height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.25);
+  animation: modalIn 0.25s ease-out;
+}
+.pdf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  background: var(--surface, #fff);
+  border-bottom: 1px solid var(--border);
+  border-radius: 14px 14px 0 0;
+  flex-shrink: 0;
+  gap: 0.75rem;
+}
+.pdf-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pdf-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+.pdf-open-btn {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+.pdf-open-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.pdf-body {
+  flex: 1;
+  min-height: 0;
+  border-radius: 0 0 14px 14px;
+  overflow: hidden;
+}
+.pdf-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
 @media (max-width: 480px) {
   .detail-modal {
     width: 96%;
@@ -542,6 +777,18 @@ const detailSections = computed(() => {
   }
   .modal-body {
     padding: 1rem;
+  }
+  .pdf-modal {
+    width: 98%;
+    height: 90vh;
+    border-radius: 10px;
+  }
+  .pdf-header {
+    border-radius: 10px 10px 0 0;
+    padding: 0.6rem 0.75rem;
+  }
+  .pdf-body {
+    border-radius: 0 0 10px 10px;
   }
 }
 
