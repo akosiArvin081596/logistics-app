@@ -1538,11 +1538,11 @@ app.post("/api/driver/respond", requireAuth, async (req, res) => {
 			return res.status(400).json({ error: "response must be 'accepted' or 'declined'" });
 		}
 
-		// Check for duplicate response
+		// Check for duplicate response (scoped to load_id + driver + rowIndex)
 		const existing = db.prepare(
-			`SELECT id FROM load_responses WHERE load_id = ? AND driver_name = ? ORDER BY responded_at DESC LIMIT 1`
-		).get(loadId, driverName.trim().toLowerCase());
-		if (existing) {
+			`SELECT id, response FROM load_responses WHERE load_id = ? AND driver_name = ? AND row_index = ? ORDER BY responded_at DESC LIMIT 1`
+		).get(loadId, driverName.trim().toLowerCase(), rowIndex);
+		if (existing && existing.response === response) {
 			return res.status(409).json({ error: "You have already responded to this load" });
 		}
 
