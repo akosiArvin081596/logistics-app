@@ -388,30 +388,41 @@ async function fetchDriverRoutes(loc) {
   const loads = loc.activeLoads || []
   if (loads.length === 0) return
 
-  const routes = await Promise.all(
-    loads.map(async (al, i) => {
+  // Step 1: Show points immediately from known coords
+  const immediate = []
+  for (let i = 0; i < loads.length; i++) {
+    const al = loads[i]
+    const oLat = Number(al.originLat), oLng = Number(al.originLng)
+    const dLat = Number(al.destLat), dLng = Number(al.destLng)
+    const origin = isFinite(oLat) && isFinite(oLng) ? [oLat, oLng] : null
+    const dest = isFinite(dLat) && isFinite(dLng) ? [dLat, dLng] : null
+    if (!origin && !dest) continue
+    immediate.push({
+      loadId: al.loadId,
+      route: origin && dest ? [origin, dest] : [],
+      origin,
+      dest,
+      originAddress: al.pickupAddress || '',
+      destAddress: al.dropoffAddress || '',
+      color: ROUTE_COLORS[i % ROUTE_COLORS.length],
+    })
+  }
+  driverRoutes.value = immediate
+
+  // Step 2: Fetch actual driving routes from OSRM in background
+  const updated = await Promise.all(
+    immediate.map(async (r) => {
+      if (!r.origin || !r.dest) return r
       try {
-        const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(loc.driver)}&loadId=${encodeURIComponent(al.loadId)}`)
-        const origin = data.origin ? [data.origin.latitude, data.origin.longitude] : null
-        const dest = data.destination ? [data.destination.latitude, data.destination.longitude] : null
-        let route = (data.route || []).map(p => [p.latitude, p.longitude])
-        // Fallback: straight line between origin and dest if OSRM can't compute a route
-        if (route.length < 2 && origin && dest) route = [origin, dest]
-        return {
-          loadId: al.loadId,
-          route,
-          origin,
-          dest,
-          originAddress: data.origin?.address || al.pickupAddress || '',
-          destAddress: data.destination?.address || al.dropoffAddress || '',
-          color: ROUTE_COLORS[i % ROUTE_COLORS.length],
+        const data = await api.get(`/api/route?fromLat=${r.origin[0]}&fromLng=${r.origin[1]}&toLat=${r.dest[0]}&toLng=${r.dest[1]}`)
+        if (data.route && data.route.length >= 2) {
+          return { ...r, route: data.route.map(p => [p.latitude, p.longitude]) }
         }
-      } catch {
-        return null
-      }
+      } catch { /* keep straight line */ }
+      return r
     })
   )
-  driverRoutes.value = routes.filter(r => r && (r.route.length >= 2 || r.origin || r.dest))
+  driverRoutes.value = updated
 }
 
 function collapseDriver() {
