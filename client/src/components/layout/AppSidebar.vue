@@ -1,7 +1,12 @@
 <template>
   <aside :class="['sidebar', { collapsed }]">
     <div class="sidebar-header">
-      <h1><img src="/logo.avif" alt="LogisX" class="sidebar-logo" /></h1>
+      <div class="header-top">
+        <h1><img src="/logo.avif" alt="LogisX" class="sidebar-logo" /></h1>
+        <button class="collapse-btn" @click="toggle" :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'">
+          <span class="collapse-icon" :class="{ flipped: collapsed }">&#9664;</span>
+        </button>
+      </div>
       <p v-show="!collapsed" class="subtitle">Logistics Management</p>
     </div>
     <div class="sidebar-section">
@@ -32,9 +37,6 @@
         <span :class="['dot', isConnected ? 'ok' : 'error']"></span>
       </div>
     </div>
-    <button class="collapse-btn" @click="toggle" :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'">
-      <span class="collapse-icon" :class="{ flipped: collapsed }">&#9664;</span>
-    </button>
   </aside>
 </template>
 
@@ -132,27 +134,30 @@ async function handleLogout() {
   overflow: hidden;
 }
 
+/* Header layout */
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 /* Collapse toggle button */
 .collapse-btn {
-  position: absolute;
-  top: 20px;
-  right: -14px;
   width: 28px;
   height: 28px;
-  border-radius: 50%;
-  background: var(--surface, #fff);
+  border-radius: 6px;
+  background: transparent;
   border: 1px solid var(--border, #e5e7eb);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  z-index: 51;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
   transition: background 0.15s;
   padding: 0;
+  flex-shrink: 0;
 }
 .collapse-btn:hover {
-  background: var(--bg, #f5f6fa);
+  background: var(--surface-hover, rgba(0,0,0,0.04));
 }
 .collapse-icon {
   font-size: 0.6rem;
@@ -170,10 +175,12 @@ async function handleLogout() {
   width: 64px;
 }
 .sidebar.collapsed .sidebar-header {
-  padding: 1rem 0.5rem 0.75rem;
-  display: flex;
+  padding: 0.75rem 0.5rem;
+}
+.sidebar.collapsed .header-top {
   flex-direction: column;
   align-items: center;
+  gap: 0.5rem;
 }
 .sidebar.collapsed .sidebar-header h1 {
   justify-content: center;
