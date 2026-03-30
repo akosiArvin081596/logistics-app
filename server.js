@@ -298,6 +298,7 @@ let driveClient = null;
 const sheetIdCache = new Map();
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 const ORS_API_KEY = process.env.ORS_API_KEY || "";
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 
 async function getSheets() {
 	if (!sheetsClient) {
@@ -3184,35 +3185,47 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 	}
 });
 
-// Get driving route between two points using OpenRouteService Directions API
+// Decode Google Maps encoded polyline to [{latitude, longitude}] array
+function decodePolyline(encoded) {
+	const points = [];
+	let index = 0, lat = 0, lng = 0;
+	while (index < encoded.length) {
+		let b, shift = 0, result = 0;
+		do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+		lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+		shift = 0; result = 0;
+		do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+		lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+		points.push({ latitude: lat / 1e5, longitude: lng / 1e5 });
+	}
+	return points;
+}
+
+// Get driving route between two points using Google Directions API
 async function getRoute(from, to, retries = 2) {
 	if (!from || !to) return null;
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		try {
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), 10000);
-			const resp = await fetch("https://api.openrouteservice.org/v2/directions/driving-car/geojson", {
-				method: "POST",
-				headers: { "Authorization": ORS_API_KEY, "Content-Type": "application/json" },
-				body: JSON.stringify({ coordinates: [[from.longitude, from.latitude], [to.longitude, to.latitude]] }),
-				signal: controller.signal,
-			});
+			const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${from.latitude},${from.longitude}&destination=${to.latitude},${to.longitude}&key=${GOOGLE_MAPS_API_KEY}`;
+			const resp = await fetch(url, { signal: controller.signal });
 			clearTimeout(timeout);
 			if (!resp.ok) {
 				if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
 				return null;
 			}
 			const data = await resp.json();
-			if (!data.features || data.features.length === 0) return null;
-			const feature = data.features[0];
-			const summary = feature.properties?.summary;
+			if (data.status !== "OK" || !data.routes || data.routes.length === 0) return null;
+			const route = data.routes[0];
+			const leg = route.legs[0];
 			return {
-				points: feature.geometry.coordinates.map(([lng, lat]) => ({ latitude: lat, longitude: lng })),
-				distanceKm: Math.round(summary.distance / 100) / 10,
-				durationMin: Math.round(summary.duration / 60),
+				points: decodePolyline(route.overview_polyline.points),
+				distanceKm: Math.round(leg.distance.value / 100) / 10,
+				durationMin: Math.round(leg.duration.value / 60),
 			};
 		} catch (err) {
-			console.error(`ORS route error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
+			console.error(`Google Directions error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
 			if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
 			return null;
 		}
