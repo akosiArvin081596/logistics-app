@@ -101,12 +101,13 @@ body {
 /* ---- Main Content ---- */
 .main {
   margin-left: var(--sidebar-w);
+  width: calc(100% - var(--sidebar-w));
   padding: 1.5rem 2rem;
   height: 100vh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  transition: margin-left 0.25s ease;
+  transition: margin-left 0.25s ease, width 0.25s ease;
 }
 .page-header {
   display: flex; align-items: center; justify-content: space-between;

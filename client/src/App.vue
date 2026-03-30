@@ -26,5 +26,6 @@ const showSidebar = computed(() => {
 <style>
 .main.no-sidebar {
   margin-left: 0;
+  width: 100%;
 }
 </style>
