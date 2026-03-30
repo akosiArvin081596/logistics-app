@@ -297,6 +297,7 @@ let sheetsClient = null;
 let driveClient = null;
 const sheetIdCache = new Map();
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
+const OSRM_BASE_URL = process.env.OSRM_BASE_URL || "https://router.project-osrm.org";
 
 async function getSheets() {
 	if (!sheetsClient) {
@@ -3160,8 +3161,11 @@ async function getRoute(from, to, retries = 2) {
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		try {
 			const coords = `${from.longitude},${from.latitude};${to.longitude},${to.latitude}`;
-			const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
-			const resp = await fetch(url);
+			const url = `${OSRM_BASE_URL}/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), 8000);
+			const resp = await fetch(url, { signal: controller.signal });
+			clearTimeout(timeout);
 			if (!resp.ok) {
 				if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
 				return null;
@@ -3194,8 +3198,11 @@ async function snapToRoads(points) {
 			if (batch.length < 2) break;
 			const coords = batch.map(p => `${p.longitude},${p.latitude}`).join(";");
 			const radiuses = batch.map(() => "25").join(";");
-			const url = `https://router.project-osrm.org/match/v1/driving/${coords}?overview=full&geometries=geojson&radiuses=${radiuses}`;
-			const resp = await fetch(url);
+			const url = `${OSRM_BASE_URL}/match/v1/driving/${coords}?overview=full&geometries=geojson&radiuses=${radiuses}`;
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), 8000);
+			const resp = await fetch(url, { signal: controller.signal });
+			clearTimeout(timeout);
 			if (!resp.ok) return null;
 			const data = await resp.json();
 			if (data.code !== "Ok" || !data.matchings || data.matchings.length === 0) return null;

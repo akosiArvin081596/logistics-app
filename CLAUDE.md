@@ -31,6 +31,7 @@ Required files at project root:
 ```
 GOOGLE_DRIVE_FOLDER_ID=<Drive folder ID for POD uploads — optional, uploads skip Drive if empty>
 PORT=3000  # optional, defaults to 3000
+OSRM_BASE_URL=http://localhost:5000  # optional, defaults to public router.project-osrm.org
 ```
 
 Hardcoded values in `server.js` (change if forking):
@@ -40,11 +41,11 @@ Hardcoded values in `server.js` (change if forking):
 ## Architecture
 
 ### Backend (`server.js`)
-Single-file Node.js/Express server (~2000 lines) using Google Sheets as the primary database via Sheets API v4, with SQLite for local data. Google Drive API for document uploads. Socket.IO for real-time events.
+Single-file Node.js/Express server (~4000 lines) using Google Sheets as the primary database via Sheets API v4, with SQLite for local data. Google Drive API for document uploads. Socket.IO for real-time events.
 
 **Static file serving**: Express checks if `client/dist/` exists (production build) → falls back to `public/` (legacy vanilla HTML/JS). SPA catch-all `app.get("*")` serves `index.html` for client-side routing.
 
-**SQLite** (`app.db`, WAL mode): `users`, `messages`, `expenses`, `maintenance_fund`, `compliance_fees`, `documents`, `driver_locations`, `investor_config`. Session store also in SQLite.
+**SQLite** (`app.db`, WAL mode): `users`, `messages`, `expenses`, `maintenance_fund`, `compliance_fees`, `documents`, `driver_locations`, `investor_config`, `notifications`, `dispatch_notifications`, `load_responses`. Session store also in SQLite.
 
 **Schema migrations**: On boot, server runs two types of migrations:
 - `ALTER TABLE ... ADD COLUMN` for adding new columns (e.g., `gallons`/`odometer` on expenses, `ocr_text` on documents). Checks for existing columns first.
@@ -95,9 +96,9 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 **Error handling**: All endpoints use try-catch with generic 500 JSON responses. Geofence check errors inside `POST /api/location` are caught and logged but never fail the location response. No explicit rate limiting — relies on Google Sheets' 300 req/min limit and pagination max of 200 rows.
 
 ### Frontend (`client/`)
-Vue 3 + Vite SPA with Vue Router, Pinia stores, and Leaflet for maps. Socket.IO client for real-time updates.
+Vue 3 + Vite SPA with Vue Router, Pinia stores, Leaflet for maps, and Vant mobile UI components. Socket.IO client for real-time updates.
 
-Key directories: `stores/` (auth, dashboard, sheets, driver, messages, investor, users), `composables/` (useApi, useSocket, useToast, usePagination, useGeolocation), `components/` (layout, shared, dashboard, data-manager, driver, investor, users), `views/` (9 view components).
+Key directories: `stores/` (auth, dashboard, sheets, driver, messages, investor, users, adminTools, dispatchNotifications), `composables/` (useApi, useSocket, useToast, usePagination, useGeolocation, useGeocode), `components/` (layout, shared, dashboard, data-manager, driver, investor, users), `views/` (11 view components).
 
 **Vite proxy** (`client/vite.config.js`): `/api` and `/socket.io` (with `ws: true`) both proxy to `http://localhost:3000`.
 
@@ -107,16 +108,18 @@ Key directories: `stores/` (auth, dashboard, sheets, driver, messages, investor,
 
 **Optimistic updates**: Both `driver` and `messages` stores append messages locally before the API request completes.
 
-**Routing** (9 routes with role-based guards):
+**Routing** (11 routes with role-based guards):
 - `/login` — public (redirects authenticated users to role home)
 - `/dashboard` — Super Admin, Dispatcher
 - `/tracking` — Super Admin, Dispatcher
 - `/expenses` — Super Admin, Dispatcher
 - `/messages` — Super Admin, Dispatcher
+- `/notifications` — Super Admin, Dispatcher
 - `/data` — Super Admin, Dispatcher
 - `/driver` — Driver, Super Admin (no sidebar)
 - `/investor` — Super Admin, Investor
 - `/users` — Super Admin only
+- `/admin/tools` — Super Admin only
 
 Auth guard calls `checkSession()` on first navigation only (blocks until resolved), then subsequent navigations use cached `isAuthenticated` state. Unauthorized users redirect to `auth.roleHome` (Driver → `/driver`, Dispatcher → `/dashboard`, Investor → `/investor`).
 
