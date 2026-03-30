@@ -14,9 +14,10 @@
     </template>
     <!-- Map: driver location, dispatch mode, OR full route -->
     <template v-else>
-      <div class="map-info" v-if="hasCoords && (distanceKm != null || etaMinutes != null)">
+      <div class="map-info" v-if="hasCoords && (distanceKm != null || etaMinutes != null || driverToPickupKm != null)">
         <span v-if="distanceKm != null" class="info-item">{{ distanceKm }} km</span>
         <span v-if="etaMinutes != null" class="info-item">{{ etaMinutes }} min ETA</span>
+        <span v-if="driverToPickupKm != null && isPrePickup" class="info-item info-warn">{{ driverToPickupKm }} km to Pickup</span>
       </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
       <div class="map-container">
@@ -135,6 +136,18 @@ const isDelivered = computed(() => /^(delivered|completed|pod received)$/i.test(
 
 const hasCoords = computed(() => destLatLng.value != null && (!isDelivered.value || props.dispatchMode))
 const waitingForGps = computed(() => hasCoords.value && !driverLatLng.value)
+const isPrePickup = computed(() => /^(dispatched|assigned|new|pending)$/i.test(loadStatus.value))
+
+// Haversine distance from driver to pickup point
+const driverToPickupKm = computed(() => {
+  if (!driverLatLng.value || !originLatLng.value) return null
+  const R = 6371
+  const toRad = d => d * Math.PI / 180
+  const dLat = toRad(originLatLng.value[0] - driverLatLng.value[0])
+  const dLng = toRad(originLatLng.value[1] - driverLatLng.value[1])
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(driverLatLng.value[0])) * Math.cos(toRad(originLatLng.value[0])) * Math.sin(dLng / 2) ** 2
+  return (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(1)
+})
 
 // Address columns (for popup display)
 const originAddrCol = computed(() => (props.headers || []).find(h => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon/i.test(h)) || null)
@@ -330,6 +343,10 @@ onMounted(() => {
   background: var(--bg);
   padding: 0.25rem 0.6rem;
   border-radius: 6px;
+}
+.info-warn {
+  color: #b45309;
+  background: #fef3c7;
 }
 .marker-popup {
   font-family: 'DM Sans', sans-serif;
