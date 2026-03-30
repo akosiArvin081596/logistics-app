@@ -300,7 +300,6 @@ const chatLoadId = ref('')
 const showFilters = ref(false)
 const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
-let refreshInterval = null
 let isMounted = false
 
 const subTabs = [
@@ -550,7 +549,6 @@ async function handleRefresh() {
 }
 
 async function handleLogout() {
-  if (refreshInterval) clearInterval(refreshInterval)
   socket.disconnect()
   await auth.logout()
   router.push('/login')
@@ -715,11 +713,6 @@ onMounted(async () => {
     toast.show('Failed to load data', 'error')
   }
 
-  // Periodic refresh fallback (in case socket events are missed)
-  refreshInterval = setInterval(() => {
-    if (isMounted) driverStore.loadData().catch(() => {})
-  }, 60_000)
-
   // Socket.IO
   socket.connect()
   socket.register(driverName.value)
@@ -730,7 +723,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   isMounted = false
-  if (refreshInterval) clearInterval(refreshInterval)
   socket.off('new-message', onNewMessage)
   socket.off('load-assigned', onLoadAssigned)
   socket.off('geofence-trigger', onGeofenceTrigger)
