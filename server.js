@@ -3203,34 +3203,65 @@ function decodePolyline(encoded) {
 	return points;
 }
 
-// Get driving route between two points using Google Directions API
+// Reverse geocode coordinates to a formatted address using Google Geocoding API
+async function geocodeReverse(lat, lng) {
+	try {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 5000);
+		const resp = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`, { signal: controller.signal });
+		clearTimeout(timeout);
+		if (!resp.ok) return null;
+		const data = await resp.json();
+		if (data.status !== "OK" || !data.results || data.results.length === 0) return null;
+		return data.results[0].formatted_address || null;
+	} catch {
+		return null;
+	}
+}
+
+// Get driving route between two points using Google Routes API
 async function getRoute(from, to, retries = 2) {
 	if (!from || !to) return null;
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		try {
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), 10000);
-			const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${from.latitude},${from.longitude}&destination=${to.latitude},${to.longitude}&key=${GOOGLE_MAPS_API_KEY}`;
-			const resp = await fetch(url, { signal: controller.signal });
+			const resp = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+					"X-Goog-FieldMask": "routes.polyline,routes.legs.distanceMeters,routes.legs.duration",
+				},
+				body: JSON.stringify({
+					origin: { location: { latLng: { latitude: from.latitude, longitude: from.longitude } } },
+					destination: { location: { latLng: { latitude: to.latitude, longitude: to.longitude } } },
+					travelMode: "DRIVE",
+				}),
+				signal: controller.signal,
+			});
 			clearTimeout(timeout);
 			if (!resp.ok) {
+				const errText = await resp.text();
+				console.error(`Routes API HTTP error (attempt ${attempt + 1}): ${resp.status} — ${errText}`);
 				if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
 				return null;
 			}
 			const data = await resp.json();
-			if (data.status !== "OK" || !data.routes || data.routes.length === 0) {
-				console.error(`Google Directions API returned: ${data.status} — ${data.error_message || 'no message'}`);
+			if (!data.routes || data.routes.length === 0) {
+				console.error("Routes API returned no routes:", JSON.stringify(data));
 				return null;
 			}
 			const route = data.routes[0];
 			const leg = route.legs[0];
+			const durationSec = parseInt((leg.duration || "0s").replace("s", ""), 10);
 			return {
-				points: decodePolyline(route.overview_polyline.points),
-				distanceKm: Math.round(leg.distance.value / 100) / 10,
-				durationMin: Math.round(leg.duration.value / 60),
+				points: decodePolyline(route.polyline.encodedPolyline),
+				distanceKm: Math.round(leg.distanceMeters / 100) / 10,
+				durationMin: Math.round(durationSec / 60),
 			};
 		} catch (err) {
-			console.error(`Google Directions error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
+			console.error(`Routes API error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
 			if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
 			return null;
 		}
@@ -3238,7 +3269,7 @@ async function getRoute(from, to, retries = 2) {
 	return null;
 }
 
-// Snap GPS points to roads using OSRM Match API
+// Snap GPS points to roads using Google Roads API
 async function snapToRoads(points) {
 	if (!points || points.length < 2) return null;
 	try {
@@ -3247,26 +3278,25 @@ async function snapToRoads(points) {
 		for (let i = 0; i < points.length; i += BATCH_SIZE - 1) {
 			const batch = points.slice(i, i + BATCH_SIZE);
 			if (batch.length < 2) break;
-			const coords = batch.map(p => `${p.longitude},${p.latitude}`).join(";");
-			const radiuses = batch.map(() => "25").join(";");
-			const url = `https://router.project-osrm.org/match/v1/driving/${coords}?overview=full&geometries=geojson&radiuses=${radiuses}`;
+			const path = batch.map(p => `${p.latitude},${p.longitude}`).join("|");
+			const url = `https://roads.googleapis.com/v1/snapToRoads?path=${encodeURIComponent(path)}&interpolate=true&key=${GOOGLE_MAPS_API_KEY}`;
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), 8000);
 			const resp = await fetch(url, { signal: controller.signal });
 			clearTimeout(timeout);
-			if (!resp.ok) return null;
+			if (!resp.ok) {
+				console.error(`Roads API error: ${resp.status}`);
+				return null;
+			}
 			const data = await resp.json();
-			if (data.code !== "Ok" || !data.matchings || data.matchings.length === 0) return null;
-			for (const matching of data.matchings) {
-				const geomCoords = matching.geometry?.coordinates || [];
-				for (const [lng, lat] of geomCoords) {
-					allSnapped.push({ latitude: lat, longitude: lng });
-				}
+			if (!data.snappedPoints || data.snappedPoints.length === 0) return null;
+			for (const pt of data.snappedPoints) {
+				allSnapped.push({ latitude: pt.location.latitude, longitude: pt.location.longitude });
 			}
 		}
 		return allSnapped.length >= 2 ? allSnapped : null;
 	} catch (err) {
-		console.error("OSRM snap error:", err.message);
+		console.error("Roads API snap error:", err.message);
 		return null;
 	}
 }
@@ -3382,6 +3412,10 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 			}
 		}
 
+		// Geocode addresses if missing from sheet data
+		if (origin && !origin.address) origin.address = await geocodeReverse(origin.latitude, origin.longitude) || "";
+		if (destination && !destination.address) destination.address = await geocodeReverse(destination.latitude, destination.longitude) || "";
+
 		// Get planned route from driver's current position to destination
 		let route = null;
 		if (destination) {
@@ -3435,6 +3469,72 @@ app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async 
 	} catch (error) {
 		console.error("Error computing route:", error.message);
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/geocode — reverse geocode proxy (key stays server-side)
+app.get("/api/geocode", requireAuth, async (req, res) => {
+	const { lat, lng } = req.query;
+	if (!lat || !lng) return res.status(400).json({ error: "lat and lng required" });
+	try {
+		const resp = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`);
+		if (!resp.ok) return res.json({ status: "ERROR", results: [] });
+		const data = await resp.json();
+		res.json(data);
+	} catch {
+		res.json({ status: "ERROR", results: [] });
+	}
+});
+
+// GET /api/geocode/search — Places text search proxy
+app.get("/api/geocode/search", requireAuth, async (req, res) => {
+	const { q } = req.query;
+	if (!q || q.trim().length < 3) return res.json({ results: [] });
+	try {
+		const resp = await fetch("https://places.googleapis.com/v1/places:searchText", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+				"X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location",
+			},
+			body: JSON.stringify({ textQuery: q.trim() }),
+		});
+		if (!resp.ok) return res.json({ results: [] });
+		const data = await resp.json();
+		const results = (data.places || []).map(p => ({
+			lat: p.location?.latitude,
+			lng: p.location?.longitude,
+			displayName: p.formattedAddress || p.displayName?.text || "",
+		}));
+		res.json({ results });
+	} catch {
+		res.json({ results: [] });
+	}
+});
+
+// GET /api/weather — current weather at coordinates proxy
+app.get("/api/weather", requireAuth, async (req, res) => {
+	const { lat, lng } = req.query;
+	if (!lat || !lng) return res.status(400).json({ error: "lat and lng required" });
+	try {
+		const resp = await fetch(
+			`https://weather.googleapis.com/v1/forecast:lookup?location.latitude=${lat}&location.longitude=${lng}&unitsSystem=IMPERIAL&key=${GOOGLE_MAPS_API_KEY}`
+		);
+		if (!resp.ok) return res.json({ error: "unavailable" });
+		const data = await resp.json();
+		const current = data.currentConditions;
+		if (!current) return res.json({ error: "no data" });
+		res.json({
+			condition: current.weatherCondition?.description?.text || current.weatherCondition?.type || "",
+			tempF: current.temperature?.value ?? null,
+			feelsLikeF: current.feelsLikeTemperature?.value ?? null,
+			humidity: current.relativeHumidity ?? null,
+			windMph: current.wind?.speed?.value ?? null,
+			uvIndex: current.uvIndex ?? null,
+		});
+	} catch {
+		res.json({ error: "unavailable" });
 	}
 });
 

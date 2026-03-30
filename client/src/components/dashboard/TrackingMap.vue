@@ -184,6 +184,12 @@
                     <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} km</span>
                     <span v-if="routeEta != null" class="route-stat">{{ routeEta }} min ETA</span>
                   </div>
+                  <div v-if="weatherData" class="route-weather">
+                    <span class="weather-temp">{{ weatherData.tempF != null ? Math.round(weatherData.tempF) + '°F' : '' }}</span>
+                    <span class="weather-cond">{{ weatherData.condition }}</span>
+                    <span v-if="weatherData.windMph != null" class="weather-wind">💨 {{ Math.round(weatherData.windMph) }} mph</span>
+                    <span v-if="weatherData.humidity != null" class="weather-humidity">💧 {{ weatherData.humidity }}%</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -232,6 +238,7 @@ const destAddress = ref('')
 const trailLoadId = ref('')
 const routeDistance = ref(null)
 const routeEta = ref(null)
+const weatherData = ref(null)
 
 // All-drivers route state
 const allRoutes = ref([])
@@ -464,6 +471,7 @@ async function toggleLoad(al, loc) {
     destLatLng.value = null
     routeDistance.value = null
     routeEta.value = null
+    weatherData.value = null
     fetchingRoute.value = false
     return
   }
@@ -519,6 +527,15 @@ async function toggleLoad(al, loc) {
     } finally {
       fetchingRoute.value = false
     }
+  }
+
+  // Fetch weather at destination in background
+  const destCoord = hasDest ? { lat: dLat, lng: dLng } : (hasOrigin ? { lat: oLat, lng: oLng } : null)
+  if (destCoord) {
+    try {
+      const w = await api.get(`/api/weather?lat=${destCoord.lat}&lng=${destCoord.lng}`)
+      if (!w.error) weatherData.value = w
+    } catch { /* silent */ }
   }
 }
 
@@ -1183,6 +1200,30 @@ onUnmounted(() => {
   background: #e0e7ff;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
+}
+
+.route-weather {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid #e5e7eb;
+}
+.weather-temp {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #1e293b;
+}
+.weather-cond {
+  font-size: 0.7rem;
+  color: #64748b;
+  text-transform: capitalize;
+}
+.weather-wind,
+.weather-humidity {
+  font-size: 0.68rem;
+  color: #64748b;
 }
 
 .tracking-loading,
