@@ -14,10 +14,10 @@
     </template>
     <!-- Map: driver location, dispatch mode, OR full route -->
     <template v-else>
-      <div class="map-info" v-if="hasCoords && (distanceKm != null || etaMinutes != null || driverToPickupKm != null)">
+      <div class="map-info" v-if="hasCoords && (distanceKm != null || etaMinutes != null || driverDistanceInfo)">
         <span v-if="distanceKm != null" class="info-item">{{ distanceKm }} km</span>
         <span v-if="etaMinutes != null" class="info-item">{{ etaMinutes }} min ETA</span>
-        <span v-if="driverToPickupKm != null && isPrePickup" class="info-item info-warn">{{ driverToPickupKm }} km to Pickup</span>
+        <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.km > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.km }} km {{ driverDistanceInfo.label }}</span>
       </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
       <div class="map-container">
@@ -138,15 +138,25 @@ const hasCoords = computed(() => destLatLng.value != null && (!isDelivered.value
 const waitingForGps = computed(() => hasCoords.value && !driverLatLng.value)
 const isPrePickup = computed(() => /^(dispatched|assigned|new|pending)$/i.test(loadStatus.value))
 
-// Haversine distance from driver to pickup point
-const driverToPickupKm = computed(() => {
-  if (!driverLatLng.value || !originLatLng.value) return null
+function haversineKm(a, b) {
   const R = 6371
   const toRad = d => d * Math.PI / 180
-  const dLat = toRad(originLatLng.value[0] - driverLatLng.value[0])
-  const dLng = toRad(originLatLng.value[1] - driverLatLng.value[1])
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(driverLatLng.value[0])) * Math.cos(toRad(originLatLng.value[0])) * Math.sin(dLng / 2) ** 2
-  return (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(1)
+  const dLat = toRad(b[0] - a[0])
+  const dLng = toRad(b[1] - a[1])
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLng / 2) ** 2
+  return (R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x))).toFixed(1)
+}
+
+// Driver distance to relevant point: pickup (pre-pickup) or drop-off (post-pickup)
+const driverDistanceInfo = computed(() => {
+  if (!driverLatLng.value) return null
+  if (isPrePickup.value && originLatLng.value) {
+    return { km: haversineKm(driverLatLng.value, originLatLng.value), label: 'to Pickup' }
+  }
+  if (!isPrePickup.value && !isDelivered.value && destLatLng.value) {
+    return { km: haversineKm(driverLatLng.value, destLatLng.value), label: 'to Drop-off' }
+  }
+  return null
 })
 
 // Address columns (for popup display)
@@ -347,6 +357,10 @@ onMounted(() => {
 .info-warn {
   color: #b45309;
   background: #fef3c7;
+}
+.info-danger {
+  color: #dc2626;
+  background: #fee2e2;
 }
 .marker-popup {
   font-family: 'DM Sans', sans-serif;
