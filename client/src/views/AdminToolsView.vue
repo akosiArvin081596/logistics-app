@@ -323,6 +323,9 @@ async function fixName(oldName, newName) {
   font-size: 0.82rem;
   color: var(--text-dim);
   margin-top: 0.25rem;
+  flex: 1;
+  min-width: 200px;
+  text-align: right;
 }
 
 .card {
@@ -358,6 +361,7 @@ async function fixName(oldName, newName) {
 
 .card-body {
   padding: 1rem 1.25rem;
+  overflow-x: auto;
 }
 
 .scan-summary {
@@ -450,6 +454,7 @@ async function fixName(oldName, newName) {
   padding: 0.35rem 0;
   font-size: 0.78rem;
   border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
 }
 
 .dup-row:last-child {
@@ -459,13 +464,13 @@ async function fixName(oldName, newName) {
 .dup-row-num {
   font-weight: 600;
   color: var(--text-dim);
-  min-width: 50px;
+  min-width: 40px;
 }
 
 .dup-raw-id {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.72rem;
-  min-width: 90px;
+  min-width: 70px;
 }
 
 .dup-status {
@@ -473,8 +478,8 @@ async function fixName(oldName, newName) {
   font-weight: 600;
   padding: 0.1rem 0.35rem;
   border-radius: 4px;
-  min-width: 70px;
   text-align: center;
+  white-space: nowrap;
 }
 
 .status-completed { background: var(--accent-dim); color: var(--accent); }
@@ -496,6 +501,7 @@ async function fixName(oldName, newName) {
   font-size: 0.7rem;
   color: var(--accent);
   font-weight: 600;
+  margin-left: auto;
 }
 
 .show-more {
