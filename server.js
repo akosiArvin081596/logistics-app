@@ -1179,6 +1179,11 @@ app.get("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) 
 			return obj;
 		});
 
+		// Deduplicate loads by Load ID (keep last occurrence)
+		if (sheetName === "Job Tracking") {
+			allData = deduplicateLoads(allData, headers);
+		}
+
 		// Search filter
 		const search = (req.query.search || "").trim().toLowerCase();
 		if (search) {
@@ -1728,6 +1733,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 
 		const jobTracking = parseSheet(rangeData[0]);
+		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = parseSheet(rangeData[1]);
 		const payments = parseSheet(rangeData[2]);
 		const carrierHistory = parseSheet(rangeData[3]);
@@ -1938,6 +1944,26 @@ function parseSheet(valueRange) {
 	return { headers, data };
 }
 
+// Helper: remove duplicate load IDs from data array, keeping the last occurrence
+function deduplicateLoads(data, headers) {
+	const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+	if (!loadIdCol) return data;
+	const seen = new Map();
+	for (let i = 0; i < data.length; i++) {
+		const lid = (data[i][loadIdCol] || "").trim().toLowerCase();
+		if (!lid) continue;
+		if (seen.has(lid)) seen.get(lid).push(i);
+		else seen.set(lid, [i]);
+	}
+	const skipSet = new Set();
+	for (const [, indices] of seen) {
+		if (indices.length > 1) {
+			for (let j = 0; j < indices.length - 1; j++) skipSet.add(indices[j]);
+		}
+	}
+	return skipSet.size > 0 ? data.filter((_, i) => !skipSet.has(i)) : data;
+}
+
 function sanitizeBrokerContact(value) {
 	if (!value || typeof value !== "string") return value;
 	const trimmed = value.trim();
@@ -1996,6 +2022,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 
 		const rangeData = response.data.valueRanges || [];
 		const jobTracking = parseSheet(rangeData[0]);
+		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = parseSheet(rangeData[1]);
 
 		// Find driver column in Job Tracking
@@ -2882,12 +2909,14 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		} catch { /* silent */ }
 
 		// Merge: GPS drivers + carrier drivers with no GPS
+		const carrierSet = new Set(allDriverNames.map(n => n.toLowerCase()));
 		const gpsMap = {};
 		for (const loc of gpsLocations) gpsMap[loc.driver.toLowerCase()] = loc;
 
 		const locations = [];
 		const seen = new Set();
 		for (const loc of gpsLocations) {
+			if (!carrierSet.has(loc.driver.toLowerCase())) continue; // skip non-drivers (e.g. admin)
 			locations.push(loc);
 			seen.add(loc.driver.toLowerCase());
 		}
@@ -3406,6 +3435,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		const rangeData = response.data.valueRanges || [];
 		const jobTracking = parseSheet(rangeData[0]);
+		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
 		const payments = parseSheet(rangeData[1]);
 		const carrierDB = parseSheet(rangeData[2]);
 
