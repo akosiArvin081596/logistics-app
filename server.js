@@ -3218,7 +3218,10 @@ async function getRoute(from, to, retries = 2) {
 				return null;
 			}
 			const data = await resp.json();
-			if (data.status !== "OK" || !data.routes || data.routes.length === 0) return null;
+			if (data.status !== "OK" || !data.routes || data.routes.length === 0) {
+				console.error(`Google Directions API returned: ${data.status} — ${data.error_message || 'no message'}`);
+				return null;
+			}
 			const route = data.routes[0];
 			const leg = route.legs[0];
 			return {
