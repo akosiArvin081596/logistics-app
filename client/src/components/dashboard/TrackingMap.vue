@@ -436,7 +436,7 @@ function collapseDriver() {
 }
 
 async function focusDriver(loc) {
-  const gen = ++focusGeneration
+  ++focusGeneration
   selectedDriver.value = loc.driver
   expandedLoadId.value = ''
   allRoutes.value = []
@@ -450,24 +450,6 @@ async function focusDriver(loc) {
   const map = mapRef.value?.leafletObject
   if (map && loc.latitude) {
     map.setView([loc.latitude, loc.longitude], 12, { animate: false })
-  }
-
-  // Fetch all active load routes in background
-  if (loc.activeLoads && loc.activeLoads.length > 0) {
-    fetchingRoute.value = true
-    await fetchDriverRoutes(loc)
-    fetchingRoute.value = false
-    if (gen !== focusGeneration) return
-
-    // Fit to all route origins and destinations (exclude driver GPS to avoid cross-continent bounds)
-    if (map && driverRoutes.value.length > 0) {
-      const allPts = []
-      for (const r of driverRoutes.value) {
-        if (r.origin) allPts.push(r.origin)
-        if (r.dest) allPts.push(r.dest)
-      }
-      safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 12, animate: false })
-    }
   }
 }
 
