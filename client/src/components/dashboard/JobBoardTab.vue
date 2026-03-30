@@ -13,9 +13,13 @@
       :visible="viewMode === 'map'"
     />
 
+    <div v-show="viewMode === 'list'" class="search-bar">
+      <input v-model="searchQuery" type="text" placeholder="Search load number..." class="search-input" />
+    </div>
+
     <div v-show="viewMode === 'list'" class="table-scroll">
       <SkeletonLoader v-if="loading" />
-      <table v-else-if="jobs.length > 0">
+      <table v-else-if="filteredJobs.length > 0">
         <thead>
           <tr>
             <th v-for="col in displayCols" :key="col">{{ col }}</th>
@@ -42,13 +46,13 @@
           </tr>
         </tbody>
       </table>
-      <EmptyState v-else>All loads are assigned.</EmptyState>
+      <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'All loads are assigned.' }}</EmptyState>
     </div>
     <PaginationBar
       v-show="viewMode === 'list'"
       :page="page"
       :page-size="pageSize"
-      :total="jobs.length"
+      :total="filteredJobs.length"
       :total-pages="totalPages"
       @go="goTo"
       @size="setSize"
@@ -137,6 +141,18 @@ const auth = useAuthStore()
 
 const assignSelections = reactive({})
 const selectedJob = ref(null)
+const searchQuery = ref('')
+
+const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
+
+const filteredJobs = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q || !loadIdCol.value) return props.jobs
+  return props.jobs.filter(job => {
+    const val = (job[loadIdCol.value] || '').toString().toLowerCase()
+    return val.includes(q)
+  })
+})
 
 const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || null)
 
@@ -169,7 +185,7 @@ const sectionPatterns = [
 ]
 
 // Broker/contact columns to exclude from the detail modal
-const hiddenCols = /broker|phone|email|contact/i
+const hiddenCols = /broker|phone|email|contact|contract/i
 
 const loadIdValue = computed(() => {
   if (!selectedJob.value) return ''
@@ -241,8 +257,7 @@ function missingData(job) {
   return warnings.length ? warnings.join('; ') : ''
 }
 
-const jobsRef = computed(() => props.jobs)
-const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(jobsRef)
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null)
 const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
@@ -316,6 +331,28 @@ function assign(job) {
 </script>
 
 <style scoped>
+.search-bar {
+  padding: 0.5rem 1rem;
+}
+.search-input {
+  width: 100%;
+  max-width: 280px;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface, #fff);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.82rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.search-input:focus {
+  border-color: var(--accent);
+}
+.search-input::placeholder {
+  color: var(--text-dim);
+}
 .view-toggle {
   display: flex;
   gap: 0;

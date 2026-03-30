@@ -14,8 +14,12 @@
       :visible="viewMode === 'map'"
     />
 
+    <div v-show="viewMode === 'list'" class="search-bar">
+      <input v-model="searchQuery" type="text" placeholder="Search load number..." class="search-input" />
+    </div>
+
     <div v-show="viewMode === 'list'" class="table-scroll">
-      <table v-if="jobs.length > 0">
+      <table v-if="filteredJobs.length > 0">
         <thead>
           <tr>
             <th v-for="col in displayCols" :key="col">{{ col }}</th>
@@ -56,13 +60,13 @@
           </tr>
         </tbody>
       </table>
-      <EmptyState v-else>No active loads right now.</EmptyState>
+      <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'No active loads right now.' }}</EmptyState>
     </div>
     <PaginationBar
       v-show="viewMode === 'list'"
       :page="page"
       :page-size="pageSize"
-      :total="jobs.length"
+      :total="filteredJobs.length"
       :total-pages="totalPages"
       @go="goTo"
       @size="setSize"
@@ -157,8 +161,19 @@ watch(() => props.showMap, (val) => {
 
 const emit = defineEmits(['reassign', 'cancel', 'status-update'])
 
-const jobsRef = computed(() => props.jobs)
-const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(jobsRef)
+const searchQuery = ref('')
+const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
+
+const filteredJobs = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q || !loadIdCol.value) return props.jobs
+  return props.jobs.filter(job => {
+    const val = (job[loadIdCol.value] || '').toString().toLowerCase()
+    return val.includes(q)
+  })
+})
+
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 
 const statusOptions = ['At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
 
@@ -275,7 +290,7 @@ const sectionPatterns = [
   { title: 'Financials', test: /rate|amount|revenue|pay|charge|price|cost|invoice|total/i },
 ]
 
-const hiddenCols = /broker|phone|email|contact/i
+const hiddenCols = /broker|phone|email|contact|contract/i
 
 const loadIdValue = computed(() => {
   if (!selectedJob.value) return ''
@@ -324,6 +339,28 @@ const detailSections = computed(() => {
 </script>
 
 <style scoped>
+.search-bar {
+  padding: 0.5rem 1rem;
+}
+.search-input {
+  width: 100%;
+  max-width: 280px;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface, #fff);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.82rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.search-input:focus {
+  border-color: var(--accent);
+}
+.search-input::placeholder {
+  color: var(--text-dim);
+}
 .view-toggle {
   display: flex;
   gap: 0;

@@ -175,7 +175,7 @@ const sectionPatterns = [
   { title: 'Financials', test: /rate|amount|revenue|pay|charge|price|cost|invoice|total/i },
 ]
 
-const hiddenCols = /broker|phone|email|contact/i
+const hiddenCols = /broker|phone|email|contact|contract/i
 
 const selectedLoadId = computed(() => {
   if (!selectedLoad.value) return ''
