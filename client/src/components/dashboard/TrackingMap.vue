@@ -160,7 +160,7 @@
               >
                 <div
                   :class="['load-entry-header', { active: expandedLoadId === al.loadId }]"
-                  @click.stop="toggleLoad(al, loc)"
+                  @click.stop="console.log('[Load clicked]', JSON.parse(JSON.stringify({ load: al, driver: loc })))"
                 >
                   <span class="load-entry-id">{{ al.loadId }}</span>
                   <span class="load-entry-status">{{ al.status }}</span>
