@@ -10,6 +10,10 @@
         :zoom="5"
         :center="mapCenter"
         :use-global-leaflet="false"
+        :min-zoom="3"
+        :max-bounds="[[-85, -180], [85, 180]]"
+        :max-bounds-viscosity="1.0"
+        world-copy-jump
         style="height: 100%; width: 100%;"
       >
         <l-tile-layer
