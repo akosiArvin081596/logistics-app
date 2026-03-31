@@ -327,6 +327,7 @@ function snapToRoute(point, route) {
 }
 
 // Safe fitBounds — validates coordinates to avoid "Bounds are not valid" errors
+// Passes raw coordinate arrays to fitBounds to avoid cross-instance L.latLngBounds issues
 function safeFitBounds(map, points, options = {}) {
   try {
     const valid = points.filter(p =>
@@ -340,9 +341,7 @@ function safeFitBounds(map, points, options = {}) {
       map.setView(valid[0], options.maxZoom || 12, { animate: false })
       return
     }
-    const bounds = L.latLngBounds(valid.map(p => L.latLng(p[0], p[1])))
-    if (!bounds.isValid()) return
-    map.fitBounds(bounds, options)
+    map.fitBounds(valid, options)
   } catch { /* silent — prevent Leaflet errors from breaking the UI */ }
 }
 
@@ -531,20 +530,12 @@ async function toggleLoad(al, loc) {
   await nextTick()
 
   const map = mapRef.value?.leafletObject
-  console.log('[toggleLoad] map:', !!map, '| hasOrigin:', hasOrigin, '| hasDest:', hasDest)
-  console.log('[toggleLoad] origin coords:', oLat, oLng, '| dest coords:', dLat, dLng)
   if (map) {
     const boundsPoints = []
     if (hasOrigin) boundsPoints.push([oLat, oLng])
     if (hasDest) boundsPoints.push([dLat, dLng])
-    console.log('[toggleLoad] boundsPoints:', boundsPoints)
     if (boundsPoints.length >= 2) {
-      const bounds = L.latLngBounds(boundsPoints.map(p => L.latLng(p[0], p[1])))
-      console.log('[toggleLoad] bounds valid:', bounds.isValid(), bounds.toBBoxString())
-      if (bounds.isValid()) {
-        map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: false })
-        console.log('[toggleLoad] fitBounds called, new center:', map.getCenter())
-      }
+      safeFitBounds(map, boundsPoints, { padding: [50, 50], maxZoom: 14, animate: false })
     } else if (boundsPoints.length === 1) {
       map.setView(boundsPoints[0], 12, { animate: false })
     }
