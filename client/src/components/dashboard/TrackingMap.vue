@@ -530,7 +530,20 @@ function toggleLoad(al, loc) {
 
   console.log('[toggleLoad] origin:', originLatLng.value, '| dest:', destLatLng.value)
 
-  // TODO: map fit bounds
+  const map = mapRef.value?.leafletObject
+  if (map) {
+    map.stop()
+    map.invalidateSize()
+    const boundsPoints = []
+    if (hasOrigin) boundsPoints.push([oLat, oLng])
+    if (hasDest) boundsPoints.push([dLat, dLng])
+    if (boundsPoints.length >= 2) {
+      safeFitBounds(map, boundsPoints, { padding: [50, 50], maxZoom: 14, animate: false })
+    } else if (boundsPoints.length === 1) {
+      map.setView(boundsPoints[0], 12, { animate: false })
+    }
+  }
+
   // TODO: route fetch
   // TODO: weather fetch (disabled)
 }
