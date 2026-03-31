@@ -64,7 +64,11 @@
             </div>
             <div class="edit-field">
               <label>Model</label>
-              <input v-model="editForm.model" type="text" />
+              <select v-if="editModelOptions.length > 0" v-model="editForm.model">
+                <option value="">-- Select --</option>
+                <option v-for="m in editModelOptions" :key="m" :value="m">{{ m }}</option>
+              </select>
+              <input v-else v-model="editForm.model" type="text" />
             </div>
           </div>
 
@@ -128,7 +132,7 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 
@@ -137,6 +141,24 @@ const truckMakes = [
   'Mack', 'Western Star', 'Hino', 'Isuzu', 'Ford', 'Chevrolet',
   'RAM', 'GMC', 'Tesla', 'Nikola', 'Other',
 ]
+
+const truckModels = {
+  Freightliner: ['Cascadia', 'Columbia', 'Coronado', 'M2 106', 'M2 112', '114SD', '122SD'],
+  Kenworth: ['T680', 'T880', 'W900', 'W990', 'T270', 'T370', 'T440', 'T470'],
+  Peterbilt: ['579', '389', '567', '520', '337', '348', '365', '367'],
+  Volvo: ['VNL 760', 'VNL 860', 'VNL 300', 'VNR 300', 'VNR 400', 'VNR 600', 'VHD 300', 'VHD 400'],
+  International: ['LT', 'RH', 'HV', 'HX', 'MV', 'CV'],
+  Mack: ['Anthem', 'Pinnacle', 'Granite', 'LR', 'MD', 'TerraPro'],
+  'Western Star': ['4900', '5700XE', '4700', '49X', '47X'],
+  Hino: ['L6', 'L7', 'XL7', 'XL8', '268', '338'],
+  Isuzu: ['NRR', 'NQR', 'NPR', 'NPR-HD', 'FTR', 'FVR'],
+  Ford: ['F-650', 'F-750', 'F-59'],
+  Chevrolet: ['Silverado 4500HD', 'Silverado 5500HD', 'Silverado 6500HD'],
+  RAM: ['3500', '4500', '5500'],
+  GMC: ['Sierra 3500HD', 'Sierra 4500HD', 'Sierra 5500HD'],
+  Tesla: ['Semi'],
+  Nikola: ['Tre BEV', 'Tre FCEV', 'Two'],
+}
 
 defineProps({
   trucks: { type: Array, default: () => [] },
@@ -148,6 +170,8 @@ const emit = defineEmits(['delete', 'update'])
 
 const showConfirm = ref(false)
 const pendingTruck = ref(null)
+
+const editModelOptions = computed(() => truckModels[editForm.make] || [])
 
 const showEdit = ref(false)
 const editForm = reactive({
