@@ -147,6 +147,7 @@
                   <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
                 </span>
                 <span v-if="inTransitLoad(loc)" class="driver-load">{{ inTransitLoad(loc) }}</span>
+                <span v-if="driverOutOfRange(loc)" class="driver-warning">{{ driverOutOfRange(loc) }}</span>
               </div>
               <span v-if="loc.speed && isOnline(loc)" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
             </div>
@@ -658,6 +659,28 @@ function inTransitLoad(loc) {
   return al ? al.loadId : ''
 }
 
+function driverOutOfRange(loc) {
+  if (!loc.latitude || loc.noGps || !isOnline(loc)) return ''
+  const loads = loc.activeLoads || []
+  if (loads.length === 0) return ''
+  // Check distance to the nearest load point (origin or destination)
+  const R = 6371 // km
+  const toRad = d => d * Math.PI / 180
+  let minDist = Infinity
+  for (const al of loads) {
+    for (const [lt, lg] of [[al.originLat, al.originLng], [al.destLat, al.destLng]]) {
+      if (!lt || !lg) continue
+      const dLat = toRad(lt - loc.latitude)
+      const dLng = toRad(lg - loc.longitude)
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(loc.latitude)) * Math.cos(toRad(lt)) * Math.sin(dLng / 2) ** 2
+      const d = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+      if (d < minDist) minDist = d
+    }
+  }
+  if (minDist > 2000) return `${Math.round(minDist).toLocaleString()} km away`
+  return ''
+}
+
 function isOnline(loc) {
   if (!loc.timestamp) return false
   return now.value - new Date(loc.timestamp).getTime() < ONLINE_THRESHOLD
@@ -1022,6 +1045,16 @@ onUnmounted(() => {
   font-size: 0.65rem;
   color: #888;
   font-family: 'JetBrains Mono', monospace;
+}
+
+.driver-warning {
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: #dc2626;
+  background: #fef2f2;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid #fecaca;
 }
 
 .driver-speed {
