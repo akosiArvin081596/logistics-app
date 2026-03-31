@@ -533,10 +533,12 @@ async function toggleLoad(al, loc) {
   const isPastPickup = PAST_PICKUP_RE.test(al.status)
   const hasDriverGps = loc.latitude != null && loc.longitude != null
   let useDriverPos = isPastPickup && hasDriverGps
-  if (useDriverPos && hasOrigin) {
+  if (useDriverPos && (hasOrigin || hasDest)) {
+    const refLat = hasOrigin ? oLat : dLat
+    const refLng = hasOrigin ? oLng : dLng
     const R = 6371, toRad = d => d * Math.PI / 180
-    const dLa = toRad(oLat - loc.latitude), dLo = toRad(oLng - loc.longitude)
-    const a = Math.sin(dLa / 2) ** 2 + Math.cos(toRad(loc.latitude)) * Math.cos(toRad(oLat)) * Math.sin(dLo / 2) ** 2
+    const dLa = toRad(refLat - loc.latitude), dLo = toRad(refLng - loc.longitude)
+    const a = Math.sin(dLa / 2) ** 2 + Math.cos(toRad(loc.latitude)) * Math.cos(toRad(refLat)) * Math.sin(dLo / 2) ** 2
     if (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) > 2000) useDriverPos = false
   }
   const fromLat = useDriverPos ? loc.latitude : oLat
