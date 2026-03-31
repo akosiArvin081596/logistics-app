@@ -302,18 +302,22 @@ async function fetchRoute(fitBounds = false) {
 
 // Reroute when driver position changes significantly
 let lastRoutePos = null
+let lastRouteTime = 0
+const REROUTE_MIN_INTERVAL = 60000 // 60 seconds minimum between reroutes
 watch(() => props.driverPosition, (pos) => {
   if (!pos || !destLatLng.value) return
   if (!lastRoutePos) {
     lastRoutePos = pos
+    lastRouteTime = Date.now()
     fetchRoute(true)
     return
   }
   const dist = L.latLng(pos.latitude, pos.longitude).distanceTo(
     L.latLng(lastRoutePos.latitude, lastRoutePos.longitude)
   )
-  if (dist > 100) {
+  if (dist > 100 && Date.now() - lastRouteTime >= REROUTE_MIN_INTERVAL) {
     lastRoutePos = pos
+    lastRouteTime = Date.now()
     fetchRoute()
   }
 }, { deep: true })

@@ -3219,12 +3219,30 @@ async function geocodeReverse(lat, lng) {
 	}
 }
 
+// Route cache: TTL-based in-memory cache for Google Routes API results
+const routeCache = new Map();
+const ROUTE_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+const ROUTE_CACHE_MAX = 500;
+
+function routeCacheKey(from, to) {
+	// Round to 3 decimal places (~111m precision) to group nearby positions
+	return `${from.latitude.toFixed(3)},${from.longitude.toFixed(3)}>${to.latitude.toFixed(3)},${to.longitude.toFixed(3)}`;
+}
+
 // Get driving route between two points using Google Routes API
 async function getRoute(from, to, retries = 2) {
 	if (!from || !to) return null;
 	// Skip impossible routes (e.g. cross-ocean) — max ~5000 km straight-line
 	const distM = geolib.getDistance(from, to);
 	if (distM > 5000000) return null;
+
+	// Check cache before calling API
+	const cacheKey = routeCacheKey(from, to);
+	const cached = routeCache.get(cacheKey);
+	if (cached && Date.now() - cached.time < ROUTE_CACHE_TTL) {
+		return cached.result;
+	}
+
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		try {
 			const controller = new AbortController();
@@ -3248,20 +3266,27 @@ async function getRoute(from, to, retries = 2) {
 				const errText = await resp.text();
 				console.error(`Routes API HTTP error (attempt ${attempt + 1}): ${resp.status} — ${errText}`);
 				if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
+				routeCache.set(cacheKey, { result: null, time: Date.now() });
+				if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
 				return null;
 			}
 			const data = await resp.json();
 			if (!data.routes || data.routes.length === 0) {
+				routeCache.set(cacheKey, { result: null, time: Date.now() });
+				if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
 				return null;
 			}
 			const route = data.routes[0];
 			const leg = route.legs[0];
 			const durationSec = parseInt((leg.duration || "0s").replace("s", ""), 10);
-			return {
+			const result = {
 				points: decodePolyline(route.polyline.encodedPolyline),
 				distanceKm: Math.round(leg.distanceMeters / 100) / 10,
 				durationMin: Math.round(durationSec / 60),
 			};
+			routeCache.set(cacheKey, { result, time: Date.now() });
+			if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
+			return result;
 		} catch (err) {
 			console.error(`Routes API error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
 			if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
@@ -3449,7 +3474,7 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 
 // GET /api/route — Lightweight rerouting: get driving route between two points
 app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async (req, res) => {
-	res.set('Cache-Control', 'no-store');
+	res.set('Cache-Control', 'private, max-age=300');
 	try {
 		const { fromLat, fromLng, toLat, toLng } = req.query;
 		if (!fromLat || !fromLng || !toLat || !toLng) {

@@ -253,6 +253,25 @@ const driverRoutes = ref([])
 const ROUTE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#65a30d']
 const PAST_PICKUP_RE = /^(at shipper|loading|in transit|at receiver)$/i
 
+// Client-side route cache for static (origin→destination) routes
+const staticRouteCache = new Map()
+const CLIENT_CACHE_TTL = 10 * 60 * 1000 // 10 minutes
+
+function clientCacheKey(fromLat, fromLng, toLat, toLng) {
+  return `${Number(fromLat).toFixed(3)},${Number(fromLng).toFixed(3)}>${Number(toLat).toFixed(3)},${Number(toLng).toFixed(3)}`
+}
+
+async function fetchRouteCached(fromLat, fromLng, toLat, toLng) {
+  const key = clientCacheKey(fromLat, fromLng, toLat, toLng)
+  const cached = staticRouteCache.get(key)
+  if (cached && Date.now() - cached.time < CLIENT_CACHE_TTL) {
+    return cached.data
+  }
+  const data = await api.get(`/api/route?fromLat=${fromLat}&fromLng=${fromLng}&toLat=${toLat}&toLng=${toLng}`)
+  staticRouteCache.set(key, { data, time: Date.now() })
+  return data
+}
+
 // Animation state
 const activeAnimations = {}
 
@@ -533,8 +552,7 @@ async function toggleLoad(al, loc) {
     if (hasDest) boundsPoints.push([dLat, dLng])
     if (useDriverPos) boundsPoints.push([fromLat, fromLng])
     if (boundsPoints.length >= 2) {
-      const bounds = L.latLngBounds(boundsPoints.map(p => L.latLng(p[0], p[1])))
-      if (bounds.isValid()) map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: false })
+      safeFitBounds(map, boundsPoints, { padding: [50, 50], maxZoom: 14, animate: false })
     } else if (boundsPoints.length === 1) {
       map.setView(boundsPoints[0], 12, { animate: false })
     }
@@ -545,7 +563,9 @@ async function toggleLoad(al, loc) {
     const gen = focusGeneration
     fetchingRoute.value = true
     try {
-      const data = await api.get(`/api/route?fromLat=${fromLat}&fromLng=${fromLng}&toLat=${dLat}&toLng=${dLng}`)
+      const data = useDriverPos
+        ? await api.get(`/api/route?fromLat=${fromLat}&fromLng=${fromLng}&toLat=${dLat}&toLng=${dLng}`)
+        : await fetchRouteCached(fromLat, fromLng, dLat, dLng)
       if (gen !== focusGeneration) return
       if (data.route && data.route.length >= 2) {
         routePoints.value = data.route.map(p => [p.latitude, p.longitude])
@@ -618,13 +638,19 @@ async function focusAll() {
   routeDistance.value = null
   routeEta.value = null
 
-  // Fetch routes for all online drivers with a load
+  // Fetch routes for all online drivers with a load (concurrency-limited)
   const onlineWithLoad = locations.value.filter(loc => isOnline(loc) && loc.loadId)
-  const routes = await Promise.all(
-    onlineWithLoad.map(async (loc, i) => {
+  const MAX_CONCURRENT = 3
+  const results = new Array(onlineWithLoad.length).fill(null)
+  let nextIdx = 0
+
+  async function trailWorker() {
+    while (nextIdx < onlineWithLoad.length) {
+      const i = nextIdx++
+      const loc = onlineWithLoad[i]
       try {
         const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(loc.driver)}&loadId=${encodeURIComponent(loc.loadId)}`)
-        return {
+        results[i] = {
           driver: loc.driver,
           route: (data.route || []).map(p => [p.latitude, p.longitude]),
           origin: data.origin ? [data.origin.latitude, data.origin.longitude] : null,
@@ -632,11 +658,13 @@ async function focusAll() {
           color: ROUTE_COLORS[i % ROUTE_COLORS.length],
         }
       } catch {
-        return null
+        results[i] = null
       }
-    })
-  )
-  allRoutes.value = routes.filter(r => r && (r.route.length >= 2 || r.origin || r.dest))
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT, onlineWithLoad.length) }, () => trailWorker()))
+  allRoutes.value = results.filter(r => r && (r.route.length >= 2 || r.origin || r.dest))
 
   // Fit bounds to all online drivers
   await nextTick()
