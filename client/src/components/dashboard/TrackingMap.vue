@@ -494,7 +494,7 @@ async function focusDriver(loc) {
   }
 }
 
-function toggleLoad(al, loc) {
+async function toggleLoad(al, loc) {
   ++focusGeneration
 
   if (expandedLoadId.value === al.loadId) {
@@ -528,7 +528,8 @@ function toggleLoad(al, loc) {
   destLatLng.value = hasDest ? [dLat, dLng] : null
   destAddress.value = al.dropoffAddress || ''
 
-  console.log('[toggleLoad] origin:', originLatLng.value, '| dest:', destLatLng.value)
+  // Wait for Vue to finish rendering markers before fitting map bounds
+  await nextTick()
 
   const map = mapRef.value?.leafletObject
   if (map) {
