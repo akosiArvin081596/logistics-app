@@ -510,10 +510,18 @@ async function toggleLoad(al, loc) {
   destAddress.value = al.dropoffAddress || ''
 
   // Determine route-from point: driver GPS when past pickup, otherwise origin
+  // But fall back to origin if driver is too far (>2000 km) from load area
   const isPastPickup = PAST_PICKUP_RE.test(al.status)
   const hasDriverGps = loc.latitude != null && loc.longitude != null
-  const fromLat = (isPastPickup && hasDriverGps) ? loc.latitude : oLat
-  const fromLng = (isPastPickup && hasDriverGps) ? loc.longitude : oLng
+  let useDriverPos = isPastPickup && hasDriverGps
+  if (useDriverPos && hasOrigin) {
+    const R = 6371, toRad = d => d * Math.PI / 180
+    const dLa = toRad(oLat - loc.latitude), dLo = toRad(oLng - loc.longitude)
+    const a = Math.sin(dLa / 2) ** 2 + Math.cos(toRad(loc.latitude)) * Math.cos(toRad(oLat)) * Math.sin(dLo / 2) ** 2
+    if (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) > 2000) useDriverPos = false
+  }
+  const fromLat = useDriverPos ? loc.latitude : oLat
+  const fromLng = useDriverPos ? loc.longitude : oLng
   const hasFrom = isFinite(fromLat) && isFinite(fromLng)
 
   const map = mapRef.value?.leafletObject
@@ -522,7 +530,7 @@ async function toggleLoad(al, loc) {
     const boundsPoints = []
     if (hasOrigin) boundsPoints.push([oLat, oLng])
     if (hasDest) boundsPoints.push([dLat, dLng])
-    if (isPastPickup && hasDriverGps) boundsPoints.push([fromLat, fromLng])
+    if (useDriverPos) boundsPoints.push([fromLat, fromLng])
     safeFitBounds(map, boundsPoints, { padding: [50, 50], maxZoom: 14, animate: false })
   }
 
@@ -535,14 +543,14 @@ async function toggleLoad(al, loc) {
       if (gen !== focusGeneration) return
       if (data.route && data.route.length >= 2) {
         routePoints.value = data.route.map(p => [p.latitude, p.longitude])
-      } else {
-        routePoints.value = [[fromLat, fromLng], [dLat, dLng]]
+      } else if (hasOrigin) {
+        routePoints.value = [[oLat, oLng], [dLat, dLng]]
       }
       routeDistance.value = data.distanceKm || null
       routeEta.value = data.etaMinutes || null
     } catch {
       if (gen !== focusGeneration) return
-      routePoints.value = [[fromLat, fromLng], [dLat, dLng]]
+      if (hasOrigin) routePoints.value = [[oLat, oLng], [dLat, dLng]]
     } finally {
       fetchingRoute.value = false
     }
