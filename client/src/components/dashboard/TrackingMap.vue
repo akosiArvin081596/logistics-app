@@ -180,9 +180,10 @@
                     <div v-if="al.dropoffAddress" class="route-point-address">{{ al.dropoffAddress }}</div>
                     <div class="route-point-coords">{{ al.destLat.toFixed(5) }}, {{ al.destLng.toFixed(5) }}</div>
                   </div>
-                  <div v-if="routeDistance != null || routeEta != null" class="route-summary">
+                  <div v-if="routeDistance != null || routeEta != null || selectedDriverSpeed != null" class="route-summary">
                     <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} km</span>
                     <span v-if="routeEta != null" class="route-stat">{{ routeEta }} min ETA</span>
+                    <span v-if="selectedDriverSpeed != null" class="route-stat speed">{{ selectedDriverSpeed }} mph</span>
                   </div>
                   <div v-if="weatherData" class="route-weather">
                     <span class="weather-temp">{{ weatherData.tempF != null ? Math.round(weatherData.tempF) + '°F' : '' }}</span>
@@ -245,6 +246,7 @@ const allRoutes = ref([])
 // Single-driver multi-load route state (when driver selected but no load expanded)
 const driverRoutes = ref([])
 const ROUTE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#65a30d']
+const PAST_PICKUP_RE = /^(at shipper|loading|in transit|at receiver)$/i
 
 // Animation state
 const activeAnimations = {}
@@ -395,6 +397,8 @@ async function fetchDriverRoutes(loc) {
   const loads = loc.activeLoads || []
   if (loads.length === 0) return
 
+  const hasDriverGps = loc.latitude != null && loc.longitude != null
+
   // Show points immediately from known coords with straight-line routes
   const routes = []
   for (let i = 0; i < loads.length; i++) {
@@ -404,9 +408,11 @@ async function fetchDriverRoutes(loc) {
     const origin = isFinite(oLat) && isFinite(oLng) ? [oLat, oLng] : null
     const dest = isFinite(dLat) && isFinite(dLng) ? [dLat, dLng] : null
     if (!origin && !dest) continue
+    const isPastPickup = PAST_PICKUP_RE.test(al.status)
+    const routeFrom = (isPastPickup && hasDriverGps) ? [loc.latitude, loc.longitude] : origin
     routes.push({
       loadId: al.loadId,
-      route: origin && dest ? [origin, dest] : [],
+      route: routeFrom && dest ? [routeFrom, dest] : [],
       origin,
       dest,
       originAddress: al.pickupAddress || '',
@@ -416,15 +422,19 @@ async function fetchDriverRoutes(loc) {
   }
   driverRoutes.value = routes
 
-  // Fetch actual driving routes from OSRM and replace straight lines
+  // Fetch actual driving routes and replace straight lines
   for (let i = 0; i < routes.length; i++) {
     const r = routes[i]
-    if (!r.origin || !r.dest) continue
+    if (!r.dest) continue
+    const al = loads[i]
+    const isPastPickup = PAST_PICKUP_RE.test(al?.status)
+    const fromPt = (isPastPickup && hasDriverGps) ? [loc.latitude, loc.longitude] : r.origin
+    if (!fromPt) continue
     try {
-      const data = await api.get(`/api/route?fromLat=${r.origin[0]}&fromLng=${r.origin[1]}&toLat=${r.dest[0]}&toLng=${r.dest[1]}`)
+      const data = await api.get(`/api/route?fromLat=${fromPt[0]}&fromLng=${fromPt[1]}&toLat=${r.dest[0]}&toLng=${r.dest[1]}`)
       if (data.route && data.route.length >= 2) {
         routes[i] = { ...r, route: data.route.map(p => [p.latitude, p.longitude]) }
-        driverRoutes.value = [...routes]  // trigger reactivity
+        driverRoutes.value = [...routes]
       }
     } catch { /* keep straight line */ }
   }
@@ -494,36 +504,40 @@ async function toggleLoad(al, loc) {
   destLatLng.value = hasDest ? [dLat, dLng] : null
   destAddress.value = al.dropoffAddress || ''
 
+  // Determine route-from point: driver GPS when past pickup, otherwise origin
+  const isPastPickup = PAST_PICKUP_RE.test(al.status)
+  const hasDriverGps = loc.latitude != null && loc.longitude != null
+  const fromLat = (isPastPickup && hasDriverGps) ? loc.latitude : oLat
+  const fromLng = (isPastPickup && hasDriverGps) ? loc.longitude : oLng
+  const hasFrom = isFinite(fromLat) && isFinite(fromLng)
+
   const map = mapRef.value?.leafletObject
   if (map) {
     map.stop()
-    if (hasOrigin && hasDest) {
-      try {
-        map.fitBounds([[oLat, oLng], [dLat, dLng]], { padding: [50, 50], maxZoom: 14, animate: false })
-      } catch { /* silent */ }
-    } else if (hasOrigin) {
-      map.setView([oLat, oLng], 14, { animate: false })
-    } else if (hasDest) {
-      map.setView([dLat, dLng], 14, { animate: false })
-    }
+    const boundsPoints = []
+    if (hasOrigin) boundsPoints.push([oLat, oLng])
+    if (hasDest) boundsPoints.push([dLat, dLng])
+    if (isPastPickup && hasDriverGps) boundsPoints.push([fromLat, fromLng])
+    safeFitBounds(map, boundsPoints, { padding: [50, 50], maxZoom: 14, animate: false })
   }
 
-  // Fetch route polyline in background (straight-line fallback if OSRM fails)
-  if (hasOrigin && hasDest) {
+  // Fetch route polyline in background
+  if (hasFrom && hasDest) {
     const gen = focusGeneration
     fetchingRoute.value = true
     try {
-      const data = await api.get(`/api/route?fromLat=${oLat}&fromLng=${oLng}&toLat=${dLat}&toLng=${dLng}`)
+      const data = await api.get(`/api/route?fromLat=${fromLat}&fromLng=${fromLng}&toLat=${dLat}&toLng=${dLng}`)
       if (gen !== focusGeneration) return
       if (data.route && data.route.length >= 2) {
         routePoints.value = data.route.map(p => [p.latitude, p.longitude])
       } else {
-        routePoints.value = [[oLat, oLng], [dLat, dLng]]
+        routePoints.value = [[fromLat, fromLng], [dLat, dLng]]
       }
       routeDistance.value = data.distanceKm || null
+      routeEta.value = data.etaMinutes || null
     } catch {
       if (gen !== focusGeneration) return
-      routePoints.value = [[oLat, oLng], [dLat, dLng]]
+      routePoints.value = [[fromLat, fromLng], [dLat, dLng]]
     } finally {
       fetchingRoute.value = false
     }
@@ -659,6 +673,10 @@ function timeAgo(ts) {
 const locationsWithGps = computed(() => locations.value.filter(loc => !loc.noGps && loc.latitude != null))
 const onlineCount = computed(() => locationsWithGps.value.filter(loc => isOnline(loc)).length)
 const activeLocations = computed(() => locations.value.filter(loc => loc.activeLoads && loc.activeLoads.length > 0))
+const selectedDriverSpeed = computed(() => {
+  const loc = locations.value.find(l => l.driver === selectedDriver.value)
+  return loc?.speed ? Math.round(loc.speed * 2.237) : null
+})
 
 const mapCenter = ref([39.8283, -98.5795]) // set once after first fetch
 
@@ -1200,6 +1218,10 @@ onUnmounted(() => {
   background: #e0e7ff;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
+}
+.route-stat.speed {
+  color: #0f766e;
+  background: #d1fae5;
 }
 
 .route-weather {
