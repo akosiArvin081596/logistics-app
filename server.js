@@ -3222,6 +3222,9 @@ async function geocodeReverse(lat, lng) {
 // Get driving route between two points using Google Routes API
 async function getRoute(from, to, retries = 2) {
 	if (!from || !to) return null;
+	// Skip impossible routes (e.g. cross-ocean) — max ~5000 km straight-line
+	const distM = geolib.getDistance(from, to);
+	if (distM > 5000000) return null;
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		try {
 			const controller = new AbortController();
@@ -3249,7 +3252,6 @@ async function getRoute(from, to, retries = 2) {
 			}
 			const data = await resp.json();
 			if (!data.routes || data.routes.length === 0) {
-				console.error("Routes API returned no routes:", JSON.stringify(data));
 				return null;
 			}
 			const route = data.routes[0];
