@@ -38,7 +38,7 @@
 
             <!-- Regular form fields -->
             <template v-for="h in headers" :key="h">
-              <div v-if="!hiddenCoordHeaders.has(h)" class="form-field">
+              <div v-if="!hiddenHeaders.has(h)" class="form-field">
                 <label>{{ h }}</label>
                 <select
                   v-if="isDriverField(h) && driverList.length && props.currentSheet !== 'Carrier Database'"
@@ -91,6 +91,22 @@ const formValues = reactive({})
 const pickerOpen = ref(false)
 const pickerTarget = ref('origin')
 
+// Job Tracking specific: auto-fill defaults and hidden fields
+const JOB_TRACKING_AUTO_FILL = {
+  'Job Status': 'Unassigned',
+  'Phase of Progress': 'Heading to Pickup',
+  'Carrier Stage': 'Waiting on Documents',
+  'Assigned Date': () => new Date().toLocaleDateString('en-US'),
+  'Status Update Date': () => new Date().toLocaleDateString('en-US'),
+}
+const JOB_TRACKING_HIDDEN = new Set([
+  'Completion Date', 'Location Link', 'Documents',
+  'Broker Contact Name', 'Phone Number', 'Email', '  Payment  ',
+  'Payment',
+])
+
+const isJobTracking = computed(() => props.currentSheet === 'Job Tracking')
+
 // Column detection (same regex patterns as DriverRouteMap.vue / LoadCard.vue)
 function findCol(regex) {
   return (props.headers || []).find((h) => regex.test(h)) || null
@@ -100,13 +116,15 @@ const originLatCol = computed(() => findCol(/origin.*lat|pickup.*lat|shipper.*la
 const originLngCol = computed(() => findCol(/origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i))
 const destLatCol = computed(() => findCol(/dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i))
 const destLngCol = computed(() => findCol(/dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i))
-const originCityCol = computed(() => findCol(/origin|pickup.*city|shipper.*city/i))
-const destCityCol = computed(() => findCol(/dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i))
+const originCityCol = computed(() => (props.headers || []).find(h => /origin|pickup.*city|shipper.*city/i.test(h) && !/lat|lng|lon/i.test(h)) || null)
+const destCityCol = computed(() => (props.headers || []).find(h => /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null)
+const pickupAddrCol = computed(() => findCol(/pickup.*addr|pickup.*address/i))
+const dropoffAddrCol = computed(() => findCol(/drop.*addr|drop.*address|dest.*addr/i))
 
 const hasOriginCoords = computed(() => !!originLatCol.value && !!originLngCol.value)
 const hasDestCoords = computed(() => !!destLatCol.value && !!destLngCol.value)
 
-const hiddenCoordHeaders = computed(() => {
+const hiddenHeaders = computed(() => {
   const set = new Set()
   if (hasOriginCoords.value) {
     set.add(originLatCol.value)
@@ -115,6 +133,14 @@ const hiddenCoordHeaders = computed(() => {
   if (hasDestCoords.value) {
     set.add(destLatCol.value)
     set.add(destLngCol.value)
+  }
+  if (isJobTracking.value) {
+    for (const h of Object.keys(JOB_TRACKING_AUTO_FILL)) set.add(h)
+    for (const h of JOB_TRACKING_HIDDEN) set.add(h)
+    // Also hide by matching trimmed header (Payment has spaces in sheet)
+    for (const h of props.headers) {
+      if (JOB_TRACKING_HIDDEN.has(h.trim())) set.add(h)
+    }
   }
   return set
 })
@@ -142,16 +168,26 @@ function onLocationPicked({ lat, lng, displayName }) {
     if (originLatCol.value) formValues[originLatCol.value] = String(lat.toFixed(6))
     if (originLngCol.value) formValues[originLngCol.value] = String(lng.toFixed(6))
     if (originCityCol.value && displayName) formValues[originCityCol.value] = displayName
+    if (pickupAddrCol.value && displayName) formValues[pickupAddrCol.value] = displayName
   } else {
     if (destLatCol.value) formValues[destLatCol.value] = String(lat.toFixed(6))
     if (destLngCol.value) formValues[destLngCol.value] = String(lng.toFixed(6))
     if (destCityCol.value && displayName) formValues[destCityCol.value] = displayName
+    if (dropoffAddrCol.value && displayName) formValues[dropoffAddrCol.value] = displayName
   }
   pickerOpen.value = false
 }
 
 function handleSubmit() {
-  const values = props.headers.map((h) => formValues[h] || '')
+  const values = props.headers.map((h) => {
+    if (formValues[h]) return formValues[h]
+    // Auto-fill for Job Tracking
+    if (isJobTracking.value && h in JOB_TRACKING_AUTO_FILL) {
+      const v = JOB_TRACKING_AUTO_FILL[h]
+      return typeof v === 'function' ? v() : v
+    }
+    return ''
+  })
   if (values.every((v) => !v.trim())) return
   emit('submit', values)
   props.headers.forEach((h) => {
