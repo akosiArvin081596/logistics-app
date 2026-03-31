@@ -527,6 +527,23 @@ async function toggleLoad(al, loc) {
   destLatLng.value = hasDest ? [dLat, dLng] : null
   destAddress.value = al.dropoffAddress || ''
 
+  // Determine route-from point: driver GPS when past pickup, otherwise origin
+  // Fall back to origin if driver is too far (>2000 km) from load area
+  const isPastPickup = PAST_PICKUP_RE.test(al.status)
+  const hasDriverGps = loc.latitude != null && loc.longitude != null
+  let useDriverPos = isPastPickup && hasDriverGps
+  if (useDriverPos && (hasOrigin || hasDest)) {
+    const refLat = hasOrigin ? oLat : dLat
+    const refLng = hasOrigin ? oLng : dLng
+    const R = 6371, toRad = d => d * Math.PI / 180
+    const dLa = toRad(refLat - loc.latitude), dLo = toRad(refLng - loc.longitude)
+    const a = Math.sin(dLa / 2) ** 2 + Math.cos(toRad(loc.latitude)) * Math.cos(toRad(refLat)) * Math.sin(dLo / 2) ** 2
+    if (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) > 2000) useDriverPos = false
+  }
+  const fromLat = useDriverPos ? loc.latitude : oLat
+  const fromLng = useDriverPos ? loc.longitude : oLng
+  const hasFrom = isFinite(fromLat) && isFinite(fromLng)
+
   await nextTick()
 
   const map = mapRef.value?.leafletObject
@@ -541,8 +558,31 @@ async function toggleLoad(al, loc) {
     }
   }
 
-  // TODO: route fetch
-  // TODO: weather fetch (disabled)
+  // Fetch route polyline in background
+  if (hasFrom && hasDest) {
+    const gen = focusGeneration
+    fetchingRoute.value = true
+    try {
+      const data = useDriverPos
+        ? await api.get(`/api/route?fromLat=${fromLat}&fromLng=${fromLng}&toLat=${dLat}&toLng=${dLng}`)
+        : await fetchRouteCached(fromLat, fromLng, dLat, dLng)
+      if (gen !== focusGeneration) return
+      if (data.route && data.route.length >= 2) {
+        routePoints.value = data.route.map(p => [p.latitude, p.longitude])
+      } else if (hasOrigin) {
+        routePoints.value = [[oLat, oLng], [dLat, dLng]]
+      }
+      routeDistance.value = data.distanceKm || null
+      routeEta.value = data.etaMinutes || null
+    } catch {
+      if (gen !== focusGeneration) return
+      if (hasOrigin) routePoints.value = [[oLat, oLng], [dLat, dLng]]
+    } finally {
+      fetchingRoute.value = false
+    }
+  }
+
+  // Weather fetch disabled to reduce Google API costs
 }
 
 let lastRerouteTime = 0
