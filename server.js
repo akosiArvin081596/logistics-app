@@ -3219,34 +3219,49 @@ async function geocodeReverse(lat, lng) {
 	}
 }
 
-// Get driving route between two points using Google Directions API
+// Get driving route between two points using Google Routes API
 async function getRoute(from, to, retries = 2) {
 	if (!from || !to) return null;
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		try {
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), 10000);
-			const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${from.latitude},${from.longitude}&destination=${to.latitude},${to.longitude}&key=${GOOGLE_MAPS_API_KEY}`;
-			const resp = await fetch(url, { signal: controller.signal });
+			const resp = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+					"X-Goog-FieldMask": "routes.polyline,routes.legs.distanceMeters,routes.legs.duration",
+				},
+				body: JSON.stringify({
+					origin: { location: { latLng: { latitude: from.latitude, longitude: from.longitude } } },
+					destination: { location: { latLng: { latitude: to.latitude, longitude: to.longitude } } },
+					travelMode: "DRIVE",
+				}),
+				signal: controller.signal,
+			});
 			clearTimeout(timeout);
 			if (!resp.ok) {
+				const errText = await resp.text();
+				console.error(`Routes API HTTP error (attempt ${attempt + 1}): ${resp.status} — ${errText}`);
 				if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
 				return null;
 			}
 			const data = await resp.json();
-			if (data.status !== "OK" || !data.routes || data.routes.length === 0) {
-				console.error(`Directions API: ${data.status} — ${data.error_message || ''}`);
+			if (!data.routes || data.routes.length === 0) {
+				console.error("Routes API returned no routes:", JSON.stringify(data));
 				return null;
 			}
 			const route = data.routes[0];
 			const leg = route.legs[0];
+			const durationSec = parseInt((leg.duration || "0s").replace("s", ""), 10);
 			return {
-				points: decodePolyline(route.overview_polyline.points),
-				distanceKm: Math.round(leg.distance.value / 100) / 10,
-				durationMin: Math.round(leg.duration.value / 60),
+				points: decodePolyline(route.polyline.encodedPolyline),
+				distanceKm: Math.round(leg.distanceMeters / 100) / 10,
+				durationMin: Math.round(durationSec / 60),
 			};
 		} catch (err) {
-			console.error(`Directions API error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
+			console.error(`Routes API error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
 			if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
 			return null;
 		}
