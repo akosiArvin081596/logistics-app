@@ -318,7 +318,7 @@ function safeFitBounds(map, points, options = {}) {
     )
     if (valid.length === 0) return
     if (valid.length === 1) {
-      map.setView(valid[0], options.maxZoom || 12, { animate: true })
+      map.setView(valid[0], options.maxZoom || 12, { animate: false })
       return
     }
     const bounds = L.latLngBounds(valid.map(p => L.latLng(p[0], p[1])))
@@ -527,11 +527,17 @@ async function toggleLoad(al, loc) {
   const map = mapRef.value?.leafletObject
   if (map) {
     map.stop()
+    map.invalidateSize()
     const boundsPoints = []
     if (hasOrigin) boundsPoints.push([oLat, oLng])
     if (hasDest) boundsPoints.push([dLat, dLng])
     if (useDriverPos) boundsPoints.push([fromLat, fromLng])
-    safeFitBounds(map, boundsPoints, { padding: [50, 50], maxZoom: 14, animate: false })
+    if (boundsPoints.length >= 2) {
+      const bounds = L.latLngBounds(boundsPoints.map(p => L.latLng(p[0], p[1])))
+      if (bounds.isValid()) map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: false })
+    } else if (boundsPoints.length === 1) {
+      map.setView(boundsPoints[0], 12, { animate: false })
+    }
   }
 
   // Fetch route polyline in background
