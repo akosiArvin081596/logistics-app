@@ -81,6 +81,7 @@ const navConfig = {
     { to: '/driver', icon: '&#128666;', label: 'Driver App' },
     { to: '/investor', icon: '&#128200;', label: 'Investor View' },
     { to: '/users', icon: '&#9881;', label: 'User Management' },
+    { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
   ],
@@ -90,6 +91,7 @@ const navConfig = {
     { to: '/notifications', icon: '&#128276;', label: 'Notifications' },
     { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
     { to: '/messages', icon: '&#128172;', label: 'Messages' },
+    { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
   ],
   Investor: [

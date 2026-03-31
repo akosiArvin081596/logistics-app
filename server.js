@@ -192,6 +192,22 @@ db.exec(`
 `);
 
 db.exec(`
+	CREATE TABLE IF NOT EXISTS trucks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		unit_number TEXT NOT NULL UNIQUE,
+		make TEXT DEFAULT '',
+		model TEXT DEFAULT '',
+		year INTEGER DEFAULT 0,
+		vin TEXT DEFAULT '',
+		license_plate TEXT DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active','Inactive','Maintenance')),
+		assigned_driver TEXT DEFAULT '',
+		notes TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
+db.exec(`
 	CREATE TABLE IF NOT EXISTS documents (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		load_id TEXT NOT NULL,
@@ -576,6 +592,93 @@ app.get("/api/db/query/:table", requireRole("Super Admin"), (req, res) => {
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	db.prepare("DELETE FROM users WHERE id = ?").run(id);
+	res.json({ success: true });
+});
+
+// Truck Database: list all trucks
+app.get("/api/trucks", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	const trucks = db
+		.prepare("SELECT * FROM trucks ORDER BY unit_number ASC")
+		.all()
+		.map((t) => ({
+			id: t.id,
+			UnitNumber: t.unit_number,
+			Make: t.make,
+			Model: t.model,
+			Year: t.year,
+			VIN: t.vin,
+			LicensePlate: t.license_plate,
+			Status: t.status,
+			AssignedDriver: t.assigned_driver,
+			Notes: t.notes,
+			CreatedAt: t.created_at,
+		}));
+	res.json({ trucks });
+});
+
+// Truck Database: add a new truck
+app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
+	try {
+		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes } = req.body;
+		if (!unitNumber || !unitNumber.trim()) {
+			return res.status(400).json({ error: "Unit number is required" });
+		}
+		const existing = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?)").get(unitNumber.trim());
+		if (existing) {
+			return res.status(400).json({ error: "Unit number already exists" });
+		}
+		const validStatus = ["Active", "Inactive", "Maintenance"].includes(status) ? status : "Active";
+		const result = db.prepare(
+			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "");
+		res.json({ success: true, id: result.lastInsertRowid });
+	} catch (error) {
+		console.error("Error creating truck:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// Truck Database: update a truck
+app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
+		if (!truck) return res.status(404).json({ error: "Truck not found" });
+
+		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes } = req.body;
+		const updates = [];
+		const params = [];
+
+		if (unitNumber !== undefined) {
+			const conflict = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?) AND id != ?").get(unitNumber.trim(), id);
+			if (conflict) return res.status(400).json({ error: "Unit number already exists" });
+			updates.push("unit_number = ?"); params.push(unitNumber.trim());
+		}
+		if (make !== undefined) { updates.push("make = ?"); params.push(make); }
+		if (model !== undefined) { updates.push("model = ?"); params.push(model); }
+		if (year !== undefined) { updates.push("year = ?"); params.push(parseInt(year) || 0); }
+		if (vin !== undefined) { updates.push("vin = ?"); params.push(vin); }
+		if (licensePlate !== undefined) { updates.push("license_plate = ?"); params.push(licensePlate); }
+		if (status !== undefined && ["Active", "Inactive", "Maintenance"].includes(status)) {
+			updates.push("status = ?"); params.push(status);
+		}
+		if (assignedDriver !== undefined) { updates.push("assigned_driver = ?"); params.push(assignedDriver); }
+		if (notes !== undefined) { updates.push("notes = ?"); params.push(notes); }
+
+		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+		params.push(id);
+		db.prepare(`UPDATE trucks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error updating truck:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// Truck Database: delete a truck
+app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
+	const id = parseInt(req.params.id);
+	db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
 	res.json({ success: true });
 });
 

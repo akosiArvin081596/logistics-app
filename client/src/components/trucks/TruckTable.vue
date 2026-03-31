@@ -1,0 +1,298 @@
+<template>
+  <div class="card">
+    <div class="admin-section-title">
+      <div class="section-dot" style="background: var(--blue);"></div>
+      Fleet Inventory
+    </div>
+
+    <EmptyState v-if="trucks.length === 0">No trucks yet.</EmptyState>
+
+    <table v-else class="truck-table">
+      <thead>
+        <tr>
+          <th>Unit #</th>
+          <th>Make / Model</th>
+          <th>Year</th>
+          <th>VIN</th>
+          <th>Plate</th>
+          <th>Status</th>
+          <th>Driver</th>
+          <th v-if="canEdit"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="truck in trucks" :key="truck.id">
+          <td class="unit-number">{{ truck.UnitNumber }}</td>
+          <td>{{ [truck.Make, truck.Model].filter(Boolean).join(' ') || '\u2014' }}</td>
+          <td>{{ truck.Year || '\u2014' }}</td>
+          <td class="vin-cell">{{ truck.VIN || '\u2014' }}</td>
+          <td>{{ truck.LicensePlate || '\u2014' }}</td>
+          <td>
+            <span :class="['status-badge', statusClass(truck.Status)]">{{ truck.Status }}</span>
+          </td>
+          <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
+            {{ truck.AssignedDriver || '\u2014' }}
+          </td>
+          <td v-if="canEdit" style="text-align: right;">
+            <div class="action-btns">
+              <button class="btn-edit" @click="openEdit(truck)">Edit</button>
+              <button class="btn-remove" @click="confirmDelete(truck)">Remove</button>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- Edit Modal -->
+    <Teleport to="body">
+      <div v-if="showEdit" class="confirm-overlay" @click.self="showEdit = false">
+        <div class="confirm-dialog edit-dialog">
+          <h3>Edit Truck &mdash; {{ editForm.unitNumber }}</h3>
+
+          <div class="edit-field">
+            <label>Unit Number</label>
+            <input v-model="editForm.unitNumber" type="text" />
+          </div>
+
+          <div class="edit-row">
+            <div class="edit-field">
+              <label>Make</label>
+              <input v-model="editForm.make" type="text" />
+            </div>
+            <div class="edit-field">
+              <label>Model</label>
+              <input v-model="editForm.model" type="text" />
+            </div>
+          </div>
+
+          <div class="edit-row">
+            <div class="edit-field">
+              <label>Year</label>
+              <input v-model="editForm.year" type="number" />
+            </div>
+            <div class="edit-field">
+              <label>License Plate</label>
+              <input v-model="editForm.licensePlate" type="text" />
+            </div>
+          </div>
+
+          <div class="edit-field">
+            <label>VIN</label>
+            <input v-model="editForm.vin" type="text" />
+          </div>
+
+          <div class="edit-row">
+            <div class="edit-field">
+              <label>Status</label>
+              <select v-model="editForm.status">
+                <option>Active</option>
+                <option>Inactive</option>
+                <option>Maintenance</option>
+              </select>
+            </div>
+            <div class="edit-field">
+              <label>Assigned Driver</label>
+              <select v-model="editForm.assignedDriver">
+                <option value="">None</option>
+                <option v-for="name in driverNames" :key="name" :value="name">{{ name }}</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="edit-field">
+            <label>Notes</label>
+            <textarea v-model="editForm.notes" rows="2"></textarea>
+          </div>
+
+          <div class="confirm-actions">
+            <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
+            <button class="btn btn-primary" @click="handleSaveEdit">Save</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <ConfirmModal
+      :open="showConfirm"
+      title="Delete Truck"
+      :message="`Delete truck '${pendingTruck?.UnitNumber || ''}'? This action cannot be undone.`"
+      confirm-text="Delete"
+      :danger="true"
+      @confirm="handleConfirmDelete"
+      @cancel="showConfirm = false"
+    />
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive } from 'vue'
+import EmptyState from '../shared/EmptyState.vue'
+import ConfirmModal from '../shared/ConfirmModal.vue'
+
+defineProps({
+  trucks: { type: Array, default: () => [] },
+  driverNames: { type: Array, default: () => [] },
+  canEdit: { type: Boolean, default: false },
+})
+
+const emit = defineEmits(['delete', 'update'])
+
+const showConfirm = ref(false)
+const pendingTruck = ref(null)
+
+const showEdit = ref(false)
+const editForm = reactive({
+  id: null, unitNumber: '', make: '', model: '', year: 0,
+  vin: '', licensePlate: '', status: 'Active', assignedDriver: '', notes: '',
+})
+
+function openEdit(truck) {
+  editForm.id = truck.id
+  editForm.unitNumber = truck.UnitNumber
+  editForm.make = truck.Make || ''
+  editForm.model = truck.Model || ''
+  editForm.year = truck.Year || ''
+  editForm.vin = truck.VIN || ''
+  editForm.licensePlate = truck.LicensePlate || ''
+  editForm.status = truck.Status
+  editForm.assignedDriver = truck.AssignedDriver || ''
+  editForm.notes = truck.Notes || ''
+  showEdit.value = true
+}
+
+function handleSaveEdit() {
+  emit('update', {
+    id: editForm.id,
+    data: {
+      unitNumber: editForm.unitNumber,
+      make: editForm.make,
+      model: editForm.model,
+      year: editForm.year,
+      vin: editForm.vin,
+      licensePlate: editForm.licensePlate,
+      status: editForm.status,
+      assignedDriver: editForm.assignedDriver,
+      notes: editForm.notes,
+    },
+  })
+  showEdit.value = false
+}
+
+function statusClass(status) {
+  if (status === 'Active') return 'status-active'
+  if (status === 'Inactive') return 'status-inactive'
+  return 'status-maintenance'
+}
+
+function confirmDelete(truck) {
+  pendingTruck.value = truck
+  showConfirm.value = true
+}
+
+function handleConfirmDelete() {
+  if (pendingTruck.value) emit('delete', pendingTruck.value.id)
+  showConfirm.value = false
+  pendingTruck.value = null
+}
+</script>
+
+<style scoped>
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+.admin-section-title {
+  display: flex; align-items: center; gap: 0.5rem;
+  font-weight: 700; font-size: 0.88rem; margin-bottom: 1rem;
+}
+.section-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+.truck-table {
+  width: 100%; border-collapse: separate; border-spacing: 0;
+  font-size: 0.82rem; margin-top: 0.5rem;
+}
+.truck-table th {
+  text-align: left; padding: 0.6rem 0.5rem; font-weight: 600;
+  color: var(--text-dim); border-bottom: 2px solid var(--border);
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
+}
+.truck-table td {
+  padding: 0.65rem 0.5rem; border-bottom: 1px solid var(--bg); vertical-align: middle;
+}
+.truck-table tbody tr { transition: background 0.1s; }
+.truck-table tbody tr:hover { background: var(--bg); }
+.truck-table tbody tr:last-child td { border-bottom: none; }
+
+.unit-number {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+}
+.vin-cell {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.status-badge {
+  display: inline-flex; align-items: center;
+  padding: 0.2rem 0.6rem; border-radius: 12px;
+  font-size: 0.68rem; font-weight: 600;
+  font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em;
+}
+.status-active { background: var(--accent-dim); color: var(--accent); }
+.status-inactive { background: var(--bg); color: var(--text-dim); }
+.status-maintenance { background: var(--amber-dim); color: var(--amber); }
+
+.action-btns { display: flex; gap: 0.35rem; justify-content: flex-end; }
+
+.btn-edit, .btn-remove {
+  padding: 0.3rem 0.65rem; font-size: 0.7rem; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface);
+  cursor: pointer; font-family: inherit; font-weight: 500;
+  color: var(--text-dim); transition: all 0.15s;
+}
+.btn-edit:hover { background: var(--blue-dim); color: var(--blue); border-color: var(--blue-dim); }
+.btn-remove:hover { background: var(--danger-dim); color: var(--danger); border-color: var(--danger-dim); }
+
+/* Edit modal */
+.confirm-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.3);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200;
+}
+.confirm-dialog {
+  background: var(--surface); border-radius: var(--radius);
+  padding: 1.5rem; max-width: 500px; width: 90%;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.12);
+}
+.confirm-dialog h3 { font-size: 1rem; margin-bottom: 1rem; }
+.confirm-actions {
+  display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1.25rem;
+}
+
+.edit-row { display: flex; gap: 1rem; }
+.edit-row .edit-field { flex: 1; }
+
+.edit-field { margin-bottom: 0.75rem; }
+.edit-field label {
+  display: block; font-size: 0.72rem; font-weight: 600;
+  color: var(--text-dim); text-transform: uppercase;
+  letter-spacing: 0.04em; margin-bottom: 0.3rem;
+}
+.edit-field select,
+.edit-field input,
+.edit-field textarea {
+  width: 100%; padding: 0.5rem 0.65rem; border: 1px solid var(--border);
+  border-radius: 6px; font-family: inherit; font-size: 0.82rem;
+  background: var(--bg); color: var(--text); resize: vertical;
+}
+.edit-field select:focus,
+.edit-field input:focus,
+.edit-field textarea:focus {
+  outline: none; border-color: var(--blue);
+}
+</style>

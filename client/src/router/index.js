@@ -12,6 +12,7 @@ import ExpensesView from '../views/ExpensesView.vue'
 import MessagesView from '../views/MessagesView.vue'
 import NotificationsView from '../views/NotificationsView.vue'
 import AdminToolsView from '../views/AdminToolsView.vue'
+import TrucksView from '../views/TrucksView.vue'
 
 const routes = [
   {
@@ -73,6 +74,12 @@ const routes = [
     name: 'users',
     component: UsersView,
     meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/trucks',
+    name: 'trucks',
+    component: TrucksView,
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
     path: '/admin/tools',
