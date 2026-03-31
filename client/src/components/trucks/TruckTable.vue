@@ -57,7 +57,10 @@
           <div class="edit-row">
             <div class="edit-field">
               <label>Make</label>
-              <input v-model="editForm.make" type="text" />
+              <select v-model="editForm.make">
+                <option value="">-- Select --</option>
+                <option v-for="m in truckMakes" :key="m" :value="m">{{ m }}</option>
+              </select>
             </div>
             <div class="edit-field">
               <label>Model</label>
@@ -128,6 +131,12 @@
 import { ref, reactive } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+
+const truckMakes = [
+  'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
+  'Mack', 'Western Star', 'Hino', 'Isuzu', 'Ford', 'Chevrolet',
+  'RAM', 'GMC', 'Tesla', 'Nikola', 'Other',
+]
 
 defineProps({
   trucks: { type: Array, default: () => [] },

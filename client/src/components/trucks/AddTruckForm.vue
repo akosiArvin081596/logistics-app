@@ -23,7 +23,10 @@
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">Make</label>
-        <input v-model="form.make" class="form-input" type="text" placeholder="e.g. Freightliner" />
+        <select v-model="form.make" class="form-select">
+          <option value="">-- Select make --</option>
+          <option v-for="m in truckMakes" :key="m" :value="m">{{ m }}</option>
+        </select>
       </div>
       <div class="form-group">
         <label class="form-label">Model</label>
@@ -68,6 +71,12 @@
 
 <script setup>
 import { reactive, ref } from 'vue'
+
+const truckMakes = [
+  'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
+  'Mack', 'Western Star', 'Hino', 'Isuzu', 'Ford', 'Chevrolet',
+  'RAM', 'GMC', 'Tesla', 'Nikola', 'Other',
+]
 
 defineProps({
   driverNames: { type: Array, default: () => [] },
