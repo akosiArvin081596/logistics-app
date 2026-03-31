@@ -528,18 +528,23 @@ async function toggleLoad(al, loc) {
   destLatLng.value = hasDest ? [dLat, dLng] : null
   destAddress.value = al.dropoffAddress || ''
 
-  // Wait for Vue to finish rendering markers before fitting map bounds
   await nextTick()
 
   const map = mapRef.value?.leafletObject
+  console.log('[toggleLoad] map:', !!map, '| hasOrigin:', hasOrigin, '| hasDest:', hasDest)
+  console.log('[toggleLoad] origin coords:', oLat, oLng, '| dest coords:', dLat, dLng)
   if (map) {
-    map.stop()
-    map.invalidateSize()
     const boundsPoints = []
     if (hasOrigin) boundsPoints.push([oLat, oLng])
     if (hasDest) boundsPoints.push([dLat, dLng])
+    console.log('[toggleLoad] boundsPoints:', boundsPoints)
     if (boundsPoints.length >= 2) {
-      safeFitBounds(map, boundsPoints, { padding: [50, 50], maxZoom: 14, animate: false })
+      const bounds = L.latLngBounds(boundsPoints.map(p => L.latLng(p[0], p[1])))
+      console.log('[toggleLoad] bounds valid:', bounds.isValid(), bounds.toBBoxString())
+      if (bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14, animate: false })
+        console.log('[toggleLoad] fitBounds called, new center:', map.getCenter())
+      }
     } else if (boundsPoints.length === 1) {
       map.setView(boundsPoints[0], 12, { animate: false })
     }
