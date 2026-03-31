@@ -64,11 +64,10 @@
             </div>
             <div class="edit-field">
               <label>Model</label>
-              <select v-if="editModelOptions.length > 0" v-model="editForm.model">
-                <option value="">-- Select --</option>
+              <select v-model="editForm.model" :disabled="!editForm.make">
+                <option value="">{{ editForm.make ? '-- Select model --' : '-- Select make first --' }}</option>
                 <option v-for="m in editModelOptions" :key="m" :value="m">{{ m }}</option>
               </select>
-              <input v-else v-model="editForm.model" type="text" />
             </div>
           </div>
 

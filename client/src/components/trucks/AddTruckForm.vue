@@ -30,11 +30,10 @@
       </div>
       <div class="form-group">
         <label class="form-label">Model</label>
-        <select v-if="modelOptions.length > 0" v-model="form.model" class="form-select">
-          <option value="">-- Select model --</option>
+        <select v-model="form.model" class="form-select" :disabled="!form.make">
+          <option value="">{{ form.make ? '-- Select model --' : '-- Select make first --' }}</option>
           <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
         </select>
-        <input v-else v-model="form.model" class="form-input" type="text" placeholder="Enter model" />
       </div>
     </div>
 
