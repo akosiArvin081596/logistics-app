@@ -584,14 +584,14 @@ async function toggleLoad(al, loc) {
     }
   }
 
-  // Fetch weather at destination in background
-  const destCoord = hasDest ? { lat: dLat, lng: dLng } : (hasOrigin ? { lat: oLat, lng: oLng } : null)
-  if (destCoord) {
-    try {
-      const w = await api.get(`/api/weather?lat=${destCoord.lat}&lng=${destCoord.lng}`)
-      if (!w.error) weatherData.value = w
-    } catch { /* silent */ }
-  }
+  // Weather fetch disabled to reduce Google API costs
+  // const destCoord = hasDest ? { lat: dLat, lng: dLng } : (hasOrigin ? { lat: oLat, lng: oLng } : null)
+  // if (destCoord) {
+  //   try {
+  //     const w = await api.get(`/api/weather?lat=${destCoord.lat}&lng=${destCoord.lng}`)
+  //     if (!w.error) weatherData.value = w
+  //   } catch { /* silent */ }
+  // }
 }
 
 let lastRerouteTime = 0
