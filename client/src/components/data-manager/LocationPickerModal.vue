@@ -41,8 +41,8 @@
               @click="onMapClick"
             >
               <l-tile-layer
-                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                attribution="&copy; OpenStreetMap contributors"
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                attribution="&copy; Esri"
               />
               <l-marker v-if="markerPos" :lat-lng="markerPos" :icon="pinIcon" />
             </l-map>
