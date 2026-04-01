@@ -12,45 +12,60 @@
       <option v-for="t in docTypes" :key="t.value" :value="t.value">{{ t.label }}</option>
     </select>
 
-    <!-- Photo thumbnails -->
-    <div v-if="photos.length" class="photo-grid">
-      <div v-for="(p, i) in photos" :key="i" class="photo-thumb">
-        <img :src="p" alt="Photo" />
-        <button class="thumb-remove" @click="removePhoto(i)">&times;</button>
+    <!-- File thumbnails -->
+    <div v-if="files.length" class="photo-grid">
+      <div v-for="(f, i) in files" :key="i" class="photo-thumb">
+        <img v-if="f.isImage" :src="f.data" alt="Photo" />
+        <div v-else class="doc-icon">
+          <span class="doc-icon-emoji">&#128196;</span>
+          <span class="doc-icon-name">{{ f.name }}</span>
+        </div>
+        <button class="thumb-remove" @click="removeFile(i)">&times;</button>
         <span class="thumb-num">{{ i + 1 }}</span>
       </div>
       <label class="photo-add">
         <input
           ref="addInput"
           type="file"
-          accept="image/*"
-          capture="camera"
+          accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt"
           hidden
-          @change="handlePhoto"
+          @change="handleFile"
         />
         <span>+</span>
       </label>
     </div>
 
-    <!-- Initial capture button -->
-    <label v-else class="photo-btn">
-      <input
-        ref="fileInput"
-        type="file"
-        accept="image/*"
-        capture="camera"
-        hidden
-        @change="handlePhoto"
-      />
-      <span>&#128247; Capture / Upload Photos</span>
-    </label>
+    <!-- Initial capture/upload button -->
+    <div v-else class="upload-buttons">
+      <label class="photo-btn">
+        <input
+          ref="cameraInput"
+          type="file"
+          accept="image/*"
+          capture="camera"
+          hidden
+          @change="handleFile"
+        />
+        <span>&#128247; Take Photo</span>
+      </label>
+      <label class="photo-btn">
+        <input
+          ref="fileInput"
+          type="file"
+          accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt"
+          hidden
+          @change="handleFile"
+        />
+        <span>&#128196; Upload File</span>
+      </label>
+    </div>
 
     <button
       class="btn btn-primary"
-      :disabled="photos.length === 0 || uploading"
+      :disabled="files.length === 0 || uploading"
       @click="handleUpload"
     >
-      {{ uploading ? 'Uploading...' : `Upload ${selectedType} (${photos.length} photo${photos.length !== 1 ? 's' : ''})` }}
+      {{ uploading ? 'Uploading...' : `Upload ${selectedType} (${files.length} file${files.length !== 1 ? 's' : ''})` }}
     </button>
   </div>
 </template>
@@ -81,9 +96,10 @@ const docTypes = [
 ]
 
 const selectedType = ref(props.docType || 'POD')
+const cameraInput = ref(null)
 const fileInput = ref(null)
 const addInput = ref(null)
-const photos = ref([])
+const files = ref([]) // { data: base64, name: string, type: string, isImage: boolean }
 const uploading = ref(false)
 
 watch(() => props.docType, (val) => {
@@ -130,33 +146,69 @@ function compressImage(file) {
   })
 }
 
-async function handlePhoto(event) {
+function readFileAsDataURL(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader()
+    reader.onload = (e) => resolve(e.target.result)
+    reader.readAsDataURL(file)
+  })
+}
+
+async function handleFile(event) {
   const file = event.target.files[0]
   if (!file) return
-  const data = await compressImage(file)
-  photos.value.push(data)
-  // Reset input so the same file can be re-selected
+
+  if (file.type.startsWith('image/')) {
+    const data = await compressImage(file)
+    files.value.push({ data, name: file.name, type: file.type, isImage: true })
+  } else {
+    const data = await readFileAsDataURL(file)
+    files.value.push({ data, name: file.name, type: file.type, isImage: false })
+  }
   event.target.value = ''
 }
 
-function removePhoto(index) {
-  photos.value.splice(index, 1)
+function removeFile(index) {
+  files.value.splice(index, 1)
 }
 
 async function handleUpload() {
-  if (photos.value.length === 0 || uploading.value) return
+  if (files.value.length === 0 || uploading.value) return
   uploading.value = true
   try {
-    await api.post('/api/documents/upload', {
-      loadId: props.loadId,
-      rowIndex: props.rowIndex,
-      docType: selectedType.value,
-      photoData: photos.value.length === 1 ? photos.value[0] : photos.value,
-      driverName: props.driverName,
-    })
-    toast.show(`${selectedType.value} uploaded (${photos.value.length} page${photos.value.length !== 1 ? 's' : ''})`)
+    const images = files.value.filter(f => f.isImage)
+    const docs = files.value.filter(f => !f.isImage)
+
+    // Upload images as before (converted to multi-page PDF server-side)
+    if (images.length > 0) {
+      const photoData = images.length === 1 ? images[0].data : images.map(f => f.data)
+      await api.post('/api/documents/upload', {
+        loadId: props.loadId,
+        rowIndex: props.rowIndex,
+        docType: selectedType.value,
+        photoData,
+        driverName: props.driverName,
+        fileType: 'image',
+      })
+    }
+
+    // Upload each document file separately
+    for (const doc of docs) {
+      await api.post('/api/documents/upload', {
+        loadId: props.loadId,
+        rowIndex: props.rowIndex,
+        docType: selectedType.value,
+        photoData: doc.data,
+        driverName: props.driverName,
+        fileType: 'document',
+        fileName: doc.name,
+      })
+    }
+
+    const total = files.value.length
+    toast.show(`${selectedType.value} uploaded (${total} file${total !== 1 ? 's' : ''})`)
     emit('uploaded', { type: selectedType.value })
-    photos.value = []
+    files.value = []
   } catch (err) {
     toast.show(err.message || 'Failed to upload document', 'error')
   } finally {
@@ -193,24 +245,29 @@ async function handleUpload() {
   cursor: pointer;
 }
 
+.upload-buttons {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
 .photo-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 100%;
-  min-height: 100px;
+  flex: 1;
+  min-height: 80px;
   border: 2px dashed var(--border);
   border-radius: var(--radius);
   cursor: pointer;
-  margin-bottom: 0.75rem;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   color: var(--text-dim);
   transition: border-color 0.15s;
 }
 
 .photo-btn:hover { border-color: var(--accent); }
 
-/* Photo grid */
+/* Photo/file grid */
 .photo-grid {
   display: flex;
   flex-wrap: wrap;
@@ -229,6 +286,30 @@ async function handleUpload() {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+.doc-icon {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  padding: 0.2rem;
+}
+.doc-icon-emoji {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+.doc-icon-name {
+  font-size: 0.5rem;
+  color: var(--text-dim);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+  margin-top: 0.15rem;
 }
 .thumb-remove {
   position: absolute;

@@ -2614,75 +2614,53 @@ app.get("/api/documents/:loadId", requireAuth, (req, res) => {
 	}
 });
 
-// POST /api/documents/upload — Upload document to Google Drive as PDF
+// POST /api/documents/upload — Upload document (images → PDF, or direct file)
 app.post("/api/documents/upload", requireAuth, async (req, res) => {
 	try {
-		const { loadId, rowIndex, photoData, driverName } = req.body;
+		const { loadId, rowIndex, photoData, driverName, fileType, fileName: clientFileName } = req.body;
 		const docType = req.body.docType || req.body.type || "POD";
 		if (!loadId || !rowIndex || !photoData) {
 			return res
 				.status(400)
-				.json({ error: "Please capture a photo before uploading." });
+				.json({ error: "Please select a file before uploading." });
 		}
 
-		// Support single string or array of base64 images
-		const photoArray = Array.isArray(photoData) ? photoData : [photoData];
-		const imageBuffers = photoArray.map(p => {
-			const base64 = p.replace(/^data:image\/\w+;base64,/, "");
-			return Buffer.from(base64, "base64");
-		});
-
-		// Convert image(s) to multi-page PDF
-		let pdfBuffer;
-		try {
-			pdfBuffer = await imageToPdf(imageBuffers);
-		} catch (pdfErr) {
-			console.error("Image-to-PDF error:", pdfErr.message);
-			return res.status(400).json({ error: "The photo could not be processed. Please try taking a new photo." });
-		}
 		const timestamp = Date.now();
-		const fileName = `${loadId}_${docType}_${timestamp}.pdf`;
-
-		let driveFileId = "";
+		let fileBuffer;
+		let fileName;
 		let driveUrl = "";
 
-		// Upload PDF to Google Drive (fall back to local disk if Drive fails)
-		if (DRIVE_FOLDER_ID) {
+		if (fileType === 'document') {
+			// Direct document upload (PDF, Word, etc.) — no image conversion
+			const base64 = (typeof photoData === 'string' ? photoData : '').replace(/^data:[^;]+;base64,/, "");
+			fileBuffer = Buffer.from(base64, "base64");
+			const ext = clientFileName ? path.extname(clientFileName) : '.pdf';
+			fileName = `${loadId}_${docType}_${timestamp}${ext}`;
+		} else {
+			// Image upload — convert to multi-page PDF
+			const photoArray = Array.isArray(photoData) ? photoData : [photoData];
+			const imageBuffers = photoArray.map(p => {
+				const base64 = p.replace(/^data:image\/\w+;base64,/, "");
+				return Buffer.from(base64, "base64");
+			});
 			try {
-				const drive = await getDrive();
-				const { Readable } = require("stream");
-
-				const driveResponse = await drive.files.create({
-					requestBody: {
-						name: fileName,
-						parents: [DRIVE_FOLDER_ID],
-					},
-					media: {
-						mimeType: "application/pdf",
-						body: Readable.from(pdfBuffer),
-					},
-					fields: "id, webViewLink",
-				});
-
-				driveFileId = driveResponse.data.id || "";
-				driveUrl = driveResponse.data.webViewLink || "";
-			} catch (driveErr) {
-				console.error("Google Drive upload error (falling back to local):", driveErr.message);
-				// Fall through to local storage below
+				fileBuffer = await imageToPdf(imageBuffers);
+			} catch (pdfErr) {
+				console.error("Image-to-PDF error:", pdfErr.message);
+				return res.status(400).json({ error: "The photo could not be processed. Please try taking a new photo." });
 			}
+			fileName = `${loadId}_${docType}_${timestamp}.pdf`;
 		}
 
-		// Fallback: save to local disk if Drive upload didn't produce a URL
-		if (!driveUrl) {
-			try {
-				const uploadsDir = path.join(__dirname, "uploads");
-				if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-				fs.writeFileSync(path.join(uploadsDir, fileName), pdfBuffer);
-				driveUrl = `/uploads/${fileName}`;
-			} catch (localErr) {
-				console.error("Local file save error:", localErr.message);
-				return res.status(500).json({ error: "Could not save the document. Please try again." });
-			}
+		// Save to local disk
+		try {
+			const uploadsDir = path.join(__dirname, "uploads");
+			if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+			fs.writeFileSync(path.join(uploadsDir, fileName), fileBuffer);
+			driveUrl = `/uploads/${fileName}`;
+		} catch (localErr) {
+			console.error("Local file save error:", localErr.message);
+			return res.status(500).json({ error: "Could not save the document. Please try again." });
 		}
 
 		// Mark sheet column only for POD uploads (non-critical — don't block upload)
@@ -2711,10 +2689,12 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 			}
 		}
 
-		// OCR for receipts
+		// OCR for receipts (images only)
 		let ocrText = "";
-		if (docType === "Receipt") {
-			ocrText = await extractReceiptText(imageBuffers[0]);
+		if (docType === "Receipt" && fileType !== 'document') {
+			const photoArray = Array.isArray(photoData) ? photoData : [photoData];
+			const firstBuf = Buffer.from(photoArray[0].replace(/^data:image\/\w+;base64,/, ""), "base64");
+			ocrText = await extractReceiptText(firstBuf);
 		}
 
 		// Store metadata in SQLite
