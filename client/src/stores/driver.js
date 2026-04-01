@@ -154,6 +154,21 @@ export const useDriverStore = defineStore('driver', {
         }
       }
 
+      // Sort historical loads by most recent first (completion date or delivery date)
+      if (state.loadSubTab === 'historical') {
+        const completionCol = findCol(headers, /completion.*date/i)
+        const sortDateCol = completionCol || delivDateCol || pickupDateCol
+        if (sortDateCol) {
+          result.sort((a, b) => {
+            const da = new Date((a[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').trim())
+            const db = new Date((b[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').trim())
+            const ta = isNaN(da) ? 0 : da.getTime()
+            const tb = isNaN(db) ? 0 : db.getTime()
+            return tb - ta
+          })
+        }
+      }
+
       return result
     },
   },
