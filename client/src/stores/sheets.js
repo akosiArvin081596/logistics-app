@@ -17,6 +17,8 @@ export const useSheetsStore = defineStore('sheets', {
     editingRow: null,
     searchQuery: '',
     isLoading: false,
+    duplicates: [],
+    showDuplicates: false,
   }),
 
   actions: {
@@ -61,6 +63,7 @@ export const useSheetsStore = defineStore('sheets', {
         this.data = json.data || []
         this.total = json.total || 0
         this.totalPages = json.totalPages || 0
+        this.duplicates = json.duplicates || []
       } catch (err) {
         console.error('Failed to load data:', err)
         throw err
@@ -70,11 +73,12 @@ export const useSheetsStore = defineStore('sheets', {
     },
 
     async addRow(values) {
-      await api.post(
+      const result = await api.post(
         `/api/data?sheet=${encodeURIComponent(this.currentSheet)}`,
         { values }
       )
       await this.loadData()
+      return result
     },
 
     async saveRow(rowIndex, values) {

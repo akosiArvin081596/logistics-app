@@ -1321,9 +1321,12 @@ app.get("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) 
 			return obj;
 		});
 
-		// Deduplicate loads by Load ID (keep last occurrence)
+		// Deduplicate loads by Load ID (keep most advanced status)
+		let duplicates = [];
 		if (sheetName === "Job Tracking") {
-			allData = deduplicateLoads(allData, headers);
+			const result = deduplicateLoads(allData, headers, true);
+			allData = result.data;
+			duplicates = result.duplicates;
 		}
 
 		// Search filter
@@ -1344,7 +1347,7 @@ app.get("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) 
 			data = sanitizeBrokerColumns(headers, data);
 		}
 
-		res.json({ headers, data, sheet: sheetName, total, page, limit, totalPages });
+		res.json({ headers, data, sheet: sheetName, total, page, limit, totalPages, duplicates });
 	} catch (error) {
 		console.error("Error reading sheet:", error.message);
 		res.status(500).json({ error: error.message });
@@ -1358,6 +1361,37 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 		const { values } = req.body; // values = array of cell values
 
 		const sheets = await getSheets();
+
+		// Check for duplicate Load ID in Job Tracking
+		let warning = "";
+		if (sheetName === "Job Tracking") {
+			try {
+				const headerResp = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: "Job Tracking!1:1",
+				});
+				const hdrs = (headerResp.data.values || [[]])[0];
+				const lidIdx = hdrs.findIndex((h) => /load.?id|job.?id/i.test(h));
+				if (lidIdx >= 0 && values[lidIdx]) {
+					const newLid = values[lidIdx].trim().toLowerCase().replace(/^#/, "");
+					if (newLid) {
+						const allResp = await sheets.spreadsheets.values.get({
+							spreadsheetId: SPREADSHEET_ID,
+							range: "Job Tracking",
+						});
+						const allRows = allResp.data.values || [];
+						for (let i = 1; i < allRows.length; i++) {
+							const existing = (allRows[i][lidIdx] || "").trim().toLowerCase().replace(/^#/, "");
+							if (existing === newLid) {
+								warning = `Load ID '${values[lidIdx]}' already exists (row ${i + 1}). A duplicate entry will be created.`;
+								break;
+							}
+						}
+					}
+				}
+			} catch { /* non-critical */ }
+		}
+
 		const response = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: `${sheetName}`,
@@ -1370,6 +1404,7 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 		res.json({
 			success: true,
 			updatedRange: response.data.updates.updatedRange,
+			...(warning && { warning }),
 		});
 	} catch (error) {
 		console.error("Error appending row:", error.message);
@@ -2098,10 +2133,18 @@ function parseSheet(valueRange) {
 	return { headers, data };
 }
 
-// Helper: remove duplicate load IDs from data array, keeping the last occurrence
-function deduplicateLoads(data, headers) {
+// Status hierarchy for smart deduplication (higher = more advanced)
+const STATUS_RANK = {
+	'': 0, unassigned: 1, dispatched: 2, assigned: 3, 'at shipper': 4,
+	loading: 5, 'in transit': 6, unloading: 7, 'at receiver': 8,
+	delivered: 9, 'pod received': 10, completed: 11,
+};
+
+// Helper: remove duplicate load IDs, keeping the row with the most advanced status
+function deduplicateLoads(data, headers, returnDuplicates = false) {
 	const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
-	if (!loadIdCol) return data;
+	if (!loadIdCol) return returnDuplicates ? { data, duplicates: [] } : data;
+	const statusCol = headers.find((h) => /^(job.?)?status$/i.test(h));
 	const seen = new Map();
 	for (let i = 0; i < data.length; i++) {
 		const lid = (data[i][loadIdCol] || "").trim().toLowerCase();
@@ -2112,10 +2155,25 @@ function deduplicateLoads(data, headers) {
 	const skipSet = new Set();
 	for (const [, indices] of seen) {
 		if (indices.length > 1) {
-			for (let j = 0; j < indices.length - 1; j++) skipSet.add(indices[j]);
+			// Pick the row with the highest status rank; on tie, keep higher index
+			let bestIdx = indices[0];
+			let bestRank = statusCol ? (STATUS_RANK[(data[bestIdx][statusCol] || "").trim().toLowerCase()] || 0) : 0;
+			for (let j = 1; j < indices.length; j++) {
+				const rank = statusCol ? (STATUS_RANK[(data[indices[j]][statusCol] || "").trim().toLowerCase()] || 0) : 0;
+				if (rank > bestRank || (rank === bestRank && indices[j] > bestIdx)) {
+					bestIdx = indices[j];
+					bestRank = rank;
+				}
+			}
+			for (const idx of indices) {
+				if (idx !== bestIdx) skipSet.add(idx);
+			}
 		}
 	}
-	return skipSet.size > 0 ? data.filter((_, i) => !skipSet.has(i)) : data;
+	if (skipSet.size === 0) return returnDuplicates ? { data, duplicates: [] } : data;
+	const filtered = data.filter((_, i) => !skipSet.has(i));
+	if (!returnDuplicates) return filtered;
+	return { data: filtered, duplicates: data.filter((_, i) => skipSet.has(i)) };
 }
 
 function sanitizeBrokerContact(value) {

@@ -19,6 +19,11 @@
           :value="store.searchQuery"
           @input="onSearch($event.target.value)"
         />
+        <button
+          v-if="store.currentSheet === 'Job Tracking' && store.duplicates.length > 0"
+          :class="['btn', 'btn-dup', { active: store.showDuplicates }]"
+          @click="store.showDuplicates = !store.showDuplicates"
+        >Duplicate Records ({{ store.duplicates.length }})</button>
         <button class="btn btn-primary" @click="showModal = true">+ Add Row</button>
       </div>
     </div>
@@ -46,6 +51,26 @@
       @go="store.setPage"
       @size="store.setPageSize"
     />
+
+    <!-- Duplicate Records Section -->
+    <div v-if="store.showDuplicates && store.duplicates.length > 0" class="duplicates-section">
+      <div class="duplicates-header">
+        <h3>Duplicate Records</h3>
+        <span class="dup-count">{{ store.duplicates.length }} stale</span>
+      </div>
+      <DataTable
+        :headers="store.headers"
+        :data="store.duplicates"
+        :editing-row="null"
+        :driver-list="store.driverList"
+        :current-sheet="store.currentSheet"
+        :user-role="auth.user?.role"
+        @edit="handleEdit"
+        @save="handleSave"
+        @cancel="handleCancel"
+        @delete="handleDelete"
+      />
+    </div>
 
     <!-- Add Row Modal -->
     <AddRowModal
@@ -152,9 +177,13 @@ async function handleSave(rowIndex, values) {
 
 async function handleAdd(values) {
   try {
-    await store.addRow(values)
+    const result = await store.addRow(values)
     showModal.value = false
-    toast('Row added successfully', 'success')
+    if (result?.warning) {
+      toast(result.warning, 'error')
+    } else {
+      toast('Row added successfully', 'success')
+    }
   } catch {
     toast('Failed to add row', 'error')
   }
@@ -193,4 +222,47 @@ async function confirmDelete() {
 .search-input:focus { border-color: var(--accent); }
 .search-input::placeholder { color: var(--text-dim); }
 :deep(.pagination) { border-radius: 0 0 var(--radius) var(--radius); }
+
+.btn-dup {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid var(--amber);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--amber);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.btn-dup:hover, .btn-dup.active {
+  background: var(--amber-dim);
+}
+
+.duplicates-section {
+  margin-top: 1.25rem;
+  border: 2px solid var(--amber);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.duplicates-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: var(--amber-dim);
+}
+.duplicates-header h3 {
+  font-size: 0.9rem;
+  font-weight: 700;
+  margin: 0;
+}
+.dup-count {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  border-radius: 8px;
+  background: var(--amber);
+  color: #fff;
+}
 </style>
