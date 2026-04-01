@@ -1690,8 +1690,8 @@ app.post("/api/driver/respond", requireAuth, async (req, res) => {
 		const existing = db.prepare(
 			`SELECT id, response FROM load_responses WHERE load_id = ? AND driver_name = ? AND row_index = ? ORDER BY responded_at DESC LIMIT 1`
 		).get(loadId, driverName.trim().toLowerCase(), rowIndex);
-		if (existing && existing.response === response) {
-			return res.status(409).json({ error: "You have already responded to this load" });
+		if (existing && existing.response === response && response === "accepted") {
+			return res.status(409).json({ error: "You have already accepted this load" });
 		}
 
 		// Insert response
