@@ -10,6 +10,7 @@
           :zoom="5"
           :center="[39.8, -98.5]"
           :use-global-leaflet="false"
+          :options="{ attributionControl: false }"
           style="height: 100%; width: 100%;"
           @ready="onMapReady"
         >

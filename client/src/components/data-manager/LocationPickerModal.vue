@@ -34,6 +34,7 @@
               :zoom="mapZoom"
               :center="mapCenter"
               :use-global-leaflet="false"
+              :options="{ attributionControl: false }"
               :min-zoom="3"
               :max-bounds="[[-85, -180], [85, 180]]"
               :max-bounds-viscosity="1.0"
