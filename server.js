@@ -1504,6 +1504,12 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			body: route,
 		});
 
+		// Clear stale load_responses so driver gets a fresh Accept/Decline prompt
+		if (loadId) {
+			db.prepare("DELETE FROM load_responses WHERE load_id = ? AND driver_name = ?")
+				.run(loadId, driver.trim().toLowerCase());
+		}
+
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error dispatching load:", error.message);
@@ -1583,6 +1589,12 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			title: `Reassigned Load ${loadId || 'N/A'} to ${newDriver}`,
 			body: `Previously ${oldDriver || 'unknown'}`,
 		});
+
+		// Clear stale load_responses for new driver
+		if (loadId && newDriver) {
+			db.prepare("DELETE FROM load_responses WHERE load_id = ? AND driver_name = ?")
+				.run(loadId, newDriver.trim().toLowerCase());
+		}
 
 		res.json({ success: true });
 	} catch (error) {
