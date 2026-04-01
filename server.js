@@ -2744,7 +2744,7 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 				driverName || "",
 				docType,
 				fileName,
-				driveFileId,
+				"",
 				driveUrl,
 				ocrText,
 			);
