@@ -59,6 +59,16 @@
       @confirm="onConfirm"
       @cancel="showConfirm = false"
     />
+
+    <!-- POD reminder after arriving at receiver -->
+    <ConfirmModal
+      :open="showPodReminder"
+      title="Upload Proof of Delivery"
+      message="You've arrived at the receiver. Please upload a Proof of Delivery (POD) in the Documents section before marking this load as Delivered."
+      confirm-text="Got it"
+      @confirm="showPodReminder = false"
+      @cancel="showPodReminder = false"
+    />
   </div>
 </template>
 
@@ -78,6 +88,7 @@ const props = defineProps({
 const emit = defineEmits(['update'])
 
 const showConfirm = ref(false)
+const showPodReminder = ref(false)
 const updating = ref(false)
 
 const statusFlow = [
@@ -126,8 +137,13 @@ function stepState(i) {
 async function onConfirm() {
   showConfirm.value = false
   if (nextStep.value) {
+    const status = nextStep.value.value
     updating.value = true
-    emit('update', { newStatus: nextStep.value.value, load: props.load })
+    emit('update', { newStatus: status, load: props.load })
+    // Show POD reminder after arriving at receiver
+    if (status === 'At Receiver') {
+      setTimeout(() => { showPodReminder.value = true }, 1500)
+    }
     // Reset after a timeout (parent controls actual completion)
     setTimeout(() => { updating.value = false }, 5000)
   }
