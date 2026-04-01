@@ -140,6 +140,10 @@ function compressImage(file) {
         canvas.getContext('2d').drawImage(img, 0, 0, w, h)
         resolve(canvas.toDataURL('image/jpeg', 0.8))
       }
+      img.onerror = () => {
+        // If image can't be rendered (unsupported format), fall back to raw file
+        resolve(e.target.result)
+      }
       img.src = e.target.result
     }
     reader.readAsDataURL(file)
