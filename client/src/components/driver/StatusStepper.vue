@@ -44,8 +44,9 @@
         <button
           v-else-if="nextStep"
           class="action-btn primary"
+          :disabled="updating"
           @click="showConfirm = true"
-        >{{ nextStep.label }}</button>
+        >{{ updating ? 'Updating...' : nextStep.label }}</button>
       </template>
     </div>
 
@@ -77,6 +78,7 @@ const props = defineProps({
 const emit = defineEmits(['update'])
 
 const showConfirm = ref(false)
+const updating = ref(false)
 
 const statusFlow = [
   { value: 'At Shipper', label: 'Arrived at Shipper' },
@@ -121,10 +123,13 @@ function stepState(i) {
   return 'pending'
 }
 
-function onConfirm() {
+async function onConfirm() {
   showConfirm.value = false
   if (nextStep.value) {
+    updating.value = true
     emit('update', { newStatus: nextStep.value.value, load: props.load })
+    // Reset after a timeout (parent controls actual completion)
+    setTimeout(() => { updating.value = false }, 5000)
   }
 }
 </script>
@@ -255,6 +260,17 @@ function onConfirm() {
 
 .action-btn.primary:hover {
   opacity: 0.9;
+}
+
+.action-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  animation: btnPulse 1s infinite;
+}
+
+@keyframes btnPulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 0.4; }
 }
 
 .action-btn.primary:disabled {
