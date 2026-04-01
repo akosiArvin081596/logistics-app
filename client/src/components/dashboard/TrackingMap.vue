@@ -33,7 +33,7 @@
               <div class="popup-coords">{{ loc.latitude.toFixed(5) }}, {{ loc.longitude.toFixed(5) }}</div>
               <div v-if="loc.speed">Speed: {{ Math.round(loc.speed * 2.237) }} mph</div>
               <div v-if="selectedDriver === loc.driver && originLatLng && expandedLoadId" class="popup-eta">
-                {{ driverToPickupKm(loc) }} km to Pickup
+                {{ driverToPickupMi(loc) }} mi to Pickup
               </div>
               <div class="popup-time">{{ formatTime(loc.timestamp) }}</div>
             </div>
@@ -186,7 +186,7 @@
                     <div class="route-point-coords">{{ al.destLat.toFixed(5) }}, {{ al.destLng.toFixed(5) }}</div>
                   </div>
                   <div v-if="routeDistance != null || routeEta != null || selectedDriverSpeed != null" class="route-summary">
-                    <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} km</span>
+                    <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} mi</span>
                     <span v-if="routeEta != null" class="route-stat">{{ routeEta }} min ETA</span>
                     <span v-if="selectedDriverSpeed != null" class="route-stat speed">{{ selectedDriverSpeed }} mph</span>
                   </div>
@@ -368,7 +368,7 @@ const routeMidpoint = computed(() => {
 
 const distanceIcon = computed(() => L.divIcon({
   className: 'distance-label-icon',
-  html: `<div class="distance-label">${routeDistance.value != null ? routeDistance.value + ' km' : ''}</div>`,
+  html: `<div class="distance-label">${routeDistance.value != null ? routeDistance.value + ' mi' : ''}</div>`,
   iconSize: [80, 24],
   iconAnchor: [40, 12],
 }))
@@ -400,7 +400,7 @@ async function fetchTrail(driverName, loadId) {
       destLatLng.value = [data.destination.latitude, data.destination.longitude]
       destAddress.value = data.destination.address || ''
     }
-    routeDistance.value = data.distanceKm
+    routeDistance.value = data.distanceMiles
     routeEta.value = data.etaMinutes
     trailLoadId.value = loadId
   } catch {
@@ -572,7 +572,7 @@ async function toggleLoad(al, loc) {
       } else if (hasOrigin) {
         routePoints.value = [[oLat, oLng], [dLat, dLng]]
       }
-      routeDistance.value = data.distanceKm || null
+      routeDistance.value = data.distanceMiles || null
       routeEta.value = data.etaMinutes || null
     } catch {
       if (gen !== focusGeneration) return
@@ -609,7 +609,7 @@ async function checkOffRoute(lat, lng) {
       const data = await api.get(`/api/route?fromLat=${lat}&fromLng=${lng}&toLat=${toLat}&toLng=${toLng}`)
       if (data.route && data.route.length >= 2) {
         routePoints.value = data.route.map(p => [p.latitude, p.longitude])
-        routeDistance.value = data.distanceKm
+        routeDistance.value = data.distanceMiles
         routeEta.value = data.etaMinutes
       }
     } catch {
@@ -679,7 +679,7 @@ const now = ref(Date.now())
 let nowInterval = null
 const ONLINE_THRESHOLD = 5 * 60 * 1000 // 5 minutes
 
-function driverToPickupKm(loc) {
+function driverToPickupMi(loc) {
   if (!originLatLng.value || !loc.latitude) return '—'
   const R = 6371
   const toRad = d => d * Math.PI / 180
@@ -699,7 +699,7 @@ function driverOutOfRange(loc) {
   const loads = loc.activeLoads || []
   if (loads.length === 0) return ''
   // Check distance to the nearest load point (origin or destination)
-  const R = 6371 // km
+  const R = 3959 // miles
   const toRad = d => d * Math.PI / 180
   let minDist = Infinity
   for (const al of loads) {
@@ -712,7 +712,7 @@ function driverOutOfRange(loc) {
       if (d < minDist) minDist = d
     }
   }
-  if (minDist > 2000) return `${Math.round(minDist).toLocaleString()} km away`
+  if (minDist > 1243) return `${Math.round(minDist).toLocaleString()} mi away`
   return ''
 }
 

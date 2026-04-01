@@ -14,10 +14,10 @@
     </template>
     <!-- Map: driver location, dispatch mode, OR full route -->
     <template v-else>
-      <div class="map-info" v-if="hasCoords && (distanceKm != null || etaMinutes != null || driverDistanceInfo)">
-        <span v-if="distanceKm != null" class="info-item">{{ distanceKm }} km</span>
+      <div class="map-info" v-if="hasCoords && (distanceMiles != null || etaMinutes != null || driverDistanceInfo)">
+        <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
         <span v-if="etaMinutes != null" class="info-item">{{ etaMinutes }} min ETA</span>
-        <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.km > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.km }} km {{ driverDistanceInfo.label }}</span>
+        <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
       </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
       <div class="map-container">
@@ -103,7 +103,7 @@ const props = defineProps({
 const api = useApi()
 const mapRef = ref(null)
 const routePoints = ref([])
-const distanceKm = ref(null)
+const distanceMiles = ref(null)
 const etaMinutes = ref(null)
 
 function findCol(regex) {
@@ -142,8 +142,8 @@ const hasCoords = computed(() => destLatLng.value != null && (!isDelivered.value
 const waitingForGps = computed(() => hasCoords.value && !driverLatLng.value)
 const isPrePickup = computed(() => /^(dispatched|assigned|new|pending)$/i.test(loadStatus.value))
 
-function haversineKm(a, b) {
-  const R = 6371
+function haversineMi(a, b) {
+  const R = 3959 // miles
   const toRad = d => d * Math.PI / 180
   const dLat = toRad(b[0] - a[0])
   const dLng = toRad(b[1] - a[1])
@@ -155,10 +155,10 @@ function haversineKm(a, b) {
 const driverDistanceInfo = computed(() => {
   if (!driverLatLng.value) return null
   if (isPrePickup.value && originLatLng.value) {
-    return { km: haversineKm(driverLatLng.value, originLatLng.value), label: 'to Pickup' }
+    return { mi: haversineMi(driverLatLng.value, originLatLng.value), label: 'to Pickup' }
   }
   if (!isPrePickup.value && !isDelivered.value && destLatLng.value) {
-    return { km: haversineKm(driverLatLng.value, destLatLng.value), label: 'to Drop-off' }
+    return { mi: haversineMi(driverLatLng.value, destLatLng.value), label: 'to Drop-off' }
   }
   return null
 })
@@ -249,7 +249,7 @@ let initialFitDone = false
 
 async function fetchRoute(fitBounds = false) {
   routePoints.value = []
-  distanceKm.value = null
+  distanceMiles.value = null
   etaMinutes.value = null
   if (!destLatLng.value) return
 
@@ -278,7 +278,7 @@ async function fetchRoute(fitBounds = false) {
     if (data.route && data.route.length >= 2) {
       routePoints.value = data.route.map(p => [p.latitude, p.longitude])
     }
-    distanceKm.value = data.distanceKm
+    distanceMiles.value = data.distanceMiles
     etaMinutes.value = data.etaMinutes
 
     // Only fit bounds on initial load, not on reroutes

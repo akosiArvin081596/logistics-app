@@ -3401,7 +3401,7 @@ async function getRoute(from, to, retries = 2) {
 			const durationSec = parseInt((leg.duration || "0s").replace("s", ""), 10);
 			const result = {
 				points: decodePolyline(route.polyline.encodedPolyline),
-				distanceKm: Math.round(leg.distanceMeters / 100) / 10,
+				distanceMiles: Math.round(leg.distanceMeters / 160.934) / 10,
 				durationMin: Math.round(durationSec / 60),
 			};
 			routeCache.set(cacheKey, { result, time: Date.now() });
@@ -3581,7 +3581,7 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 		res.json({
 			trail,
 			route: route ? route.points : null,
-			distanceKm: route ? route.distanceKm : null,
+			distanceMiles: route ? route.distanceMiles : null,
 			etaMinutes: route ? route.durationMin : null,
 			origin,
 			destination,
@@ -3605,12 +3605,12 @@ app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async 
 		const route = await getRoute(from, to);
 		if (!route) {
 			// Return empty route instead of 500 (e.g. cross-ocean routes OSRM can't compute)
-			const distKm = Math.round(geolib.getDistance(from, to) / 100) / 10;
-			return res.json({ route: null, distanceKm: distKm, etaMinutes: null, fallback: true });
+			const distMiles = Math.round(geolib.getDistance(from, to) / 160.934) / 10;
+			return res.json({ route: null, distanceMiles: distMiles, etaMinutes: null, fallback: true });
 		}
 		res.json({
 			route: route.points,
-			distanceKm: route.distanceKm,
+			distanceMiles: route.distanceMiles,
 			etaMinutes: route.durationMin,
 		});
 	} catch (error) {
