@@ -20,9 +20,17 @@
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
       <ProductionSection :production="store.production" :config="store.config" />
+      <TrendSection :production="store.production" />
       <AssetSection :asset="store.asset" :config="store.config" />
+      <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
+      <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
       <RecessionSection v-if="store.recessionProof" :recession-proof="store.recessionProof" :config="store.config" />
+      <ConfigPanel
+        v-if="authStore.user?.role === 'Super Admin'"
+        :config="store.config"
+        @save="handleSaveConfig"
+      />
     </template>
 
     <!-- Error State -->
@@ -31,23 +39,30 @@
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useInvestorStore } from '../stores/investor'
 import { useAuthStore } from '../stores/auth'
+import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import ProductionSection from '../components/investor/ProductionSection.vue'
+import TrendSection from '../components/investor/TrendSection.vue'
 import AssetSection from '../components/investor/AssetSection.vue'
+import FleetBreakdownSection from '../components/investor/FleetBreakdownSection.vue'
+import CashFlowSection from '../components/investor/CashFlowSection.vue'
 import TaxShieldSection from '../components/investor/TaxShieldSection.vue'
 import RecessionSection from '../components/investor/RecessionSection.vue'
+import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 
 const store = useInvestorStore()
 const authStore = useAuthStore()
+const api = useApi()
 const { show: toast } = useToast()
+
+const trucks = ref([])
 
 const statusText = computed(() => (store.isLoading ? 'Loading...' : 'Read-Only'))
 
-// Merge taxShield with purchasePrice from asset for the TaxShieldSection
 const taxShieldData = computed(() => {
   const ts = store.taxShield || {}
   const asset = store.asset || {}
@@ -57,8 +72,23 @@ const taxShieldData = computed(() => {
 async function loadData() {
   try {
     await store.load()
+    // Load trucks for fleet breakdown
+    try {
+      const data = await api.get('/api/trucks')
+      trucks.value = data.trucks || []
+    } catch { /* trucks table may not exist for Investor role */ }
   } catch {
     toast('Failed to load investor data', 'error')
+  }
+}
+
+async function handleSaveConfig(config) {
+  try {
+    await store.updateConfig(config)
+    toast('Configuration saved')
+    await store.load()
+  } catch (err) {
+    toast(err.message || 'Failed to save configuration', 'error')
   }
 }
 
@@ -96,5 +126,4 @@ onMounted(() => {
   margin-bottom: 1rem;
   border-radius: var(--radius);
 }
-
 </style>

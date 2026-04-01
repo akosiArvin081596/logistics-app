@@ -596,7 +596,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 });
 
 // Truck Database: list all trucks
-app.get("/api/trucks", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
 	const trucks = db
 		.prepare("SELECT * FROM trucks ORDER BY unit_number ASC")
 		.all()
