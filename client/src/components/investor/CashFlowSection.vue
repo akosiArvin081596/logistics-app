@@ -12,9 +12,9 @@
         <div class="kpi-sub">revenue minus expenses</div>
       </div>
       <div class="kpi-card blue">
-        <div class="kpi-label">Investor Payout (Est.)</div>
+        <div class="kpi-label">Owner Earnings (Est.)</div>
         <div class="kpi-value">{{ fmt(investorPayout) }}</div>
-        <div class="kpi-sub">at {{ splitPct }}% split</div>
+        <div class="kpi-sub">at {{ splitPct }}% owner take</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Break-Even</div>
@@ -22,7 +22,7 @@
         <div class="kpi-sub">est. {{ breakEvenDate }}</div>
       </div>
       <div class="kpi-card" :class="roiPct >= 0 ? 'accent' : 'danger'">
-        <div class="kpi-label">Return on Investment</div>
+        <div class="kpi-label">Business ROI</div>
         <div class="kpi-value">{{ roiPct.toFixed(1) }}%</div>
         <div class="kpi-sub">total to date</div>
       </div>
@@ -30,7 +30,7 @@
 
     <!-- Cash flow timeline -->
     <div class="timeline">
-      <div class="timeline-title">Investment Recovery Timeline</div>
+      <div class="timeline-title">Truck Payoff Timeline</div>
       <div class="progress-track">
         <div class="progress-fill" :style="{ width: Math.min(recoveryPct, 100) + '%' }"></div>
         <span class="progress-label">{{ recoveryPct.toFixed(0) }}% recovered</span>

@@ -1,7 +1,7 @@
 <template>
   <div class="investor-dashboard admin-page">
     <div class="page-header">
-      <h2>Financial &amp; Investor Dashboard</h2>
+      <h2>Business Owner Dashboard</h2>
       <div class="header-actions">
         <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
           {{ store.isLoading ? 'Loading...' : 'Refresh' }}

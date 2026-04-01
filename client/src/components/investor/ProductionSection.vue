@@ -12,7 +12,7 @@
         <div class="kpi-sub">over {{ production.operatingDays }} days</div>
       </div>
       <div class="kpi-card accent">
-        <div class="kpi-label">Monthly Investor Payout</div>
+        <div class="kpi-label">Monthly Owner Earnings</div>
         <div class="kpi-value">{{ fmt(payoutMin) }}</div>
         <div class="kpi-sub">to {{ fmt(payoutMax) }}/mo</div>
       </div>

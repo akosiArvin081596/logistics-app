@@ -2,13 +2,13 @@
   <div class="section config-section">
     <div class="section-title">
       <div class="section-icon" style="background: var(--bg); color: var(--text-dim);">&#9881;</div>
-      Investor Configuration
+      Business Configuration
       <span class="admin-badge">Admin Only</span>
     </div>
 
     <div class="config-grid">
       <div class="config-group">
-        <label>Investor Split %</label>
+        <label>Owner Take %</label>
         <input v-model.number="form.investor_split_pct" type="number" min="0" max="100" />
       </div>
       <div class="config-group">
