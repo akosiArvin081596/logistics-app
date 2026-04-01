@@ -59,7 +59,7 @@
         <RecessionSection v-if="store.recessionProof" :recession-proof="store.recessionProof" :config="store.config" />
       </div>
       <ConfigPanel
-        v-if="authStore.user?.role === 'Super Admin'"
+        v-if="authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Investor'"
         :config="store.config"
         @save="handleSaveConfig"
       />

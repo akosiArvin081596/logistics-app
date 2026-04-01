@@ -7,6 +7,8 @@
     <AddTruckForm
       v-if="authStore.user?.role === 'Super Admin'"
       :driver-names="store.availableDriverNames"
+      :investor-users="store.investorUsers"
+      :show-owner="true"
       @submit="handleAddTruck"
     />
 
@@ -17,6 +19,8 @@
       <TruckTable
         :trucks="store.trucks"
         :driver-names="store.driverNames"
+        :investor-users="store.investorUsers"
+        :show-owner="authStore.user?.role === 'Super Admin'"
         :can-edit="authStore.user?.role === 'Super Admin'"
         @delete="handleDeleteTruck"
         @update="handleUpdateTruck"
@@ -68,5 +72,8 @@ async function handleDeleteTruck(id) {
 onMounted(() => {
   store.loadTrucks()
   store.loadDriverNames()
+  if (authStore.user?.role === 'Super Admin') {
+    store.loadInvestorUsers()
+  }
 })
 </script>

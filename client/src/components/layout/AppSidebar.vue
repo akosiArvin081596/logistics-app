@@ -96,6 +96,7 @@ const navConfig = {
   ],
   Investor: [
     { to: '/investor', icon: '&#128200;', label: 'Financial Overview' },
+    { to: '/trucks', icon: '&#128203;', label: 'My Trucks' },
   ],
   Driver: [],
 }

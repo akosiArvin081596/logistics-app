@@ -207,6 +207,10 @@ db.exec(`
 	)
 `);
 
+// Migration: add owner_id to trucks
+try { db.prepare("SELECT owner_id FROM trucks LIMIT 1").get(); }
+catch { db.exec(`ALTER TABLE trucks ADD COLUMN owner_id INTEGER DEFAULT 0`); }
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS documents (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -250,10 +254,25 @@ db.exec(`
 		value TEXT NOT NULL
 	)
 `);
+// Migration: add owner_id to investor_config (composite key)
+try { db.prepare("SELECT owner_id FROM investor_config LIMIT 1").get(); }
+catch {
+	db.exec(`
+		ALTER TABLE investor_config RENAME TO investor_config_old;
+		CREATE TABLE investor_config (
+			owner_id INTEGER DEFAULT 0,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			PRIMARY KEY(owner_id, key)
+		);
+		INSERT INTO investor_config (owner_id, key, value) SELECT 0, key, value FROM investor_config_old;
+		DROP TABLE investor_config_old;
+	`);
+}
 // Seed default investor config if empty
-const configCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_config").get().cnt;
+const configCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_config WHERE owner_id = 0").get().cnt;
 if (configCount === 0) {
-	const defaults = db.prepare("INSERT OR IGNORE INTO investor_config (key, value) VALUES (?, ?)");
+	const defaults = db.prepare("INSERT OR IGNORE INTO investor_config (owner_id, key, value) VALUES (0, ?, ?)");
 	const seedMany = db.transaction((items) => {
 		for (const [k, v] of items) defaults.run(k, v);
 	});
@@ -389,7 +408,9 @@ app.post("/api/auth/setup", async (req, res) => {
 			"INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (?, ?, 'Super Admin', '', ?)",
 		).run(username, hash, email || "");
 
+		const newUser = db.prepare("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(username);
 		req.session.user = {
+			id: newUser ? newUser.id : 0,
 			username,
 			role: "Super Admin",
 			driverName: "",
@@ -425,6 +446,7 @@ app.post("/api/auth/login", async (req, res) => {
 		}
 
 		req.session.user = {
+			id: user.id,
 			username: user.username,
 			role: user.role,
 			driverName: user.driver_name || "",
@@ -434,6 +456,7 @@ app.post("/api/auth/login", async (req, res) => {
 		res.json({
 			success: true,
 			user: {
+				id: user.id,
 				username: user.username,
 				role: user.role,
 				driverName: user.driver_name || "",
@@ -595,31 +618,44 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	res.json({ success: true });
 });
 
-// Truck Database: list all trucks
+// List investor users (for owner dropdown)
+app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	const investors = db
+		.prepare("SELECT id, username FROM users WHERE role = 'Investor' ORDER BY username ASC")
+		.all();
+	res.json({ investors });
+});
+
+// Truck Database: list all trucks (Investor sees only their own)
 app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
-	const trucks = db
-		.prepare("SELECT * FROM trucks ORDER BY unit_number ASC")
-		.all()
-		.map((t) => ({
-			id: t.id,
-			UnitNumber: t.unit_number,
-			Make: t.make,
-			Model: t.model,
-			Year: t.year,
-			VIN: t.vin,
-			LicensePlate: t.license_plate,
-			Status: t.status,
-			AssignedDriver: t.assigned_driver,
-			Notes: t.notes,
-			CreatedAt: t.created_at,
-		}));
+	const user = req.session.user;
+	let rows;
+	if (user.role === "Investor") {
+		rows = db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(user.id);
+	} else {
+		rows = db.prepare("SELECT * FROM trucks ORDER BY unit_number ASC").all();
+	}
+	const trucks = rows.map((t) => ({
+		id: t.id,
+		UnitNumber: t.unit_number,
+		Make: t.make,
+		Model: t.model,
+		Year: t.year,
+		VIN: t.vin,
+		LicensePlate: t.license_plate,
+		Status: t.status,
+		AssignedDriver: t.assigned_driver,
+		OwnerId: t.owner_id || 0,
+		Notes: t.notes,
+		CreatedAt: t.created_at,
+	}));
 	res.json({ trucks });
 });
 
 // Truck Database: add a new truck
 app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
 	try {
-		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes } = req.body;
+		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId } = req.body;
 		if (!unitNumber || !unitNumber.trim()) {
 			return res.status(400).json({ error: "Unit number is required" });
 		}
@@ -629,8 +665,8 @@ app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
 		}
 		const validStatus = ["Active", "Inactive", "Maintenance"].includes(status) ? status : "Active";
 		const result = db.prepare(
-			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "");
+			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", parseInt(ownerId) || 0);
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error creating truck:", error.message);
@@ -645,7 +681,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
-		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes } = req.body;
+		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId } = req.body;
 		const updates = [];
 		const params = [];
 
@@ -663,6 +699,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 			updates.push("status = ?"); params.push(status);
 		}
 		if (assignedDriver !== undefined) { updates.push("assigned_driver = ?"); params.push(assignedDriver); }
+		if (ownerId !== undefined) { updates.push("owner_id = ?"); params.push(parseInt(ownerId) || 0); }
 		if (notes !== undefined) { updates.push("notes = ?"); params.push(notes); }
 
 		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
@@ -3668,10 +3705,64 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const payments = parseSheet(rangeData[1]);
 		const carrierDB = parseSheet(rangeData[2]);
 
-		// Load investor config from SQLite
-		const configRows = db.prepare("SELECT key, value FROM investor_config").all();
+		const user = req.session.user;
+		const isSuperAdmin = user.role === "Super Admin";
+
+		// Get investor's driver names from their owned trucks (for data filtering)
+		let investorDriverSet = null; // null = no filter (Super Admin)
+		if (!isSuperAdmin) {
+			const ownedTrucks = db
+				.prepare("SELECT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver != ''")
+				.all(user.id);
+			investorDriverSet = new Set(ownedTrucks.map(t => t.assigned_driver.trim().toLowerCase()));
+		}
+
+		// Load per-investor config with fallback to global defaults (owner_id=0)
+		const globalConfig = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all();
 		const config = {};
-		configRows.forEach((r) => (config[r.key] = r.value));
+		globalConfig.forEach((r) => (config[r.key] = r.value));
+		if (!isSuperAdmin) {
+			const investorConfig = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(user.id);
+			investorConfig.forEach((r) => (config[r.key] = r.value)); // override globals
+		}
+
+		// Filter sheet data by investor's drivers
+		const driverCol = findCol(jobTracking.headers, /^driver$/i);
+		const filteredJobData = investorDriverSet
+			? jobTracking.data.filter(r => {
+				const driver = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
+				return driver && investorDriverSet.has(driver);
+			})
+			: jobTracking.data;
+
+		const payDriverCol = findCol(payments.headers, /driver/i);
+		const payLoadIdCol = findCol(payments.headers, /load.?id|job.?id/i);
+		const jobLoadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
+		const investorLoadIds = investorDriverSet && jobLoadIdCol
+			? new Set(filteredJobData.map(r => (r[jobLoadIdCol] || "").trim().toLowerCase()).filter(Boolean))
+			: null;
+
+		const filteredPayments = investorDriverSet
+			? payments.data.filter(r => {
+				if (payDriverCol) {
+					const driver = (r[payDriverCol] || "").trim().toLowerCase();
+					if (driver && investorDriverSet.has(driver)) return true;
+				}
+				if (payLoadIdCol && investorLoadIds) {
+					const lid = (r[payLoadIdCol] || "").trim().toLowerCase();
+					if (lid && investorLoadIds.has(lid)) return true;
+				}
+				return false;
+			})
+			: payments.data;
+
+		const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+		const filteredCarrierData = investorDriverSet
+			? carrierDB.data.filter(r => {
+				const driver = (r[carrierDriverCol] || "").trim().toLowerCase();
+				return driver && investorDriverSet.has(driver);
+			})
+			: carrierDB.data;
 
 		// ---- Production Performance ----
 		const rateCol = findCol(payments.headers, /rate|amount|total|pay/i);
@@ -3682,7 +3773,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		let paidRevenue = 0;
 		const monthlyRevenue = {};
 
-		payments.data.forEach((r) => {
+		filteredPayments.forEach((r) => {
 			const amt =
 				parseFloat(String(rateCol ? r[rateCol] : "0").replace(/[$,]/g, "")) || 0;
 			totalRevenue += amt;
@@ -3702,7 +3793,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// Calculate operating days (from earliest to latest payment date)
 		let earliestDate = null;
 		let latestDate = null;
-		payments.data.forEach((r) => {
+		filteredPayments.forEach((r) => {
 			if (dateCol && r[dateCol]) {
 				const d = new Date(r[dateCol]);
 				if (!isNaN(d)) {
@@ -3730,7 +3821,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const annualDepreciation = purchasePrice / depreciationYears;
 
 		// Total trucks in fleet
-		const totalTrucks = carrierDB.data.length;
+		const totalTrucks = investorDriverSet
+			? db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE owner_id = ?").get(user.id).cnt
+			: filteredCarrierData.length;
 
 		// ---- Tax Shield ----
 		const section179 = parseFloat(config.section_179_deduction) || 30000;
@@ -3745,7 +3838,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const brokerCol = findCol(jobTracking.headers, /broker|shipper|customer|client/i);
 		const statusCol = findCol(jobTracking.headers, /status/i);
 
-		let totalJobs = jobTracking.data.length;
+		let totalJobs = filteredJobData.length;
 		let blueChipJobs = 0;
 		const brokerCounts = {};
 
@@ -3764,7 +3857,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			return val;
 		}
 
-		jobTracking.data.forEach((r) => {
+		filteredJobData.forEach((r) => {
 			const broker = parseBrokerName(brokerCol ? r[brokerCol] : "");
 			if (broker) {
 				brokerCounts[broker] = (brokerCounts[broker] || 0) + 1;
@@ -3787,7 +3880,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// Completed jobs count
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 		const completedJobs = statusCol
-			? jobTracking.data.filter((r) =>
+			? filteredJobData.filter((r) =>
 					completedStatuses.test((r[statusCol] || "").trim()),
 				).length
 			: 0;
@@ -3838,14 +3931,18 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 });
 
 // PUT /api/investor/config — Admin: update investor config
-app.put("/api/investor/config", requireRole("Super Admin"), (req, res) => {
+app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, res) => {
 	try {
+		const user = req.session.user;
+		const targetOwnerId = user.role === "Super Admin"
+			? parseInt(req.query.ownerId) || 0
+			: user.id;
 		const updates = req.body; // { key: value, ... }
 		const stmt = db.prepare(
-			"INSERT OR REPLACE INTO investor_config (key, value) VALUES (?, ?)",
+			"INSERT OR REPLACE INTO investor_config (owner_id, key, value) VALUES (?, ?, ?)",
 		);
 		const updateMany = db.transaction((entries) => {
-			for (const [k, v] of entries) stmt.run(k, String(v));
+			for (const [k, v] of entries) stmt.run(targetOwnerId, k, String(v));
 		});
 		updateMany(Object.entries(updates));
 		res.json({ success: true });

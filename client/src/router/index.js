@@ -79,7 +79,7 @@ const routes = [
     path: '/trucks',
     name: 'trucks',
     component: TrucksView,
-    meta: { roles: ['Super Admin', 'Dispatcher'] },
+    meta: { roles: ['Super Admin', 'Dispatcher', 'Investor'] },
   },
   {
     path: '/admin/tools',

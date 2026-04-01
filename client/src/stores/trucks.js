@@ -7,6 +7,7 @@ export const useTrucksStore = defineStore('trucks', {
   state: () => ({
     trucks: [],
     driverNames: [],
+    investorUsers: [],
     isLoading: false,
   }),
 
@@ -49,6 +50,15 @@ export const useTrucksStore = defineStore('trucks', {
         }
       } catch {
         console.error('Failed to load driver names')
+      }
+    },
+
+    async loadInvestorUsers() {
+      try {
+        const data = await api.get('/api/users/investors')
+        this.investorUsers = data.investors || []
+      } catch {
+        console.error('Failed to load investor users')
       }
     },
 

@@ -62,6 +62,16 @@
       </div>
     </div>
 
+    <div v-if="showOwner" class="form-row">
+      <div class="form-group">
+        <label class="form-label">Owner (Investor)</label>
+        <select v-model="form.ownerId" class="form-select">
+          <option :value="0">-- Unassigned --</option>
+          <option v-for="inv in investorUsers" :key="inv.id" :value="inv.id">{{ inv.username }}</option>
+        </select>
+      </div>
+    </div>
+
     <div class="form-group">
       <label class="form-label">Notes (optional)</label>
       <textarea v-model="form.notes" class="form-input form-textarea" rows="2" placeholder="Any additional notes..."></textarea>
@@ -101,6 +111,8 @@ const truckModels = {
 
 defineProps({
   driverNames: { type: Array, default: () => [] },
+  investorUsers: { type: Array, default: () => [] },
+  showOwner: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['submit'])
@@ -118,6 +130,7 @@ const form = reactive({
   licensePlate: '',
   status: 'Active',
   assignedDriver: '',
+  ownerId: 0,
   notes: '',
 })
 
@@ -139,6 +152,7 @@ function handleSubmit() {
     licensePlate: form.licensePlate.trim(),
     status: form.status,
     assignedDriver: form.assignedDriver,
+    ownerId: form.ownerId,
     notes: form.notes.trim(),
   })
 
@@ -150,6 +164,7 @@ function handleSubmit() {
   form.licensePlate = ''
   form.status = 'Active'
   form.assignedDriver = ''
+  form.ownerId = 0
   form.notes = ''
 }
 </script>

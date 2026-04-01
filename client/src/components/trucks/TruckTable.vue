@@ -17,6 +17,7 @@
           <th>Plate</th>
           <th>Status</th>
           <th>Driver</th>
+          <th v-if="showOwner">Owner</th>
           <th v-if="canEdit"></th>
         </tr>
       </thead>
@@ -32,6 +33,9 @@
           </td>
           <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
             {{ truck.AssignedDriver || '\u2014' }}
+          </td>
+          <td v-if="showOwner" :style="{ color: truck.OwnerId ? 'var(--text)' : 'var(--text-dim)' }">
+            {{ ownerName(truck.OwnerId) }}
           </td>
           <td v-if="canEdit" style="text-align: right;">
             <div class="action-btns">
@@ -105,6 +109,14 @@
             </div>
           </div>
 
+          <div v-if="showOwner" class="edit-field">
+            <label>Owner (Investor)</label>
+            <select v-model="editForm.ownerId">
+              <option :value="0">Unassigned</option>
+              <option v-for="inv in investorUsers" :key="inv.id" :value="inv.id">{{ inv.username }}</option>
+            </select>
+          </div>
+
           <div class="edit-field">
             <label>Notes</label>
             <textarea v-model="editForm.notes" rows="2"></textarea>
@@ -162,6 +174,8 @@ const truckModels = {
 defineProps({
   trucks: { type: Array, default: () => [] },
   driverNames: { type: Array, default: () => [] },
+  investorUsers: { type: Array, default: () => [] },
+  showOwner: { type: Boolean, default: false },
   canEdit: { type: Boolean, default: false },
 })
 
@@ -175,7 +189,7 @@ const editModelOptions = computed(() => truckModels[editForm.make] || [])
 const showEdit = ref(false)
 const editForm = reactive({
   id: null, unitNumber: '', make: '', model: '', year: 0,
-  vin: '', licensePlate: '', status: 'Active', assignedDriver: '', notes: '',
+  vin: '', licensePlate: '', status: 'Active', assignedDriver: '', ownerId: 0, notes: '',
 })
 
 function openEdit(truck) {
@@ -188,6 +202,7 @@ function openEdit(truck) {
   editForm.licensePlate = truck.LicensePlate || ''
   editForm.status = truck.Status
   editForm.assignedDriver = truck.AssignedDriver || ''
+  editForm.ownerId = truck.OwnerId || 0
   editForm.notes = truck.Notes || ''
   showEdit.value = true
 }
@@ -204,10 +219,17 @@ function handleSaveEdit() {
       licensePlate: editForm.licensePlate,
       status: editForm.status,
       assignedDriver: editForm.assignedDriver,
+      ownerId: editForm.ownerId,
       notes: editForm.notes,
     },
   })
   showEdit.value = false
+}
+
+function ownerName(ownerId) {
+  if (!ownerId) return '\u2014'
+  const inv = props.investorUsers.find(i => i.id === ownerId)
+  return inv ? inv.username : `#${ownerId}`
 }
 
 function statusClass(status) {
