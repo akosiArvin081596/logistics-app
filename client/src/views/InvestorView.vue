@@ -1,12 +1,40 @@
 <template>
   <div class="investor-dashboard admin-page">
-    <div class="page-header">
-      <h2>Business Owner Dashboard</h2>
-      <div class="header-actions">
-        <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
-          {{ store.isLoading ? 'Loading...' : 'Refresh' }}
-        </button>
-        <span class="status-pill">{{ statusText }}</span>
+    <!-- Hero Header -->
+    <div class="hero-header">
+      <div class="hero-top">
+        <div>
+          <h2 class="hero-title">Business Owner Dashboard</h2>
+          <p class="hero-sub">Performance overview &middot; {{ todayFormatted }}</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
+            {{ store.isLoading ? 'Loading...' : 'Refresh' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Quick Stats Strip -->
+      <div v-if="store.data" class="quick-stats">
+        <div class="stat-item">
+          <span class="stat-value">{{ fmtK(store.production?.totalRevenue) }}</span>
+          <span class="stat-label">Total Revenue</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat-item">
+          <span class="stat-value">{{ store.production?.completedJobs || 0 }}</span>
+          <span class="stat-label">Completed Loads</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat-item">
+          <span class="stat-value">{{ store.asset?.totalTrucks || trucks.length || 0 }}</span>
+          <span class="stat-label">Fleet Size</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat-item">
+          <span class="stat-value accent">{{ fmtK(store.production?.avgDailyRevenue) }}</span>
+          <span class="stat-label">Avg / Day</span>
+        </div>
       </div>
     </div>
 
@@ -19,13 +47,17 @@
 
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
-      <ProductionSection :production="store.production" :config="store.config" />
-      <TrendSection :production="store.production" />
+      <div class="sections-grid">
+        <ProductionSection :production="store.production" :config="store.config" />
+        <TrendSection :production="store.production" />
+      </div>
       <AssetSection :asset="store.asset" :config="store.config" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
-      <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
-      <RecessionSection v-if="store.recessionProof" :recession-proof="store.recessionProof" :config="store.config" />
+      <div class="sections-grid">
+        <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
+        <RecessionSection v-if="store.recessionProof" :recession-proof="store.recessionProof" :config="store.config" />
+      </div>
       <ConfigPanel
         v-if="authStore.user?.role === 'Super Admin'"
         :config="store.config"
@@ -61,7 +93,9 @@ const { show: toast } = useToast()
 
 const trucks = ref([])
 
-const statusText = computed(() => (store.isLoading ? 'Loading...' : 'Read-Only'))
+const todayFormatted = computed(() =>
+  new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+)
 
 const taxShieldData = computed(() => {
   const ts = store.taxShield || {}
@@ -69,14 +103,20 @@ const taxShieldData = computed(() => {
   return { ...ts, purchasePrice: asset.purchasePrice }
 })
 
+function fmtK(n) {
+  const v = Number(n || 0)
+  if (v >= 1000000) return '$' + (v / 1000000).toFixed(1) + 'M'
+  if (v >= 1000) return '$' + (v / 1000).toFixed(1) + 'K'
+  return '$' + v.toLocaleString('en-US')
+}
+
 async function loadData() {
   try {
     await store.load()
-    // Load trucks for fleet breakdown
     try {
       const data = await api.get('/api/trucks')
       trucks.value = data.trucks || []
-    } catch { /* trucks table may not exist for Investor role */ }
+    } catch { /* silent */ }
   } catch {
     toast('Failed to load investor data', 'error')
   }
@@ -100,6 +140,36 @@ onMounted(() => {
 <style scoped>
 .investor-dashboard { padding-bottom: 6rem; }
 
+/* Hero Header */
+.hero-header {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  border-radius: var(--radius);
+  padding: 1.5rem 1.75rem;
+  margin-bottom: 1.25rem;
+  color: #fff;
+}
+
+.hero-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 1.25rem;
+}
+
+.hero-title {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: #fff;
+}
+
+.hero-sub {
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.55);
+  margin-top: 0.25rem;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
@@ -111,15 +181,82 @@ onMounted(() => {
   font-size: 0.78rem;
   font-weight: 600;
   font-family: inherit;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 6px;
-  background: var(--surface);
-  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
   cursor: pointer;
   transition: all 0.15s;
 }
-.btn-refresh:hover { background: var(--bg); color: var(--text); }
-.btn-refresh:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-refresh:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+.btn-refresh:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* Quick Stats Strip */
+.quick-stats {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 0.75rem 0;
+}
+
+.stat-item {
+  flex: 1;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.stat-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: #fff;
+}
+
+.stat-value.accent {
+  color: #34d399;
+}
+
+.stat-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.45);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stat-divider {
+  width: 1px;
+  height: 32px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Sections grid for side-by-side */
+.sections-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.sections-grid > :deep(.section) {
+  margin-bottom: 0;
+}
+
+@media (max-width: 900px) {
+  .sections-grid {
+    grid-template-columns: 1fr;
+  }
+  .quick-stats {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .stat-divider { display: none; }
+  .stat-item { min-width: 40%; }
+}
 
 .skeleton-block {
   height: 200px;
