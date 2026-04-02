@@ -13,6 +13,7 @@
           <th>User</th>
           <th>Role</th>
           <th>Full Name</th>
+          <th>Company</th>
           <th>Linked Driver</th>
           <th>Email</th>
           <th>Created</th>
@@ -30,6 +31,9 @@
           </td>
           <td :style="{ color: user.FullName ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.FullName || '\u2014' }}
+          </td>
+          <td :style="{ color: user.CompanyName ? 'var(--text)' : 'var(--text-dim)' }">
+            {{ user.CompanyName || '\u2014' }}
           </td>
           <td :style="{ color: user.DriverName ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.DriverName || '\u2014' }}
@@ -80,6 +84,11 @@
           </div>
 
           <div class="edit-field">
+            <label>Company Name</label>
+            <input v-model="editForm.companyName" type="text" placeholder="e.g. Smith Trucking LLC" />
+          </div>
+
+          <div class="edit-field">
             <label>Email</label>
             <input v-model="editForm.email" type="email" placeholder="Email" />
           </div>
@@ -125,7 +134,7 @@ const showConfirm = ref(false)
 const pendingUser = ref(null)
 
 const showEdit = ref(false)
-const editForm = reactive({ id: null, username: '', role: '', driverName: '', email: '', password: '', fullName: '' })
+const editForm = reactive({ id: null, username: '', role: '', driverName: '', email: '', password: '', fullName: '', companyName: '' })
 
 function openEdit(user) {
   editForm.id = user.id
@@ -134,6 +143,7 @@ function openEdit(user) {
   editForm.driverName = user.DriverName || ''
   editForm.email = user.Email || ''
   editForm.fullName = user.FullName || ''
+  editForm.companyName = user.CompanyName || ''
   editForm.password = ''
   showEdit.value = true
 }
@@ -144,6 +154,7 @@ function handleSaveEdit() {
     driverName: editForm.driverName,
     email: editForm.email,
     fullName: editForm.fullName,
+    companyName: editForm.companyName,
   }
   if (editForm.password) data.password = editForm.password
   emit('update', { id: editForm.id, data })

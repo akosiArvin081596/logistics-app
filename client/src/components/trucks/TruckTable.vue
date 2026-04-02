@@ -285,7 +285,7 @@ function handleSaveEdit() {
 function ownerName(ownerId) {
   if (!ownerId) return '\u2014'
   const inv = props.investorUsers.find(i => i.id === ownerId)
-  return inv ? inv.username : `#${ownerId}`
+  return inv ? (inv.CompanyName || inv.username) : `#${ownerId}`
 }
 
 function statusClass(status) {

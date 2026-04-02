@@ -55,6 +55,16 @@
       />
     </div>
 
+    <div v-show="form.role === 'Investor'" class="form-group">
+      <label class="form-label">Company Name</label>
+      <input
+        v-model="form.companyName"
+        class="form-input"
+        type="text"
+        placeholder="e.g. Smith Trucking LLC"
+      />
+    </div>
+
     <div class="form-group">
       <label class="form-label">Email (optional)</label>
       <input
@@ -86,6 +96,7 @@ const form = reactive({
   driverName: '',
   email: '',
   fullName: '',
+  companyName: '',
 })
 
 const errorMsg = ref('')
@@ -110,6 +121,7 @@ function handleSubmit() {
     driverName: form.driverName,
     email: form.email.trim(),
     fullName: form.fullName.trim(),
+    companyName: form.companyName.trim(),
   })
 
   // Reset form
@@ -118,6 +130,7 @@ function handleSubmit() {
   form.email = ''
   form.driverName = ''
   form.fullName = ''
+  form.companyName = ''
 }
 </script>
 

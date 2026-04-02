@@ -144,6 +144,9 @@ try {
 try {
 	db.exec("ALTER TABLE users ADD COLUMN full_name TEXT NOT NULL DEFAULT ''");
 } catch { /* column already exists */ }
+try {
+	db.exec("ALTER TABLE users ADD COLUMN company_name TEXT NOT NULL DEFAULT ''");
+} catch { /* column already exists */ }
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS expenses (
@@ -477,6 +480,8 @@ app.post("/api/auth/setup", async (req, res) => {
 			role: "Super Admin",
 			driverName: "",
 			email: email || "",
+			fullName: "",
+			companyName: "",
 		};
 
 		res.json({ success: true, role: "Super Admin" });
@@ -514,6 +519,7 @@ app.post("/api/auth/login", async (req, res) => {
 			driverName: user.driver_name || "",
 			email: user.email || "",
 			fullName: user.full_name || "",
+			companyName: user.company_name || "",
 		};
 
 		res.json({
@@ -523,6 +529,7 @@ app.post("/api/auth/login", async (req, res) => {
 				username: user.username,
 				role: user.role,
 				driverName: user.driver_name || "",
+				companyName: user.company_name || "",
 				fullName: user.full_name || "",
 			},
 		});
@@ -550,7 +557,7 @@ app.get("/api/auth/session", (req, res) => {
 // Admin: create a new user
 app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 	try {
-		const { username, password, role, driverName, email, fullName } = req.body;
+		const { username, password, role, driverName, email, fullName, companyName } = req.body;
 		if (!username || !password || !role) {
 			return res.status(400).json({ error: "Username, password, and role required" });
 		}
@@ -567,8 +574,8 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 
 		const hash = await bcrypt.hash(password, 10);
 		db.prepare(
-			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name) VALUES (?, ?, ?, ?, ?, ?)",
-		).run(username, hash, role, driverName || "", email || "", fullName || "");
+			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		).run(username, hash, role, driverName || "", email || "", fullName || "", companyName || "");
 
 		res.json({ success: true });
 	} catch (error) {
@@ -580,7 +587,7 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 // Admin: list all users (without password hashes)
 app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
-		.prepare("SELECT id, username, role, driver_name, email, full_name, created_at FROM users")
+		.prepare("SELECT id, username, role, driver_name, email, full_name, company_name, created_at FROM users")
 		.all()
 		.map((u) => ({
 			id: u.id,
@@ -589,6 +596,7 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			DriverName: u.driver_name,
 			Email: u.email,
 			FullName: u.full_name,
+			CompanyName: u.company_name,
 			CreatedAt: u.created_at,
 		}));
 	res.json({ users });
@@ -599,7 +607,7 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
-		const { role, driverName, email, password, fullName } = req.body;
+		const { role, driverName, email, password, fullName, companyName } = req.body;
 
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
 		if (!user) return res.status(404).json({ error: "User not found" });
@@ -622,6 +630,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		if (fullName !== undefined) {
 			updates.push("full_name = ?");
 			params.push(fullName);
+		}
+		if (companyName !== undefined) {
+			updates.push("company_name = ?");
+			params.push(companyName);
 		}
 		if (password) {
 			const bcrypt = await import("bcryptjs");
