@@ -48,22 +48,33 @@
       <!-- Pickup -->
       <div class="form-section">
         <div class="section-label">Pickup Details</div>
-        <div class="form-row">
-          <div class="form-group flex-2">
-            <label class="form-label">Pickup Address / City</label>
-            <input v-model="form.pickupAddress" class="form-input" type="text" placeholder="e.g. 123 Main St, Dallas, TX" />
+        <div class="location-card">
+          <div class="location-card-header pickup">
+            <span class="location-dot pickup"></span>
+            <span class="location-card-title">Origin / Pickup</span>
           </div>
-          <div class="form-group">
-            <label class="form-label">Pickup Date</label>
-            <input v-model="form.pickupDate" class="form-input" type="date" />
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Coordinates</label>
-            <div class="coord-display">
-              <span v-if="form.pickupLat" class="coord-text">{{ form.pickupLat.toFixed(5) }}, {{ form.pickupLng.toFixed(5) }}</span>
-              <span v-else class="coord-text dim">Not set</span>
+          <div class="location-card-body">
+            <div class="form-row">
+              <div class="form-group flex-2">
+                <label class="form-label">Address</label>
+                <div class="address-input-wrap">
+                  <input v-model="form.pickupAddress" class="form-input" type="text" placeholder="Search or pick on map..." @input="onPickupSearch" />
+                  <div v-if="pickupSuggestions.length" class="address-suggestions">
+                    <div v-for="(s, i) in pickupSuggestions" :key="i" class="address-suggestion-item" @click="selectPickupSuggestion(s)">{{ s.displayName }}</div>
+                  </div>
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Date</label>
+                <input v-model="form.pickupDate" class="form-input" type="date" />
+              </div>
+            </div>
+            <div class="coord-row">
+              <div class="coord-info">
+                <span v-if="form.pickupLat" class="coord-text">{{ form.pickupLat.toFixed(5) }}, {{ form.pickupLng.toFixed(5) }}</span>
+                <span v-else class="coord-text dim">No coordinates set</span>
+                <span v-if="pickupResolvedAddress" class="resolved-address">{{ pickupResolvedAddress }}</span>
+              </div>
               <button class="btn-map" type="button" @click="openPicker('pickup')">&#128205; Pick on Map</button>
             </div>
           </div>
@@ -73,22 +84,33 @@
       <!-- Drop-off -->
       <div class="form-section">
         <div class="section-label">Drop-off Details</div>
-        <div class="form-row">
-          <div class="form-group flex-2">
-            <label class="form-label">Drop-off Address / City</label>
-            <input v-model="form.dropoffAddress" class="form-input" type="text" placeholder="e.g. 456 Oak Ave, Houston, TX" />
+        <div class="location-card">
+          <div class="location-card-header dropoff">
+            <span class="location-dot dropoff"></span>
+            <span class="location-card-title">Destination / Drop-off</span>
           </div>
-          <div class="form-group">
-            <label class="form-label">Delivery Date</label>
-            <input v-model="form.deliveryDate" class="form-input" type="date" />
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Coordinates</label>
-            <div class="coord-display">
-              <span v-if="form.dropoffLat" class="coord-text">{{ form.dropoffLat.toFixed(5) }}, {{ form.dropoffLng.toFixed(5) }}</span>
-              <span v-else class="coord-text dim">Not set</span>
+          <div class="location-card-body">
+            <div class="form-row">
+              <div class="form-group flex-2">
+                <label class="form-label">Address</label>
+                <div class="address-input-wrap">
+                  <input v-model="form.dropoffAddress" class="form-input" type="text" placeholder="Search or pick on map..." @input="onDropoffSearch" />
+                  <div v-if="dropoffSuggestions.length" class="address-suggestions">
+                    <div v-for="(s, i) in dropoffSuggestions" :key="i" class="address-suggestion-item" @click="selectDropoffSuggestion(s)">{{ s.displayName }}</div>
+                  </div>
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Date</label>
+                <input v-model="form.deliveryDate" class="form-input" type="date" />
+              </div>
+            </div>
+            <div class="coord-row">
+              <div class="coord-info">
+                <span v-if="form.dropoffLat" class="coord-text">{{ form.dropoffLat.toFixed(5) }}, {{ form.dropoffLng.toFixed(5) }}</span>
+                <span v-else class="coord-text dim">No coordinates set</span>
+                <span v-if="dropoffResolvedAddress" class="resolved-address">{{ dropoffResolvedAddress }}</span>
+              </div>
               <button class="btn-map" type="button" @click="openPicker('dropoff')">&#128205; Pick on Map</button>
             </div>
           </div>
@@ -141,11 +163,13 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { useGeocode } from '../composables/useGeocode'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 
 const api = useApi()
 const router = useRouter()
 const { show: toast } = useToast()
+const geocode = useGeocode()
 
 const headers = ref([])
 const drivers = ref([])
@@ -173,6 +197,41 @@ const form = reactive({
   driver: '',
   details: '',
 })
+
+// Inline address search
+const pickupSuggestions = ref([])
+const dropoffSuggestions = ref([])
+const pickupResolvedAddress = ref('')
+const dropoffResolvedAddress = ref('')
+let pickupTimer = null
+let dropoffTimer = null
+
+function onPickupSearch() {
+  clearTimeout(pickupTimer)
+  pickupTimer = setTimeout(async () => {
+    pickupSuggestions.value = await geocode.searchAddress(form.pickupAddress)
+  }, 400)
+}
+function onDropoffSearch() {
+  clearTimeout(dropoffTimer)
+  dropoffTimer = setTimeout(async () => {
+    dropoffSuggestions.value = await geocode.searchAddress(form.dropoffAddress)
+  }, 400)
+}
+function selectPickupSuggestion(s) {
+  form.pickupAddress = s.displayName
+  form.pickupLat = s.lat
+  form.pickupLng = s.lng
+  pickupSuggestions.value = []
+  pickupResolvedAddress.value = s.displayName
+}
+function selectDropoffSuggestion(s) {
+  form.dropoffAddress = s.displayName
+  form.dropoffLat = s.lat
+  form.dropoffLng = s.lng
+  dropoffSuggestions.value = []
+  dropoffResolvedAddress.value = s.displayName
+}
 
 function generateId() {
   form.loadId = `LD-${Date.now().toString(36).toUpperCase()}`
@@ -203,11 +262,11 @@ function onPickerConfirm({ lat, lng, displayName }) {
   if (pickerTarget.value === 'pickup') {
     form.pickupLat = lat
     form.pickupLng = lng
-    if (displayName) form.pickupAddress = displayName
+    if (displayName) { form.pickupAddress = displayName; pickupResolvedAddress.value = displayName }
   } else {
     form.dropoffLat = lat
     form.dropoffLng = lng
-    if (displayName) form.dropoffAddress = displayName
+    if (displayName) { form.dropoffAddress = displayName; dropoffResolvedAddress.value = displayName }
   }
   pickerOpen.value = false
 }
@@ -384,7 +443,6 @@ onMounted(() => {
 .form-input:focus, .form-select:focus {
   outline: none; border-color: var(--accent);
 }
-.form-input.mono { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; }
 
 .input-with-btn { display: flex; gap: 0.35rem; }
 .input-with-btn .form-input { flex: 1; }
@@ -395,6 +453,74 @@ onMounted(() => {
 }
 .btn-gen:hover { border-color: var(--accent); color: var(--accent); }
 
+/* Location cards */
+.location-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.location-card-header {
+  display: flex; align-items: center; gap: 0.625rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.location-card-header.pickup { background: #eff6ff; }
+.location-card-header.dropoff { background: #fef2f2; }
+.location-dot {
+  width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+}
+.location-dot.pickup { background: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.2); }
+.location-dot.dropoff { background: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,0.2); }
+.location-card-title {
+  font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; color: #374151;
+}
+.location-card-body {
+  padding: 1rem;
+}
+
+/* Address search inline */
+.address-input-wrap { position: relative; }
+.address-suggestions {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 50;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; margin-top: 2px; max-height: 180px; overflow-y: auto;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+}
+.address-suggestion-item {
+  padding: 0.5rem 0.75rem; font-size: 0.82rem; cursor: pointer;
+  border-bottom: 1px solid var(--bg); color: var(--text);
+}
+.address-suggestion-item:last-child { border-bottom: none; }
+.address-suggestion-item:hover { background: var(--surface-hover); }
+
+/* Coordinate row */
+.coord-row {
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0.625rem 0.75rem; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px;
+  margin-top: 0.5rem;
+}
+.coord-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.coord-text {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--text);
+}
+.coord-text.dim { color: var(--text-dim); font-family: inherit; }
+.resolved-address {
+  font-size: 0.72rem; color: #6b7280; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.btn-map {
+  padding: 0.4rem 0.85rem;
+  font-size: 0.75rem; font-weight: 600; font-family: inherit;
+  border: 1px solid var(--accent); border-radius: 8px;
+  background: var(--accent-dim); color: var(--accent);
+  cursor: pointer; white-space: nowrap; transition: all 0.15s;
+  flex-shrink: 0;
+}
+.btn-map:hover { background: var(--accent); color: #fff; }
+
 .form-actions {
   display: flex; justify-content: flex-end; gap: 0.75rem;
   margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--bg);
@@ -402,24 +528,6 @@ onMounted(() => {
 
 .error-msg { color: var(--danger); font-size: 0.78rem; margin-top: 0.75rem; }
 .field-warning { color: var(--amber); font-size: 0.72rem; margin-top: 0.25rem; }
-
-.coord-display {
-  display: flex; align-items: center; gap: 0.75rem;
-  padding: 0.5rem 0.65rem; background: var(--bg);
-  border: 1px solid var(--border); border-radius: 6px;
-}
-.coord-text {
-  font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--text);
-}
-.coord-text.dim { color: var(--text-dim); }
-.btn-map {
-  margin-left: auto; padding: 0.3rem 0.75rem;
-  font-size: 0.75rem; font-weight: 600; font-family: inherit;
-  border: 1px solid var(--accent); border-radius: 6px;
-  background: var(--accent-dim); color: var(--accent);
-  cursor: pointer; white-space: nowrap; transition: opacity 0.15s;
-}
-.btn-map:hover { opacity: 0.75; }
 
 @media (max-width: 640px) {
   .form-row { flex-direction: column; gap: 0; }
