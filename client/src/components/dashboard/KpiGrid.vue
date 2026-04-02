@@ -1,42 +1,23 @@
 <template>
   <div class="kpi-grid">
-    <div class="kpi-card accent clickable" @click="emit('card-click', 'active')">
-      <div class="kpi-icon">🚛</div>
-      <div class="kpi-body">
-        <div class="kpi-label">Active Loads</div>
-        <div class="kpi-value accent">{{ kpis.activeLoads }}</div>
-        <div class="kpi-sub">Currently in progress</div>
-      </div>
-    </div>
-    <div class="kpi-card danger clickable" @click="emit('card-click', 'unassigned')">
-      <div class="kpi-icon">⚠️</div>
-      <div class="kpi-body">
-        <div class="kpi-label">Unassigned</div>
-        <div class="kpi-value danger">{{ kpis.unassignedLoads }}</div>
-        <div class="kpi-sub">Waiting for dispatch</div>
-      </div>
-    </div>
-    <div class="kpi-card blue clickable" @click="emit('card-click', 'completed')">
-      <div class="kpi-icon">✅</div>
-      <div class="kpi-body">
-        <div class="kpi-label">Completed</div>
-        <div class="kpi-value blue">{{ kpis.completedThisMonth }}</div>
-        <div class="kpi-sub">{{ kpis.completedThisWeek }} this week</div>
-      </div>
-    </div>
-    <div class="kpi-card amber clickable" @click="emit('card-click', 'fleet')">
-      <div class="kpi-icon">🚐</div>
-      <div class="kpi-body">
-        <div class="kpi-label">Fleet Utilization</div>
-        <div class="kpi-value amber">{{ fu.assigned }}/{{ fu.total }}</div>
-        <div class="kpi-sub">{{ fu.total ? Math.round((fu.assigned / fu.total) * 100) : 0 }}% active</div>
-      </div>
-    </div>
+    <Card v-for="card in cards" :key="card.key" class="kpi-card" :class="card.color" @click="emit('card-click', card.key)">
+      <template #content>
+        <div class="kpi-row">
+          <span class="kpi-icon">{{ card.icon }}</span>
+          <div class="kpi-body">
+            <span class="kpi-label">{{ card.label }}</span>
+            <span class="kpi-value" :class="card.color">{{ card.value }}</span>
+            <span class="kpi-sub">{{ card.sub }}</span>
+          </div>
+        </div>
+      </template>
+    </Card>
   </div>
 </template>
 
 <script setup>
 import { computed } from 'vue'
+import Card from 'primevue/card'
 
 const props = defineProps({
   kpis: { type: Object, required: true },
@@ -45,6 +26,13 @@ const props = defineProps({
 const emit = defineEmits(['card-click'])
 
 const fu = computed(() => props.kpis.fleetUtilization || { assigned: 0, total: 0 })
+
+const cards = computed(() => [
+  { key: 'active', icon: '🚛', label: 'Active Loads', value: props.kpis.activeLoads, sub: 'Currently in progress', color: 'accent' },
+  { key: 'unassigned', icon: '⚠️', label: 'Unassigned', value: props.kpis.unassignedLoads, sub: 'Waiting for dispatch', color: 'danger' },
+  { key: 'completed', icon: '✅', label: 'Completed', value: props.kpis.completedThisMonth, sub: `${props.kpis.completedThisWeek} this week`, color: 'blue' },
+  { key: 'fleet', icon: '🚐', label: 'Fleet Utilization', value: `${fu.value.assigned}/${fu.value.total}`, sub: `${fu.value.total ? Math.round((fu.value.assigned / fu.value.total) * 100) : 0}% active`, color: 'amber' },
+])
 </script>
 
 <style scoped>
@@ -55,65 +43,26 @@ const fu = computed(() => props.kpis.fleetUtilization || { assigned: 0, total: 0
   margin-bottom: 1rem;
 }
 
-.kpi-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.1rem 1.25rem;
-  display: flex;
-  align-items: flex-start;
-  gap: 1rem;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-  border-left: 3px solid transparent;
-}
+.kpi-card { cursor: pointer; transition: transform 0.15s, box-shadow 0.15s; border-left: 3px solid transparent; }
+.kpi-card:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
 .kpi-card.accent { border-left-color: var(--accent); }
 .kpi-card.danger { border-left-color: var(--danger); }
-.kpi-card.blue   { border-left-color: var(--blue); }
-.kpi-card.amber  { border-left-color: var(--amber); }
-.kpi-card.clickable {
-  cursor: pointer;
-  transition: box-shadow 0.15s, transform 0.15s;
-}
-.kpi-card.clickable:hover {
-  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-  transform: translateY(-1px);
-}
+.kpi-card.blue { border-left-color: var(--blue); }
+.kpi-card.amber { border-left-color: var(--amber); }
 
-.kpi-icon {
-  font-size: 1.4rem;
-  line-height: 1;
-  margin-top: 0.1rem;
-  flex-shrink: 0;
-}
+:deep(.p-card-body) { padding: 1rem 1.25rem; }
+:deep(.p-card-content) { padding: 0; }
 
-.kpi-body { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
-
-.kpi-label {
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-dim);
-}
-
-.kpi-value {
-  font-size: 1.75rem;
-  font-weight: 700;
-  line-height: 1.15;
-  font-family: 'JetBrains Mono', monospace;
-}
+.kpi-row { display: flex; align-items: flex-start; gap: 1rem; }
+.kpi-icon { font-size: 1.4rem; line-height: 1; flex-shrink: 0; }
+.kpi-body { display: flex; flex-direction: column; gap: 0.1rem; }
+.kpi-label { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); }
+.kpi-value { font-size: 1.75rem; font-weight: 700; line-height: 1.15; font-family: 'JetBrains Mono', monospace; }
 .kpi-value.accent { color: var(--accent); }
 .kpi-value.danger { color: var(--danger); }
-.kpi-value.blue   { color: var(--blue); }
-.kpi-value.amber  { color: var(--amber); }
+.kpi-value.blue { color: var(--blue); }
+.kpi-value.amber { color: var(--amber); }
+.kpi-sub { font-size: 0.75rem; color: var(--text-dim); }
 
-.kpi-sub {
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  margin-top: 0.1rem;
-}
-
-@media (max-width: 900px) {
-  .kpi-grid { grid-template-columns: repeat(2, 1fr); }
-}
+@media (max-width: 900px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
 </style>
