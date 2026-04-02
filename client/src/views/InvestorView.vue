@@ -10,6 +10,9 @@
         <div class="header-actions">
           <a href="mailto:info@logisx.com" class="btn-email">info@logisx.com</a>
           <a href="mailto:dev@logisx.com" class="btn-email">dev@logisx.com</a>
+          <button class="btn-report" :disabled="reportLoading" @click="downloadReport">
+            {{ reportLoading ? 'Generating...' : 'Download Report' }}
+          </button>
           <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
             {{ store.isLoading ? 'Loading...' : 'Refresh' }}
           </button>
@@ -57,6 +60,7 @@
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
+      <InvestorChat />
       <DocumentPortal />
       <ConfigPanel
         v-if="authStore.user?.role === 'Super Admin'"
@@ -82,6 +86,7 @@ import AssetSection from '../components/investor/AssetSection.vue'
 import FleetBreakdownSection from '../components/investor/FleetBreakdownSection.vue'
 import CashFlowSection from '../components/investor/CashFlowSection.vue'
 import TaxShieldSection from '../components/investor/TaxShieldSection.vue'
+import InvestorChat from '../components/investor/InvestorChat.vue'
 import DocumentPortal from '../components/investor/DocumentPortal.vue'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
@@ -92,6 +97,7 @@ const api = useApi()
 const { show: toast } = useToast()
 
 const trucks = ref([])
+const reportLoading = ref(false)
 
 const dashboardTitle = computed(() => {
   if (authStore.user?.role === 'Super Admin') return 'Asset Dashboard'
@@ -125,6 +131,27 @@ async function loadData() {
     } catch { /* silent */ }
   } catch {
     toast('Failed to load investor data', 'error')
+  }
+}
+
+async function downloadReport() {
+  reportLoading.value = true
+  try {
+    const res = await fetch('/api/investor/report', { credentials: 'include' })
+    if (!res.ok) throw new Error('Failed')
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const cd = res.headers.get('Content-Disposition') || ''
+    const match = cd.match(/filename="(.+)"/)
+    a.download = match ? match[1] : 'report.pdf'
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch {
+    toast('Failed to generate report', 'error')
+  } finally {
+    reportLoading.value = false
   }
 }
 
@@ -196,6 +223,21 @@ onMounted(() => {
   transition: all 0.15s;
 }
 .btn-email:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+
+.btn-report {
+  padding: 0.4rem 1rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: inherit;
+  border: 1px solid rgba(52, 211, 153, 0.5);
+  border-radius: 6px;
+  background: rgba(52, 211, 153, 0.12);
+  color: #34d399;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-report:hover { background: rgba(52, 211, 153, 0.22); }
+.btn-report:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .btn-refresh {
   padding: 0.4rem 1rem;

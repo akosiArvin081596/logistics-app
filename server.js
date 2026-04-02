@@ -2580,6 +2580,26 @@ app.put("/api/dispatch-notifications/read", requireRole("Super Admin", "Dispatch
 	}
 });
 
+// GET /api/investor/messages — Investor's own message thread with dispatch
+app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, res) => {
+	try {
+		const user = req.session.user;
+		const name = user.username.trim().toLowerCase();
+		const messages = db.prepare(
+			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
+			 FROM messages
+			 WHERE LOWER("from") = ? OR LOWER("to") = ?
+			 ORDER BY id ASC`
+		).all(name, name);
+		// Mark messages to this investor as read
+		db.prepare(`UPDATE messages SET read = 1 WHERE LOWER("to") = ? AND read = 0`).run(name);
+		res.json({ messages });
+	} catch (err) {
+		console.error("Error fetching investor messages:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // GET /api/messages — All messages for dispatch view (Admin/Dispatcher)
 app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
@@ -2741,6 +2761,240 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 	} catch (err) {
 		console.error("Error fetching investor documents:", err.message);
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/investor/report — Generate PDF performance report
+app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (req, res) => {
+	try {
+		// Re-use the investor data by making an internal call
+		const user = req.session.user;
+		const isSuperAdmin = user.role === "Super Admin";
+
+		// Fetch the same investor data inline (mirrors /api/investor logic summary)
+		const sheets = await getSheets();
+		const response = await sheets.spreadsheets.values.batchGet({
+			spreadsheetId: SPREADSHEET_ID,
+			ranges: ["Job Tracking", "Payments Table"],
+		});
+		const rangeData = response.data.valueRanges || [];
+		const jobTracking = parseSheet(rangeData[0]);
+		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
+		const payments = parseSheet(rangeData[1]);
+
+		let investorDriverSet = null;
+		if (!isSuperAdmin) {
+			const ownedTrucks = db.prepare("SELECT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver != ''").all(user.id);
+			investorDriverSet = new Set(ownedTrucks.map(t => t.assigned_driver.trim().toLowerCase()));
+		}
+
+		const globalCfg = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all();
+		const config = {};
+		globalCfg.forEach(r => (config[r.key] = r.value));
+		if (!isSuperAdmin) {
+			db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(user.id)
+				.forEach(r => (config[r.key] = r.value));
+		}
+
+		const driverCol = findCol(jobTracking.headers, /^driver$/i);
+		const filteredJobData = investorDriverSet
+			? jobTracking.data.filter(r => {
+				const d = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
+				return d && investorDriverSet.has(d);
+			}) : jobTracking.data;
+
+		const rateCol = findCol(payments.headers, /rate|amount|total|pay/i);
+		const payStatusCol = findCol(payments.headers, /pay.*status|status/i);
+		const payLoadIdCol = findCol(payments.headers, /load.?id|job.?id/i);
+		const jobLoadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
+		const investorLoadIds = investorDriverSet && jobLoadIdCol
+			? new Set(filteredJobData.map(r => (r[jobLoadIdCol] || "").trim().toLowerCase()).filter(Boolean))
+			: null;
+		const filteredPayments = investorDriverSet
+			? payments.data.filter(r => {
+				if (payLoadIdCol && investorLoadIds) {
+					const lid = (r[payLoadIdCol] || "").trim().toLowerCase();
+					if (lid && investorLoadIds.has(lid)) return true;
+				}
+				return false;
+			}) : payments.data;
+
+		const jtRateCol2 = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
+		const jtDateCol2 = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(jobTracking.headers, /date/i);
+		const paymentsHaveDates2 = filteredPayments.some(r => findCol(payments.headers, /date/i) && r[findCol(payments.headers, /date/i)]);
+
+		let totalRevenue = 0, paidRevenue = 0;
+		filteredPayments.forEach(r => {
+			const amt = parseFloat(String(rateCol ? r[rateCol] : "0").replace(/[$,]/g, "")) || 0;
+			totalRevenue += amt;
+			const ps = payStatusCol ? (r[payStatusCol] || "").trim() : "";
+			if (/^paid$/i.test(ps)) paidRevenue += amt;
+		});
+		if (!paymentsHaveDates2 && paidRevenue === 0) {
+			filteredJobData.forEach(r => {
+				paidRevenue += parseFloat(String((r[jtRateCol2] || "0")).replace(/[$,]/g, "")) || 0;
+			});
+		}
+
+		const purchasePrice = parseFloat(config.truck_purchase_price) || 58000;
+		const ownedTrucks2 = isSuperAdmin
+			? db.prepare("SELECT * FROM trucks").all()
+			: db.prepare("SELECT * FROM trucks WHERE owner_id = ?").all(user.id);
+		const totalTrucks = ownedTrucks2.length || 1;
+		const totalPurchasePrice = purchasePrice * totalTrucks;
+		const totalStartupExpenses = 5000 * totalTrucks;
+		const currentValue = Math.round(purchasePrice * 0.80);
+
+		let totalExpenses = 0;
+		if (investorDriverSet && investorDriverSet.size > 0) {
+			const driverList = [...investorDriverSet];
+			const ph = driverList.map(() => '?').join(',');
+			totalExpenses += (db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE LOWER(driver) IN (${ph})`).get(...driverList)).t;
+			totalExpenses += (db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id=?`).get(user.id)).t;
+			totalExpenses += (db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=?`).get(user.id)).t;
+		}
+		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
+		const netCashFlow = totalRevenue - totalExpenses;
+		const ownerEarnings = netCashFlow * 0.5;
+
+		// Monthly revenue from Job Tracking
+		const monthlyRevenue2 = {};
+		if (jtDateCol2 && jtRateCol2) {
+			filteredJobData.forEach(r => {
+				const amt = parseFloat(String((r[jtRateCol2] || "0")).replace(/[$,]/g, "")) || 0;
+				if (!amt) return;
+				const d = new Date(r[jtDateCol2]);
+				if (!isNaN(d)) {
+					const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+					monthlyRevenue2[key] = (monthlyRevenue2[key] || 0) + amt;
+				}
+			});
+		}
+		const monthlyData2 = Object.entries(monthlyRevenue2)
+			.sort(([a],[b]) => a.localeCompare(b))
+			.map(([month, amount]) => ({ month, amount: Math.round(amount) }));
+
+		const completedStatuses = /^(delivered|completed|pod received)$/i;
+		const statusCol2 = findCol(jobTracking.headers, /status/i);
+		const completedJobs = statusCol2 ? filteredJobData.filter(r => completedStatuses.test((r[statusCol2]||"").trim())).length : 0;
+
+		// Build PDF
+		const PDFDocument = require("pdfkit");
+		const doc = new PDFDocument({ margin: 50, size: "LETTER" });
+		const chunks = [];
+		doc.on("data", c => chunks.push(c));
+
+		const fmt = n => "$" + Number(n||0).toLocaleString("en-US", { maximumFractionDigits: 0 });
+		const dateStr = new Date().toLocaleDateString("en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+		const investorName = isSuperAdmin ? "Super Admin" : user.username;
+
+		// ── Header
+		doc.rect(0, 0, doc.page.width, 80).fill("#0f3460");
+		doc.fillColor("#ffffff").fontSize(22).font("Helvetica-Bold")
+			.text(`${investorName} — Asset Dashboard`, 50, 22);
+		doc.fontSize(10).font("Helvetica").fillColor("rgba(255,255,255,0.7)")
+			.text(`Performance Report  ·  ${dateStr}`, 50, 52);
+		doc.moveDown(3).fillColor("#000000");
+
+		// ── Helper: section header
+		const sectionHeader = (title) => {
+			doc.moveDown(0.5)
+				.rect(50, doc.y, doc.page.width - 100, 22).fill("#e8f4fd")
+				.fillColor("#0f3460").fontSize(11).font("Helvetica-Bold")
+				.text(title, 58, doc.y - 17)
+				.fillColor("#333333").font("Helvetica").fontSize(10)
+				.moveDown(0.8);
+		};
+
+		// ── Helper: two-column KPI row
+		const kpiRow = (label, value, label2, value2) => {
+			const y = doc.y;
+			doc.font("Helvetica-Bold").fontSize(9).fillColor("#666").text(label.toUpperCase(), 50, y, { width: 200 });
+			doc.font("Helvetica-Bold").fontSize(13).fillColor("#0f3460").text(value, 50, y + 11, { width: 200 });
+			if (label2) {
+				doc.font("Helvetica-Bold").fontSize(9).fillColor("#666").text(label2.toUpperCase(), 280, y, { width: 200 });
+				doc.font("Helvetica-Bold").fontSize(13).fillColor("#0f3460").text(value2 || "—", 280, y + 11, { width: 200 });
+			}
+			doc.moveDown(1.8);
+		};
+
+		// ── Production
+		sectionHeader("Production Performance");
+		kpiRow("Total Revenue", fmt(totalRevenue), "Paid / Collected", fmt(paidRevenue));
+		kpiRow("Completed Loads", String(completedJobs), "Total Jobs", String(filteredJobData.length));
+
+		// ── Asset
+		sectionHeader("Asset Security");
+		kpiRow("Purchase Price (per truck)", fmt(purchasePrice), "Current Market Value (80%)", fmt(currentValue));
+		kpiRow("Fleet Size", String(totalTrucks), "Total Purchase Price", fmt(totalPurchasePrice));
+		kpiRow("Title Status", config.truck_title_status || "Clean", "Depreciation", "100% Year 1 (Sec. 179)");
+
+		// ── Cash Flow
+		sectionHeader("Cash Flow & Projections");
+		kpiRow("Net Cash Flow", fmt(netCashFlow), "Owner Earnings (50%)", fmt(ownerEarnings));
+		kpiRow("Total Expenses", fmt(totalExpenses), "Net Revenue To Date", fmt(netRevenueToDate));
+		const totalInv = totalPurchasePrice + totalStartupExpenses;
+		const recPct = totalInv > 0 ? Math.min(100, (netRevenueToDate / totalInv * 100)).toFixed(1) : "0";
+		kpiRow("Total Investment", fmt(totalInv), "Payoff Progress", `${recPct}%`);
+		const roiPct = totalRevenue > 0 ? (netRevenueToDate / totalRevenue * 100).toFixed(1) : "0";
+		kpiRow("Business ROI", `${roiPct}%`, "Section 179 Deduction", fmt(purchasePrice));
+
+		// ── Monthly Revenue Table
+		if (monthlyData2.length > 0) {
+			sectionHeader("Monthly Revenue");
+			const colW = [120, 100];
+			const tableX = 50;
+			let ty = doc.y;
+			doc.rect(tableX, ty, colW[0] + colW[1], 18).fill("#e8f4fd");
+			doc.fillColor("#0f3460").font("Helvetica-Bold").fontSize(9)
+				.text("Month", tableX + 5, ty + 5, { width: colW[0] })
+				.text("Revenue", tableX + colW[0] + 5, ty + 5, { width: colW[1] });
+			ty += 18;
+			monthlyData2.forEach((m, i) => {
+				if (ty > doc.page.height - 100) { doc.addPage(); ty = 50; }
+				doc.rect(tableX, ty, colW[0] + colW[1], 16).fill(i % 2 === 0 ? "#ffffff" : "#f8f9fa");
+				doc.fillColor("#333333").font("Helvetica").fontSize(9)
+					.text(m.month, tableX + 5, ty + 4, { width: colW[0] })
+					.text(fmt(m.amount), tableX + colW[0] + 5, ty + 4, { width: colW[1] });
+				ty += 16;
+			});
+			doc.y = ty + 10;
+		}
+
+		// ── Per-Truck
+		if (ownedTrucks2.length > 0) {
+			sectionHeader("Fleet Breakdown");
+			ownedTrucks2.forEach(t => {
+				kpiRow(
+					`Unit ${t.unit_number}`,
+					`${t.make||""} ${t.model||""}`.trim() || "—",
+					"Driver",
+					t.assigned_driver || "Unassigned"
+				);
+			});
+		}
+
+		// ── Footer
+		doc.on("pageAdded", () => {
+			doc.rect(0, doc.page.height - 30, doc.page.width, 30).fill("#f0f0f0");
+			doc.fillColor("#999").fontSize(8).font("Helvetica")
+				.text(`Generated by LogisX  ·  ${dateStr}`, 50, doc.page.height - 20);
+		});
+		doc.rect(0, doc.page.height - 30, doc.page.width, 30).fill("#f0f0f0");
+		doc.fillColor("#999").fontSize(8).font("Helvetica")
+			.text(`Generated by LogisX  ·  ${dateStr}`, 50, doc.page.height - 20);
+
+		doc.end();
+		await new Promise(resolve => doc.on("end", resolve));
+
+		const pdfBuffer = Buffer.concat(chunks);
+		const fileName = `${investorName.replace(/\s+/g,"_")}_Report_${new Date().toISOString().slice(0,10)}.pdf`;
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+		res.send(pdfBuffer);
+	} catch (err) {
+		console.error("Report generation error:", err.message);
+		res.status(500).json({ error: "Failed to generate report" });
 	}
 });
 
