@@ -53,23 +53,25 @@
     />
 
     <!-- Duplicate Records Section -->
-    <div v-if="store.showDuplicates && store.duplicates.length > 0" class="duplicates-section">
+    <div v-if="store.showDuplicates && sortedDuplicates.length > 0" class="duplicates-section">
       <div class="duplicates-header">
         <h3>Duplicate Records</h3>
-        <span class="dup-count">{{ store.duplicates.length }} stale</span>
+        <span class="dup-count">{{ sortedDuplicates.length }} records with duplicate Load IDs</span>
       </div>
-      <DataTable
-        :headers="store.headers"
-        :data="store.duplicates"
-        :editing-row="null"
-        :driver-list="store.driverList"
-        :current-sheet="store.currentSheet"
-        :user-role="auth.user?.role"
-        @edit="handleEdit"
-        @save="handleSave"
-        @cancel="handleCancel"
-        @delete="handleDelete"
-      />
+      <div class="duplicates-body">
+        <DataTable
+          :headers="store.headers"
+          :data="sortedDuplicates"
+          :editing-row="null"
+          :driver-list="store.driverList"
+          :current-sheet="store.currentSheet"
+          :user-role="auth.user?.role"
+          @edit="handleEdit"
+          @save="handleSave"
+          @cancel="handleCancel"
+          @delete="handleDelete"
+        />
+      </div>
     </div>
 
     <!-- Add Row Modal -->
@@ -96,7 +98,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useSheetsStore } from '../stores/sheets'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
@@ -115,6 +117,19 @@ const socket = useSocket()
 const showModal = ref(false)
 const deleteTarget = ref(null)
 let searchTimer = null
+
+// Sort duplicates by Load ID so matching rows are grouped together
+const sortedDuplicates = computed(() => {
+  const dups = store.duplicates || []
+  if (dups.length === 0) return []
+  const loadIdCol = store.headers.find(h => /load.?id|job.?id/i.test(h))
+  if (!loadIdCol) return dups
+  return [...dups].sort((a, b) => {
+    const aId = (a[loadIdCol] || '').replace(/^#/, '').trim()
+    const bId = (b[loadIdCol] || '').replace(/^#/, '').trim()
+    return aId.localeCompare(bId) || (a._rowIndex || 0) - (b._rowIndex || 0)
+  })
+})
 
 function onSearch(value) {
   store.searchQuery = value
@@ -240,7 +255,7 @@ async function confirmDelete() {
 }
 
 .duplicates-section {
-  margin-top: 1.25rem;
+  margin-top: 1.5rem;
   border: 2px solid var(--amber);
   border-radius: var(--radius);
   overflow: hidden;
@@ -249,20 +264,27 @@ async function confirmDelete() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1rem;
+  padding: 0.85rem 1.25rem;
   background: var(--amber-dim);
+  border-bottom: 1px solid var(--amber);
 }
 .duplicates-header h3 {
-  font-size: 0.9rem;
+  font-size: 0.95rem;
   font-weight: 700;
   margin: 0;
+  color: var(--text);
 }
 .dup-count {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
-  padding: 0.2rem 0.5rem;
+  padding: 0.25rem 0.65rem;
   border-radius: 8px;
   background: var(--amber);
   color: #fff;
+}
+.duplicates-body {
+  max-height: 500px;
+  overflow-y: auto;
+  background: var(--surface);
 }
 </style>
