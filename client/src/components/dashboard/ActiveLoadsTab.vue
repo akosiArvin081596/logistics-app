@@ -19,21 +19,21 @@
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
             <td @click.stop>
-              <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:nowrap;">
-                <div style="display:flex;flex-direction:column;gap:2px;flex-shrink:0;">
+              <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:nowrap;width:100%;">
+                <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;">
                   <span style="font-size:0.6rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#9ca3af;padding-left:2px;">Status</span>
                   <div style="display:flex;align-items:center;gap:0.25rem;">
-                    <select v-model="statusSelections[job._rowIndex]" class="dash-select dash-select-sm" style="width:108px">
+                    <select v-model="statusSelections[job._rowIndex]" class="dash-select dash-select-sm" style="flex:1;min-width:0;">
                       <option value="">{{ getCurrentStatus(job) || 'Pick status' }}</option>
                       <option v-for="s in statusOptions" :key="s" :value="s">{{ s }}</option>
                     </select>
                     <button v-if="statusSelections[job._rowIndex]" class="dash-go-btn" @click="confirmStatusUpdate(job)">Go</button>
                   </div>
                 </div>
-                <div style="display:flex;flex-direction:column;gap:2px;flex-shrink:0;">
+                <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;">
                   <span style="font-size:0.6rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#9ca3af;padding-left:2px;">Driver</span>
                   <div style="display:flex;align-items:center;gap:0.25rem;">
-                    <select v-model="reassignSelections[job._rowIndex]" class="dash-select dash-select-sm" style="width:118px">
+                    <select v-model="reassignSelections[job._rowIndex]" class="dash-select dash-select-sm" style="flex:1;min-width:0;">
                       <option value="">{{ getCurrentDriver(job) || 'Pick driver' }}</option>
                       <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
                     </select>
