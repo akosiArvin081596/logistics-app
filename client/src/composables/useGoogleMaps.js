@@ -1,7 +1,5 @@
-import { Loader } from '@googlemaps/js-api-loader'
-
-let loaderPromise = null
-let googleObj = null
+let mapsLib = null
+let loadPromise = null
 
 async function fetchApiKey() {
   const res = await fetch('/api/config/maps-key')
@@ -12,20 +10,31 @@ async function fetchApiKey() {
 
 export function useGoogleMaps() {
   async function load() {
-    if (googleObj) return googleObj
-    if (loaderPromise) return loaderPromise
+    if (mapsLib) return mapsLib
+    if (loadPromise) return loadPromise
 
-    loaderPromise = (async () => {
+    loadPromise = (async () => {
       const apiKey = await fetchApiKey()
-      const loader = new Loader({ apiKey, version: 'weekly', libraries: ['marker'] })
-      googleObj = await loader.importLibrary('maps')
-      return googleObj
+
+      // Load Google Maps via dynamic script tag (Loader class is deprecated)
+      if (!window.google?.maps) {
+        await new Promise((resolve, reject) => {
+          const script = document.createElement('script')
+          script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=marker&v=weekly`
+          script.async = true
+          script.onload = resolve
+          script.onerror = reject
+          document.head.appendChild(script)
+        })
+      }
+
+      mapsLib = google.maps
+      return mapsLib
     })()
 
-    return loaderPromise
+    return loadPromise
   }
 
-  // Helper: create a standard road map in a container div
   async function createMap(container, options = {}) {
     const maps = await load()
     return new maps.Map(container, {
