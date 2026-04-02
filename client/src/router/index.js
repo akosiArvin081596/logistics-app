@@ -20,7 +20,7 @@ const routes = [
     path: '/jobs/new',
     name: 'new-job',
     component: () => import('../views/NewJobView.vue'),
-    meta: { roles: ['Super Admin', 'Dispatcher'] },
+    meta: { roles: ['Super Admin'] },
   },
   {
     path: '/tracking',

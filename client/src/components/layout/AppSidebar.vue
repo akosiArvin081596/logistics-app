@@ -88,7 +88,6 @@ const navConfig = {
   ],
   Dispatcher: [
     { to: '/dashboard', icon: '&#9635;', label: 'Dashboard' },
-    { to: '/jobs/new', icon: '&#10010;', label: 'New Job' },
     { to: '/tracking', icon: '&#128205;', label: 'Tracking' },
     { to: '/notifications', icon: '&#128276;', label: 'Notifications' },
     { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
