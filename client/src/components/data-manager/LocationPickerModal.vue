@@ -130,7 +130,7 @@ watch(() => props.open, (isOpen) => {
           navigator.geolocation.getCurrentPosition(
             (pos) => {
               const lm = mapRef.value?.leafletObject
-              if (lm) lm.flyTo([pos.coords.latitude, pos.coords.longitude], 11, { duration: 1.2 })
+              if (lm) lm.flyTo([pos.coords.latitude, pos.coords.longitude], 15, { duration: 1.5 })
             },
             () => {},
             { timeout: 8000, enableHighAccuracy: false }
