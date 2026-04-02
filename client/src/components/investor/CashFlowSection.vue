@@ -14,7 +14,7 @@
       <div class="kpi-card blue">
         <div class="kpi-label">Owner Earnings (Est.)</div>
         <div class="kpi-value">{{ fmt(investorPayout) }}</div>
-        <div class="kpi-sub">at {{ splitPct }}% owner take</div>
+        <div class="kpi-sub">at 50% owner take</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Break-Even</div>
@@ -37,8 +37,8 @@
       </div>
       <div class="timeline-markers">
         <span>$0</span>
-        <span>{{ fmt(purchasePrice / 2) }}</span>
-        <span>{{ fmt(purchasePrice) }}</span>
+        <span>{{ fmt(totalInvestment / 2) }}</span>
+        <span>{{ fmt(totalInvestment) }}</span>
       </div>
     </div>
   </div>
@@ -54,34 +54,38 @@ const props = defineProps({
 })
 
 const totalRevenue = computed(() => props.production?.totalRevenue || 0)
-const purchasePrice = computed(() => props.asset?.purchasePrice || 58000)
-const splitPct = computed(() => props.production?.investorSplitPct || 35)
+const totalExpenses = computed(() => props.production?.totalExpenses || 0)
+const netRevenueToDate = computed(() => props.production?.netRevenueToDate || 0)
+const totalPurchasePrice = computed(() => props.production?.totalPurchasePrice || 0)
+const totalStartupExpenses = computed(() => props.production?.totalStartupExpenses || 0)
+const avgMonthlyOwnerEarnings = computed(() => props.production?.avgMonthlyOwnerEarnings || 0)
 
-// Estimate operating expenses at 65% of revenue (industry standard for trucking)
-const estExpenses = computed(() => totalRevenue.value * 0.65)
-const netCashFlow = computed(() => totalRevenue.value - estExpenses.value)
-const investorPayout = computed(() => netCashFlow.value * (splitPct.value / 100))
+// Total investment = purchase price + startup costs
+const totalInvestment = computed(() => totalPurchasePrice.value + totalStartupExpenses.value)
 
+// Net Cash Flow = revenue - actual expenses from server
+const netCashFlow = computed(() => totalRevenue.value - totalExpenses.value)
+
+// Owner Earnings = fixed 50%
+const investorPayout = computed(() => netCashFlow.value * 0.5)
+
+// Payoff progress = net revenue recovered / total investment
 const recoveryPct = computed(() => {
-  if (purchasePrice.value <= 0) return 0
-  return (investorPayout.value / purchasePrice.value) * 100
+  if (totalInvestment.value <= 0) return 0
+  return (netRevenueToDate.value / totalInvestment.value) * 100
 })
 
+// Business ROI = net / gross * 100
 const roiPct = computed(() => {
-  if (purchasePrice.value <= 0) return 0
-  return ((investorPayout.value - purchasePrice.value) / purchasePrice.value) * 100
+  if (totalRevenue.value <= 0) return 0
+  return (netRevenueToDate.value / totalRevenue.value) * 100
 })
 
+// Break-even = total investment / avg monthly owner earnings
 const breakEvenMonths = computed(() => {
-  const months = props.production?.monthlyData || []
-  if (months.length === 0) return 'N/A'
-  const recent = months.slice(-3)
-  const avgMonthlyRev = recent.reduce((s, m) => s + m.amount, 0) / recent.length
-  const monthlyNet = avgMonthlyRev * 0.35 * (splitPct.value / 100)
-  if (monthlyNet <= 0) return 'N/A'
-  const remaining = purchasePrice.value - investorPayout.value
-  if (remaining <= 0) return 0
-  return Math.ceil(remaining / monthlyNet)
+  if (avgMonthlyOwnerEarnings.value <= 0) return 'N/A'
+  const months = Math.ceil(totalInvestment.value / avgMonthlyOwnerEarnings.value)
+  return months
 })
 
 const breakEvenDate = computed(() => {

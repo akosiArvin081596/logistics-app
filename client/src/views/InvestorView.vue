@@ -4,10 +4,12 @@
     <div class="hero-header">
       <div class="hero-top">
         <div>
-          <h2 class="hero-title">Business Owner Dashboard</h2>
+          <h2 class="hero-title">{{ dashboardTitle }}</h2>
           <p class="hero-sub">Performance overview &middot; {{ todayFormatted }}</p>
         </div>
         <div class="header-actions">
+          <a href="mailto:info@logisx.com" class="btn-email">info@logisx.com</a>
+          <a href="mailto:dev@logisx.com" class="btn-email">dev@logisx.com</a>
           <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
             {{ store.isLoading ? 'Loading...' : 'Refresh' }}
           </button>
@@ -54,12 +56,9 @@
       <AssetSection :asset="store.asset" :config="store.config" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
-      <div class="sections-grid">
-        <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
-        <RecessionSection v-if="store.recessionProof" :recession-proof="store.recessionProof" :config="store.config" />
-      </div>
+      <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
       <ConfigPanel
-        v-if="authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Investor'"
+        v-if="authStore.user?.role === 'Super Admin'"
         :config="store.config"
         @save="handleSaveConfig"
       />
@@ -82,7 +81,6 @@ import AssetSection from '../components/investor/AssetSection.vue'
 import FleetBreakdownSection from '../components/investor/FleetBreakdownSection.vue'
 import CashFlowSection from '../components/investor/CashFlowSection.vue'
 import TaxShieldSection from '../components/investor/TaxShieldSection.vue'
-import RecessionSection from '../components/investor/RecessionSection.vue'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 
@@ -92,6 +90,12 @@ const api = useApi()
 const { show: toast } = useToast()
 
 const trucks = ref([])
+
+const dashboardTitle = computed(() => {
+  if (authStore.user?.role === 'Super Admin') return 'Asset Dashboard'
+  const name = authStore.user?.username || authStore.user?.name || ''
+  return name ? `${name} - Asset Dashboard` : 'Asset Dashboard'
+})
 
 const todayFormatted = computed(() =>
   new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
@@ -175,6 +179,21 @@ onMounted(() => {
   align-items: center;
   gap: 0.75rem;
 }
+
+.btn-email {
+  padding: 0.4rem 0.85rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.15s;
+}
+.btn-email:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
 
 .btn-refresh {
   padding: 0.4rem 1rem;

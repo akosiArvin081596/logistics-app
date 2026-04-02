@@ -9,12 +9,12 @@
       <div class="kpi-card accent">
         <div class="kpi-label">Avg Daily Revenue</div>
         <div class="kpi-value">{{ fmt(production.avgDailyRevenue) }}</div>
-        <div class="kpi-sub">over {{ production.operatingDays }} days</div>
+        <div class="kpi-sub">avg last 30 days</div>
       </div>
       <div class="kpi-card accent">
         <div class="kpi-label">Monthly Owner Earnings</div>
-        <div class="kpi-value">{{ fmt(payoutMin) }}</div>
-        <div class="kpi-sub">to {{ fmt(payoutMax) }}/mo</div>
+        <div class="kpi-value">{{ fmt(production.avgMonthlyOwnerEarnings) }}</div>
+        <div class="kpi-sub">avg over {{ production.monthsOfOperation || 0 }} months</div>
       </div>
       <div class="kpi-card blue">
         <div class="kpi-label">Total Revenue</div>
@@ -56,9 +56,6 @@ const months = computed(() => props.production.monthlyData || [])
 const maxAmount = computed(() =>
   Math.max(...months.value.map((m) => m.amount), 1)
 )
-
-const payoutMin = computed(() => props.production.payoutRange?.min ?? 0)
-const payoutMax = computed(() => props.production.payoutRange?.max ?? 0)
 
 function fmt(n) {
   return '$' + Number(n || 0).toLocaleString('en-US')

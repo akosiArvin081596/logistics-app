@@ -61,15 +61,17 @@ const props = defineProps({
 })
 
 const trucksWithROI = computed(() => {
-  const totalRev = props.production?.totalRevenue || 0
-  const activeTrucks = props.trucks.filter(t => t.Status === 'Active')
-  const perTruckRev = activeTrucks.length > 0 ? totalRev / activeTrucks.length : 0
+  const perTruckData = props.production?.perTruckData || {}
+  const grossRevenue = props.production?.totalRevenue || 0
   const purchasePrice = props.asset?.purchasePrice || 58000
 
   return props.trucks.map(t => {
-    const isActive = t.Status === 'Active'
-    const estRevenue = isActive ? perTruckRev : 0
-    const roi = purchasePrice > 0 ? ((estRevenue - (purchasePrice * 0.15)) / purchasePrice) * 100 : 0
+    const unitKey = t.UnitNumber || t.unit_number || ''
+    const perUnit = perTruckData[unitKey]
+    const estRevenue = perUnit?.estAnnualRevenue ?? 0
+    const roi = purchasePrice > 0 && grossRevenue > 0
+      ? (estRevenue / grossRevenue) * 100
+      : 0
     return { ...t, estRevenue, roi }
   })
 })

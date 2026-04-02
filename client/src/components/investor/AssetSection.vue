@@ -26,28 +26,20 @@
 
     <div class="dep-bar-container">
       <div class="dep-bar-label">
-        <span>Depreciation ({{ asset.depreciationYears }}yr schedule)</span>
-        <span>{{ depPct }}% depreciated &middot; {{ fmt(asset.annualDepreciation) }}/yr</span>
+        <span>Sec. 179 Depreciation (Year 1 &mdash; 100%)</span>
+        <span>100% depreciated</span>
       </div>
       <div class="dep-bar">
-        <div class="dep-bar-fill" :style="{ width: depPct + '%', background: 'var(--amber)' }"></div>
+        <div class="dep-bar-fill" style="width: 100%; background: var(--amber);"></div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
-
 const props = defineProps({
   asset: { type: Object, required: true },
   config: { type: Object, default: null },
-})
-
-const depPct = computed(() => {
-  const { purchasePrice, currentValue } = props.asset
-  if (!purchasePrice) return 0
-  return Math.round(((purchasePrice - currentValue) / purchasePrice) * 100)
 })
 
 function fmt(n) {

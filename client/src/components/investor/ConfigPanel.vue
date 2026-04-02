@@ -8,41 +8,23 @@
 
     <div class="config-grid">
       <div class="config-group">
-        <label>Owner Take %</label>
-        <input v-model.number="form.investor_split_pct" type="number" min="0" max="100" />
-      </div>
-      <div class="config-group">
-        <label>Monthly Payout Min</label>
-        <input v-model.number="form.investor_payout_min" type="number" min="0" />
-      </div>
-      <div class="config-group">
-        <label>Monthly Payout Max</label>
-        <input v-model.number="form.investor_payout_max" type="number" min="0" />
+        <label>Owner Take % <span class="hint">(fixed)</span></label>
+        <input :value="50" type="number" disabled />
       </div>
       <div class="config-group">
         <label>Truck Purchase Price</label>
         <input v-model.number="form.truck_purchase_price" type="number" min="0" />
       </div>
       <div class="config-group">
-        <label>Current Market Value</label>
-        <input v-model.number="form.truck_current_value" type="number" min="0" />
-      </div>
-      <div class="config-group">
         <label>Title Status</label>
         <select v-model="form.truck_title_status">
           <option>Clean</option>
-          <option>Salvage</option>
-          <option>Rebuilt</option>
-          <option>Lien</option>
+          <option>Accident / Salvage</option>
         </select>
       </div>
       <div class="config-group">
-        <label>Depreciation Years</label>
-        <input v-model.number="form.depreciation_years" type="number" min="1" max="20" />
-      </div>
-      <div class="config-group">
-        <label>Section 179 Deduction</label>
-        <input v-model.number="form.section_179_deduction" type="number" min="0" />
+        <label>Section 179 Deduction <span class="hint">(auto)</span></label>
+        <input :value="form.truck_purchase_price" type="number" disabled />
       </div>
       <div class="config-group">
         <label>Maintenance Fund / Month</label>
@@ -78,14 +60,8 @@ const emit = defineEmits(['save'])
 const saving = ref(false)
 
 const form = reactive({
-  investor_split_pct: 35,
-  investor_payout_min: 2100,
-  investor_payout_max: 3100,
   truck_purchase_price: 58000,
-  truck_current_value: 21000,
   truck_title_status: 'Clean',
-  depreciation_years: 5,
-  section_179_deduction: 30000,
   maintenance_fund_monthly: 800,
   fuel_savings_target_pct: 15,
   blue_chip_brokers: '',
@@ -151,6 +127,9 @@ async function handleSave() {
 .config-group input:focus,
 .config-group select:focus {
   outline: none; border-color: var(--blue);
+}
+.config-group input:disabled {
+  opacity: 0.5; cursor: not-allowed;
 }
 
 .config-actions {
