@@ -4377,26 +4377,21 @@ app.get("/api/geocode", requireAuth, async (req, res) => {
 	}
 });
 
-// GET /api/geocode/search — Places text search proxy
+// GET /api/geocode/search — Forward geocode (address → coordinates) using Geocoding API
 app.get("/api/geocode/search", requireAuth, async (req, res) => {
 	const { q } = req.query;
 	if (!q || q.trim().length < 3) return res.json({ results: [] });
 	try {
-		const resp = await fetch("https://places.googleapis.com/v1/places:searchText", {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				"X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
-				"X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location",
-			},
-			body: JSON.stringify({ textQuery: q.trim() }),
-		});
+		const resp = await fetch(
+			`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q.trim())}&key=${GOOGLE_MAPS_API_KEY}`
+		);
 		if (!resp.ok) return res.json({ results: [] });
 		const data = await resp.json();
-		const results = (data.places || []).map(p => ({
-			lat: p.location?.latitude,
-			lng: p.location?.longitude,
-			displayName: p.formattedAddress || p.displayName?.text || "",
+		if (data.status !== "OK" || !data.results) return res.json({ results: [] });
+		const results = data.results.slice(0, 5).map(r => ({
+			lat: r.geometry.location.lat,
+			lng: r.geometry.location.lng,
+			displayName: r.formatted_address || "",
 		}));
 		res.json({ results });
 	} catch {

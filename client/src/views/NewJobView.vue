@@ -203,11 +203,11 @@ function onPickerConfirm({ lat, lng, displayName }) {
   if (pickerTarget.value === 'pickup') {
     form.pickupLat = lat
     form.pickupLng = lng
-    if (displayName && !form.pickupAddress) form.pickupAddress = displayName
+    if (displayName) form.pickupAddress = displayName
   } else {
     form.dropoffLat = lat
     form.dropoffLng = lng
-    if (displayName && !form.dropoffAddress) form.dropoffAddress = displayName
+    if (displayName) form.dropoffAddress = displayName
   }
   pickerOpen.value = false
 }
