@@ -42,7 +42,7 @@
           <template #body="{ data }">
             <div v-if="!hideAssign(data)" class="assign-cell" @click.stop>
               <Select v-model="assignSelections[data._rowIndex]" :options="drivers" placeholder="Select driver" size="small" class="assign-select" />
-              <Button label="Assign" size="small" severity="success" @click.stop="assign(data)" />
+              <Button label="Assign" size="small" @click.stop="assign(data)" />
             </div>
             <span v-else class="text-dim">&mdash;</span>
           </template>

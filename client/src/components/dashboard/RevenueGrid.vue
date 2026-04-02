@@ -1,22 +1,17 @@
 <template>
   <div class="revenue-grid">
-    <Card v-for="card in cards" :key="card.key" class="rev-card" :class="card.color">
-      <template #content>
-        <div class="rev-row">
-          <span class="rev-icon">{{ card.icon }}</span>
-          <div class="rev-body">
-            <span class="rev-label">{{ card.label }}</span>
-            <span class="rev-value" :class="card.color">{{ card.value }}</span>
-          </div>
-        </div>
-      </template>
-    </Card>
+    <div v-for="card in cards" :key="card.key" class="rev-card">
+      <i :class="['rev-icon pi', card.icon]"></i>
+      <div class="rev-body">
+        <span class="rev-label">{{ card.label }}</span>
+        <span class="rev-value">{{ card.value }}</span>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { computed } from 'vue'
-import Card from 'primevue/card'
 
 const props = defineProps({
   revenue: { type: Object, required: true },
@@ -27,9 +22,9 @@ function fmt(n) {
 }
 
 const cards = computed(() => [
-  { key: 'total', icon: '💰', label: 'Total Revenue', value: fmt(props.revenue.total), color: '' },
-  { key: 'paid', icon: '✔', label: 'Paid', value: fmt(props.revenue.paid), color: 'accent' },
-  { key: 'pending', icon: '🕐', label: 'Pending', value: fmt(props.revenue.pending), color: 'amber' },
+  { key: 'total', icon: 'pi-dollar', label: 'Total Revenue', value: fmt(props.revenue.total) },
+  { key: 'paid', icon: 'pi-check', label: 'Paid', value: fmt(props.revenue.paid) },
+  { key: 'pending', icon: 'pi-clock', label: 'Pending', value: fmt(props.revenue.pending) },
 ])
 </script>
 
@@ -37,22 +32,22 @@ const cards = computed(() => [
 .revenue-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
-  margin-bottom: 1rem;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
 }
 
-.rev-card { border-left: 3px solid var(--border); }
-.rev-card.accent { border-left-color: var(--accent); }
-.rev-card.amber { border-left-color: var(--amber); }
+.rev-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.85rem 1.15rem;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
 
-:deep(.p-card-body) { padding: 0.9rem 1.25rem; }
-:deep(.p-card-content) { padding: 0; }
-
-.rev-row { display: flex; align-items: center; gap: 0.9rem; }
-.rev-icon { font-size: 1.2rem; flex-shrink: 0; opacity: 0.8; }
-.rev-body { display: flex; flex-direction: column; gap: 0.1rem; }
-.rev-label { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); }
-.rev-value { font-size: 1.35rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
-.rev-value.accent { color: var(--accent); }
-.rev-value.amber { color: var(--amber); }
+.rev-icon { font-size: 1.1rem; color: var(--text-dim); }
+.rev-body { display: flex; flex-direction: column; gap: 0.05rem; }
+.rev-label { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); }
+.rev-value { font-size: 1.25rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; color: var(--text); }
 </style>

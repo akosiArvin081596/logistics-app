@@ -33,10 +33,10 @@
     <div class="dash-section fill">
       <Tabs :value="activeTab" @update:value="activeTab = $event">
         <TabList>
-          <Tab value="jobBoard">Job Board <Badge :value="store.unassignedJobs.length" severity="danger" /></Tab>
-          <Tab value="activeLoads">Active Loads <Badge :value="store.activeJobs.length" /></Tab>
-          <Tab value="completed">Completed <Badge :value="store.completedJobs.length" severity="success" /></Tab>
-          <Tab value="fleet">Fleet & Drivers <Badge :value="store.fleet.length" severity="info" /></Tab>
+          <Tab value="jobBoard">Job Board <Badge :value="store.unassignedJobs.length" severity="secondary" /></Tab>
+          <Tab value="activeLoads">Active Loads <Badge :value="store.activeJobs.length" severity="secondary" /></Tab>
+          <Tab value="completed">Completed <Badge :value="store.completedJobs.length" severity="secondary" /></Tab>
+          <Tab value="fleet">Fleet & Drivers <Badge :value="store.fleet.length" severity="secondary" /></Tab>
         </TabList>
         <TabPanels>
           <TabPanel value="jobBoard">
