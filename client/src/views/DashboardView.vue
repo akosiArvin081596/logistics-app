@@ -245,68 +245,54 @@ onUnmounted(() => {
 :deep(.p-tabpanel) { padding: 0; }
 :deep(.p-tab) { gap: 0.4rem; }
 
-/* Table styles */
-:deep(table) { width: 100%; border-collapse: collapse; }
-:deep(thead) { background: var(--surface-hover); }
-:deep(th) {
-  padding: 0.75rem 1rem; text-align: left;
-  font-size: 0.72rem; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.06em;
-  color: var(--text-dim);
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
+/* PrimeVue DataTable — clean professional look */
+:deep(.p-datatable) { font-size: 0.85rem; }
+:deep(.p-datatable-header-cell) {
+  font-size: 0.7rem !important; font-weight: 600 !important;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-dim) !important;
+  background: transparent !important;
+  border-bottom: 2px solid var(--border) !important;
+  padding: 0.7rem 0.85rem !important;
 }
-:deep(td) {
-  padding: 0.7rem 1rem; font-size: 0.88rem;
-  border-bottom: 1px solid var(--border);
+:deep(.p-datatable-row-cell) {
+  padding: 0.65rem 0.85rem !important;
+  border-bottom: 1px solid var(--border) !important;
+  background: transparent !important;
 }
-:deep(tr:last-child td) { border-bottom: none; }
-:deep(tr:hover td) { background: var(--surface-hover); }
+:deep(.p-datatable-tbody > tr) {
+  background: transparent !important;
+}
+:deep(.p-datatable-tbody > tr:hover) {
+  background: rgba(255,255,255,0.03) !important;
+}
+:deep(.p-datatable-striped .p-datatable-tbody > tr:nth-child(even)) {
+  background: transparent !important;
+}
+:deep(.p-datatable-tbody > tr:last-child > td) {
+  border-bottom: none !important;
+}
 
-/* Status badge overrides for dashboard */
+/* PrimeVue Dialog polish */
+:deep(.p-dialog) {
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+}
+:deep(.p-dialog-header) {
+  padding: 1rem 1.25rem;
+  font-size: 1rem;
+}
+:deep(.p-dialog-content) {
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+/* Status badge overrides */
 :deep(.status-badge.in-transit) { background: var(--blue-dim); color: var(--blue); }
 :deep(.status-badge.assigned) { background: var(--accent-dim); color: var(--accent); }
 :deep(.status-badge.dispatched) { background: var(--blue-dim); color: var(--blue); }
 :deep(.status-badge.delivered) { background: rgba(16,185,129,0.2); color: #059669; }
 :deep(.status-badge.unassigned) { background: var(--danger-dim); color: var(--danger); }
 :deep(.status-badge.picked-up) { background: var(--amber-dim); color: var(--amber); }
-
-:deep(.assign-cell) {
-  display: flex; align-items: center; gap: 0.4rem; white-space: nowrap;
-}
-:deep(.assign-cell select) {
-  padding: 0.3rem 0.5rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  font-family: 'DM Sans', sans-serif;
-  font-size: 0.82rem;
-  outline: none;
-  min-width: 120px;
-}
-
-.fleet-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 1rem;
-  padding: 1.25rem;
-}
-.fleet-card {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem;
-  transition: box-shadow 0.15s;
-}
-.fleet-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
-.fleet-card .driver-name { font-weight: 700; font-size: 0.95rem; margin-bottom: 0.15rem; }
-.fleet-card .truck-id { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--text-dim); }
-.fleet-card .fleet-meta { margin-top: 0.75rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-.driver-status { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 12px; font-size: 0.7rem; font-weight: 600; }
-.driver-status.on-load { background: var(--blue-dim); color: var(--blue); }
-.driver-status.available { background: var(--accent-dim); color: var(--accent); }
-.fleet-card .fleet-stat { font-size: 0.75rem; color: var(--text-dim); }
-.fleet-card .load-id { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--blue); margin-top: 0.25rem; }
 
 .skeleton-line { height: 0.85rem; margin-bottom: 0.4rem; }
 .skeleton-line.lg { height: 1.75rem; width: 60%; }
