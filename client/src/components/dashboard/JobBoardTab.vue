@@ -30,7 +30,7 @@
           <tr v-for="job in paginatedItems" :key="job._rowIndex" class="clickable-row" :class="{ 'warning-row': missingData(job) }" @click="openDetail(job)">
             <td v-for="(col, idx) in displayCols" :key="col">
               <span v-if="idx === 0 && missingData(job)" class="row-warning" :title="missingData(job)">&#9888;</span>
-              <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
+              <StatusBadge v-if="/status/i.test(col)" :status="job[col] || 'Unassigned'" />
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
             <td @click.stop>

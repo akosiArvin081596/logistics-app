@@ -1955,12 +1955,13 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const activeJobs = jobTracking.data.filter(
 			(r) => statusCol && activeStatuses.test((r[statusCol] || "").trim()),
 		);
-		const unassignedJobs = jobTracking.data.filter(
-			(r) =>
-				(statusCol &&
-					unassignedStatuses.test((r[statusCol] || "").trim())) ||
-				(driverCol && !(r[driverCol] || "").trim()),
-		);
+		const unassignedJobs = jobTracking.data.filter((r) => {
+			const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
+			if (!lid) return false; // skip rows with no Load ID
+			const status = statusCol ? (r[statusCol] || "").trim() : "";
+			const hasDriver = driverCol ? !!(r[driverCol] || "").trim() : true;
+			return unassignedStatuses.test(status) || !status || !hasDriver;
+		});
 		const completedJobs = jobTracking.data.filter(
 			(r) =>
 				statusCol &&
