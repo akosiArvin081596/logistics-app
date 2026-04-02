@@ -4363,35 +4363,49 @@ app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async 
 	}
 });
 
-// GET /api/geocode — reverse geocode proxy (key stays server-side)
+// GET /api/geocode — reverse geocode via Nominatim (no API key needed)
 app.get("/api/geocode", requireAuth, async (req, res) => {
 	const { lat, lng } = req.query;
 	if (!lat || !lng) return res.status(400).json({ error: "lat and lng required" });
 	try {
-		const resp = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`);
+		const resp = await fetch(
+			`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1`,
+			{ headers: { "User-Agent": "LogisX/1.0" } }
+		);
 		if (!resp.ok) return res.json({ status: "ERROR", results: [] });
 		const data = await resp.json();
-		res.json(data);
+		if (!data.display_name) return res.json({ status: "OK", results: [] });
+		const addr = data.address || {};
+		res.json({
+			status: "OK",
+			results: [{
+				formatted_address: data.display_name,
+				address_components: [
+					{ long_name: addr.city || addr.town || addr.village || "", types: ["locality"] },
+					{ short_name: addr.state || addr.region || "", types: ["administrative_area_level_1"] },
+				],
+			}],
+		});
 	} catch {
 		res.json({ status: "ERROR", results: [] });
 	}
 });
 
-// GET /api/geocode/search — Forward geocode (address → coordinates) using Geocoding API
+// GET /api/geocode/search — Forward geocode via Nominatim
 app.get("/api/geocode/search", requireAuth, async (req, res) => {
 	const { q } = req.query;
 	if (!q || q.trim().length < 3) return res.json({ results: [] });
 	try {
 		const resp = await fetch(
-			`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q.trim())}&key=${GOOGLE_MAPS_API_KEY}`
+			`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q.trim())}&limit=5&addressdetails=1`,
+			{ headers: { "User-Agent": "LogisX/1.0" } }
 		);
 		if (!resp.ok) return res.json({ results: [] });
 		const data = await resp.json();
-		if (data.status !== "OK" || !data.results) return res.json({ results: [] });
-		const results = data.results.slice(0, 5).map(r => ({
-			lat: r.geometry.location.lat,
-			lng: r.geometry.location.lng,
-			displayName: r.formatted_address || "",
+		const results = data.map(r => ({
+			lat: parseFloat(r.lat),
+			lng: parseFloat(r.lon),
+			displayName: r.display_name || "",
 		}));
 		res.json({ results });
 	} catch {
