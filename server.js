@@ -2443,9 +2443,16 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			),
 		].sort();
 
+		// Assigned truck from SQLite
+		const assignedTruck = db.prepare(
+			`SELECT unit_number, make, model, year, vin, license_plate, status, photo
+			 FROM trucks WHERE LOWER(assigned_driver) = ?`
+		).get(nameLower) || null;
+
 		res.json({
 			loads: filteredLoads,
 			driverInfo: driverInfo || null,
+			truck: assignedTruck,
 			messages: driverMessages,
 			notifications: driverNotifications,
 			expenses: driverExpenses,

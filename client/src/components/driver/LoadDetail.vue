@@ -80,6 +80,24 @@
       <van-collapse-item title="Documents" name="documents">
         <DocumentList :load-id="loadId" />
       </van-collapse-item>
+
+      <van-collapse-item v-if="truck" title="Truck Details" name="truck">
+        <div class="truck-detail-card">
+          <img v-if="truck.photo" :src="truck.photo" class="truck-photo" />
+          <div class="truck-fields">
+            <van-cell title="Unit #" :value="truck.unit_number || '\u2014'" />
+            <van-cell title="Make / Model" :value="[truck.make, truck.model].filter(Boolean).join(' ') || '\u2014'" />
+            <van-cell title="Year" :value="truck.year || '\u2014'" />
+            <van-cell title="VIN" :value="truck.vin || '\u2014'" />
+            <van-cell title="License Plate" :value="truck.license_plate || '\u2014'" />
+            <van-cell title="Status">
+              <template #value>
+                <span :class="['truck-status', 'ts-' + (truck.status || 'Active').toLowerCase()]">{{ truck.status || 'Active' }}</span>
+              </template>
+            </van-cell>
+          </div>
+        </div>
+      </van-collapse-item>
     </van-collapse>
   </div>
 </template>
@@ -97,6 +115,7 @@ const props = defineProps({
   driverName: { type: String, default: '' },
   hasActiveJob: { type: Boolean, default: false },
   driverPosition: { type: Object, default: null },
+  truck: { type: Object, default: null },
 })
 
 const emit = defineEmits(['back', 'status-update', 'uploaded'])
@@ -297,4 +316,19 @@ const dropoffFields = computed(() => {
   font-size: 0.85rem;
   line-height: 1;
 }
+
+/* Truck Details */
+.truck-detail-card { padding: 0.25rem 0; }
+.truck-photo {
+  width: 100%; max-height: 160px; object-fit: cover;
+  border-radius: 8px; margin-bottom: 0.5rem;
+}
+.truck-status {
+  display: inline-flex; padding: 0.1rem 0.5rem; border-radius: 10px;
+  font-size: 0.7rem; font-weight: 600;
+}
+.ts-active { background: rgba(52,211,153,0.15); color: #34d399; }
+.ts-inactive { background: rgba(156,163,175,0.15); color: #9ca3af; }
+.ts-maintenance { background: rgba(251,191,36,0.15); color: #f59e0b; }
+.ts-oos { background: rgba(239,68,68,0.15); color: #ef4444; }
 </style>

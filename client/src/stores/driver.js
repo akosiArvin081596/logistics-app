@@ -8,6 +8,7 @@ export const useDriverStore = defineStore('driver', {
     driverName: '',
     loads: [],
     driverInfo: null,
+    truck: null,
     messages: [],
     notifications: [],
     expenses: [],
@@ -197,6 +198,7 @@ export const useDriverStore = defineStore('driver', {
             .filter(Boolean)
         )
         this.driverInfo = data.driverInfo || null
+        this.truck = data.truck || null
         this.messages = data.messages || []
         this.notifications = data.notifications || []
         this.expenses = data.expenses || []

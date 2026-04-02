@@ -37,6 +37,7 @@
           :driver-name="driverName"
           :has-active-job="driverStore.hasActiveJob"
           :driver-position="geo.lastPosition.value"
+          :truck="driverStore.truck"
           @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
