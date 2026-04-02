@@ -19,7 +19,7 @@ export function useGoogleMaps() {
       if (!window.google?.maps) {
         await new Promise((resolve, reject) => {
           const script = document.createElement('script')
-          script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=marker&v=weekly`
+          script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=marker&v=weekly&loading=async`
           script.async = true
           script.onload = resolve
           script.onerror = reject
