@@ -254,6 +254,12 @@ catch {
 	`);
 }
 
+// Migration: add driver_pay_daily to trucks
+try { db.exec("ALTER TABLE trucks ADD COLUMN driver_pay_daily REAL DEFAULT 0"); } catch {}
+
+// Migration: add asset_ref to messages (for "Share Asset" in chat)
+try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } catch {}
+
 // Legal documents table (per-truck legal files)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS legal_documents (
@@ -767,6 +773,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 		HvutAnnual: t.hvut_annual || 0,
 		IrpAnnual: t.irp_annual || 0,
 		AdminFeePct: t.admin_fee_pct ?? 50,
+		DriverPayDaily: t.driver_pay_daily || 0,
 	}));
 	res.json({ trucks });
 });
@@ -774,7 +781,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 // Truck Database: add a new truck
 app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
 	try {
-		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId } = req.body;
+		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily } = req.body;
 		if (!unitNumber || !unitNumber.trim()) {
 			return res.status(400).json({ error: "Unit number is required" });
 		}
@@ -789,8 +796,8 @@ app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
 				.run(assignedDriver.trim(), unitNumber.trim());
 		}
 		const result = db.prepare(
-			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", parseInt(ownerId) || 0);
+			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", parseInt(ownerId) || 0, parseFloat(driverPayDaily) || 0);
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error creating truck:", error.message);
@@ -806,7 +813,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId,
-			photo, insuranceMonthly, eldMonthly, hvutAnnual, irpAnnual, adminFeePct } = req.body;
+			photo, insuranceMonthly, eldMonthly, hvutAnnual, irpAnnual, adminFeePct, driverPayDaily } = req.body;
 		const updates = [];
 		const params = [];
 
@@ -839,6 +846,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		if (hvutAnnual !== undefined) { updates.push("hvut_annual = ?"); params.push(parseFloat(hvutAnnual) || 0); }
 		if (irpAnnual !== undefined) { updates.push("irp_annual = ?"); params.push(parseFloat(irpAnnual) || 0); }
 		if (adminFeePct !== undefined) { updates.push("admin_fee_pct = ?"); params.push(parseFloat(adminFeePct) ?? 50); }
+		if (driverPayDaily !== undefined) { updates.push("driver_pay_daily = ?"); params.push(parseFloat(driverPayDaily) || 0); }
 
 		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 		params.push(id);
@@ -2626,18 +2634,18 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 // POST /api/messages — Send a new message
 app.post("/api/messages", requireAuth, (req, res) => {
 	try {
-		const { from, to, message, loadId, attachmentUrl, attachmentType } = req.body;
-		if (!from || !to || !message) {
+		const { from, to, message, loadId, attachmentUrl, attachmentType, assetRef } = req.body;
+		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
 
 		const timestamp = new Date().toISOString();
 		const result = db
 			.prepare(
-				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
-			.run(timestamp, from, to, message, loadId || "", attachmentUrl || "", attachmentType || "");
+			.run(timestamp, from, to, message || "", loadId || "", attachmentUrl || "", attachmentType || "", assetRef || "");
 
 		// Persist notification for recipient
 		const msgNotif = insertNotification.run(
@@ -2739,7 +2747,7 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 		const user = req.session.user;
 		const name = user.username.trim().toLowerCase();
 		const messages = db.prepare(
-			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref
 			 FROM messages
 			 WHERE LOWER("from") = ? OR LOWER("to") = ?
 			 ORDER BY id ASC`
@@ -2819,6 +2827,10 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 			req.body;
 		if (!driver || !type || !amount || !date) {
 			return res.status(400).json({ error: "Missing required fields" });
+		}
+		const VALID_EXPENSE_TYPES = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other'];
+		if (!VALID_EXPENSE_TYPES.includes(type)) {
+			return res.status(400).json({ error: "Invalid expense type" });
 		}
 
 		const timestamp = new Date().toISOString();
@@ -4687,8 +4699,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const maintRow = db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf WHERE LOWER(mf.truck) = ? AND strftime('%Y-%m', mf.date) = ?`).get(truck.unit_number.toLowerCase(), currentMonthKey);
 				const compRow = db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf WHERE LOWER(cf.truck) = ? AND strftime('%Y-%m', cf.due_date) = ? AND cf.status = 'Paid'`).get(truck.unit_number.toLowerCase(), currentMonthKey);
 				// Fixed costs from truck record (pro-rated monthly)
-				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual FROM trucks WHERE unit_number = ?").get(truck.unit_number);
-				const fixedMonthly = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12);
+				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily FROM trucks WHERE unit_number = ?").get(truck.unit_number);
+				const fixedMonthly = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12) + ((truckRow?.driver_pay_daily || 0) * 30);
 				const unitMonthlyExpenses = (expRow?.t || 0) + (maintRow?.t || 0) + (compRow?.t || 0) + fixedMonthly;
 				perTruckData[truck.unit_number] = {
 					unitMonthlyGross: Math.round(unitMonthlyGross),

@@ -155,6 +155,10 @@
               <label>Admin Fee (%)</label>
               <input v-model.number="editForm.adminFeePct" type="number" min="0" max="100" />
             </div>
+            <div class="edit-field">
+              <label>Driver Pay ($/day)</label>
+              <input v-model.number="editForm.driverPayDaily" type="number" min="0" />
+            </div>
           </details>
 
           <div class="confirm-actions">
@@ -225,7 +229,7 @@ const showEdit = ref(false)
 const editForm = reactive({
   id: null, unitNumber: '', make: '', model: '', year: 0,
   vin: '', licensePlate: '', status: 'Active', assignedDriver: '', ownerId: 0, notes: '',
-  photo: '', insuranceMonthly: 0, eldMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50,
+  photo: '', insuranceMonthly: 0, eldMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50, driverPayDaily: 0,
 })
 
 function openEdit(truck) {
@@ -246,6 +250,7 @@ function openEdit(truck) {
   editForm.hvutAnnual = truck.HvutAnnual || 0
   editForm.irpAnnual = truck.IrpAnnual || 0
   editForm.adminFeePct = truck.AdminFeePct ?? 50
+  editForm.driverPayDaily = truck.DriverPayDaily || 0
   showEdit.value = true
 }
 
@@ -277,6 +282,7 @@ function handleSaveEdit() {
       hvutAnnual: editForm.hvutAnnual,
       irpAnnual: editForm.irpAnnual,
       adminFeePct: editForm.adminFeePct,
+      driverPayDaily: editForm.driverPayDaily,
     },
   })
   showEdit.value = false

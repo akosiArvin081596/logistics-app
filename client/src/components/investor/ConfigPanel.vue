@@ -19,6 +19,7 @@
         <label>Title Status</label>
         <select v-model="form.truck_title_status">
           <option>Clean</option>
+          <option>Lien</option>
           <option>Accident / Salvage</option>
         </select>
       </div>

@@ -21,6 +21,7 @@
             <span class="bubble-from">{{ isMine(msg) ? 'You' : 'Dispatch' }}</span>
             <span class="bubble-time">{{ fmtTime(msg.timestamp) }}</span>
           </div>
+          <div v-if="msg.asset_ref" class="bubble-asset"><span class="asset-badge">&#128666; {{ msg.asset_ref }}</span></div>
           <div v-if="msg.message" class="bubble-text">{{ msg.message }}</div>
           <div v-if="msg.attachment_url" class="bubble-attachment">
             <a v-if="msg.attachment_type === 'image'" :href="msg.attachment_url" target="_blank" rel="noopener">
@@ -49,10 +50,14 @@
             &#128206;
             <input type="file" style="display:none" accept="image/*,application/pdf" @change="onAttach" />
           </label>
+          <select v-if="trucks.length" v-model="selectedAsset" class="asset-select" title="Share asset">
+            <option value="">&#128666; Share Truck</option>
+            <option v-for="t in trucks" :key="t.id" :value="t.UnitNumber || t.unit_number">{{ t.UnitNumber || t.unit_number }}</option>
+          </select>
           <span v-if="attachFile" class="attach-preview">{{ attachFile.name }} <button class="attach-clear" @click="clearAttach">&times;</button></span>
         </div>
       </div>
-      <button class="send-btn" :disabled="(!draft.trim() && !attachFile) || sending" @click="send">
+      <button class="send-btn" :disabled="(!draft.trim() && !attachFile && !selectedAsset) || sending" @click="send">
         {{ sending ? '...' : 'Send' }}
       </button>
     </div>
@@ -65,6 +70,10 @@ import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import { useAuthStore } from '../../stores/auth'
 
+const props = defineProps({
+  trucks: { type: Array, default: () => [] },
+})
+
 const api = useApi()
 const socket = useSocket()
 const auth = useAuthStore()
@@ -74,6 +83,7 @@ const draft = ref('')
 const sending = ref(false)
 const chatBody = ref(null)
 const attachFile = ref(null)
+const selectedAsset = ref('')
 const attachBase64 = ref('')
 
 function onAttach(e) {
@@ -121,10 +131,12 @@ async function load() {
 
 async function send() {
   const text = draft.value.trim()
-  if ((!text && !attachFile.value) || sending.value) return
+  const assetRef = selectedAsset.value || ''
+  if ((!text && !attachFile.value && !assetRef) || sending.value) return
   sending.value = true
   const optimistic = {
     id: Date.now(),
+    asset_ref: assetRef,
     from: auth.user?.username,
     to: 'dispatch',
     message: text,
@@ -161,7 +173,9 @@ async function send() {
       message: text,
       attachmentUrl,
       attachmentType,
+      assetRef,
     })
+    selectedAsset.value = ''
   } catch {
     messages.value = messages.value.filter(m => m.id !== optimistic.id)
   } finally {
@@ -300,5 +314,16 @@ onUnmounted(() => {
 .attach-img { max-width: 200px; max-height: 140px; border-radius: 6px; display: block; }
 .attach-link {
   font-size: 0.78rem; color: inherit; opacity: 0.85; text-decoration: underline;
+}
+.asset-select {
+  padding: 0.2rem 0.4rem; font-size: 0.72rem; font-family: inherit;
+  border: 1px solid var(--border); border-radius: 5px;
+  background: var(--bg); color: var(--text-dim); cursor: pointer;
+}
+.bubble-asset { margin-bottom: 0.2rem; }
+.asset-badge {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  padding: 0.15rem 0.5rem; border-radius: 8px; font-size: 0.68rem; font-weight: 600;
+  background: rgba(59,130,246,0.12); color: var(--blue, #3b82f6);
 }
 </style>

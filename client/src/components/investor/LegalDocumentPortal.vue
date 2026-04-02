@@ -77,7 +77,7 @@ const isSuperAdmin = computed(() => auth.user?.role === 'Super Admin')
 
 const docTypes = [
   'Title', 'Registration', 'Insurance Certificate', 'Lease Agreement',
-  'Bill of Sale', 'Inspection Report', 'IFTA License', 'Other',
+  'Bill of Sale', 'Inspection Report', 'IFTA License', 'Maintenance Records', 'Other',
 ]
 
 const docs = ref([])

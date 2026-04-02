@@ -131,6 +131,8 @@ const form = reactive({
 const typeColumns = [
   { text: 'Fuel', value: 'Fuel' },
   { text: 'Repair', value: 'Repair' },
+  { text: 'Maintenance', value: 'Maintenance' },
+  { text: 'Wear & Tear', value: 'Wear & Tear' },
   { text: 'Toll', value: 'Toll' },
   { text: 'Food', value: 'Food' },
   { text: 'Other', value: 'Other' },

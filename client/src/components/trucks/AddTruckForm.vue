@@ -106,9 +106,15 @@
           <input v-model.number="form.irpAnnual" class="form-input" type="number" min="0" placeholder="0" />
         </div>
       </div>
-      <div class="form-group" style="max-width:200px;">
-        <label class="form-label">Admin Fee (%)</label>
-        <input v-model.number="form.adminFeePct" class="form-input" type="number" min="0" max="100" placeholder="50" />
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Admin Fee (%)</label>
+          <input v-model.number="form.adminFeePct" class="form-input" type="number" min="0" max="100" placeholder="50" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Driver Pay ($/day)</label>
+          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" placeholder="250" />
+        </div>
       </div>
     </details>
 
@@ -173,6 +179,7 @@ const form = reactive({
   hvutAnnual: 0,
   irpAnnual: 0,
   adminFeePct: 50,
+  driverPayDaily: 0,
 })
 
 function onPhoto(e) {
@@ -209,6 +216,7 @@ function handleSubmit() {
     hvutAnnual: form.hvutAnnual,
     irpAnnual: form.irpAnnual,
     adminFeePct: form.adminFeePct,
+    driverPayDaily: form.driverPayDaily,
   })
 
   form.unitNumber = ''
@@ -227,6 +235,7 @@ function handleSubmit() {
   form.hvutAnnual = 0
   form.irpAnnual = 0
   form.adminFeePct = 50
+  form.driverPayDaily = 0
 }
 </script>
 

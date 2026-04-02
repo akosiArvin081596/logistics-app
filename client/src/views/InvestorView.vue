@@ -64,7 +64,7 @@
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
-      <InvestorChat />
+      <InvestorChat :trucks="trucks" />
       <DocumentPortal />
       <LegalDocumentPortal :trucks="trucks" />
       <ConfigPanel
