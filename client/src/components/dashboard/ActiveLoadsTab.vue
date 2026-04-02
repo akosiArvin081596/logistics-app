@@ -17,16 +17,16 @@
         </Column>
         <Column header="Actions" :style="{ minWidth: '280px' }">
           <template #body="{ data }">
-            <div @click.stop>
+            <div class="actions-wrap" @click.stop>
               <div class="action-row">
-                <Select v-model="statusSelections[data._rowIndex]" :options="statusOptions" :placeholder="getCurrentStatus(data) || 'Update Status...'" size="small" class="action-sel" />
+                <Select v-model="statusSelections[data._rowIndex]" :options="statusOptions" :placeholder="getCurrentStatus(data) || 'Status'" size="small" class="action-sel" />
                 <Button v-if="statusSelections[data._rowIndex]" label="Update" size="small" severity="info" @click="confirmStatusUpdate(data)" />
               </div>
-              <div class="action-row" style="margin-top:0.3rem">
-                <Select v-model="reassignSelections[data._rowIndex]" :options="drivers" :placeholder="getCurrentDriver(data) || 'Reassign...'" size="small" class="action-sel" />
+              <div class="action-row">
+                <Select v-model="reassignSelections[data._rowIndex]" :options="drivers" :placeholder="getCurrentDriver(data) || 'Driver'" size="small" class="action-sel" />
                 <Button v-if="reassignSelections[data._rowIndex]" label="Reassign" size="small" @click="confirmReassign(data)" />
-                <Button label="Cancel" size="small" severity="danger" @click="confirmCancel(data)" />
               </div>
+              <Button label="Cancel" size="small" severity="danger" text @click="confirmCancel(data)" />
             </div>
           </template>
         </Column>
@@ -219,8 +219,9 @@ const detailSections = computed(() => {
 
 <style scoped>
 .toolbar { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 1rem; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.action-row { display: flex; align-items: center; gap: 0.35rem; }
-.action-sel { min-width: 130px; }
+.actions-wrap { display: flex; align-items: center; gap: 0.4rem; flex-wrap: nowrap; }
+.action-row { display: flex; align-items: center; gap: 0.25rem; }
+.action-sel { width: 130px; }
 .detail-section { margin-bottom: 1.25rem; }
 .detail-section:last-child { margin-bottom: 0; }
 .section-label { font-size: 0.68rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem; }
