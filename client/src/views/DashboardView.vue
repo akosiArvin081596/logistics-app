@@ -24,14 +24,14 @@
       </div>
     </template>
 
-    <div class="flex-1 flex flex-col min-h-0 bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-      <div class="flex border-b border-gray-200 shrink-0">
+    <div class="flex-1 flex flex-col min-h-0 bg-white border border-gray-100 rounded-xl overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.06)]">
+      <div class="flex gap-0 border-b border-gray-100 shrink-0 bg-gray-50/50">
         <button v-for="tab in tabs" :key="tab.key"
-          :class="['px-4 py-3 text-sm font-semibold flex items-center gap-2 border-b-2 transition',
-            activeTab === tab.key ? 'text-sky-600 border-sky-500' : 'text-gray-400 border-transparent hover:text-gray-600']"
+          :class="['px-5 py-3.5 text-[13px] font-semibold flex items-center gap-2.5 border-b-2 transition-colors',
+            activeTab === tab.key ? 'text-sky-600 border-sky-500 bg-white' : 'text-gray-400 border-transparent hover:text-gray-600']"
           @click="activeTab = tab.key">
           {{ tab.label }}
-          <span class="text-xs font-mono bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{{ tab.count }}</span>
+          <span :class="['text-[11px] font-bold px-2 py-0.5 rounded-full', activeTab === tab.key ? 'bg-sky-100 text-sky-600' : 'bg-gray-100 text-gray-400']" style="font-family:'JetBrains Mono',monospace;">{{ tab.count }}</span>
         </button>
       </div>
 

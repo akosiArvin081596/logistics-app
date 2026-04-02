@@ -5,15 +5,15 @@
         class="w-full max-w-[280px] px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg text-gray-800 placeholder-gray-400 outline-none focus:border-sky-400/50" />
     </div>
     <div class="overflow-x-auto">
-      <table v-if="filteredJobs.length > 0" class="w-full text-sm">
+      <table v-if="filteredJobs.length > 0" class="w-full text-[13px]">
         <thead>
-          <tr class="border-b border-gray-200">
-            <th v-for="col in displayCols" :key="col" class="px-3 py-2.5 text-left text-[0.68rem] font-semibold uppercase tracking-wider text-gray-400">{{ col }}</th>
+          <tr class="bg-gray-50 border-b border-gray-200">
+            <th v-for="col in displayCols" :key="col" class="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-400">{{ col }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" @click="openDetail(job)">
-            <td v-for="col in displayCols" :key="col" class="px-3 py-2.5">
+          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-gray-50 hover:bg-sky-50/40 cursor-pointer" @click="openDetail(job)">
+            <td v-for="col in displayCols" :key="col" class="px-4 py-3">
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>

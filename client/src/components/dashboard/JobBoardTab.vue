@@ -7,28 +7,28 @@
 
     <div class="overflow-x-auto">
       <SkeletonLoader v-if="loading" />
-      <table v-else-if="filteredJobs.length > 0" class="w-full text-sm">
+      <table v-else-if="filteredJobs.length > 0" class="w-full text-[13px]">
         <thead>
-          <tr class="border-b border-gray-200">
-            <th v-for="col in displayCols" :key="col" class="px-3 py-2.5 text-left text-[0.68rem] font-semibold uppercase tracking-wider text-gray-400">{{ col }}</th>
-            <th class="px-3 py-2.5 text-left text-[0.68rem] font-semibold uppercase tracking-wider text-gray-400">Assign Driver</th>
+          <tr class="bg-gray-50 border-b border-gray-200">
+            <th v-for="col in displayCols" :key="col" class="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-400 whitespace-nowrap">{{ col }}</th>
+            <th class="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-400 whitespace-nowrap">Assign Driver</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" @click="openDetail(job)">
-            <td v-for="col in displayCols" :key="col" class="px-3 py-2.5">
+          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-gray-50 hover:bg-sky-50/40 cursor-pointer transition-colors" @click="openDetail(job)">
+            <td v-for="col in displayCols" :key="col" class="px-4 py-3">
               <StatusBadge v-if="/status/i.test(col)" :status="job[col] || 'Unassigned'" />
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
-            <td class="px-3 py-2.5" @click.stop>
+            <td class="px-4 py-3" @click.stop>
               <div v-if="!hideAssign(job)" class="flex items-center gap-2">
-                <select v-model="assignSelections[job._rowIndex]" class="px-2 py-1 text-sm bg-white border border-gray-200 rounded text-gray-800 outline-none min-w-[130px]">
+                <select v-model="assignSelections[job._rowIndex]" class="px-2.5 py-1.5 text-[13px] bg-gray-50 border border-gray-200 rounded-lg text-gray-700 outline-none focus:border-sky-300 min-w-[140px]">
                   <option value="">Select driver</option>
                   <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
                 </select>
-                <button class="px-3 py-1 text-xs font-semibold bg-sky-500 text-white rounded hover:bg-sky-600 transition" @click="assign(job)">Assign</button>
+                <button class="px-3.5 py-1.5 text-xs font-semibold bg-sky-500 text-white rounded-lg hover:bg-sky-600 transition shadow-sm" @click="assign(job)">Assign</button>
               </div>
-              <span v-else class="text-gray-500">&mdash;</span>
+              <span v-else class="text-gray-300">&mdash;</span>
             </td>
           </tr>
         </tbody>
