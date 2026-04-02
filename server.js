@@ -3826,6 +3826,28 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			})
 			: carrierDB.data;
 
+		// ---- Expense Data (S1) ----
+		let totalExpenses = 0;
+		if (investorDriverSet && investorDriverSet.size > 0) {
+			const driverList = [...investorDriverSet];
+			const placeholders = driverList.map(() => '?').join(',');
+			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE LOWER(driver) IN (${placeholders})`).get(...driverList);
+			totalExpenses += expSum.total;
+			// Maintenance fund services for investor's trucks
+			const maintSum = db.prepare(`SELECT COALESCE(SUM(mf.amount), 0) AS total FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type = 'service'`).get(user.id);
+			totalExpenses += maintSum.total;
+			// Compliance fees paid for investor's trucks
+			const compSum = db.prepare(`SELECT COALESCE(SUM(cf.amount), 0) AS total FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status = 'Paid'`).get(user.id);
+			totalExpenses += compSum.total;
+		} else if (isSuperAdmin) {
+			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses`).get();
+			totalExpenses += expSum.total;
+			const maintSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM maintenance_fund WHERE type = 'service'`).get();
+			totalExpenses += maintSum.total;
+			const compSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid'`).get();
+			totalExpenses += compSum.total;
+		}
+
 		// ---- Production Performance ----
 		const rateCol = findCol(payments.headers, /rate|amount|total|pay/i);
 		const payStatusCol = findCol(payments.headers, /pay.*status|status/i);
@@ -3833,7 +3855,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		let totalRevenue = 0;
 		let paidRevenue = 0;
+		let last30DaysRevenue = 0;
 		const monthlyRevenue = {};
+		const now = new Date();
+		const thirtyDaysAgo = new Date(now);
+		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
 		filteredPayments.forEach((r) => {
 			const amt =
@@ -3842,17 +3868,21 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const ps = payStatusCol ? (r[payStatusCol] || "").trim() : "";
 			if (/^paid$/i.test(ps)) paidRevenue += amt;
 
-			// Group by month
 			if (dateCol && r[dateCol]) {
 				const d = new Date(r[dateCol]);
 				if (!isNaN(d)) {
+					// 30-day window (S2)
+					if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
 					const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 					monthlyRevenue[key] = (monthlyRevenue[key] || 0) + amt;
 				}
 			}
 		});
 
-		// Calculate operating days (from earliest to latest payment date)
+		// Avg daily revenue = 30-day average (S2)
+		const avgDailyRevenue = last30DaysRevenue / 30;
+
+		// Operating period (earliest to latest payment)
 		let earliestDate = null;
 		let latestDate = null;
 		filteredPayments.forEach((r) => {
@@ -3864,93 +3894,78 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				}
 			}
 		});
-		const operatingDays =
-			earliestDate && latestDate
-				? Math.max(1, Math.ceil((latestDate - earliestDate) / (1000 * 60 * 60 * 24)))
-				: 1;
-		const avgDailyRevenue = totalRevenue / operatingDays;
+
+		// Months of operation and avg monthly owner earnings (S3)
+		let monthsOfOperation = 1;
+		if (earliestDate && latestDate) {
+			monthsOfOperation = Math.max(1,
+				(latestDate.getFullYear() - earliestDate.getFullYear()) * 12
+				+ (latestDate.getMonth() - earliestDate.getMonth()) + 1
+			);
+		}
+		const avgMonthlyOwnerEarnings = Math.round(paidRevenue / monthsOfOperation);
 
 		// Monthly revenue sorted
 		const monthlyData = Object.entries(monthlyRevenue)
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([month, amount]) => ({ month, amount: Math.round(amount) }));
 
-		// ---- Asset Security ----
+		// ---- Asset Security (S4, S5) ----
 		const purchasePrice = parseFloat(config.truck_purchase_price) || 58000;
-		const currentValue = parseFloat(config.truck_current_value) || 21000;
+		const currentValue = Math.round(purchasePrice * 0.80); // S4: 20% flat depreciation
 		const titleStatus = config.truck_title_status || "Clean";
-		const depreciationYears = parseInt(config.depreciation_years) || 5;
-		const annualDepreciation = purchasePrice / depreciationYears;
 
 		// Total trucks in fleet
 		const totalTrucks = investorDriverSet
 			? db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE owner_id = ?").get(user.id).cnt
-			: filteredCarrierData.length;
+			: filteredCarrierData.length || 1;
 
-		// ---- Tax Shield ----
-		const section179 = parseFloat(config.section_179_deduction) || 30000;
-		const atRiskCapital = Math.max(0, purchasePrice - section179);
+		// Fleet totals (S9)
+		const totalPurchasePrice = purchasePrice * totalTrucks;
+		const totalStartupExpenses = 5000 * totalTrucks;
+		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
 
-		// ---- Recession-Proof Metrics ----
-		const blueChipList = (config.blue_chip_brokers || "")
-			.split(",")
-			.map((s) => s.trim().toLowerCase())
-			.filter(Boolean);
+		// ---- Tax Shield (S6, S7, S10) ----
+		const section179 = purchasePrice; // S6: 100% deductibility
+		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate); // S7
 
-		const brokerCol = findCol(jobTracking.headers, /broker|shipper|customer|client/i);
-		const statusCol = findCol(jobTracking.headers, /status/i);
-
-		let totalJobs = filteredJobData.length;
-		let blueChipJobs = 0;
-		const brokerCounts = {};
-
-		// Extract broker name — handles JSON objects like {"Name":"C.H. Robinson","Email":"..."}
-		function parseBrokerName(raw) {
-			const val = (raw || "").trim();
-			if (!val) return "";
-			if (val.startsWith("{")) {
-				try {
-					const obj = JSON.parse(val);
-					return (obj.Name || obj.name || Object.values(obj)[0] || "").trim();
-				} catch {
-					return val;
+		// ---- Per-Truck Revenue Data (S8) ----
+		const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+		const perTruckData = {};
+		if (investorDriverSet) {
+			const ownedTrucks = db.prepare("SELECT unit_number, assigned_driver FROM trucks WHERE owner_id = ?").all(user.id);
+			ownedTrucks.forEach((truck) => {
+				const driverName = (truck.assigned_driver || "").trim().toLowerCase();
+				let unitMonthlyGross = 0;
+				if (driverName) {
+					filteredPayments.forEach((r) => {
+						const driver = payDriverCol ? (r[payDriverCol] || "").trim().toLowerCase() : "";
+						if (driver === driverName && dateCol && r[dateCol]) {
+							const d = new Date(r[dateCol]);
+							if (!isNaN(d)) {
+								const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+								if (key === currentMonthKey) {
+									unitMonthlyGross += parseFloat(String(rateCol ? r[rateCol] : "0").replace(/[$,]/g, "")) || 0;
+								}
+							}
+						}
+					});
 				}
-			}
-			return val;
+				perTruckData[truck.unit_number] = {
+					unitMonthlyGross: Math.round(unitMonthlyGross),
+					estAnnualRevenue: Math.round((unitMonthlyGross * 0.50) * 12),
+				};
+			});
 		}
 
-		filteredJobData.forEach((r) => {
-			const broker = parseBrokerName(brokerCol ? r[brokerCol] : "");
-			if (broker) {
-				brokerCounts[broker] = (brokerCounts[broker] || 0) + 1;
-				if (blueChipList.some((bc) => broker.toLowerCase().includes(bc))) {
-					blueChipJobs++;
-				}
-			}
-		});
-
-		// Top brokers by volume
-		const topBrokers = Object.entries(brokerCounts)
-			.sort(([, a], [, b]) => b - a)
-			.slice(0, 10)
-			.map(([name, count]) => ({
-				name,
-				count,
-				isBlueChip: blueChipList.some((bc) => name.toLowerCase().includes(bc)),
-			}));
-
-		// Completed jobs count
+		// ---- Recession-Proof Metrics (kept in API for backward compat) ----
+		const brokerCol = findCol(jobTracking.headers, /broker|shipper|customer|client/i);
+		const statusCol = findCol(jobTracking.headers, /status/i);
+		let totalJobs = filteredJobData.length;
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 		const completedJobs = statusCol
-			? filteredJobData.filter((r) =>
-					completedStatuses.test((r[statusCol] || "").trim()),
-				).length
+			? filteredJobData.filter((r) => completedStatuses.test((r[statusCol] || "").trim())).length
 			: 0;
-
-		// Investor payout range
-		const payoutMin = parseFloat(config.investor_payout_min) || 2100;
-		const payoutMax = parseFloat(config.investor_payout_max) || 3100;
-		const splitPct = parseFloat(config.investor_split_pct) || 35;
 
 		res.json({
 			production: {
@@ -3958,31 +3973,34 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				paidRevenue: Math.round(paidRevenue),
 				pendingRevenue: Math.round(totalRevenue - paidRevenue),
 				avgDailyRevenue: Math.round(avgDailyRevenue),
-				operatingDays,
 				monthlyData,
-				payoutRange: { min: payoutMin, max: payoutMax },
-				investorSplitPct: splitPct,
+				avgMonthlyOwnerEarnings,
+				monthsOfOperation,
+				investorSplitPct: 50,
 				totalJobs,
 				completedJobs,
+				totalExpenses: Math.round(totalExpenses),
+				netRevenueToDate,
+				totalPurchasePrice,
+				totalStartupExpenses,
+				perTruckData,
 			},
 			asset: {
 				purchasePrice,
 				currentValue,
 				titleStatus,
-				depreciationYears,
-				annualDepreciation: Math.round(annualDepreciation),
+				depreciationYears: 1,
+				annualDepreciation: purchasePrice,
 				totalTrucks,
 			},
 			taxShield: {
 				section179,
 				atRiskCapital,
-				writeOffPct: Math.round((section179 / purchasePrice) * 100),
+				writeOffPct: 100,
 			},
 			recessionProof: {
 				totalJobs,
-				blueChipJobs,
-				blueChipPct: totalJobs > 0 ? Math.round((blueChipJobs / totalJobs) * 100) : 0,
-				topBrokers,
+				completedJobs,
 			},
 			config,
 		});
