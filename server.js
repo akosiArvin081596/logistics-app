@@ -4381,20 +4381,21 @@ app.get("/api/geocode", requireAuth, async (req, res) => {
 	if (!lat || !lng) return res.status(400).json({ error: "lat and lng required" });
 	try {
 		const resp = await fetch(
-			`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1`,
-			{ headers: { "User-Agent": "LogisX/1.0" } }
+			`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`
 		);
 		if (!resp.ok) return res.json({ status: "ERROR", results: [] });
 		const data = await resp.json();
-		if (!data.display_name) return res.json({ status: "OK", results: [] });
-		const addr = data.address || {};
+		if (data.status !== "OK" || !data.results || data.results.length === 0)
+			return res.json({ status: "OK", results: [] });
+		const r = data.results[0];
+		const comp = r.address_components || [];
 		res.json({
 			status: "OK",
 			results: [{
-				formatted_address: data.display_name,
+				formatted_address: r.formatted_address,
 				address_components: [
-					{ long_name: addr.city || addr.town || addr.village || "", types: ["locality"] },
-					{ short_name: addr.state || addr.region || "", types: ["administrative_area_level_1"] },
+					{ long_name: (comp.find(c => c.types.includes("locality")) || {}).long_name || "", types: ["locality"] },
+					{ short_name: (comp.find(c => c.types.includes("administrative_area_level_1")) || {}).short_name || "", types: ["administrative_area_level_1"] },
 				],
 			}],
 		});
