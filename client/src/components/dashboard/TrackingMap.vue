@@ -1100,7 +1100,13 @@ async function initMap() {
   map = await createMap(mapContainer.value, {
     zoom: 5,
     center: { lat: 39.8283, lng: -98.5795 },
-    mapTypeId: 'hybrid',
+    mapTypeId: 'roadmap',
+    mapTypeControl: true,
+    mapTypeControlOptions: {
+      style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
+      position: google.maps.ControlPosition.TOP_LEFT,
+      mapTypeIds: ['roadmap', 'hybrid'],
+    },
     minZoom: 3,
   })
   // After map is ready, fetch and render locations
