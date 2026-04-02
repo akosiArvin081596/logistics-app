@@ -3853,6 +3853,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const payStatusCol = findCol(payments.headers, /pay.*status|status/i);
 		const dateCol = findCol(payments.headers, /date/i);
 
+		// Job Tracking cols used for per-truck revenue and daily avg fallback
+		const jtRateCol = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
+		const jtDateCol = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i)
+			|| findCol(jobTracking.headers, /date/i);
+		const jtDriverCol = findCol(jobTracking.headers, /^driver$/i);
+
 		let totalRevenue = 0;
 		let paidRevenue = 0;
 		let last30DaysRevenue = 0;
@@ -3860,6 +3866,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const now = new Date();
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+		// Detect if Payments Table has usable date data; fall back to Job Tracking if not
+		const paymentsHaveDates = filteredPayments.some(r => dateCol && r[dateCol]);
 
 		filteredPayments.forEach((r) => {
 			const amt =
@@ -3879,15 +3888,38 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			}
 		});
 
+		// If Payments Table has no dates, derive date-based metrics from Job Tracking
+		if (!paymentsHaveDates && jtDateCol && jtRateCol) {
+			filteredJobData.forEach((r) => {
+				const amt = parseFloat(String((r[jtRateCol] || "0")).replace(/[$,]/g, "")) || 0;
+				if (!amt) return;
+				const d = new Date(r[jtDateCol]);
+				if (!isNaN(d)) {
+					if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
+					const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+					monthlyRevenue[key] = (monthlyRevenue[key] || 0) + amt;
+				}
+			});
+			// Also treat all job amounts as "paid" for paidRevenue when no payment status exists
+			if (paidRevenue === 0) {
+				filteredJobData.forEach((r) => {
+					const amt = parseFloat(String((r[jtRateCol] || "0")).replace(/[$,]/g, "")) || 0;
+					paidRevenue += amt;
+				});
+			}
+		}
+
 		// Avg daily revenue = 30-day average (S2)
 		const avgDailyRevenue = last30DaysRevenue / 30;
 
-		// Operating period (earliest to latest payment)
+		// Operating period (earliest to latest — from Job Tracking dates if Payments Table lacks them)
 		let earliestDate = null;
 		let latestDate = null;
-		filteredPayments.forEach((r) => {
-			if (dateCol && r[dateCol]) {
-				const d = new Date(r[dateCol]);
+		const dateSource = paymentsHaveDates ? filteredPayments : filteredJobData;
+		const dateSourceCol = paymentsHaveDates ? dateCol : jtDateCol;
+		dateSource.forEach((r) => {
+			if (dateSourceCol && r[dateSourceCol]) {
+				const d = new Date(r[dateSourceCol]);
 				if (!isNaN(d)) {
 					if (!earliestDate || d < earliestDate) earliestDate = d;
 					if (!latestDate || d > latestDate) latestDate = d;
@@ -3937,15 +3969,18 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			ownedTrucks.forEach((truck) => {
 				const driverName = (truck.assigned_driver || "").trim().toLowerCase();
 				let unitMonthlyGross = 0;
-				if (driverName) {
-					filteredPayments.forEach((r) => {
-						const driver = payDriverCol ? (r[payDriverCol] || "").trim().toLowerCase() : "";
-						if (driver === driverName && dateCol && r[dateCol]) {
-							const d = new Date(r[dateCol]);
+				if (driverName && jtRateCol) {
+					// Use Job Tracking data for per-truck monthly revenue (more reliable driver+date data)
+					filteredJobData.forEach((r) => {
+						const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
+						if (driver !== driverName) return;
+						const dateVal = jtDateCol ? r[jtDateCol] : null;
+						if (dateVal) {
+							const d = new Date(dateVal);
 							if (!isNaN(d)) {
 								const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 								if (key === currentMonthKey) {
-									unitMonthlyGross += parseFloat(String(rateCol ? r[rateCol] : "0").replace(/[$,]/g, "")) || 0;
+									unitMonthlyGross += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
 								}
 							}
 						}
