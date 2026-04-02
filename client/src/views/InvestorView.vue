@@ -8,7 +8,6 @@
           <p class="hero-sub">Performance overview &middot; {{ todayFormatted }}</p>
         </div>
         <div class="header-actions">
-          <!-- RFD REVIEW: hidden until verified
           <a href="mailto:info@logisx.com" class="btn-email">info@logisx.com</a>
           <a href="mailto:dev@logisx.com" class="btn-email">dev@logisx.com</a>
           <div class="report-group">
@@ -18,7 +17,6 @@
               {{ reportLoading ? 'Generating...' : 'Download Report' }}
             </button>
           </div>
-          -->
           <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
             {{ store.isLoading ? 'Loading...' : 'Refresh' }}
           </button>
@@ -66,12 +64,9 @@
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
-      <!-- RFD REVIEW: sections hidden until individually verified against checklist -->
-      <!--
       <InvestorChat />
       <DocumentPortal />
       <LegalDocumentPortal :trucks="trucks" />
-      -->
       <ConfigPanel
         v-if="authStore.user?.role === 'Super Admin'"
         :config="store.config"
