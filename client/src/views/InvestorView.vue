@@ -58,12 +58,12 @@
 
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
-      <ProductionSection :production="store.production" :config="store.config" />
-      <!-- RFD REVIEW: sections hidden until individually verified against checklist -->
-      <!--
       <div class="sections-grid">
+        <ProductionSection :production="store.production" :config="store.config" />
         <TrendSection :production="store.production" />
       </div>
+      <!-- RFD REVIEW: sections hidden until individually verified against checklist -->
+      <!--
       <AssetSection :asset="store.asset" :config="store.config" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
