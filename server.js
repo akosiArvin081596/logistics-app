@@ -140,6 +140,11 @@ try {
 	try { db.exec("DELETE FROM sessions"); } catch {}
 }
 
+// Migrate: add full_name column if not present
+try {
+	db.exec("ALTER TABLE users ADD COLUMN full_name TEXT NOT NULL DEFAULT ''");
+} catch { /* column already exists */ }
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS expenses (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -508,6 +513,7 @@ app.post("/api/auth/login", async (req, res) => {
 			role: user.role,
 			driverName: user.driver_name || "",
 			email: user.email || "",
+			fullName: user.full_name || "",
 		};
 
 		res.json({
@@ -517,6 +523,7 @@ app.post("/api/auth/login", async (req, res) => {
 				username: user.username,
 				role: user.role,
 				driverName: user.driver_name || "",
+				fullName: user.full_name || "",
 			},
 		});
 	} catch (error) {
@@ -543,7 +550,7 @@ app.get("/api/auth/session", (req, res) => {
 // Admin: create a new user
 app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 	try {
-		const { username, password, role, driverName, email } = req.body;
+		const { username, password, role, driverName, email, fullName } = req.body;
 		if (!username || !password || !role) {
 			return res.status(400).json({ error: "Username, password, and role required" });
 		}
@@ -560,8 +567,8 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 
 		const hash = await bcrypt.hash(password, 10);
 		db.prepare(
-			"INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (?, ?, ?, ?, ?)",
-		).run(username, hash, role, driverName || "", email || "");
+			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name) VALUES (?, ?, ?, ?, ?, ?)",
+		).run(username, hash, role, driverName || "", email || "", fullName || "");
 
 		res.json({ success: true });
 	} catch (error) {
@@ -573,7 +580,7 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 // Admin: list all users (without password hashes)
 app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
-		.prepare("SELECT id, username, role, driver_name, email, created_at FROM users")
+		.prepare("SELECT id, username, role, driver_name, email, full_name, created_at FROM users")
 		.all()
 		.map((u) => ({
 			id: u.id,
@@ -581,6 +588,7 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			Role: u.role,
 			DriverName: u.driver_name,
 			Email: u.email,
+			FullName: u.full_name,
 			CreatedAt: u.created_at,
 		}));
 	res.json({ users });
@@ -591,7 +599,7 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
-		const { role, driverName, email, password } = req.body;
+		const { role, driverName, email, password, fullName } = req.body;
 
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
 		if (!user) return res.status(404).json({ error: "User not found" });
@@ -610,6 +618,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		if (email !== undefined) {
 			updates.push("email = ?");
 			params.push(email);
+		}
+		if (fullName !== undefined) {
+			updates.push("full_name = ?");
+			params.push(fullName);
 		}
 		if (password) {
 			const bcrypt = await import("bcryptjs");

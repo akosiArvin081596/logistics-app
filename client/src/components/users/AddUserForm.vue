@@ -46,6 +46,16 @@
     </div>
 
     <div class="form-group">
+      <label class="form-label">Full Name (optional)</label>
+      <input
+        v-model="form.fullName"
+        class="form-input"
+        type="text"
+        placeholder="e.g. John Smith"
+      />
+    </div>
+
+    <div class="form-group">
       <label class="form-label">Email (optional)</label>
       <input
         v-model="form.email"
@@ -75,6 +85,7 @@ const form = reactive({
   role: 'Driver',
   driverName: '',
   email: '',
+  fullName: '',
 })
 
 const errorMsg = ref('')
@@ -98,6 +109,7 @@ function handleSubmit() {
     role: form.role,
     driverName: form.driverName,
     email: form.email.trim(),
+    fullName: form.fullName.trim(),
   })
 
   // Reset form
@@ -105,6 +117,7 @@ function handleSubmit() {
   form.password = ''
   form.email = ''
   form.driverName = ''
+  form.fullName = ''
 }
 </script>
 

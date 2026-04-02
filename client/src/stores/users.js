@@ -59,6 +59,7 @@ export const useUsersStore = defineStore('users', {
         role: data.role,
         driverName: data.driverName,
         email: data.email,
+        fullName: data.fullName,
       })
       await this.loadUsers()
       return result

@@ -12,6 +12,7 @@
         <tr>
           <th>User</th>
           <th>Role</th>
+          <th>Full Name</th>
           <th>Linked Driver</th>
           <th>Email</th>
           <th>Created</th>
@@ -26,6 +27,9 @@
           </td>
           <td>
             <span :class="['role-badge', roleClass(user.Role)]">{{ user.Role || '' }}</span>
+          </td>
+          <td :style="{ color: user.FullName ? 'var(--text)' : 'var(--text-dim)' }">
+            {{ user.FullName || '\u2014' }}
           </td>
           <td :style="{ color: user.DriverName ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.DriverName || '\u2014' }}
@@ -68,6 +72,11 @@
               <option value="">None</option>
               <option v-for="name in driverNames" :key="name" :value="name">{{ name }}</option>
             </select>
+          </div>
+
+          <div class="edit-field">
+            <label>Full Name</label>
+            <input v-model="editForm.fullName" type="text" placeholder="e.g. John Smith" />
           </div>
 
           <div class="edit-field">
@@ -116,7 +125,7 @@ const showConfirm = ref(false)
 const pendingUser = ref(null)
 
 const showEdit = ref(false)
-const editForm = reactive({ id: null, username: '', role: '', driverName: '', email: '', password: '' })
+const editForm = reactive({ id: null, username: '', role: '', driverName: '', email: '', password: '', fullName: '' })
 
 function openEdit(user) {
   editForm.id = user.id
@@ -124,6 +133,7 @@ function openEdit(user) {
   editForm.role = user.Role
   editForm.driverName = user.DriverName || ''
   editForm.email = user.Email || ''
+  editForm.fullName = user.FullName || ''
   editForm.password = ''
   showEdit.value = true
 }
@@ -133,6 +143,7 @@ function handleSaveEdit() {
     role: editForm.role,
     driverName: editForm.driverName,
     email: editForm.email,
+    fullName: editForm.fullName,
   }
   if (editForm.password) data.password = editForm.password
   emit('update', { id: editForm.id, data })
