@@ -15,7 +15,6 @@
 
     <template v-if="store.kpis">
       <KpiGrid :kpis="store.kpis" @card-click="handleKpiClick" />
-      <RevenueGrid :revenue="store.revenue" />
     </template>
     <template v-else>
       <div class="grid grid-cols-4 gap-4 mb-4">
@@ -53,7 +52,6 @@ import { useDashboardStore } from '../stores/dashboard'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
 import KpiGrid from '../components/dashboard/KpiGrid.vue'
-import RevenueGrid from '../components/dashboard/RevenueGrid.vue'
 import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
 import ActiveLoadsTab from '../components/dashboard/ActiveLoadsTab.vue'
 import FleetTab from '../components/dashboard/FleetTab.vue'
