@@ -39,10 +39,10 @@
       <tfoot>
         <tr>
           <td colspan="4" class="total-label">Fleet Total</td>
-          <td class="mono total-val">{{ fmt(totalRevenue) }}</td>
+          <td class="mono total-val">{{ fmt(totalEstRevenue) }}</td>
           <td>
-            <span :class="['roi-badge', avgROI >= 0 ? 'positive' : 'negative']">
-              {{ avgROI >= 0 ? '+' : '' }}{{ avgROI.toFixed(1) }}%
+            <span :class="['roi-badge', fleetROI >= 0 ? 'positive' : 'negative']">
+              {{ fleetROI >= 0 ? '+' : '' }}{{ fleetROI.toFixed(1) }}%
             </span>
           </td>
         </tr>
@@ -76,11 +76,12 @@ const trucksWithROI = computed(() => {
   })
 })
 
-const totalRevenue = computed(() => trucksWithROI.value.reduce((s, t) => s + t.estRevenue, 0))
-const avgROI = computed(() => {
-  const active = trucksWithROI.value.filter(t => t.Status === 'Active')
-  if (active.length === 0) return 0
-  return active.reduce((s, t) => s + t.roi, 0) / active.length
+const totalEstRevenue = computed(() => trucksWithROI.value.reduce((s, t) => s + t.estRevenue, 0))
+// RFD-14: Fleet Total ROI = sum(estAnnualRevenue) / totalGrossRevenue
+const fleetROI = computed(() => {
+  const grossRevenue = props.production?.totalRevenue || 0
+  if (grossRevenue === 0) return 0
+  return (totalEstRevenue.value / grossRevenue) * 100
 })
 
 function fmt(n) {

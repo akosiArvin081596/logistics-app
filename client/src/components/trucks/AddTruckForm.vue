@@ -16,6 +16,7 @@
           <option value="Active">Active</option>
           <option value="Inactive">Inactive</option>
           <option value="Maintenance">Maintenance</option>
+          <option value="OOS">OOS</option>
         </select>
       </div>
     </div>
@@ -77,6 +78,40 @@
       <textarea v-model="form.notes" class="form-input form-textarea" rows="2" placeholder="Any additional notes..."></textarea>
     </div>
 
+    <div class="form-group">
+      <label class="form-label">Truck Photo (optional)</label>
+      <input type="file" accept="image/*" class="form-input" @change="onPhoto" style="padding:0.3rem;" />
+      <img v-if="form.photo" :src="form.photo" style="max-height:80px;border-radius:6px;margin-top:0.4rem;" />
+    </div>
+
+    <details style="margin-bottom:0.75rem;">
+      <summary class="fixed-costs-label">Fixed Costs (optional)</summary>
+      <div class="form-row" style="margin-top:0.5rem;">
+        <div class="form-group">
+          <label class="form-label">Insurance ($/mo)</label>
+          <input v-model.number="form.insuranceMonthly" class="form-input" type="number" min="0" placeholder="0" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">ELD ($/mo)</label>
+          <input v-model.number="form.eldMonthly" class="form-input" type="number" min="0" placeholder="0" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">HVUT ($/yr)</label>
+          <input v-model.number="form.hvutAnnual" class="form-input" type="number" min="0" placeholder="0" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">IRP ($/yr)</label>
+          <input v-model.number="form.irpAnnual" class="form-input" type="number" min="0" placeholder="0" />
+        </div>
+      </div>
+      <div class="form-group" style="max-width:200px;">
+        <label class="form-label">Admin Fee (%)</label>
+        <input v-model.number="form.adminFeePct" class="form-input" type="number" min="0" max="100" placeholder="50" />
+      </div>
+    </details>
+
     <button class="btn btn-primary btn-add" @click="handleSubmit">Add Truck</button>
     <div class="error-msg">{{ errorMsg }}</div>
   </div>
@@ -132,7 +167,21 @@ const form = reactive({
   assignedDriver: '',
   ownerId: 0,
   notes: '',
+  photo: '',
+  insuranceMonthly: 0,
+  eldMonthly: 0,
+  hvutAnnual: 0,
+  irpAnnual: 0,
+  adminFeePct: 50,
 })
+
+function onPhoto(e) {
+  const file = e.target.files[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = ev => { form.photo = ev.target.result }
+  reader.readAsDataURL(file)
+}
 
 const errorMsg = ref('')
 
@@ -154,6 +203,12 @@ function handleSubmit() {
     assignedDriver: form.assignedDriver,
     ownerId: form.ownerId,
     notes: form.notes.trim(),
+    photo: form.photo,
+    insuranceMonthly: form.insuranceMonthly,
+    eldMonthly: form.eldMonthly,
+    hvutAnnual: form.hvutAnnual,
+    irpAnnual: form.irpAnnual,
+    adminFeePct: form.adminFeePct,
   })
 
   form.unitNumber = ''
@@ -166,6 +221,12 @@ function handleSubmit() {
   form.assignedDriver = ''
   form.ownerId = 0
   form.notes = ''
+  form.photo = ''
+  form.insuranceMonthly = 0
+  form.eldMonthly = 0
+  form.hvutAnnual = 0
+  form.irpAnnual = 0
+  form.adminFeePct = 50
 }
 </script>
 
@@ -188,4 +249,8 @@ function handleSubmit() {
 .form-textarea { resize: vertical; }
 .btn-add { width: auto; padding: 0.5rem 1.5rem; }
 .error-msg { color: var(--danger); font-size: 0.78rem; margin-top: 0.5rem; min-height: 1.1em; }
+.fixed-costs-label {
+  font-size: 0.72rem; font-weight: 600; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;
+}
 </style>

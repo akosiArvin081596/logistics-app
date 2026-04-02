@@ -21,21 +21,38 @@
             <span class="bubble-from">{{ isMine(msg) ? 'You' : 'Dispatch' }}</span>
             <span class="bubble-time">{{ fmtTime(msg.timestamp) }}</span>
           </div>
-          <div class="bubble-text">{{ msg.message }}</div>
+          <div v-if="msg.message" class="bubble-text">{{ msg.message }}</div>
+          <div v-if="msg.attachment_url" class="bubble-attachment">
+            <a v-if="msg.attachment_type === 'image'" :href="msg.attachment_url" target="_blank" rel="noopener">
+              <img :src="msg.attachment_url" class="attach-img" />
+            </a>
+            <a v-else :href="msg.attachment_url" target="_blank" rel="noopener" class="attach-link">
+              &#128206; {{ msg.attachment_url.split('/').pop() }}
+            </a>
+          </div>
         </div>
       </div>
     </div>
 
     <!-- Composer -->
     <div class="chat-composer">
-      <textarea
-        v-model="draft"
-        class="chat-input"
-        placeholder="Type a message..."
-        rows="2"
-        @keydown.enter.exact.prevent="send"
-      ></textarea>
-      <button class="send-btn" :disabled="!draft.trim() || sending" @click="send">
+      <div class="composer-main">
+        <textarea
+          v-model="draft"
+          class="chat-input"
+          placeholder="Type a message..."
+          rows="2"
+          @keydown.enter.exact.prevent="send"
+        ></textarea>
+        <div class="composer-toolbar">
+          <label class="attach-btn" title="Attach file">
+            &#128206;
+            <input type="file" style="display:none" accept="image/*,application/pdf" @change="onAttach" />
+          </label>
+          <span v-if="attachFile" class="attach-preview">{{ attachFile.name }} <button class="attach-clear" @click="clearAttach">&times;</button></span>
+        </div>
+      </div>
+      <button class="send-btn" :disabled="(!draft.trim() && !attachFile) || sending" @click="send">
         {{ sending ? '...' : 'Send' }}
       </button>
     </div>
@@ -56,6 +73,23 @@ const messages = ref([])
 const draft = ref('')
 const sending = ref(false)
 const chatBody = ref(null)
+const attachFile = ref(null)
+const attachBase64 = ref('')
+
+function onAttach(e) {
+  const file = e.target.files[0]
+  if (!file) return
+  attachFile.value = file
+  const reader = new FileReader()
+  reader.onload = ev => { attachBase64.value = ev.target.result }
+  reader.readAsDataURL(file)
+  e.target.value = ''
+}
+
+function clearAttach() {
+  attachFile.value = null
+  attachBase64.value = ''
+}
 
 const myName = computed(() => (auth.user?.username || '').toLowerCase())
 
@@ -87,9 +121,8 @@ async function load() {
 
 async function send() {
   const text = draft.value.trim()
-  if (!text || sending.value) return
+  if ((!text && !attachFile.value) || sending.value) return
   sending.value = true
-  // Optimistic
   const optimistic = {
     id: Date.now(),
     from: auth.user?.username,
@@ -97,19 +130,39 @@ async function send() {
     message: text,
     timestamp: new Date().toISOString(),
     read: 1,
+    attachment_url: '',
+    attachment_type: '',
   }
   messages.value.push(optimistic)
   draft.value = ''
+  const savedFile = attachFile.value
+  const savedBase64 = attachBase64.value
+  attachFile.value = null
+  attachBase64.value = ''
   await nextTick()
   scrollBottom()
   try {
+    let attachmentUrl = ''
+    let attachmentType = ''
+    if (savedFile && savedBase64) {
+      const uploadRes = await api.post('/api/chat/attachment', {
+        fileName: savedFile.name,
+        fileData: savedBase64,
+        fileType: savedFile.type,
+      })
+      attachmentUrl = uploadRes.url || ''
+      attachmentType = savedFile.type.startsWith('image/') ? 'image' : 'file'
+      optimistic.attachment_url = attachmentUrl
+      optimistic.attachment_type = attachmentType
+    }
     await api.post('/api/messages', {
       from: auth.user?.username,
       to: 'dispatch',
       message: text,
+      attachmentUrl,
+      attachmentType,
     })
   } catch {
-    // Remove optimistic on failure
     messages.value = messages.value.filter(m => m.id !== optimistic.id)
   } finally {
     sending.value = false
@@ -208,13 +261,33 @@ onUnmounted(() => {
 .chat-composer {
   display: flex; gap: 0.5rem; align-items: flex-end;
 }
+.composer-main { flex: 1; display: flex; flex-direction: column; gap: 0.35rem; }
 .chat-input {
-  flex: 1; padding: 0.6rem 0.75rem; border: 1px solid var(--border);
+  width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border);
   border-radius: 8px; font-family: inherit; font-size: 0.85rem;
   background: var(--bg); color: var(--text); resize: none; outline: none;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s; box-sizing: border-box;
 }
 .chat-input:focus { border-color: var(--accent); }
+.composer-toolbar {
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.attach-btn {
+  cursor: pointer; font-size: 1rem; padding: 0.2rem 0.4rem;
+  border-radius: 5px; background: var(--bg); border: 1px solid var(--border);
+  color: var(--text-dim); transition: all 0.15s; line-height: 1;
+}
+.attach-btn:hover { border-color: var(--accent); color: var(--accent); }
+.attach-preview {
+  font-size: 0.72rem; color: var(--text-dim);
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 5px; padding: 0.15rem 0.5rem;
+  display: flex; align-items: center; gap: 0.35rem;
+}
+.attach-clear {
+  background: none; border: none; cursor: pointer; color: var(--danger);
+  font-size: 0.85rem; line-height: 1; padding: 0;
+}
 .send-btn {
   padding: 0.6rem 1.25rem; background: var(--accent); color: #fff;
   border: none; border-radius: 8px; font-family: inherit;
@@ -223,4 +296,9 @@ onUnmounted(() => {
 }
 .send-btn:hover { opacity: 0.85; }
 .send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.bubble-attachment { margin-top: 0.3rem; }
+.attach-img { max-width: 200px; max-height: 140px; border-radius: 6px; display: block; }
+.attach-link {
+  font-size: 0.78rem; color: inherit; opacity: 0.85; text-decoration: underline;
+}
 </style>

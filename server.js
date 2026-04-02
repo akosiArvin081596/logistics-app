@@ -209,9 +209,64 @@ db.exec(`
 	)
 `);
 
-// Migration: add owner_id to trucks
+// Migration: trucks table — add owner_id, photo, fixed costs, OOS status (rename-recreate if needed)
 try { db.prepare("SELECT owner_id FROM trucks LIMIT 1").get(); }
 catch { db.exec(`ALTER TABLE trucks ADD COLUMN owner_id INTEGER DEFAULT 0`); }
+
+try { db.prepare("SELECT photo FROM trucks LIMIT 1").get(); }
+catch {
+	// Full recreate to add new columns AND update CHECK constraint to include OOS
+	db.exec(`
+		BEGIN TRANSACTION;
+		CREATE TABLE trucks_new (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			unit_number TEXT NOT NULL UNIQUE,
+			make TEXT DEFAULT '',
+			model TEXT DEFAULT '',
+			year INTEGER DEFAULT 0,
+			vin TEXT DEFAULT '',
+			license_plate TEXT DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active','Inactive','Maintenance','OOS')),
+			assigned_driver TEXT DEFAULT '',
+			notes TEXT DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			owner_id INTEGER DEFAULT 0,
+			photo TEXT DEFAULT '',
+			insurance_monthly REAL DEFAULT 0,
+			eld_monthly REAL DEFAULT 0,
+			hvut_annual REAL DEFAULT 0,
+			irp_annual REAL DEFAULT 0,
+			admin_fee_pct REAL DEFAULT 50
+		);
+		INSERT INTO trucks_new (id, unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, created_at, owner_id)
+			SELECT id, unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, created_at, owner_id FROM trucks;
+		DROP TABLE trucks;
+		ALTER TABLE trucks_new RENAME TO trucks;
+		COMMIT;
+	`);
+}
+
+// Legal documents table (per-truck legal files)
+db.exec(`
+	CREATE TABLE IF NOT EXISTS legal_documents (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		truck_id INTEGER NOT NULL,
+		unit_number TEXT NOT NULL,
+		doc_type TEXT NOT NULL DEFAULT 'Other',
+		file_name TEXT NOT NULL,
+		file_url TEXT DEFAULT '',
+		notes TEXT DEFAULT '',
+		uploaded_by TEXT DEFAULT '',
+		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
+// Migration: messages attachment columns
+try { db.prepare("SELECT attachment_url FROM messages LIMIT 1").get(); }
+catch {
+	db.exec(`ALTER TABLE messages ADD COLUMN attachment_url TEXT DEFAULT ''`);
+	db.exec(`ALTER TABLE messages ADD COLUMN attachment_type TEXT DEFAULT ''`);
+}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS documents (
@@ -650,6 +705,12 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 		OwnerId: t.owner_id || 0,
 		Notes: t.notes,
 		CreatedAt: t.created_at,
+		Photo: t.photo || '',
+		InsuranceMonthly: t.insurance_monthly || 0,
+		EldMonthly: t.eld_monthly || 0,
+		HvutAnnual: t.hvut_annual || 0,
+		IrpAnnual: t.irp_annual || 0,
+		AdminFeePct: t.admin_fee_pct ?? 50,
 	}));
 	res.json({ trucks });
 });
@@ -665,7 +726,12 @@ app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
 		if (existing) {
 			return res.status(400).json({ error: "Unit number already exists" });
 		}
-		const validStatus = ["Active", "Inactive", "Maintenance"].includes(status) ? status : "Active";
+		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
+		// 1:1 driver constraint — unassign driver from any other truck first
+		if (assignedDriver && assignedDriver.trim()) {
+			db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = LOWER(?) AND unit_number != ?")
+				.run(assignedDriver.trim(), unitNumber.trim());
+		}
 		const result = db.prepare(
 			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", parseInt(ownerId) || 0);
@@ -683,7 +749,8 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
-		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId } = req.body;
+		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId,
+			photo, insuranceMonthly, eldMonthly, hvutAnnual, irpAnnual, adminFeePct } = req.body;
 		const updates = [];
 		const params = [];
 
@@ -697,12 +764,25 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		if (year !== undefined) { updates.push("year = ?"); params.push(parseInt(year) || 0); }
 		if (vin !== undefined) { updates.push("vin = ?"); params.push(vin); }
 		if (licensePlate !== undefined) { updates.push("license_plate = ?"); params.push(licensePlate); }
-		if (status !== undefined && ["Active", "Inactive", "Maintenance"].includes(status)) {
+		if (status !== undefined && ["Active", "Inactive", "Maintenance", "OOS"].includes(status)) {
 			updates.push("status = ?"); params.push(status);
 		}
-		if (assignedDriver !== undefined) { updates.push("assigned_driver = ?"); params.push(assignedDriver); }
+		if (assignedDriver !== undefined) {
+			// 1:1 driver constraint — unassign from any other truck first
+			if (assignedDriver && assignedDriver.trim()) {
+				db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = LOWER(?) AND id != ?")
+					.run(assignedDriver.trim(), id);
+			}
+			updates.push("assigned_driver = ?"); params.push(assignedDriver);
+		}
 		if (ownerId !== undefined) { updates.push("owner_id = ?"); params.push(parseInt(ownerId) || 0); }
 		if (notes !== undefined) { updates.push("notes = ?"); params.push(notes); }
+		if (photo !== undefined) { updates.push("photo = ?"); params.push(photo); }
+		if (insuranceMonthly !== undefined) { updates.push("insurance_monthly = ?"); params.push(parseFloat(insuranceMonthly) || 0); }
+		if (eldMonthly !== undefined) { updates.push("eld_monthly = ?"); params.push(parseFloat(eldMonthly) || 0); }
+		if (hvutAnnual !== undefined) { updates.push("hvut_annual = ?"); params.push(parseFloat(hvutAnnual) || 0); }
+		if (irpAnnual !== undefined) { updates.push("irp_annual = ?"); params.push(parseFloat(irpAnnual) || 0); }
+		if (adminFeePct !== undefined) { updates.push("admin_fee_pct = ?"); params.push(parseFloat(adminFeePct) ?? 50); }
 
 		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 		params.push(id);
@@ -2475,7 +2555,7 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 // POST /api/messages — Send a new message
 app.post("/api/messages", requireAuth, (req, res) => {
 	try {
-		const { from, to, message, loadId } = req.body;
+		const { from, to, message, loadId, attachmentUrl, attachmentType } = req.body;
 		if (!from || !to || !message) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
@@ -2483,10 +2563,10 @@ app.post("/api/messages", requireAuth, (req, res) => {
 		const timestamp = new Date().toISOString();
 		const result = db
 			.prepare(
-				`INSERT INTO messages (timestamp, "from", "to", message, load_id)
-				 VALUES (?, ?, ?, ?, ?)`,
+				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			)
-			.run(timestamp, from, to, message, loadId || "");
+			.run(timestamp, from, to, message, loadId || "", attachmentUrl || "", attachmentType || "");
 
 		// Persist notification for recipient
 		const msgNotif = insertNotification.run(
@@ -2505,6 +2585,8 @@ app.post("/api/messages", requireAuth, (req, res) => {
 			to,
 			message,
 			loadId: loadId || "",
+			attachment_url: attachmentUrl || "",
+			attachment_type: attachmentType || "",
 		});
 
 		res.json({ success: true, id: result.lastInsertRowid });
@@ -2586,7 +2668,7 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 		const user = req.session.user;
 		const name = user.username.trim().toLowerCase();
 		const messages = db.prepare(
-			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
+			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
 			 FROM messages
 			 WHERE LOWER("from") = ? OR LOWER("to") = ?
 			 ORDER BY id ASC`
@@ -2733,6 +2815,101 @@ app.get("/api/documents/:loadId", requireAuth, (req, res) => {
 	}
 });
 
+// GET /api/legal-documents — Legal docs for investor's trucks
+app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, res) => {
+	try {
+		const user = req.session.user;
+		const isSuperAdmin = user.role === "Super Admin";
+		const truckId = req.query.truckId ? parseInt(req.query.truckId) : null;
+		let docs;
+		if (isSuperAdmin) {
+			if (truckId) {
+				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE ld.truck_id = ? ORDER BY ld.uploaded_at DESC`).all(truckId);
+			} else {
+				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ORDER BY ld.uploaded_at DESC`).all();
+			}
+		} else {
+			const owned = db.prepare("SELECT id FROM trucks WHERE owner_id = ?").all(user.id).map(t => t.id);
+			if (owned.length === 0) return res.json({ documents: [] });
+			const ph = owned.map(() => '?').join(',');
+			const baseQ = `SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE ld.truck_id IN (${ph})`;
+			docs = truckId && owned.includes(truckId)
+				? db.prepare(baseQ + ' AND ld.truck_id = ? ORDER BY ld.uploaded_at DESC').all(...owned, truckId)
+				: db.prepare(baseQ + ' ORDER BY ld.uploaded_at DESC').all(...owned);
+		}
+		res.json({ documents: docs });
+	} catch (err) {
+		console.error("Error fetching legal documents:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/legal-documents/upload — Super Admin uploads a legal doc per truck
+app.post("/api/legal-documents/upload", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const { truckId, unitNumber, docType, fileData, fileName, notes } = req.body;
+		if (!truckId || !fileData || !fileName) {
+			return res.status(400).json({ error: "truckId, fileData, and fileName are required" });
+		}
+		if (fileData.length > 13_500_000) {
+			return res.status(400).json({ error: "File too large (max 10MB)" });
+		}
+		const validTypes = ['Vehicle Title','Registration','Insurance COI','Lease Agreement','Maintenance Records','Other'];
+		const safeType = validTypes.includes(docType) ? docType : 'Other';
+		const ext = require("path").extname(fileName) || '.pdf';
+		const safeName = `${(unitNumber||'truck').replace(/[^a-zA-Z0-9]/g,'_')}_${safeType.replace(/\s+/g,'_')}_${Date.now()}${ext}`;
+		const legalDir = require("path").join(__dirname, "uploads", "legal");
+		if (!require("fs").existsSync(legalDir)) require("fs").mkdirSync(legalDir, { recursive: true });
+		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
+		require("fs").writeFileSync(require("path").join(legalDir, safeName), Buffer.from(base64, "base64"));
+		const fileUrl = `/uploads/legal/${safeName}`;
+		const result = db.prepare(
+			`INSERT INTO legal_documents (truck_id, unit_number, doc_type, file_name, file_url, notes, uploaded_by) VALUES (?,?,?,?,?,?,?)`
+		).run(parseInt(truckId), unitNumber || '', safeType, fileName, fileUrl, notes || '', req.session.user.username);
+		res.json({ success: true, id: result.lastInsertRowid, fileUrl });
+	} catch (err) {
+		console.error("Legal doc upload error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// DELETE /api/legal-documents/:id — Super Admin removes a legal doc
+app.delete("/api/legal-documents/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		const doc = db.prepare("SELECT * FROM legal_documents WHERE id = ?").get(id);
+		if (!doc) return res.status(404).json({ error: "Document not found" });
+		if (doc.file_url) {
+			const filePath = require("path").join(__dirname, doc.file_url);
+			try { require("fs").unlinkSync(filePath); } catch { /* file may already be gone */ }
+		}
+		db.prepare("DELETE FROM legal_documents WHERE id = ?").run(id);
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/chat/attachment — Upload file for chat message
+app.post("/api/chat/attachment", requireAuth, async (req, res) => {
+	try {
+		const { fileData, fileName, mimeType } = req.body;
+		if (!fileData || !fileName) return res.status(400).json({ error: "fileData and fileName required" });
+		if (fileData.length > 13_500_000) return res.status(400).json({ error: "File too large (max 10MB)" });
+		const attachmentType = (mimeType || '').startsWith('image/') ? 'image' : (mimeType === 'application/pdf' ? 'pdf' : 'other');
+		const ext = require("path").extname(fileName) || (attachmentType === 'image' ? '.jpg' : '.bin');
+		const safeName = `chat_${Date.now()}_${Math.random().toString(36).slice(2,7)}${ext}`;
+		const chatDir = require("path").join(__dirname, "uploads", "chat");
+		if (!require("fs").existsSync(chatDir)) require("fs").mkdirSync(chatDir, { recursive: true });
+		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
+		require("fs").writeFileSync(require("path").join(chatDir, safeName), Buffer.from(base64, "base64"));
+		res.json({ success: true, fileUrl: `/uploads/chat/${safeName}`, attachmentType });
+	} catch (err) {
+		console.error("Chat attachment error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // GET /api/investor/documents — All documents for the investor's drivers
 app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
@@ -2796,12 +2973,25 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 				.forEach(r => (config[r.key] = r.value));
 		}
 
+		// Date range filter (RFD-26)
+		const filterStart = req.query.start ? new Date(req.query.start) : null;
+		const filterEnd = req.query.end ? new Date(req.query.end + 'T23:59:59') : null;
+
 		const driverCol = findCol(jobTracking.headers, /^driver$/i);
-		const filteredJobData = investorDriverSet
+		const jtDateColR = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(jobTracking.headers, /date/i);
+		const filteredJobData = (investorDriverSet
 			? jobTracking.data.filter(r => {
 				const d = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
 				return d && investorDriverSet.has(d);
-			}) : jobTracking.data;
+			}) : jobTracking.data
+		).filter(r => {
+			if (!filterStart && !filterEnd) return true;
+			const d = jtDateColR ? new Date(r[jtDateColR]) : null;
+			if (!d || isNaN(d)) return false;
+			if (filterStart && d < filterStart) return false;
+			if (filterEnd && d > filterEnd) return false;
+			return true;
+		});
 
 		const rateCol = findCol(payments.headers, /rate|amount|total|pay/i);
 		const payStatusCol = findCol(payments.headers, /pay.*status|status/i);
@@ -2846,12 +3036,26 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		const currentValue = Math.round(purchasePrice * 0.80);
 
 		let totalExpenses = 0;
+		let fuelExpenses = 0, maintenanceExpenses = 0, complianceExpenses = 0, otherExpenses = 0;
+		const dateWhereExp = filterStart ? ` AND date >= '${filterStart.toISOString().slice(0,10)}'` : '';
+		const dateWhereExpEnd = filterEnd ? ` AND date <= '${filterEnd.toISOString().slice(0,10)}'` : '';
 		if (investorDriverSet && investorDriverSet.size > 0) {
 			const driverList = [...investorDriverSet];
 			const ph = driverList.map(() => '?').join(',');
-			totalExpenses += (db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE LOWER(driver) IN (${ph})`).get(...driverList)).t;
-			totalExpenses += (db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id=?`).get(user.id)).t;
-			totalExpenses += (db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=?`).get(user.id)).t;
+			// Itemized expenses by type
+			const expRows = db.prepare(`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE LOWER(driver) IN (${ph})${dateWhereExp}${dateWhereExpEnd} GROUP BY LOWER(type)`).all(...driverList);
+			expRows.forEach(r => {
+				if (/fuel/i.test(r.t)) fuelExpenses += r.total;
+				else if (/maint|repair|tire|oil/i.test(r.t)) maintenanceExpenses += r.total;
+				else otherExpenses += r.total;
+				totalExpenses += r.total;
+			});
+			const maintTotal = (db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id=?`).get(user.id)).t;
+			maintenanceExpenses += maintTotal;
+			totalExpenses += maintTotal;
+			const compTotal = (db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND cf.status='Paid'`).get(user.id)).t;
+			complianceExpenses += compTotal;
+			totalExpenses += compTotal;
 		}
 		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
 		const netCashFlow = totalRevenue - totalExpenses;
@@ -2887,13 +3091,18 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		const fmt = n => "$" + Number(n||0).toLocaleString("en-US", { maximumFractionDigits: 0 });
 		const dateStr = new Date().toLocaleDateString("en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
 		const investorName = isSuperAdmin ? "Super Admin" : user.username;
+		const periodStr = filterStart || filterEnd
+			? `Period: ${filterStart ? filterStart.toLocaleDateString("en-US") : "All"} – ${filterEnd ? filterEnd.toLocaleDateString("en-US") : "Today"}`
+			: "All-time";
 
 		// ── Header
 		doc.rect(0, 0, doc.page.width, 80).fill("#0f3460");
 		doc.fillColor("#ffffff").fontSize(22).font("Helvetica-Bold")
-			.text(`${investorName} — Asset Dashboard`, 50, 22);
+			.text(`${investorName} — Asset Dashboard`, 50, 18);
 		doc.fontSize(10).font("Helvetica").fillColor("rgba(255,255,255,0.7)")
-			.text(`Performance Report  ·  ${dateStr}`, 50, 52);
+			.text(`Performance Report  ·  ${dateStr}`, 50, 45);
+		doc.fontSize(9).fillColor("rgba(255,255,255,0.5)")
+			.text(periodStr, 50, 62);
 		doc.moveDown(3).fillColor("#000000");
 
 		// ── Helper: section header
@@ -2938,6 +3147,33 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		kpiRow("Total Investment", fmt(totalInv), "Payoff Progress", `${recPct}%`);
 		const roiPct = totalRevenue > 0 ? (netRevenueToDate / totalRevenue * 100).toFixed(1) : "0";
 		kpiRow("Business ROI", `${roiPct}%`, "Section 179 Deduction", fmt(purchasePrice));
+
+		// ── P&L Statement (RFD-26)
+		sectionHeader("Income Statement (Profit & Loss)");
+		const plLines = [
+			{ label: "Gross Revenue", value: fmt(totalRevenue), indent: false, bold: true },
+			{ label: "  Fuel Expenses", value: `(${fmt(fuelExpenses)})`, indent: true, bold: false },
+			{ label: "  Maintenance & Repairs", value: `(${fmt(maintenanceExpenses)})`, indent: true, bold: false },
+			{ label: "  Compliance / Regulatory", value: `(${fmt(complianceExpenses)})`, indent: true, bold: false },
+			{ label: "  Other Expenses", value: `(${fmt(otherExpenses)})`, indent: true, bold: false },
+			{ label: "Total Expenses", value: `(${fmt(totalExpenses)})`, indent: false, bold: false },
+			{ label: "Net Profit", value: fmt(netCashFlow), indent: false, bold: true },
+			{ label: "Investor Payout (50%)", value: fmt(ownerEarnings), indent: false, bold: true },
+		];
+		const plX = 50, plW = doc.page.width - 100;
+		plLines.forEach((line, i) => {
+			if (i === plLines.length - 3) { // separator before net profit
+				doc.moveTo(plX, doc.y).lineTo(plX + plW, doc.y).strokeColor("#cccccc").stroke();
+				doc.moveDown(0.3);
+			}
+			const y = doc.y;
+			doc.font(line.bold ? "Helvetica-Bold" : "Helvetica").fontSize(10).fillColor(line.indent ? "#555555" : "#000000")
+				.text(line.label, plX + (line.indent ? 15 : 0), y, { width: plW - 80 })
+				.font(line.bold ? "Helvetica-Bold" : "Helvetica").fillColor(line.bold ? "#0f3460" : "#333333")
+				.text(line.value, plX + plW - 80, y, { width: 80, align: "right" });
+			doc.moveDown(0.6);
+		});
+		doc.moveDown(0.5);
 
 		// ── Monthly Revenue Table
 		if (monthlyData2.length > 0) {
@@ -4271,9 +4507,18 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						}
 					});
 				}
+				// Per-truck monthly expenses (RFD-13)
+				const expRow = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE LOWER(driver) = ? AND strftime('%Y-%m', date) = ?`).get(driverName, currentMonthKey);
+				const maintRow = db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf WHERE LOWER(mf.truck) = ? AND strftime('%Y-%m', mf.date) = ?`).get(truck.unit_number.toLowerCase(), currentMonthKey);
+				const compRow = db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf WHERE LOWER(cf.truck) = ? AND strftime('%Y-%m', cf.due_date) = ? AND cf.status = 'Paid'`).get(truck.unit_number.toLowerCase(), currentMonthKey);
+				// Fixed costs from truck record (pro-rated monthly)
+				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual FROM trucks WHERE unit_number = ?").get(truck.unit_number);
+				const fixedMonthly = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12);
+				const unitMonthlyExpenses = (expRow?.t || 0) + (maintRow?.t || 0) + (compRow?.t || 0) + fixedMonthly;
 				perTruckData[truck.unit_number] = {
 					unitMonthlyGross: Math.round(unitMonthlyGross),
-					estAnnualRevenue: Math.round((unitMonthlyGross * 0.50) * 12),
+					unitMonthlyExpenses: Math.round(unitMonthlyExpenses),
+					estAnnualRevenue: Math.round((unitMonthlyGross - unitMonthlyExpenses) * 12),
 				};
 			});
 		}

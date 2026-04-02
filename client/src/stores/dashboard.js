@@ -38,8 +38,8 @@ export const useDashboardStore = defineStore('dashboard', {
     async assignDriver(rowIndex, driver, job, headers) {
       const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
       const detailsCol = headers.find((h) => /details/i.test(h))
-      const originCol = headers.find((h) => /origin|pickup.*city|shipper.*city/i.test(h))
-      const destCol = headers.find((h) => /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h))
+      const originCol = headers.find((h) => /origin|pickup.*city|shipper.*city/i.test(h) && !/lat|lng|lon/i.test(h))
+      const destCol = headers.find((h) => /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h))
       const loadId = loadIdCol ? job[loadIdCol] || '' : ''
 
       let origin = originCol ? job[originCol] || '' : ''

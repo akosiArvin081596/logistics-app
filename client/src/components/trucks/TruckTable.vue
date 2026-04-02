@@ -98,6 +98,7 @@
                 <option>Active</option>
                 <option>Inactive</option>
                 <option>Maintenance</option>
+                <option>OOS</option>
               </select>
             </div>
             <div class="edit-field">
@@ -121,6 +122,40 @@
             <label>Notes</label>
             <textarea v-model="editForm.notes" rows="2"></textarea>
           </div>
+
+          <div class="edit-field">
+            <label>Truck Photo</label>
+            <input type="file" accept="image/*" @change="onEditPhoto" style="font-size:0.8rem;" />
+            <img v-if="editForm.photo" :src="editForm.photo" style="max-height:80px;border-radius:6px;margin-top:0.4rem;" />
+          </div>
+
+          <details style="margin-bottom:0.75rem;">
+            <summary style="font-size:0.72rem;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em;cursor:pointer;margin-bottom:0.5rem;">Fixed Costs</summary>
+            <div class="edit-row">
+              <div class="edit-field">
+                <label>Insurance ($/mo)</label>
+                <input v-model.number="editForm.insuranceMonthly" type="number" min="0" />
+              </div>
+              <div class="edit-field">
+                <label>ELD ($/mo)</label>
+                <input v-model.number="editForm.eldMonthly" type="number" min="0" />
+              </div>
+            </div>
+            <div class="edit-row">
+              <div class="edit-field">
+                <label>HVUT ($/yr)</label>
+                <input v-model.number="editForm.hvutAnnual" type="number" min="0" />
+              </div>
+              <div class="edit-field">
+                <label>IRP ($/yr)</label>
+                <input v-model.number="editForm.irpAnnual" type="number" min="0" />
+              </div>
+            </div>
+            <div class="edit-field">
+              <label>Admin Fee (%)</label>
+              <input v-model.number="editForm.adminFeePct" type="number" min="0" max="100" />
+            </div>
+          </details>
 
           <div class="confirm-actions">
             <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
@@ -171,7 +206,7 @@ const truckModels = {
   Nikola: ['Tre BEV', 'Tre FCEV', 'Two'],
 }
 
-defineProps({
+const props = defineProps({
   trucks: { type: Array, default: () => [] },
   driverNames: { type: Array, default: () => [] },
   investorUsers: { type: Array, default: () => [] },
@@ -190,6 +225,7 @@ const showEdit = ref(false)
 const editForm = reactive({
   id: null, unitNumber: '', make: '', model: '', year: 0,
   vin: '', licensePlate: '', status: 'Active', assignedDriver: '', ownerId: 0, notes: '',
+  photo: '', insuranceMonthly: 0, eldMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50,
 })
 
 function openEdit(truck) {
@@ -204,7 +240,21 @@ function openEdit(truck) {
   editForm.assignedDriver = truck.AssignedDriver || ''
   editForm.ownerId = truck.OwnerId || 0
   editForm.notes = truck.Notes || ''
+  editForm.photo = truck.Photo || ''
+  editForm.insuranceMonthly = truck.InsuranceMonthly || 0
+  editForm.eldMonthly = truck.EldMonthly || 0
+  editForm.hvutAnnual = truck.HvutAnnual || 0
+  editForm.irpAnnual = truck.IrpAnnual || 0
+  editForm.adminFeePct = truck.AdminFeePct ?? 50
   showEdit.value = true
+}
+
+function onEditPhoto(e) {
+  const file = e.target.files[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = ev => { editForm.photo = ev.target.result }
+  reader.readAsDataURL(file)
 }
 
 function handleSaveEdit() {
@@ -221,6 +271,12 @@ function handleSaveEdit() {
       assignedDriver: editForm.assignedDriver,
       ownerId: editForm.ownerId,
       notes: editForm.notes,
+      photo: editForm.photo,
+      insuranceMonthly: editForm.insuranceMonthly,
+      eldMonthly: editForm.eldMonthly,
+      hvutAnnual: editForm.hvutAnnual,
+      irpAnnual: editForm.irpAnnual,
+      adminFeePct: editForm.adminFeePct,
     },
   })
   showEdit.value = false
@@ -235,6 +291,7 @@ function ownerName(ownerId) {
 function statusClass(status) {
   if (status === 'Active') return 'status-active'
   if (status === 'Inactive') return 'status-inactive'
+  if (status === 'OOS') return 'status-oos'
   return 'status-maintenance'
 }
 
@@ -299,6 +356,7 @@ function handleConfirmDelete() {
 .status-active { background: var(--accent-dim); color: var(--accent); }
 .status-inactive { background: var(--bg); color: var(--text-dim); }
 .status-maintenance { background: var(--amber-dim); color: var(--amber); }
+.status-oos { background: var(--danger-dim); color: var(--danger); }
 
 .action-btns { display: flex; gap: 0.35rem; justify-content: flex-end; }
 
@@ -322,6 +380,7 @@ function handleConfirmDelete() {
   background: var(--surface); border-radius: var(--radius);
   padding: 1.5rem; max-width: 500px; width: 90%;
   box-shadow: 0 8px 30px rgba(0,0,0,0.12);
+  max-height: 90vh; overflow-y: auto;
 }
 .confirm-dialog h3 { font-size: 1rem; margin-bottom: 1rem; }
 .confirm-actions {

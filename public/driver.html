@@ -954,8 +954,8 @@ function renderLoads() {
   const loads = driverData.loads || [];
   const statusCol = findCol(headers, /status/i);
   const loadIdCol = findCol(headers, /load.?id|job.?id/i);
-  const originCol = findCol(headers, /origin|pickup.*city|shipper.*city/i);
-  const destCol = findCol(headers, /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i);
+  const originCol = (headers || []).find(h => /origin|pickup.*city|shipper.*city/i.test(h) && !/lat|lng|lon/i.test(h)) || null;
+  const destCol = (headers || []).find(h => /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
   const pickupCol = findCol(headers, /pickup.*date|pickup.*appt/i);
   const delivCol = findCol(headers, /deliv|drop.?off.*date|completion.*date/i);
   const brokerCol = findCol(headers, /broker/i);

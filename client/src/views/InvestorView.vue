@@ -10,9 +10,13 @@
         <div class="header-actions">
           <a href="mailto:info@logisx.com" class="btn-email">info@logisx.com</a>
           <a href="mailto:dev@logisx.com" class="btn-email">dev@logisx.com</a>
-          <button class="btn-report" :disabled="reportLoading" @click="downloadReport">
-            {{ reportLoading ? 'Generating...' : 'Download Report' }}
-          </button>
+          <div class="report-group">
+            <input v-model="reportStart" type="date" class="date-input" title="Report start date" />
+            <input v-model="reportEnd" type="date" class="date-input" title="Report end date" />
+            <button class="btn-report" :disabled="reportLoading" @click="downloadReport">
+              {{ reportLoading ? 'Generating...' : 'Download Report' }}
+            </button>
+          </div>
           <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
             {{ store.isLoading ? 'Loading...' : 'Refresh' }}
           </button>
@@ -62,6 +66,7 @@
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
       <InvestorChat />
       <DocumentPortal />
+      <LegalDocumentPortal />
       <ConfigPanel
         v-if="authStore.user?.role === 'Super Admin'"
         :config="store.config"
@@ -88,6 +93,7 @@ import CashFlowSection from '../components/investor/CashFlowSection.vue'
 import TaxShieldSection from '../components/investor/TaxShieldSection.vue'
 import InvestorChat from '../components/investor/InvestorChat.vue'
 import DocumentPortal from '../components/investor/DocumentPortal.vue'
+import LegalDocumentPortal from '../components/investor/LegalDocumentPortal.vue'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 
@@ -98,6 +104,8 @@ const { show: toast } = useToast()
 
 const trucks = ref([])
 const reportLoading = ref(false)
+const reportStart = ref('')
+const reportEnd = ref('')
 
 const dashboardTitle = computed(() => {
   if (authStore.user?.role === 'Super Admin') return 'Asset Dashboard'
@@ -137,7 +145,11 @@ async function loadData() {
 async function downloadReport() {
   reportLoading.value = true
   try {
-    const res = await fetch('/api/investor/report', { credentials: 'include' })
+    const params = new URLSearchParams()
+    if (reportStart.value) params.set('start', reportStart.value)
+    if (reportEnd.value) params.set('end', reportEnd.value)
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    const res = await fetch(`/api/investor/report${qs}`, { credentials: 'include' })
     if (!res.ok) throw new Error('Failed')
     const blob = await res.blob()
     const url = URL.createObjectURL(blob)
@@ -224,6 +236,16 @@ onMounted(() => {
 }
 .btn-email:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
 
+.report-group {
+  display: flex; align-items: center; gap: 0.4rem;
+}
+.date-input {
+  padding: 0.35rem 0.55rem; font-size: 0.73rem; font-family: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.8);
+  cursor: pointer; width: 130px;
+}
+.date-input::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.5; }
 .btn-report {
   padding: 0.4rem 1rem;
   font-size: 0.78rem;
