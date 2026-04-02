@@ -2147,7 +2147,7 @@ function deduplicateLoads(data, headers, returnDuplicates = false) {
 	const statusCol = headers.find((h) => /^(job.?)?status$/i.test(h));
 	const seen = new Map();
 	for (let i = 0; i < data.length; i++) {
-		const lid = (data[i][loadIdCol] || "").trim().toLowerCase();
+		const lid = (data[i][loadIdCol] || "").trim().toLowerCase().replace(/^#/, "");
 		if (!lid) continue;
 		if (seen.has(lid)) seen.get(lid).push(i);
 		else seen.set(lid, [i]);
