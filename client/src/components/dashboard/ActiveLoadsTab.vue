@@ -9,7 +9,7 @@
         <thead>
           <tr>
             <th v-for="col in displayCols" :key="col">{{ col }}</th>
-            <th>Actions</th>
+            <th style="min-width:300px;">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -19,7 +19,7 @@
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
             <td @click.stop>
-              <div style="display:flex;align-items:center;gap:0.375rem;flex-wrap:wrap;">
+              <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:nowrap;">
                 <div style="display:flex;align-items:center;gap:0.25rem;flex-shrink:0;">
                   <select v-model="statusSelections[job._rowIndex]" class="dash-select dash-select-sm" style="width:108px">
                     <option value="">{{ getCurrentStatus(job) || 'Status' }}</option>
