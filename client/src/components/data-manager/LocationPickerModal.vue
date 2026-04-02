@@ -44,6 +44,8 @@
               <l-tile-layer
                 url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                 attribution="&copy; Esri"
+                :max-zoom="20"
+                :max-native-zoom="18"
               />
               <l-marker v-if="markerPos" :lat-lng="markerPos" :icon="pinIcon" />
             </l-map>
