@@ -60,12 +60,12 @@
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Latitude</label>
-            <input v-model.number="form.pickupLat" class="form-input mono" type="number" step="0.000001" placeholder="32.7767" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Longitude</label>
-            <input v-model.number="form.pickupLng" class="form-input mono" type="number" step="0.000001" placeholder="-96.7970" />
+            <label class="form-label">Coordinates</label>
+            <div class="coord-display">
+              <span v-if="form.pickupLat" class="coord-text">{{ form.pickupLat.toFixed(5) }}, {{ form.pickupLng.toFixed(5) }}</span>
+              <span v-else class="coord-text dim">Not set</span>
+              <button class="btn-map" type="button" @click="openPicker('pickup')">&#128205; Pick on Map</button>
+            </div>
           </div>
         </div>
       </div>
@@ -85,15 +85,25 @@
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Latitude</label>
-            <input v-model.number="form.dropoffLat" class="form-input mono" type="number" step="0.000001" placeholder="29.7604" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Longitude</label>
-            <input v-model.number="form.dropoffLng" class="form-input mono" type="number" step="0.000001" placeholder="-95.3698" />
+            <label class="form-label">Coordinates</label>
+            <div class="coord-display">
+              <span v-if="form.dropoffLat" class="coord-text">{{ form.dropoffLat.toFixed(5) }}, {{ form.dropoffLng.toFixed(5) }}</span>
+              <span v-else class="coord-text dim">Not set</span>
+              <button class="btn-map" type="button" @click="openPicker('dropoff')">&#128205; Pick on Map</button>
+            </div>
           </div>
         </div>
       </div>
+
+      <!-- Location Picker Modal -->
+      <LocationPickerModal
+        :open="pickerOpen"
+        :label="pickerLabel"
+        :initial-lat="pickerInitLat"
+        :initial-lng="pickerInitLng"
+        @confirm="onPickerConfirm"
+        @close="pickerOpen = false"
+      />
 
       <!-- Assignment -->
       <div class="form-section">
@@ -131,6 +141,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 
 const api = useApi()
 const router = useRouter()
@@ -165,6 +176,40 @@ const form = reactive({
 
 function generateId() {
   form.loadId = `LD-${Date.now().toString(36).toUpperCase()}`
+}
+
+// Map picker state
+const pickerOpen = ref(false)
+const pickerTarget = ref('')
+const pickerLabel = ref('Pickup')
+const pickerInitLat = ref(NaN)
+const pickerInitLng = ref(NaN)
+
+function openPicker(target) {
+  pickerTarget.value = target
+  if (target === 'pickup') {
+    pickerLabel.value = 'Pickup'
+    pickerInitLat.value = form.pickupLat || NaN
+    pickerInitLng.value = form.pickupLng || NaN
+  } else {
+    pickerLabel.value = 'Drop-off'
+    pickerInitLat.value = form.dropoffLat || NaN
+    pickerInitLng.value = form.dropoffLng || NaN
+  }
+  pickerOpen.value = true
+}
+
+function onPickerConfirm({ lat, lng, displayName }) {
+  if (pickerTarget.value === 'pickup') {
+    form.pickupLat = lat
+    form.pickupLng = lng
+    if (displayName && !form.pickupAddress) form.pickupAddress = displayName
+  } else {
+    form.dropoffLat = lat
+    form.dropoffLng = lng
+    if (displayName && !form.dropoffAddress) form.dropoffAddress = displayName
+  }
+  pickerOpen.value = false
 }
 
 // Column matchers — same regex patterns used by server.js
@@ -357,6 +402,24 @@ onMounted(() => {
 
 .error-msg { color: var(--danger); font-size: 0.78rem; margin-top: 0.75rem; }
 .field-warning { color: var(--amber); font-size: 0.72rem; margin-top: 0.25rem; }
+
+.coord-display {
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0.5rem 0.65rem; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.coord-text {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--text);
+}
+.coord-text.dim { color: var(--text-dim); }
+.btn-map {
+  margin-left: auto; padding: 0.3rem 0.75rem;
+  font-size: 0.75rem; font-weight: 600; font-family: inherit;
+  border: 1px solid var(--accent); border-radius: 6px;
+  background: var(--accent-dim); color: var(--accent);
+  cursor: pointer; white-space: nowrap; transition: opacity 0.15s;
+}
+.btn-map:hover { opacity: 0.75; }
 
 @media (max-width: 640px) {
   .form-row { flex-direction: column; gap: 0; }
