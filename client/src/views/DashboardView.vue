@@ -4,7 +4,7 @@
       <h2>Operations Dashboard</h2>
       <div class="status-bar">
         <span class="status-pill">{{ lastUpdated }}</span>
-        <button class="btn btn-secondary btn-sm" @click="refresh">Refresh</button>
+        <Button label="Refresh" icon="pi pi-refresh" severity="secondary" size="small" @click="refresh" />
       </div>
     </div>
 
@@ -31,58 +31,60 @@
 
     <!-- Tabbed Section -->
     <div class="dash-section fill">
-      <div class="tab-bar">
-        <button :class="['tab-btn', { active: activeTab === 'jobBoard' }]" @click="activeTab = 'jobBoard'">
-          Job Board <span class="count-badge danger">{{ store.unassignedJobs.length }}</span>
-        </button>
-        <button :class="['tab-btn', { active: activeTab === 'activeLoads' }]" @click="activeTab = 'activeLoads'">
-          Active Loads <span class="count-badge">{{ store.activeJobs.length }}</span>
-        </button>
-        <button :class="['tab-btn', { active: activeTab === 'completed' }]" @click="activeTab = 'completed'">
-          Completed <span class="count-badge" style="background:rgba(16,185,129,0.15);color:#059669">{{ store.completedJobs.length }}</span>
-        </button>
-        <button :class="['tab-btn', { active: activeTab === 'fleet' }]" @click="activeTab = 'fleet'">
-          Fleet & Drivers <span class="count-badge" style="background:var(--blue-dim);color:var(--blue)">{{ store.fleet.length }}</span>
-        </button>
-      </div>
-
-      <div v-show="activeTab === 'jobBoard'" class="tab-panel active">
-        <JobBoardTab
-          :jobs="store.unassignedJobs"
-          :drivers="store.drivers"
-          :headers="store.headers"
-          :loading="store.isLoading"
-          :show-map="activeTab === 'jobBoard' ? mapTrigger : 0"
-          @assign="handleAssign"
-        />
-      </div>
-      <div v-show="activeTab === 'activeLoads'" class="tab-panel active">
-        <ActiveLoadsTab
-          :jobs="store.activeJobs"
-          :headers="store.headers"
-          :drivers="store.drivers"
-          :show-map="activeTab === 'activeLoads' ? mapTrigger : 0"
-          @reassign="handleReassign"
-          @cancel="handleCancel"
-          @status-update="handleStatusUpdate"
-        />
-      </div>
-      <div v-show="activeTab === 'completed'" class="tab-panel active">
-        <CompletedLoadsTab
-          :jobs="store.completedJobs"
-          :headers="store.completedHeaders"
-          :show-map="activeTab === 'completed' ? mapTrigger : 0"
-        />
-      </div>
-      <div v-show="activeTab === 'fleet'" class="tab-panel active">
-        <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />
-      </div>
+      <Tabs :value="activeTab" @update:value="activeTab = $event">
+        <TabList>
+          <Tab value="jobBoard">Job Board <Badge :value="store.unassignedJobs.length" severity="danger" /></Tab>
+          <Tab value="activeLoads">Active Loads <Badge :value="store.activeJobs.length" /></Tab>
+          <Tab value="completed">Completed <Badge :value="store.completedJobs.length" severity="success" /></Tab>
+          <Tab value="fleet">Fleet & Drivers <Badge :value="store.fleet.length" severity="info" /></Tab>
+        </TabList>
+        <TabPanels>
+          <TabPanel value="jobBoard">
+            <JobBoardTab
+              :jobs="store.unassignedJobs"
+              :drivers="store.drivers"
+              :headers="store.headers"
+              :loading="store.isLoading"
+              :show-map="activeTab === 'jobBoard' ? mapTrigger : 0"
+              @assign="handleAssign"
+            />
+          </TabPanel>
+          <TabPanel value="activeLoads">
+            <ActiveLoadsTab
+              :jobs="store.activeJobs"
+              :headers="store.headers"
+              :drivers="store.drivers"
+              :show-map="activeTab === 'activeLoads' ? mapTrigger : 0"
+              @reassign="handleReassign"
+              @cancel="handleCancel"
+              @status-update="handleStatusUpdate"
+            />
+          </TabPanel>
+          <TabPanel value="completed">
+            <CompletedLoadsTab
+              :jobs="store.completedJobs"
+              :headers="store.completedHeaders"
+              :show-map="activeTab === 'completed' ? mapTrigger : 0"
+            />
+          </TabPanel>
+          <TabPanel value="fleet">
+            <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />
+          </TabPanel>
+        </TabPanels>
+      </Tabs>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import Tabs from 'primevue/tabs'
+import TabList from 'primevue/tablist'
+import Tab from 'primevue/tab'
+import TabPanels from 'primevue/tabpanels'
+import TabPanel from 'primevue/tabpanel'
+import Badge from 'primevue/badge'
+import Button from 'primevue/button'
 import { useDashboardStore } from '../stores/dashboard'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
@@ -237,38 +239,11 @@ onUnmounted(() => {
   box-shadow: 0 1px 3px rgba(0,0,0,0.04);
   overflow: hidden;
 }
-.tab-bar {
-  display: flex; gap: 0;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.tab-btn {
-  padding: 0.75rem 1.25rem;
-  border: none; background: transparent;
-  font-family: 'DM Sans', sans-serif;
-  font-size: 0.85rem; font-weight: 600;
-  color: var(--text-dim);
-  cursor: pointer; transition: all 0.15s;
-  border-bottom: 2px solid transparent;
-  display: flex; align-items: center; gap: 0.4rem;
-}
-.tab-btn:hover { color: var(--text); background: var(--surface-hover); }
-.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
-.tab-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.count-badge {
-  background: var(--accent-dim); color: var(--accent);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.72rem; padding: 0.15rem 0.5rem;
-  border-radius: 10px; font-weight: 600;
-}
-.count-badge.danger { background: var(--danger-dim); color: var(--danger); }
+/* PrimeVue Tab overrides */
+:deep(.p-tabs) { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+:deep(.p-tabpanels) { flex: 1; overflow-y: auto; min-height: 0; }
+:deep(.p-tabpanel) { padding: 0; }
+:deep(.p-tab) { gap: 0.4rem; }
 
 /* Table styles */
 :deep(table) { width: 100%; border-collapse: collapse; }
