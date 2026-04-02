@@ -22,6 +22,7 @@ const LogisXPreset = definePreset(Aura, {
   }
 })
 import 'primeicons/primeicons.css'
+import 'primeflex/primeflex.css'
 import App from './App.vue'
 import router from './router'
 import './assets/shared.css'
