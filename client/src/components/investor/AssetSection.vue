@@ -22,6 +22,18 @@
         <div class="asset-label">Fleet Size</div>
         <div class="asset-value">{{ asset.totalTrucks }}</div>
       </div>
+      <div class="asset-item">
+        <div class="asset-label">Total Miles</div>
+        <div class="asset-value">{{ (asset.totalMiles || 0).toLocaleString() }}</div>
+      </div>
+      <div class="asset-item">
+        <div class="asset-label">Revenue / Mile</div>
+        <div class="asset-value" style="color: var(--accent);">{{ asset.revenuePerMile ? '$' + asset.revenuePerMile.toFixed(2) : '\u2014' }}</div>
+      </div>
+      <div class="asset-item">
+        <div class="asset-label">Cost / Mile</div>
+        <div class="asset-value" style="color: var(--danger);">{{ asset.costPerMile ? '$' + asset.costPerMile.toFixed(2) : '\u2014' }}</div>
+      </div>
     </div>
 
     <div class="dep-bar-container">

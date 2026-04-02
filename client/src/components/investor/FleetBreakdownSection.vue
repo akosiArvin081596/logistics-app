@@ -15,6 +15,7 @@
           <th>Make / Model</th>
           <th>Status</th>
           <th>Driver</th>
+          <th>Miles</th>
           <th>Est. Revenue</th>
           <th>ROI</th>
         </tr>
@@ -33,6 +34,7 @@
           <td :style="{ color: t.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
             {{ t.AssignedDriver || '\u2014' }}
           </td>
+          <td class="mono">{{ (t.totalMiles || 0).toLocaleString() }}</td>
           <td class="mono">{{ fmt(t.estRevenue) }}</td>
           <td>
             <span :class="['roi-badge', t.roi >= 0 ? 'positive' : 'negative']">
@@ -43,7 +45,7 @@
       </tbody>
       <tfoot>
         <tr>
-          <td colspan="5" class="total-label">Fleet Total</td>
+          <td colspan="6" class="total-label">Fleet Total</td>
           <td class="mono total-val">{{ fmt(totalEstRevenue) }}</td>
           <td>
             <span :class="['roi-badge', fleetROI >= 0 ? 'positive' : 'negative']">
@@ -77,7 +79,8 @@ const trucksWithROI = computed(() => {
     const roi = purchasePrice > 0 && grossRevenue > 0
       ? (estRevenue / grossRevenue) * 100
       : 0
-    return { ...t, estRevenue, roi }
+    const totalMiles = perUnit?.totalMiles ?? 0
+    return { ...t, estRevenue, roi, totalMiles }
   })
 })
 

@@ -4702,10 +4702,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily FROM trucks WHERE unit_number = ?").get(truck.unit_number);
 				const fixedMonthly = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12) + ((truckRow?.driver_pay_daily || 0) * 30);
 				const unitMonthlyExpenses = (expRow?.t || 0) + (maintRow?.t || 0) + (compRow?.t || 0) + fixedMonthly;
+				// Mileage from odometer readings (max - min)
+				const odometerRange = db.prepare(
+					`SELECT MIN(odometer) AS minOdo, MAX(odometer) AS maxOdo FROM expenses WHERE LOWER(driver) = ? AND odometer > 0`
+				).get(driverName);
+				const totalMiles = (odometerRange?.maxOdo && odometerRange?.minOdo) ? Math.round(odometerRange.maxOdo - odometerRange.minOdo) : 0;
+
 				perTruckData[truck.unit_number] = {
 					unitMonthlyGross: Math.round(unitMonthlyGross),
 					unitMonthlyExpenses: Math.round(unitMonthlyExpenses),
 					estAnnualRevenue: Math.round((unitMonthlyGross - unitMonthlyExpenses) * 12),
+					totalMiles,
 				};
 			});
 		}
@@ -4718,6 +4725,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const completedJobs = statusCol
 			? filteredJobData.filter((r) => completedStatuses.test((r[statusCol] || "").trim())).length
 			: 0;
+
+		// Fleet-level mileage aggregation
+		const fleetTotalMiles = Object.values(perTruckData).reduce((s, t) => s + (t.totalMiles || 0), 0);
+		const revenuePerMile = fleetTotalMiles > 0 ? Math.round((totalRevenue / fleetTotalMiles) * 100) / 100 : 0;
+		const costPerMile = fleetTotalMiles > 0 ? Math.round((totalExpenses / fleetTotalMiles) * 100) / 100 : 0;
 
 		res.json({
 			production: {
@@ -4744,6 +4756,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				depreciationYears: 1,
 				annualDepreciation: purchasePrice,
 				totalTrucks,
+				totalMiles: fleetTotalMiles,
+				revenuePerMile,
+				costPerMile,
 			},
 			taxShield: {
 				section179,
