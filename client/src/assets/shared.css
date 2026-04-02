@@ -316,10 +316,10 @@ body {
   box-shadow: 0 4px 16px rgba(0,0,0,0.1), 0 12px 28px rgba(0,0,0,0.06);
   transform: translateY(-2px);
 }
-.kpi-blue  { background: linear-gradient(145deg,#eff6ff,#ffffff); border:1px solid #bfdbfe; border-left:4px solid #3b82f6; }
-.kpi-amber { background: linear-gradient(145deg,#fffbeb,#ffffff); border:1px solid #fde68a; border-left:4px solid #f59e0b; }
-.kpi-emerald { background: linear-gradient(145deg,#ecfdf5,#ffffff); border:1px solid #a7f3d0; border-left:4px solid #10b981; }
-.kpi-violet { background: linear-gradient(145deg,#f5f3ff,#ffffff); border:1px solid #ddd6fe; border-left:4px solid #8b5cf6; }
+.kpi-blue, .kpi-amber, .kpi-emerald, .kpi-violet {
+  background: #ffffff;
+  border: 1px solid #e8edf2;
+}
 
 .kpi-icon {
   width: 42px; height: 42px; border-radius: 10px;
