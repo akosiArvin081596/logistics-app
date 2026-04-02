@@ -115,7 +115,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
-import { useGoogleMaps } from '../../composables/useGoogleMaps'
+import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -136,7 +136,7 @@ const fetchingRoute = ref(false)
 const panelCollapsed = ref(false)
 
 // Google Maps overlay objects (managed programmatically)
-const driverMarkers = new Map()   // driver name -> google.maps.Marker
+const driverMarkers = new Map()   // driver name -> AdvancedMarkerElement
 let originMarker = null
 let destMarker = null
 let distanceLabelMarker = null
@@ -209,7 +209,7 @@ function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 800) {
     const lng = fromLng + (toLng - fromLng) * eased
     // Update the Google Maps marker position directly
     if (markerObj) {
-      markerObj.setPosition({ lat, lng })
+      markerObj.position = { lat, lng }
     }
     // Also update reactive data for panel display
     const loc = locations.value.find((l) => l.driver === driver)
@@ -256,27 +256,6 @@ function snapToRoute(point, route) {
 }
 
 // ---- Google Maps helpers ----
-function dotIcon(color, scale = 7) {
-  return {
-    path: google.maps.SymbolPath.CIRCLE,
-    scale,
-    fillColor: color,
-    fillOpacity: 1,
-    strokeColor: '#fff',
-    strokeWeight: 2,
-  }
-}
-
-function endpointIcon(color) {
-  return {
-    path: google.maps.SymbolPath.CIRCLE,
-    scale: 9,
-    fillColor: color,
-    fillOpacity: 1,
-    strokeColor: '#fff',
-    strokeWeight: 3,
-  }
-}
 
 function safeFitBounds(points, options = {}) {
   if (!map) return
@@ -302,16 +281,16 @@ function safeFitBounds(points, options = {}) {
 // ---- Clear overlay helpers ----
 function clearSingleLoadOverlays() {
   if (routePolyline) { routePolyline.setMap(null); routePolyline = null }
-  if (originMarker) { originMarker.setMap(null); originMarker = null }
-  if (destMarker) { destMarker.setMap(null); destMarker = null }
-  if (distanceLabelMarker) { distanceLabelMarker.setMap(null); distanceLabelMarker = null }
+  if (originMarker) { originMarker.map = null; originMarker = null }
+  if (destMarker) { destMarker.map = null; destMarker = null }
+  if (distanceLabelMarker) { distanceLabelMarker.map = null; distanceLabelMarker = null }
 }
 
 function clearDriverRouteOverlays() {
   for (const o of driverRouteOverlays) {
     if (o.polyline) o.polyline.setMap(null)
-    if (o.originMarker) o.originMarker.setMap(null)
-    if (o.destMarker) o.destMarker.setMap(null)
+    if (o.originMarker) o.originMarker.map = null
+    if (o.destMarker) o.destMarker.map = null
   }
   driverRouteOverlays = []
 }
@@ -319,8 +298,8 @@ function clearDriverRouteOverlays() {
 function clearAllRouteOverlays() {
   for (const o of allRouteOverlays) {
     if (o.polyline) o.polyline.setMap(null)
-    if (o.originMarker) o.originMarker.setMap(null)
-    if (o.destMarker) o.destMarker.setMap(null)
+    if (o.originMarker) o.originMarker.map = null
+    if (o.destMarker) o.destMarker.map = null
   }
   allRouteOverlays = []
 }
@@ -345,22 +324,13 @@ function renderSingleLoadRoute() {
     if (routeDistance.value != null) {
       const mid = Math.floor(routePoints.value.length / 2)
       const midPt = routePoints.value[mid]
-      distanceLabelMarker = new google.maps.Marker({
+      const labelEl = document.createElement('div')
+      labelEl.textContent = routeDistance.value + ' mi'
+      labelEl.style.cssText = 'color:#333;font-size:11px;font-weight:700;font-family:JetBrains Mono,monospace;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px;white-space:nowrap;pointer-events:none;'
+      distanceLabelMarker = new google.maps.marker.AdvancedMarkerElement({
         position: { lat: midPt[0], lng: midPt[1] },
         map,
-        icon: {
-          path: 'M 0,0',
-          scale: 0,
-        },
-        label: {
-          text: routeDistance.value + ' mi',
-          color: '#333',
-          fontSize: '11px',
-          fontWeight: '700',
-          fontFamily: 'JetBrains Mono, monospace',
-          className: 'distance-label',
-        },
-        clickable: false,
+        content: labelEl,
         zIndex: 900,
       })
     }
@@ -368,30 +338,30 @@ function renderSingleLoadRoute() {
 
   // Origin marker (green)
   if (originLatLng.value) {
-    originMarker = new google.maps.Marker({
+    originMarker = new google.maps.marker.AdvancedMarkerElement({
       position: { lat: originLatLng.value[0], lng: originLatLng.value[1] },
       map,
-      icon: endpointIcon('#16a34a'),
+      content: createDotPin('#16a34a', 18),
       title: 'Pickup',
       zIndex: 800,
     })
     const infoContent = `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>Pickup</strong>${originAddress.value ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + originAddress.value + '</div>' : ''}</div>`
     const info = new google.maps.InfoWindow({ content: infoContent })
-    originMarker.addListener('click', () => info.open(map, originMarker))
+    originMarker.addListener('click', () => info.open({ map, anchor: originMarker }))
   }
 
   // Destination marker (red)
   if (destLatLng.value) {
-    destMarker = new google.maps.Marker({
+    destMarker = new google.maps.marker.AdvancedMarkerElement({
       position: { lat: destLatLng.value[0], lng: destLatLng.value[1] },
       map,
-      icon: endpointIcon('#dc2626'),
+      content: createDotPin('#dc2626', 18),
       title: 'Drop-off',
       zIndex: 800,
     })
     const infoContent = `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>Drop-off</strong>${destAddress.value ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + destAddress.value + '</div>' : ''}</div>`
     const info = new google.maps.InfoWindow({ content: infoContent })
-    destMarker.addListener('click', () => info.open(map, destMarker))
+    destMarker.addListener('click', () => info.open({ map, anchor: destMarker }))
   }
 }
 
@@ -413,30 +383,30 @@ function renderDriverRoutes() {
       })
     }
     if (r.origin) {
-      entry.originMarker = new google.maps.Marker({
+      entry.originMarker = new google.maps.marker.AdvancedMarkerElement({
         position: { lat: r.origin[0], lng: r.origin[1] },
         map,
-        icon: endpointIcon('#16a34a'),
+        content: createDotPin('#16a34a', 18),
         title: r.loadId + ' - Pickup',
         zIndex: 800,
       })
       const info = new google.maps.InfoWindow({
         content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Pickup</strong>${r.originAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.originAddress + '</div>' : ''}</div>`,
       })
-      entry.originMarker.addListener('click', () => info.open(map, entry.originMarker))
+      entry.originMarker.addListener('click', () => info.open({ map, anchor: entry.originMarker }))
     }
     if (r.dest) {
-      entry.destMarker = new google.maps.Marker({
+      entry.destMarker = new google.maps.marker.AdvancedMarkerElement({
         position: { lat: r.dest[0], lng: r.dest[1] },
         map,
-        icon: endpointIcon('#dc2626'),
+        content: createDotPin('#dc2626', 18),
         title: r.loadId + ' - Drop-off',
         zIndex: 800,
       })
       const info = new google.maps.InfoWindow({
         content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Drop-off</strong>${r.destAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.destAddress + '</div>' : ''}</div>`,
       })
-      entry.destMarker.addListener('click', () => info.open(map, entry.destMarker))
+      entry.destMarker.addListener('click', () => info.open({ map, anchor: entry.destMarker }))
     }
 
     driverRouteOverlays.push(entry)
@@ -461,30 +431,30 @@ function renderAllRoutes() {
       })
     }
     if (r.origin) {
-      entry.originMarker = new google.maps.Marker({
+      entry.originMarker = new google.maps.marker.AdvancedMarkerElement({
         position: { lat: r.origin[0], lng: r.origin[1] },
         map,
-        icon: endpointIcon('#16a34a'),
+        content: createDotPin('#16a34a', 18),
         title: r.driver + ' - Pickup',
         zIndex: 800,
       })
       const info = new google.maps.InfoWindow({
         content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.driver} — Pickup</strong></div>`,
       })
-      entry.originMarker.addListener('click', () => info.open(map, entry.originMarker))
+      entry.originMarker.addListener('click', () => info.open({ map, anchor: entry.originMarker }))
     }
     if (r.dest) {
-      entry.destMarker = new google.maps.Marker({
+      entry.destMarker = new google.maps.marker.AdvancedMarkerElement({
         position: { lat: r.dest[0], lng: r.dest[1] },
         map,
-        icon: endpointIcon('#dc2626'),
+        content: createDotPin('#dc2626', 18),
         title: r.driver + ' - Destination',
         zIndex: 800,
       })
       const info = new google.maps.InfoWindow({
         content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.driver} — Destination</strong></div>`,
       })
-      entry.destMarker.addListener('click', () => info.open(map, entry.destMarker))
+      entry.destMarker.addListener('click', () => info.open({ map, anchor: entry.destMarker }))
     }
 
     allRouteOverlays.push(entry)
@@ -502,10 +472,10 @@ function syncDriverMarkers() {
     if (!marker) {
       // Create new marker for this driver
       const isOn = isOnline(loc)
-      marker = new google.maps.Marker({
+      marker = new google.maps.marker.AdvancedMarkerElement({
         position: { lat: loc.latitude, lng: loc.longitude },
         map,
-        icon: dotIcon(isOn ? '#16a34a' : '#9ca3af', 7),
+        content: createDotPin(isOn ? '#16a34a' : '#9ca3af', 14),
         title: loc.driver,
         zIndex: 1000,
       })
@@ -513,23 +483,23 @@ function syncDriverMarkers() {
       const iw = new google.maps.InfoWindow()
       marker.addListener('click', () => {
         iw.setContent(buildDriverPopupContent(loc))
-        iw.open(map, marker)
+        iw.open({ map, anchor: marker })
       })
       driverInfoWindows.set(loc.driver, iw)
       driverMarkers.set(loc.driver, marker)
     } else {
       // Update position
-      marker.setPosition({ lat: loc.latitude, lng: loc.longitude })
-      // Update icon color based on online status
+      marker.position = { lat: loc.latitude, lng: loc.longitude }
+      // Update dot color based on online status
       const isOn = isOnline(loc)
-      marker.setIcon(dotIcon(isOn ? '#16a34a' : '#9ca3af', 7))
+      marker.content = createDotPin(isOn ? '#16a34a' : '#9ca3af', 14)
     }
   }
 
   // Remove markers for drivers no longer present
   for (const [driver, marker] of driverMarkers) {
     if (!currentDrivers.has(driver)) {
-      marker.setMap(null)
+      marker.map = null
       driverMarkers.delete(driver)
       const iw = driverInfoWindows.get(driver)
       if (iw) { iw.close(); driverInfoWindows.delete(driver) }
@@ -940,7 +910,7 @@ function updateMarkerVisibility() {
   const showAll = !sel || sel === '__all__'
   for (const [driver, marker] of driverMarkers) {
     const show = showAll || driver === sel
-    marker.setVisible(show)
+    marker.map = show ? map : null
   }
 }
 
@@ -1142,7 +1112,7 @@ onUnmounted(() => {
   Object.values(activeAnimations).forEach(cancelAnimationFrame)
   clearInterval(nowInterval)
   // Clean up Google Maps objects
-  for (const [, marker] of driverMarkers) marker.setMap(null)
+  for (const [, marker] of driverMarkers) marker.map = null
   driverMarkers.clear()
   for (const [, iw] of driverInfoWindows) iw.close()
   driverInfoWindows.clear()

@@ -26,7 +26,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
-import { useGoogleMaps } from '../../composables/useGoogleMaps'
+import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -106,21 +106,10 @@ const destAddr = computed(() => destAddrCol.value ? props.load[destAddrCol.value
 const loadIdValue = computed(() => loadIdCol.value ? props.load[loadIdCol.value] || '' : '')
 const driverName = computed(() => driverColName.value ? props.load[driverColName.value] || '' : '')
 
-function dotIcon(color, size = 14) {
-  return {
-    path: google.maps.SymbolPath.CIRCLE,
-    scale: size / 2,
-    fillColor: color,
-    fillOpacity: 1,
-    strokeColor: '#ffffff',
-    strokeWeight: 2,
-  }
-}
-
 function clearMapObjects() {
-  if (originMarker) { originMarker.setMap(null); originMarker = null }
-  if (destMarker) { destMarker.setMap(null); destMarker = null }
-  if (driverMarker) { driverMarker.setMap(null); driverMarker = null }
+  if (originMarker) { originMarker.map = null; originMarker = null }
+  if (destMarker) { destMarker.map = null; destMarker = null }
+  if (driverMarker) { driverMarker.map = null; driverMarker = null }
   if (routeLine) { routeLine.setMap(null); routeLine = null }
 }
 
@@ -129,13 +118,13 @@ function renderMarkers() {
   clearMapObjects()
 
   if (originLatLng.value && hasCoords.value) {
-    originMarker = new google.maps.Marker({ position: originLatLng.value, map, icon: dotIcon('#16a34a', 14), title: 'Pickup' })
+    originMarker = new google.maps.marker.AdvancedMarkerElement({ position: originLatLng.value, map, content: createDotPin('#16a34a', 14), title: 'Pickup' })
   }
   if (destLatLng.value && hasCoords.value) {
-    destMarker = new google.maps.Marker({ position: destLatLng.value, map, icon: dotIcon('#dc2626', 14), title: 'Drop-off' })
+    destMarker = new google.maps.marker.AdvancedMarkerElement({ position: destLatLng.value, map, content: createDotPin('#dc2626', 14), title: 'Drop-off' })
   }
   if (driverLatLng.value) {
-    driverMarker = new google.maps.Marker({ position: driverLatLng.value, map, icon: dotIcon('#2563eb', 16), title: driverName.value || 'Driver' })
+    driverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map, content: createDotPin('#2563eb', 16), title: driverName.value || 'Driver' })
   }
 
   if (routePoints.value.length >= 2) {
@@ -195,7 +184,7 @@ let lastRoutePos = null
 let lastRouteTime = 0
 watch(() => props.driverPosition, (pos) => {
   if (!pos || !destLatLng.value) return
-  if (driverMarker && map) driverMarker.setPosition({ lat: pos.latitude, lng: pos.longitude })
+  if (driverMarker && map) driverMarker.position = { lat: pos.latitude, lng: pos.longitude }
   if (!lastRoutePos) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute(true); return }
   const dist = haversineMi({ lat: pos.latitude, lng: pos.longitude }, { lat: lastRoutePos.latitude, lng: lastRoutePos.longitude })
   if (dist > 0.06 && Date.now() - lastRouteTime >= 60000) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute() }

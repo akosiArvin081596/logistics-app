@@ -43,7 +43,7 @@
 
 <script setup>
 import { ref, watch, nextTick } from 'vue'
-import { useGoogleMaps } from '../../composables/useGoogleMaps'
+import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
 import { useGeocode } from '../../composables/useGeocode'
 
 const props = defineProps({
@@ -66,6 +66,33 @@ let searchTimer = null
 let map = null
 let marker = null
 
+function clearMarker() {
+  if (marker) { marker.map = null; marker = null }
+}
+
+function placeMarker(pos) {
+  if (marker) {
+    marker.position = pos
+  } else {
+    marker = new google.maps.marker.AdvancedMarkerElement({
+      position: pos,
+      map,
+      content: createDotPin('#6366f1', 16),
+    })
+  }
+}
+
+function onMapClick(e) {
+  const pos = { lat: e.latLng.lat(), lng: e.latLng.lng() }
+  placeMarker(pos)
+  markerPos.value = pos
+  selectedAddress.value = ''
+  suggestions.value = []
+  geocode.reverseGeocode(pos.lat, pos.lng).then(r => {
+    if (r) selectedAddress.value = r.displayName
+  })
+}
+
 watch(() => props.open, async (isOpen) => {
   if (!isOpen) return
   searchQuery.value = ''
@@ -85,55 +112,34 @@ watch(() => props.open, async (isOpen) => {
     ? { lat: props.initialLat, lng: props.initialLng }
     : { lat: 32.7767, lng: -96.7970 }
 
-  map = await createMap(mapContainer.value, {
-    zoom: hasInitial ? 14 : 5,
-    center,
-    mapTypeId: 'hybrid',
-  })
-
-  if (hasInitial) {
-    placeMarker(center)
+  // Reuse existing map or create once
+  if (!map) {
+    map = await createMap(mapContainer.value, {
+      zoom: hasInitial ? 14 : 5,
+      center,
+      mapTypeId: 'hybrid',
+    })
+    map.addListener('click', onMapClick)
+  } else {
+    map.setCenter(center)
+    map.setZoom(hasInitial ? 14 : 5)
   }
 
-  map.addListener('click', (e) => {
-    const pos = { lat: e.latLng.lat(), lng: e.latLng.lng() }
-    placeMarker(pos)
-    markerPos.value = pos
-    selectedAddress.value = ''
-    suggestions.value = []
-    geocode.reverseGeocode(pos.lat, pos.lng).then(r => {
-      if (r) selectedAddress.value = r.displayName
-    })
-  })
+  // Reset marker
+  clearMarker()
+  if (hasInitial) placeMarker(center)
 
   // Geolocate if no initial coords
   if (!hasInitial && navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        if (map) map.panTo({ lat: pos.coords.latitude, lng: pos.coords.longitude })
-        if (map) map.setZoom(15)
+        if (map) { map.panTo({ lat: pos.coords.latitude, lng: pos.coords.longitude }); map.setZoom(15) }
       },
       () => {},
       { timeout: 8000, enableHighAccuracy: false }
     )
   }
 })
-
-function placeMarker(pos) {
-  if (marker) marker.setMap(null)
-  marker = new google.maps.Marker({
-    position: pos,
-    map,
-    icon: {
-      path: google.maps.SymbolPath.CIRCLE,
-      scale: 8,
-      fillColor: '#6366f1',
-      fillOpacity: 1,
-      strokeColor: '#ffffff',
-      strokeWeight: 3,
-    },
-  })
-}
 
 function onSearchInput() {
   clearTimeout(searchTimer)
@@ -149,10 +155,7 @@ function selectSuggestion(s) {
   selectedAddress.value = s.displayName
   searchQuery.value = ''
   suggestions.value = []
-  if (map) {
-    map.panTo(pos)
-    map.setZoom(15)
-  }
+  if (map) { map.panTo(pos); map.setZoom(15) }
 }
 
 function handleConfirm() {

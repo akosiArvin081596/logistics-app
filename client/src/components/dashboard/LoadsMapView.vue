@@ -12,7 +12,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
-import { useGoogleMaps } from '../../composables/useGoogleMaps'
+import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
 
 const props = defineProps({
   loads: { type: Array, required: true },
@@ -64,12 +64,8 @@ const mappedLoads = computed(() => {
   return results
 })
 
-function dotIcon(color, size = 14) {
-  return { path: google.maps.SymbolPath.CIRCLE, scale: size / 2, fillColor: color, fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 2 }
-}
-
 function clearOverlays() {
-  markers.forEach(m => m.setMap(null)); markers = []
+  markers.forEach(m => { m.map = null }); markers = []
   polylines.forEach(p => p.setMap(null)); polylines = []
 }
 
@@ -87,21 +83,21 @@ function render() {
       }))
     }
     if (item.origin) {
-      const m = new google.maps.Marker({ position: item.origin, map, icon: dotIcon('#16a34a'), title: `Pickup: ${item.loadId}` })
+      const m = new google.maps.marker.AdvancedMarkerElement({ position: item.origin, map, content: createDotPin('#16a34a'), title: `Pickup: ${item.loadId}` })
       const info = new google.maps.InfoWindow({ content: `<div style="font-family:DM Sans,sans-serif;font-size:0.82rem"><strong>Pickup</strong>${item.loadId ? `<div style="color:#666;font-size:0.75rem">${item.loadId}</div>` : ''}${item.driver ? `<div style="color:#666;font-size:0.75rem">Driver: ${item.driver}</div>` : ''}</div>` })
-      m.addListener('click', () => info.open(map, m))
+      m.addListener('click', () => info.open({ map, anchor: m }))
       markers.push(m)
       bounds.extend(item.origin); count++
     }
     if (item.dest) {
-      const m = new google.maps.Marker({ position: item.dest, map, icon: dotIcon('#dc2626'), title: `Drop-off: ${item.loadId}` })
+      const m = new google.maps.marker.AdvancedMarkerElement({ position: item.dest, map, content: createDotPin('#dc2626'), title: `Drop-off: ${item.loadId}` })
       const info = new google.maps.InfoWindow({ content: `<div style="font-family:DM Sans,sans-serif;font-size:0.82rem"><strong>Drop-off</strong>${item.loadId ? `<div style="color:#666;font-size:0.75rem">${item.loadId}</div>` : ''}${item.driver ? `<div style="color:#666;font-size:0.75rem">Driver: ${item.driver}</div>` : ''}</div>` })
-      m.addListener('click', () => info.open(map, m))
+      m.addListener('click', () => info.open({ map, anchor: m }))
       markers.push(m)
       bounds.extend(item.dest); count++
     }
     if (item.driverPos) {
-      const m = new google.maps.Marker({ position: item.driverPos, map, icon: dotIcon('#2563eb', 16), title: item.driver })
+      const m = new google.maps.marker.AdvancedMarkerElement({ position: item.driverPos, map, content: createDotPin('#2563eb', 16), title: item.driver })
       markers.push(m)
       bounds.extend(item.driverPos); count++
     }
