@@ -1,6 +1,6 @@
 <template>
   <div class="flex flex-col overflow-hidden h-full">
-    <div class="flex items-center justify-between mb-5 shrink-0">
+    <div class="flex items-center justify-between mb-6 shrink-0">
       <div>
         <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Operations Dashboard</h2>
         <p class="text-[13px] text-gray-400 mt-0.5">Real-time logistics overview</p>
@@ -18,7 +18,7 @@
       <RevenueGrid :revenue="store.revenue" />
     </template>
     <template v-else>
-      <div class="grid grid-cols-4 gap-4 mb-4">
+      <div class="grid grid-cols-4 gap-5 mb-6">
         <div v-for="n in 4" :key="n" class="bg-white border border-gray-100 rounded-xl p-5 animate-pulse" :style="{ animationDelay: (n * 0.1) + 's' }">
           <div class="h-3 bg-gray-100 rounded-full w-1/2 mb-3"></div>
           <div class="h-8 bg-gray-100 rounded-lg w-2/3 mb-2"></div>

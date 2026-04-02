@@ -1,5 +1,5 @@
 <template>
-  <div class="grid grid-cols-4 gap-4 mb-4 max-[900px]:grid-cols-2">
+  <div class="grid grid-cols-4 gap-5 mb-6 max-[900px]:grid-cols-2">
     <div v-for="card in cards" :key="card.key" :class="['kpi-card', card.theme]" @click="emit('card-click', card.key)">
       <div :class="['kpi-icon', card.iconTheme]">{{ card.icon }}</div>
       <div class="kpi-info">

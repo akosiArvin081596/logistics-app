@@ -1,5 +1,5 @@
 <template>
-  <div class="grid grid-cols-3 gap-4 mb-4">
+  <div class="grid grid-cols-3 gap-5 mb-6">
     <div v-for="card in cards" :key="card.key" :class="['rev-card', card.theme]">
       <div :class="['rev-icon', card.iconTheme]">{{ card.icon }}</div>
       <div>
