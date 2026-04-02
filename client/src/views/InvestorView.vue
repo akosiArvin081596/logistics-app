@@ -8,6 +8,7 @@
           <p class="hero-sub">Performance overview &middot; {{ todayFormatted }}</p>
         </div>
         <div class="header-actions">
+          <!-- RFD REVIEW: hidden until verified
           <a href="mailto:info@logisx.com" class="btn-email">info@logisx.com</a>
           <a href="mailto:dev@logisx.com" class="btn-email">dev@logisx.com</a>
           <div class="report-group">
@@ -17,6 +18,7 @@
               {{ reportLoading ? 'Generating...' : 'Download Report' }}
             </button>
           </div>
+          -->
           <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
             {{ store.isLoading ? 'Loading...' : 'Refresh' }}
           </button>
