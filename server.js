@@ -4391,21 +4391,26 @@ app.get("/api/geocode", requireAuth, async (req, res) => {
 	}
 });
 
-// GET /api/geocode/search — Forward geocode via Nominatim
+// GET /api/geocode/search — Forward geocode via Google Places API (New)
 app.get("/api/geocode/search", requireAuth, async (req, res) => {
 	const { q } = req.query;
 	if (!q || q.trim().length < 3) return res.json({ results: [] });
 	try {
-		const resp = await fetch(
-			`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q.trim())}&limit=5&addressdetails=1`,
-			{ headers: { "User-Agent": "LogisX/1.0" } }
-		);
+		const resp = await fetch("https://places.googleapis.com/v1/places:searchText", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+				"X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location",
+			},
+			body: JSON.stringify({ textQuery: q.trim() }),
+		});
 		if (!resp.ok) return res.json({ results: [] });
 		const data = await resp.json();
-		const results = data.map(r => ({
-			lat: parseFloat(r.lat),
-			lng: parseFloat(r.lon),
-			displayName: r.display_name || "",
+		const results = (data.places || []).map(p => ({
+			lat: p.location?.latitude,
+			lng: p.location?.longitude,
+			displayName: p.formattedAddress || p.displayName?.text || "",
 		}));
 		res.json({ results });
 	} catch {
