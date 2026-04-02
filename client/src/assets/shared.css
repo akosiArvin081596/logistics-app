@@ -9,12 +9,12 @@
   --border: #e2e4ea;
   --text: #1a1d27;
   --text-dim: #6b7085;
-  --accent: #10b981;
-  --accent-dim: rgba(16, 185, 129, 0.1);
+  --accent: #38bdf8;
+  --accent-dim: rgba(56, 189, 248, 0.1);
   --danger: #ef4444;
   --danger-dim: rgba(239, 68, 68, 0.08);
-  --blue: #3b82f6;
-  --blue-dim: rgba(59, 130, 246, 0.08);
+  --blue: #38bdf8;
+  --blue-dim: rgba(56, 189, 248, 0.08);
   --amber: #f59e0b;
   --amber-dim: rgba(245, 158, 11, 0.1);
   --radius: 10px;
