@@ -57,6 +57,7 @@
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
+      <DocumentPortal />
       <ConfigPanel
         v-if="authStore.user?.role === 'Super Admin'"
         :config="store.config"
@@ -81,6 +82,7 @@ import AssetSection from '../components/investor/AssetSection.vue'
 import FleetBreakdownSection from '../components/investor/FleetBreakdownSection.vue'
 import CashFlowSection from '../components/investor/CashFlowSection.vue'
 import TaxShieldSection from '../components/investor/TaxShieldSection.vue'
+import DocumentPortal from '../components/investor/DocumentPortal.vue'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 

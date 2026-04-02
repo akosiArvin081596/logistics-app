@@ -2713,6 +2713,37 @@ app.get("/api/documents/:loadId", requireAuth, (req, res) => {
 	}
 });
 
+// GET /api/investor/documents — All documents for the investor's drivers
+app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async (req, res) => {
+	try {
+		const user = req.session.user;
+		const isSuperAdmin = user.role === "Super Admin";
+		let docs;
+		if (isSuperAdmin) {
+			docs = db.prepare(
+				`SELECT id, load_id, driver, type, file_name, drive_url, uploaded_at
+				 FROM documents ORDER BY uploaded_at DESC LIMIT 500`
+			).all();
+		} else {
+			const ownedTrucks = db.prepare(
+				"SELECT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver != ''"
+			).all(user.id);
+			if (ownedTrucks.length === 0) return res.json({ documents: [] });
+			const drivers = ownedTrucks.map(t => t.assigned_driver.trim().toLowerCase());
+			const placeholders = drivers.map(() => '?').join(',');
+			docs = db.prepare(
+				`SELECT id, load_id, driver, type, file_name, drive_url, uploaded_at
+				 FROM documents WHERE LOWER(driver) IN (${placeholders})
+				 ORDER BY uploaded_at DESC LIMIT 500`
+			).all(...drivers);
+		}
+		res.json({ documents: docs });
+	} catch (err) {
+		console.error("Error fetching investor documents:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // POST /api/documents/upload — Upload document (images → PDF, or direct file)
 app.post("/api/documents/upload", requireAuth, async (req, res) => {
 	try {
