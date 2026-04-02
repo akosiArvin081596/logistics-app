@@ -66,7 +66,7 @@
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
       <InvestorChat />
       <DocumentPortal />
-      <LegalDocumentPortal />
+      <LegalDocumentPortal :trucks="trucks" />
       <ConfigPanel
         v-if="authStore.user?.role === 'Super Admin'"
         :config="store.config"

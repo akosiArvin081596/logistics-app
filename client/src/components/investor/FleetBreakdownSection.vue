@@ -10,6 +10,7 @@
     <table v-else class="fleet-table">
       <thead>
         <tr>
+          <th></th>
           <th>Unit</th>
           <th>Make / Model</th>
           <th>Status</th>
@@ -20,6 +21,10 @@
       </thead>
       <tbody>
         <tr v-for="t in trucksWithROI" :key="t.id">
+          <td class="photo-cell">
+            <img v-if="t.Photo" :src="t.Photo" class="truck-thumb" :alt="t.UnitNumber" />
+            <div v-else class="truck-thumb-placeholder">&#128665;</div>
+          </td>
           <td class="unit-num">{{ t.UnitNumber }}</td>
           <td>{{ [t.Make, t.Model].filter(Boolean).join(' ') || '\u2014' }}</td>
           <td>
@@ -38,7 +43,7 @@
       </tbody>
       <tfoot>
         <tr>
-          <td colspan="4" class="total-label">Fleet Total</td>
+          <td colspan="5" class="total-label">Fleet Total</td>
           <td class="mono total-val">{{ fmt(totalEstRevenue) }}</td>
           <td>
             <span :class="['roi-badge', fleetROI >= 0 ? 'positive' : 'negative']">
@@ -128,6 +133,16 @@ function statusClass(status) {
   font-weight: 700;
 }
 
+.photo-cell { width: 42px; padding: 0.3rem 0.25rem; }
+.truck-thumb {
+  width: 38px; height: 28px; object-fit: cover;
+  border-radius: 4px; display: block;
+}
+.truck-thumb-placeholder {
+  width: 38px; height: 28px; border-radius: 4px;
+  background: var(--bg); display: flex; align-items: center;
+  justify-content: center; font-size: 1rem; color: var(--text-dim);
+}
 .unit-num { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
 .mono { font-family: 'JetBrains Mono', monospace; }
 .total-label { text-align: right; }

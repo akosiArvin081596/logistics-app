@@ -2941,6 +2941,96 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 	}
 });
 
+// GET /api/investor/tax-csv — Download tax shield data as CSV
+app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (req, res) => {
+	try {
+		const user = req.session.user;
+		const isSuperAdmin = user.role === "Super Admin";
+
+		// Pull investor config for purchase price
+		const globalCfg = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all();
+		const config = {};
+		globalCfg.forEach(r => (config[r.key] = r.value));
+		if (!isSuperAdmin) {
+			const investorCfg = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(user.id);
+			investorCfg.forEach(r => (config[r.key] = r.value));
+		}
+		const purchasePrice = parseFloat(config.purchase_price) || 58000;
+		const totalTrucks = isSuperAdmin
+			? db.prepare("SELECT COUNT(*) AS cnt FROM trucks").get().cnt
+			: db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE owner_id = ?").get(user.id).cnt;
+		const totalPurchasePrice = purchasePrice * totalTrucks;
+		const totalStartupExpenses = 5000 * totalTrucks;
+		const section179 = purchasePrice;
+		const annualDepreciation = purchasePrice;
+
+		// Net revenue
+		let netRevenueToDate = 0;
+		try {
+			const sheets = await getSheets();
+			const rng = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+			const jt = parseSheet({ data: { values: rng.data.values } });
+			const jtRateCol = findCol(jt.headers, /rate|amount|revenue|pay|charge|price|cost/i);
+			const jtDriverCol = findCol(jt.headers, /driver/i);
+			let totalRevenue = 0;
+			let driverSet = null;
+			if (!isSuperAdmin) {
+				const owned = db.prepare("SELECT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver != ''").all(user.id);
+				driverSet = new Set(owned.map(t => t.assigned_driver.trim().toLowerCase()));
+			}
+			jt.data.forEach(r => {
+				if (driverSet && jtDriverCol) {
+					const d = (r[jtDriverCol] || "").trim().toLowerCase();
+					if (!driverSet.has(d)) return;
+				}
+				if (jtRateCol) totalRevenue += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
+			});
+			const expClause = isSuperAdmin
+				? db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM expenses").get().t
+				: (() => {
+					const drivers = db.prepare("SELECT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver != ''").all(user.id).map(t => t.assigned_driver.trim().toLowerCase());
+					if (!drivers.length) return 0;
+					const ph = drivers.map(() => "?").join(",");
+					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE LOWER(driver) IN (${ph})`).get(...drivers).t;
+				})();
+			netRevenueToDate = Math.round(totalRevenue - expClause);
+		} catch { /* if sheets fail, use 0 */ }
+
+		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate);
+		const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+		const ownerLabel = isSuperAdmin ? "All Investors" : user.username;
+
+		const rows = [
+			["LogisX Tax Shield Summary"],
+			["Generated", today],
+			["Investor", ownerLabel],
+			[""],
+			["Field", "Value"],
+			["Purchase Price (per truck)", `$${purchasePrice.toLocaleString("en-US")}`],
+			["Total Trucks", totalTrucks],
+			["Total Fleet Purchase Price", `$${totalPurchasePrice.toLocaleString("en-US")}`],
+			["Startup Expenses (est. $5,000/truck)", `$${totalStartupExpenses.toLocaleString("en-US")}`],
+			["Section 179 Deduction (100%)", `$${section179.toLocaleString("en-US")}`],
+			["Annual Depreciation (Year 1)", `$${annualDepreciation.toLocaleString("en-US")}`],
+			["Write-Off Percentage", "100%"],
+			["Net Revenue to Date", `$${netRevenueToDate.toLocaleString("en-US")}`],
+			["At-Risk Capital Remaining", `$${atRiskCapital.toLocaleString("en-US")}`],
+			[""],
+			["Note", "Section 179 allows 100% first-year deduction of qualifying business property."],
+			["Disclaimer", "Consult a licensed tax professional before filing."],
+		];
+
+		const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+		const filename = `tax-shield-${user.username}-${new Date().toISOString().slice(0, 10)}.csv`;
+		res.setHeader("Content-Type", "text/csv");
+		res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+		res.send(csv);
+	} catch (err) {
+		console.error("Tax CSV error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // GET /api/investor/report — Generate PDF performance report
 app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {

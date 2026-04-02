@@ -8,6 +8,10 @@
 
     <!-- Upload (Super Admin only) -->
     <div v-if="isSuperAdmin" class="upload-row">
+      <select v-if="!truckId && trucks.length > 0" v-model="uploadForm.selectedTruckId" class="doc-select">
+        <option :value="null">-- Select Truck --</option>
+        <option v-for="t in trucks" :key="t.id" :value="t.id">{{ t.UnitNumber }}</option>
+      </select>
       <select v-model="uploadForm.docType" class="doc-select">
         <option value="">-- Doc Type --</option>
         <option v-for="t in docTypes" :key="t" :value="t">{{ t }}</option>
@@ -17,7 +21,7 @@
         {{ uploadForm.file ? uploadForm.file.name : 'Choose File' }}
         <input type="file" style="display:none" @change="onFileChange" />
       </label>
-      <button class="btn-upload" :disabled="!uploadForm.file || !uploadForm.docType || uploading" @click="upload">
+      <button class="btn-upload" :disabled="!uploadForm.file || !uploadForm.docType || uploading || (!truckId && !uploadForm.selectedTruckId)" @click="upload">
         {{ uploading ? 'Uploading...' : 'Upload' }}
       </button>
     </div>
@@ -63,6 +67,7 @@ import { useAuthStore } from '../../stores/auth'
 const props = defineProps({
   truckId: { type: Number, default: null },
   unitNumber: { type: String, default: '' },
+  trucks: { type: Array, default: () => [] },
 })
 
 const api = useApi()
@@ -85,6 +90,7 @@ const uploadForm = reactive({
   notes: '',
   file: null,
   fileBase64: '',
+  selectedTruckId: null,
 })
 
 async function load() {
@@ -111,12 +117,16 @@ function onFileChange(e) {
 
 async function upload() {
   if (!uploadForm.file || !uploadForm.docType) return
+  const activeTruckId = props.truckId || uploadForm.selectedTruckId
+  if (!activeTruckId) return
+  const activeTruck = props.trucks.find(t => t.id === activeTruckId)
+  const activeUnitNumber = props.unitNumber || activeTruck?.UnitNumber || ''
   uploading.value = true
   errorMsg.value = ''
   try {
-    await api.post('/api/legal-documents', {
-      truckId: props.truckId,
-      unitNumber: props.unitNumber,
+    await api.post('/api/legal-documents/upload', {
+      truckId: activeTruckId,
+      unitNumber: activeUnitNumber,
       docType: uploadForm.docType,
       fileName: uploadForm.file.name,
       fileData: uploadForm.fileBase64,
@@ -127,6 +137,7 @@ async function upload() {
     uploadForm.fileBase64 = ''
     uploadForm.docType = ''
     uploadForm.notes = ''
+    uploadForm.selectedTruckId = null
     await load()
   } catch {
     errorMsg.value = 'Upload failed.'

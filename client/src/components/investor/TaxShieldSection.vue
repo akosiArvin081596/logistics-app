@@ -3,6 +3,7 @@
     <div class="section-title">
       <div class="section-icon" style="background: var(--amber-dim); color: var(--amber);">&#9670;</div>
       Tax Shield Tracker
+      <button class="csv-btn" @click="exportCsv">&#8595; Export CSV</button>
     </div>
 
     <div class="progress-container">
@@ -46,6 +47,20 @@
 <script setup>
 import { computed } from 'vue'
 
+async function exportCsv() {
+  const res = await fetch('/api/investor/tax-csv', { credentials: 'include' })
+  if (!res.ok) return
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  const cd = res.headers.get('Content-Disposition') || ''
+  const m = cd.match(/filename="(.+)"/)
+  a.download = m ? m[1] : 'tax-shield.csv'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 const props = defineProps({
   taxShield: { type: Object, required: true },
   config: { type: Object, default: null },
@@ -82,6 +97,15 @@ function fmt(n) {
   align-items: center;
   gap: 0.5rem;
 }
+.csv-btn {
+  margin-left: auto;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.72rem; font-weight: 600; font-family: inherit;
+  border: 1px solid var(--amber); border-radius: 6px;
+  background: var(--amber-dim); color: var(--amber);
+  cursor: pointer; transition: opacity 0.15s;
+}
+.csv-btn:hover { opacity: 0.75; }
 
 .section-icon {
   width: 28px;
