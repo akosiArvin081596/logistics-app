@@ -1,19 +1,18 @@
 <template>
   <div>
-    <div class="px-4 py-3 border-b border-gray-100 bg-gray-50/30">
-      <input v-model="searchQuery" type="text" placeholder="Search load number..."
-        class="w-full max-w-[300px] px-3.5 py-2 text-sm bg-gray-50/80 border border-gray-200 rounded-lg text-gray-800 placeholder-gray-400 outline-none focus:border-sky-300 focus:bg-white focus:shadow-[0_0_0_3px_rgba(56,189,248,0.1)] transition-all duration-200" />
+    <div class="dash-search-bar">
+      <input v-model="searchQuery" type="text" placeholder="Search load number..." class="dash-search-input" />
     </div>
     <div class="overflow-x-auto">
-      <table v-if="filteredJobs.length > 0" class="w-full text-[13px]">
+      <table v-if="filteredJobs.length > 0" class="dash-table">
         <thead>
-          <tr class="bg-gray-50/70 border-b border-gray-200">
-            <th v-for="col in displayCols" :key="col" class="px-4 py-3.5 text-left text-[10px] font-bold uppercase tracking-[0.08em] text-gray-400">{{ col }}</th>
+          <tr>
+            <th v-for="col in displayCols" :key="col">{{ col }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-gray-100/80 hover:bg-sky-50/30 cursor-pointer transition-all duration-150 group" @click="openDetail(job)">
-            <td v-for="col in displayCols" :key="col" class="px-4 py-3.5">
+          <tr v-for="job in paginatedItems" :key="job._rowIndex" @click="openDetail(job)">
+            <td v-for="col in displayCols" :key="col">
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
@@ -26,41 +25,41 @@
 
     <Teleport to="body">
       <div v-if="selectedJob" class="fixed inset-0 bg-black/30 backdrop-blur-sm z-[200] flex items-center justify-center" @click.self="selectedJob = null">
-        <div class="bg-white rounded-2xl w-[92%] max-w-[680px] max-h-[85vh] flex flex-col shadow-[0_8px_30px_rgba(0,0,0,0.12),0_24px_60px_rgba(0,0,0,0.1)]">
-          <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-            <h3 class="text-lg font-bold">{{ loadIdValue || 'Load Details' }}</h3>
-            <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-300 hover:text-gray-600 text-lg transition-colors duration-150" @click="selectedJob = null">&times;</button>
+        <div class="dash-modal-container">
+          <div class="dash-modal-header">
+            <h3 style="font-size:1.1rem;font-weight:700;">{{ loadIdValue || 'Load Details' }}</h3>
+            <button class="dash-modal-close" @click="selectedJob = null">&times;</button>
           </div>
-          <div class="p-5 overflow-y-auto flex-1">
+          <div style="padding:1.25rem;overflow-y:auto;flex:1;">
             <template v-for="section in detailSections" :key="section.title">
-              <div v-if="section.fields.length" class="mb-4">
-                <div class="text-[0.68rem] font-bold uppercase tracking-[0.1em] text-gray-400 mb-2.5 flex items-center gap-2"><span class="w-1 h-3 bg-sky-400 rounded-full"></span>{{ section.title }}</div>
-                <div class="bg-gray-50/50 border border-gray-200/80 rounded-xl grid grid-cols-2 overflow-hidden">
-                  <div v-for="field in section.fields" :key="field.col" :class="['flex flex-col gap-0.5 p-3 border-b border-gray-100', field.wide ? 'col-span-2' : '']">
-                    <span class="text-[0.68rem] font-semibold uppercase text-gray-400">{{ field.col }}</span>
-                    <span class="text-sm">{{ field.value || '\u2014' }}</span>
+              <div v-if="section.fields.length" style="margin-bottom:1rem;">
+                <div class="dash-section-title">{{ section.title }}</div>
+                <div class="dash-detail-grid">
+                  <div v-for="field in section.fields" :key="field.col" :style="[field.wide ? 'grid-column:span 2' : '']" style="display:flex;flex-direction:column;gap:2px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
+                    <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">{{ field.col }}</span>
+                    <span style="font-size:0.875rem;">{{ field.value || '\u2014' }}</span>
                   </div>
                 </div>
               </div>
             </template>
-            <div class="mb-4">
-              <div class="text-[0.68rem] font-bold uppercase tracking-[0.1em] text-gray-400 mb-2.5 flex items-center gap-2"><span class="w-1 h-3 bg-sky-400 rounded-full"></span>Documents</div>
-              <div class="bg-gray-50/50 border border-gray-200/80 rounded-xl p-3">
-                <div v-if="loadingDocs" class="text-center text-gray-500 text-sm py-3">Loading...</div>
-                <div v-else-if="loadDocs.length === 0" class="text-center text-gray-500 text-sm py-3">No documents</div>
-                <div v-else class="space-y-2">
-                  <div v-for="doc in loadDocs" :key="doc.id" class="flex items-center justify-between py-1">
-                    <div class="flex items-center gap-2">
-                      <span class="text-xs font-semibold px-2 py-0.5 rounded bg-sky-50 text-sky-600">{{ doc.type }}</span>
-                      <span class="text-sm">{{ doc.file_name }}</span>
+            <div style="margin-bottom:1rem;">
+              <div class="dash-section-title">Documents</div>
+              <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
+                <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
+                <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
+                <div v-else style="display:flex;flex-direction:column;gap:0.5rem;">
+                  <div v-for="doc in loadDocs" :key="doc.id" style="display:flex;align-items:center;justify-content:space-between;padding:0.25rem 0;">
+                    <div style="display:flex;align-items:center;gap:0.5rem;">
+                      <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;">{{ doc.type }}</span>
+                      <span style="font-size:0.875rem;">{{ doc.file_name }}</span>
                     </div>
-                    <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" class="text-xs text-sky-400 hover:underline">View</a>
+                    <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;">View</a>
                   </div>
                 </div>
               </div>
             </div>
             <div>
-              <div class="text-[0.68rem] font-bold uppercase tracking-[0.1em] text-gray-400 mb-2.5 flex items-center gap-2"><span class="w-1 h-3 bg-sky-400 rounded-full"></span>Route Map</div>
+              <div class="dash-section-title">Route Map</div>
               <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="null" dispatch-mode />
             </div>
           </div>

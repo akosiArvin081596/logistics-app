@@ -1,19 +1,17 @@
 <template>
-  <div class="p-5">
+  <div style="padding:1.25rem;">
     <div v-if="fleet.length > 0" class="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-4">
-      <div v-for="f in fleet" :key="f.Driver"
-        class="bg-white border border-gray-200/80 rounded-xl p-5 cursor-pointer hover:border-sky-300/60 hover:shadow-[0_2px_8px_rgba(0,0,0,0.06),0_8px_20px_rgba(0,0,0,0.04)] hover:-translate-y-0.5 transition-all duration-200 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
-        @click="openDetail(f)">
-        <div class="flex justify-between items-start mb-3">
+      <div v-for="f in fleet" :key="f.Driver" class="fleet-card" @click="openDetail(f)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.75rem;">
           <div>
-            <div class="font-bold text-[0.95rem] text-gray-900">{{ f.Driver || 'Unknown' }}</div>
-            <div class="text-[11px] text-gray-400 font-mono tracking-wide">{{ f.Truck || 'No truck assigned' }}</div>
+            <div style="font-weight:700;font-size:0.9375rem;color:#111827;">{{ f.Driver || 'Unknown' }}</div>
+            <div style="font-size:0.6875rem;color:#9ca3af;font-family:'JetBrains Mono',monospace;margin-top:2px;">{{ f.Truck || 'No truck assigned' }}</div>
           </div>
-          <span :class="['text-[10px] font-bold px-2.5 py-1 rounded-full tracking-wide uppercase', f.Status === 'On Load' ? 'bg-sky-50 text-sky-600 ring-1 ring-sky-200/60' : 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200/60']">{{ f.Status }}</span>
+          <span :class="['fleet-status', f.Status === 'On Load' ? 'fleet-status-active' : 'fleet-status-available']">{{ f.Status }}</span>
         </div>
-        <div class="flex items-center gap-3 pt-3 mt-3 border-t border-gray-100">
-          <span class="text-[11px] text-gray-400"><span class="font-mono font-semibold text-gray-600">{{ f.CompletedLoads }}</span> completed</span>
-          <span v-if="f.CurrentLoad" class="text-[11px] font-mono text-sky-500 bg-sky-50 px-2 py-0.5 rounded">{{ f.CurrentLoad }}</span>
+        <div style="display:flex;align-items:center;gap:0.75rem;padding-top:0.75rem;margin-top:0.75rem;border-top:1px solid #f3f4f6;">
+          <span style="font-size:0.6875rem;color:#9ca3af;"><span style="font-family:'JetBrains Mono',monospace;font-weight:600;color:#4b5563;">{{ f.CompletedLoads }}</span> completed</span>
+          <span v-if="f.CurrentLoad" style="font-size:0.6875rem;font-family:'JetBrains Mono',monospace;color:#0284c7;background:#f0f9ff;padding:2px 8px;border-radius:4px;">{{ f.CurrentLoad }}</span>
         </div>
       </div>
     </div>
@@ -21,37 +19,37 @@
 
     <Teleport to="body">
       <div v-if="selected" class="fixed inset-0 bg-black/30 backdrop-blur-sm z-[200] flex items-center justify-center" @click.self="selected = null">
-        <div class="bg-white rounded-2xl w-[92%] max-w-[480px] max-h-[85vh] flex flex-col shadow-[0_8px_30px_rgba(0,0,0,0.12),0_24px_60px_rgba(0,0,0,0.1)]">
-          <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-            <h3 class="text-lg font-bold">{{ selected.Driver || 'Driver' }}</h3>
-            <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-300 hover:text-gray-600 text-lg transition-colors duration-150" @click="selected = null">&times;</button>
+        <div class="dash-modal-container dash-modal-sm">
+          <div class="dash-modal-header">
+            <h3 style="font-size:1.1rem;font-weight:700;">{{ selected.Driver || 'Driver' }}</h3>
+            <button class="dash-modal-close" @click="selected = null">&times;</button>
           </div>
-          <div class="p-5 overflow-y-auto">
-            <div class="mb-4">
-              <div class="text-[0.68rem] font-bold uppercase tracking-[0.1em] text-gray-400 mb-2.5 flex items-center gap-2"><span class="w-1 h-3 bg-sky-400 rounded-full"></span>Status</div>
-              <div class="bg-gray-50/50 border border-gray-200/80 rounded-xl grid grid-cols-2 overflow-hidden">
-                <div class="flex flex-col gap-0.5 p-3 border-b border-gray-100">
-                  <span class="text-[0.68rem] font-semibold uppercase text-gray-400">Availability</span>
-                  <span :class="['text-[10px] font-bold px-2.5 py-1 rounded-full w-fit uppercase tracking-wide', selected.Status === 'On Load' ? 'bg-sky-50 text-sky-600 ring-1 ring-sky-200/60' : 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200/60']">{{ selected.Status }}</span>
+          <div style="padding:1.25rem;overflow-y:auto;">
+            <div style="margin-bottom:1rem;">
+              <div class="dash-section-title">Status</div>
+              <div class="dash-detail-grid">
+                <div style="display:flex;flex-direction:column;gap:4px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
+                  <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Availability</span>
+                  <span :class="['fleet-status', selected.Status === 'On Load' ? 'fleet-status-active' : 'fleet-status-available']" style="width:fit-content;">{{ selected.Status }}</span>
                 </div>
-                <div class="flex flex-col gap-0.5 p-3 border-b border-gray-100">
-                  <span class="text-[0.68rem] font-semibold uppercase text-gray-400">Current Load</span>
-                  <span class="text-sm">{{ selected.CurrentLoad || '\u2014' }}</span>
+                <div style="display:flex;flex-direction:column;gap:4px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
+                  <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Current Load</span>
+                  <span style="font-size:0.875rem;">{{ selected.CurrentLoad || '\u2014' }}</span>
                 </div>
               </div>
             </div>
-            <div class="mb-4">
-              <div class="text-[0.68rem] font-bold uppercase tracking-[0.1em] text-gray-400 mb-2.5 flex items-center gap-2"><span class="w-1 h-3 bg-sky-400 rounded-full"></span>Performance</div>
-              <div class="bg-gray-50/50 border border-gray-200/80 rounded-xl p-3">
-                <span class="text-[0.68rem] font-semibold uppercase text-gray-400">Completed Loads</span>
-                <div class="text-3xl font-bold font-mono mt-1 text-gray-900">{{ selected.CompletedLoads }}</div>
+            <div style="margin-bottom:1rem;">
+              <div class="dash-section-title">Performance</div>
+              <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
+                <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Completed Loads</span>
+                <div style="font-size:2rem;font-weight:800;font-family:'JetBrains Mono',monospace;color:#111827;margin-top:4px;">{{ selected.CompletedLoads }}</div>
               </div>
             </div>
             <div v-if="selected.Phone">
-              <div class="text-[0.68rem] font-bold uppercase tracking-[0.1em] text-gray-400 mb-2.5 flex items-center gap-2"><span class="w-1 h-3 bg-sky-400 rounded-full"></span>Contact</div>
-              <div class="bg-gray-50/50 border border-gray-200/80 rounded-xl p-3">
-                <span class="text-[0.68rem] font-semibold uppercase text-gray-400">Phone</span>
-                <div class="text-sm mt-1">{{ selected.Phone }}</div>
+              <div class="dash-section-title">Contact</div>
+              <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
+                <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Phone</span>
+                <div style="font-size:0.875rem;margin-top:4px;">{{ selected.Phone }}</div>
               </div>
             </div>
           </div>

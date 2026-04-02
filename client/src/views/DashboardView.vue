@@ -27,15 +27,13 @@
       </div>
     </template>
 
-    <div class="flex-1 flex flex-col min-h-0 bg-white border border-gray-200/80 rounded-xl overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.04)]">
-      <div class="flex gap-0 border-b border-gray-200 shrink-0 bg-white px-1">
+    <div class="dash-wrapper">
+      <div class="dash-tabs">
         <button v-for="tab in tabs" :key="tab.key"
-          :class="['relative px-5 py-3.5 text-[13px] font-semibold flex items-center gap-2.5 transition-all duration-200',
-            activeTab === tab.key ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600']"
+          :class="['dash-tab', { active: activeTab === tab.key }]"
           @click="activeTab = tab.key">
           {{ tab.label }}
-          <span :class="['text-[11px] font-bold px-2 py-0.5 rounded-full transition-colors duration-200', activeTab === tab.key ? 'bg-sky-100 text-sky-700' : 'bg-gray-100 text-gray-400']" style="font-family:'JetBrains Mono',monospace;">{{ tab.count }}</span>
-          <span v-if="activeTab === tab.key" class="absolute bottom-0 left-2 right-2 h-0.5 bg-gray-900 rounded-full"></span>
+          <span class="dash-tab-badge">{{ tab.count }}</span>
         </button>
       </div>
 
