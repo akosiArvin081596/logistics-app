@@ -1,16 +1,13 @@
 <template>
   <div>
     <div class="toolbar">
-      <SelectButton v-model="viewMode" :options="[{label:'List',value:'list'},{label:'Map',value:'map'}]" option-label="label" option-value="value" :allow-empty="false" @change="onViewChange" />
-      <IconField v-show="viewMode === 'list'">
+      <IconField>
         <InputIcon class="pi pi-search" />
         <InputText v-model="searchQuery" placeholder="Search load number..." size="small" />
       </IconField>
     </div>
 
-    <LoadsMapView v-show="viewMode === 'map'" :loads="jobs" :headers="headers" category="active" :driver-locations="driverLocations" :visible="viewMode === 'map'" />
-
-    <div v-show="viewMode === 'list'">
+    <div>
       <DataTable v-if="filteredJobs.length > 0" :value="paginatedItems" :rows="pageSize" striped-rows size="small" row-hover class="dash-table" @row-click="openDetail($event.data)">
         <Column v-for="col in displayCols" :key="col" :field="col" :header="col" sortable>
           <template #body="{ data }">
@@ -36,7 +33,7 @@
       </DataTable>
       <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'No active loads right now.' }}</EmptyState>
     </div>
-    <PaginationBar v-show="viewMode === 'list'" :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
+    <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
 
     <!-- Detail Dialog -->
     <Dialog v-model:visible="showDetail" :header="loadIdValue || 'Load Details'" modal :style="{ width: '680px', maxWidth: '95vw' }" :dismissable-mask="true" @hide="closeDetail">

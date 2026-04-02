@@ -1,22 +1,13 @@
 <template>
   <div>
     <div class="toolbar">
-      <SelectButton v-model="viewMode" :options="viewOptions" option-label="label" option-value="value" :allow-empty="false" />
-      <IconField v-show="viewMode === 'list'">
+      <IconField>
         <InputIcon class="pi pi-search" />
         <InputText v-model="searchQuery" placeholder="Search load number..." size="small" />
       </IconField>
     </div>
 
-    <LoadsMapView
-      v-show="viewMode === 'map'"
-      :loads="jobs"
-      :headers="headers"
-      category="unassigned"
-      :visible="viewMode === 'map'"
-    />
-
-    <div v-show="viewMode === 'list'">
+    <div>
       <SkeletonLoader v-if="loading" />
       <DataTable
         v-else-if="filteredJobs.length > 0"
@@ -51,7 +42,6 @@
       <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'All loads are assigned.' }}</EmptyState>
     </div>
     <PaginationBar
-      v-show="viewMode === 'list'"
       :page="page"
       :page-size="pageSize"
       :total="filteredJobs.length"
