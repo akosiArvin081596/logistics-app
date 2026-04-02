@@ -10,6 +10,78 @@
       >{{ tab.label }}</button>
     </div>
 
+    <!-- ALL EXPENSES -->
+    <div v-show="activeSubTab === 'all'" class="sub-panel">
+      <template v-if="allLoading">
+        <div class="skeleton skeleton-card"></div>
+      </template>
+      <template v-else>
+        <div class="filter-row">
+          <select v-model="allFilter.driver" class="filter-select" @change="loadAll">
+            <option value="">All Drivers</option>
+            <option v-for="d in allDrivers" :key="d" :value="d">{{ d }}</option>
+          </select>
+          <select v-model="allFilter.type" class="filter-select" @change="loadAll">
+            <option value="">All Types</option>
+            <option v-for="t in expenseTypes" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <select v-model="allFilter.status" class="filter-select" @change="loadAll">
+            <option value="">All Status</option>
+            <option>Pending</option>
+            <option>Approved</option>
+            <option>Rejected</option>
+          </select>
+          <span class="filter-count">{{ allExpenses.length }} expenses</span>
+        </div>
+
+        <div v-if="allExpenses.length === 0" class="empty-msg">No expenses found.</div>
+        <table v-else class="data-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Driver</th>
+              <th>Type</th>
+              <th>Description</th>
+              <th>Amount</th>
+              <th>Receipt</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="e in allExpenses" :key="e.id">
+              <td class="mono-sm">{{ fmtDate(e.date) }}</td>
+              <td>{{ e.driver }}</td>
+              <td><span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span></td>
+              <td class="desc-cell">{{ e.description || '\u2014' }}</td>
+              <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
+              <td>
+                <img v-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
+                <span v-else class="dim">\u2014</span>
+              </td>
+              <td>
+                <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
+              </td>
+              <td class="action-cell">
+                <template v-if="(e.status || 'Pending') === 'Pending'">
+                  <button class="btn-approve" @click="setStatus(e.id, 'Approved')">Approve</button>
+                  <button class="btn-reject" @click="setStatus(e.id, 'Rejected')">Reject</button>
+                </template>
+                <button v-else-if="e.status !== 'Pending'" class="btn-undo" @click="setStatus(e.id, 'Pending')">Undo</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
+
+      <!-- Receipt preview overlay -->
+      <Teleport to="body">
+        <div v-if="previewImg" class="preview-overlay" @click="previewImg = null">
+          <img :src="previewImg" class="preview-img" />
+        </div>
+      </Teleport>
+    </div>
+
     <!-- FUEL LOGS -->
     <div v-show="activeSubTab === 'fuel'" class="sub-panel">
       <template v-if="fuelLoading">
@@ -308,6 +380,7 @@ const { show: toast } = useToast()
 const auth = useAuthStore()
 
 const allSubTabs = [
+  { key: 'all', label: 'All Expenses' },
   { key: 'fuel', label: 'Fuel Logs' },
   { key: 'maintenance', label: 'Maintenance Fund', adminOnly: true },
   { key: 'ifta', label: 'IFTA / Compliance', adminOnly: true },
@@ -317,7 +390,50 @@ const subTabs = computed(() =>
   allSubTabs.filter(t => !t.adminOnly || auth.isSuperAdmin)
 )
 
-const activeSubTab = ref('fuel')
+const activeSubTab = ref('all')
+
+// All expenses
+const allExpenses = ref([])
+const allLoading = ref(true)
+const allDrivers = ref([])
+const previewImg = ref(null)
+const expenseTypes = ['Fuel', 'Toll', 'Repair', 'Food', 'Other']
+const allFilter = reactive({ driver: '', type: '', status: '' })
+
+async function loadAll() {
+  allLoading.value = true
+  try {
+    const params = new URLSearchParams()
+    if (allFilter.driver) params.set('driver', allFilter.driver)
+    if (allFilter.type) params.set('type', allFilter.type)
+    if (allFilter.status) params.set('status', allFilter.status)
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    const data = await api.get(`/api/expenses/all${qs}`)
+    allExpenses.value = data.expenses || []
+    // Build driver list from unfiltered data (only on first load)
+    if (allDrivers.value.length === 0) {
+      const names = new Set(allExpenses.value.map(e => e.driver).filter(Boolean))
+      allDrivers.value = [...names].sort()
+    }
+  } catch { /* empty */ }
+  allLoading.value = false
+}
+
+async function setStatus(id, status) {
+  try {
+    await api.put(`/api/expenses/${id}/status`, { status })
+    const exp = allExpenses.value.find(e => e.id === id)
+    if (exp) exp.status = status
+    toast(status === 'Approved' ? 'Expense approved' : status === 'Rejected' ? 'Expense rejected' : 'Status reset', 'success')
+  } catch {
+    toast('Failed to update status', 'error')
+  }
+}
+
+function fmtDate(d) {
+  if (!d) return '\u2014'
+  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
 
 // Fuel analytics
 const fuel = ref({})
@@ -429,6 +545,7 @@ async function markFeePaid(id) {
 }
 
 onMounted(() => {
+  loadAll()
   loadFuel()
   if (auth.isSuperAdmin) {
     loadMaintenance()
@@ -716,4 +833,63 @@ tr:hover td { background: var(--surface-hover); }
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+
+/* All Expenses tab */
+.filter-row {
+  display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+  padding: 0.75rem 1rem; border-bottom: 1px solid var(--border);
+}
+.filter-select {
+  padding: 0.35rem 0.6rem; border: 1px solid var(--border); border-radius: 6px;
+  font-family: inherit; font-size: 0.78rem; background: var(--bg); color: var(--text);
+}
+.filter-count {
+  margin-left: auto; font-size: 0.72rem; color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
+}
+.mono-sm { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; }
+.dim { color: var(--text-dim); }
+.desc-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.type-pill {
+  display: inline-flex; padding: 0.12rem 0.5rem; border-radius: 10px;
+  font-size: 0.66rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.type-fuel { background: var(--blue-dim, rgba(59,130,246,0.12)); color: var(--blue, #3b82f6); }
+.type-toll { background: var(--amber-dim); color: var(--amber); }
+.type-repair { background: var(--danger-dim); color: var(--danger); }
+.type-food { background: var(--accent-dim); color: var(--accent); }
+.type-other { background: var(--bg); color: var(--text-dim); }
+
+.status-pill {
+  display: inline-flex; padding: 0.12rem 0.5rem; border-radius: 10px;
+  font-size: 0.66rem; font-weight: 600;
+}
+.st-pending { background: var(--amber-dim); color: var(--amber); }
+.st-approved { background: var(--accent-dim); color: var(--accent); }
+.st-rejected { background: var(--danger-dim); color: var(--danger); }
+
+.receipt-thumb {
+  width: 36px; height: 28px; object-fit: cover; border-radius: 4px;
+  cursor: pointer; transition: opacity 0.15s;
+}
+.receipt-thumb:hover { opacity: 0.7; }
+
+.action-cell { white-space: nowrap; }
+.btn-approve, .btn-reject, .btn-undo {
+  padding: 0.22rem 0.55rem; font-size: 0.68rem; font-weight: 600;
+  border-radius: 5px; border: none; cursor: pointer; font-family: inherit;
+  transition: opacity 0.15s;
+}
+.btn-approve { background: var(--accent-dim); color: var(--accent); margin-right: 0.25rem; }
+.btn-reject { background: var(--danger-dim); color: var(--danger); }
+.btn-undo { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border); }
+.btn-approve:hover, .btn-reject:hover, .btn-undo:hover { opacity: 0.7; }
+
+.preview-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 300; cursor: pointer;
+}
+.preview-img { max-width: 90vw; max-height: 85vh; border-radius: 8px; }
 </style>

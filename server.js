@@ -4703,6 +4703,44 @@ app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 // EXPENSE & MAINTENANCE TRACKING
 // ============================================================
 
+// GET /api/expenses/all — All expenses (all types) for dispatcher/admin
+app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { driver, type, status } = req.query;
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, created_at FROM expenses";
+		const conditions = [];
+		const params = [];
+		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
+		if (type) { conditions.push("LOWER(type) = ?"); params.push(type.toLowerCase()); }
+		if (status) { conditions.push("LOWER(status) = ?"); params.push(status.toLowerCase()); }
+		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
+		sql += " ORDER BY id DESC";
+		const expenses = db.prepare(sql).all(...params);
+		res.json({ expenses });
+	} catch (err) {
+		console.error("Error fetching all expenses:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// PUT /api/expenses/:id/status — Approve or reject an expense
+app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		const { status } = req.body;
+		if (!["Approved", "Rejected", "Pending"].includes(status)) {
+			return res.status(400).json({ error: "Status must be Approved, Rejected, or Pending" });
+		}
+		const expense = db.prepare("SELECT id FROM expenses WHERE id = ?").get(id);
+		if (!expense) return res.status(404).json({ error: "Expense not found" });
+		db.prepare("UPDATE expenses SET status = ? WHERE id = ?").run(status, id);
+		res.json({ success: true });
+	} catch (err) {
+		console.error("Error updating expense status:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // GET /api/expenses/fuel-analytics — Fuel cost analytics + compliance
 app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
