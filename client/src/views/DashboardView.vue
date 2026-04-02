@@ -1,11 +1,14 @@
 <template>
   <div class="flex flex-col overflow-hidden h-full">
-    <div class="flex items-center justify-between mb-4 shrink-0">
-      <h2 class="text-xl font-bold text-gray-800">Operations Dashboard</h2>
+    <div class="flex items-center justify-between mb-5 shrink-0">
+      <div>
+        <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Operations Dashboard</h2>
+        <p class="text-[13px] text-gray-400 mt-0.5">Real-time logistics overview</p>
+      </div>
       <div class="flex items-center gap-3">
-        <span class="text-xs text-gray-500 font-mono bg-gray-100 px-3 py-1.5 rounded-full">{{ lastUpdated }}</span>
-        <button class="px-3 py-1.5 text-sm font-medium bg-sky-50 text-sky-600 border border-sky-200 rounded-lg hover:bg-sky-100 transition" @click="refresh">
-          Refresh
+        <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ lastUpdated }}</span>
+        <button class="px-4 py-2 text-sm font-semibold bg-white text-gray-700 border border-gray-200 rounded-lg hover:border-gray-300 hover:shadow-sm active:scale-[0.97] transition-all duration-150" @click="refresh">
+          &#8635; Refresh
         </button>
       </div>
     </div>
@@ -15,23 +18,24 @@
       <RevenueGrid :revenue="store.revenue" />
     </template>
     <template v-else>
-      <div class="grid grid-cols-4 gap-3 mb-3">
-        <div v-for="n in 4" :key="n" class="bg-white border border-gray-200 rounded-xl p-4 animate-pulse">
-          <div class="h-3 bg-gray-100 rounded w-1/2 mb-2"></div>
-          <div class="h-7 bg-gray-100 rounded w-2/3 mb-2"></div>
-          <div class="h-2.5 bg-gray-100 rounded w-1/3"></div>
+      <div class="grid grid-cols-4 gap-4 mb-4">
+        <div v-for="n in 4" :key="n" class="bg-white border border-gray-100 rounded-xl p-5 animate-pulse" :style="{ animationDelay: (n * 0.1) + 's' }">
+          <div class="h-3 bg-gray-100 rounded-full w-1/2 mb-3"></div>
+          <div class="h-8 bg-gray-100 rounded-lg w-2/3 mb-2"></div>
+          <div class="h-2.5 bg-gray-50 rounded-full w-1/3"></div>
         </div>
       </div>
     </template>
 
-    <div class="flex-1 flex flex-col min-h-0 bg-white border border-gray-100 rounded-xl overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.06)]">
-      <div class="flex gap-0 border-b border-gray-100 shrink-0 bg-gray-50/50">
+    <div class="flex-1 flex flex-col min-h-0 bg-white border border-gray-200/80 rounded-xl overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.04)]">
+      <div class="flex gap-0 border-b border-gray-200 shrink-0 bg-white px-1">
         <button v-for="tab in tabs" :key="tab.key"
-          :class="['px-5 py-3.5 text-[13px] font-semibold flex items-center gap-2.5 border-b-2 transition-colors',
-            activeTab === tab.key ? 'text-sky-600 border-sky-500 bg-white' : 'text-gray-400 border-transparent hover:text-gray-600']"
+          :class="['relative px-5 py-3.5 text-[13px] font-semibold flex items-center gap-2.5 transition-all duration-200',
+            activeTab === tab.key ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600']"
           @click="activeTab = tab.key">
           {{ tab.label }}
-          <span :class="['text-[11px] font-bold px-2 py-0.5 rounded-full', activeTab === tab.key ? 'bg-sky-100 text-sky-600' : 'bg-gray-100 text-gray-400']" style="font-family:'JetBrains Mono',monospace;">{{ tab.count }}</span>
+          <span :class="['text-[11px] font-bold px-2 py-0.5 rounded-full transition-colors duration-200', activeTab === tab.key ? 'bg-sky-100 text-sky-700' : 'bg-gray-100 text-gray-400']" style="font-family:'JetBrains Mono',monospace;">{{ tab.count }}</span>
+          <span v-if="activeTab === tab.key" class="absolute bottom-0 left-2 right-2 h-0.5 bg-gray-900 rounded-full"></span>
         </button>
       </div>
 

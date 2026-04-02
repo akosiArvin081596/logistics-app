@@ -1,10 +1,10 @@
 <template>
-  <div class="skeleton-table">
-    <div class="skeleton-row header">
-      <div v-for="n in cols" :key="n" class="skeleton skeleton-cell" :style="{ width: colWidth() }"></div>
+  <div class="p-4">
+    <div class="flex gap-4 py-3 border-b border-gray-100">
+      <div v-for="n in cols" :key="'h'+n" class="skeleton h-3 rounded-full skeleton-cell" :style="{ width: colWidth() }"></div>
     </div>
-    <div v-for="r in rows" :key="r" class="skeleton-row">
-      <div v-for="n in cols" :key="n" class="skeleton skeleton-cell" :style="{ width: colWidth() }"></div>
+    <div v-for="r in rows" :key="r" class="flex gap-4 py-3.5" :style="{ opacity: 1 - (r * 0.12) }">
+      <div v-for="n in cols" :key="n" class="skeleton h-3 rounded-full skeleton-cell" :style="{ width: colWidth() }"></div>
     </div>
   </div>
 </template>

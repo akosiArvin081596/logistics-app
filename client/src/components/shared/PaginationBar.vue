@@ -5,7 +5,7 @@
       <button class="page-btn" :disabled="page === 1" @click="$emit('go', 1)">&laquo;</button>
       <button class="page-btn" :disabled="page === 1" @click="$emit('go', page - 1)">&lsaquo;</button>
       <template v-for="i in pageNumbers" :key="i">
-        <span v-if="i === '...'" style="padding:0 0.25rem;color:var(--text-dim)">...</span>
+        <span v-if="i === '...'" class="px-1 text-gray-300 text-sm select-none">&#183;&#183;&#183;</span>
         <button v-else class="page-btn" :class="{ active: i === page }" @click="$emit('go', i)">{{ i }}</button>
       </template>
       <button class="page-btn" :disabled="page === totalPages" @click="$emit('go', page + 1)">&rsaquo;</button>
