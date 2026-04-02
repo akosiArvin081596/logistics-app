@@ -115,33 +115,28 @@ watch(() => props.open, (isOpen) => {
       mapZoom.value = 12
     } else {
       markerPos.value = null
-      // Try browser geolocation to center on user's area
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            mapCenter.value = [pos.coords.latitude, pos.coords.longitude]
-            mapZoom.value = 11
-            const map = mapRef.value?.leafletObject
-            if (map) map.setView([pos.coords.latitude, pos.coords.longitude], 11)
-          },
-          () => {
-            mapCenter.value = [32.7767, -96.7970]
-            mapZoom.value = 5
-          },
-          { timeout: 5000, enableHighAccuracy: false }
-        )
-      } else {
-        mapCenter.value = [32.7767, -96.7970]
-        mapZoom.value = 5
-      }
+      mapCenter.value = [32.7767, -96.7970]
+      mapZoom.value = 5
     }
 
-    // Fix Leaflet tile rendering in modal
+    // Fix Leaflet tile rendering, then geolocate
     nextTick(() => {
       setTimeout(() => {
         const map = mapRef.value?.leafletObject
         if (map) map.invalidateSize()
-      }, 200)
+
+        // After map is ready, fly to user's location if no initial coords
+        if (!hasInitial && navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              const lm = mapRef.value?.leafletObject
+              if (lm) lm.flyTo([pos.coords.latitude, pos.coords.longitude], 11, { duration: 1.2 })
+            },
+            () => {},
+            { timeout: 8000, enableHighAccuracy: false }
+          )
+        }
+      }, 300)
     })
   }
 })
