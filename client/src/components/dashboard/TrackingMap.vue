@@ -1109,18 +1109,30 @@ async function initMap() {
     },
     minZoom: 3,
   })
-  // After map is ready, fetch and render locations
-  await fetchLocations()
+  // Render any already-fetched locations onto the map
+  syncDriverMarkers()
+  if (initialFetchDone) {
+    const withGps = locationsWithGps.value
+    if (withGps.length > 0) {
+      const bounds = new google.maps.LatLngBounds()
+      withGps.forEach(l => bounds.extend({ lat: l.latitude, lng: l.longitude }))
+      map.fitBounds(bounds, 50)
+    }
+  }
 }
+
+// When mapContainer ref appears in DOM (after locations load), init the map
+watch(() => mapContainer.value, (el) => {
+  if (el && !map) initMap()
+})
 
 onMounted(() => {
   socket.connect()
   socket.register('dispatch')
+  fetchLocations()
   socket.on('location-update', onLocationUpdate)
   socket.on('status-updated', onStatusUpdated)
   nowInterval = setInterval(() => { now.value = Date.now() }, 10000)
-  // Initialize map once component is mounted
-  nextTick(() => initMap())
 })
 
 onUnmounted(() => {
