@@ -2,7 +2,7 @@
   <div class="grid grid-cols-4 gap-4 mb-4 max-[900px]:grid-cols-2">
     <div v-for="card in cards" :key="card.key" :class="['kpi-card', card.theme]" @click="emit('card-click', card.key)">
       <div :class="['kpi-icon', card.iconTheme]">{{ card.icon }}</div>
-      <div class="min-w-0">
+      <div class="kpi-info">
         <div class="kpi-label">{{ card.label }}</div>
         <div class="kpi-value">{{ card.value }}</div>
         <div class="kpi-sub">{{ card.sub }}</div>

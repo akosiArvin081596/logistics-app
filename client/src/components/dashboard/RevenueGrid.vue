@@ -3,8 +3,8 @@
     <div v-for="card in cards" :key="card.key" :class="['rev-card', card.theme]">
       <div :class="['rev-icon', card.iconTheme]">{{ card.icon }}</div>
       <div>
-        <div class="kpi-label">{{ card.label }}</div>
-        <div style="font-size:1.25rem;font-weight:800;color:#111827;font-family:'JetBrains Mono',monospace;">{{ card.value }}</div>
+        <div class="rev-label">{{ card.label }}</div>
+        <div class="rev-value">{{ card.value }}</div>
       </div>
     </div>
   </div>
