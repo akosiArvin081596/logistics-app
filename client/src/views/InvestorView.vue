@@ -112,10 +112,14 @@ const reportLoading = ref(false)
 const reportStart = ref('')
 const reportEnd = ref('')
 
+function titleCase(s) {
+  return s.replace(/\b\w/g, c => c.toUpperCase())
+}
+
 const dashboardTitle = computed(() => {
   if (authStore.user?.role === 'Super Admin') return 'Asset Dashboard'
   const name = authStore.user?.companyName || authStore.user?.fullName || authStore.user?.username || ''
-  return name ? `${name} - Asset Dashboard` : 'Asset Dashboard'
+  return name ? `${titleCase(name)} - Asset Dashboard` : 'Asset Dashboard'
 })
 
 const todayFormatted = computed(() =>
