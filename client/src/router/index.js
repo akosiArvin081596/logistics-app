@@ -2,17 +2,6 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
 import LoginView from '../views/LoginView.vue'
-import DashboardView from '../views/DashboardView.vue'
-import DataManagerView from '../views/DataManagerView.vue'
-import DriverView from '../views/DriverView.vue'
-import InvestorView from '../views/InvestorView.vue'
-import UsersView from '../views/UsersView.vue'
-import TrackingView from '../views/TrackingView.vue'
-import ExpensesView from '../views/ExpensesView.vue'
-import MessagesView from '../views/MessagesView.vue'
-import NotificationsView from '../views/NotificationsView.vue'
-import AdminToolsView from '../views/AdminToolsView.vue'
-import TrucksView from '../views/TrucksView.vue'
 
 const routes = [
   {
@@ -24,67 +13,67 @@ const routes = [
   {
     path: '/dashboard',
     name: 'dashboard',
-    component: DashboardView,
+    component: () => import('../views/DashboardView.vue'),
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
     path: '/tracking',
     name: 'tracking',
-    component: TrackingView,
+    component: () => import('../views/TrackingView.vue'),
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
     path: '/expenses',
     name: 'expenses',
-    component: ExpensesView,
+    component: () => import('../views/ExpensesView.vue'),
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
     path: '/messages',
     name: 'messages',
-    component: MessagesView,
+    component: () => import('../views/MessagesView.vue'),
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
     path: '/notifications',
     name: 'notifications',
-    component: NotificationsView,
+    component: () => import('../views/NotificationsView.vue'),
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
     path: '/data',
     name: 'data-manager',
-    component: DataManagerView,
+    component: () => import('../views/DataManagerView.vue'),
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
     path: '/driver',
     name: 'driver',
-    component: DriverView,
+    component: () => import('../views/DriverView.vue'),
     meta: { roles: ['Driver', 'Super Admin'], noSidebar: true },
   },
   {
     path: '/investor',
     name: 'investor',
-    component: InvestorView,
+    component: () => import('../views/InvestorView.vue'),
     meta: { roles: ['Super Admin', 'Investor'] },
   },
   {
     path: '/users',
     name: 'users',
-    component: UsersView,
+    component: () => import('../views/UsersView.vue'),
     meta: { roles: ['Super Admin'] },
   },
   {
     path: '/trucks',
     name: 'trucks',
-    component: TrucksView,
+    component: () => import('../views/TrucksView.vue'),
     meta: { roles: ['Super Admin', 'Dispatcher', 'Investor'] },
   },
   {
     path: '/admin/tools',
     name: 'admin-tools',
-    component: AdminToolsView,
+    component: () => import('../views/AdminToolsView.vue'),
     meta: { roles: ['Super Admin'] },
   },
   {

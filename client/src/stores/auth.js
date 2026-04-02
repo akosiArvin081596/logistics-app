@@ -28,21 +28,26 @@ export const useAuthStore = defineStore('auth', {
 
   actions: {
     async checkSession() {
-      try {
-        const data = await api.get('/api/auth/session')
-        if (data.authenticated) {
-          this.user = data.user
-          this.isAuthenticated = true
-        } else {
+      if (this._sessionPromise) return this._sessionPromise
+      this._sessionPromise = (async () => {
+        try {
+          const data = await api.get('/api/auth/session')
+          if (data.authenticated) {
+            this.user = data.user
+            this.isAuthenticated = true
+          } else {
+            this.user = null
+            this.isAuthenticated = false
+          }
+        } catch {
           this.user = null
           this.isAuthenticated = false
+        } finally {
+          this.isLoading = false
+          this._sessionPromise = null
         }
-      } catch {
-        this.user = null
-        this.isAuthenticated = false
-      } finally {
-        this.isLoading = false
-      }
+      })()
+      return this._sessionPromise
     },
 
     async login(username, password) {
