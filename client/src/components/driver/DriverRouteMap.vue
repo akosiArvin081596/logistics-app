@@ -1,6 +1,5 @@
 <template>
   <div class="route-map-wrap">
-    <!-- Waiting for GPS -->
     <template v-if="!driverLatLng && !hasCoords">
       <div class="map-empty">No route coordinates available</div>
     </template>
@@ -12,7 +11,6 @@
         </div>
       </div>
     </template>
-    <!-- Map: driver location, dispatch mode, OR full route -->
     <template v-else>
       <div class="map-info" v-if="hasCoords && (distanceMiles != null || etaMinutes != null || driverDistanceInfo)">
         <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
@@ -20,69 +18,7 @@
         <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
       </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
-      <div class="map-container">
-        <l-map
-          ref="mapRef"
-          :zoom="initialZoom"
-          :center="mapCenter"
-          :use-global-leaflet="false"
-          :options="{ attributionControl: false }"
-          :min-zoom="3"
-          :max-bounds="[[-85, -180], [85, 180]]"
-          :max-bounds-viscosity="1.0"
-          world-copy-jump
-          style="height: 100%; width: 100%;"
-          @ready="onMapReady"
-        >
-          <l-tile-layer
-            url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-            attribution="&copy; Esri"
-          />
-
-          <!-- Planned route (only when active load) -->
-          <l-polyline
-            v-if="hasCoords && routePoints.length >= 2"
-            :lat-lngs="routePoints"
-            color="#000000"
-            :weight="5"
-            :opacity="0.7"
-            dashArray="12, 8"
-            className="route-animate"
-          />
-
-          <!-- Origin marker (green) -->
-          <l-marker v-if="hasCoords && originLatLng" :lat-lng="originLatLng" :icon="originIcon">
-            <l-popup>
-              <div class="marker-popup">
-                <strong>Pickup</strong>
-                <div v-if="originAddr" class="popup-address">{{ originAddr }}</div>
-                <div v-if="dispatchMode && loadIdValue" class="popup-detail">{{ loadIdValue }}</div>
-              </div>
-            </l-popup>
-          </l-marker>
-
-          <!-- Destination marker (red) -->
-          <l-marker v-if="hasCoords && destLatLng" :lat-lng="destLatLng" :icon="destIcon">
-            <l-popup>
-              <div class="marker-popup">
-                <strong>Drop-off</strong>
-                <div v-if="destAddr" class="popup-address">{{ destAddr }}</div>
-                <div v-if="dispatchMode && loadIdValue" class="popup-detail">{{ loadIdValue }}</div>
-              </div>
-            </l-popup>
-          </l-marker>
-
-          <!-- Driver position (blue) -->
-          <l-marker v-if="driverLatLng" :lat-lng="driverLatLng" :icon="driverIcon">
-            <l-popup>
-              <div class="marker-popup">
-                <strong>{{ dispatchMode && driverName ? driverName : 'You are here' }}</strong>
-                <div v-if="dispatchMode && loadIdValue" class="popup-detail">{{ loadIdValue }}</div>
-              </div>
-            </l-popup>
-          </l-marker>
-        </l-map>
-      </div>
+      <div ref="mapContainer" class="map-container"></div>
     </template>
   </div>
 </template>
@@ -90,9 +26,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
-import 'leaflet/dist/leaflet.css'
-import { LMap, LTileLayer, LMarker, LPopup, LPolyline } from '@vue-leaflet/vue-leaflet'
-import L from 'leaflet'
+import { useGoogleMaps } from '../../composables/useGoogleMaps'
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -102,10 +36,17 @@ const props = defineProps({
 })
 
 const api = useApi()
-const mapRef = ref(null)
+const { createMap } = useGoogleMaps()
+const mapContainer = ref(null)
 const routePoints = ref([])
 const distanceMiles = ref(null)
 const etaMinutes = ref(null)
+
+let map = null
+let originMarker = null
+let destMarker = null
+let driverMarker = null
+let routeLine = null
 
 function findCol(regex) {
   return (props.headers || []).find(h => regex.test(h)) || null
@@ -120,51 +61,41 @@ const originLatLng = computed(() => {
   if (!originLatCol.value || !originLngCol.value) return null
   const lat = parseFloat(props.load[originLatCol.value])
   const lng = parseFloat(props.load[originLngCol.value])
-  return !isNaN(lat) && !isNaN(lng) ? [lat, lng] : null
+  return !isNaN(lat) && !isNaN(lng) ? { lat, lng } : null
 })
-
 const destLatLng = computed(() => {
   if (!destLatCol.value || !destLngCol.value) return null
   const lat = parseFloat(props.load[destLatCol.value])
   const lng = parseFloat(props.load[destLngCol.value])
-  return !isNaN(lat) && !isNaN(lng) ? [lat, lng] : null
+  return !isNaN(lat) && !isNaN(lng) ? { lat, lng } : null
 })
-
 const driverLatLng = computed(() => {
   if (!props.driverPosition) return null
-  return [props.driverPosition.latitude, props.driverPosition.longitude]
+  return { lat: props.driverPosition.latitude, lng: props.driverPosition.longitude }
 })
 
 const statusCol = computed(() => (props.headers || []).find(h => /^status$/i.test(h)) || null)
 const loadStatus = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim().toLowerCase() : '')
 const isDelivered = computed(() => /^(delivered|completed|pod received)$/i.test(loadStatus.value))
-
 const hasCoords = computed(() => destLatLng.value != null && (!isDelivered.value || props.dispatchMode))
-const waitingForGps = computed(() => hasCoords.value && !driverLatLng.value)
 const isPrePickup = computed(() => /^(dispatched|assigned|new|pending)$/i.test(loadStatus.value))
 
 function haversineMi(a, b) {
-  const R = 3959 // miles
+  const R = 3959
   const toRad = d => d * Math.PI / 180
-  const dLat = toRad(b[0] - a[0])
-  const dLng = toRad(b[1] - a[1])
-  const x = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLng / 2) ** 2
+  const dLat = toRad(b.lat - a.lat)
+  const dLng = toRad(b.lng - a.lng)
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2
   return (R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x))).toFixed(1)
 }
 
-// Driver distance to relevant point: pickup (pre-pickup) or drop-off (post-pickup)
 const driverDistanceInfo = computed(() => {
   if (!driverLatLng.value) return null
-  if (isPrePickup.value && originLatLng.value) {
-    return { mi: haversineMi(driverLatLng.value, originLatLng.value), label: 'to Pickup' }
-  }
-  if (!isPrePickup.value && !isDelivered.value && destLatLng.value) {
-    return { mi: haversineMi(driverLatLng.value, destLatLng.value), label: 'to Drop-off' }
-  }
+  if (isPrePickup.value && originLatLng.value) return { mi: haversineMi(driverLatLng.value, originLatLng.value), label: 'to Pickup' }
+  if (!isPrePickup.value && !isDelivered.value && destLatLng.value) return { mi: haversineMi(driverLatLng.value, destLatLng.value), label: 'to Drop-off' }
   return null
 })
 
-// Address columns (for popup display)
 const originAddrCol = computed(() => (props.headers || []).find(h => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon/i.test(h)) || null)
 const destAddrCol = computed(() => (props.headers || []).find(h => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null)
 const loadIdCol = computed(() => findCol(/load.?id|job.?id/i))
@@ -175,87 +106,69 @@ const destAddr = computed(() => destAddrCol.value ? props.load[destAddrCol.value
 const loadIdValue = computed(() => loadIdCol.value ? props.load[loadIdCol.value] || '' : '')
 const driverName = computed(() => driverColName.value ? props.load[driverColName.value] || '' : '')
 
-// Static initial center — route coords take priority over driver position
-const mapCenter = ref((() => {
-  const o = originLatLng.value
-  const d = destLatLng.value
-  if (o && d) return [(o[0] + d[0]) / 2, (o[1] + d[1]) / 2]
-  if (o) return o
-  if (d) return d
-  const dPos = props.driverPosition
-  if (dPos) return [dPos.latitude, dPos.longitude]
-  return [0, 0]
-})())
-
-const initialZoom = computed(() => {
-  if (originLatLng.value && destLatLng.value) return 5
-  return 12
-})
-
-// Custom icons
-const originIcon = L.divIcon({
-  className: 'endpoint-icon',
-  html: '<div class="endpoint-dot" style="background:#16a34a;"></div>',
-  iconSize: [18, 18],
-  iconAnchor: [9, 9],
-})
-const destIcon = L.divIcon({
-  className: 'endpoint-icon',
-  html: '<div class="endpoint-dot" style="background:#dc2626;"></div>',
-  iconSize: [18, 18],
-  iconAnchor: [9, 9],
-})
-const driverIcon = L.divIcon({
-  className: 'endpoint-icon',
-  html: '<div class="endpoint-dot" style="background:#2563eb;border-color:#bfdbfe;"></div>',
-  iconSize: [20, 20],
-  iconAnchor: [10, 10],
-})
-
-function safeFitBounds(map, points, options = {}) {
-  try {
-    const valid = points.filter(p =>
-      Array.isArray(p) && p.length >= 2 &&
-      isFinite(p[0]) && isFinite(p[1]) &&
-      Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180
-    )
-    if (valid.length === 0) return false
-    if (valid.length === 1) {
-      map.setView(valid[0], options.maxZoom || 12, { animate: options.animate ?? false })
-      return true
-    }
-    const bounds = L.latLngBounds(valid.map(p => L.latLng(p[0], p[1])))
-    if (!bounds.isValid()) return false
-    map.fitBounds(bounds, options)
-    return true
-  } catch { return false }
+function dotIcon(color, size = 14) {
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: size / 2,
+    fillColor: color,
+    fillOpacity: 1,
+    strokeColor: '#ffffff',
+    strokeWeight: 2,
+  }
 }
 
-function onMapReady() {
-  const map = mapRef.value?.leafletObject
+function clearMapObjects() {
+  if (originMarker) { originMarker.setMap(null); originMarker = null }
+  if (destMarker) { destMarker.setMap(null); destMarker = null }
+  if (driverMarker) { driverMarker.setMap(null); driverMarker = null }
+  if (routeLine) { routeLine.setMap(null); routeLine = null }
+}
+
+function renderMarkers() {
   if (!map) return
-  map.invalidateSize()
-  // Fit to origin+dest immediately (like tracking page), driver marker appears wherever it falls
-  if (!initialFitDone) {
-    const pts = []
-    if (originLatLng.value) pts.push(originLatLng.value)
-    if (destLatLng.value) pts.push(destLatLng.value)
-    if (safeFitBounds(map, pts, { padding: [50, 50], maxZoom: 14, animate: false })) {
-      initialFitDone = true
-    }
+  clearMapObjects()
+
+  if (originLatLng.value && hasCoords.value) {
+    originMarker = new google.maps.Marker({ position: originLatLng.value, map, icon: dotIcon('#16a34a', 14), title: 'Pickup' })
   }
+  if (destLatLng.value && hasCoords.value) {
+    destMarker = new google.maps.Marker({ position: destLatLng.value, map, icon: dotIcon('#dc2626', 14), title: 'Drop-off' })
+  }
+  if (driverLatLng.value) {
+    driverMarker = new google.maps.Marker({ position: driverLatLng.value, map, icon: dotIcon('#2563eb', 16), title: driverName.value || 'Driver' })
+  }
+
+  if (routePoints.value.length >= 2) {
+    routeLine = new google.maps.Polyline({
+      path: routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude })),
+      strokeColor: '#000000', strokeOpacity: 0.7, strokeWeight: 5,
+      map,
+      icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
+    })
+  }
+
+  fitBounds()
+}
+
+function fitBounds() {
+  if (!map) return
+  const bounds = new google.maps.LatLngBounds()
+  let count = 0
+  if (originLatLng.value) { bounds.extend(originLatLng.value); count++ }
+  if (destLatLng.value) { bounds.extend(destLatLng.value); count++ }
+  if (driverLatLng.value) { bounds.extend(driverLatLng.value); count++ }
+  if (count >= 2) map.fitBounds(bounds, 50)
+  else if (count === 1) { map.setCenter(bounds.getCenter()); map.setZoom(12) }
 }
 
 let initialFitDone = false
 
-async function fetchRoute(fitBounds = false) {
+async function fetchRoute(doFit = false) {
   routePoints.value = []
   distanceMiles.value = null
   etaMinutes.value = null
   if (!destLatLng.value) return
 
-  // Before pickup: route from origin (A) to destination (B)
-  // After pickup: route from driver position to destination (B)
   const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
   const from = pickedUp && driverLatLng.value ? driverLatLng.value : originLatLng.value
   if (!from) return
@@ -263,169 +176,68 @@ async function fetchRoute(fitBounds = false) {
   try {
     let data
     try {
-      data = await api.get(`/api/route?fromLat=${from[0]}&fromLng=${from[1]}&toLat=${destLatLng.value[0]}&toLng=${destLatLng.value[1]}`)
-    } catch {
-      // silent
-    }
-    // If route failed or returned null, try origin → destination as fallback
+      data = await api.get(`/api/route?fromLat=${from.lat}&fromLng=${from.lng}&toLat=${destLatLng.value.lat}&toLng=${destLatLng.value.lng}`)
+    } catch { /* silent */ }
     if ((!data || !data.route) && originLatLng.value && from !== originLatLng.value) {
       try {
-        data = await api.get(`/api/route?fromLat=${originLatLng.value[0]}&fromLng=${originLatLng.value[1]}&toLat=${destLatLng.value[0]}&toLng=${destLatLng.value[1]}`)
-      } catch {
-        // silent
-      }
+        data = await api.get(`/api/route?fromLat=${originLatLng.value.lat}&fromLng=${originLatLng.value.lng}&toLat=${destLatLng.value.lat}&toLng=${destLatLng.value.lng}`)
+      } catch { /* silent */ }
     }
     if (!data) return
-    if (data.route && data.route.length >= 2) {
-      routePoints.value = data.route.map(p => [p.latitude, p.longitude])
-    }
+    if (data.route && data.route.length >= 2) routePoints.value = data.route
     distanceMiles.value = data.distanceMiles
     etaMinutes.value = data.etaMinutes
-
-    // Only fit bounds on initial load, not on reroutes
-    if (fitBounds && !initialFitDone) {
-      nextTick(() => {
-        const map = mapRef.value?.leafletObject
-        if (map) {
-          const allPoints = [...routePoints.value]
-          if (originLatLng.value) allPoints.push(originLatLng.value)
-          if (destLatLng.value) allPoints.push(destLatLng.value)
-          if (safeFitBounds(map, allPoints, { padding: [50, 50], maxZoom: 14, animate: false })) {
-            initialFitDone = true
-          }
-        }
-      })
-    }
-  } catch {
-    // silent
-  }
+    renderMarkers()
+  } catch { /* silent */ }
 }
 
-// Reroute when driver position changes significantly
 let lastRoutePos = null
 let lastRouteTime = 0
-const REROUTE_MIN_INTERVAL = 60000 // 60 seconds minimum between reroutes
 watch(() => props.driverPosition, (pos) => {
   if (!pos || !destLatLng.value) return
-  if (!lastRoutePos) {
-    lastRoutePos = pos
-    lastRouteTime = Date.now()
-    fetchRoute(true)
-    return
-  }
-  const dist = L.latLng(pos.latitude, pos.longitude).distanceTo(
-    L.latLng(lastRoutePos.latitude, lastRoutePos.longitude)
-  )
-  if (dist > 100 && Date.now() - lastRouteTime >= REROUTE_MIN_INTERVAL) {
-    lastRoutePos = pos
-    lastRouteTime = Date.now()
-    fetchRoute()
-  }
+  if (driverMarker && map) driverMarker.setPosition({ lat: pos.latitude, lng: pos.longitude })
+  if (!lastRoutePos) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute(true); return }
+  const dist = haversineMi({ lat: pos.latitude, lng: pos.longitude }, { lat: lastRoutePos.latitude, lng: lastRoutePos.longitude })
+  if (dist > 0.06 && Date.now() - lastRouteTime >= 60000) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute() }
 }, { deep: true })
 
-function focusOn(lat, lng) {
-  const map = mapRef.value?.leafletObject
-  if (map) {
-    map.setView([lat, lng], 15, { animate: true })
-  }
-}
-
+function focusOn(lat, lng) { if (map) { map.panTo({ lat, lng }); map.setZoom(15) } }
 defineExpose({ focusOn })
 
+async function initMap() {
+  if (!mapContainer.value) return
+  const center = originLatLng.value && destLatLng.value
+    ? { lat: (originLatLng.value.lat + destLatLng.value.lat) / 2, lng: (originLatLng.value.lng + destLatLng.value.lng) / 2 }
+    : originLatLng.value || destLatLng.value || driverLatLng.value || { lat: 0, lng: 0 }
+
+  map = await createMap(mapContainer.value, { zoom: 5, center, mapTypeId: 'hybrid' })
+  renderMarkers()
+  if (props.dispatchMode && hasCoords.value) fetchRoute(true)
+  else if (hasCoords.value && driverLatLng.value) fetchRoute(true)
+}
+
+watch(() => [hasCoords.value, driverLatLng.value], () => {
+  nextTick(() => { if (mapContainer.value && !map) initMap() })
+})
+
 onMounted(() => {
-  if (props.dispatchMode && hasCoords.value) {
-    fetchRoute(true)
-  } else if (hasCoords.value && driverLatLng.value) {
-    fetchRoute(true)
+  if ((hasCoords.value && (driverLatLng.value || props.dispatchMode)) || driverLatLng.value) {
+    nextTick(() => initMap())
   }
 })
 </script>
 
 <style scoped>
-.route-map-wrap {
-  width: 100%;
-}
-.map-container {
-  height: 250px;
-  border-radius: 8px;
-  overflow: hidden;
-}
-.map-info {
-  display: flex;
-  gap: 0.75rem;
-  margin-bottom: 0.5rem;
-}
-.info-item {
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--text);
-  background: var(--bg);
-  padding: 0.25rem 0.6rem;
-  border-radius: 6px;
-}
-.info-warn {
-  color: #b45309;
-  background: #fef3c7;
-}
-.info-danger {
-  color: #dc2626;
-  background: #fee2e2;
-}
-.marker-popup {
-  font-family: 'DM Sans', sans-serif;
-  font-size: 0.82rem;
-  line-height: 1.4;
-}
-.marker-popup strong {
-  display: block;
-  margin-bottom: 0.1rem;
-}
-.popup-address {
-  font-size: 0.8rem;
-  color: #444;
-}
-.popup-detail {
-  font-size: 0.72rem;
-  color: #888;
-  font-family: 'JetBrains Mono', monospace;
-}
-.map-empty {
-  text-align: center;
-  color: var(--text-dim);
-  font-size: 0.8rem;
-  padding: 1rem 0;
-}
-.map-label {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text-dim);
-  margin-bottom: 0.4rem;
-}
-.gps-waiting {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg, #f5f6fa);
-  border: 1px solid var(--border, #e5e7eb);
-}
-.gps-overlay {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.6rem;
-  color: var(--text-dim);
-  font-size: 0.82rem;
-  font-weight: 500;
-}
-.gps-spinner {
-  width: 28px;
-  height: 28px;
-  border: 3px solid var(--border, #e5e7eb);
-  border-top-color: var(--accent, #6366f1);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
+.route-map-wrap { width: 100%; }
+.map-container { height: 250px; border-radius: 8px; overflow: hidden; }
+.map-info { display: flex; gap: 0.75rem; margin-bottom: 0.5rem; }
+.info-item { font-size: 0.82rem; font-weight: 600; color: var(--text); background: var(--bg); padding: 0.25rem 0.6rem; border-radius: 6px; }
+.info-warn { color: #b45309; background: #fef3c7; }
+.info-danger { color: #dc2626; background: #fee2e2; }
+.map-empty { text-align: center; color: var(--text-dim); font-size: 0.8rem; padding: 1rem 0; }
+.map-label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); margin-bottom: 0.4rem; }
+.gps-waiting { display: flex; align-items: center; justify-content: center; background: var(--bg, #f5f6fa); border: 1px solid var(--border, #e5e7eb); }
+.gps-overlay { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; color: var(--text-dim); font-size: 0.82rem; font-weight: 500; }
+.gps-spinner { width: 28px; height: 28px; border: 3px solid var(--border, #e5e7eb); border-top-color: var(--accent, #6366f1); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>

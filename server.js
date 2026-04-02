@@ -4375,7 +4375,12 @@ app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async 
 	}
 });
 
-// GET /api/geocode — reverse geocode via Nominatim (no API key needed)
+// GET /api/config/maps-key — expose Google Maps API key for client-side map rendering
+app.get("/api/config/maps-key", requireAuth, (req, res) => {
+	res.json({ key: GOOGLE_MAPS_API_KEY });
+});
+
+// GET /api/geocode — reverse geocode via Google Geocoding API
 app.get("/api/geocode", requireAuth, async (req, res) => {
 	const { lat, lng } = req.query;
 	if (!lat || !lng) return res.status(400).json({ error: "lat and lng required" });

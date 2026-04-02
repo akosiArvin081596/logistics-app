@@ -5,106 +5,7 @@
       No active driver locations in the last hour.
     </div>
     <div v-else class="map-wrap">
-      <l-map
-        ref="mapRef"
-        :zoom="5"
-        :center="mapCenter"
-        :use-global-leaflet="false"
-        :options="{ attributionControl: false }"
-        :min-zoom="3"
-        :max-bounds="[[-85, -180], [85, 180]]"
-        :max-bounds-viscosity="1.0"
-        world-copy-jump
-        style="height: 100%; width: 100%;"
-      >
-        <l-tile-layer
-          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-          attribution="&copy; Esri"
-        />
-        <l-marker
-          v-for="loc in locationsWithGps"
-          :key="loc.driver"
-          :ref="el => setMarkerRef(loc.driver, el)"
-          :lat-lng="[loc.latitude, loc.longitude]"
-        >
-          <l-popup>
-            <div class="marker-popup">
-              <strong>{{ loc.driver }}</strong>
-              <div v-if="inTransitLoad(loc)">Load: {{ inTransitLoad(loc) }}</div>
-              <div class="popup-coords">{{ loc.latitude.toFixed(5) }}, {{ loc.longitude.toFixed(5) }}</div>
-              <div v-if="loc.speed">Speed: {{ Math.round(loc.speed * 2.237) }} mph</div>
-              <div v-if="selectedDriver === loc.driver && originLatLng && expandedLoadId" class="popup-eta">
-                {{ driverToPickupMi(loc) }} mi to Pickup
-              </div>
-              <div class="popup-time">{{ formatTime(loc.timestamp) }}</div>
-            </div>
-          </l-popup>
-        </l-marker>
-
-        <!-- Single load route (when a specific load is expanded) -->
-        <l-polyline
-          v-if="selectedDriver !== '__all__' && expandedLoadId && routePoints.length >= 2"
-          :lat-lngs="routePoints"
-          color="#000000"
-          :weight="6"
-          :opacity="0.7"
-          dashArray="12, 8"
-          className="route-animate"
-        />
-        <l-marker
-          v-if="selectedDriver !== '__all__' && expandedLoadId && routePoints.length >= 2 && routeDistance != null"
-          :lat-lng="routeMidpoint"
-          :icon="distanceIcon"
-        />
-        <l-marker v-if="selectedDriver !== '__all__' && expandedLoadId && originLatLng" :lat-lng="originLatLng" :icon="originIcon">
-          <l-popup><div class="marker-popup"><strong>Pickup</strong><div v-if="originAddress" class="popup-address">{{ originAddress }}</div></div></l-popup>
-        </l-marker>
-        <l-marker v-if="selectedDriver !== '__all__' && expandedLoadId && destLatLng" :lat-lng="destLatLng" :icon="destIcon">
-          <l-popup><div class="marker-popup"><strong>Drop-off</strong><div v-if="destAddress" class="popup-address">{{ destAddress }}</div></div></l-popup>
-        </l-marker>
-
-        <!-- All active load routes for selected driver (when no specific load expanded) -->
-        <template v-if="selectedDriver !== '__all__' && !expandedLoadId && driverRoutes.length > 0">
-          <template v-for="r in driverRoutes" :key="r.loadId">
-            <l-polyline
-              v-if="r.route.length >= 2"
-              :lat-lngs="r.route"
-              :color="r.color"
-              :weight="4"
-              :opacity="0.7"
-              dashArray="10, 6"
-              className="route-animate"
-            />
-            <l-marker v-if="r.origin" :lat-lng="r.origin" :icon="originIcon">
-              <l-popup><div class="marker-popup"><strong>{{ r.loadId }} — Pickup</strong><div v-if="r.originAddress" class="popup-address">{{ r.originAddress }}</div></div></l-popup>
-            </l-marker>
-            <l-marker v-if="r.dest" :lat-lng="r.dest" :icon="destIcon">
-              <l-popup><div class="marker-popup"><strong>{{ r.loadId }} — Drop-off</strong><div v-if="r.destAddress" class="popup-address">{{ r.destAddress }}</div></div></l-popup>
-            </l-marker>
-          </template>
-        </template>
-
-        <!-- All drivers routes (when "All Drivers" selected) -->
-        <template v-if="selectedDriver === '__all__'">
-          <template v-for="r in allRoutes" :key="r.driver">
-            <l-polyline
-              v-if="r.route.length >= 2"
-              :lat-lngs="r.route"
-              :color="r.color"
-              :weight="4"
-              :opacity="0.7"
-              dashArray="10, 6"
-              className="route-animate"
-            />
-            <l-marker v-if="r.origin" :lat-lng="r.origin" :icon="originIcon">
-              <l-popup><div class="marker-popup"><strong>{{ r.driver }} — Pickup</strong></div></l-popup>
-            </l-marker>
-            <l-marker v-if="r.dest" :lat-lng="r.dest" :icon="destIcon">
-              <l-popup><div class="marker-popup"><strong>{{ r.driver }} — Destination</strong></div></l-popup>
-            </l-marker>
-          </template>
-        </template>
-      </l-map>
+      <div ref="mapContainer" style="height:100%;width:100%;"></div>
 
       <!-- Route loading overlay -->
       <div v-if="fetchingRoute" class="route-overlay">
@@ -194,8 +95,8 @@
                   <div v-if="weatherData" class="route-weather">
                     <span class="weather-temp">{{ weatherData.tempF != null ? Math.round(weatherData.tempF) + '°F' : '' }}</span>
                     <span class="weather-cond">{{ weatherData.condition }}</span>
-                    <span v-if="weatherData.windMph != null" class="weather-wind">💨 {{ Math.round(weatherData.windMph) }} mph</span>
-                    <span v-if="weatherData.humidity != null" class="weather-humidity">💧 {{ weatherData.humidity }}%</span>
+                    <span v-if="weatherData.windMph != null" class="weather-wind">{{ Math.round(weatherData.windMph) }} mph</span>
+                    <span v-if="weatherData.humidity != null" class="weather-humidity">{{ weatherData.humidity }}%</span>
                   </div>
                 </div>
               </div>
@@ -214,9 +115,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
-import 'leaflet/dist/leaflet.css'
-import { LMap, LTileLayer, LMarker, LPopup, LPolyline } from '@vue-leaflet/vue-leaflet'
-import L from 'leaflet'
+import { useGoogleMaps } from '../../composables/useGoogleMaps'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -224,8 +123,10 @@ const props = defineProps({
 
 const api = useApi()
 const socket = useSocket()
+const { createMap } = useGoogleMaps()
 
-const mapRef = ref(null)
+const mapContainer = ref(null)
+let map = null
 const locations = ref([])
 const loading = ref(true)
 const selectedDriver = ref('')
@@ -233,7 +134,16 @@ const expandedLoadId = ref('')
 let focusGeneration = 0  // incremented on each focus action to cancel stale async fits
 const fetchingRoute = ref(false)
 const panelCollapsed = ref(false)
-const markerRefs = {}
+
+// Google Maps overlay objects (managed programmatically)
+const driverMarkers = new Map()   // driver name -> google.maps.Marker
+let originMarker = null
+let destMarker = null
+let distanceLabelMarker = null
+let routePolyline = null
+let driverRouteOverlays = []      // { polyline, originMarker, destMarker, infoO, infoD }
+let allRouteOverlays = []         // same shape, for "All Drivers" view
+let driverInfoWindows = new Map() // driver name -> google.maps.InfoWindow
 
 // Trail state (single driver)
 const trailPoints = ref([])
@@ -254,7 +164,7 @@ const driverRoutes = ref([])
 const ROUTE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#65a30d']
 const PAST_PICKUP_RE = /^(at shipper|loading|in transit|at receiver)$/i
 
-// Client-side route cache for static (origin→destination) routes
+// Client-side route cache for static (origin->destination) routes
 const staticRouteCache = new Map()
 const CLIENT_CACHE_TTL = 10 * 60 * 1000 // 10 minutes
 
@@ -276,18 +186,36 @@ async function fetchRouteCached(fromLat, fromLng, toLat, toLng) {
 // Animation state
 const activeAnimations = {}
 
+// ---- Haversine distance in meters (replaces L.latLng().distanceTo()) ----
+function haversineMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000 // Earth radius in meters
+  const toRad = d => d * Math.PI / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLng = toRad(lng2 - lng1)
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
 // ---- Smooth marker animation via requestAnimationFrame ----
 function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 800) {
   if (activeAnimations[driver]) cancelAnimationFrame(activeAnimations[driver])
+  const markerObj = driverMarkers.get(driver)
   const start = performance.now()
 
   function frame(now) {
     const t = Math.min((now - start) / duration, 1)
     const eased = t * (2 - t) // ease-out quadratic
+    const lat = fromLat + (toLat - fromLat) * eased
+    const lng = fromLng + (toLng - fromLng) * eased
+    // Update the Google Maps marker position directly
+    if (markerObj) {
+      markerObj.setPosition({ lat, lng })
+    }
+    // Also update reactive data for panel display
     const loc = locations.value.find((l) => l.driver === driver)
     if (loc) {
-      loc.latitude = fromLat + (toLat - fromLat) * eased
-      loc.longitude = fromLng + (toLng - fromLng) * eased
+      loc.latitude = lat
+      loc.longitude = lng
     }
     if (t < 1) activeAnimations[driver] = requestAnimationFrame(frame)
     else delete activeAnimations[driver]
@@ -323,13 +251,35 @@ function snapToRoute(point, route) {
       closest = snapped
     }
   }
-  // ~0.002 degrees ≈ 200m — only snap if reasonably close to route
+  // ~0.002 degrees ~ 200m -- only snap if reasonably close to route
   return minDist < 0.002 * 0.002 ? closest : null
 }
 
-// Safe fitBounds — validates coordinates to avoid "Bounds are not valid" errors
-// Passes raw coordinate arrays to fitBounds to avoid cross-instance L.latLngBounds issues
-function safeFitBounds(map, points, options = {}) {
+// ---- Google Maps helpers ----
+function dotIcon(color, scale = 7) {
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale,
+    fillColor: color,
+    fillOpacity: 1,
+    strokeColor: '#fff',
+    strokeWeight: 2,
+  }
+}
+
+function endpointIcon(color) {
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: 9,
+    fillColor: color,
+    fillOpacity: 1,
+    strokeColor: '#fff',
+    strokeWeight: 3,
+  }
+}
+
+function safeFitBounds(points, options = {}) {
+  if (!map) return
   try {
     const valid = points.filter(p =>
       Array.isArray(p) && p.length >= 2 &&
@@ -339,43 +289,269 @@ function safeFitBounds(map, points, options = {}) {
     )
     if (valid.length === 0) return
     if (valid.length === 1) {
-      map.setView(valid[0], options.maxZoom || 12, { animate: false })
+      map.setCenter({ lat: valid[0][0], lng: valid[0][1] })
+      map.setZoom(options.maxZoom || 12)
       return
     }
-    map.fitBounds(valid, options)
-  } catch { /* silent — prevent Leaflet errors from breaking the UI */ }
+    const bounds = new google.maps.LatLngBounds()
+    valid.forEach(p => bounds.extend({ lat: p[0], lng: p[1] }))
+    map.fitBounds(bounds, options.padding ? options.padding[0] : 50)
+  } catch { /* silent -- prevent Google Maps errors from breaking the UI */ }
 }
 
-// Custom icons for origin (green) and destination (red)
-const originIcon = L.divIcon({
-  className: 'endpoint-icon origin-icon',
-  html: '<div class="endpoint-dot" style="background:#16a34a;"></div>',
-  iconSize: [18, 18],
-  iconAnchor: [9, 9],
-})
-const destIcon = L.divIcon({
-  className: 'endpoint-icon dest-icon',
-  html: '<div class="endpoint-dot" style="background:#dc2626;"></div>',
-  iconSize: [18, 18],
-  iconAnchor: [9, 9],
-})
+// ---- Clear overlay helpers ----
+function clearSingleLoadOverlays() {
+  if (routePolyline) { routePolyline.setMap(null); routePolyline = null }
+  if (originMarker) { originMarker.setMap(null); originMarker = null }
+  if (destMarker) { destMarker.setMap(null); destMarker = null }
+  if (distanceLabelMarker) { distanceLabelMarker.setMap(null); distanceLabelMarker = null }
+}
 
-const routeMidpoint = computed(() => {
-  const pts = routePoints.value
-  if (pts.length < 2) return [0, 0]
-  const mid = Math.floor(pts.length / 2)
-  return pts[mid]
-})
+function clearDriverRouteOverlays() {
+  for (const o of driverRouteOverlays) {
+    if (o.polyline) o.polyline.setMap(null)
+    if (o.originMarker) o.originMarker.setMap(null)
+    if (o.destMarker) o.destMarker.setMap(null)
+  }
+  driverRouteOverlays = []
+}
 
-const distanceIcon = computed(() => L.divIcon({
-  className: 'distance-label-icon',
-  html: `<div class="distance-label">${routeDistance.value != null ? routeDistance.value + ' mi' : ''}</div>`,
-  iconSize: [80, 24],
-  iconAnchor: [40, 12],
-}))
+function clearAllRouteOverlays() {
+  for (const o of allRouteOverlays) {
+    if (o.polyline) o.polyline.setMap(null)
+    if (o.originMarker) o.originMarker.setMap(null)
+    if (o.destMarker) o.destMarker.setMap(null)
+  }
+  allRouteOverlays = []
+}
 
-function setMarkerRef(driver, el) {
-  if (el) markerRefs[driver] = el
+// ---- Build/rebuild Google Maps overlays from reactive state ----
+function renderSingleLoadRoute() {
+  clearSingleLoadOverlays()
+  if (!map) return
+  if (selectedDriver.value === '__all__' || !expandedLoadId.value) return
+
+  // Route polyline
+  if (routePoints.value.length >= 2) {
+    routePolyline = new google.maps.Polyline({
+      path: routePoints.value.map(p => ({ lat: p[0], lng: p[1] })),
+      strokeColor: '#000000',
+      strokeOpacity: 0.7,
+      strokeWeight: 6,
+      map,
+    })
+
+    // Distance label at midpoint
+    if (routeDistance.value != null) {
+      const mid = Math.floor(routePoints.value.length / 2)
+      const midPt = routePoints.value[mid]
+      distanceLabelMarker = new google.maps.Marker({
+        position: { lat: midPt[0], lng: midPt[1] },
+        map,
+        icon: {
+          path: 'M 0,0',
+          scale: 0,
+        },
+        label: {
+          text: routeDistance.value + ' mi',
+          color: '#333',
+          fontSize: '11px',
+          fontWeight: '700',
+          fontFamily: 'JetBrains Mono, monospace',
+          className: 'distance-label',
+        },
+        clickable: false,
+        zIndex: 900,
+      })
+    }
+  }
+
+  // Origin marker (green)
+  if (originLatLng.value) {
+    originMarker = new google.maps.Marker({
+      position: { lat: originLatLng.value[0], lng: originLatLng.value[1] },
+      map,
+      icon: endpointIcon('#16a34a'),
+      title: 'Pickup',
+      zIndex: 800,
+    })
+    const infoContent = `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>Pickup</strong>${originAddress.value ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + originAddress.value + '</div>' : ''}</div>`
+    const info = new google.maps.InfoWindow({ content: infoContent })
+    originMarker.addListener('click', () => info.open(map, originMarker))
+  }
+
+  // Destination marker (red)
+  if (destLatLng.value) {
+    destMarker = new google.maps.Marker({
+      position: { lat: destLatLng.value[0], lng: destLatLng.value[1] },
+      map,
+      icon: endpointIcon('#dc2626'),
+      title: 'Drop-off',
+      zIndex: 800,
+    })
+    const infoContent = `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>Drop-off</strong>${destAddress.value ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + destAddress.value + '</div>' : ''}</div>`
+    const info = new google.maps.InfoWindow({ content: infoContent })
+    destMarker.addListener('click', () => info.open(map, destMarker))
+  }
+}
+
+function renderDriverRoutes() {
+  clearDriverRouteOverlays()
+  if (!map) return
+  if (selectedDriver.value === '__all__' || expandedLoadId.value) return
+
+  for (const r of driverRoutes.value) {
+    const entry = {}
+
+    if (r.route.length >= 2) {
+      entry.polyline = new google.maps.Polyline({
+        path: r.route.map(p => ({ lat: p[0], lng: p[1] })),
+        strokeColor: r.color,
+        strokeOpacity: 0.7,
+        strokeWeight: 4,
+        map,
+      })
+    }
+    if (r.origin) {
+      entry.originMarker = new google.maps.Marker({
+        position: { lat: r.origin[0], lng: r.origin[1] },
+        map,
+        icon: endpointIcon('#16a34a'),
+        title: r.loadId + ' - Pickup',
+        zIndex: 800,
+      })
+      const info = new google.maps.InfoWindow({
+        content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Pickup</strong>${r.originAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.originAddress + '</div>' : ''}</div>`,
+      })
+      entry.originMarker.addListener('click', () => info.open(map, entry.originMarker))
+    }
+    if (r.dest) {
+      entry.destMarker = new google.maps.Marker({
+        position: { lat: r.dest[0], lng: r.dest[1] },
+        map,
+        icon: endpointIcon('#dc2626'),
+        title: r.loadId + ' - Drop-off',
+        zIndex: 800,
+      })
+      const info = new google.maps.InfoWindow({
+        content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Drop-off</strong>${r.destAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.destAddress + '</div>' : ''}</div>`,
+      })
+      entry.destMarker.addListener('click', () => info.open(map, entry.destMarker))
+    }
+
+    driverRouteOverlays.push(entry)
+  }
+}
+
+function renderAllRoutes() {
+  clearAllRouteOverlays()
+  if (!map) return
+  if (selectedDriver.value !== '__all__') return
+
+  for (const r of allRoutes.value) {
+    const entry = {}
+
+    if (r.route.length >= 2) {
+      entry.polyline = new google.maps.Polyline({
+        path: r.route.map(p => ({ lat: p[0], lng: p[1] })),
+        strokeColor: r.color,
+        strokeOpacity: 0.7,
+        strokeWeight: 4,
+        map,
+      })
+    }
+    if (r.origin) {
+      entry.originMarker = new google.maps.Marker({
+        position: { lat: r.origin[0], lng: r.origin[1] },
+        map,
+        icon: endpointIcon('#16a34a'),
+        title: r.driver + ' - Pickup',
+        zIndex: 800,
+      })
+      const info = new google.maps.InfoWindow({
+        content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.driver} — Pickup</strong></div>`,
+      })
+      entry.originMarker.addListener('click', () => info.open(map, entry.originMarker))
+    }
+    if (r.dest) {
+      entry.destMarker = new google.maps.Marker({
+        position: { lat: r.dest[0], lng: r.dest[1] },
+        map,
+        icon: endpointIcon('#dc2626'),
+        title: r.driver + ' - Destination',
+        zIndex: 800,
+      })
+      const info = new google.maps.InfoWindow({
+        content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.driver} — Destination</strong></div>`,
+      })
+      entry.destMarker.addListener('click', () => info.open(map, entry.destMarker))
+    }
+
+    allRouteOverlays.push(entry)
+  }
+}
+
+// ---- Sync driver markers with locations data ----
+function syncDriverMarkers() {
+  if (!map) return
+  const currentDrivers = new Set()
+
+  for (const loc of locationsWithGps.value) {
+    currentDrivers.add(loc.driver)
+    let marker = driverMarkers.get(loc.driver)
+    if (!marker) {
+      // Create new marker for this driver
+      const isOn = isOnline(loc)
+      marker = new google.maps.Marker({
+        position: { lat: loc.latitude, lng: loc.longitude },
+        map,
+        icon: dotIcon(isOn ? '#16a34a' : '#9ca3af', 7),
+        title: loc.driver,
+        zIndex: 1000,
+      })
+      // InfoWindow for the driver marker
+      const iw = new google.maps.InfoWindow()
+      marker.addListener('click', () => {
+        iw.setContent(buildDriverPopupContent(loc))
+        iw.open(map, marker)
+      })
+      driverInfoWindows.set(loc.driver, iw)
+      driverMarkers.set(loc.driver, marker)
+    } else {
+      // Update position
+      marker.setPosition({ lat: loc.latitude, lng: loc.longitude })
+      // Update icon color based on online status
+      const isOn = isOnline(loc)
+      marker.setIcon(dotIcon(isOn ? '#16a34a' : '#9ca3af', 7))
+    }
+  }
+
+  // Remove markers for drivers no longer present
+  for (const [driver, marker] of driverMarkers) {
+    if (!currentDrivers.has(driver)) {
+      marker.setMap(null)
+      driverMarkers.delete(driver)
+      const iw = driverInfoWindows.get(driver)
+      if (iw) { iw.close(); driverInfoWindows.delete(driver) }
+    }
+  }
+
+  // Update visibility based on selection
+  updateMarkerVisibility()
+}
+
+function buildDriverPopupContent(loc) {
+  let html = `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${loc.driver}</strong>`
+  const loadId = inTransitLoad(loc)
+  if (loadId) html += `<div style="color:#555;font-size:0.8rem">Load: ${loadId}</div>`
+  html += `<div style="color:#888;font-size:0.72rem;font-family:JetBrains Mono,monospace">${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}</div>`
+  if (loc.speed) html += `<div style="color:#555;font-size:0.8rem">Speed: ${Math.round(loc.speed * 2.237)} mph</div>`
+  if (selectedDriver.value === loc.driver && originLatLng.value && expandedLoadId.value) {
+    html += `<div style="font-weight:600;font-size:0.8rem">${driverToPickupMi(loc)} mi to Pickup</div>`
+  }
+  html += `<div style="color:#999;font-size:0.7rem;margin-top:3px">${formatTime(loc.timestamp)}</div>`
+  html += '</div>'
+  return html
 }
 
 async function fetchTrail(driverName, loadId) {
@@ -405,14 +581,14 @@ async function fetchTrail(driverName, loadId) {
     routeEta.value = data.etaMinutes
     trailLoadId.value = loadId
   } catch {
-    // silent — trail is supplementary
+    // silent -- trail is supplementary
   }
 }
 
 function focusPoint(lat, lng) {
-  const map = mapRef.value?.leafletObject
   if (map) {
-    map.setView([lat, lng], 15, { animate: true })
+    map.setCenter({ lat, lng })
+    map.setZoom(15)
   }
 }
 
@@ -474,6 +650,9 @@ function collapseDriver() {
   destLatLng.value = null
   routeDistance.value = null
   fetchingRoute.value = false
+  clearSingleLoadOverlays()
+  clearDriverRouteOverlays()
+  clearAllRouteOverlays()
 }
 
 async function focusDriver(loc) {
@@ -487,10 +666,12 @@ async function focusDriver(loc) {
   destLatLng.value = null
   routeDistance.value = null
   fetchingRoute.value = false
+  clearSingleLoadOverlays()
+  clearAllRouteOverlays()
 
-  const map = mapRef.value?.leafletObject
   if (map && loc.latitude) {
-    map.setView([loc.latitude, loc.longitude], 12, { animate: false })
+    map.setCenter({ lat: loc.latitude, lng: loc.longitude })
+    map.setZoom(12)
   }
 }
 
@@ -507,6 +688,7 @@ async function toggleLoad(al, loc) {
     routeEta.value = null
     weatherData.value = null
     fetchingRoute.value = false
+    clearSingleLoadOverlays()
     return
   }
 
@@ -514,6 +696,8 @@ async function toggleLoad(al, loc) {
   expandedLoadId.value = al.loadId
   driverRoutes.value = []
   routePoints.value = []
+  clearDriverRouteOverlays()
+  clearSingleLoadOverlays()
 
   const oLat = Number(al.originLat)
   const oLng = Number(al.originLng)
@@ -547,17 +731,20 @@ async function toggleLoad(al, loc) {
 
   await nextTick()
 
-  const map = mapRef.value?.leafletObject
   if (map) {
     const boundsPoints = []
     if (hasOrigin) boundsPoints.push([oLat, oLng])
     if (hasDest) boundsPoints.push([dLat, dLng])
     if (boundsPoints.length >= 2) {
-      safeFitBounds(map, boundsPoints, { padding: [50, 50], maxZoom: 14, animate: false })
+      safeFitBounds(boundsPoints, { padding: [50, 50], maxZoom: 14 })
     } else if (boundsPoints.length === 1) {
-      map.setView(boundsPoints[0], 12, { animate: false })
+      map.setCenter({ lat: boundsPoints[0][0], lng: boundsPoints[0][1] })
+      map.setZoom(12)
     }
   }
+
+  // Render origin/dest markers immediately
+  renderSingleLoadRoute()
 
   // Fetch route polyline in background
   if (hasFrom && hasDest) {
@@ -581,6 +768,8 @@ async function toggleLoad(al, loc) {
     } finally {
       fetchingRoute.value = false
     }
+    // Re-render with the fetched route
+    renderSingleLoadRoute()
   }
 
   // Weather fetch disabled to reduce Google API costs
@@ -593,16 +782,15 @@ async function checkOffRoute(lat, lng) {
   if (Date.now() - lastRerouteTime < 30000) return
 
   // Find minimum distance from driver to any point on the route
-  const driverPos = L.latLng(lat, lng)
   let minDist = Infinity
   for (const pt of routePoints.value) {
-    const d = driverPos.distanceTo(L.latLng(pt[0], pt[1]))
+    const d = haversineMeters(lat, lng, pt[0], pt[1])
     if (d < minDist) minDist = d
     if (d < 100) return // still on route, no need to check further
   }
 
   // Off-route: recalculate from current position to destination
-  // Only update if new route succeeds — never clear the existing route
+  // Only update if new route succeeds -- never clear the existing route
   if (minDist >= 100 && destLatLng.value) {
     lastRerouteTime = Date.now()
     try {
@@ -612,9 +800,10 @@ async function checkOffRoute(lat, lng) {
         routePoints.value = data.route.map(p => [p.latitude, p.longitude])
         routeDistance.value = data.distanceMiles
         routeEta.value = data.etaMinutes
+        renderSingleLoadRoute()
       }
     } catch {
-      // silent — keep existing route
+      // silent -- keep existing route
     }
   }
 }
@@ -623,6 +812,8 @@ async function focusAll() {
   selectedDriver.value = '__all__'
   expandedLoadId.value = ''
   driverRoutes.value = []
+  clearSingleLoadOverlays()
+  clearDriverRouteOverlays()
   // Clear single-driver state
   trailPoints.value = []
   routePoints.value = []
@@ -660,9 +851,11 @@ async function focusAll() {
   await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT, onlineWithLoad.length) }, () => trailWorker()))
   allRoutes.value = results.filter(r => r && (r.route.length >= 2 || r.origin || r.dest))
 
+  // Render all routes on map
+  renderAllRoutes()
+
   // Fit bounds to all online drivers
   await nextTick()
-  const map = mapRef.value?.leafletObject
   if (!map) return
   const withGps = locationsWithGps.value
   if (withGps.length === 0) return
@@ -672,7 +865,7 @@ async function focusAll() {
     if (r.origin) allPts.push(r.origin)
     if (r.dest) allPts.push(r.dest)
   }
-  safeFitBounds(map, allPts, { padding: [50, 50], maxZoom: 12, animate: true })
+  safeFitBounds(allPts, { padding: [50, 50], maxZoom: 12 })
 }
 
 // Online/offline detection (5-minute threshold)
@@ -681,7 +874,7 @@ let nowInterval = null
 const ONLINE_THRESHOLD = 5 * 60 * 1000 // 5 minutes
 
 function driverToPickupMi(loc) {
-  if (!originLatLng.value || !loc.latitude) return '—'
+  if (!originLatLng.value || !loc.latitude) return '\u2014'
   const R = 6371
   const toRad = d => d * Math.PI / 180
   const dLat = toRad(originLatLng.value[0] - loc.latitude)
@@ -741,32 +934,39 @@ const selectedDriverSpeed = computed(() => {
   return loc?.speed ? Math.round(loc.speed * 2.237) : null
 })
 
-const mapCenter = ref([39.8283, -98.5795]) // set once after first fetch
-
 function updateMarkerVisibility() {
-  const map = mapRef.value?.leafletObject
   if (!map) return
   const sel = selectedDriver.value
   const showAll = !sel || sel === '__all__'
-  for (const [driver, ref] of Object.entries(markerRefs)) {
-    const layer = ref?.leafletObject
-    if (!layer) continue
-    let show = false
-    if (showAll) {
-      show = true
-    } else {
-      show = driver === sel
-    }
-    if (show) {
-      if (!map.hasLayer(layer)) map.addLayer(layer)
-    } else {
-      if (map.hasLayer(layer)) map.removeLayer(layer)
-    }
+  for (const [driver, marker] of driverMarkers) {
+    const show = showAll || driver === sel
+    marker.setVisible(show)
   }
 }
 
 watch(selectedDriver, () => {
   nextTick(updateMarkerVisibility)
+})
+
+// Watch for changes in reactive route data and re-render overlays
+watch(routePoints, () => {
+  if (expandedLoadId.value) renderSingleLoadRoute()
+})
+
+watch(driverRoutes, () => {
+  renderDriverRoutes()
+}, { deep: true })
+
+watch(allRoutes, () => {
+  renderAllRoutes()
+}, { deep: true })
+
+// Watch selected driver to load routes for the driver
+watch(selectedDriver, async (driverName) => {
+  if (driverName && driverName !== '__all__' && !expandedLoadId.value) {
+    const loc = locations.value.find(l => l.driver === driverName)
+    if (loc) await fetchDriverRoutes(loc)
+  }
 })
 
 let initialFetchDone = false
@@ -775,18 +975,17 @@ async function fetchLocations() {
   try {
     const data = await api.get('/api/locations/latest')
     locations.value = data.locations || []
+    // Sync Google Maps markers
+    await nextTick()
+    syncDriverMarkers()
     // Only fit map on the very first load, not on refreshes
     if (!initialFetchDone) {
       initialFetchDone = true
       const withGps = locations.value.filter(l => !l.noGps && l.latitude != null)
       if (withGps.length > 0) {
         const pts = withGps.map(l => [l.latitude, l.longitude])
-        mapCenter.value = pts[0]
         await nextTick()
-        const map = mapRef.value?.leafletObject
-        if (map) {
-          safeFitBounds(map, pts, { padding: [50, 50], maxZoom: 12, animate: false })
-        }
+        safeFitBounds(pts, { padding: [50, 50], maxZoom: 12 })
       }
     }
   } catch {
@@ -832,6 +1031,8 @@ function onLocationUpdate(payload) {
       loadId: payload.loadId || '',
       timestamp: payload.timestamp,
     })
+    // Create a marker for the new driver
+    nextTick(() => syncDriverMarkers())
   }
 
   // Extend trail in real-time if this update is for the selected driver/load
@@ -864,8 +1065,8 @@ function formatTime(ts) {
 watch(() => props.visible, (val) => {
   if (val) {
     nextTick(() => {
-      if (mapRef.value?.leafletObject) {
-        mapRef.value.leafletObject.invalidateSize()
+      if (map) {
+        google.maps.event.trigger(map, 'resize')
       }
     })
   }
@@ -888,18 +1089,32 @@ function onStatusUpdated(payload) {
     trailLoadId.value = ''
     routeDistance.value = null
     routeEta.value = null
+    clearSingleLoadOverlays()
   }
   // Refresh locations to get updated loadId
   fetchLocations()
 }
 
+async function initMap() {
+  if (!mapContainer.value || map) return
+  map = await createMap(mapContainer.value, {
+    zoom: 5,
+    center: { lat: 39.8283, lng: -98.5795 },
+    mapTypeId: 'hybrid',
+    minZoom: 3,
+  })
+  // After map is ready, fetch and render locations
+  await fetchLocations()
+}
+
 onMounted(() => {
   socket.connect()
   socket.register('dispatch')
-  fetchLocations()
   socket.on('location-update', onLocationUpdate)
   socket.on('status-updated', onStatusUpdated)
   nowInterval = setInterval(() => { now.value = Date.now() }, 10000)
+  // Initialize map once component is mounted
+  nextTick(() => initMap())
 })
 
 onUnmounted(() => {
@@ -907,6 +1122,15 @@ onUnmounted(() => {
   socket.off('status-updated', onStatusUpdated)
   Object.values(activeAnimations).forEach(cancelAnimationFrame)
   clearInterval(nowInterval)
+  // Clean up Google Maps objects
+  for (const [, marker] of driverMarkers) marker.setMap(null)
+  driverMarkers.clear()
+  for (const [, iw] of driverInfoWindows) iw.close()
+  driverInfoWindows.clear()
+  clearSingleLoadOverlays()
+  clearDriverRouteOverlays()
+  clearAllRouteOverlays()
+  map = null
 })
 </script>
 
@@ -1329,93 +1553,5 @@ onUnmounted(() => {
   height: 300px;
   color: var(--text-dim);
   font-size: 0.9rem;
-}
-
-.marker-popup strong {
-  font-size: 0.9rem;
-}
-
-.marker-popup div {
-  font-size: 0.8rem;
-  color: #555;
-}
-
-.popup-coords {
-  font-size: 0.72rem;
-  color: #888;
-  font-family: 'JetBrains Mono', monospace;
-}
-
-.popup-eta {
-  font-weight: 600;
-  font-size: 0.8rem;
-}
-
-.eta-badge {
-  display: inline-block;
-  padding: 0.1rem 0.4rem;
-  border-radius: 9999px;
-  font-size: 0.7rem;
-  font-weight: 600;
-}
-
-.eta-badge.on-time {
-  background: #dcfce7;
-  color: #166534;
-}
-
-.eta-badge.delayed {
-  background: #fef2f2;
-  color: #dc2626;
-}
-
-.popup-address {
-  font-size: 0.8rem;
-  color: #444;
-  margin-top: 0.15rem;
-}
-
-.popup-time {
-  font-size: 0.7rem;
-  color: #999;
-  margin-top: 0.2rem;
-}
-</style>
-
-<style>
-/* Unscoped — Leaflet injects divIcon outside scoped scope */
-.endpoint-icon {
-  background: none !important;
-  border: none !important;
-}
-.endpoint-dot {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 3px solid #fff;
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
-}
-.route-animate {
-  animation: route-blink 1.5s ease-in-out infinite;
-}
-@keyframes route-blink {
-  0%, 100% { opacity: 0.7; }
-  50% { opacity: 0.25; }
-}
-.distance-label-icon {
-  background: none !important;
-  border: none !important;
-}
-.distance-label {
-  background: #fff;
-  color: #333;
-  font-size: 0.72rem;
-  font-weight: 700;
-  font-family: 'JetBrains Mono', monospace;
-  padding: 0.15rem 0.5rem;
-  border-radius: 4px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
-  white-space: nowrap;
-  text-align: center;
 }
 </style>
