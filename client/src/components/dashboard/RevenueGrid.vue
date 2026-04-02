@@ -1,17 +1,22 @@
 <template>
-  <div class="revenue-grid">
-    <div v-for="card in cards" :key="card.key" class="rev-card">
-      <i :class="['rev-icon pi', card.icon]"></i>
-      <div class="rev-body">
-        <span class="rev-label">{{ card.label }}</span>
-        <span class="rev-value">{{ card.value }}</span>
-      </div>
-    </div>
+  <div class="grid grid-cols-3 gap-3 mb-3">
+    <Card v-for="card in cards" :key="card.key" :pt="{ body: { style: 'padding: 0.85rem 1.15rem' }, content: { style: 'padding: 0' } }">
+      <template #content>
+        <div class="flex align-items-center gap-3">
+          <i :class="['pi', card.icon]" style="font-size:1.1rem;color:var(--p-text-muted-color);"></i>
+          <div class="flex flex-column">
+            <span class="text-xs font-semibold text-color-secondary uppercase" style="letter-spacing:0.05em;">{{ card.label }}</span>
+            <span class="text-xl font-bold font-mono text-color">{{ card.value }}</span>
+          </div>
+        </div>
+      </template>
+    </Card>
   </div>
 </template>
 
 <script setup>
 import { computed } from 'vue'
+import Card from 'primevue/card'
 
 const props = defineProps({
   revenue: { type: Object, required: true },
@@ -29,25 +34,6 @@ const cards = computed(() => [
 </script>
 
 <style scoped>
-.revenue-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
-}
-
-.rev-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.85rem 1.15rem;
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-}
-
-.rev-icon { font-size: 1.1rem; color: var(--text-dim); }
-.rev-body { display: flex; flex-direction: column; gap: 0.05rem; }
-.rev-label { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); }
-.rev-value { font-size: 1.25rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; color: var(--text); }
+.font-mono { font-family: 'JetBrains Mono', monospace; }
+.grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
 </style>

@@ -199,100 +199,22 @@ onUnmounted(() => {
 
 <style scoped>
 .dashboard { overflow: hidden; }
-.kpi-grid, .revenue-grid, .page-header { flex-shrink: 0; }
+.page-header { flex-shrink: 0; }
 
-/* skeleton fallback grids */
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 1rem;
-  margin-bottom: 1rem;
-}
-.kpi-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.1rem 1.25rem;
-}
+/* Skeleton fallback */
+.kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 0.75rem; }
+.revenue-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-bottom: 0.75rem; }
+.kpi-card, .revenue-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
 
-.revenue-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
-  margin-bottom: 1rem;
-}
-.revenue-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.9rem 1.25rem;
-}
-
+/* Tab layout */
 .dash-section.fill {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-  overflow: hidden;
+  flex: 1; display: flex; flex-direction: column; min-height: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
 }
-/* PrimeVue Tab overrides */
 :deep(.p-tabs) { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 :deep(.p-tabpanels) { flex: 1; overflow-y: auto; min-height: 0; }
 :deep(.p-tabpanel) { padding: 0; }
 :deep(.p-tab) { gap: 0.4rem; }
-
-/* PrimeVue DataTable — clean professional look */
-:deep(.p-datatable) { font-size: 0.85rem; }
-:deep(.p-datatable-header-cell) {
-  font-size: 0.7rem !important; font-weight: 600 !important;
-  text-transform: uppercase; letter-spacing: 0.05em;
-  color: var(--text-dim) !important;
-  background: transparent !important;
-  border-bottom: 2px solid var(--border) !important;
-  padding: 0.7rem 0.85rem !important;
-}
-:deep(.p-datatable-row-cell) {
-  padding: 0.65rem 0.85rem !important;
-  border-bottom: 1px solid var(--border) !important;
-  background: transparent !important;
-}
-:deep(.p-datatable-tbody > tr) {
-  background: transparent !important;
-}
-:deep(.p-datatable-tbody > tr:hover) {
-  background: rgba(255,255,255,0.03) !important;
-}
-:deep(.p-datatable-striped .p-datatable-tbody > tr:nth-child(even)) {
-  background: transparent !important;
-}
-:deep(.p-datatable-tbody > tr:last-child > td) {
-  border-bottom: none !important;
-}
-
-/* PrimeVue Dialog polish */
-:deep(.p-dialog) {
-  border-radius: 14px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
-}
-:deep(.p-dialog-header) {
-  padding: 1rem 1.25rem;
-  font-size: 1rem;
-}
-:deep(.p-dialog-content) {
-  padding: 1rem 1.25rem 1.25rem;
-}
-
-/* Status badge overrides */
-:deep(.status-badge.in-transit) { background: var(--blue-dim); color: var(--blue); }
-:deep(.status-badge.assigned) { background: var(--accent-dim); color: var(--accent); }
-:deep(.status-badge.dispatched) { background: var(--blue-dim); color: var(--blue); }
-:deep(.status-badge.delivered) { background: rgba(16,185,129,0.2); color: #059669; }
-:deep(.status-badge.unassigned) { background: var(--danger-dim); color: var(--danger); }
-:deep(.status-badge.picked-up) { background: var(--amber-dim); color: var(--amber); }
 
 .skeleton-line { height: 0.85rem; margin-bottom: 0.4rem; }
 .skeleton-line.lg { height: 1.75rem; width: 60%; }
