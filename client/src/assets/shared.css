@@ -290,16 +290,16 @@ body {
 /* KPI Cards */
 .kpi-card {
   border-radius: 14px;
-  padding: 1.5rem 1.5rem 1.25rem;
-  display: flex; align-items: flex-start; gap: 1.125rem;
+  padding: 1rem 1.25rem;
+  display: flex; align-items: center; gap: 1rem;
   cursor: pointer;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.06), 0 8px 20px rgba(0,0,0,0.04);
-  min-height: 110px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04);
+  min-height: 88px;
 }
 .kpi-card:hover {
-  box-shadow: 0 4px 16px rgba(0,0,0,0.1), 0 16px 36px rgba(0,0,0,0.06);
-  transform: translateY(-3px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.1), 0 12px 28px rgba(0,0,0,0.06);
+  transform: translateY(-2px);
 }
 .kpi-blue  { background: linear-gradient(145deg,#eff6ff,#ffffff); border:1px solid #bfdbfe; border-left:4px solid #3b82f6; }
 .kpi-amber { background: linear-gradient(145deg,#fffbeb,#ffffff); border:1px solid #fde68a; border-left:4px solid #f59e0b; }
@@ -307,9 +307,9 @@ body {
 .kpi-violet { background: linear-gradient(145deg,#f5f3ff,#ffffff); border:1px solid #ddd6fe; border-left:4px solid #8b5cf6; }
 
 .kpi-icon {
-  width: 48px; height: 48px; border-radius: 12px;
+  width: 42px; height: 42px; border-radius: 10px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 1.25rem; flex-shrink: 0;
+  font-size: 1.1rem; flex-shrink: 0;
   box-shadow: 0 2px 6px rgba(0,0,0,0.08);
 }
 .kpi-icon-blue   { background: #dbeafe; color: #1d4ed8; }
@@ -319,25 +319,25 @@ body {
 
 .kpi-info { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
 .kpi-label {
-  font-size: 0.65rem; font-weight: 700;
+  font-size: 0.625rem; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.1em;
-  color: #9ca3af; margin-bottom: 8px;
+  color: #9ca3af; margin-bottom: 3px;
 }
 .kpi-value {
-  font-size: 2rem; font-weight: 800; line-height: 1;
+  font-size: 1.75rem; font-weight: 800; line-height: 1;
   color: #0f172a; font-family: 'JetBrains Mono', monospace;
 }
-.kpi-sub { font-size: 0.7rem; color: #94a3b8; margin-top: 6px; font-weight: 500; }
+.kpi-sub { font-size: 0.675rem; color: #94a3b8; margin-top: 3px; font-weight: 500; }
 
 /* Revenue Cards */
-.rev-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 1rem; margin-bottom: 1.25rem; }
+.rev-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 1rem; margin-bottom: 1rem; }
 .rev-card {
   border-radius: 14px;
-  padding: 1.25rem 1.5rem;
-  display: flex; align-items: center; gap: 1.125rem;
+  padding: 0.875rem 1.25rem;
+  display: flex; align-items: center; gap: 1rem;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
   box-shadow: 0 1px 4px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.03);
-  min-height: 80px;
+  min-height: 66px;
 }
 .rev-card:hover { box-shadow: 0 2px 10px rgba(0,0,0,0.07), 0 10px 24px rgba(0,0,0,0.05); transform: translateY(-2px); }
 .rev-gray    { background: linear-gradient(145deg,#f8fafc,#ffffff); border:1px solid #e2e8f0; border-top:4px solid #64748b; }
@@ -345,16 +345,16 @@ body {
 .rev-amber   { background: linear-gradient(145deg,#fffbeb,#ffffff); border:1px solid #fde68a; border-top:4px solid #f59e0b; }
 
 .rev-icon {
-  width: 44px; height: 44px; border-radius: 12px;
+  width: 38px; height: 38px; border-radius: 10px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 1.1rem; flex-shrink: 0;
+  font-size: 1rem; flex-shrink: 0;
   box-shadow: 0 2px 6px rgba(0,0,0,0.07);
 }
 .rev-icon-gray    { background: #f1f5f9; color: #475569; }
 .rev-icon-emerald { background: #d1fae5; color: #047857; }
 .rev-icon-amber   { background: #fef3c7; color: #b45309; }
-.rev-label { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #9ca3af; margin-bottom: 5px; }
-.rev-value { font-size: 1.35rem; font-weight: 800; color: #0f172a; font-family: 'JetBrains Mono', monospace; line-height: 1; }
+.rev-label { font-size: 0.625rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #9ca3af; margin-bottom: 4px; }
+.rev-value { font-size: 1.25rem; font-weight: 800; color: #0f172a; font-family: 'JetBrains Mono', monospace; line-height: 1; }
 
 /* Dashboard Content Wrapper */
 .dash-wrapper {
