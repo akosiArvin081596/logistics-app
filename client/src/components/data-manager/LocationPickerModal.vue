@@ -246,7 +246,7 @@ function handleConfirm() {
   margin-top: 2px;
   max-height: 180px;
   overflow-y: auto;
-  z-index: 10;
+  z-index: 1000;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 .suggestion-item {
