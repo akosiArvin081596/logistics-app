@@ -115,8 +115,25 @@ watch(() => props.open, (isOpen) => {
       mapZoom.value = 12
     } else {
       markerPos.value = null
-      mapCenter.value = [8.9475, 125.5406]
-      mapZoom.value = 6
+      // Try browser geolocation to center on user's area
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            mapCenter.value = [pos.coords.latitude, pos.coords.longitude]
+            mapZoom.value = 11
+            const map = mapRef.value?.leafletObject
+            if (map) map.setView([pos.coords.latitude, pos.coords.longitude], 11)
+          },
+          () => {
+            mapCenter.value = [32.7767, -96.7970]
+            mapZoom.value = 5
+          },
+          { timeout: 5000, enableHighAccuracy: false }
+        )
+      } else {
+        mapCenter.value = [32.7767, -96.7970]
+        mapZoom.value = 5
+      }
     }
 
     // Fix Leaflet tile rendering in modal
