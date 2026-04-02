@@ -10,6 +10,7 @@ const Database = require("better-sqlite3");
 const SqliteStore = require("better-sqlite3-session-store")(session);
 const geolib = require("geolib");
 const PDFDocument = require("pdfkit");
+const compression = require("compression");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -26,6 +27,7 @@ const app = express();
 app.disable('etag');
 const server = http.createServer(app);
 const io = new Server(server);
+app.use(compression());
 app.use(express.json({ limit: "20mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
