@@ -2152,28 +2152,17 @@ function deduplicateLoads(data, headers, returnDuplicates = false) {
 		if (seen.has(lid)) seen.get(lid).push(i);
 		else seen.set(lid, [i]);
 	}
-	const skipSet = new Set();
+	// Collect ALL indices for load IDs that have duplicates
+	const dupSet = new Set();
 	for (const [, indices] of seen) {
 		if (indices.length > 1) {
-			// Pick the row with the highest status rank; on tie, keep higher index
-			let bestIdx = indices[0];
-			let bestRank = statusCol ? (STATUS_RANK[(data[bestIdx][statusCol] || "").trim().toLowerCase()] || 0) : 0;
-			for (let j = 1; j < indices.length; j++) {
-				const rank = statusCol ? (STATUS_RANK[(data[indices[j]][statusCol] || "").trim().toLowerCase()] || 0) : 0;
-				if (rank > bestRank || (rank === bestRank && indices[j] > bestIdx)) {
-					bestIdx = indices[j];
-					bestRank = rank;
-				}
-			}
-			for (const idx of indices) {
-				if (idx !== bestIdx) skipSet.add(idx);
-			}
+			for (const idx of indices) dupSet.add(idx);
 		}
 	}
-	if (skipSet.size === 0) return returnDuplicates ? { data, duplicates: [] } : data;
-	const filtered = data.filter((_, i) => !skipSet.has(i));
+	if (dupSet.size === 0) return returnDuplicates ? { data, duplicates: [] } : data;
+	const filtered = data.filter((_, i) => !dupSet.has(i));
 	if (!returnDuplicates) return filtered;
-	return { data: filtered, duplicates: data.filter((_, i) => skipSet.has(i)) };
+	return { data: filtered, duplicates: data.filter((_, i) => dupSet.has(i)) };
 }
 
 function sanitizeBrokerContact(value) {
