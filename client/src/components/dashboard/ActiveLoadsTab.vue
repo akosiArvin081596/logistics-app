@@ -19,22 +19,22 @@
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
             <td @click.stop>
-              <div style="display:flex;flex-direction:column;gap:0.375rem;">
-                <div style="display:flex;align-items:center;gap:0.375rem;">
-                  <select v-model="statusSelections[job._rowIndex]" class="dash-select dash-select-sm" style="width:110px">
+              <div style="display:flex;align-items:center;gap:0.375rem;flex-wrap:wrap;">
+                <div style="display:flex;align-items:center;gap:0.25rem;flex-shrink:0;">
+                  <select v-model="statusSelections[job._rowIndex]" class="dash-select dash-select-sm" style="width:108px">
                     <option value="">{{ getCurrentStatus(job) || 'Status' }}</option>
                     <option v-for="s in statusOptions" :key="s" :value="s">{{ s }}</option>
                   </select>
                   <button v-if="statusSelections[job._rowIndex]" class="dash-go-btn" @click="confirmStatusUpdate(job)">Go</button>
                 </div>
-                <div style="display:flex;align-items:center;gap:0.375rem;">
-                  <select v-model="reassignSelections[job._rowIndex]" class="dash-select dash-select-sm" style="width:120px">
+                <div style="display:flex;align-items:center;gap:0.25rem;flex-shrink:0;">
+                  <select v-model="reassignSelections[job._rowIndex]" class="dash-select dash-select-sm" style="width:118px">
                     <option value="">{{ getCurrentDriver(job) || 'Driver' }}</option>
                     <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
                   </select>
                   <button v-if="reassignSelections[job._rowIndex]" class="dash-go-btn" @click="confirmReassign(job)">Go</button>
                 </div>
-                <button class="dash-cancel-btn" style="align-self:flex-start;" @click="confirmCancel(job)">Cancel</button>
+                <button class="dash-cancel-btn" style="flex-shrink:0;" @click="confirmCancel(job)">✕</button>
               </div>
             </td>
           </tr>
