@@ -123,7 +123,7 @@ const props = defineProps({
 
 const api = useApi()
 const socket = useSocket()
-const { createMap } = useGoogleMaps()
+const { load: loadGoogleMaps, createMap } = useGoogleMaps()
 
 const mapContainer = ref(null)
 let map = null
@@ -1097,6 +1097,7 @@ function onStatusUpdated(payload) {
 
 async function initMap() {
   if (!mapContainer.value || map) return
+  await loadGoogleMaps()
   map = await createMap(mapContainer.value, {
     zoom: 5,
     center: { lat: 39.8283, lng: -98.5795 },
