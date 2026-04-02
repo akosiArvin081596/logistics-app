@@ -649,6 +649,22 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		params.push(id);
 		db.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).run(...params);
 
+		// Cascade driver name rename across all tables
+		if (driverName !== undefined && driverName !== (user.driver_name || "")) {
+			const oldName = (user.driver_name || "").trim().toLowerCase();
+			const newName = driverName.trim();
+			if (oldName && newName) {
+				db.prepare("UPDATE expenses SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName);
+				db.prepare(`UPDATE messages SET "from" = ? WHERE LOWER("from") = ?`).run(newName, oldName);
+				db.prepare(`UPDATE messages SET "to" = ? WHERE LOWER("to") = ?`).run(newName, oldName);
+				db.prepare("UPDATE notifications SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName, oldName);
+				db.prepare("UPDATE driver_locations SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName);
+				db.prepare("UPDATE load_responses SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName, oldName);
+				db.prepare("UPDATE trucks SET assigned_driver = ? WHERE LOWER(assigned_driver) = ?").run(newName, oldName);
+				db.prepare("UPDATE documents SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName);
+			}
+		}
+
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error updating user:", error.message);
@@ -695,6 +711,22 @@ app.get("/api/db/query/:table", requireRole("Super Admin"), (req, res) => {
 
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
+	const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+	if (!user) return res.status(404).json({ error: "User not found" });
+	const name = (user.driver_name || user.username || "").trim().toLowerCase();
+	if (name) {
+		db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name);
+		db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name);
+		db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name);
+		db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name);
+		db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name);
+		db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name);
+		db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ?").run(name);
+	}
+	if (user.role === "Investor") {
+		db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id);
+		db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id);
+	}
 	db.prepare("DELETE FROM users WHERE id = ?").run(id);
 	res.json({ success: true });
 });
@@ -821,6 +853,14 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 // Truck Database: delete a truck
 app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
+	const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
+	if (!truck) return res.status(404).json({ error: "Truck not found" });
+	const unit = (truck.unit_number || "").trim().toLowerCase();
+	if (unit) {
+		db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id);
+		db.prepare("DELETE FROM maintenance_fund WHERE LOWER(truck) = ?").run(unit);
+		db.prepare("DELETE FROM compliance_fees WHERE LOWER(truck) = ?").run(unit);
+	}
 	db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
 	res.json({ success: true });
 });
@@ -5185,5 +5225,7 @@ server.listen(PORT, async () => {
 		console.log(`Google Sheets connected — ${tabs.length} tabs cached`);
 	} catch (error) {
 		console.error(`Google Sheets connection FAILED: ${error.message}`);
+		console.error("Server cannot operate without Google Sheets. Exiting.");
+		process.exit(1);
 	}
 });
