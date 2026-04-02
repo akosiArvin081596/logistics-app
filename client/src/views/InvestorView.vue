@@ -62,21 +62,21 @@
         <ProductionSection :production="store.production" :config="store.config" />
         <TrendSection :production="store.production" />
       </div>
+      <AssetSection :asset="store.asset" :config="store.config" />
       <!-- RFD REVIEW: sections hidden until individually verified against checklist -->
       <!--
-      <AssetSection :asset="store.asset" :config="store.config" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
       <InvestorChat />
       <DocumentPortal />
       <LegalDocumentPortal :trucks="trucks" />
+      -->
       <ConfigPanel
         v-if="authStore.user?.role === 'Super Admin'"
         :config="store.config"
         @save="handleSaveConfig"
       />
-      -->
     </template>
 
     <!-- Error State -->
