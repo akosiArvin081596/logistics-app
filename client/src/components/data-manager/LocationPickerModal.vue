@@ -176,7 +176,7 @@ function handleConfirm() {
 }
 .picker-modal {
   background: var(--surface); border-radius: 14px;
-  width: 92%; max-width: 600px; max-height: 90vh; overflow-y: auto;
+  width: 92%; max-width: 900px; max-height: 90vh; overflow-y: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
   animation: pickerIn 0.2s ease-out;
 }
@@ -217,7 +217,7 @@ function handleConfirm() {
 .suggestion-item:last-child { border-bottom: none; }
 .suggestion-item:hover { background: var(--surface-hover); }
 .map-container {
-  height: 320px; border-radius: 8px; overflow: hidden;
+  height: 480px; border-radius: 8px; overflow: hidden;
   border: 1px solid var(--border);
 }
 .selected-info {
