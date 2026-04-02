@@ -56,6 +56,8 @@
 
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
+      <!-- RFD REVIEW: sections hidden until individually verified against checklist -->
+      <!--
       <div class="sections-grid">
         <ProductionSection :production="store.production" :config="store.config" />
         <TrendSection :production="store.production" />
@@ -72,6 +74,7 @@
         :config="store.config"
         @save="handleSaveConfig"
       />
+      -->
     </template>
 
     <!-- Error State -->
