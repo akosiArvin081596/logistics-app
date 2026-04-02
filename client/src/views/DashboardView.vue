@@ -1,90 +1,52 @@
 <template>
-  <div class="dashboard admin-page">
-    <div class="page-header">
-      <h2>Operations Dashboard</h2>
-      <div class="status-bar">
-        <span class="status-pill">{{ lastUpdated }}</span>
-        <Button label="Refresh" icon="pi pi-refresh" severity="secondary" size="small" @click="refresh" />
+  <div class="flex flex-col overflow-hidden h-full">
+    <div class="flex items-center justify-between mb-4 shrink-0">
+      <h2 class="text-xl font-bold">Operations Dashboard</h2>
+      <div class="flex items-center gap-3">
+        <span class="text-xs text-gray-400 font-mono bg-gray-800/50 px-3 py-1.5 rounded-full">{{ lastUpdated }}</span>
+        <button class="px-3 py-1.5 text-sm font-medium bg-sky-500/10 text-sky-400 border border-sky-500/20 rounded-lg hover:bg-sky-500/20 transition" @click="refresh">
+          Refresh
+        </button>
       </div>
     </div>
 
-    <!-- KPI Cards -->
     <template v-if="store.kpis">
       <KpiGrid :kpis="store.kpis" @card-click="handleKpiClick" />
       <RevenueGrid :revenue="store.revenue" />
     </template>
     <template v-else>
-      <div class="kpi-grid">
-        <div v-for="n in 4" :key="n" class="kpi-card">
-          <div class="skeleton skeleton-line" style="width:50%"></div>
-          <div class="skeleton skeleton-line lg"></div>
-          <div class="skeleton skeleton-line sm"></div>
-        </div>
-      </div>
-      <div class="revenue-grid">
-        <div v-for="n in 3" :key="n" class="revenue-card">
-          <div class="skeleton skeleton-line" style="width:50%"></div>
-          <div class="skeleton skeleton-line lg"></div>
+      <div class="grid grid-cols-4 gap-3 mb-3">
+        <div v-for="n in 4" :key="n" class="bg-white/5 border border-white/10 rounded-xl p-4 animate-pulse">
+          <div class="h-3 bg-white/10 rounded w-1/2 mb-2"></div>
+          <div class="h-7 bg-white/10 rounded w-2/3 mb-2"></div>
+          <div class="h-2.5 bg-white/10 rounded w-1/3"></div>
         </div>
       </div>
     </template>
 
-    <!-- Tabbed Section -->
-    <div class="dash-section fill">
-      <Tabs :value="activeTab" @update:value="activeTab = $event">
-        <TabList>
-          <Tab value="jobBoard">Job Board <Badge :value="store.unassignedJobs.length" severity="secondary" /></Tab>
-          <Tab value="activeLoads">Active Loads <Badge :value="store.activeJobs.length" severity="secondary" /></Tab>
-          <Tab value="completed">Completed <Badge :value="store.completedJobs.length" severity="secondary" /></Tab>
-          <Tab value="fleet">Fleet & Drivers <Badge :value="store.fleet.length" severity="secondary" /></Tab>
-        </TabList>
-        <TabPanels>
-          <TabPanel value="jobBoard">
-            <JobBoardTab
-              :jobs="store.unassignedJobs"
-              :drivers="store.drivers"
-              :headers="store.headers"
-              :loading="store.isLoading"
-              :show-map="activeTab === 'jobBoard' ? mapTrigger : 0"
-              @assign="handleAssign"
-            />
-          </TabPanel>
-          <TabPanel value="activeLoads">
-            <ActiveLoadsTab
-              :jobs="store.activeJobs"
-              :headers="store.headers"
-              :drivers="store.drivers"
-              :show-map="activeTab === 'activeLoads' ? mapTrigger : 0"
-              @reassign="handleReassign"
-              @cancel="handleCancel"
-              @status-update="handleStatusUpdate"
-            />
-          </TabPanel>
-          <TabPanel value="completed">
-            <CompletedLoadsTab
-              :jobs="store.completedJobs"
-              :headers="store.completedHeaders"
-              :show-map="activeTab === 'completed' ? mapTrigger : 0"
-            />
-          </TabPanel>
-          <TabPanel value="fleet">
-            <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />
-          </TabPanel>
-        </TabPanels>
-      </Tabs>
+    <div class="flex-1 flex flex-col min-h-0 border border-white/10 rounded-xl overflow-hidden">
+      <div class="flex border-b border-white/10 shrink-0">
+        <button v-for="tab in tabs" :key="tab.key"
+          :class="['px-4 py-3 text-sm font-semibold flex items-center gap-2 border-b-2 transition',
+            activeTab === tab.key ? 'text-sky-400 border-sky-400' : 'text-gray-400 border-transparent hover:text-gray-200']"
+          @click="activeTab = tab.key">
+          {{ tab.label }}
+          <span class="text-xs font-mono bg-white/10 px-2 py-0.5 rounded-full">{{ tab.count }}</span>
+        </button>
+      </div>
+
+      <div class="flex-1 overflow-y-auto">
+        <JobBoardTab v-show="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" />
+        <ActiveLoadsTab v-show="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" />
+        <CompletedLoadsTab v-show="activeTab === 'completed'" :jobs="store.completedJobs" :headers="store.completedHeaders" />
+        <FleetTab v-show="activeTab === 'fleet'" :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import Tabs from 'primevue/tabs'
-import TabList from 'primevue/tablist'
-import Tab from 'primevue/tab'
-import TabPanels from 'primevue/tabpanels'
-import TabPanel from 'primevue/tabpanel'
-import Badge from 'primevue/badge'
-import Button from 'primevue/button'
 import { useDashboardStore } from '../stores/dashboard'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
@@ -100,8 +62,14 @@ const { show: toast } = useToast()
 const socket = useSocket()
 
 const activeTab = ref('jobBoard')
-const mapTrigger = ref(0)
 let refreshInterval = null
+
+const tabs = computed(() => [
+  { key: 'jobBoard', label: 'Job Board', count: store.unassignedJobs.length },
+  { key: 'activeLoads', label: 'Active Loads', count: store.activeJobs.length },
+  { key: 'completed', label: 'Completed', count: store.completedJobs.length },
+  { key: 'fleet', label: 'Fleet & Drivers', count: store.fleet.length },
+])
 
 const lastUpdated = computed(() => {
   if (!store.timestamp) return 'Loading...'
@@ -109,84 +77,60 @@ const lastUpdated = computed(() => {
 })
 
 function handleKpiClick(key) {
-  const tabMap = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }
-  activeTab.value = tabMap[key] || activeTab.value
-  if (key !== 'fleet') mapTrigger.value++
+  const map = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }
+  activeTab.value = map[key] || activeTab.value
 }
 
 async function refresh() {
-  try {
-    await store.refresh()
-  } catch {
-    toast('Failed to load dashboard', 'error')
-  }
+  try { await store.refresh() } catch { toast('Failed to load dashboard', 'error') }
 }
 
 async function handleAssign({ rowIndex, driver, job }) {
   try {
     await store.assignDriver(rowIndex, driver, job, store.headers)
-    const loadIdCol = store.headers.find((h) => /load.?id|job.?id/i.test(h))
-    toast(`${driver} assigned to ${loadIdCol ? job[loadIdCol] : 'load'}`, 'success')
+    const lc = store.headers.find(h => /load.?id|job.?id/i.test(h))
+    toast(`${driver} assigned to ${lc ? job[lc] : 'load'}`, 'success')
     refresh()
-  } catch {
-    toast('Failed to assign driver', 'error')
-  }
+  } catch { toast('Failed to assign driver', 'error') }
 }
 
 async function handleReassign({ rowIndex, newDriver, job }) {
   try {
     await store.reassignDriver(rowIndex, newDriver, job, store.headers)
-    const loadIdCol = store.headers.find((h) => /load.?id|job.?id/i.test(h))
-    toast(`Load ${loadIdCol ? job[loadIdCol] : ''} reassigned to ${newDriver}`, 'success')
+    const lc = store.headers.find(h => /load.?id|job.?id/i.test(h))
+    toast(`Load ${lc ? job[lc] : ''} reassigned to ${newDriver}`, 'success')
     refresh()
-  } catch {
-    toast('Failed to reassign driver', 'error')
-  }
+  } catch { toast('Failed to reassign driver', 'error') }
 }
 
 async function handleCancel({ rowIndex, job }) {
   try {
     await store.cancelLoad(rowIndex, job, store.headers)
-    const loadIdCol = store.headers.find((h) => /load.?id|job.?id/i.test(h))
-    toast(`Load ${loadIdCol ? job[loadIdCol] : ''} assignment cancelled`, 'success')
+    const lc = store.headers.find(h => /load.?id|job.?id/i.test(h))
+    toast(`Load ${lc ? job[lc] : ''} cancelled`, 'success')
     refresh()
-  } catch {
-    toast('Failed to cancel assignment', 'error')
-  }
+  } catch { toast('Failed to cancel assignment', 'error') }
 }
 
 async function handleStatusUpdate({ rowIndex, newStatus, job }) {
   try {
-    const loadIdCol = store.headers.find((h) => /load.?id|job.?id/i.test(h))
-    const driverCol = store.headers.find((h) => /driver/i.test(h))
-    const loadId = loadIdCol ? job[loadIdCol] || '' : ''
-    const driverName = driverCol ? job[driverCol] || '' : ''
-    await store.updateStatus(rowIndex, driverName, loadId, newStatus)
+    const lc = store.headers.find(h => /load.?id|job.?id/i.test(h))
+    const dc = store.headers.find(h => /driver/i.test(h))
+    await store.updateStatus(rowIndex, dc ? job[dc] || '' : '', lc ? job[lc] || '' : '', newStatus)
     toast(`Status updated to ${newStatus}`, 'success')
     refresh()
-  } catch {
-    toast('Failed to update status', 'error')
-  }
+  } catch { toast('Failed to update status', 'error') }
 }
 
-function onStatusUpdated(payload) {
-  toast(`${payload.driverName}: ${payload.newStatus} — Load ${payload.loadId}`, 'info')
-  refresh()
-}
-
-function onPodUploaded(payload) {
-  toast(`POD uploaded for Load ${payload.loadId} by ${payload.driverName}`, 'success')
-  refresh()
-}
+function onStatusUpdated(p) { toast(`${p.driverName}: ${p.newStatus} — Load ${p.loadId}`, 'info'); refresh() }
+function onPodUploaded(p) { toast(`POD uploaded for Load ${p.loadId} by ${p.driverName}`, 'success'); refresh() }
 
 onMounted(() => {
   refresh()
-
   socket.connect()
   socket.register('dispatch')
   socket.on('status-updated', onStatusUpdated)
   socket.on('pod-uploaded', onPodUploaded)
-
   refreshInterval = setInterval(refresh, 60000)
 })
 
@@ -196,28 +140,3 @@ onUnmounted(() => {
   socket.off('pod-uploaded', onPodUploaded)
 })
 </script>
-
-<style scoped>
-.dashboard { overflow: hidden; }
-.page-header { flex-shrink: 0; }
-
-/* Skeleton fallback */
-.kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 0.75rem; }
-.revenue-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-bottom: 0.75rem; }
-.kpi-card, .revenue-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
-
-/* Tab layout */
-.dash-section.fill {
-  flex: 1; display: flex; flex-direction: column; min-height: 0;
-  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
-}
-:deep(.p-tabs) { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-:deep(.p-tabpanels) { flex: 1; overflow-y: auto; min-height: 0; }
-:deep(.p-tabpanel) { padding: 0; }
-:deep(.p-tab) { gap: 0.4rem; }
-
-.skeleton-line { height: 0.85rem; margin-bottom: 0.4rem; }
-.skeleton-line.lg { height: 1.75rem; width: 60%; }
-.skeleton-line.sm { height: 0.7rem; width: 40%; }
-
-</style>

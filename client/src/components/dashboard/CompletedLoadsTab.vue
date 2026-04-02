@@ -1,86 +1,77 @@
 <template>
   <div>
-    <div class="flex align-items-center gap-3 p-2 border-bottom-1 surface-border">
-      <IconField>
-        <InputIcon class="pi pi-search" />
-        <InputText v-model="searchQuery" placeholder="Search load number..." size="small" />
-      </IconField>
+    <div class="px-3 py-2 border-b border-white/10">
+      <input v-model="searchQuery" type="text" placeholder="Search load number..."
+        class="w-full max-w-[280px] px-3 py-1.5 text-sm bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 outline-none focus:border-sky-400/50" />
     </div>
-
-    <div>
-      <DataTable v-if="filteredJobs.length > 0" :value="paginatedItems" :rows="pageSize" size="small" row-hover @row-click="openDetail($event.data)">
-        <Column v-for="col in displayCols" :key="col" :field="col" :header="col" sortable>
-          <template #body="{ data }">
-            <StatusBadge v-if="/status/i.test(col) && data[col]" :status="data[col]" />
-            <template v-else>{{ cellValue(data, col) }}</template>
-          </template>
-        </Column>
-      </DataTable>
+    <div class="overflow-x-auto">
+      <table v-if="filteredJobs.length > 0" class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-white/10">
+            <th v-for="col in displayCols" :key="col" class="px-3 py-2.5 text-left text-[0.68rem] font-semibold uppercase tracking-wider text-gray-400">{{ col }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-white/5 hover:bg-white/[0.02] cursor-pointer" @click="openDetail(job)">
+            <td v-for="col in displayCols" :key="col" class="px-3 py-2.5">
+              <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
+              <template v-else>{{ cellValue(job, col) }}</template>
+            </td>
+          </tr>
+        </tbody>
+      </table>
       <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'No completed loads.' }}</EmptyState>
     </div>
     <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
 
-    <Dialog v-model:visible="showDetail" :header="loadIdValue || 'Load Details'" modal :style="{ width: '680px', maxWidth: '95vw' }" :dismissable-mask="true">
-      <template v-if="selectedJob">
-        <template v-for="section in detailSections" :key="section.title">
-          <div v-if="section.fields.length" class="mb-3">
-            <div class="text-xs font-bold text-color-secondary uppercase mb-2" style="letter-spacing:0.06em;">{{ section.title }}</div>
-            <div class="surface-card border-1 surface-border border-round-lg overflow-hidden grid grid-cols-2">
-              <div v-for="field in section.fields" :key="field.col" :class="['flex flex-column gap-1 p-3 border-bottom-1 surface-border', { 'col-span-2': field.wide }]">
-                <span class="text-xs font-semibold text-color-secondary uppercase">{{ field.col }}</span>
-                <span class="text-sm font-medium">
-                  <StatusBadge v-if="/status/i.test(field.col) && field.value" :status="field.value" />
-                  <template v-else>{{ field.value || '\u2014' }}</template>
-                </span>
-              </div>
-            </div>
+    <Teleport to="body">
+      <div v-if="selectedJob" class="fixed inset-0 bg-black/40 backdrop-blur-sm z-[200] flex items-center justify-center" @click.self="selectedJob = null">
+        <div class="bg-[var(--bg)] rounded-2xl w-[92%] max-w-[680px] max-h-[85vh] flex flex-col shadow-2xl">
+          <div class="flex items-center justify-between px-5 py-4 border-b border-white/10">
+            <h3 class="text-lg font-bold">{{ loadIdValue || 'Load Details' }}</h3>
+            <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-gray-400 hover:text-white text-xl" @click="selectedJob = null">&times;</button>
           </div>
-        </template>
-        <div class="mb-3">
-          <div class="text-xs font-bold text-color-secondary uppercase mb-2" style="letter-spacing:0.06em;">Documents</div>
-          <div class="surface-card border-1 surface-border border-round-lg p-3">
-            <div v-if="loadingDocs" class="text-center text-color-secondary text-sm p-3">Loading documents...</div>
-            <div v-else-if="loadDocs.length === 0" class="text-center text-color-secondary text-sm p-3">No documents attached</div>
-            <div v-else class="flex flex-column gap-2">
-              <div v-for="doc in loadDocs" :key="doc.id" class="flex align-items-center justify-content-between p-2 border-bottom-1 surface-border">
-                <div class="flex align-items-center gap-2">
-                  <Tag :value="doc.type" :severity="doc.type === 'POD' ? 'success' : 'info'" />
-                  <div class="flex flex-column">
-                    <span class="text-sm font-medium">{{ doc.file_name }}</span>
-                    <span class="text-xs text-color-secondary">{{ formatDocDate(doc.uploaded_at) }}</span>
+          <div class="p-5 overflow-y-auto flex-1">
+            <template v-for="section in detailSections" :key="section.title">
+              <div v-if="section.fields.length" class="mb-4">
+                <div class="text-[0.68rem] font-bold uppercase tracking-wider text-gray-400 mb-2">{{ section.title }}</div>
+                <div class="bg-white/5 border border-white/10 rounded-lg grid grid-cols-2 overflow-hidden">
+                  <div v-for="field in section.fields" :key="field.col" :class="['flex flex-col gap-0.5 p-3 border-b border-white/5', field.wide ? 'col-span-2' : '']">
+                    <span class="text-[0.68rem] font-semibold uppercase text-gray-400">{{ field.col }}</span>
+                    <span class="text-sm">{{ field.value || '\u2014' }}</span>
                   </div>
                 </div>
-                <Button v-if="doc.drive_url" label="View" size="small" severity="secondary" @click="openPdfViewer(doc)" />
               </div>
+            </template>
+            <div class="mb-4">
+              <div class="text-[0.68rem] font-bold uppercase tracking-wider text-gray-400 mb-2">Documents</div>
+              <div class="bg-white/5 border border-white/10 rounded-lg p-3">
+                <div v-if="loadingDocs" class="text-center text-gray-500 text-sm py-3">Loading...</div>
+                <div v-else-if="loadDocs.length === 0" class="text-center text-gray-500 text-sm py-3">No documents</div>
+                <div v-else class="space-y-2">
+                  <div v-for="doc in loadDocs" :key="doc.id" class="flex items-center justify-between py-1">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-semibold px-2 py-0.5 rounded bg-sky-500/10 text-sky-400">{{ doc.type }}</span>
+                      <span class="text-sm">{{ doc.file_name }}</span>
+                    </div>
+                    <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" class="text-xs text-sky-400 hover:underline">View</a>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="text-[0.68rem] font-bold uppercase tracking-wider text-gray-400 mb-2">Route Map</div>
+              <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="null" dispatch-mode />
             </div>
           </div>
         </div>
-        <div class="mb-3">
-          <div class="text-xs font-bold text-color-secondary uppercase mb-2" style="letter-spacing:0.06em;">Route Map</div>
-          <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="null" dispatch-mode />
-        </div>
-      </template>
-    </Dialog>
-
-    <Dialog v-model:visible="showPdf" :header="pdfDoc?.file_name || 'Document'" modal :style="{ width: '90vw', maxWidth: '900px', height: '85vh' }" :dismissable-mask="true">
-      <template v-if="pdfDoc">
-        <div class="mb-2"><Tag :value="pdfDoc.type" :severity="'info'" /> <a :href="pdfDoc.drive_url" target="_blank" rel="noopener" class="ml-2 text-sm">Open in New Tab</a></div>
-        <iframe :src="pdfEmbedUrl" style="width:100%;height:calc(85vh - 120px);border:none;border-radius:8px;" allowfullscreen></iframe>
-      </template>
-    </Dialog>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
-import DataTable from 'primevue/datatable'
-import Column from 'primevue/column'
-import Dialog from 'primevue/dialog'
-import Button from 'primevue/button'
-import InputText from 'primevue/inputtext'
-import IconField from 'primevue/iconfield'
-import InputIcon from 'primevue/inputicon'
-import Tag from 'primevue/tag'
+import { computed, ref } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
 import StatusBadge from '../shared/StatusBadge.vue'
@@ -89,18 +80,14 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
 const api = useApi()
-const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, showMap: { type: Number, default: 0 } })
+const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true } })
 const searchQuery = ref('')
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
-const selectedJob = ref(null); const showDetail = ref(false); const showPdf = ref(false); const loadDocs = ref([]); const loadingDocs = ref(false); const pdfDoc = ref(null)
-async function openDetail(job) { selectedJob.value = job; showDetail.value = true; loadDocs.value = []; loadingDocs.value = true; const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''; if (lid) { try { loadDocs.value = (await api.get(`/api/documents/${encodeURIComponent(lid)}`)).documents || [] } catch {} }; loadingDocs.value = false }
-function formatDocDate(s) { if (!s) return ''; const d = new Date(s); return isNaN(d) ? s : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) }
-function openPdfViewer(doc) { pdfDoc.value = doc; showPdf.value = true }
-const pdfEmbedUrl = computed(() => { if (!pdfDoc.value) return ''; const m = pdfDoc.value.drive_url.match(/drive\.google\.com\/file\/d\/([^/]+)/); return m ? `https://drive.google.com/file/d/${m[1]}/preview` : pdfDoc.value.drive_url })
-const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null)
-const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
+const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
+async function openDetail(job) { selectedJob.value = job; loadDocs.value = []; loadingDocs.value = true; const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''; if (lid) { try { loadDocs.value = (await api.get(`/api/documents/${encodeURIComponent(lid)}`)).documents || [] } catch {} }; loadingDocs.value = false }
+const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null); const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
 const displayCols = computed(() => { const kw = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery', 'date']; const m = []; for (const k of kw) { const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !m.includes(h)); if (c) m.push(c) }; return (m.length < 3 ? props.headers.slice(0, 8) : m).filter(c => c !== brokerSourceCol.value && c !== phoneSourceCol.value) })
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
 function cellValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
@@ -121,8 +108,3 @@ const detailSections = computed(() => {
   if (rem.length) secs.push({ title: 'Other Details', fields: rem }); return secs.filter(s => s.fields.length > 0)
 })
 </script>
-
-<style scoped>
-.grid-cols-2 { display: grid; grid-template-columns: 1fr 1fr; }
-.col-span-2 { grid-column: 1 / -1; }
-</style>

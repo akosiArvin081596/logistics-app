@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LogisX — System Architecture & Data Flow</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; padding: 2rem; }
+  h1 { text-align: center; font-size: 1.6rem; margin-bottom: 0.3rem; color: #fff; }
+  .subtitle { text-align: center; font-size: 0.8rem; color: #64748b; margin-bottom: 2rem; }
+  .section { margin-bottom: 2.5rem; }
+  .section-title { font-size: 1rem; font-weight: 700; color: #38bdf8; margin-bottom: 1rem; padding-left: 0.5rem; border-left: 3px solid #38bdf8; }
+
+  /* ===== ROLES ===== */
+  .roles { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; margin-bottom: 2rem; }
+  .role-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1rem 1.2rem; min-width: 200px; flex: 1; max-width: 250px; }
+  .role-card h3 { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  .role-card.sa h3 { color: #f87171; }
+  .role-card.disp h3 { color: #60a5fa; }
+  .role-card.drv h3 { color: #34d399; }
+  .role-card.inv h3 { color: #fbbf24; }
+  .role-card ul { list-style: none; font-size: 0.72rem; color: #94a3b8; }
+  .role-card li { padding: 0.15rem 0; }
+  .role-card li::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 0.4rem; vertical-align: middle; }
+  .role-card.sa li::before { background: #f87171; }
+  .role-card.disp li::before { background: #60a5fa; }
+  .role-card.drv li::before { background: #34d399; }
+  .role-card.inv li::before { background: #fbbf24; }
+
+  /* ===== PROCESS FLOW ===== */
+  .flow { display: flex; align-items: flex-start; gap: 0; flex-wrap: wrap; justify-content: center; }
+  .flow-step { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 0.8rem 1rem; width: 150px; text-align: center; position: relative; }
+  .flow-step .step-num { font-size: 0.6rem; font-weight: 700; color: #0f172a; background: #38bdf8; width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 0.3rem; }
+  .flow-step .step-title { font-size: 0.72rem; font-weight: 700; color: #f1f5f9; margin-bottom: 0.2rem; }
+  .flow-step .step-detail { font-size: 0.6rem; color: #64748b; }
+  .flow-step .step-actor { font-size: 0.58rem; font-weight: 600; margin-top: 0.3rem; padding: 0.1rem 0.4rem; border-radius: 8px; display: inline-block; }
+  .flow-step .step-actor.sa { background: rgba(248,113,113,0.15); color: #f87171; }
+  .flow-step .step-actor.disp { background: rgba(96,165,250,0.15); color: #60a5fa; }
+  .flow-step .step-actor.drv { background: rgba(52,211,153,0.15); color: #34d399; }
+  .flow-step .step-actor.auto { background: rgba(168,85,247,0.15); color: #a855f7; }
+  .flow-arrow { display: flex; align-items: center; padding: 0 0.3rem; color: #475569; font-size: 1.2rem; min-height: 80px; }
+
+  /* ===== DATA SOURCES ===== */
+  .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  .data-box { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1rem 1.2rem; }
+  .data-box h3 { font-size: 0.82rem; font-weight: 700; margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.4rem; }
+  .data-box.sheets h3 { color: #34d399; }
+  .data-box.sqlite h3 { color: #60a5fa; }
+  .data-box .badge { font-size: 0.55rem; padding: 0.1rem 0.4rem; border-radius: 6px; font-weight: 600; }
+  .data-box.sheets .badge { background: rgba(52,211,153,0.15); color: #34d399; }
+  .data-box.sqlite .badge { background: rgba(96,165,250,0.15); color: #60a5fa; }
+  .tbl { width: 100%; font-size: 0.68rem; border-collapse: collapse; }
+  .tbl th { text-align: left; padding: 0.35rem 0.5rem; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.58rem; border-bottom: 1px solid #334155; }
+  .tbl td { padding: 0.35rem 0.5rem; border-bottom: 1px solid #1e293b; color: #cbd5e1; }
+  .tbl td:first-child { font-weight: 600; color: #f1f5f9; white-space: nowrap; }
+  .rw { font-size: 0.55rem; padding: 0.08rem 0.35rem; border-radius: 4px; font-weight: 600; }
+  .rw.r { background: rgba(52,211,153,0.12); color: #34d399; }
+  .rw.w { background: rgba(251,191,36,0.12); color: #fbbf24; }
+  .rw.rw { background: rgba(96,165,250,0.12); color: #60a5fa; }
+
+  /* ===== RELATIONSHIPS ===== */
+  .rel-diagram { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1.5rem; font-family: 'Consolas', 'Courier New', monospace; font-size: 0.7rem; line-height: 1.6; color: #94a3b8; overflow-x: auto; white-space: pre; }
+  .rel-diagram .hl-green { color: #34d399; }
+  .rel-diagram .hl-blue { color: #60a5fa; }
+  .rel-diagram .hl-yellow { color: #fbbf24; }
+  .rel-diagram .hl-red { color: #f87171; }
+  .rel-diagram .hl-purple { color: #a855f7; }
+  .rel-diagram .hl-dim { color: #475569; }
+
+  /* ===== STATUS FLOW ===== */
+  .status-flow { display: flex; align-items: center; gap: 0; flex-wrap: wrap; justify-content: center; margin-top: 0.5rem; }
+  .status-pill { font-size: 0.62rem; font-weight: 600; padding: 0.25rem 0.6rem; border-radius: 12px; }
+  .status-pill.new { background: rgba(148,163,184,0.15); color: #94a3b8; }
+  .status-pill.dispatched { background: rgba(96,165,250,0.15); color: #60a5fa; }
+  .status-pill.active { background: rgba(251,191,36,0.15); color: #fbbf24; }
+  .status-pill.transit { background: rgba(168,85,247,0.15); color: #a855f7; }
+  .status-pill.done { background: rgba(52,211,153,0.15); color: #34d399; }
+  .sarrow { color: #475569; font-size: 0.7rem; padding: 0 0.25rem; }
+
+  @media (max-width: 768px) {
+    .data-grid { grid-template-columns: 1fr; }
+    .flow { flex-direction: column; align-items: center; }
+    .flow-arrow { transform: rotate(90deg); min-height: auto; padding: 0.3rem 0; }
+    .roles { flex-direction: column; align-items: center; }
+  }
+</style>
+</head>
+<body>
+
+<h1>LogisX System Architecture</h1>
+<p class="subtitle">Process Flow & Data Relationships</p>
+
+<!-- ROLES -->
+<div class="section">
+  <div class="section-title">User Roles & Access</div>
+  <div class="roles">
+    <div class="role-card sa">
+      <h3>Super Admin</h3>
+      <ul>
+        <li>Dashboard, New Job, Tracking</li>
+        <li>User & Truck Management</li>
+        <li>Investor Config Panel</li>
+        <li>Data Manager, Data Tools</li>
+        <li>All pages accessible</li>
+      </ul>
+    </div>
+    <div class="role-card disp">
+      <h3>Dispatcher</h3>
+      <ul>
+        <li>Dashboard (Job Board)</li>
+        <li>Assign drivers to loads</li>
+        <li>Tracking, Messages</li>
+        <li>Expenses (approve/reject)</li>
+        <li>Notifications</li>
+      </ul>
+    </div>
+    <div class="role-card drv">
+      <h3>Driver</h3>
+      <ul>
+        <li>Driver App (mobile)</li>
+        <li>View assigned loads</li>
+        <li>Update status, upload POD</li>
+        <li>Log expenses, send messages</li>
+        <li>GPS tracking (auto)</li>
+      </ul>
+    </div>
+    <div class="role-card inv">
+      <h3>Investor</h3>
+      <ul>
+        <li>Asset Dashboard</li>
+        <li>Revenue, cash flow, ROI</li>
+        <li>Per-truck breakdown</li>
+        <li>Chat with Super Admin</li>
+        <li>Legal docs, PDF reports</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- PROCESS FLOW -->
+<div class="section">
+  <div class="section-title">Load Lifecycle (Process Flow)</div>
+  <div class="flow">
+    <div class="flow-step">
+      <div class="step-num">1</div>
+      <div class="step-title">Create Job</div>
+      <div class="step-detail">/jobs/new<br>Load ID, broker, rate, pickup/dropoff</div>
+      <div class="step-actor sa">Super Admin</div>
+    </div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-step">
+      <div class="step-num">2</div>
+      <div class="step-title">Dispatch</div>
+      <div class="step-detail">Assign driver<br>Socket.IO notification</div>
+      <div class="step-actor disp">Dispatcher</div>
+    </div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-step">
+      <div class="step-num">3</div>
+      <div class="step-title">Accept Load</div>
+      <div class="step-detail">Driver confirms<br>accept/decline</div>
+      <div class="step-actor drv">Driver</div>
+    </div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-step">
+      <div class="step-num">4</div>
+      <div class="step-title">Status Updates</div>
+      <div class="step-detail">At Shipper &rarr; Loading &rarr; In Transit &rarr; At Receiver</div>
+      <div class="step-actor drv">Driver</div>
+    </div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-step">
+      <div class="step-num">5</div>
+      <div class="step-title">Geofence</div>
+      <div class="step-detail">Auto-advance status<br>within 500m</div>
+      <div class="step-actor auto">Automatic</div>
+    </div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-step">
+      <div class="step-num">6</div>
+      <div class="step-title">Upload POD</div>
+      <div class="step-detail">Photo/PDF proof<br>of delivery</div>
+      <div class="step-actor drv">Driver</div>
+    </div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-step">
+      <div class="step-num">7</div>
+      <div class="step-title">Delivered</div>
+      <div class="step-detail">Load complete<br>Revenue recorded</div>
+      <div class="step-actor done" style="background:rgba(52,211,153,0.15);color:#34d399;">Complete</div>
+    </div>
+  </div>
+
+  <div style="margin-top: 1.2rem;">
+    <div style="font-size:0.68rem; color:#64748b; text-align:center; margin-bottom:0.5rem;">Load Status Progression</div>
+    <div class="status-flow">
+      <span class="status-pill new">Unassigned</span><span class="sarrow">&rarr;</span>
+      <span class="status-pill dispatched">Dispatched</span><span class="sarrow">&rarr;</span>
+      <span class="status-pill active">At Shipper</span><span class="sarrow">&rarr;</span>
+      <span class="status-pill active">Loading</span><span class="sarrow">&rarr;</span>
+      <span class="status-pill transit">In Transit</span><span class="sarrow">&rarr;</span>
+      <span class="status-pill active">At Receiver</span><span class="sarrow">&rarr;</span>
+      <span class="status-pill done">Delivered</span><span class="sarrow">&rarr;</span>
+      <span class="status-pill done">POD Received</span>
+    </div>
+  </div>
+</div>
+
+<!-- DATA SOURCES -->
+<div class="section">
+  <div class="section-title">Data Sources</div>
+  <div class="data-grid">
+    <div class="data-box sheets">
+      <h3><span class="badge">Google Sheets</span> Spreadsheet Database</h3>
+      <table class="tbl">
+        <thead><tr><th>Sheet Tab</th><th>Purpose</th><th>Access</th></tr></thead>
+        <tbody>
+          <tr><td>Job Tracking</td><td>All loads — status, driver, rate, locations</td><td><span class="rw rw">R/W</span></td></tr>
+          <tr><td>Carrier Database</td><td>Driver & carrier master list</td><td><span class="rw rw">R/W</span></td></tr>
+          <tr><td>Payments Table</td><td>Revenue records, payment status</td><td><span class="rw r">Read</span></td></tr>
+          <tr><td>Status Logs</td><td>Audit trail — every status change</td><td><span class="rw w">Write</span></td></tr>
+          <tr><td>Job Summary</td><td>Completed load summaries</td><td><span class="rw r">Read</span></td></tr>
+          <tr><td>Carrier History</td><td>Historical carrier data</td><td><span class="rw r">Read</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="data-box sqlite">
+      <h3><span class="badge">SQLite</span> Application Database (app.db)</h3>
+      <table class="tbl">
+        <thead><tr><th>Table</th><th>Purpose</th><th>Rows</th></tr></thead>
+        <tbody>
+          <tr><td>users</td><td>Auth, roles, full_name, company_name</td><td>All roles</td></tr>
+          <tr><td>trucks</td><td>Fleet — unit, make, VIN, owner_id, driver</td><td>Per truck</td></tr>
+          <tr><td>expenses</td><td>Driver expenses + receipts</td><td>Per expense</td></tr>
+          <tr><td>messages</td><td>Chat (dispatch/driver/investor)</td><td>Per message</td></tr>
+          <tr><td>notifications</td><td>Push alerts to drivers</td><td>Per alert</td></tr>
+          <tr><td>driver_locations</td><td>GPS history</td><td>Per ping</td></tr>
+          <tr><td>documents</td><td>POD uploads, receipts</td><td>Per file</td></tr>
+          <tr><td>load_responses</td><td>Accept/decline records</td><td>Per response</td></tr>
+          <tr><td>maintenance_fund</td><td>Maintenance contributions/services</td><td>Per entry</td></tr>
+          <tr><td>compliance_fees</td><td>Gov fees (HVUT, IRP, IFTA)</td><td>Per fee</td></tr>
+          <tr><td>legal_documents</td><td>Per-truck legal files</td><td>Per doc</td></tr>
+          <tr><td>investor_config</td><td>Per-investor settings</td><td>Per key</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ENTITY RELATIONSHIPS -->
+<div class="section">
+  <div class="section-title">Entity Relationships & Data Flow</div>
+  <div class="rel-diagram"><span class="hl-yellow">INVESTOR (users)</span>
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">│</span> owner_id
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">▼</span>
+<span class="hl-blue">TRUCKS (trucks)</span> ────── assigned_driver ──────&gt; <span class="hl-green">DRIVER (users)</span>
+    <span class="hl-dim">│</span>                                                  <span class="hl-dim">│</span>
+    <span class="hl-dim">│</span> unit_number                                <span class="hl-dim">│</span> driver_name
+    <span class="hl-dim">│</span>                                                  <span class="hl-dim">│</span>
+    <span class="hl-dim">├──&gt;</span> <span class="hl-blue">legal_documents</span> (truck_id)                 <span class="hl-dim">├──&gt;</span> <span class="hl-green">Job Tracking</span> (Driver column)
+    <span class="hl-dim">├──&gt;</span> <span class="hl-blue">maintenance_fund</span> (truck)                  <span class="hl-dim">├──&gt;</span> <span class="hl-blue">expenses</span> (driver)
+    <span class="hl-dim">└──&gt;</span> <span class="hl-blue">compliance_fees</span> (truck)                   <span class="hl-dim">├──&gt;</span> <span class="hl-blue">messages</span> (from/to)
+                                                       <span class="hl-dim">├──&gt;</span> <span class="hl-blue">notifications</span> (driver_name)
+                                                       <span class="hl-dim">├──&gt;</span> <span class="hl-blue">driver_locations</span> (driver)
+                                                       <span class="hl-dim">├──&gt;</span> <span class="hl-blue">documents</span> (driver)
+                                                       <span class="hl-dim">└──&gt;</span> <span class="hl-blue">load_responses</span> (driver_name)
+
+<span class="hl-green">Job Tracking</span> (Google Sheets)
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">│</span> Load ID
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">├──&gt;</span> <span class="hl-green">Payments Table</span> (matched by Load ID)
+    <span class="hl-dim">├──&gt;</span> <span class="hl-green">Status Logs</span> (appended on every status change)
+    <span class="hl-dim">├──&gt;</span> <span class="hl-green">Job Summary</span> (completed loads)
+    <span class="hl-dim">├──&gt;</span> <span class="hl-blue">documents</span> (load_id)
+    <span class="hl-dim">└──&gt;</span> <span class="hl-blue">messages</span> (load_id)
+
+<span class="hl-purple">KEY LINK:</span> <span class="hl-red">Driver Name</span> (text string) connects Google Sheets &lt;-&gt; SQLite
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">├──</span> Google Sheets: Job Tracking "Driver" column (free text)
+    <span class="hl-dim">├──</span> SQLite: users.driver_name (canonical)
+    <span class="hl-dim">└──</span> SQLite: trucks.assigned_driver (must match)
+    All matched via <span class="hl-red">LOWER()</span> comparison — case-insensitive</div>
+</div>
+
+<!-- INVESTOR DATA FLOW -->
+<div class="section">
+  <div class="section-title">Investor Dashboard Data Flow</div>
+  <div class="rel-diagram"><span class="hl-yellow">Investor logs in</span>
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">▼</span>
+<span class="hl-blue">SQLite:</span> SELECT assigned_driver FROM trucks WHERE owner_id = <span class="hl-yellow">{user.id}</span>
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">│</span>  investorDriverSet = <span class="hl-green">{"lesline johnson"}</span>
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">├──&gt;</span> <span class="hl-green">Google Sheets</span>: Job Tracking filtered by investorDriverSet
+    <span class="hl-dim">│</span>       <span class="hl-dim">├──</span> Total Revenue (sum of rate column)
+    <span class="hl-dim">│</span>       <span class="hl-dim">├──</span> Completed Loads (status = delivered/completed)
+    <span class="hl-dim">│</span>       <span class="hl-dim">├──</span> Monthly Revenue (grouped by date)
+    <span class="hl-dim">│</span>       <span class="hl-dim">└──</span> Avg Daily Revenue (last 30 days)
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">├──&gt;</span> <span class="hl-green">Google Sheets</span>: Payments Table filtered by matching Load IDs
+    <span class="hl-dim">│</span>       <span class="hl-dim">└──</span> Paid Revenue, Payment Status
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">├──&gt;</span> <span class="hl-blue">SQLite</span>: expenses WHERE driver IN investorDriverSet
+    <span class="hl-dim">│</span>       <span class="hl-dim">└──</span> Fuel, Maintenance, Compliance, Other (itemized)
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">├──&gt;</span> <span class="hl-blue">SQLite</span>: investor_config WHERE owner_id = <span class="hl-yellow">{user.id}</span>
+    <span class="hl-dim">│</span>       <span class="hl-dim">└──</span> Purchase Price, Title Status
+    <span class="hl-dim">│</span>
+    <span class="hl-dim">└──&gt;</span> <span class="hl-purple">Calculated at request time:</span>
+            <span class="hl-dim">├──</span> Net Cash Flow = Revenue - Expenses
+            <span class="hl-dim">├──</span> Owner Earnings = Net Cash Flow / 2
+            <span class="hl-dim">├──</span> Break-Even = (Purchase + $5K/truck) / Monthly Earnings
+            <span class="hl-dim">├──</span> Business ROI = Net Revenue / Gross Revenue
+            <span class="hl-dim">├──</span> Section 179 = Purchase Price (100%)
+            <span class="hl-dim">├──</span> At-Risk Capital = (Purchase + Startup) - Net Revenue
+            <span class="hl-dim">└──</span> Per-Truck Est. Revenue = (Monthly Gross - Expenses) x 12</div>
+</div>
+
+<div style="text-align:center; color:#475569; font-size:0.65rem; margin-top:2rem;">
+  LogisX System Diagram &mdash; Generated April 2, 2026
+</div>
+
+</body>
+</html>
