@@ -109,7 +109,7 @@ const reportEnd = ref('')
 
 const dashboardTitle = computed(() => {
   if (authStore.user?.role === 'Super Admin') return 'Asset Dashboard'
-  const name = authStore.user?.username || authStore.user?.name || ''
+  const name = authStore.user?.driverName || authStore.user?.username || ''
   return name ? `${name} - Asset Dashboard` : 'Asset Dashboard'
 })
 
