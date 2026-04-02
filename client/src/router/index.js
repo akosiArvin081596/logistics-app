@@ -17,6 +17,12 @@ const routes = [
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
+    path: '/jobs/new',
+    name: 'new-job',
+    component: () => import('../views/NewJobView.vue'),
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
     path: '/tracking',
     name: 'tracking',
     component: () => import('../views/TrackingView.vue'),
