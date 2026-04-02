@@ -14,7 +14,7 @@
     </div>
 
     <template v-if="store.kpis">
-      <KpiGrid :kpis="store.kpis" @card-click="handleKpiClick" />
+      <KpiGrid :kpis="store.kpis" :completed-total="store.completedJobs.length" @card-click="handleKpiClick" />
     </template>
     <template v-else>
       <div class="kpi-grid">
