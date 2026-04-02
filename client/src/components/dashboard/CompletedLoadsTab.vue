@@ -1,18 +1,18 @@
 <template>
   <div>
-    <div class="px-3 py-2 border-b border-white/10">
+    <div class="px-3 py-2 border-b border-gray-200">
       <input v-model="searchQuery" type="text" placeholder="Search load number..."
-        class="w-full max-w-[280px] px-3 py-1.5 text-sm bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 outline-none focus:border-sky-400/50" />
+        class="w-full max-w-[280px] px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg text-gray-800 placeholder-gray-400 outline-none focus:border-sky-400/50" />
     </div>
     <div class="overflow-x-auto">
       <table v-if="filteredJobs.length > 0" class="w-full text-sm">
         <thead>
-          <tr class="border-b border-white/10">
+          <tr class="border-b border-gray-200">
             <th v-for="col in displayCols" :key="col" class="px-3 py-2.5 text-left text-[0.68rem] font-semibold uppercase tracking-wider text-gray-400">{{ col }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-white/5 hover:bg-white/[0.02] cursor-pointer" @click="openDetail(job)">
+          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" @click="openDetail(job)">
             <td v-for="col in displayCols" :key="col" class="px-3 py-2.5">
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
               <template v-else>{{ cellValue(job, col) }}</template>
@@ -25,18 +25,18 @@
     <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
 
     <Teleport to="body">
-      <div v-if="selectedJob" class="fixed inset-0 bg-black/40 backdrop-blur-sm z-[200] flex items-center justify-center" @click.self="selectedJob = null">
-        <div class="bg-[var(--bg)] rounded-2xl w-[92%] max-w-[680px] max-h-[85vh] flex flex-col shadow-2xl">
-          <div class="flex items-center justify-between px-5 py-4 border-b border-white/10">
+      <div v-if="selectedJob" class="fixed inset-0 bg-black/30 backdrop-blur-sm z-[200] flex items-center justify-center" @click.self="selectedJob = null">
+        <div class="bg-white rounded-2xl w-[92%] max-w-[680px] max-h-[85vh] flex flex-col shadow-2xl">
+          <div class="flex items-center justify-between px-5 py-4 border-b border-gray-200">
             <h3 class="text-lg font-bold">{{ loadIdValue || 'Load Details' }}</h3>
-            <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-gray-400 hover:text-white text-xl" @click="selectedJob = null">&times;</button>
+            <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-800 text-xl" @click="selectedJob = null">&times;</button>
           </div>
           <div class="p-5 overflow-y-auto flex-1">
             <template v-for="section in detailSections" :key="section.title">
               <div v-if="section.fields.length" class="mb-4">
                 <div class="text-[0.68rem] font-bold uppercase tracking-wider text-gray-400 mb-2">{{ section.title }}</div>
-                <div class="bg-white/5 border border-white/10 rounded-lg grid grid-cols-2 overflow-hidden">
-                  <div v-for="field in section.fields" :key="field.col" :class="['flex flex-col gap-0.5 p-3 border-b border-white/5', field.wide ? 'col-span-2' : '']">
+                <div class="bg-white border border-gray-200 rounded-lg grid grid-cols-2 overflow-hidden">
+                  <div v-for="field in section.fields" :key="field.col" :class="['flex flex-col gap-0.5 p-3 border-b border-gray-100', field.wide ? 'col-span-2' : '']">
                     <span class="text-[0.68rem] font-semibold uppercase text-gray-400">{{ field.col }}</span>
                     <span class="text-sm">{{ field.value || '\u2014' }}</span>
                   </div>
@@ -45,13 +45,13 @@
             </template>
             <div class="mb-4">
               <div class="text-[0.68rem] font-bold uppercase tracking-wider text-gray-400 mb-2">Documents</div>
-              <div class="bg-white/5 border border-white/10 rounded-lg p-3">
+              <div class="bg-white border border-gray-200 rounded-lg p-3">
                 <div v-if="loadingDocs" class="text-center text-gray-500 text-sm py-3">Loading...</div>
                 <div v-else-if="loadDocs.length === 0" class="text-center text-gray-500 text-sm py-3">No documents</div>
                 <div v-else class="space-y-2">
                   <div v-for="doc in loadDocs" :key="doc.id" class="flex items-center justify-between py-1">
                     <div class="flex items-center gap-2">
-                      <span class="text-xs font-semibold px-2 py-0.5 rounded bg-sky-500/10 text-sky-400">{{ doc.type }}</span>
+                      <span class="text-xs font-semibold px-2 py-0.5 rounded bg-sky-50 text-sky-600">{{ doc.type }}</span>
                       <span class="text-sm">{{ doc.file_name }}</span>
                     </div>
                     <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" class="text-xs text-sky-400 hover:underline">View</a>

@@ -1,28 +1,28 @@
 <template>
   <div>
-    <div class="px-3 py-2 border-b border-white/10">
+    <div class="px-3 py-2 border-b border-gray-200">
       <input v-model="searchQuery" type="text" placeholder="Search load number..."
-        class="w-full max-w-[280px] px-3 py-1.5 text-sm bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 outline-none focus:border-sky-400/50" />
+        class="w-full max-w-[280px] px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg text-gray-800 placeholder-gray-400 outline-none focus:border-sky-400/50" />
     </div>
 
     <div class="overflow-x-auto">
       <SkeletonLoader v-if="loading" />
       <table v-else-if="filteredJobs.length > 0" class="w-full text-sm">
         <thead>
-          <tr class="border-b border-white/10">
+          <tr class="border-b border-gray-200">
             <th v-for="col in displayCols" :key="col" class="px-3 py-2.5 text-left text-[0.68rem] font-semibold uppercase tracking-wider text-gray-400">{{ col }}</th>
             <th class="px-3 py-2.5 text-left text-[0.68rem] font-semibold uppercase tracking-wider text-gray-400">Assign Driver</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-white/5 hover:bg-white/[0.02] cursor-pointer" @click="openDetail(job)">
+          <tr v-for="job in paginatedItems" :key="job._rowIndex" class="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" @click="openDetail(job)">
             <td v-for="col in displayCols" :key="col" class="px-3 py-2.5">
               <StatusBadge v-if="/status/i.test(col)" :status="job[col] || 'Unassigned'" />
               <template v-else>{{ cellValue(job, col) }}</template>
             </td>
             <td class="px-3 py-2.5" @click.stop>
               <div v-if="!hideAssign(job)" class="flex items-center gap-2">
-                <select v-model="assignSelections[job._rowIndex]" class="px-2 py-1 text-sm bg-white/5 border border-white/10 rounded text-white outline-none min-w-[130px]">
+                <select v-model="assignSelections[job._rowIndex]" class="px-2 py-1 text-sm bg-white border border-gray-200 rounded text-gray-800 outline-none min-w-[130px]">
                   <option value="">Select driver</option>
                   <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
                 </select>
@@ -38,21 +38,21 @@
     <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
 
     <Teleport to="body">
-      <div v-if="selectedJob" class="fixed inset-0 bg-black/40 backdrop-blur-sm z-[200] flex items-center justify-center" @click.self="selectedJob = null">
-        <div class="bg-[var(--bg)] rounded-2xl w-[92%] max-w-[680px] max-h-[85vh] flex flex-col shadow-2xl">
-          <div class="flex items-center justify-between px-5 py-4 border-b border-white/10">
+      <div v-if="selectedJob" class="fixed inset-0 bg-black/30 backdrop-blur-sm z-[200] flex items-center justify-center" @click.self="selectedJob = null">
+        <div class="bg-white rounded-2xl w-[92%] max-w-[680px] max-h-[85vh] flex flex-col shadow-2xl">
+          <div class="flex items-center justify-between px-5 py-4 border-b border-gray-200">
             <div class="flex items-center gap-3">
               <h3 class="text-lg font-bold">{{ loadIdValue || 'Load Details' }}</h3>
               <StatusBadge v-if="statusValue" :status="statusValue" />
             </div>
-            <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-gray-400 hover:text-white text-xl" @click="selectedJob = null">&times;</button>
+            <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-800 text-xl" @click="selectedJob = null">&times;</button>
           </div>
           <div class="p-5 overflow-y-auto flex-1">
             <template v-for="section in detailSections" :key="section.title">
               <div v-if="section.fields.length" class="mb-4">
                 <div class="text-[0.68rem] font-bold uppercase tracking-wider text-gray-400 mb-2">{{ section.title }}</div>
-                <div class="bg-white/5 border border-white/10 rounded-lg grid grid-cols-2 overflow-hidden">
-                  <div v-for="field in section.fields" :key="field.col" :class="['flex flex-col gap-0.5 p-3 border-b border-white/5', field.wide ? 'col-span-2' : '']">
+                <div class="bg-white border border-gray-200 rounded-lg grid grid-cols-2 overflow-hidden">
+                  <div v-for="field in section.fields" :key="field.col" :class="['flex flex-col gap-0.5 p-3 border-b border-gray-100', field.wide ? 'col-span-2' : '']">
                     <span class="text-[0.68rem] font-semibold uppercase text-gray-400">{{ field.col }}</span>
                     <span class="text-sm">
                       <StatusBadge v-if="/status/i.test(field.col) && field.value" :status="field.value" />
