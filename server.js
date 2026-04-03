@@ -442,6 +442,73 @@ async function getSheetId(sheets, sheetName) {
 }
 
 // ============================================================
+// Auto-sync Driver users ↔ Carrier Database Google Sheet
+// ============================================================
+async function syncDriverToCarrierSheet(driverName, opts = {}) {
+	const { oldName, email, companyName, action } = opts;
+	try {
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
+		const rows = resp.data.values || [];
+		if (rows.length === 0) return;
+		const headers = rows[0];
+		const driverIdx = headers.findIndex(h => /driver/i.test(h));
+		const carrierIdx = headers.findIndex(h => /carrier/i.test(h));
+		const emailIdx = headers.findIndex(h => /email/i.test(h));
+		const trucksIdx = headers.findIndex(h => /truck/i.test(h));
+		const di = driverIdx !== -1 ? driverIdx : 0;
+
+		// Find existing row by name
+		const searchName = (oldName || driverName || "").trim().toLowerCase();
+		let foundRow = -1;
+		for (let i = 1; i < rows.length; i++) {
+			if ((rows[i][di] || "").trim().toLowerCase() === searchName) { foundRow = i; break; }
+		}
+
+		// Get assigned truck unit number
+		const truck = driverName ? db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driverName.trim()) : null;
+		const truckUnit = truck ? truck.unit_number : "";
+
+		if (action === "add") {
+			if (foundRow !== -1) return; // already exists
+			const newRow = new Array(headers.length).fill("");
+			if (di !== -1) newRow[di] = driverName;
+			if (carrierIdx !== -1) newRow[carrierIdx] = companyName || "";
+			if (emailIdx !== -1) newRow[emailIdx] = email || "";
+			if (trucksIdx !== -1) newRow[trucksIdx] = truckUnit;
+			await sheets.spreadsheets.values.append({
+				spreadsheetId: SPREADSHEET_ID, range: "Carrier Database",
+				valueInputOption: "USER_ENTERED", requestBody: { values: [newRow] },
+			});
+		} else if (action === "update") {
+			if (foundRow === -1) {
+				// Row doesn't exist yet — add it
+				return syncDriverToCarrierSheet(driverName, { ...opts, action: "add" });
+			}
+			const row = rows[foundRow];
+			// Preserve existing values, only update fields we manage
+			if (di !== -1) row[di] = driverName;
+			if (carrierIdx !== -1 && companyName !== undefined) row[carrierIdx] = companyName;
+			if (emailIdx !== -1 && email !== undefined) row[emailIdx] = email;
+			if (trucksIdx !== -1) row[trucksIdx] = truckUnit;
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID, range: `Carrier Database!A${foundRow + 1}`,
+				valueInputOption: "USER_ENTERED", requestBody: { values: [row] },
+			});
+		} else if (action === "delete") {
+			if (foundRow === -1) return; // nothing to delete
+			const sheetId = await getSheetId(sheets, "Carrier Database");
+			await sheets.spreadsheets.batchUpdate({
+				spreadsheetId: SPREADSHEET_ID,
+				requestBody: { requests: [{ deleteDimension: { range: { sheetId, dimension: "ROWS", startIndex: foundRow, endIndex: foundRow + 1 } } }] },
+			});
+		}
+	} catch (err) {
+		console.error("syncDriverToCarrierSheet error:", err.message);
+	}
+}
+
+// ============================================================
 // AUTH — Session-based authentication with roles (SQLite)
 // ============================================================
 // Roles: Super Admin (full access), Admin (dispatch, no broker/financial), Driver (own data only, no rate/revenue), Investor (financial view)
@@ -590,6 +657,11 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		).run(username, hash, role, driverName || "", email || "", fullName || "", companyName || "");
 
+		// Auto-sync driver to Carrier Database sheet
+		if (role === "Driver" && driverName) {
+			syncDriverToCarrierSheet(driverName, { email, companyName, action: "add" });
+		}
+
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error creating user:", error.message);
@@ -676,6 +748,11 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				db.prepare("UPDATE trucks SET assigned_driver = ? WHERE LOWER(assigned_driver) = ?").run(newName, oldName);
 				db.prepare("UPDATE documents SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName);
 			}
+			// Sync renamed driver to Carrier Database sheet
+			syncDriverToCarrierSheet(driverName, { oldName: user.driver_name, email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
+		} else if (user.role === "Driver" && user.driver_name && (email !== undefined || companyName !== undefined)) {
+			// Name didn't change but email/company did
+			syncDriverToCarrierSheet(user.driver_name, { email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
 		}
 
 		res.json({ success: true });
@@ -739,6 +816,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	if (user.role === "Investor") {
 		db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id);
 		db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id);
+	}
+	// Sync: remove driver from Carrier Database sheet
+	if (user.role === "Driver" && user.driver_name) {
+		syncDriverToCarrierSheet(user.driver_name, { action: "delete" });
 	}
 	db.prepare("DELETE FROM users WHERE id = ?").run(id);
 	res.json({ success: true });
@@ -865,6 +946,16 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 		params.push(id);
 		db.prepare(`UPDATE trucks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+		// Sync truck assignment to Carrier Database sheet
+		if (assignedDriver !== undefined) {
+			const oldDriver = truck.assigned_driver;
+			if (assignedDriver && assignedDriver.trim()) {
+				syncDriverToCarrierSheet(assignedDriver.trim(), { action: "update" });
+			}
+			if (oldDriver && oldDriver.trim() && oldDriver.trim().toLowerCase() !== (assignedDriver || "").trim().toLowerCase()) {
+				syncDriverToCarrierSheet(oldDriver.trim(), { action: "update" });
+			}
+		}
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error updating truck:", error.message);
