@@ -67,11 +67,14 @@
       <InvestorChat :trucks="trucks" />
       <DocumentPortal />
       <LegalDocumentPortal :trucks="trucks" />
+      <!-- Business Configuration hidden from investor view; admin manages via Admin Tools -->
+      <!--
       <ConfigPanel
         v-if="authStore.user?.role === 'Super Admin'"
         :config="store.config"
         @save="handleSaveConfig"
       />
+      -->
     </template>
 
     <!-- Error State -->

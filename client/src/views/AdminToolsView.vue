@@ -203,15 +203,26 @@
         </div>
       </div>
     </div>
+
+    <!-- Business Configuration (Investor Settings) -->
+    <ConfigPanel
+      :config="investorStore.config"
+      @save="handleSaveConfig"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useAdminToolsStore } from '../stores/adminTools'
+import { useInvestorStore } from '../stores/investor'
 import { useToast } from '../composables/useToast'
+import ConfigPanel from '../components/investor/ConfigPanel.vue'
 
 const store = useAdminToolsStore()
+const investorStore = useInvestorStore()
+
+onMounted(() => { if (!investorStore.data) investorStore.load().catch(() => {}) })
 const { show: toast } = useToast()
 const dupShowCount = ref(20)
 
@@ -246,6 +257,15 @@ async function runOrphanScan() {
     toast(count > 0 ? `Found ${count} tables with orphans` : 'No orphan records')
   } catch {
     toast('Scan failed', 'error')
+  }
+}
+
+async function handleSaveConfig(cfg) {
+  try {
+    await investorStore.updateConfig(cfg)
+    toast('Configuration saved')
+  } catch {
+    toast('Failed to save configuration', 'error')
   }
 }
 
