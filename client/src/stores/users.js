@@ -7,6 +7,7 @@ export const useUsersStore = defineStore('users', {
   state: () => ({
     users: [],
     driverNames: [],
+    carrierNames: [],
     isLoading: false,
   }),
 
@@ -46,6 +47,13 @@ export const useUsersStore = defineStore('users', {
             .map((row) => (row[driverCol] || '').trim())
             .filter(Boolean)
           this.driverNames = [...new Set(names)].sort()
+        }
+        const carrierCol = headers.find((h) => /carrier.?name/i.test(h))
+        if (carrierCol) {
+          const names = (json.data || [])
+            .map((row) => (row[carrierCol] || '').trim())
+            .filter(Boolean)
+          this.carrierNames = [...new Set(names)].sort()
         }
       } catch {
         console.error('Failed to load driver names')

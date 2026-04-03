@@ -91,8 +91,11 @@
           </div>
 
           <div class="edit-field">
-            <label>Company Name</label>
-            <input v-model="editForm.companyName" type="text" placeholder="e.g. Smith Trucking LLC" />
+            <label>Company Name (Carrier)</label>
+            <select v-model="editForm.companyName">
+              <option value="">-- Select carrier --</option>
+              <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
+            </select>
           </div>
 
           <div class="edit-field">
@@ -133,6 +136,7 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 defineProps({
   users: { type: Array, default: () => [] },
   driverNames: { type: Array, default: () => [] },
+  carrierNames: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits(['delete', 'update', 'rate'])

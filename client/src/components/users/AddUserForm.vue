@@ -56,13 +56,11 @@
     </div>
 
     <div v-show="form.role === 'Investor'" class="form-group">
-      <label class="form-label">Company Name</label>
-      <input
-        v-model="form.companyName"
-        class="form-input"
-        type="text"
-        placeholder="e.g. Smith Trucking LLC"
-      />
+      <label class="form-label">Company Name (Carrier)</label>
+      <select v-model="form.companyName" class="form-select">
+        <option value="">-- Select carrier --</option>
+        <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
+      </select>
     </div>
 
     <div class="form-group">
@@ -85,6 +83,7 @@ import { reactive, ref } from 'vue'
 
 defineProps({
   driverNames: { type: Array, default: () => [] },
+  carrierNames: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits(['submit'])

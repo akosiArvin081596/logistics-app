@@ -4,13 +4,13 @@
       <h2>User Management</h2>
     </div>
 
-    <AddUserForm :driver-names="store.availableDriverNames" @submit="handleAddUser" />
+    <AddUserForm :driver-names="store.availableDriverNames" :carrier-names="store.carrierNames" @submit="handleAddUser" />
 
     <template v-if="store.isLoading">
       <SkeletonLoader :rows="4" :cols="5" />
     </template>
     <template v-else>
-      <UserTable :users="store.users" :driver-names="store.driverNames" @delete="handleDeleteUser" @update="handleUpdateUser" @rate="handleRateUser" />
+      <UserTable :users="store.users" :driver-names="store.driverNames" :carrier-names="store.carrierNames" @delete="handleDeleteUser" @update="handleUpdateUser" @rate="handleRateUser" />
     </template>
   </div>
 </template>
