@@ -15,6 +15,7 @@
 
     <template v-if="store.kpis">
       <KpiGrid :kpis="store.kpis" :completed-total="store.completedJobs.length" @card-click="handleKpiClick" />
+      <RevenueGrid v-if="auth.isSuperAdmin" :revenue="store.revenue" />
     </template>
     <template v-else>
       <div class="kpi-grid">
@@ -63,13 +64,16 @@ import { useToast } from '../composables/useToast'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
+import { useAuthStore } from '../stores/auth'
 import KpiGrid from '../components/dashboard/KpiGrid.vue'
+import RevenueGrid from '../components/dashboard/RevenueGrid.vue'
 import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
 import ActiveLoadsTab from '../components/dashboard/ActiveLoadsTab.vue'
 import FleetTab from '../components/dashboard/FleetTab.vue'
 import CompletedLoadsTab from '../components/dashboard/CompletedLoadsTab.vue'
 
 const store = useDashboardStore()
+const auth = useAuthStore()
 const { show: toast } = useToast()
 const socket = useSocket()
 const activeTab = ref('jobBoard')
