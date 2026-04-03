@@ -79,8 +79,11 @@
               <input v-model="editForm.fullName" type="text" />
             </div>
             <div class="edit-field">
-              <label>Company Name</label>
-              <input v-model="editForm.companyName" type="text" />
+              <label>Company Name (Carrier)</label>
+              <select v-model="editForm.companyName">
+                <option value="">-- Select carrier --</option>
+                <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
+              </select>
             </div>
           </div>
 
@@ -174,6 +177,7 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 const props = defineProps({
   investors: { type: Array, default: () => [] },
   investorUsers: { type: Array, default: () => [] },
+  carrierNames: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits(['delete', 'update'])

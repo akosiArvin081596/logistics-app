@@ -6,6 +6,7 @@
 
     <AddInvestorForm
       :investor-users="store.investorUsers"
+      :carrier-names="store.carrierNames"
       @submit="handleAdd"
     />
 
@@ -16,6 +17,7 @@
       <InvestorTable
         :investors="store.investors"
         :investor-users="store.investorUsers"
+        :carrier-names="store.carrierNames"
         @delete="handleDelete"
         @update="handleUpdate"
       />
@@ -64,5 +66,6 @@ async function handleDelete(id) {
 onMounted(() => {
   store.load()
   store.loadInvestorUsers()
+  store.loadCarrierNames()
 })
 </script>

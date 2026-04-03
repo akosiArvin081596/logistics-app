@@ -7,10 +7,25 @@ export const useInvestorsStore = defineStore('investors', {
   state: () => ({
     investors: [],
     investorUsers: [],
+    carrierNames: [],
     isLoading: false,
   }),
 
   actions: {
+    async loadCarrierNames() {
+      try {
+        const json = await api.get(`/api/data?sheet=${encodeURIComponent('Carrier Database')}&page=1&limit=200`)
+        const headers = json.headers || []
+        const col = headers.find(h => /carrier.?name/i.test(h))
+        if (col) {
+          const names = (json.data || []).map(r => (r[col] || '').trim()).filter(Boolean)
+          this.carrierNames = [...new Set(names)].sort()
+        }
+      } catch {
+        console.error('Failed to load carrier names')
+      }
+    },
+
     async load() {
       this.isLoading = true
       try {
