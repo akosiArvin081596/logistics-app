@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 /**
  * Batch geocode load addresses and update Origin/Dest Lat/Lng columns.
- * Usage: node scripts/geocode-loads.js <session-cookie>
+ * Usage: GOOGLE_MAPS_API_KEY=<key> node scripts/geocode-loads.js <session-cookie>
  *
- * Uses OpenStreetMap Nominatim (free, 1 req/sec limit).
+ * Uses Google Geocoding API.
  */
 
 const BASE = "https://logistics-app.abedubas.dev";
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 const COOKIE = process.argv[2];
 if (!COOKIE) {
-  console.error("Usage: node scripts/geocode-loads.js <connect.sid cookie value>");
+  console.error("Usage: GOOGLE_MAPS_API_KEY=<key> node scripts/geocode-loads.js <connect.sid cookie value>");
+  process.exit(1);
+}
+if (!GOOGLE_MAPS_API_KEY) {
+  console.error("Error: GOOGLE_MAPS_API_KEY environment variable is required");
   process.exit(1);
 }
 
@@ -23,17 +28,13 @@ async function geocode(address) {
   const key = address.trim().toLowerCase();
   if (geocodeCache.has(key)) return geocodeCache.get(key);
 
-  // Rate limit: 1 req/sec for Nominatim
-  await new Promise(r => setTimeout(r, 1100));
-
   try {
-    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`;
-    const resp = await fetch(url, {
-      headers: { "User-Agent": "LogisX-Geocoder/1.0" },
-    });
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_API_KEY}`;
+    const resp = await fetch(url);
     const data = await resp.json();
-    if (data && data.length > 0) {
-      const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+    if (data.status === "OK" && data.results && data.results.length > 0) {
+      const loc = data.results[0].geometry.location;
+      const result = { lat: loc.lat, lng: loc.lng };
       geocodeCache.set(key, result);
       return result;
     }

@@ -1,8 +1,12 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
+import { Locale } from 'vant'
+import enUS from 'vant/es/locale/lang/en-US'
 import App from './App.vue'
 import router from './router'
 import './assets/shared.css'
+
+Locale.use('en-US', enUS)
 
 const app = createApp(App)
 

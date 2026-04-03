@@ -38,13 +38,13 @@
         </TabsList>
         <CardContent class="flex-1 overflow-y-auto" style="padding:0;">
           <TabsContent value="jobBoard" style="margin-top:0;">
-            <JobBoardTab :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" />
+            <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" />
           </TabsContent>
           <TabsContent value="activeLoads" style="margin-top:0;">
-            <ActiveLoadsTab :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" />
+            <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" />
           </TabsContent>
           <TabsContent value="completed" style="margin-top:0;">
-            <CompletedLoadsTab :jobs="store.completedJobs" :headers="store.completedHeaders" />
+            <CompletedLoadsTab :active="activeTab === 'completed'" :jobs="store.completedJobs" :headers="store.completedHeaders" />
           </TabsContent>
           <TabsContent value="fleet" style="margin-top:0;">
             <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />

@@ -71,7 +71,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useToast } from '../../composables/useToast'
 import { Input } from '@/components/ui/input'
@@ -84,7 +84,8 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import SkeletonLoader from '../shared/SkeletonLoader.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
-const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false } })
+const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
+watch(() => props.active, v => { if (!v) selectedJob.value = null })
 const emit = defineEmits(['assign'])
 const { show: toast } = useToast()
 const assignSelections = reactive({})

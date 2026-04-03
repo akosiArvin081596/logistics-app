@@ -16,9 +16,29 @@
         <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
         <span v-if="etaMinutes != null" class="info-item">{{ etaMinutes }} min ETA</span>
         <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
+        <button class="expand-btn" @click="expanded = true" title="Expand map">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
       </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
       <div ref="mapContainer" class="map-container"></div>
+
+      <!-- Expanded fullscreen overlay -->
+      <Teleport to="body">
+        <div v-if="expanded" class="map-fullscreen-overlay" @click.self="expanded = false">
+          <div class="map-fullscreen-panel">
+            <div class="map-fullscreen-header">
+              <div class="map-fullscreen-info">
+                <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
+                <span v-if="etaMinutes != null" class="info-item">{{ etaMinutes }} min ETA</span>
+                <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
+              </div>
+              <button class="collapse-btn" @click="expanded = false" title="Close">✕</button>
+            </div>
+            <div ref="expandedMapContainer" class="map-fullscreen-body"></div>
+          </div>
+        </div>
+      </Teleport>
     </template>
   </div>
 </template>
@@ -38,15 +58,22 @@ const props = defineProps({
 const api = useApi()
 const { createMap } = useGoogleMaps()
 const mapContainer = ref(null)
+const expandedMapContainer = ref(null)
+const expanded = ref(false)
 const routePoints = ref([])
 const distanceMiles = ref(null)
 const etaMinutes = ref(null)
 
 let map = null
+let expandedMap = null
 let originMarker = null
 let destMarker = null
 let driverMarker = null
 let routeLine = null
+let exOriginMarker = null
+let exDestMarker = null
+let exDriverMarker = null
+let exRouteLine = null
 
 function findCol(regex) {
   return (props.headers || []).find(h => regex.test(h)) || null
@@ -190,6 +217,48 @@ watch(() => props.driverPosition, (pos) => {
   if (dist > 0.06 && Date.now() - lastRouteTime >= 60000) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute() }
 }, { deep: true })
 
+function renderExpandedMap() {
+  if (!expandedMap) return
+  if (exOriginMarker) { exOriginMarker.map = null; exOriginMarker = null }
+  if (exDestMarker) { exDestMarker.map = null; exDestMarker = null }
+  if (exDriverMarker) { exDriverMarker.map = null; exDriverMarker = null }
+  if (exRouteLine) { exRouteLine.setMap(null); exRouteLine = null }
+
+  if (originLatLng.value && hasCoords.value) {
+    exOriginMarker = new google.maps.marker.AdvancedMarkerElement({ position: originLatLng.value, map: expandedMap, content: createDotPin('#16a34a', 14), title: 'Pickup' })
+  }
+  if (destLatLng.value && hasCoords.value) {
+    exDestMarker = new google.maps.marker.AdvancedMarkerElement({ position: destLatLng.value, map: expandedMap, content: createDotPin('#dc2626', 14), title: 'Drop-off' })
+  }
+  if (driverLatLng.value) {
+    exDriverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map: expandedMap, content: createDotPin('#2563eb', 16), title: driverName.value || 'Driver' })
+  }
+  if (routePoints.value.length >= 2) {
+    exRouteLine = new google.maps.Polyline({
+      path: routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude })),
+      strokeColor: '#000000', strokeOpacity: 0.7, strokeWeight: 5,
+      map: expandedMap,
+      icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
+    })
+  }
+  const bounds = new google.maps.LatLngBounds()
+  let count = 0
+  if (originLatLng.value) { bounds.extend(originLatLng.value); count++ }
+  if (destLatLng.value) { bounds.extend(destLatLng.value); count++ }
+  if (driverLatLng.value) { bounds.extend(driverLatLng.value); count++ }
+  if (count >= 2) expandedMap.fitBounds(bounds, 50)
+  else if (count === 1) { expandedMap.setCenter(bounds.getCenter()); expandedMap.setZoom(12) }
+}
+
+watch(expanded, async (val) => {
+  if (!val) { expandedMap = null; return }
+  await nextTick()
+  if (!expandedMapContainer.value) return
+  const center = map ? map.getCenter().toJSON() : { lat: 0, lng: 0 }
+  expandedMap = await createMap(expandedMapContainer.value, { zoom: map ? map.getZoom() : 5, center, mapTypeId: 'hybrid' })
+  renderExpandedMap()
+})
+
 function focusOn(lat, lng) { if (map) { map.panTo({ lat, lng }); map.setZoom(15) } }
 defineExpose({ focusOn })
 
@@ -229,4 +298,15 @@ onMounted(() => {
 .gps-overlay { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; color: var(--text-dim); font-size: 0.82rem; font-weight: 500; }
 .gps-spinner { width: 28px; height: 28px; border: 3px solid var(--border, #e5e7eb); border-top-color: var(--accent, #6366f1); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.expand-btn { margin-left: auto; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: none; background: var(--bg, #f5f6fa); color: var(--text-dim, #6b7280); cursor: pointer; transition: background 0.15s, color 0.15s; }
+.expand-btn:hover { background: var(--accent, #0ea5e9); color: #fff; }
+
+.map-fullscreen-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; }
+.map-fullscreen-panel { width: 92vw; height: 85vh; max-width: 1400px; background: #fff; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 25px 50px rgba(0,0,0,0.25); }
+.map-fullscreen-header { display: flex; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid #e5e7eb; }
+.map-fullscreen-info { display: flex; gap: 0.75rem; flex: 1; }
+.collapse-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; border: 1px solid #e5e7eb; background: #fff; font-size: 1rem; color: #6b7280; cursor: pointer; transition: background 0.15s, color 0.15s; }
+.collapse-btn:hover { background: #f3f4f6; color: #111; }
+.map-fullscreen-body { flex: 1; }
 </style>

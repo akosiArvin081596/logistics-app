@@ -404,7 +404,6 @@ let sheetsClient = null;
 let driveClient = null;
 const sheetIdCache = new Map();
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
-const ORS_API_KEY = process.env.ORS_API_KEY || "";
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 
 async function getSheets() {

@@ -30,8 +30,8 @@ Required files at project root:
 
 ```
 GOOGLE_DRIVE_FOLDER_ID=<Drive folder ID for POD uploads — optional, uploads skip Drive if empty>
+GOOGLE_MAPS_API_KEY=<Google Maps API key — required for maps, routing, geocoding, and places>
 PORT=3000  # optional, defaults to 3000
-ORS_API_KEY=<OpenRouteService API key — required for routing/directions>
 ```
 
 Hardcoded values in `server.js` (change if forking):

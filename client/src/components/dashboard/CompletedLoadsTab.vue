@@ -68,7 +68,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
 import { Input } from '@/components/ui/input'
@@ -80,7 +80,8 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
 const api = useApi()
-const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true } })
+const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, active: { type: Boolean, default: true } })
+watch(() => props.active, v => { if (!v) selectedJob.value = null })
 const searchQuery = ref('')
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })

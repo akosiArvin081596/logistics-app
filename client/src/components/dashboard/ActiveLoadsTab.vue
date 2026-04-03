@@ -95,7 +95,7 @@
 </template>
 
 <script setup>
-import { computed, ref, reactive } from 'vue'
+import { computed, ref, reactive, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
 import { Input } from '@/components/ui/input'
@@ -108,7 +108,8 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
 const api = useApi()
-const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] } })
+const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] }, active: { type: Boolean, default: true } })
+watch(() => props.active, v => { if (!v) { selectedJob.value = null; selectedDriverPosition.value = null } })
 const emit = defineEmits(['reassign', 'cancel', 'status-update'])
 const searchQuery = ref('')
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
