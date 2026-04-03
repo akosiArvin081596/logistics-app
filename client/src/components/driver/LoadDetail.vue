@@ -27,22 +27,25 @@
 
     <!-- Main accordion sections -->
     <van-collapse v-model="openSections" class="detail-collapse" :border="false">
-      <van-collapse-item v-if="truck" title="Truck Details" name="truck">
-        <div class="truck-detail-card">
-          <img v-if="truck.photo" :src="truck.photo" class="truck-photo" />
-          <div class="truck-fields">
-            <van-cell title="Unit #" :value="truck.unit_number || '\u2014'" />
-            <van-cell title="Make / Model" :value="[truck.make, truck.model].filter(Boolean).join(' ') || '\u2014'" />
-            <van-cell title="Year" :value="truck.year || '\u2014'" />
-            <van-cell title="VIN" :value="truck.vin || '\u2014'" />
-            <van-cell title="License Plate" :value="truck.license_plate || '\u2014'" />
-            <van-cell title="Status">
-              <template #value>
-                <span :class="['truck-status', 'ts-' + (truck.status || 'Active').toLowerCase()]">{{ truck.status || 'Active' }}</span>
-              </template>
-            </van-cell>
+      <van-collapse-item title="Truck Details" name="truck">
+        <template v-if="truck">
+          <div class="truck-detail-card">
+            <img v-if="truck.photo" :src="truck.photo" class="truck-photo" />
+            <div class="truck-fields">
+              <van-cell title="Unit #" :value="truck.unit_number || '\u2014'" />
+              <van-cell title="Make / Model" :value="[truck.make, truck.model].filter(Boolean).join(' ') || '\u2014'" />
+              <van-cell title="Year" :value="truck.year || '\u2014'" />
+              <van-cell title="VIN" :value="truck.vin || '\u2014'" />
+              <van-cell title="License Plate" :value="truck.license_plate || '\u2014'" />
+              <van-cell title="Status">
+                <template #value>
+                  <span :class="['truck-status', 'ts-' + (truck.status || 'Active').toLowerCase()]">{{ truck.status || 'Active' }}</span>
+                </template>
+              </van-cell>
+            </div>
           </div>
-        </div>
+        </template>
+        <van-empty v-else description="No truck assigned to this driver" image="search" :image-size="60" />
       </van-collapse-item>
 
       <van-collapse-item title="Pickup Details" name="pickup">
