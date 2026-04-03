@@ -55,11 +55,11 @@
             <option v-for="t in trucks" :key="t.id" :value="t.UnitNumber || t.unit_number">{{ t.UnitNumber || t.unit_number }}</option>
           </select>
           <span v-if="attachFile" class="attach-preview">{{ attachFile.name }} <button class="attach-clear" @click="clearAttach">&times;</button></span>
+          <button class="send-btn" style="margin-left:auto;" :disabled="(!draft.trim() && !attachFile && !selectedAsset) || sending" @click="send">
+            {{ sending ? '...' : 'Send' }}
+          </button>
         </div>
       </div>
-      <button class="send-btn" :disabled="(!draft.trim() && !attachFile && !selectedAsset) || sending" @click="send">
-        {{ sending ? '...' : 'Send' }}
-      </button>
     </div>
   </div>
 </template>
@@ -303,13 +303,14 @@ onUnmounted(() => {
   font-size: 0.85rem; line-height: 1; padding: 0;
 }
 .send-btn {
-  padding: 0.6rem 1.25rem; background: var(--accent); color: #fff;
+  padding: 0.6rem 1.25rem; background: #0284c7; color: #fff;
   border: none; border-radius: 8px; font-family: inherit;
   font-size: 0.85rem; font-weight: 600; cursor: pointer;
-  transition: opacity 0.15s; white-space: nowrap;
+  transition: all 0.15s; white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(2, 132, 199, 0.3);
 }
-.send-btn:hover { opacity: 0.85; }
-.send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.send-btn:hover { background: #0369a1; }
+.send-btn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; background: #94a3b8; }
 .bubble-attachment { margin-top: 0.3rem; }
 .attach-img { max-width: 200px; max-height: 140px; border-radius: 6px; display: block; }
 .attach-link {
