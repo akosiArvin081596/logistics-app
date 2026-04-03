@@ -63,8 +63,8 @@ function findCol(headers, regex) {
 const statusCol = computed(() => findCol(props.headers, /status/i))
 const loadIdCol = computed(() => findCol(props.headers, /load.?id|job.?id/i))
 const detailsCol = computed(() => findCol(props.headers, /details/i))
-const originCol = computed(() => (props.headers || []).find(h => /origin|pickup.*city|shipper.*city/i.test(h) && !/lat|lng|lon/i.test(h)) || null)
-const destCol = computed(() => (props.headers || []).find(h => /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null)
+const originCol = computed(() => (props.headers || []).find(h => /origin|pickup.*(city|info|address)|shipper.*(city|info)/i.test(h) && !/lat|lng|lon/i.test(h)) || null)
+const destCol = computed(() => (props.headers || []).find(h => /dest|drop.*(city|info|address)|receiver.*(city|info)|delivery.*(city|info)|consignee.*(city|info)/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null)
 const pickupCol = computed(() => findCol(props.headers, /pickup.*date|pickup.*appoint/i))
 const delivCol = computed(() => findCol(props.headers, /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint|completion.*date/i))
 
