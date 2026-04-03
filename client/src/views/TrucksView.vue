@@ -6,7 +6,7 @@
 
     <AddTruckForm
       v-if="authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Dispatcher'"
-      :driver-names="store.availableDriverNames"
+      :driver-names="store.driverNames"
       :investor-users="store.investorUsers"
       :show-owner="true"
       @submit="handleAddTruck"
