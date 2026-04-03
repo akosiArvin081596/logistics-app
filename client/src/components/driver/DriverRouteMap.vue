@@ -25,7 +25,7 @@
 
       <!-- Expanded fullscreen overlay -->
       <Teleport to="body">
-        <div v-if="expanded" class="map-fullscreen-overlay" @click.self="expanded = false">
+        <div v-if="expanded" class="map-fullscreen-overlay" @click.self="expanded = false" @pointerdown.stop>
           <div class="map-fullscreen-panel" @click.stop>
             <div class="map-fullscreen-header">
               <div class="map-fullscreen-info">
