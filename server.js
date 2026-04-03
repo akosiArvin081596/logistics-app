@@ -2293,6 +2293,18 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		});
 		const allCompletedJobs = [...completedJobs, ...extraCompleted];
 
+		// Sort completed jobs by most recent first
+		const sortDateCol = findCol(jobTracking.headers, /completion.*date|status.*update.*date|drop.?off.*date|assigned.*date/i);
+		if (sortDateCol) {
+			allCompletedJobs.sort((a, b) => {
+				const da = new Date((a[sortDateCol] || '').replace(/^Date:\s*/i, '').trim());
+				const db2 = new Date((b[sortDateCol] || '').replace(/^Date:\s*/i, '').trim());
+				const ta = isNaN(da) ? 0 : da.getTime();
+				const tb = isNaN(db2) ? 0 : db2.getTime();
+				return tb - ta;
+			});
+		}
+
 		// Date boundaries
 		const now = new Date();
 		const weekStart = new Date(now);
