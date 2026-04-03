@@ -124,12 +124,13 @@ function shortMonth(month) {
   display: flex; align-items: center; justify-content: center; font-size: 0.9rem;
 }
 .kpi-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 1rem; margin-bottom: 1rem;
 }
 .kpi-card {
   padding: 1rem; border: 1px solid var(--border);
   border-radius: var(--radius); text-align: center;
+  overflow: hidden; min-width: 0;
 }
 .kpi-card.accent { border-color: var(--accent); }
 .kpi-card.accent .kpi-value { color: var(--accent); }
@@ -141,8 +142,8 @@ function shortMonth(month) {
   font-size: 0.72rem; font-weight: 600; color: var(--text-dim);
   text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.4rem;
 }
-.kpi-value { font-family: 'JetBrains Mono', monospace; font-size: 1.5rem; font-weight: 700; }
-.kpi-sub { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.2rem; }
+.kpi-value { font-family: 'JetBrains Mono', monospace; font-size: clamp(1rem, 2.5vw, 1.5rem); font-weight: 700; overflow-wrap: break-word; }
+.kpi-sub { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.2rem; overflow-wrap: break-word; }
 
 .trend-chart { margin-top: 0.5rem; }
 .trend-line { height: 100px; border-bottom: 1px solid var(--border); }

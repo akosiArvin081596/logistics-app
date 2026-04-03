@@ -100,7 +100,7 @@ function monthLabel(month) {
 
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 1rem;
   margin-bottom: 1rem;
 }
@@ -110,6 +110,8 @@ function monthLabel(month) {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   text-align: center;
+  overflow: hidden;
+  min-width: 0;
 }
 
 .kpi-card.accent {
@@ -136,14 +138,16 @@ function monthLabel(month) {
 
 .kpi-value {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 1.5rem;
+  font-size: clamp(1rem, 2.5vw, 1.5rem);
   font-weight: 700;
+  overflow-wrap: break-word;
 }
 
 .kpi-sub {
   font-size: 0.72rem;
   color: var(--text-dim);
   margin-top: 0.2rem;
+  overflow-wrap: break-word;
 }
 
 .chart-bars {
