@@ -2413,8 +2413,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			jobTracking.headers,
 			/deliv|drop.?off.*date|completion.*date/i,
 		);
-		const rateCol = findCol(payments.headers, /rate|amount|total|pay/i);
-		const payStatusCol = findCol(payments.headers, /pay.*status|status/i);
+		const jtPayCol = findCol(jobTracking.headers, /payment|rate|amount|pay/i);
 		const carrierDriverCol =
 			findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
 		const truckCol = findCol(carrierDB.headers, /truck|unit|vehicle/i);
@@ -2521,13 +2520,12 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		let revTotal = 0,
 			revPaid = 0,
 			revPending = 0;
-		payments.data.forEach((r) => {
-			const amt = parseAmount(rateCol ? r[rateCol] : 0);
+		jobTracking.data.filter(hasLoadId).forEach((r) => {
+			const amt = parseAmount(jtPayCol ? r[jtPayCol] : 0);
+			if (!amt) return;
 			revTotal += amt;
-			const ps = payStatusCol
-				? (r[payStatusCol] || "").trim().toLowerCase()
-				: "";
-			if (/^paid$/i.test(ps)) revPaid += amt;
+			const status = statusCol ? (r[statusCol] || "").trim() : "";
+			if (completedStatuses.test(status)) revPaid += amt;
 			else revPending += amt;
 		});
 
