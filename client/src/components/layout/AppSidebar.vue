@@ -74,7 +74,7 @@ onMounted(() => {
 const navConfig = {
   'Super Admin': [
     { to: '/dashboard', icon: '&#9635;', label: 'Dashboard' },
-    { to: '/jobs/new', icon: '&#10010;', label: 'New Job' },
+    // { to: '/jobs/new', icon: '&#10010;', label: 'New Job' },
     { to: '/tracking', icon: '&#128205;', label: 'Tracking' },
     { to: '/notifications', icon: '&#128276;', label: 'Notifications' },
     { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
@@ -84,7 +84,7 @@ const navConfig = {
     { to: '/users', icon: '&#9881;', label: 'User Management' },
     { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
-    { to: '/archive', icon: '&#128451;', label: 'Archive' },
+    // { to: '/archive', icon: '&#128451;', label: 'Archive' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
   ],
   Dispatcher: [
