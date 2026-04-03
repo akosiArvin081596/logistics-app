@@ -93,7 +93,6 @@ const navConfig = {
     { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
     { to: '/messages', icon: '&#128172;', label: 'Messages' },
     { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
-    { to: '/data', icon: '&#9776;', label: 'Data Manager' },
   ],
   Investor: [
     { to: '/investor', icon: '&#128200;', label: 'Financial Overview' },

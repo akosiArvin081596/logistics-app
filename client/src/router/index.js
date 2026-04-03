@@ -50,7 +50,7 @@ const routes = [
     path: '/data',
     name: 'data-manager',
     component: () => import('../views/DataManagerView.vue'),
-    meta: { roles: ['Super Admin', 'Dispatcher'] },
+    meta: { roles: ['Super Admin'] },
   },
   {
     path: '/driver',
