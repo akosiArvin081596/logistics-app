@@ -271,6 +271,32 @@ try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } ca
 // Migration: add rating to users (0-5 stars, Super Admin rates drivers)
 try { db.exec("ALTER TABLE users ADD COLUMN rating REAL DEFAULT 0"); } catch {}
 
+// Audit trail table
+db.exec(`
+	CREATE TABLE IF NOT EXISTS audit_trail (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp TEXT NOT NULL,
+		user_id INTEGER NOT NULL,
+		username TEXT NOT NULL,
+		role TEXT NOT NULL,
+		action TEXT NOT NULL,
+		entity TEXT NOT NULL,
+		entity_id TEXT DEFAULT '',
+		details TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_trail(timestamp)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_trail(entity, entity_id)`);
+
+function logAudit(req, action, entity, entityId, details) {
+	try {
+		const user = req.session?.user || {};
+		db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+			.run(new Date().toISOString(), user.id || 0, user.username || 'system', user.role || 'system', action, entity, String(entityId || ''), details || '');
+	} catch (err) { console.error("Audit log error:", err.message); }
+}
+
 // Legal documents table (per-truck legal files)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS legal_documents (
@@ -665,6 +691,7 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 			syncDriverToCarrierSheet(driverName, { email, companyName, action: "add" });
 		}
 
+		logAudit(req, 'create_user', 'user', username, `Created user "${username}" with role ${role}`);
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error creating user:", error.message);
@@ -1028,6 +1055,21 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 });
 
 // Admin: bulk-rename a misspelled driver name in Job Tracking sheet
+// GET /api/admin/audit-trail — View audit log
+app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
+	const { limit = 100, entity, username } = req.query;
+	let sql = "SELECT * FROM audit_trail";
+	const conditions = [];
+	const params = [];
+	if (entity) { conditions.push("entity = ?"); params.push(entity); }
+	if (username) { conditions.push("LOWER(username) = LOWER(?)"); params.push(username); }
+	if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
+	sql += " ORDER BY id DESC LIMIT ?";
+	params.push(parseInt(limit) || 100);
+	const logs = db.prepare(sql).all(...params);
+	res.json({ logs });
+});
+
 app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { oldName, newName } = req.body;
@@ -1853,6 +1895,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 				.run(loadId, driver.trim().toLowerCase());
 		}
 
+		logAudit(req, 'dispatch_load', 'load', loadId, `Assigned driver ${driver} to load ${loadId}`);
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error dispatching load:", error.message);
@@ -2790,6 +2833,7 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 			body: `Load ${loadId}`,
 		});
 
+		logAudit(req, 'update_status', 'load', loadId, `Status changed to "${newStatus}" for load ${loadId} (driver: ${driverName})`);
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error updating driver status:", error.message);
