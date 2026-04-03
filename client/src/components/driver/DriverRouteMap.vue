@@ -70,10 +70,22 @@ let originMarker = null
 let destMarker = null
 let driverMarker = null
 let routeLine = null
+let routeAnim = null
 let exOriginMarker = null
 let exDestMarker = null
 let exDriverMarker = null
 let exRouteLine = null
+let exRouteAnim = null
+
+function animatePolyline(line) {
+  let offset = 0
+  return setInterval(() => {
+    offset = (offset + 1) % 200
+    const icons = line.get('icons')
+    icons[0].offset = (offset / 2) + '%'
+    line.set('icons', icons)
+  }, 80)
+}
 
 function findCol(regex) {
   return (props.headers || []).find(h => regex.test(h)) || null
@@ -134,6 +146,7 @@ const loadIdValue = computed(() => props.load && loadIdCol.value ? props.load[lo
 const driverName = computed(() => props.load && driverColName.value ? props.load[driverColName.value] || '' : '')
 
 function clearMapObjects() {
+  if (routeAnim) { clearInterval(routeAnim); routeAnim = null }
   if (originMarker) { originMarker.map = null; originMarker = null }
   if (destMarker) { destMarker.map = null; destMarker = null }
   if (driverMarker) { driverMarker.map = null; driverMarker = null }
@@ -161,6 +174,7 @@ function renderMarkers() {
       map,
       icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
     })
+    routeAnim = animatePolyline(routeLine)
   }
 
   fitBounds()
@@ -219,6 +233,7 @@ watch(() => props.driverPosition, (pos) => {
 
 function renderExpandedMap() {
   if (!expandedMap) return
+  if (exRouteAnim) { clearInterval(exRouteAnim); exRouteAnim = null }
   if (exOriginMarker) { exOriginMarker.map = null; exOriginMarker = null }
   if (exDestMarker) { exDestMarker.map = null; exDestMarker = null }
   if (exDriverMarker) { exDriverMarker.map = null; exDriverMarker = null }
@@ -240,6 +255,7 @@ function renderExpandedMap() {
       map: expandedMap,
       icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
     })
+    exRouteAnim = animatePolyline(exRouteLine)
   }
   const bounds = new google.maps.LatLngBounds()
   let count = 0
@@ -251,7 +267,7 @@ function renderExpandedMap() {
 }
 
 watch(expanded, async (val) => {
-  if (!val) { expandedMap = null; return }
+  if (!val) { if (exRouteAnim) { clearInterval(exRouteAnim); exRouteAnim = null }; expandedMap = null; return }
   await nextTick()
   if (!expandedMapContainer.value) return
   const center = map ? map.getCenter().toJSON() : { lat: 0, lng: 0 }
