@@ -257,6 +257,14 @@ catch {
 // Migration: add driver_pay_daily to trucks
 try { db.exec("ALTER TABLE trucks ADD COLUMN driver_pay_daily REAL DEFAULT 0"); } catch {}
 
+// Migration: add per-truck business config columns
+try { db.exec("ALTER TABLE trucks ADD COLUMN purchase_price REAL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE trucks ADD COLUMN title_status TEXT DEFAULT 'Clean'"); } catch {}
+// Note: maintenance_fund_monthly already added via rename-recreate if needed;
+// safe ALTER in case column doesn't exist yet on this instance
+try { db.prepare("SELECT maintenance_fund_monthly FROM trucks LIMIT 1").get(); }
+catch { try { db.exec("ALTER TABLE trucks ADD COLUMN maintenance_fund_monthly REAL DEFAULT 0"); } catch {} }
+
 // Migration: add asset_ref to messages (for "Share Asset" in chat)
 try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } catch {}
 
@@ -773,6 +781,9 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 		IrpAnnual: t.irp_annual || 0,
 		AdminFeePct: t.admin_fee_pct ?? 50,
 		DriverPayDaily: t.driver_pay_daily || 0,
+		PurchasePrice: t.purchase_price || 0,
+		TitleStatus: t.title_status || 'Clean',
+		MaintenanceFundMonthly: t.maintenance_fund_monthly || 0,
 	}));
 	res.json({ trucks });
 });
@@ -780,7 +791,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 // Truck Database: add a new truck
 app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
 	try {
-		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily } = req.body;
+		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
 		if (!unitNumber || !unitNumber.trim()) {
 			return res.status(400).json({ error: "Unit number is required" });
 		}
@@ -795,8 +806,8 @@ app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
 				.run(assignedDriver.trim(), unitNumber.trim());
 		}
 		const result = db.prepare(
-			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", parseInt(ownerId) || 0, parseFloat(driverPayDaily) || 0);
+			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", parseInt(ownerId) || 0, parseFloat(driverPayDaily) || 0, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0);
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error creating truck:", error.message);
@@ -812,7 +823,8 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId,
-			photo, insuranceMonthly, eldMonthly, hvutAnnual, irpAnnual, adminFeePct, driverPayDaily } = req.body;
+			photo, insuranceMonthly, eldMonthly, hvutAnnual, irpAnnual, adminFeePct, driverPayDaily,
+			purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
 		const updates = [];
 		const params = [];
 
@@ -846,6 +858,9 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		if (irpAnnual !== undefined) { updates.push("irp_annual = ?"); params.push(parseFloat(irpAnnual) || 0); }
 		if (adminFeePct !== undefined) { updates.push("admin_fee_pct = ?"); params.push(parseFloat(adminFeePct) ?? 50); }
 		if (driverPayDaily !== undefined) { updates.push("driver_pay_daily = ?"); params.push(parseFloat(driverPayDaily) || 0); }
+		if (purchasePrice !== undefined) { updates.push("purchase_price = ?"); params.push(parseFloat(purchasePrice) || 0); }
+		if (titleStatus !== undefined) { updates.push("title_status = ?"); params.push(titleStatus || "Clean"); }
+		if (maintenanceFundMonthly !== undefined) { updates.push("maintenance_fund_monthly = ?"); params.push(parseFloat(maintenanceFundMonthly) || 0); }
 
 		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 		params.push(id);
@@ -4653,19 +4668,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// ---- Add truck fixed costs & maintenance fund to totalExpenses ----
 		{
 			const truckQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily FROM trucks WHERE owner_id = ?"
-				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily FROM trucks";
+				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly FROM trucks WHERE owner_id = ?"
+				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly FROM trucks";
 			const truckArgs = investorDriverSet ? [user.id] : [];
 			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
 			let fixedMonthlyTotal = 0;
 			for (const t of fleetTrucks) {
 				fixedMonthlyTotal += (t.insurance_monthly || 0) + (t.eld_monthly || 0)
 					+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12)
-					+ ((t.driver_pay_daily || 0) * 30);
+					+ ((t.driver_pay_daily || 0) * 30)
+					+ (t.maintenance_fund_monthly || 0);
 			}
-			// Add maintenance fund monthly (per truck) from config
-			const maintFundMonthly = parseFloat(config.maintenance_fund_monthly) || 0;
-			fixedMonthlyTotal += maintFundMonthly * fleetTrucks.length;
 			totalExpenses += fixedMonthlyTotal * monthsOfOperation;
 		}
 
@@ -4674,23 +4687,24 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([month, amount]) => ({ month, amount: Math.round(amount) }));
 
-		// ---- Asset Security (S4, S5) ----
-		const purchasePrice = parseFloat(config.truck_purchase_price) || 58000;
-		const currentValue = Math.round(purchasePrice * 0.80); // S4: 20% flat depreciation
-		const titleStatus = config.truck_title_status || "Clean";
-
-		// Total trucks in fleet
-		const totalTrucks = investorDriverSet
-			? db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE owner_id = ?").get(user.id).cnt
-			: filteredCarrierData.length || 1;
+		// ---- Asset Security (S4, S5) — now per-truck ----
+		const allOwnedTrucks = investorDriverSet
+			? db.prepare("SELECT id, unit_number, assigned_driver, purchase_price, title_status FROM trucks WHERE owner_id = ?").all(user.id)
+			: db.prepare("SELECT id, unit_number, assigned_driver, purchase_price, title_status FROM trucks").all();
+		const totalTrucks = allOwnedTrucks.length || 1;
+		const totalPurchasePrice = allOwnedTrucks.reduce((sum, t) => sum + (t.purchase_price || 0), 0);
+		const totalCurrentValue = Math.round(totalPurchasePrice * 0.80); // 20% flat depreciation
+		// Use first truck's values as representative for single-truck display; fleet view uses totals
+		const purchasePrice = allOwnedTrucks.length === 1 ? (allOwnedTrucks[0].purchase_price || 0) : totalPurchasePrice;
+		const currentValue = allOwnedTrucks.length === 1 ? Math.round((allOwnedTrucks[0].purchase_price || 0) * 0.80) : totalCurrentValue;
+		const titleStatus = allOwnedTrucks.length === 1 ? (allOwnedTrucks[0].title_status || "Clean") : "Mixed";
 
 		// Fleet totals (S9)
-		const totalPurchasePrice = purchasePrice * totalTrucks;
 		const totalStartupExpenses = 5000 * totalTrucks;
 		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
 
 		// ---- Tax Shield (S6, S7, S10) ----
-		const section179 = purchasePrice; // S6: 100% deductibility
+		const section179 = totalPurchasePrice; // S6: 100% deductibility per truck
 		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate); // S7
 
 		// ---- Per-Truck Revenue Data (S8) ----
@@ -4723,8 +4737,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const maintRow = db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf WHERE LOWER(mf.truck) = ? AND strftime('%Y-%m', mf.date) = ?`).get(truck.unit_number.toLowerCase(), currentMonthKey);
 				const compRow = db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf WHERE LOWER(cf.truck) = ? AND strftime('%Y-%m', cf.due_date) = ? AND cf.status = 'Paid'`).get(truck.unit_number.toLowerCase(), currentMonthKey);
 				// Fixed costs from truck record (pro-rated monthly)
-				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily FROM trucks WHERE unit_number = ?").get(truck.unit_number);
-				const fixedMonthly = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12) + ((truckRow?.driver_pay_daily || 0) * 30);
+				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly FROM trucks WHERE unit_number = ?").get(truck.unit_number);
+				const fixedMonthly = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12) + ((truckRow?.driver_pay_daily || 0) * 30) + (truckRow?.maintenance_fund_monthly || 0);
 				const unitMonthlyExpenses = (expRow?.t || 0) + (maintRow?.t || 0) + (compRow?.t || 0) + fixedMonthly;
 				// Mileage from odometer readings (max - min)
 				const odometerRange = db.prepare(

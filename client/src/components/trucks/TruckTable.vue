@@ -129,8 +129,32 @@
             <img v-if="editForm.photo" :src="editForm.photo" style="max-height:80px;border-radius:6px;margin-top:0.4rem;" />
           </div>
 
-          <details style="margin-bottom:0.75rem;">
-            <summary style="font-size:0.72rem;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em;cursor:pointer;margin-bottom:0.5rem;">Fixed Costs</summary>
+          <details style="margin-bottom:0.75rem;" open>
+            <summary style="font-size:0.72rem;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em;cursor:pointer;margin-bottom:0.5rem;">Business Configuration</summary>
+            <div class="edit-row">
+              <div class="edit-field">
+                <label>Purchase Price ($)</label>
+                <input v-model.number="editForm.purchasePrice" type="number" min="0" />
+              </div>
+              <div class="edit-field">
+                <label>Title Status</label>
+                <select v-model="editForm.titleStatus" style="width:100%;padding:0.4rem 0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.82rem;">
+                  <option value="Clean">Clean</option>
+                  <option value="Lien">Lien</option>
+                  <option value="Accident/Salvage">Accident/Salvage</option>
+                </select>
+              </div>
+            </div>
+            <div class="edit-row">
+              <div class="edit-field">
+                <label>Maintenance Fund ($/mo)</label>
+                <input v-model.number="editForm.maintenanceFundMonthly" type="number" min="0" />
+              </div>
+              <div class="edit-field">
+                <label>Driver Pay ($/day)</label>
+                <input v-model.number="editForm.driverPayDaily" type="number" min="0" />
+              </div>
+            </div>
             <div class="edit-row">
               <div class="edit-field">
                 <label>Insurance ($/mo)</label>
@@ -154,10 +178,6 @@
             <div class="edit-field">
               <label>Admin Fee (%)</label>
               <input v-model.number="editForm.adminFeePct" type="number" min="0" max="100" />
-            </div>
-            <div class="edit-field">
-              <label>Driver Pay ($/day)</label>
-              <input v-model.number="editForm.driverPayDaily" type="number" min="0" />
             </div>
           </details>
 
@@ -230,6 +250,7 @@ const editForm = reactive({
   id: null, unitNumber: '', make: '', model: '', year: 0,
   vin: '', licensePlate: '', status: 'Active', assignedDriver: '', ownerId: 0, notes: '',
   photo: '', insuranceMonthly: 0, eldMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50, driverPayDaily: 0,
+  purchasePrice: 0, titleStatus: 'Clean', maintenanceFundMonthly: 0,
 })
 
 function openEdit(truck) {
@@ -251,6 +272,9 @@ function openEdit(truck) {
   editForm.irpAnnual = truck.IrpAnnual || 0
   editForm.adminFeePct = truck.AdminFeePct ?? 50
   editForm.driverPayDaily = truck.DriverPayDaily || 0
+  editForm.purchasePrice = truck.PurchasePrice || 0
+  editForm.titleStatus = truck.TitleStatus || 'Clean'
+  editForm.maintenanceFundMonthly = truck.MaintenanceFundMonthly || 0
   showEdit.value = true
 }
 
@@ -283,6 +307,9 @@ function handleSaveEdit() {
       irpAnnual: editForm.irpAnnual,
       adminFeePct: editForm.adminFeePct,
       driverPayDaily: editForm.driverPayDaily,
+      purchasePrice: editForm.purchasePrice,
+      titleStatus: editForm.titleStatus,
+      maintenanceFundMonthly: editForm.maintenanceFundMonthly,
     },
   })
   showEdit.value = false

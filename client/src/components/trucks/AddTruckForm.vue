@@ -84,9 +84,33 @@
       <img v-if="form.photo" :src="form.photo" style="max-height:80px;border-radius:6px;margin-top:0.4rem;" />
     </div>
 
-    <details style="margin-bottom:0.75rem;">
-      <summary class="fixed-costs-label">Fixed Costs (optional)</summary>
+    <details style="margin-bottom:0.75rem;" open>
+      <summary class="fixed-costs-label">Business Configuration</summary>
       <div class="form-row" style="margin-top:0.5rem;">
+        <div class="form-group">
+          <label class="form-label">Purchase Price ($)</label>
+          <input v-model.number="form.purchasePrice" class="form-input" type="number" min="0" placeholder="58000" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Title Status</label>
+          <select v-model="form.titleStatus" class="form-input">
+            <option value="Clean">Clean</option>
+            <option value="Lien">Lien</option>
+            <option value="Accident/Salvage">Accident/Salvage</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Maintenance Fund ($/mo)</label>
+          <input v-model.number="form.maintenanceFundMonthly" class="form-input" type="number" min="0" placeholder="800" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Driver Pay ($/day)</label>
+          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" placeholder="250" />
+        </div>
+      </div>
+      <div class="form-row">
         <div class="form-group">
           <label class="form-label">Insurance ($/mo)</label>
           <input v-model.number="form.insuranceMonthly" class="form-input" type="number" min="0" placeholder="0" />
@@ -110,10 +134,6 @@
         <div class="form-group">
           <label class="form-label">Admin Fee (%)</label>
           <input v-model.number="form.adminFeePct" class="form-input" type="number" min="0" max="100" placeholder="50" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">Driver Pay ($/day)</label>
-          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" placeholder="250" />
         </div>
       </div>
     </details>
@@ -180,6 +200,9 @@ const form = reactive({
   irpAnnual: 0,
   adminFeePct: 50,
   driverPayDaily: 0,
+  purchasePrice: 0,
+  titleStatus: 'Clean',
+  maintenanceFundMonthly: 0,
 })
 
 function onPhoto(e) {
@@ -217,6 +240,9 @@ function handleSubmit() {
     irpAnnual: form.irpAnnual,
     adminFeePct: form.adminFeePct,
     driverPayDaily: form.driverPayDaily,
+    purchasePrice: form.purchasePrice,
+    titleStatus: form.titleStatus,
+    maintenanceFundMonthly: form.maintenanceFundMonthly,
   })
 
   form.unitNumber = ''
@@ -236,6 +262,9 @@ function handleSubmit() {
   form.irpAnnual = 0
   form.adminFeePct = 50
   form.driverPayDaily = 0
+  form.purchasePrice = 0
+  form.titleStatus = 'Clean'
+  form.maintenanceFundMonthly = 0
 }
 </script>
 

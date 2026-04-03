@@ -2,7 +2,7 @@
   <div class="section config-section">
     <div class="section-title">
       <div class="section-icon" style="background: var(--bg); color: var(--text-dim);">&#9881;</div>
-      Business Configuration
+      Fleet Configuration
       <span class="admin-badge">Admin Only</span>
     </div>
 
@@ -10,26 +10,6 @@
       <div class="config-group">
         <label>Owner Take % <span class="hint">(fixed)</span></label>
         <input :value="50" type="number" disabled />
-      </div>
-      <div class="config-group">
-        <label>Truck Purchase Price</label>
-        <input v-model.number="form.truck_purchase_price" type="number" min="0" />
-      </div>
-      <div class="config-group">
-        <label>Title Status</label>
-        <select v-model="form.truck_title_status">
-          <option>Clean</option>
-          <option>Lien</option>
-          <option>Accident / Salvage</option>
-        </select>
-      </div>
-      <div class="config-group">
-        <label>Section 179 Deduction <span class="hint">(auto)</span></label>
-        <input :value="form.truck_purchase_price" type="number" disabled />
-      </div>
-      <div class="config-group">
-        <label>Maintenance Fund / Month</label>
-        <input v-model.number="form.maintenance_fund_monthly" type="number" min="0" />
       </div>
       <div class="config-group">
         <label>Fuel Savings Target %</label>
@@ -40,6 +20,8 @@
         <input v-model="form.blue_chip_brokers" type="text" placeholder="Pepsi, Coca-Cola, ..." />
       </div>
     </div>
+
+    <p class="config-note">Per-truck settings (purchase price, title status, maintenance fund, fixed costs) are configured in the Truck Database.</p>
 
     <div class="config-actions">
       <button class="btn btn-primary" :disabled="saving" @click="handleSave">
@@ -61,9 +43,6 @@ const emit = defineEmits(['save'])
 const saving = ref(false)
 
 const form = reactive({
-  truck_purchase_price: 58000,
-  truck_title_status: 'Clean',
-  maintenance_fund_monthly: 800,
   fuel_savings_target_pct: 15,
   blue_chip_brokers: '',
 })
@@ -131,6 +110,10 @@ async function handleSave() {
 }
 .config-group input:disabled {
   opacity: 0.5; cursor: not-allowed;
+}
+
+.config-note {
+  font-size: 0.75rem; color: var(--text-dim); margin-top: 0.75rem; font-style: italic;
 }
 
 .config-actions {
