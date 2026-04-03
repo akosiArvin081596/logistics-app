@@ -116,6 +116,7 @@ const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLower
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 const statusOptions = ['At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false)
+watch(() => props.jobs, (jobs) => { jobs.forEach(j => { if (!(j._rowIndex in statusSelections)) statusSelections[j._rowIndex] = ''; if (!(j._rowIndex in reassignSelections)) reassignSelections[j._rowIndex] = '' }) }, { immediate: true })
 const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || ''); const driverCol = computed(() => props.headers.find(h => /driver/i.test(h)) || '')
 function getCurrentStatus(j) { return statusCol.value ? (j[statusCol.value] || '') : '' }
 function getCurrentDriver(j) { return driverCol.value ? (j[driverCol.value] || '') : '' }
