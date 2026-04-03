@@ -22,7 +22,7 @@ export function useGoogleMaps() {
           const cbName = '_gmReady' + Date.now()
           window[cbName] = () => { delete window[cbName]; resolve() }
           const script = document.createElement('script')
-          script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=marker&v=weekly&callback=${cbName}`
+          script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=marker&v=weekly&loading=async&callback=${cbName}`
           script.async = true
           script.onerror = reject
           document.head.appendChild(script)
