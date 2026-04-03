@@ -14,7 +14,7 @@
     <template v-else>
       <div class="map-info" v-if="hasCoords && (distanceMiles != null || etaMinutes != null || driverDistanceInfo)">
         <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
-        <span v-if="etaMinutes != null" class="info-item">{{ etaMinutes }} min ETA</span>
+        <span v-if="etaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
         <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
         <button class="expand-btn" @click="expanded = true" title="Expand map">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -30,7 +30,7 @@
             <div class="map-fullscreen-header">
               <div class="map-fullscreen-info">
                 <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
-                <span v-if="etaMinutes != null" class="info-item">{{ etaMinutes }} min ETA</span>
+                <span v-if="etaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
                 <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
               </div>
               <button class="collapse-btn" @click="expanded = false" title="Close">✕</button>
@@ -63,6 +63,12 @@ const expanded = ref(false)
 const routePoints = ref([])
 const distanceMiles = ref(null)
 const etaMinutes = ref(null)
+const etaFormatted = computed(() => {
+  if (etaMinutes.value == null) return null
+  const m = Math.round(etaMinutes.value)
+  if (m < 60) return `${m}m`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+})
 
 let map = null
 let expandedMap = null
