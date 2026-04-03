@@ -22,7 +22,7 @@
         </tr>
       </thead>
       <tbody>
-        <tr v-for="truck in trucks" :key="truck.id">
+        <tr v-for="truck in trucks" :key="truck.id" class="clickable-row" @click="viewTruck = truck">
           <td class="unit-number">{{ truck.UnitNumber }}</td>
           <td>{{ [truck.Make, truck.Model].filter(Boolean).join(' ') || '\u2014' }}</td>
           <td>{{ truck.Year || '\u2014' }}</td>
@@ -198,6 +198,30 @@
       @confirm="handleConfirmDelete"
       @cancel="showConfirm = false"
     />
+
+    <!-- View Truck Detail Modal -->
+    <div v-if="viewTruck" class="confirm-overlay" @click.self="viewTruck = null">
+      <div class="confirm-box" style="max-width:500px;">
+        <h3 style="margin-bottom:1rem;">{{ viewTruck.UnitNumber }} — {{ [viewTruck.Make, viewTruck.Model].filter(Boolean).join(' ') }}</h3>
+        <div class="view-grid">
+          <div class="view-row"><span class="view-label">Year</span><span>{{ viewTruck.Year || '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">VIN</span><span>{{ viewTruck.VIN || '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">License Plate</span><span>{{ viewTruck.LicensePlate || '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Status</span><span :class="['status-badge', statusClass(viewTruck.Status)]">{{ viewTruck.Status }}</span></div>
+          <div class="view-row"><span class="view-label">Assigned Driver</span><span>{{ viewTruck.AssignedDriver || '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Owner</span><span>{{ ownerName(viewTruck.OwnerId) }}</span></div>
+          <div class="view-row"><span class="view-label">Purchase Price</span><span>{{ viewTruck.PurchasePrice ? '$' + Number(viewTruck.PurchasePrice).toLocaleString() : '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Title Status</span><span>{{ viewTruck.TitleStatus || '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Maintenance Fund</span><span>{{ viewTruck.MaintenanceFundMonthly ? '$' + viewTruck.MaintenanceFundMonthly + '/mo' : '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Insurance</span><span>{{ viewTruck.InsuranceMonthly ? '$' + viewTruck.InsuranceMonthly + '/mo' : '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '\u2014' }}</span></div>
+        </div>
+        <div style="margin-top:1rem;text-align:right;">
+          <button class="btn btn-secondary" @click="viewTruck = null">Close</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -242,6 +266,7 @@ const emit = defineEmits(['delete', 'update'])
 
 const showConfirm = ref(false)
 const pendingTruck = ref(null)
+const viewTruck = ref(null)
 
 const editModelOptions = computed(() => truckModels[editForm.make] || [])
 
@@ -441,4 +466,9 @@ function handleConfirmDelete() {
 .edit-field textarea:focus {
   outline: none; border-color: var(--blue);
 }
+.clickable-row { cursor: pointer; }
+.clickable-row:hover td { background: var(--accent-dim, #f0f9ff); }
+.view-grid { display: flex; flex-direction: column; gap: 0.4rem; }
+.view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
+.view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
 </style>
