@@ -1,7 +1,8 @@
 <template>
   <div>
-    <div class="dash-search-bar">
+    <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
       <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
+      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
 
     <div class="overflow-x-auto">
@@ -34,8 +35,6 @@
       </Table>
       <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'All loads are assigned.' }}</EmptyState>
     </div>
-    <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
-
     <Dialog :open="!!selectedJob" @update:open="v => { if (!v) selectedJob = null }">
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
