@@ -29,7 +29,7 @@
           <div>
             <div>{{ c.driver }}</div>
             <div v-if="c.loadId" class="msg-load-label">Load {{ c.loadId }}</div>
-            <div v-else class="msg-load-label">Legacy</div>
+            <div v-else class="msg-load-label">General</div>
             <div class="msg-time">{{ formatTime(c.lastTimestamp) }}</div>
           </div>
           <div v-if="c.unread > 0" class="msg-unread">{{ c.unread }}</div>
@@ -58,7 +58,7 @@
         <span>{{ attachFileName }}</span>
         <button class="msg-attach-remove" @click="clearAttachment">&times;</button>
       </div>
-      <div v-if="store.selectedDriver && store.selectedLoadId" class="msg-chat-input">
+      <div v-if="store.selectedDriver" class="msg-chat-input">
         <label class="msg-attach-btn" title="Attach file">
           &#128206;
           <input type="file" accept="image/*,.pdf" style="display:none" @change="onAttachFile" />
@@ -67,14 +67,11 @@
           v-model="messageInput"
           type="text"
           class="msg-input"
-          placeholder="Reply to driver..."
+          :placeholder="store.selectedLoadId ? 'Reply to driver...' : 'Reply...'"
           maxlength="500"
           @keydown.enter.prevent="sendMessage"
         />
         <button class="msg-send-btn" @click="sendMessage">&#10148;</button>
-      </div>
-      <div v-else-if="store.selectedDriver && !store.selectedLoadId" class="msg-chat-legacy">
-        Legacy conversation — replies require a load context.
       </div>
     </div>
   </div>
@@ -162,7 +159,7 @@ function formatTime(ts) {
 
 async function sendMessage() {
   const msg = messageInput.value.trim()
-  if ((!msg && !attachData.value) || !store.selectedDriver || !store.selectedLoadId) return
+  if ((!msg && !attachData.value) || !store.selectedDriver) return
   try {
     let attachmentUrl = '', attachmentType = ''
     if (attachData.value) {
