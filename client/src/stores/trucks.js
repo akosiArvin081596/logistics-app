@@ -13,7 +13,12 @@ export const useTrucksStore = defineStore('trucks', {
 
   getters: {
     availableDriverNames(state) {
-      return state.driverNames
+      const taken = new Set(
+        state.trucks
+          .filter(t => t.AssignedDriver)
+          .map(t => t.AssignedDriver.toLowerCase())
+      )
+      return state.driverNames.filter(n => !taken.has(n.toLowerCase()))
     },
   },
 
