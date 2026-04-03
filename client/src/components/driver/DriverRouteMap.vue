@@ -85,13 +85,13 @@ const destLatCol = computed(() => findCol(/dest.*lat|drop.*lat|receiver.*lat|del
 const destLngCol = computed(() => findCol(/dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i))
 
 const originLatLng = computed(() => {
-  if (!originLatCol.value || !originLngCol.value) return null
+  if (!props.load || !originLatCol.value || !originLngCol.value) return null
   const lat = parseFloat(props.load[originLatCol.value])
   const lng = parseFloat(props.load[originLngCol.value])
   return !isNaN(lat) && !isNaN(lng) ? { lat, lng } : null
 })
 const destLatLng = computed(() => {
-  if (!destLatCol.value || !destLngCol.value) return null
+  if (!props.load || !destLatCol.value || !destLngCol.value) return null
   const lat = parseFloat(props.load[destLatCol.value])
   const lng = parseFloat(props.load[destLngCol.value])
   return !isNaN(lat) && !isNaN(lng) ? { lat, lng } : null
@@ -102,7 +102,7 @@ const driverLatLng = computed(() => {
 })
 
 const statusCol = computed(() => (props.headers || []).find(h => /^status$/i.test(h)) || null)
-const loadStatus = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim().toLowerCase() : '')
+const loadStatus = computed(() => !props.load || !statusCol.value ? '' : (props.load[statusCol.value] || '').trim().toLowerCase())
 const isDelivered = computed(() => /^(delivered|completed|pod received)$/i.test(loadStatus.value))
 const hasCoords = computed(() => destLatLng.value != null && (!isDelivered.value || props.dispatchMode))
 const isPrePickup = computed(() => /^(dispatched|assigned|new|pending)$/i.test(loadStatus.value))
@@ -128,10 +128,10 @@ const destAddrCol = computed(() => (props.headers || []).find(h => /dest|drop|re
 const loadIdCol = computed(() => findCol(/load.?id|job.?id/i))
 const driverColName = computed(() => findCol(/driver/i))
 
-const originAddr = computed(() => originAddrCol.value ? props.load[originAddrCol.value] || '' : '')
-const destAddr = computed(() => destAddrCol.value ? props.load[destAddrCol.value] || '' : '')
-const loadIdValue = computed(() => loadIdCol.value ? props.load[loadIdCol.value] || '' : '')
-const driverName = computed(() => driverColName.value ? props.load[driverColName.value] || '' : '')
+const originAddr = computed(() => props.load && originAddrCol.value ? props.load[originAddrCol.value] || '' : '')
+const destAddr = computed(() => props.load && destAddrCol.value ? props.load[destAddrCol.value] || '' : '')
+const loadIdValue = computed(() => props.load && loadIdCol.value ? props.load[loadIdCol.value] || '' : '')
+const driverName = computed(() => props.load && driverColName.value ? props.load[driverColName.value] || '' : '')
 
 function clearMapObjects() {
   if (originMarker) { originMarker.map = null; originMarker = null }
