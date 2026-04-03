@@ -57,10 +57,13 @@ export function useGeolocation(api) {
   }
 
   function onPosition(pos) {
+    const accuracy = pos.coords.accuracy || 999
+    // Ignore very inaccurate readings (>100m) to prevent map jumping
+    if (accuracy > 100 && lastPosition.value) return
     const data = {
       latitude: pos.coords.latitude,
       longitude: pos.coords.longitude,
-      accuracy: pos.coords.accuracy || 0,
+      accuracy,
       speed: pos.coords.speed || 0,
       heading: pos.coords.heading || 0,
       loadId: activeLoadId,
