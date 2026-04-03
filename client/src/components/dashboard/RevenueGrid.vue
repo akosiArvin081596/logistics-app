@@ -1,6 +1,6 @@
 <template>
   <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);">
-    <Card v-for="card in cards" :key="card.key" class="kpi-card">
+    <Card v-for="card in cards" :key="card.key" class="kpi-card" style="border:1px solid #e8edf2;">
       <CardContent class="flex items-center gap-4" style="padding:1rem 1.25rem;">
         <div :class="['kpi-icon', card.iconTheme]">{{ card.icon }}</div>
         <div class="kpi-info">
