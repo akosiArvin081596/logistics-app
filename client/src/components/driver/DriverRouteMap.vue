@@ -170,9 +170,9 @@ function renderMarkers() {
   if (routePoints.value.length >= 2) {
     routeLine = new google.maps.Polyline({
       path: routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude })),
-      strokeColor: '#000000', strokeOpacity: 0.7, strokeWeight: 5,
+      strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 5,
       map,
-      icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
+      icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
     })
     routeAnim = animatePolyline(routeLine)
   }
@@ -251,9 +251,9 @@ function renderExpandedMap() {
   if (routePoints.value.length >= 2) {
     exRouteLine = new google.maps.Polyline({
       path: routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude })),
-      strokeColor: '#000000', strokeOpacity: 0.7, strokeWeight: 5,
+      strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 5,
       map: expandedMap,
-      icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
+      icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
     })
     exRouteAnim = animatePolyline(exRouteLine)
   }
