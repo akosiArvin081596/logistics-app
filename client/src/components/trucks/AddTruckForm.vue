@@ -178,10 +178,6 @@ defineProps({
 
 const emit = defineEmits(['submit'])
 
-const modelOptions = computed(() => truckModels[form.make] || [])
-
-watch(() => form.make, () => { form.model = '' })
-
 const form = reactive({
   unitNumber: '',
   make: '',
@@ -204,6 +200,9 @@ const form = reactive({
   titleStatus: 'Clean',
   maintenanceFundMonthly: 0,
 })
+
+const modelOptions = computed(() => truckModels[form.make] || [])
+watch(() => form.make, () => { form.model = '' })
 
 function onPhoto(e) {
   const file = e.target.files[0]
