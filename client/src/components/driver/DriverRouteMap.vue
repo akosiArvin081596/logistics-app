@@ -255,8 +255,13 @@ watch(expanded, async (val) => {
   await nextTick()
   if (!expandedMapContainer.value) return
   const center = map ? map.getCenter().toJSON() : { lat: 0, lng: 0 }
-  expandedMap = await createMap(expandedMapContainer.value, { zoom: map ? map.getZoom() : 5, center, mapTypeId: 'hybrid' })
-  renderExpandedMap()
+  expandedMap = await createMap(expandedMapContainer.value, {
+    zoom: map ? map.getZoom() : 5, center, mapTypeId: 'hybrid',
+    zoomControl: true, gestureHandling: 'greedy',
+    mapTypeControl: true,
+    mapTypeControlOptions: { style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR, position: google.maps.ControlPosition.TOP_LEFT },
+  })
+  google.maps.event.addListenerOnce(expandedMap, 'idle', () => renderExpandedMap())
 })
 
 function focusOn(lat, lng) { if (map) { map.panTo({ lat, lng }); map.setZoom(15) } }
@@ -302,8 +307,8 @@ onMounted(() => {
 .expand-btn { margin-left: auto; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: none; background: var(--bg, #f5f6fa); color: var(--text-dim, #6b7280); cursor: pointer; transition: background 0.15s, color 0.15s; }
 .expand-btn:hover { background: var(--accent, #0ea5e9); color: #fff; }
 
-.map-fullscreen-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; }
-.map-fullscreen-panel { width: 92vw; height: 85vh; max-width: 1400px; background: #fff; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 25px 50px rgba(0,0,0,0.25); }
+.map-fullscreen-overlay { position: fixed; inset: 0; z-index: 99999; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; pointer-events: auto; }
+.map-fullscreen-panel { width: 92vw; height: 85vh; max-width: 1400px; background: #fff; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 25px 50px rgba(0,0,0,0.25); pointer-events: auto; }
 .map-fullscreen-header { display: flex; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid #e5e7eb; }
 .map-fullscreen-info { display: flex; gap: 0.75rem; flex: 1; }
 .collapse-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; border: 1px solid #e5e7eb; background: #fff; font-size: 1rem; color: #6b7280; cursor: pointer; transition: background 0.15s, color 0.15s; }
