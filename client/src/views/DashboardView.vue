@@ -15,7 +15,7 @@
 
     <template v-if="store.kpis">
       <KpiGrid :kpis="store.kpis" :completed-total="store.completedJobs.length" @card-click="handleKpiClick" />
-      <RevenueGrid v-if="auth.isSuperAdmin" :revenue="store.revenue" />
+      <RevenueGrid v-if="auth.isSuperAdmin" :revenue="store.revenue" style="margin-top:1rem;" />
     </template>
     <template v-else>
       <div class="kpi-grid">
