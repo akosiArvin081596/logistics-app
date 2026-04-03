@@ -1,5 +1,5 @@
 <template>
-  <div class="trucks-page admin-page">
+  <div class="trucks-page admin-page" style="overflow-y:auto;min-height:auto;flex:none;">
     <div class="page-header">
       <h2>Truck Database</h2>
     </div>
