@@ -13,8 +13,7 @@
           <th>User</th>
           <th>Role</th>
           <th>Full Name</th>
-          <th>Company</th>
-          <th>Linked Driver</th>
+          <th>Details</th>
           <th>Email</th>
           <th>Rating</th>
           <th>Created</th>
@@ -33,11 +32,8 @@
           <td :style="{ color: user.FullName ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.FullName || '\u2014' }}
           </td>
-          <td :style="{ color: user.CompanyName ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ user.CompanyName || '\u2014' }}
-          </td>
-          <td :style="{ color: user.DriverName ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ user.DriverName || '\u2014' }}
+          <td :style="{ color: userDetail(user) !== '\u2014' ? 'var(--text)' : 'var(--text-dim)' }">
+            {{ userDetail(user) }}
           </td>
           <td :style="{ color: user.Email ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.Email || '\u2014' }}
@@ -170,6 +166,12 @@ function handleSaveEdit() {
   if (editForm.password) data.password = editForm.password
   emit('update', { id: editForm.id, data })
   showEdit.value = false
+}
+
+function userDetail(user) {
+  if (user.Role === 'Investor' && user.CompanyName) return user.CompanyName
+  if (user.Role === 'Driver' && user.DriverName) return user.DriverName
+  return '\u2014'
 }
 
 function initials(name) {
