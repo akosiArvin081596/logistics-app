@@ -2504,11 +2504,11 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const totalTrucks = carrierDB.data.length;
 		const activeDriverNames = new Set(
 			activeJobs
-				.map((r) => (driverCol ? (r[driverCol] || "").trim() : ""))
+				.map((r) => (driverCol ? (r[driverCol] || "").trim().toLowerCase() : ""))
 				.filter(Boolean),
 		);
 		const assignedTrucks = carrierDB.data.filter((r) =>
-			activeDriverNames.has((r[carrierDriverCol] || "").trim()),
+			activeDriverNames.has((r[carrierDriverCol] || "").trim().toLowerCase()),
 		).length;
 
 		// Revenue
@@ -2540,9 +2540,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Fleet details
 		const fleet = carrierDB.data.map((r) => {
 			const name = (r[carrierDriverCol] || "").trim();
+			const nameLower = name.toLowerCase();
 			const currentLoad = activeJobs.find(
 				(j) =>
-					driverCol && (j[driverCol] || "").trim() === name,
+					driverCol && (j[driverCol] || "").trim().toLowerCase() === nameLower,
 			);
 			const phoneCol = findCol(carrierDB.headers, /phone|contact/i);
 			return {
@@ -2557,7 +2558,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 					: "",
 				CompletedLoads: allCompletedJobs.filter((j) => {
 					const jDriverCol = driverCol || findCol(jobSummary.headers, /driver/i);
-					return jDriverCol && (j[jDriverCol] || "").trim() === name;
+					return jDriverCol && (j[jDriverCol] || "").trim().toLowerCase() === nameLower;
 				}).length,
 			};
 		});
