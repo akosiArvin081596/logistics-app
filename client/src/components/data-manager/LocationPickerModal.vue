@@ -112,25 +112,20 @@ watch(() => props.open, async (isOpen) => {
     ? { lat: props.initialLat, lng: props.initialLng }
     : { lat: 32.7767, lng: -96.7970 }
 
-  // Reuse existing map or create once
-  if (!map) {
-    map = await createMap(mapContainer.value, {
-      zoom: hasInitial ? 14 : 5,
-      center,
-      mapTypeId: 'hybrid',
-      mapTypeControl: true,
-    })
-    map.setOptions({
-      mapTypeControlOptions: {
-        style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
-        position: google.maps.ControlPosition.TOP_LEFT,
-      },
-    })
-    map.addListener('click', onMapClick)
-  } else {
-    map.setCenter(center)
-    map.setZoom(hasInitial ? 14 : 5)
-  }
+  // Always create fresh map (container is destroyed between modal opens)
+  map = await createMap(mapContainer.value, {
+    zoom: hasInitial ? 14 : 5,
+    center,
+    mapTypeId: 'hybrid',
+    mapTypeControl: true,
+  })
+  map.setOptions({
+    mapTypeControlOptions: {
+      style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
+      position: google.maps.ControlPosition.TOP_LEFT,
+    },
+  })
+  map.addListener('click', onMapClick)
 
   // Reset marker
   clearMarker()
