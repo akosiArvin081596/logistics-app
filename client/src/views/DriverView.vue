@@ -654,16 +654,21 @@ function onLoadCancelled(payload) {
 
 function onGeofenceTrigger(payload) {
   if (!isMounted) return
-  toast.show(`Geofence: ${payload.status} for Load ${payload.loadId}`)
+  const statusMsg = payload.status === 'At Shipper'
+    ? 'You have arrived at the pickup location'
+    : 'You have arrived at the delivery location'
+  toast.show(`${statusMsg} (Load ${payload.loadId})`)
   driverStore.addNotification({
     id: payload.notificationId || Date.now(),
     type: 'geofence',
-    title: `Geofence: ${payload.status}`,
-    body: `Load ${payload.loadId}`,
+    title: `${payload.status} — Load ${payload.loadId}`,
+    body: statusMsg,
     metadata: JSON.stringify(payload),
     read: 0,
     createdAt: new Date().toISOString(),
   })
+  // Reload data so load status updates and route recalculates from driver position
+  driverStore.loadData()
 }
 
 function onNewMessage(msg) {

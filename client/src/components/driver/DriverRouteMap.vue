@@ -241,6 +241,15 @@ watch(() => props.driverPosition, (pos) => {
   if (dist > 0.06 && Date.now() - lastRouteTime >= 60000) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute() }
 }, { deep: true })
 
+// Re-fetch route when load status changes (e.g., geofence triggers "At Shipper" → driver becomes Point A)
+watch(loadStatus, (newStatus, oldStatus) => {
+  if (newStatus !== oldStatus && map && destLatLng.value) {
+    lastRoutePos = null
+    lastRouteTime = 0
+    fetchRoute(true)
+  }
+})
+
 function renderExpandedMap() {
   if (!expandedMap) return
   if (exRouteAnim) { clearInterval(exRouteAnim); exRouteAnim = null }
