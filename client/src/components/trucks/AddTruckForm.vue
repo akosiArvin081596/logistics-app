@@ -54,13 +54,6 @@
         <label class="form-label">License Plate</label>
         <input v-model="form.licensePlate" class="form-input" type="text" placeholder="e.g. ABC-1234" />
       </div>
-      <div class="form-group">
-        <label class="form-label">Assigned Driver</label>
-        <select v-model="form.assignedDriver" class="form-select">
-          <option value="">-- No driver --</option>
-          <option v-for="name in driverNames" :key="name" :value="name">{{ name }}</option>
-        </select>
-      </div>
     </div>
 
     <div v-if="showOwner" class="form-row">
