@@ -80,7 +80,18 @@
       <van-collapse-item title="Documents" name="documents">
         <DocumentList :load-id="loadId" />
       </van-collapse-item>
+    </van-collapse>
 
+    <!-- Accept / Reject buttons for dispatched loads -->
+    <div v-if="showResponseButtons" class="load-response-actions">
+      <van-button type="danger" plain block @click="$emit('decline', load)">Reject Load</van-button>
+      <van-button type="primary" block @click="$emit('accept', load)">Accept Load</van-button>
+    </div>
+    <div v-else-if="showAcceptedBadge" class="load-accepted-banner">
+      <span>&#10003; Load Accepted</span>
+    </div>
+
+    <van-collapse v-model="openSections">
       <van-collapse-item v-if="truck" title="Truck Details" name="truck">
         <div class="truck-detail-card">
           <img v-if="truck.photo" :src="truck.photo" class="truck-photo" />
@@ -118,7 +129,7 @@ const props = defineProps({
   truck: { type: Object, default: null },
 })
 
-const emit = defineEmits(['back', 'status-update', 'uploaded'])
+const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline'])
 
 const openSections = ref(['map'])
 const copiedField = ref(null)
@@ -180,6 +191,9 @@ const destCol = computed(() => (props.headers || []).find(h => /dest|drop.*city|
 const status = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim() : '')
 const loadId = computed(() => loadIdCol.value ? props.load[loadIdCol.value] : '')
 const isPending = computed(() => /^(assigned|dispatched|)$/i.test(status.value))
+const isDispatched = computed(() => /^(dispatched)$/i.test(status.value))
+const showResponseButtons = computed(() => isDispatched.value && !props.load._accepted)
+const showAcceptedBadge = computed(() => isDispatched.value && props.load._accepted)
 
 const route = computed(() => {
   if (detailsCol.value) {
@@ -331,4 +345,8 @@ const dropoffFields = computed(() => {
 .ts-inactive { background: rgba(156,163,175,0.15); color: #9ca3af; }
 .ts-maintenance { background: rgba(251,191,36,0.15); color: #f59e0b; }
 .ts-oos { background: rgba(239,68,68,0.15); color: #ef4444; }
+
+.load-response-actions { display: flex; gap: 0.75rem; padding: 1rem 0.5rem; }
+.load-response-actions .van-button { flex: 1; font-weight: 600; height: 44px; border-radius: 10px; }
+.load-accepted-banner { text-align: center; padding: 0.75rem; margin: 0.75rem 0; background: #ecfdf5; color: #047857; font-weight: 600; border-radius: 10px; font-size: 0.9rem; }
 </style>

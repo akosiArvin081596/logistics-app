@@ -41,6 +41,8 @@
           @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
+          @accept="handleAcceptLoad"
+          @decline="handleDeclineLoad"
         />
 
         <!-- Load List -->
