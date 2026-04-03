@@ -38,11 +38,13 @@
           :has-active-job="driverStore.hasActiveJob"
           :driver-position="geo.lastPosition.value"
           :truck="driverStore.truck"
+          :load-expenses="detailLoadExpenses"
           @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
           @accept="handleAcceptLoad"
           @decline="handleDeclineLoad"
+          @expense-submit="handleExpenseSubmit"
         />
 
         <!-- Load List -->
@@ -336,6 +338,15 @@ const driverName = computed(() => auth.user?.driverName || auth.user?.username |
 const detailLoad = computed(() => {
   if (!detailRowIndex.value) return null
   return driverStore.loads.find(l => l._rowIndex === detailRowIndex.value) || null
+})
+
+const detailLoadExpenses = computed(() => {
+  if (!detailLoad.value) return []
+  const hdrs = driverStore.headers.jobTracking || []
+  const lidCol = hdrs.find(h => /load.?id|job.?id/i.test(h))
+  const lid = lidCol ? (detailLoad.value[lidCol] || '').toString().trim() : ''
+  if (!lid) return []
+  return driverStore.expenses.filter(e => (e.load_id || '').toString().trim() === lid)
 })
 
 // Current active load for status tab (only working loads — not pending/delivered)

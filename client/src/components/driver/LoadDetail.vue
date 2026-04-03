@@ -101,6 +101,21 @@
       <van-collapse-item title="Documents" name="documents">
         <DocumentList :load-id="loadId" />
       </van-collapse-item>
+
+      <van-collapse-item title="Expenses" name="expenses">
+        <ExpenseForm
+          v-if="isActiveLoad"
+          :loads="[load]"
+          :driver-name="driverName"
+          :headers="headers"
+          @submit="$emit('expense-submit', $event)"
+        />
+        <div v-if="loadExpenses.length > 0" class="expense-history">
+          <div class="expense-history-label">Expense History</div>
+          <ExpenseCard v-for="exp in loadExpenses" :key="exp.id" :expense="exp" />
+        </div>
+        <van-empty v-else-if="!isActiveLoad" description="No expenses for this load" image="search" :image-size="60" />
+      </van-collapse-item>
     </van-collapse>
 
     <!-- Accept / Reject buttons for dispatched loads -->
@@ -121,6 +136,8 @@ import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCe
 import StatusBadge from '../shared/StatusBadge.vue'
 import DocumentList from './DocumentList.vue'
 import DriverRouteMap from './DriverRouteMap.vue'
+import ExpenseForm from './ExpenseForm.vue'
+import ExpenseCard from './ExpenseCard.vue'
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -129,9 +146,10 @@ const props = defineProps({
   hasActiveJob: { type: Boolean, default: false },
   driverPosition: { type: Object, default: null },
   truck: { type: Object, default: null },
+  loadExpenses: { type: Array, default: () => [] },
 })
 
-const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline'])
+const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline', 'expense-submit'])
 
 const openSections = ref(['map'])
 const copiedField = ref(null)
@@ -196,6 +214,7 @@ const isPending = computed(() => /^(assigned|dispatched|)$/i.test(status.value))
 const isDispatched = computed(() => /^(dispatched)$/i.test(status.value))
 const showResponseButtons = computed(() => isDispatched.value && !props.load._accepted)
 const showAcceptedBadge = computed(() => isDispatched.value && props.load._accepted)
+const isActiveLoad = computed(() => /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i.test(status.value))
 
 const route = computed(() => {
   if (detailsCol.value) {
@@ -351,4 +370,7 @@ const dropoffFields = computed(() => {
 .load-response-actions { display: flex; gap: 0.75rem; padding: 1rem 0.5rem; }
 .load-response-actions .van-button { flex: 1; font-weight: 600; height: 44px; border-radius: 10px; }
 .load-accepted-banner { text-align: center; padding: 0.75rem; margin: 0.75rem 0; background: #ecfdf5; color: #047857; font-weight: 600; border-radius: 10px; font-size: 0.9rem; }
+
+.expense-history { margin-top: 0.75rem; }
+.expense-history-label { font-size: 0.72rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border, #e5e7eb); }
 </style>

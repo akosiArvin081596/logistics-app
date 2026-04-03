@@ -32,7 +32,6 @@ const tabs = [
   { key: 'notifications', label: 'Alerts', icon: '&#128276;' },
   { key: 'kit', label: 'Kit', icon: '&#128196;' },
   { key: 'messages', label: 'Messages', icon: '&#128172;' },
-  { key: 'expenses', label: 'Expenses', icon: '&#128176;' },
 ]
 </script>
 
