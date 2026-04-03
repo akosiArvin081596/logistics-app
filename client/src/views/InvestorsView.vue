@@ -5,18 +5,16 @@
     </div>
 
     <AddInvestorForm
-      :investor-users="store.investorUsers"
       :carrier-names="store.carrierNames"
       @submit="handleAdd"
     />
 
     <template v-if="store.isLoading">
-      <SkeletonLoader :rows="4" :cols="8" />
+      <SkeletonLoader :rows="4" :cols="6" />
     </template>
     <template v-else>
       <InvestorTable
         :investors="store.investors"
-        :investor-users="store.investorUsers"
         :carrier-names="store.carrierNames"
         @delete="handleDelete"
         @update="handleUpdate"
@@ -65,7 +63,6 @@ async function handleDelete(id) {
 
 onMounted(() => {
   store.load()
-  store.loadInvestorUsers()
   store.loadCarrierNames()
 })
 </script>

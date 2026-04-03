@@ -21,13 +21,6 @@
 
     <div class="form-row">
       <div class="form-group">
-        <label class="form-label">Linked User Account</label>
-        <select v-model="form.userId" class="form-select">
-          <option :value="null">-- None --</option>
-          <option v-for="u in investorUsers" :key="u.id" :value="u.id">{{ u.username }}</option>
-        </select>
-      </div>
-      <div class="form-group">
         <label class="form-label">Status</label>
         <select v-model="form.status" class="form-select">
           <option value="Active">Active</option>
@@ -50,14 +43,13 @@
 import { reactive, ref } from 'vue'
 
 defineProps({
-  investorUsers: { type: Array, default: () => [] },
   carrierNames: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits(['submit'])
 
 const defaults = () => ({
-  fullName: '', carrierName: '', status: 'Active', userId: null, notes: '',
+  fullName: '', carrierName: '', status: 'Active', notes: '',
 })
 
 const form = reactive(defaults())

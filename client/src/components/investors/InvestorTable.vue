@@ -12,7 +12,6 @@
         <tr>
           <th>Investor Name</th>
           <th>Carrier Name</th>
-          <th>Linked Account</th>
           <th>Trucks</th>
           <th>Status</th>
           <th>Notes</th>
@@ -23,7 +22,6 @@
         <tr v-for="inv in investors" :key="inv.id">
           <td class="name-cell">{{ inv.fullName }}</td>
           <td>{{ inv.carrierName || '\u2014' }}</td>
-          <td>{{ inv.username || '\u2014' }}</td>
           <td class="mono">{{ inv.truckCount }}</td>
           <td>
             <span :class="['status-badge', inv.status === 'Active' ? 'status-active' : 'status-inactive']">{{ inv.status }}</span>
@@ -60,13 +58,6 @@
           </div>
 
           <div class="edit-row">
-            <div class="edit-field">
-              <label>Linked User Account</label>
-              <select v-model="editForm.userId">
-                <option :value="null">-- None --</option>
-                <option v-for="u in investorUsers" :key="u.id" :value="u.id">{{ u.username }}</option>
-              </select>
-            </div>
             <div class="edit-field">
               <label>Status</label>
               <select v-model="editForm.status">
@@ -108,7 +99,6 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 
 defineProps({
   investors: { type: Array, default: () => [] },
-  investorUsers: { type: Array, default: () => [] },
   carrierNames: { type: Array, default: () => [] },
 })
 
@@ -118,7 +108,7 @@ const showConfirm = ref(false)
 const pendingInv = ref(null)
 const showEdit = ref(false)
 const editForm = reactive({
-  id: null, fullName: '', carrierName: '', status: 'Active', userId: null, notes: '',
+  id: null, fullName: '', carrierName: '', status: 'Active', notes: '',
 })
 
 function openEdit(inv) {
@@ -126,7 +116,6 @@ function openEdit(inv) {
   editForm.fullName = inv.fullName
   editForm.carrierName = inv.carrierName
   editForm.status = inv.status
-  editForm.userId = inv.userId
   editForm.notes = inv.notes
   showEdit.value = true
 }
