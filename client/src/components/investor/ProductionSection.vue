@@ -100,10 +100,11 @@ function monthLabel(month) {
 
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 1rem;
   margin-bottom: 1rem;
 }
+@media (max-width: 600px) { .kpi-grid { grid-template-columns: 1fr; } }
 
 .kpi-card {
   padding: 1rem;

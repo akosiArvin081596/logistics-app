@@ -124,9 +124,10 @@ function shortMonth(month) {
   display: flex; align-items: center; justify-content: center; font-size: 0.9rem;
 }
 .kpi-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  display: grid; grid-template-columns: repeat(2, 1fr);
   gap: 1rem; margin-bottom: 1rem;
 }
+@media (max-width: 600px) { .kpi-grid { grid-template-columns: 1fr; } }
 .kpi-card {
   padding: 1rem; border: 1px solid var(--border);
   border-radius: var(--radius); text-align: center;
