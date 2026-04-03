@@ -9,7 +9,7 @@
     <!-- Message thread -->
     <div class="chat-body" ref="chatBody">
       <div v-if="messages.length === 0" class="chat-empty">
-        No messages yet. Send a message to get in touch with dispatch.
+        No messages yet. Send a message to get in touch with the admin.
       </div>
       <div
         v-for="msg in messages"
@@ -138,7 +138,7 @@ async function send() {
     id: Date.now(),
     asset_ref: assetRef,
     from: auth.user?.username,
-    to: 'dispatch',
+    to: 'admin',
     message: text,
     timestamp: new Date().toISOString(),
     read: 1,
@@ -169,7 +169,7 @@ async function send() {
     }
     await api.post('/api/messages', {
       from: auth.user?.username,
-      to: 'dispatch',
+      to: 'admin',
       message: text,
       attachmentUrl,
       attachmentType,

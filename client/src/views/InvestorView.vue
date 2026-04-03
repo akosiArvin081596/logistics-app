@@ -65,7 +65,6 @@
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
       <InvestorChat :trucks="trucks" />
-      <DocumentPortal />
       <LegalDocumentPortal :trucks="trucks" />
       <!-- Business Configuration hidden from investor view; admin manages via Admin Tools -->
       <!--
