@@ -3763,10 +3763,13 @@ app.post("/api/location", requireAuth, async (req, res) => {
 										values: [[logId, loadId, driverName, dateTime, geofenceTriggered, `Auto-triggered by geofence (was ${currentStatus})`]],
 									},
 								});
+								const geoMsg = geofenceTriggered === "At Shipper"
+									? `You have arrived at the pickup location`
+									: `You have arrived at the delivery location`;
 								const geoNotif = insertNotification.run(
 									driverName.trim().toLowerCase(), 'geofence',
-									`Geofence: ${geofenceTriggered}`,
-									`Load ${loadId}`,
+									`${geofenceTriggered} — Load ${loadId}`,
+									geoMsg,
 									JSON.stringify({ loadId, status: geofenceTriggered })
 								);
 								io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
@@ -3779,16 +3782,19 @@ app.post("/api/location", requireAuth, async (req, res) => {
 									driver: driverName,
 									status: geofenceTriggered,
 								});
+								const dispatchMsg = geofenceTriggered === "At Shipper"
+									? `${driverName} has arrived at the pickup location (Load ${loadId})`
+									: `${driverName} has arrived at the delivery location (Load ${loadId})`;
 								insertDispatchNotification.run(
 									'geofence',
 									`${driverName}: ${geofenceTriggered}`,
-									`Load ${loadId} — auto-triggered by geofence`,
+									dispatchMsg,
 									JSON.stringify({ loadId, driverName, status: geofenceTriggered })
 								);
 								io.to("dispatch").emit("dispatch-notification", {
 									type: 'geofence',
 									title: `${driverName}: ${geofenceTriggered}`,
-									body: `Load ${loadId} — auto-triggered by geofence`,
+									body: dispatchMsg,
 								});
 							}
 						}
