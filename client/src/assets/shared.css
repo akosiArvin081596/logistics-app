@@ -60,7 +60,7 @@
   animation: fadeInUp 0.35s ease-out both;
 }
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+*, *::before, *::after { box-sizing: border-box; margin: 0; }
 
 body {
   font-family: 'DM Sans', sans-serif;
