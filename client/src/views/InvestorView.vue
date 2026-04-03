@@ -8,8 +8,8 @@
           <p class="hero-sub">Performance overview &middot; {{ todayFormatted }}</p>
         </div>
         <div class="header-actions">
-          <a href="mailto:info@logisx.com" class="btn-email">info@logisx.com</a>
-          <a href="mailto:dev@logisx.com" class="btn-email">dev@logisx.com</a>
+          <a href="mailto:info@logisx.com" class="btn-email">Contact Operations</a>
+          <a href="mailto:dev@logisx.com" class="btn-email">Contact Tech Support</a>
           <div class="report-group">
             <input v-model="reportStart" type="date" class="date-input" title="Report start date" />
             <input v-model="reportEnd" type="date" class="date-input" title="Report end date" />
