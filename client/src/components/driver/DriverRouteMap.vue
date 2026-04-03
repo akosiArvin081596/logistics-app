@@ -26,7 +26,7 @@
       <!-- Expanded fullscreen overlay -->
       <Teleport to="body">
         <div v-if="expanded" class="map-fullscreen-overlay" @click.self="expanded = false">
-          <div class="map-fullscreen-panel">
+          <div class="map-fullscreen-panel" @click.stop>
             <div class="map-fullscreen-header">
               <div class="map-fullscreen-info">
                 <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
