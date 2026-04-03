@@ -4650,6 +4650,25 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 		const avgMonthlyOwnerEarnings = Math.round(paidRevenue / monthsOfOperation);
 
+		// ---- Add truck fixed costs & maintenance fund to totalExpenses ----
+		{
+			const truckQuery = investorDriverSet
+				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily FROM trucks WHERE owner_id = ?"
+				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily FROM trucks";
+			const truckArgs = investorDriverSet ? [user.id] : [];
+			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
+			let fixedMonthlyTotal = 0;
+			for (const t of fleetTrucks) {
+				fixedMonthlyTotal += (t.insurance_monthly || 0) + (t.eld_monthly || 0)
+					+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12)
+					+ ((t.driver_pay_daily || 0) * 30);
+			}
+			// Add maintenance fund monthly (per truck) from config
+			const maintFundMonthly = parseFloat(config.maintenance_fund_monthly) || 0;
+			fixedMonthlyTotal += maintFundMonthly * fleetTrucks.length;
+			totalExpenses += fixedMonthlyTotal * monthsOfOperation;
+		}
+
 		// Monthly revenue sorted
 		const monthlyData = Object.entries(monthlyRevenue)
 			.sort(([a], [b]) => a.localeCompare(b))
