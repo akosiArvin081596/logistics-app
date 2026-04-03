@@ -15,7 +15,6 @@
           <th>Full Name</th>
           <th>Details</th>
           <th>Email</th>
-          <th>Rating</th>
           <th>Created</th>
           <th></th>
         </tr>
@@ -37,12 +36,6 @@
           </td>
           <td :style="{ color: user.Email ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.Email || '\u2014' }}
-          </td>
-          <td>
-            <div v-if="user.Role === 'Driver'" class="star-rating">
-              <span v-for="s in 5" :key="s" class="star" :class="{ filled: s <= (user.Rating || 0), clickable: true }" @click="$emit('rate', user.id, s)">&#9733;</span>
-            </div>
-            <span v-else style="color:var(--text-dim);">&mdash;</span>
           </td>
           <td class="created-at">
             {{ formatDate(user.CreatedAt) }}
