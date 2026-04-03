@@ -26,23 +26,32 @@
       </div>
     </template>
 
-    <div class="dash-wrapper">
-      <div class="dash-tabs">
-        <button v-for="tab in tabs" :key="tab.key"
-          :class="['dash-tab', { active: activeTab === tab.key }]"
-          @click="activeTab = tab.key">
-          {{ tab.label }}
-          <span class="dash-tab-badge">{{ tab.count }}</span>
-        </button>
-      </div>
-
-      <div class="flex-1 overflow-y-auto">
-        <JobBoardTab v-show="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" />
-        <ActiveLoadsTab v-show="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" />
-        <CompletedLoadsTab v-show="activeTab === 'completed'" :jobs="store.completedJobs" :headers="store.completedHeaders" />
-        <FleetTab v-show="activeTab === 'fleet'" :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />
-      </div>
-    </div>
+    <Card class="flex-1 flex flex-col min-h-0 overflow-hidden" style="margin-top:1.25rem;">
+      <Tabs :model-value="activeTab" @update:model-value="v => activeTab = v">
+        <TabsList class="w-full justify-start rounded-none border-b bg-muted/50 h-auto" style="padding:0 0.75rem;">
+          <TabsTrigger v-for="tab in tabs" :key="tab.key" :value="tab.key"
+            class="rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none data-[state=active]:bg-transparent"
+            style="padding:1rem 1.25rem;">
+            {{ tab.label }}
+            <Badge variant="secondary" class="font-mono" style="margin-left:0.5rem;">{{ tab.count }}</Badge>
+          </TabsTrigger>
+        </TabsList>
+        <CardContent class="flex-1 overflow-y-auto" style="padding:0;">
+          <TabsContent value="jobBoard" style="margin-top:0;">
+            <JobBoardTab :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" />
+          </TabsContent>
+          <TabsContent value="activeLoads" style="margin-top:0;">
+            <ActiveLoadsTab :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" />
+          </TabsContent>
+          <TabsContent value="completed" style="margin-top:0;">
+            <CompletedLoadsTab :jobs="store.completedJobs" :headers="store.completedHeaders" />
+          </TabsContent>
+          <TabsContent value="fleet" style="margin-top:0;">
+            <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />
+          </TabsContent>
+        </CardContent>
+      </Tabs>
+    </Card>
   </div>
 </template>
 
@@ -51,6 +60,9 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useDashboardStore } from '../stores/dashboard'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
+import { Card, CardContent } from '@/components/ui/card'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { Badge } from '@/components/ui/badge'
 import KpiGrid from '../components/dashboard/KpiGrid.vue'
 import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
 import ActiveLoadsTab from '../components/dashboard/ActiveLoadsTab.vue'

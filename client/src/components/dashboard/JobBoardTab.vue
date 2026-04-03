@@ -1,74 +1,72 @@
 <template>
   <div>
     <div class="dash-search-bar">
-      <input v-model="searchQuery" type="text" placeholder="Search load number..." class="dash-search-input" />
+      <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
     </div>
 
     <div class="overflow-x-auto">
       <SkeletonLoader v-if="loading" />
-      <table v-else-if="filteredJobs.length > 0" class="dash-table">
-        <thead>
-          <tr>
-            <th v-for="col in displayCols" :key="col">{{ col }}</th>
-            <th>Assign Driver</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="job in paginatedItems" :key="job._rowIndex" @click="openDetail(job)">
-            <td v-for="col in displayCols" :key="col">
+      <Table v-else-if="filteredJobs.length > 0">
+        <TableHeader>
+          <TableRow>
+            <TableHead v-for="col in displayCols" :key="col">{{ col }}</TableHead>
+            <TableHead>Assign Driver</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow v-for="job in paginatedItems" :key="job._rowIndex" class="cursor-pointer" @click="openDetail(job)">
+            <TableCell v-for="col in displayCols" :key="col">
               <StatusBadge v-if="/status/i.test(col)" :status="job[col] || 'Unassigned'" />
               <template v-else>{{ cellValue(job, col) }}</template>
-            </td>
-            <td @click.stop>
+            </TableCell>
+            <TableCell @click.stop>
               <div v-if="!hideAssign(job)" class="flex items-center gap-2">
                 <select v-model="assignSelections[job._rowIndex]" class="dash-select" style="min-width:140px">
                   <option value="">Select driver</option>
                   <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
                 </select>
-                <button class="dash-assign-btn" @click="assign(job)">Assign</button>
+                <Button size="sm" @click="assign(job)">Assign</Button>
               </div>
               <span v-else class="text-gray-300">&mdash;</span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+            </TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
       <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'All loads are assigned.' }}</EmptyState>
     </div>
     <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
 
-    <Teleport to="body">
-      <div v-if="selectedJob" class="fixed inset-0 bg-black/30 backdrop-blur-sm z-[200] flex items-center justify-center" @click.self="selectedJob = null">
-        <div class="dash-modal-container">
-          <div class="dash-modal-header">
-            <div class="flex items-center gap-3">
-              <h3 style="font-size:1.1rem;font-weight:700;">{{ loadIdValue || 'Load Details' }}</h3>
-              <StatusBadge v-if="statusValue" :status="statusValue" />
-            </div>
-            <button class="dash-modal-close" @click="selectedJob = null">&times;</button>
+    <Dialog :open="!!selectedJob" @update:open="v => { if (!v) selectedJob = null }">
+      <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
+        <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
+          <div class="flex items-center gap-3">
+            <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+            <StatusBadge v-if="statusValue" :status="statusValue" />
           </div>
-          <div style="padding:1.25rem;overflow-y:auto;flex:1;">
-            <template v-for="section in detailSections" :key="section.title">
-              <div v-if="section.fields.length" style="margin-bottom:1rem;">
-                <div class="dash-section-title">{{ section.title }}</div>
-                <div class="dash-detail-grid">
-                  <div v-for="field in section.fields" :key="field.col" :style="[field.wide ? 'grid-column:span 2' : '']" style="display:flex;flex-direction:column;gap:2px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
-                    <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">{{ field.col }}</span>
-                    <span style="font-size:0.875rem;">
-                      <StatusBadge v-if="/status/i.test(field.col) && field.value" :status="field.value" />
-                      <template v-else>{{ field.value || '\u2014' }}</template>
-                    </span>
-                  </div>
+          <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
+        </DialogHeader>
+        <div style="padding:1.25rem;overflow-y:auto;flex:1;">
+          <template v-for="section in detailSections" :key="section.title">
+            <div v-if="section.fields.length" style="margin-bottom:1rem;">
+              <div class="dash-section-title">{{ section.title }}</div>
+              <div class="dash-detail-grid">
+                <div v-for="field in section.fields" :key="field.col" :style="[field.wide ? 'grid-column:span 2' : '']" style="display:flex;flex-direction:column;gap:2px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
+                  <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">{{ field.col }}</span>
+                  <span style="font-size:0.875rem;">
+                    <StatusBadge v-if="/status/i.test(field.col) && field.value" :status="field.value" />
+                    <template v-else>{{ field.value || '\u2014' }}</template>
+                  </span>
                 </div>
               </div>
-            </template>
-            <div style="margin-bottom:1rem;">
-              <div class="dash-section-title">Route Map</div>
-              <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="null" dispatch-mode />
             </div>
+          </template>
+          <div style="margin-bottom:1rem;">
+            <div class="dash-section-title">Route Map</div>
+            <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="null" dispatch-mode />
           </div>
         </div>
-      </div>
-    </Teleport>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
 
@@ -76,6 +74,10 @@
 import { computed, reactive, ref } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useToast } from '../../composables/useToast'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import StatusBadge from '../shared/StatusBadge.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'

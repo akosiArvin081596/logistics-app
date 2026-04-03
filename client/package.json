@@ -9,8 +9,15 @@
   },
   "dependencies": {
     "@googlemaps/js-api-loader": "^2.0.2",
+    "@vueuse/core": "^14.2.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-vue-next": "^1.0.0",
     "pinia": "^3.0.2",
+    "radix-vue": "^1.9.17",
+    "reka-ui": "^2.9.3",
     "socket.io-client": "^4.8.3",
+    "tailwind-merge": "^3.5.0",
     "vant": "^4.9.22",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
@@ -19,6 +26,7 @@
     "@tailwindcss/vite": "^4.2.2",
     "@vitejs/plugin-vue": "^5.2.3",
     "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
     "vite": "^6.2.5"
   }
 }

@@ -1,71 +1,69 @@
 <template>
   <div>
     <div class="dash-search-bar">
-      <input v-model="searchQuery" type="text" placeholder="Search load number..." class="dash-search-input" />
+      <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
     </div>
     <div class="overflow-x-auto">
-      <table v-if="filteredJobs.length > 0" class="dash-table">
-        <thead>
-          <tr>
-            <th v-for="col in displayCols" :key="col">{{ col }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="job in paginatedItems" :key="job._rowIndex" @click="openDetail(job)">
-            <td v-for="col in displayCols" :key="col">
+      <Table v-if="filteredJobs.length > 0">
+        <TableHeader>
+          <TableRow>
+            <TableHead v-for="col in displayCols" :key="col">{{ col }}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow v-for="job in paginatedItems" :key="job._rowIndex" class="cursor-pointer" @click="openDetail(job)">
+            <TableCell v-for="col in displayCols" :key="col">
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
               <template v-else>{{ cellValue(job, col) }}</template>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+            </TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
       <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'No completed loads.' }}</EmptyState>
     </div>
     <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
 
-    <Teleport to="body">
-      <div v-if="selectedJob" class="fixed inset-0 bg-black/30 backdrop-blur-sm z-[200] flex items-center justify-center" @click.self="selectedJob = null">
-        <div class="dash-modal-container">
-          <div class="dash-modal-header">
-            <h3 style="font-size:1.1rem;font-weight:700;">{{ loadIdValue || 'Load Details' }}</h3>
-            <button class="dash-modal-close" @click="selectedJob = null">&times;</button>
+    <Dialog :open="!!selectedJob" @update:open="v => { if (!v) selectedJob = null }">
+      <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
+        <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
+          <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+          <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
+        </DialogHeader>
+        <div style="padding:1.25rem;overflow-y:auto;flex:1;">
+          <template v-for="section in detailSections" :key="section.title">
+            <div v-if="section.fields.length" style="margin-bottom:1rem;">
+              <div class="dash-section-title">{{ section.title }}</div>
+              <div class="dash-detail-grid">
+                <div v-for="field in section.fields" :key="field.col" :style="[field.wide ? 'grid-column:span 2' : '']" style="display:flex;flex-direction:column;gap:2px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
+                  <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">{{ field.col }}</span>
+                  <span style="font-size:0.875rem;">{{ field.value || '\u2014' }}</span>
+                </div>
+              </div>
+            </div>
+          </template>
+          <div style="margin-bottom:1rem;">
+            <div class="dash-section-title">Documents</div>
+            <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
+              <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
+              <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
+              <div v-else style="display:flex;flex-direction:column;gap:0.5rem;">
+                <div v-for="doc in loadDocs" :key="doc.id" style="display:flex;align-items:center;justify-content:space-between;padding:0.25rem 0;">
+                  <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;">{{ doc.type }}</span>
+                    <span style="font-size:0.875rem;">{{ doc.file_name }}</span>
+                  </div>
+                  <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;">View</a>
+                </div>
+              </div>
+            </div>
           </div>
-          <div style="padding:1.25rem;overflow-y:auto;flex:1;">
-            <template v-for="section in detailSections" :key="section.title">
-              <div v-if="section.fields.length" style="margin-bottom:1rem;">
-                <div class="dash-section-title">{{ section.title }}</div>
-                <div class="dash-detail-grid">
-                  <div v-for="field in section.fields" :key="field.col" :style="[field.wide ? 'grid-column:span 2' : '']" style="display:flex;flex-direction:column;gap:2px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
-                    <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">{{ field.col }}</span>
-                    <span style="font-size:0.875rem;">{{ field.value || '\u2014' }}</span>
-                  </div>
-                </div>
-              </div>
-            </template>
-            <div style="margin-bottom:1rem;">
-              <div class="dash-section-title">Documents</div>
-              <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
-                <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
-                <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
-                <div v-else style="display:flex;flex-direction:column;gap:0.5rem;">
-                  <div v-for="doc in loadDocs" :key="doc.id" style="display:flex;align-items:center;justify-content:space-between;padding:0.25rem 0;">
-                    <div style="display:flex;align-items:center;gap:0.5rem;">
-                      <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;">{{ doc.type }}</span>
-                      <span style="font-size:0.875rem;">{{ doc.file_name }}</span>
-                    </div>
-                    <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;">View</a>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div>
-              <div class="dash-section-title">Route Map</div>
-              <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="null" dispatch-mode />
-            </div>
+          <div>
+            <div class="dash-section-title">Route Map</div>
+            <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="null" dispatch-mode />
           </div>
         </div>
-      </div>
-    </Teleport>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
 
@@ -73,6 +71,9 @@
 import { computed, ref } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
+import { Input } from '@/components/ui/input'
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import StatusBadge from '../shared/StatusBadge.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'

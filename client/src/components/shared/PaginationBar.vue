@@ -2,14 +2,14 @@
   <div v-if="totalPages > 1" class="pagination">
     <div class="pagination-info">{{ start }}–{{ end }} of {{ total }}</div>
     <div class="pagination-controls">
-      <button class="page-btn" :disabled="page === 1" @click="$emit('go', 1)">&laquo;</button>
-      <button class="page-btn" :disabled="page === 1" @click="$emit('go', page - 1)">&lsaquo;</button>
+      <Button variant="outline" size="sm" :disabled="page === 1" @click="$emit('go', 1)">&laquo;</Button>
+      <Button variant="outline" size="sm" :disabled="page === 1" @click="$emit('go', page - 1)">&lsaquo;</Button>
       <template v-for="i in pageNumbers" :key="i">
         <span v-if="i === '...'" class="px-1 text-gray-300 text-sm select-none">&#183;&#183;&#183;</span>
-        <button v-else class="page-btn" :class="{ active: i === page }" @click="$emit('go', i)">{{ i }}</button>
+        <Button v-else :variant="i === page ? 'default' : 'outline'" size="sm" @click="$emit('go', i)">{{ i }}</Button>
       </template>
-      <button class="page-btn" :disabled="page === totalPages" @click="$emit('go', page + 1)">&rsaquo;</button>
-      <button class="page-btn" :disabled="page === totalPages" @click="$emit('go', totalPages)">&raquo;</button>
+      <Button variant="outline" size="sm" :disabled="page === totalPages" @click="$emit('go', page + 1)">&rsaquo;</Button>
+      <Button variant="outline" size="sm" :disabled="page === totalPages" @click="$emit('go', totalPages)">&raquo;</Button>
       <select class="page-size-select" :value="pageSize" @change="$emit('size', +($event.target).value)">
         <option v-for="s in sizes" :key="s" :value="s">{{ s }}/page</option>
       </select>
@@ -19,6 +19,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { Button } from '@/components/ui/button'
 
 const props = defineProps({
   page: { type: Number, required: true },

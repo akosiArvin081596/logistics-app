@@ -1,18 +1,22 @@
 <template>
   <div class="kpi-grid">
-    <div v-for="card in cards" :key="card.key" :class="['kpi-card', card.theme]" @click="emit('card-click', card.key)">
-      <div :class="['kpi-icon', card.iconTheme]">{{ card.icon }}</div>
-      <div class="kpi-info">
-        <div class="kpi-label">{{ card.label }}</div>
-        <div class="kpi-value">{{ card.value }}</div>
-        <div class="kpi-sub">{{ card.sub }}</div>
-      </div>
-    </div>
+    <Card v-for="card in cards" :key="card.key" :class="['kpi-card', card.theme]" @click="emit('card-click', card.key)">
+      <CardContent class="flex items-center gap-4" style="padding:1rem 1.25rem;">
+        <div :class="['kpi-icon', card.iconTheme]">{{ card.icon }}</div>
+        <div class="kpi-info">
+          <div class="kpi-label">{{ card.label }}</div>
+          <div class="kpi-value">{{ card.value }}</div>
+          <div class="kpi-sub">{{ card.sub }}</div>
+        </div>
+      </CardContent>
+    </Card>
   </div>
 </template>
 
 <script setup>
 import { computed } from 'vue'
+import { Card, CardContent } from '@/components/ui/card'
+
 const props = defineProps({ kpis: { type: Object, required: true }, completedTotal: { type: Number, default: null } })
 const emit = defineEmits(['card-click'])
 const fu = computed(() => props.kpis.fleetUtilization || { assigned: 0, total: 0 })
