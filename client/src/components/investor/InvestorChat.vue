@@ -160,10 +160,10 @@ async function send() {
       const uploadRes = await api.post('/api/chat/attachment', {
         fileName: savedFile.name,
         fileData: savedBase64,
-        fileType: savedFile.type,
+        mimeType: savedFile.type,
       })
-      attachmentUrl = uploadRes.url || ''
-      attachmentType = savedFile.type.startsWith('image/') ? 'image' : 'file'
+      attachmentUrl = uploadRes.fileUrl || ''
+      attachmentType = uploadRes.attachmentType || (savedFile.type.startsWith('image/') ? 'image' : 'file')
       optimistic.attachment_url = attachmentUrl
       optimistic.attachment_type = attachmentType
     }
