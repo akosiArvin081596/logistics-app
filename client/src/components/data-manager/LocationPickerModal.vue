@@ -119,6 +119,8 @@ watch(() => props.open, async (isOpen) => {
       center,
       mapTypeId: 'hybrid',
       mapTypeControl: true,
+    })
+    map.setOptions({
       mapTypeControlOptions: {
         style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
         position: google.maps.ControlPosition.TOP_LEFT,
