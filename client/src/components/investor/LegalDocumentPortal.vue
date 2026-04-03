@@ -21,9 +21,10 @@
         {{ uploadForm.file ? uploadForm.file.name : 'Choose File' }}
         <input type="file" style="display:none" @change="onFileChange" />
       </label>
-      <button class="btn-upload" :disabled="!uploadForm.file || !uploadForm.docType || uploading || (!truckId && !uploadForm.selectedTruckId)" @click="upload">
+      <button class="btn-upload" :disabled="!uploadForm.file || !uploadForm.docType || uploading || (!truckId && !uploadForm.selectedTruckId)" @click="upload" :title="!uploadForm.docType ? 'Please select a doc type first' : !uploadForm.file ? 'Please choose a file first' : ''">
         {{ uploading ? 'Uploading...' : 'Upload' }}
       </button>
+      <span v-if="uploadForm.file && !uploadForm.docType" class="upload-hint">Select a doc type to upload</span>
     </div>
 
     <!-- Doc list -->
@@ -207,7 +208,8 @@ onMounted(load)
   border: none; border-radius: 6px; font-family: inherit; font-size: 0.8rem;
   font-weight: 600; cursor: pointer; white-space: nowrap; transition: opacity 0.15s;
 }
-.btn-upload:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-upload:disabled { opacity: 0.5; cursor: not-allowed; background: #9ca3af; }
+.upload-hint { font-size: 0.72rem; color: #f59e0b; font-weight: 500; white-space: nowrap; }
 
 .doc-empty { text-align: center; color: var(--text-dim); font-size: 0.82rem; padding: 1.5rem 0; }
 
