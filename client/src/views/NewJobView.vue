@@ -127,21 +127,12 @@
         @close="pickerOpen = false"
       />
 
-      <!-- Assignment -->
+      <!-- Details -->
       <div class="form-section">
-        <div class="section-label">Assignment</div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Driver</label>
-            <select v-model="form.driver" class="form-select">
-              <option value="">Unassigned</option>
-              <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
-            </select>
-          </div>
-          <div class="form-group flex-2">
-            <label class="form-label">Details / Notes</label>
-            <input v-model="form.details" class="form-input" type="text" placeholder="Additional load details" />
-          </div>
+        <div class="section-label">Additional Info</div>
+        <div class="form-group">
+          <label class="form-label">Details / Notes</label>
+          <input v-model="form.details" class="form-input" type="text" placeholder="Additional load details" />
         </div>
       </div>
 
@@ -318,11 +309,11 @@ async function submit() {
     // Load ID
     if (/load.?id|job.?id/i.test(h)) return form.loadId.trim()
 
-    // Status
-    if (/^(job.?)?status$/i.test(h)) return form.driver ? 'Dispatched' : 'Unassigned'
+    // Status — always Unassigned on creation
+    if (/^(job.?)?status$/i.test(h)) return 'Unassigned'
 
-    // Driver
-    if (/^driver$/i.test(h)) return form.driver || ''
+    // Driver — always empty on creation (assigned later from dashboard)
+    if (/^driver$/i.test(h)) return ''
 
     // Rate
     if (/^(rate|amount|revenue|pay|charge)$/i.test(h)) return form.rate ? String(form.rate) : ''
@@ -362,23 +353,6 @@ async function submit() {
   try {
     const res = await api.post('/api/data?sheet=Job%20Tracking', { values })
     if (res.warning) duplicateWarning.value = res.warning
-
-    // If driver was assigned, dispatch
-    if (form.driver) {
-      try {
-        const loadIdCol = findCol(hdrs, /load.?id|job.?id/i)
-        const rowIndex = res.updatedRange
-          ? parseInt(res.updatedRange.split('!')[1]?.match(/\d+/)?.[0] || '0')
-          : 0
-        await api.post('/api/dispatch', {
-          rowIndex,
-          driver: form.driver,
-          loadId: form.loadId.trim(),
-          origin: form.pickupAddress,
-          destination: form.dropoffAddress,
-        })
-      } catch { /* dispatch notification failed but job was created */ }
-    }
 
     toast('Job created successfully', 'success')
     router.push('/dashboard')
