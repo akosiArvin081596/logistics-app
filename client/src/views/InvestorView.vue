@@ -348,6 +348,20 @@ onMounted(() => {
   }
   .stat-divider { display: none; }
   .stat-item { min-width: 40%; }
+  .header-actions { flex-wrap: wrap; }
+  .report-group { flex-wrap: wrap; }
+}
+
+@media (max-width: 600px) {
+  .inv-header { padding: 1rem; }
+  .inv-header h1 { font-size: 1.1rem; }
+  .header-actions { flex-wrap: wrap; gap: 0.4rem; }
+  .report-group { flex-wrap: wrap; gap: 0.4rem; width: 100%; }
+  .date-input { width: auto; flex: 1; min-width: 100px; }
+  .btn-email, .btn-report, .btn-refresh { font-size: 0.7rem; padding: 0.35rem 0.6rem; }
+  .stat-value { font-size: 1rem; }
+  .stat-item { min-width: 45%; }
+  .quick-stats { padding: 0.5rem 0; }
 }
 
 .skeleton-block {

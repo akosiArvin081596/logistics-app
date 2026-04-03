@@ -260,6 +260,7 @@ body {
 .form-input::placeholder { color: var(--text-dim); opacity: 0.5; }
 .form-textarea { resize: vertical; min-height: 60px; }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+@media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
 
 /* ---- Status Badges ---- */
 .status-badge, .status-pill {
