@@ -201,7 +201,7 @@
 
     <!-- View Truck Detail Modal -->
     <div v-if="viewTruck" class="confirm-overlay" @click.self="viewTruck = null">
-      <div class="confirm-box" style="max-width:500px;">
+      <div class="confirm-box" style="max-width:700px;max-height:85vh;overflow-y:auto;">
         <h3 style="margin-bottom:1rem;">{{ viewTruck.UnitNumber }} — {{ [viewTruck.Make, viewTruck.Model].filter(Boolean).join(' ') }}</h3>
         <div class="view-grid">
           <div class="view-row"><span class="view-label">Year</span><span>{{ viewTruck.Year || '\u2014' }}</span></div>
@@ -217,6 +217,9 @@
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '\u2014' }}</span></div>
         </div>
+        <div style="margin-top:1.25rem;border-top:1px solid #e5e7eb;padding-top:1rem;">
+          <LegalDocumentPortal :truck-id="viewTruck.id" :unit-number="viewTruck.UnitNumber" />
+        </div>
         <div style="margin-top:1rem;text-align:right;">
           <button class="btn btn-secondary" @click="viewTruck = null">Close</button>
         </div>
@@ -229,6 +232,7 @@
 import { ref, reactive, computed } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',

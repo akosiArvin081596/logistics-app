@@ -3113,7 +3113,11 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 	try {
 		const user = req.session.user;
 		const isSuperAdmin = user.role === "Super Admin";
-		const truckId = req.query.truckId ? parseInt(req.query.truckId) : null;
+		let truckId = req.query.truckId ? parseInt(req.query.truckId) : null;
+		if (!truckId && req.query.unit_number) {
+			const t = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?)").get(req.query.unit_number.trim());
+			if (t) truckId = t.id;
+		}
 		let docs;
 		if (isSuperAdmin) {
 			if (truckId) {
@@ -3147,7 +3151,7 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin"), async (req, 
 		if (fileData.length > 13_500_000) {
 			return res.status(400).json({ error: "File too large (max 10MB)" });
 		}
-		const validTypes = ['Vehicle Title','Registration','Insurance COI','Lease Agreement','Maintenance Records','Other'];
+		const validTypes = ['Title','Vehicle Title','Registration','Insurance Certificate','Insurance COI','Lease Agreement','Bill of Sale','Inspection Report','IFTA License','Maintenance Records','Other'];
 		const safeType = validTypes.includes(docType) ? docType : 'Other';
 		const ext = require("path").extname(fileName) || '.pdf';
 		const safeName = `${(unitNumber||'truck').replace(/[^a-zA-Z0-9]/g,'_')}_${safeType.replace(/\s+/g,'_')}_${Date.now()}${ext}`;
