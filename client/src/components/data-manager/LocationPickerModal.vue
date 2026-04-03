@@ -118,6 +118,11 @@ watch(() => props.open, async (isOpen) => {
       zoom: hasInitial ? 14 : 5,
       center,
       mapTypeId: 'hybrid',
+      mapTypeControl: true,
+      mapTypeControlOptions: {
+        style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
+        position: google.maps.ControlPosition.TOP_LEFT,
+      },
     })
     map.addListener('click', onMapClick)
   } else {
