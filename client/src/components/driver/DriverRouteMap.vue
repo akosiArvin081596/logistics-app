@@ -174,8 +174,12 @@ function renderMarkers() {
   }
 
   if (routePoints.value.length >= 2) {
+    const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))
+    // Extend polyline to connect exactly to origin and destination markers
+    if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
+    if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
     routeLine = new google.maps.Polyline({
-      path: routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude })),
+      path,
       strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 5,
       map,
       icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
@@ -255,8 +259,11 @@ function renderExpandedMap() {
     exDriverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map: expandedMap, content: createDotPin('#2563eb', 16), title: driverName.value || 'Driver' })
   }
   if (routePoints.value.length >= 2) {
+    const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))
+    if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
+    if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
     exRouteLine = new google.maps.Polyline({
-      path: routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude })),
+      path,
       strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 5,
       map: expandedMap,
       icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
