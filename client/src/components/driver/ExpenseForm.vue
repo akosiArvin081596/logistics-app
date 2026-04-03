@@ -215,11 +215,12 @@ function handleSubmit() {
 
     form.amount = ''
     form.description = ''
-    form.loadId = ''
     form.gallons = ''
     form.odometer = ''
     photoBase64.value = ''
     fileList.value = []
+    // Keep loadId if only one load (inside load detail)
+    if (props.loads.length > 1) form.loadId = ''
   } finally {
     submitting.value = false
   }
