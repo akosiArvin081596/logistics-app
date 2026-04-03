@@ -316,26 +316,19 @@ db.exec(`
 db.exec(`CREATE INDEX IF NOT EXISTS idx_tdh_owner ON truck_driver_history(owner_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_tdh_driver ON truck_driver_history(driver_name)`);
 
-// Investors table (extended profile data linked to users)
+// Investors table (links investor name to a carrier in the Google Sheet)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investors (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		user_id INTEGER UNIQUE,
 		full_name TEXT NOT NULL DEFAULT '',
-		company_name TEXT NOT NULL DEFAULT '',
-		email TEXT NOT NULL DEFAULT '',
-		phone TEXT NOT NULL DEFAULT '',
-		address TEXT NOT NULL DEFAULT '',
-		city TEXT NOT NULL DEFAULT '',
-		state TEXT NOT NULL DEFAULT '',
-		zip TEXT NOT NULL DEFAULT '',
-		tax_id TEXT NOT NULL DEFAULT '',
-		split_pct REAL DEFAULT 50,
+		carrier_name TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active','Inactive')),
 		notes TEXT NOT NULL DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
+try { db.exec("ALTER TABLE investors ADD COLUMN carrier_name TEXT NOT NULL DEFAULT ''"); } catch {}
 
 // Seed history from current truck assignments (one-time backfill)
 {
@@ -965,15 +958,7 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 		userId: r.user_id,
 		username: r.username || "",
 		fullName: r.full_name,
-		companyName: r.company_name,
-		email: r.email,
-		phone: r.phone,
-		address: r.address,
-		city: r.city,
-		state: r.state,
-		zip: r.zip,
-		taxId: r.tax_id,
-		splitPct: r.split_pct,
+		carrierName: r.carrier_name || "",
 		status: r.status,
 		notes: r.notes,
 		createdAt: r.created_at,
@@ -983,12 +968,12 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 });
 
 app.post("/api/investors", requireRole("Super Admin"), (req, res) => {
-	const { userId, fullName, companyName, email, phone, address, city, state, zip, taxId, splitPct, status, notes } = req.body;
+	const { userId, fullName, carrierName, status, notes } = req.body;
 	if (!fullName || !fullName.trim()) return res.status(400).json({ error: "Full name is required" });
 	const result = db.prepare(`
-		INSERT INTO investors (user_id, full_name, company_name, email, phone, address, city, state, zip, tax_id, split_pct, status, notes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).run(userId || null, fullName.trim(), (companyName || "").trim(), (email || "").trim(), (phone || "").trim(), (address || "").trim(), (city || "").trim(), (state || "").trim(), (zip || "").trim(), (taxId || "").trim(), splitPct ?? 50, status || "Active", (notes || "").trim());
+		INSERT INTO investors (user_id, full_name, carrier_name, status, notes)
+		VALUES (?, ?, ?, ?, ?)
+	`).run(userId || null, fullName.trim(), (carrierName || "").trim(), status || "Active", (notes || "").trim());
 	res.json({ success: true, id: result.lastInsertRowid });
 });
 
@@ -996,11 +981,11 @@ app.put("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 	const { id } = req.params;
 	const existing = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
 	if (!existing) return res.status(404).json({ error: "Investor not found" });
-	const { userId, fullName, companyName, email, phone, address, city, state, zip, taxId, splitPct, status, notes } = req.body;
+	const { userId, fullName, carrierName, status, notes } = req.body;
 	db.prepare(`
-		UPDATE investors SET user_id=?, full_name=?, company_name=?, email=?, phone=?, address=?, city=?, state=?, zip=?, tax_id=?, split_pct=?, status=?, notes=?
+		UPDATE investors SET user_id=?, full_name=?, carrier_name=?, status=?, notes=?
 		WHERE id=?
-	`).run(userId ?? existing.user_id, (fullName || "").trim(), (companyName || "").trim(), (email || "").trim(), (phone || "").trim(), (address || "").trim(), (city || "").trim(), (state || "").trim(), (zip || "").trim(), (taxId || "").trim(), splitPct ?? existing.split_pct, status || existing.status, (notes || "").trim(), id);
+	`).run(userId ?? existing.user_id, (fullName || "").trim(), (carrierName || "").trim(), status || existing.status, (notes || "").trim(), id);
 	res.json({ success: true });
 });
 

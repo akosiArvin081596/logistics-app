@@ -10,30 +10,26 @@
     <table v-else class="inv-table">
       <thead>
         <tr>
-          <th>Name</th>
-          <th>Company</th>
-          <th>Email</th>
-          <th>Phone</th>
-          <th>Location</th>
-          <th>Split</th>
+          <th>Investor Name</th>
+          <th>Carrier Name</th>
+          <th>Linked Account</th>
           <th>Trucks</th>
           <th>Status</th>
+          <th>Notes</th>
           <th></th>
         </tr>
       </thead>
       <tbody>
-        <tr v-for="inv in investors" :key="inv.id" class="clickable-row" @click="viewInv = inv">
+        <tr v-for="inv in investors" :key="inv.id">
           <td class="name-cell">{{ inv.fullName }}</td>
-          <td>{{ inv.companyName || '\u2014' }}</td>
-          <td>{{ inv.email || '\u2014' }}</td>
-          <td>{{ inv.phone || '\u2014' }}</td>
-          <td>{{ locationStr(inv) }}</td>
-          <td class="mono">{{ inv.splitPct }}%</td>
+          <td>{{ inv.carrierName || '\u2014' }}</td>
+          <td>{{ inv.username || '\u2014' }}</td>
           <td class="mono">{{ inv.truckCount }}</td>
           <td>
             <span :class="['status-badge', inv.status === 'Active' ? 'status-active' : 'status-inactive']">{{ inv.status }}</span>
           </td>
-          <td style="text-align:right;" @click.stop>
+          <td class="notes-cell">{{ inv.notes || '\u2014' }}</td>
+          <td style="text-align:right;">
             <div class="action-btns">
               <button class="btn-edit" @click="openEdit(inv)">Edit</button>
               <button class="btn-remove" @click="confirmDelete(inv)">Remove</button>
@@ -43,44 +39,20 @@
       </tbody>
     </table>
 
-    <!-- View Detail Modal -->
-    <Teleport to="body">
-      <div v-if="viewInv" class="confirm-overlay" @click.self="viewInv = null">
-        <div class="confirm-box" style="max-width:600px;max-height:85vh;overflow-y:auto;">
-          <h3 style="margin-bottom:1rem;">{{ viewInv.fullName }}</h3>
-          <div class="view-grid">
-            <div class="view-row"><span class="view-label">Company</span><span>{{ viewInv.companyName || '\u2014' }}</span></div>
-            <div class="view-row"><span class="view-label">Email</span><span>{{ viewInv.email || '\u2014' }}</span></div>
-            <div class="view-row"><span class="view-label">Phone</span><span>{{ viewInv.phone || '\u2014' }}</span></div>
-            <div class="view-row"><span class="view-label">Address</span><span>{{ fullAddress(viewInv) }}</span></div>
-            <div class="view-row"><span class="view-label">Tax ID / EIN</span><span>{{ viewInv.taxId || '\u2014' }}</span></div>
-            <div class="view-row"><span class="view-label">Split %</span><span>{{ viewInv.splitPct }}%</span></div>
-            <div class="view-row"><span class="view-label">Linked Account</span><span>{{ viewInv.username || '\u2014' }}</span></div>
-            <div class="view-row"><span class="view-label">Status</span><span :class="['status-badge', viewInv.status === 'Active' ? 'status-active' : 'status-inactive']">{{ viewInv.status }}</span></div>
-            <div class="view-row"><span class="view-label">Trucks</span><span>{{ viewInv.truckCount }}</span></div>
-            <div v-if="viewInv.notes" class="view-row"><span class="view-label">Notes</span><span>{{ viewInv.notes }}</span></div>
-          </div>
-          <div style="margin-top:1rem;text-align:right;">
-            <button class="btn btn-secondary" @click="viewInv = null">Close</button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
-
     <!-- Edit Modal -->
     <Teleport to="body">
       <div v-if="showEdit" class="confirm-overlay" @click.self="showEdit = false">
-        <div class="confirm-dialog edit-dialog">
+        <div class="confirm-dialog">
           <h3>Edit Investor &mdash; {{ editForm.fullName }}</h3>
 
           <div class="edit-row">
             <div class="edit-field">
-              <label>Full Name</label>
+              <label>Investor Name</label>
               <input v-model="editForm.fullName" type="text" />
             </div>
             <div class="edit-field">
-              <label>Company Name (Carrier)</label>
-              <select v-model="editForm.companyName">
+              <label>Carrier Name</label>
+              <select v-model="editForm.carrierName">
                 <option value="">-- Select carrier --</option>
                 <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
               </select>
@@ -89,43 +61,11 @@
 
           <div class="edit-row">
             <div class="edit-field">
-              <label>Email</label>
-              <input v-model="editForm.email" type="email" />
-            </div>
-            <div class="edit-field">
-              <label>Phone</label>
-              <input v-model="editForm.phone" type="tel" />
-            </div>
-          </div>
-
-          <div class="edit-field">
-            <label>Address</label>
-            <input v-model="editForm.address" type="text" />
-          </div>
-
-          <div class="edit-row">
-            <div class="edit-field">
-              <label>City</label>
-              <input v-model="editForm.city" type="text" />
-            </div>
-            <div class="edit-field">
-              <label>State</label>
-              <input v-model="editForm.state" type="text" maxlength="2" style="text-transform:uppercase;" />
-            </div>
-            <div class="edit-field">
-              <label>ZIP</label>
-              <input v-model="editForm.zip" type="text" />
-            </div>
-          </div>
-
-          <div class="edit-row">
-            <div class="edit-field">
-              <label>Tax ID / EIN</label>
-              <input v-model="editForm.taxId" type="text" />
-            </div>
-            <div class="edit-field">
-              <label>Split %</label>
-              <input v-model.number="editForm.splitPct" type="number" min="0" max="100" />
+              <label>Linked User Account</label>
+              <select v-model="editForm.userId">
+                <option :value="null">-- None --</option>
+                <option v-for="u in investorUsers" :key="u.id" :value="u.id">{{ u.username }}</option>
+              </select>
             </div>
             <div class="edit-field">
               <label>Status</label>
@@ -134,14 +74,6 @@
                 <option value="Inactive">Inactive</option>
               </select>
             </div>
-          </div>
-
-          <div class="edit-field">
-            <label>Linked User Account</label>
-            <select v-model="editForm.userId">
-              <option :value="null">-- None --</option>
-              <option v-for="u in investorUsers" :key="u.id" :value="u.id">{{ u.username }}</option>
-            </select>
           </div>
 
           <div class="edit-field">
@@ -174,7 +106,7 @@ import { ref, reactive } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 
-const props = defineProps({
+defineProps({
   investors: { type: Array, default: () => [] },
   investorUsers: { type: Array, default: () => [] },
   carrierNames: { type: Array, default: () => [] },
@@ -182,38 +114,17 @@ const props = defineProps({
 
 const emit = defineEmits(['delete', 'update'])
 
-const viewInv = ref(null)
 const showConfirm = ref(false)
 const pendingInv = ref(null)
 const showEdit = ref(false)
 const editForm = reactive({
-  id: null, fullName: '', companyName: '', email: '', phone: '',
-  address: '', city: '', state: '', zip: '',
-  taxId: '', splitPct: 50, status: 'Active', userId: null, notes: '',
+  id: null, fullName: '', carrierName: '', status: 'Active', userId: null, notes: '',
 })
-
-function locationStr(inv) {
-  const parts = [inv.city, inv.state].filter(Boolean)
-  return parts.length ? parts.join(', ') : '\u2014'
-}
-
-function fullAddress(inv) {
-  const parts = [inv.address, inv.city, inv.state, inv.zip].filter(Boolean)
-  return parts.length ? parts.join(', ') : '\u2014'
-}
 
 function openEdit(inv) {
   editForm.id = inv.id
   editForm.fullName = inv.fullName
-  editForm.companyName = inv.companyName
-  editForm.email = inv.email
-  editForm.phone = inv.phone
-  editForm.address = inv.address
-  editForm.city = inv.city
-  editForm.state = inv.state
-  editForm.zip = inv.zip
-  editForm.taxId = inv.taxId
-  editForm.splitPct = inv.splitPct
+  editForm.carrierName = inv.carrierName
   editForm.status = inv.status
   editForm.userId = inv.userId
   editForm.notes = inv.notes
@@ -269,6 +180,7 @@ function handleConfirmDelete() {
 
 .name-cell { font-weight: 600; }
 .mono { font-family: 'JetBrains Mono', monospace; }
+.notes-cell { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 0.78rem; }
 
 .status-badge {
   display: inline-flex; align-items: center;
@@ -297,18 +209,13 @@ function handleConfirmDelete() {
 }
 .confirm-dialog {
   background: var(--surface); border-radius: var(--radius);
-  padding: 1.5rem; max-width: 550px; width: 90%;
+  padding: 1.5rem; max-width: 500px; width: 90%;
   box-shadow: 0 8px 30px rgba(0,0,0,0.12);
   max-height: 90vh; overflow-y: auto;
 }
 .confirm-dialog h3 { font-size: 1rem; margin-bottom: 1rem; }
 .confirm-actions {
   display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1.25rem;
-}
-.confirm-box {
-  background: var(--surface); border-radius: var(--radius);
-  padding: 1.5rem; width: 90%;
-  box-shadow: 0 8px 30px rgba(0,0,0,0.12);
 }
 
 .edit-row { display: flex; gap: 1rem; }
@@ -331,10 +238,4 @@ function handleConfirmDelete() {
 .edit-field textarea:focus {
   outline: none; border-color: var(--blue);
 }
-
-.clickable-row { cursor: pointer; }
-.clickable-row:hover td { background: var(--accent-dim, #f0f9ff); }
-.view-grid { display: flex; flex-direction: column; gap: 0.4rem; }
-.view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
-.view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
 </style>

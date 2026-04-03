@@ -7,12 +7,12 @@
 
     <div class="form-row">
       <div class="form-group">
-        <label class="form-label">Full Name *</label>
+        <label class="form-label">Investor Name *</label>
         <input v-model="form.fullName" class="form-input" type="text" placeholder="e.g. John Smith" />
       </div>
       <div class="form-group">
-        <label class="form-label">Company Name (Carrier)</label>
-        <select v-model="form.companyName" class="form-select">
+        <label class="form-label">Carrier Name *</label>
+        <select v-model="form.carrierName" class="form-select">
           <option value="">-- Select carrier --</option>
           <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
         </select>
@@ -21,45 +21,11 @@
 
     <div class="form-row">
       <div class="form-group">
-        <label class="form-label">Email</label>
-        <input v-model="form.email" class="form-input" type="email" placeholder="john@example.com" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">Phone</label>
-        <input v-model="form.phone" class="form-input" type="tel" placeholder="(555) 123-4567" />
-      </div>
-    </div>
-
-    <div class="form-row">
-      <div class="form-group" style="flex:2;">
-        <label class="form-label">Address</label>
-        <input v-model="form.address" class="form-input" type="text" placeholder="Street address" />
-      </div>
-    </div>
-
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">City</label>
-        <input v-model="form.city" class="form-input" type="text" placeholder="City" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">State</label>
-        <input v-model="form.state" class="form-input" type="text" placeholder="TX" maxlength="2" style="text-transform:uppercase;" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">ZIP</label>
-        <input v-model="form.zip" class="form-input" type="text" placeholder="77302" />
-      </div>
-    </div>
-
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">Tax ID / EIN</label>
-        <input v-model="form.taxId" class="form-input" type="text" placeholder="XX-XXXXXXX" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">Split %</label>
-        <input v-model.number="form.splitPct" class="form-input" type="number" min="0" max="100" placeholder="50" />
+        <label class="form-label">Linked User Account</label>
+        <select v-model="form.userId" class="form-select">
+          <option :value="null">-- None --</option>
+          <option v-for="u in investorUsers" :key="u.id" :value="u.id">{{ u.username }}</option>
+        </select>
       </div>
       <div class="form-group">
         <label class="form-label">Status</label>
@@ -68,14 +34,6 @@
           <option value="Inactive">Inactive</option>
         </select>
       </div>
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Linked User Account</label>
-      <select v-model="form.userId" class="form-select">
-        <option :value="null">-- None --</option>
-        <option v-for="u in investorUsers" :key="u.id" :value="u.id">{{ u.username }}</option>
-      </select>
     </div>
 
     <div class="form-group">
@@ -99,9 +57,7 @@ defineProps({
 const emit = defineEmits(['submit'])
 
 const defaults = () => ({
-  fullName: '', companyName: '', email: '', phone: '',
-  address: '', city: '', state: '', zip: '',
-  taxId: '', splitPct: 50, status: 'Active', userId: null, notes: '',
+  fullName: '', carrierName: '', status: 'Active', userId: null, notes: '',
 })
 
 const form = reactive(defaults())
@@ -109,8 +65,9 @@ const errorMsg = ref('')
 
 function handleSubmit() {
   errorMsg.value = ''
-  if (!form.fullName.trim()) { errorMsg.value = 'Full name is required.'; return }
-  emit('submit', { ...form, fullName: form.fullName.trim(), state: form.state.toUpperCase() })
+  if (!form.fullName.trim()) { errorMsg.value = 'Investor name is required.'; return }
+  if (!form.carrierName) { errorMsg.value = 'Please select a carrier.'; return }
+  emit('submit', { ...form })
   Object.assign(form, defaults())
 }
 </script>
