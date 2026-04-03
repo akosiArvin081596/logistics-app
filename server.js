@@ -2426,19 +2426,20 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const unassignedStatuses =
 			/^(unassigned|new|open|pending|available)$/i;
 
-		// Filter jobs
+		// Filter jobs — only rows with a Load ID
+		const hasLoadId = (r) => loadIdCol ? !!(r[loadIdCol] || "").trim() : true;
 		const activeJobs = jobTracking.data.filter(
-			(r) => statusCol && activeStatuses.test((r[statusCol] || "").trim()),
+			(r) => hasLoadId(r) && statusCol && activeStatuses.test((r[statusCol] || "").trim()),
 		);
 		const unassignedJobs = jobTracking.data.filter((r) => {
-			const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
-			if (!lid) return false; // skip rows with no Load ID
+			if (!hasLoadId(r)) return false;
 			const status = statusCol ? (r[statusCol] || "").trim() : "";
 			const hasDriver = driverCol ? !!(r[driverCol] || "").trim() : true;
 			return unassignedStatuses.test(status) || !status || !hasDriver;
 		});
 		const completedJobs = jobTracking.data.filter(
 			(r) =>
+				hasLoadId(r) &&
 				statusCol &&
 				completedStatuses.test((r[statusCol] || "").trim()),
 		);
