@@ -347,7 +347,7 @@ function renderSingleLoadRoute() {
     })
     const infoContent = `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>Pickup</strong>${originAddress.value ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + originAddress.value + '</div>' : ''}</div>`
     const info = new google.maps.InfoWindow({ content: infoContent })
-    originMarker.addListener('click', () => info.open({ map, anchor: originMarker }))
+    originMarker.addEventListener('gmp-click', () => info.open({ map, anchor: originMarker }))
   }
 
   // Destination marker (red)
@@ -361,7 +361,7 @@ function renderSingleLoadRoute() {
     })
     const infoContent = `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>Drop-off</strong>${destAddress.value ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + destAddress.value + '</div>' : ''}</div>`
     const info = new google.maps.InfoWindow({ content: infoContent })
-    destMarker.addListener('click', () => info.open({ map, anchor: destMarker }))
+    destMarker.addEventListener('gmp-click', () => info.open({ map, anchor: destMarker }))
   }
 }
 
@@ -393,7 +393,7 @@ function renderDriverRoutes() {
       const info = new google.maps.InfoWindow({
         content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Pickup</strong>${r.originAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.originAddress + '</div>' : ''}</div>`,
       })
-      entry.originMarker.addListener('click', () => info.open({ map, anchor: entry.originMarker }))
+      entry.originMarker.addEventListener('gmp-click', () => info.open({ map, anchor: entry.originMarker }))
     }
     if (r.dest) {
       entry.destMarker = new google.maps.marker.AdvancedMarkerElement({
@@ -406,7 +406,7 @@ function renderDriverRoutes() {
       const info = new google.maps.InfoWindow({
         content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Drop-off</strong>${r.destAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.destAddress + '</div>' : ''}</div>`,
       })
-      entry.destMarker.addListener('click', () => info.open({ map, anchor: entry.destMarker }))
+      entry.destMarker.addEventListener('gmp-click', () => info.open({ map, anchor: entry.destMarker }))
     }
 
     driverRouteOverlays.push(entry)
@@ -441,7 +441,7 @@ function renderAllRoutes() {
       const info = new google.maps.InfoWindow({
         content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.driver} — Pickup</strong></div>`,
       })
-      entry.originMarker.addListener('click', () => info.open({ map, anchor: entry.originMarker }))
+      entry.originMarker.addEventListener('gmp-click', () => info.open({ map, anchor: entry.originMarker }))
     }
     if (r.dest) {
       entry.destMarker = new google.maps.marker.AdvancedMarkerElement({
@@ -454,7 +454,7 @@ function renderAllRoutes() {
       const info = new google.maps.InfoWindow({
         content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.driver} — Destination</strong></div>`,
       })
-      entry.destMarker.addListener('click', () => info.open({ map, anchor: entry.destMarker }))
+      entry.destMarker.addEventListener('gmp-click', () => info.open({ map, anchor: entry.destMarker }))
     }
 
     allRouteOverlays.push(entry)
@@ -481,7 +481,7 @@ function syncDriverMarkers() {
       })
       // InfoWindow for the driver marker
       const iw = new google.maps.InfoWindow()
-      marker.addListener('click', () => {
+      marker.addEventListener('gmp-click', () => {
         iw.setContent(buildDriverPopupContent(loc))
         iw.open({ map, anchor: marker })
       })

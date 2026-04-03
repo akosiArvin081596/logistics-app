@@ -85,14 +85,14 @@ function render() {
     if (item.origin) {
       const m = new google.maps.marker.AdvancedMarkerElement({ position: item.origin, map, content: createDotPin('#16a34a'), title: `Pickup: ${item.loadId}` })
       const info = new google.maps.InfoWindow({ content: `<div style="font-family:DM Sans,sans-serif;font-size:0.82rem"><strong>Pickup</strong>${item.loadId ? `<div style="color:#666;font-size:0.75rem">${item.loadId}</div>` : ''}${item.driver ? `<div style="color:#666;font-size:0.75rem">Driver: ${item.driver}</div>` : ''}</div>` })
-      m.addListener('click', () => info.open({ map, anchor: m }))
+      m.addEventListener('gmp-click', () => info.open({ map, anchor: m }))
       markers.push(m)
       bounds.extend(item.origin); count++
     }
     if (item.dest) {
       const m = new google.maps.marker.AdvancedMarkerElement({ position: item.dest, map, content: createDotPin('#dc2626'), title: `Drop-off: ${item.loadId}` })
       const info = new google.maps.InfoWindow({ content: `<div style="font-family:DM Sans,sans-serif;font-size:0.82rem"><strong>Drop-off</strong>${item.loadId ? `<div style="color:#666;font-size:0.75rem">${item.loadId}</div>` : ''}${item.driver ? `<div style="color:#666;font-size:0.75rem">Driver: ${item.driver}</div>` : ''}</div>` })
-      m.addListener('click', () => info.open({ map, anchor: m }))
+      m.addEventListener('gmp-click', () => info.open({ map, anchor: m }))
       markers.push(m)
       bounds.extend(item.dest); count++
     }
