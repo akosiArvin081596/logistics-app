@@ -71,6 +71,12 @@ export const useUsersStore = defineStore('users', {
       await this.loadUsers()
     },
 
+    async rateUser(id, rating) {
+      await api.put(`/api/users/${id}/rating`, { rating })
+      const user = this.users.find(u => u.id === id)
+      if (user) user.Rating = rating
+    },
+
     async deleteUser(id) {
       await api.del(`/api/users/${id}`)
       await this.loadUsers()

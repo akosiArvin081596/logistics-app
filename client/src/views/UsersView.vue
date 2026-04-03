@@ -10,7 +10,7 @@
       <SkeletonLoader :rows="4" :cols="5" />
     </template>
     <template v-else>
-      <UserTable :users="store.users" :driver-names="store.driverNames" @delete="handleDeleteUser" @update="handleUpdateUser" />
+      <UserTable :users="store.users" :driver-names="store.driverNames" @delete="handleDeleteUser" @update="handleUpdateUser" @rate="handleRateUser" />
     </template>
   </div>
 </template>
@@ -43,6 +43,15 @@ async function handleUpdateUser({ id, data }) {
     toast('User updated')
   } catch (err) {
     toast(err.message || 'Failed to update user', 'error')
+  }
+}
+
+async function handleRateUser(id, rating) {
+  try {
+    await store.rateUser(id, rating)
+    toast('Rating updated')
+  } catch {
+    toast('Failed to rate driver', 'error')
   }
 }
 

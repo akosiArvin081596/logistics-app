@@ -16,6 +16,7 @@
           <th>Company</th>
           <th>Linked Driver</th>
           <th>Email</th>
+          <th>Rating</th>
           <th>Created</th>
           <th></th>
         </tr>
@@ -40,6 +41,12 @@
           </td>
           <td :style="{ color: user.Email ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.Email || '\u2014' }}
+          </td>
+          <td>
+            <div v-if="user.Role === 'Driver'" class="star-rating">
+              <span v-for="s in 5" :key="s" class="star" :class="{ filled: s <= (user.Rating || 0), clickable: true }" @click="$emit('rate', user.id, s)">&#9733;</span>
+            </div>
+            <span v-else style="color:var(--text-dim);">&mdash;</span>
           </td>
           <td class="created-at">
             {{ formatDate(user.CreatedAt) }}
@@ -128,7 +135,7 @@ defineProps({
   driverNames: { type: Array, default: () => [] },
 })
 
-const emit = defineEmits(['delete', 'update'])
+const emit = defineEmits(['delete', 'update', 'rate'])
 
 const showConfirm = ref(false)
 const pendingUser = ref(null)
@@ -456,4 +463,9 @@ function handleConfirmDelete() {
   outline: none;
   border-color: var(--blue);
 }
+.star-rating { display: flex; gap: 1px; }
+.star { font-size: 1.1rem; color: #d1d5db; transition: color 0.1s; }
+.star.filled { color: #f59e0b; }
+.star.clickable { cursor: pointer; }
+.star.clickable:hover { color: #fbbf24; }
 </style>

@@ -268,6 +268,9 @@ catch { try { db.exec("ALTER TABLE trucks ADD COLUMN maintenance_fund_monthly RE
 // Migration: add asset_ref to messages (for "Share Asset" in chat)
 try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } catch {}
 
+// Migration: add rating to users (0-5 stars, Super Admin rates drivers)
+try { db.exec("ALTER TABLE users ADD COLUMN rating REAL DEFAULT 0"); } catch {}
+
 // Legal documents table (per-truck legal files)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS legal_documents (
@@ -672,7 +675,7 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 // Admin: list all users (without password hashes)
 app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
-		.prepare("SELECT id, username, role, driver_name, email, full_name, company_name, created_at FROM users")
+		.prepare("SELECT id, username, role, driver_name, email, full_name, company_name, created_at, rating FROM users")
 		.all()
 		.map((u) => ({
 			id: u.id,
@@ -683,6 +686,7 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			FullName: u.full_name,
 			CompanyName: u.company_name,
 			CreatedAt: u.created_at,
+			Rating: u.rating || 0,
 		}));
 	res.json({ users });
 });
@@ -797,6 +801,18 @@ app.get("/api/db/query/:table", requireRole("Super Admin"), (req, res) => {
 	const rows = db.prepare(`SELECT * FROM "${table}" LIMIT ? OFFSET ?`).all(limit, offset);
 	const count = db.prepare(`SELECT COUNT(*) as total FROM "${table}"`).get();
 	res.json({ table, total: count.total, limit, offset, rows });
+});
+
+// Rate a driver (Super Admin only)
+app.put("/api/users/:id/rating", requireRole("Super Admin"), (req, res) => {
+	const id = parseInt(req.params.id);
+	const { rating } = req.body;
+	if (rating === undefined || rating < 0 || rating > 5) return res.status(400).json({ error: "Rating must be between 0 and 5" });
+	const user = db.prepare("SELECT id, role FROM users WHERE id = ?").get(id);
+	if (!user) return res.status(404).json({ error: "User not found" });
+	if (user.role !== "Driver") return res.status(400).json({ error: "Only drivers can be rated" });
+	db.prepare("UPDATE users SET rating = ? WHERE id = ?").run(parseFloat(rating), id);
+	res.json({ success: true });
 });
 
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
