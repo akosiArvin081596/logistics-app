@@ -32,7 +32,7 @@
           <TabsTrigger v-for="tab in tabs" :key="tab.key" :value="tab.key"
             class="rounded-none data-[state=active]:shadow-none data-[state=active]:bg-transparent"
             style="padding:1rem 1.25rem;">
-            <span class="border-b-2 border-transparent" :class="activeTab === tab.key ? 'border-primary' : ''" style="padding-bottom:2px;">{{ tab.label }}</span>
+            <span :style="{ paddingBottom: '2px', borderBottom: activeTab === tab.key ? '2px solid hsl(199 89% 48%)' : '2px solid transparent' }">{{ tab.label }}</span>
             <Badge variant="secondary" class="font-mono" style="margin-left:0.5rem;">{{ tab.count }}</Badge>
           </TabsTrigger>
         </TabsList>
