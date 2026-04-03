@@ -54,7 +54,15 @@
         <EmptyState v-else-if="store.selectedDriver">No messages yet.</EmptyState>
         <EmptyState v-else>Select a conversation from the left to view messages.</EmptyState>
       </div>
+      <div v-if="attachPreview" class="msg-attach-preview">
+        <span>{{ attachFileName }}</span>
+        <button class="msg-attach-remove" @click="clearAttachment">&times;</button>
+      </div>
       <div v-if="store.selectedDriver && store.selectedLoadId" class="msg-chat-input">
+        <label class="msg-attach-btn" title="Attach file">
+          &#128206;
+          <input type="file" accept="image/*,.pdf" style="display:none" @change="onAttachFile" />
+        </label>
         <input
           v-model="messageInput"
           type="text"
@@ -75,6 +83,7 @@
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
 import { useMessagesStore } from '../../stores/messages'
+import { useApi } from '../../composables/useApi'
 import { useDashboardStore } from '../../stores/dashboard'
 import { useToast } from '../../composables/useToast'
 import ChatBubble from './ChatBubble.vue'
@@ -90,6 +99,24 @@ const { show: toast } = useToast()
 
 const messageInput = ref('')
 const messagesEl = ref(null)
+const attachPreview = ref(null)
+const attachFileName = ref('')
+const attachData = ref('')
+const attachType = ref('')
+
+function onAttachFile(e) {
+  const file = e.target.files[0]
+  if (!file) return
+  if (file.size > 10 * 1024 * 1024) { toast('File too large (max 10MB)', 'error'); return }
+  attachFileName.value = file.name
+  attachType.value = file.type.startsWith('image/') ? 'image' : file.type === 'application/pdf' ? 'pdf' : 'other'
+  const reader = new FileReader()
+  reader.onload = ev => { attachData.value = ev.target.result; attachPreview.value = true }
+  reader.readAsDataURL(file)
+  e.target.value = ''
+}
+
+function clearAttachment() { attachPreview.value = null; attachData.value = ''; attachFileName.value = ''; attachType.value = '' }
 
 // New conversation form state
 const showNewMsg = ref(false)
@@ -135,10 +162,18 @@ function formatTime(ts) {
 
 async function sendMessage() {
   const msg = messageInput.value.trim()
-  if (!msg || !store.selectedDriver || !store.selectedLoadId) return
+  if ((!msg && !attachData.value) || !store.selectedDriver || !store.selectedLoadId) return
   try {
-    await store.sendMessage(store.selectedDriver, msg, store.selectedLoadId)
+    let attachmentUrl = '', attachmentType = ''
+    if (attachData.value) {
+      const api = useApi()
+      const res = await api.post('/api/chat/attachment', { fileData: attachData.value, fileName: attachFileName.value, mimeType: attachType.value })
+      attachmentUrl = res.fileUrl || ''
+      attachmentType = res.attachmentType || ''
+    }
+    await store.sendMessage(store.selectedDriver, msg, store.selectedLoadId, attachmentUrl, attachmentType)
     messageInput.value = ''
+    clearAttachment()
     scrollToBottom()
   } catch {
     toast('Failed to send', 'error')

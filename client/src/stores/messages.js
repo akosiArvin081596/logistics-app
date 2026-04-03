@@ -52,12 +52,14 @@ export const useMessagesStore = defineStore('messages', {
       return this.selectConversation(name, '')
     },
 
-    async sendMessage(driver, message, loadId) {
+    async sendMessage(driver, message, loadId, attachmentUrl, attachmentType) {
       await api.post('/api/messages', {
         from: 'Dispatch',
         to: driver,
         message,
         loadId: loadId || '',
+        attachmentUrl: attachmentUrl || '',
+        attachmentType: attachmentType || '',
       })
       // Optimistic update
       this.currentMessages.push({
@@ -68,6 +70,8 @@ export const useMessagesStore = defineStore('messages', {
         message,
         loadId: loadId || '',
         read: 1,
+        attachment_url: attachmentUrl || '',
+        attachment_type: attachmentType || '',
       })
       this.loadConversations()
     },

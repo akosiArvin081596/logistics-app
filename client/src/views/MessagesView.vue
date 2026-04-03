@@ -186,4 +186,18 @@ onUnmounted(() => {
   cursor: pointer;
   display: flex; align-items: center; justify-content: center;
 }
+:deep(.msg-attach-btn) {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; font-size: 1.1rem; cursor: pointer;
+  border-radius: 50%; border: 1px solid var(--border); background: var(--bg);
+  transition: background 0.15s;
+}
+:deep(.msg-attach-btn:hover) { background: var(--accent-dim); }
+:deep(.msg-attach-preview) {
+  display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 1rem;
+  background: #eff6ff; font-size: 0.75rem; color: #1e40af; border-top: 1px solid var(--border);
+}
+:deep(.msg-attach-remove) {
+  background: none; border: none; cursor: pointer; font-size: 1rem; color: #6b7280;
+}
 </style>
