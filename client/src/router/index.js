@@ -83,6 +83,12 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    path: '/drivers',
+    name: 'drivers-db',
+    component: () => import('../views/DriversDbView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/admin/tools',
     name: 'admin-tools',
     component: () => import('../views/AdminToolsView.vue'),
