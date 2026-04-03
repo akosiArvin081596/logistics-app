@@ -2399,7 +2399,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 
 		const jobTracking = parseSheet(rangeData[0]);
-		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
+		// jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers); // Disabled: show all rows including duplicates
 		const carrierDB = parseSheet(rangeData[1]);
 		const payments = parseSheet(rangeData[2]);
 		const carrierHistory = parseSheet(rangeData[3]);
