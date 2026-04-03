@@ -316,6 +316,27 @@ db.exec(`
 db.exec(`CREATE INDEX IF NOT EXISTS idx_tdh_owner ON truck_driver_history(owner_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_tdh_driver ON truck_driver_history(driver_name)`);
 
+// Investors table (extended profile data linked to users)
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investors (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER UNIQUE,
+		full_name TEXT NOT NULL DEFAULT '',
+		company_name TEXT NOT NULL DEFAULT '',
+		email TEXT NOT NULL DEFAULT '',
+		phone TEXT NOT NULL DEFAULT '',
+		address TEXT NOT NULL DEFAULT '',
+		city TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL DEFAULT '',
+		zip TEXT NOT NULL DEFAULT '',
+		tax_id TEXT NOT NULL DEFAULT '',
+		split_pct REAL DEFAULT 50,
+		status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active','Inactive')),
+		notes TEXT NOT NULL DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
 // Seed history from current truck assignments (one-time backfill)
 {
 	const existing = db.prepare("SELECT COUNT(*) AS c FROM truck_driver_history").get().c;
@@ -927,6 +948,68 @@ app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, 
 		.prepare("SELECT id, username FROM users WHERE role = 'Investor' ORDER BY username ASC")
 		.all();
 	res.json({ investors });
+});
+
+// ============================================================
+// INVESTOR DATABASE — CRUD for investor profiles
+// ============================================================
+
+app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
+	const rows = db.prepare(`
+		SELECT i.*, u.username FROM investors i
+		LEFT JOIN users u ON u.id = i.user_id
+		ORDER BY i.full_name ASC
+	`).all();
+	const investors = rows.map(r => ({
+		id: r.id,
+		userId: r.user_id,
+		username: r.username || "",
+		fullName: r.full_name,
+		companyName: r.company_name,
+		email: r.email,
+		phone: r.phone,
+		address: r.address,
+		city: r.city,
+		state: r.state,
+		zip: r.zip,
+		taxId: r.tax_id,
+		splitPct: r.split_pct,
+		status: r.status,
+		notes: r.notes,
+		createdAt: r.created_at,
+		truckCount: db.prepare("SELECT COUNT(*) as n FROM trucks WHERE owner_id = ?").get(r.user_id || 0).n,
+	}));
+	res.json({ investors });
+});
+
+app.post("/api/investors", requireRole("Super Admin"), (req, res) => {
+	const { userId, fullName, companyName, email, phone, address, city, state, zip, taxId, splitPct, status, notes } = req.body;
+	if (!fullName || !fullName.trim()) return res.status(400).json({ error: "Full name is required" });
+	const result = db.prepare(`
+		INSERT INTO investors (user_id, full_name, company_name, email, phone, address, city, state, zip, tax_id, split_pct, status, notes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).run(userId || null, fullName.trim(), (companyName || "").trim(), (email || "").trim(), (phone || "").trim(), (address || "").trim(), (city || "").trim(), (state || "").trim(), (zip || "").trim(), (taxId || "").trim(), splitPct ?? 50, status || "Active", (notes || "").trim());
+	res.json({ success: true, id: result.lastInsertRowid });
+});
+
+app.put("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
+	const { id } = req.params;
+	const existing = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
+	if (!existing) return res.status(404).json({ error: "Investor not found" });
+	const { userId, fullName, companyName, email, phone, address, city, state, zip, taxId, splitPct, status, notes } = req.body;
+	db.prepare(`
+		UPDATE investors SET user_id=?, full_name=?, company_name=?, email=?, phone=?, address=?, city=?, state=?, zip=?, tax_id=?, split_pct=?, status=?, notes=?
+		WHERE id=?
+	`).run(userId ?? existing.user_id, (fullName || "").trim(), (companyName || "").trim(), (email || "").trim(), (phone || "").trim(), (address || "").trim(), (city || "").trim(), (state || "").trim(), (zip || "").trim(), (taxId || "").trim(), splitPct ?? existing.split_pct, status || existing.status, (notes || "").trim(), id);
+	res.json({ success: true });
+});
+
+app.delete("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
+	const { id } = req.params;
+	const existing = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
+	if (!existing) return res.status(404).json({ error: "Investor not found" });
+	db.prepare("DELETE FROM investors WHERE id = ?").run(id);
+	res.json({ success: true });
 });
 
 // Check if a driver has an active load (returns error message or null)
