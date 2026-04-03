@@ -833,6 +833,35 @@ app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, 
 	res.json({ investors });
 });
 
+// Check if a driver has an active load (returns error message or null)
+async function checkDriverActiveLoad(driverName) {
+	try {
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const rows = resp.data.values || [];
+		if (rows.length < 2) return null;
+		const headers = rows[0];
+		const driverCol = headers.findIndex(h => /^driver$/i.test(h));
+		const statusCol = headers.findIndex(h => /status/i.test(h));
+		if (driverCol === -1 || statusCol === -1) return null;
+		const activeRe = /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i;
+		for (let i = 1; i < rows.length; i++) {
+			const r = rows[i];
+			const driver = (r[driverCol] || "").trim().toLowerCase();
+			const status = (r[statusCol] || "").trim();
+			if (driver === driverName.trim().toLowerCase() && activeRe.test(status)) {
+				const loadIdCol = headers.findIndex(h => /load.?id|job.?id/i.test(h));
+				const loadId = loadIdCol !== -1 ? (r[loadIdCol] || "unknown") : "unknown";
+				return `${driverName} has an active load (${loadId}, status: ${status}). Complete or cancel the load before reassigning.`;
+			}
+		}
+		return null;
+	} catch (err) {
+		console.error("checkDriverActiveLoad error:", err.message);
+		return null; // Allow assignment if check fails
+	}
+}
+
 // Truck Database: list all trucks (Investor sees only their own)
 app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
 	const user = req.session.user;
@@ -870,7 +899,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 });
 
 // Truck Database: add a new truck
-app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
+app.post("/api/trucks", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
 		if (!unitNumber || !unitNumber.trim()) {
@@ -881,10 +910,10 @@ app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
 			return res.status(400).json({ error: "Unit number already exists" });
 		}
 		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
-		// 1:1 driver constraint — unassign driver from any other truck first
+		// Check if driver has an active load before allowing assignment
 		if (assignedDriver && assignedDriver.trim()) {
-			db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = LOWER(?) AND unit_number != ?")
-				.run(assignedDriver.trim(), unitNumber.trim());
+			const activeCheck = await checkDriverActiveLoad(assignedDriver.trim());
+			if (activeCheck) return res.status(409).json({ error: activeCheck });
 		}
 		const result = db.prepare(
 			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -897,7 +926,7 @@ app.post("/api/trucks", requireRole("Super Admin"), (req, res) => {
 });
 
 // Truck Database: update a truck
-app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
+app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
 		const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
@@ -923,10 +952,10 @@ app.put("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 			updates.push("status = ?"); params.push(status);
 		}
 		if (assignedDriver !== undefined) {
-			// 1:1 driver constraint — unassign from any other truck first
-			if (assignedDriver && assignedDriver.trim()) {
-				db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = LOWER(?) AND id != ?")
-					.run(assignedDriver.trim(), id);
+			// Check if driver has an active load before allowing reassignment
+			if (assignedDriver && assignedDriver.trim() && assignedDriver.trim().toLowerCase() !== (truck.assigned_driver || "").trim().toLowerCase()) {
+				const activeCheck = await checkDriverActiveLoad(assignedDriver.trim());
+				if (activeCheck) return res.status(409).json({ error: activeCheck });
 			}
 			updates.push("assigned_driver = ?"); params.push(assignedDriver);
 		}
