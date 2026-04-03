@@ -192,13 +192,11 @@ function scrollBottom() {
 function onNewMessage(payload) {
   const toLower = (payload.to || '').toLowerCase()
   const fromLower = (payload.from || '').toLowerCase()
+  // Skip own messages (already added optimistically)
+  if (fromLower === myName.value) return
   if (toLower === myName.value || fromLower === myName.value) {
-    // Replace optimistic or add new
-    const idx = messages.value.findIndex(m => m.id === payload.id)
-    if (idx === -1) {
-      messages.value.push(payload)
-      nextTick(scrollBottom)
-    }
+    messages.value.push(payload)
+    nextTick(scrollBottom)
   }
 }
 

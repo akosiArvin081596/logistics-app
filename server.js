@@ -3006,7 +3006,7 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 		if (loadId) {
 			messages = db
 				.prepare(
-					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
 					 FROM messages
 					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?
 					 ORDER BY id ASC`,
@@ -3015,7 +3015,7 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 		} else {
 			messages = db
 				.prepare(
-					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
 					 FROM messages
 					 WHERE LOWER("from") = ? OR LOWER("to") = ?
 					 ORDER BY id ASC`,
