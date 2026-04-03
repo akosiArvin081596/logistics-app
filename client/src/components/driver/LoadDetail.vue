@@ -103,18 +103,20 @@
       </van-collapse-item>
 
       <van-collapse-item title="Expenses" name="expenses">
-        <ExpenseForm
-          v-if="isActiveLoad"
-          :loads="[load]"
-          :driver-name="driverName"
-          :headers="headers"
-          @submit="$emit('expense-submit', $event)"
-        />
-        <div v-if="loadExpenses.length > 0" class="expense-history">
-          <div class="expense-history-label">Expense History</div>
-          <ExpenseCard v-for="exp in loadExpenses" :key="exp.id" :expense="exp" />
+        <div class="expenses-section">
+          <ExpenseForm
+            v-if="isActiveLoad"
+            :loads="[load]"
+            :driver-name="driverName"
+            :headers="headers"
+            @submit="$emit('expense-submit', $event)"
+          />
+          <div v-if="loadExpenses.length > 0" class="expense-history">
+            <div class="expense-history-label">Expense History</div>
+            <ExpenseCard v-for="exp in loadExpenses" :key="exp.id" :expense="exp" />
+          </div>
+          <van-empty v-else-if="!isActiveLoad" description="No expenses for this load" image="search" :image-size="60" />
         </div>
-        <van-empty v-else-if="!isActiveLoad" description="No expenses for this load" image="search" :image-size="60" />
       </van-collapse-item>
     </van-collapse>
 
@@ -371,6 +373,7 @@ const dropoffFields = computed(() => {
 .load-response-actions .van-button { flex: 1; font-weight: 600; height: 44px; border-radius: 10px; }
 .load-accepted-banner { text-align: center; padding: 0.75rem; margin: 0.75rem 0; background: #ecfdf5; color: #047857; font-weight: 600; border-radius: 10px; font-size: 0.9rem; }
 
+.expenses-section { padding: 0.5rem; background: var(--bg, #f8f9fa); border-radius: 8px; }
 .expense-history { margin-top: 0.75rem; }
 .expense-history-label { font-size: 0.72rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border, #e5e7eb); }
 </style>
