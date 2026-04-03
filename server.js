@@ -474,7 +474,7 @@ if (fs.existsSync(clientDistPath)) {
 // ============================================================
 // CONFIGURATION — Update these values with your own
 // ============================================================
-const SPREADSHEET_ID = "1Ny1q0nY-sYxgjH_4KqzEdWXUNp8etfW7M-G7h_MNA9Y"; // New production sheet
+const SPREADSHEET_ID = "11JdDxUw-rYo33hzW9LaG4mpjLFpioEtoV4BUQCL5tWg"; // Production sheet (dispatch-management)
 const ARCHIVE_SPREADSHEET_ID = "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
 const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON
