@@ -474,7 +474,8 @@ if (fs.existsSync(clientDistPath)) {
 // ============================================================
 // CONFIGURATION — Update these values with your own
 // ============================================================
-const SPREADSHEET_ID = "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // From the sheet URL
+const SPREADSHEET_ID = "1Ny1q0nY-sYxgjH_4KqzEdWXUNp8etfW7M-G7h_MNA9Y"; // New production sheet
+const ARCHIVE_SPREADSHEET_ID = "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
 const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON
 
@@ -1357,6 +1358,52 @@ app.get("/api/admin/scan-orphans", requireRole("Super Admin"), async (req, res) 
 		res.json({ orphans, knownDrivers: users.map((u) => u.driver_name) });
 	} catch (error) {
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/archive — Read-only access to old/archived spreadsheet data
+app.get("/api/archive", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const sheets = await getSheets();
+		const sheetName = req.query.sheet || "Job Tracking";
+		const page = Math.max(1, parseInt(req.query.page) || 1);
+		const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
+		const search = (req.query.search || "").trim().toLowerCase();
+
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: ARCHIVE_SPREADSHEET_ID, range: sheetName });
+		const rows = resp.data.values || [];
+		if (rows.length < 1) return res.json({ headers: [], data: [], total: 0, page, limit });
+		const headers = rows[0];
+		let data = rows.slice(1).map((r, i) => {
+			const obj = { _rowIndex: i + 2 };
+			headers.forEach((h, j) => { obj[h] = r[j] || ""; });
+			return obj;
+		});
+
+		// Search filter
+		if (search) {
+			data = data.filter(row => headers.some(h => (row[h] || "").toLowerCase().includes(search)));
+		}
+
+		const total = data.length;
+		const start = (page - 1) * limit;
+		const paged = data.slice(start, start + limit);
+		res.json({ headers, data: paged, total, page, limit });
+	} catch (err) {
+		console.error("Archive read error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/archive/tabs — List available tabs in the archive spreadsheet
+app.get("/api/archive/tabs", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const sheets = await getSheets();
+		const meta = await sheets.spreadsheets.get({ spreadsheetId: ARCHIVE_SPREADSHEET_ID, fields: "sheets.properties.title" });
+		const tabs = meta.data.sheets.map(s => s.properties.title);
+		res.json({ tabs });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
 	}
 });
 

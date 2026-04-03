@@ -83,6 +83,12 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    path: '/archive',
+    name: 'archive',
+    component: () => import('../views/ArchiveView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/',
     redirect: '/login',
   },
