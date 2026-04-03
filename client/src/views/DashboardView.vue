@@ -30,7 +30,7 @@
       <Tabs :model-value="activeTab" @update:model-value="v => activeTab = v">
         <TabsList class="w-full justify-start rounded-none border-b bg-muted/50 h-auto" style="padding:0 0.75rem;">
           <TabsTrigger v-for="tab in tabs" :key="tab.key" :value="tab.key"
-            class="rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none data-[state=active]:bg-transparent"
+            class="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:shadow-none data-[state=active]:bg-transparent"
             style="padding:1rem 1.25rem;">
             {{ tab.label }}
             <Badge variant="secondary" class="font-mono" style="margin-left:0.5rem;">{{ tab.count }}</Badge>
