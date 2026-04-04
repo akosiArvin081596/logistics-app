@@ -163,7 +163,9 @@ function renderMarkers() {
   if (!map) return
   clearMapObjects()
 
-  if (originLatLng.value && hasCoords.value) {
+  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+  // After pickup, hide origin marker — driver is now Point A
+  if (originLatLng.value && hasCoords.value && !pickedUp) {
     originMarker = new google.maps.marker.AdvancedMarkerElement({ position: originLatLng.value, map, content: createDotPin('#16a34a', 14), title: 'Pickup' })
   }
   if (destLatLng.value && hasCoords.value) {
@@ -175,8 +177,9 @@ function renderMarkers() {
 
   if (routePoints.value.length >= 2) {
     const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))
-    // Extend polyline to connect exactly to origin and destination markers
-    if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
+    // After pickup, start polyline from driver; before pickup, from origin
+    if (pickedUp && driverLatLng.value) path.unshift(driverLatLng.value)
+    else if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
     if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
     routeLine = new google.maps.Polyline({
       path,
@@ -259,7 +262,8 @@ function renderExpandedMap() {
   if (exDriverMarker) { exDriverMarker.map = null; exDriverMarker = null }
   if (exRouteLine) { exRouteLine.setMap(null); exRouteLine = null }
 
-  if (originLatLng.value && hasCoords.value) {
+  const exPickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+  if (originLatLng.value && hasCoords.value && !exPickedUp) {
     exOriginMarker = new google.maps.marker.AdvancedMarkerElement({ position: originLatLng.value, map: expandedMap, content: createDotPin('#16a34a', 14), title: 'Pickup' })
   }
   if (destLatLng.value && hasCoords.value) {
@@ -270,7 +274,8 @@ function renderExpandedMap() {
   }
   if (routePoints.value.length >= 2) {
     const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))
-    if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
+    if (exPickedUp && driverLatLng.value) path.unshift(driverLatLng.value)
+    else if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
     if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
     exRouteLine = new google.maps.Polyline({
       path,
