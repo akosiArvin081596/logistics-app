@@ -93,6 +93,20 @@ function animatePolyline(line) {
   }, 80)
 }
 
+function animateMarker(marker, from, to, duration = 1000) {
+  if (!marker || !from || !to) return
+  const start = performance.now()
+  function step(now) {
+    const t = Math.min((now - start) / duration, 1)
+    const ease = t * (2 - t) // ease-out quad
+    const lat = from.lat + (to.lat - from.lat) * ease
+    const lng = from.lng + (to.lng - from.lng) * ease
+    marker.position = { lat, lng }
+    if (t < 1) requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step)
+}
+
 function findCol(regex) {
   return (props.headers || []).find(h => regex.test(h)) || null
 }
@@ -236,10 +250,14 @@ async function fetchRoute(doFit = false) {
 
 let lastRoutePos = null
 let lastRouteTime = 0
+let prevDriverPos = null
 watch(() => props.driverPosition, (pos) => {
   if (!pos || !destLatLng.value) return
-  if (driverMarker && map) driverMarker.position = { lat: pos.latitude, lng: pos.longitude }
-  if (exDriverMarker && expandedMap) exDriverMarker.position = { lat: pos.latitude, lng: pos.longitude }
+  const to = { lat: pos.latitude, lng: pos.longitude }
+  const from = prevDriverPos || to
+  if (driverMarker && map) animateMarker(driverMarker, from, to)
+  if (exDriverMarker && expandedMap) animateMarker(exDriverMarker, from, to)
+  prevDriverPos = to
   if (!lastRoutePos) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute(true); return }
   const dist = haversineMi({ lat: pos.latitude, lng: pos.longitude }, { lat: lastRoutePos.latitude, lng: lastRoutePos.longitude })
   if (dist > 0.06 && Date.now() - lastRouteTime >= 60000) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute() }
