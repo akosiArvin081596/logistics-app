@@ -488,8 +488,17 @@ function syncDriverMarkers() {
       driverInfoWindows.set(loc.driver, iw)
       driverMarkers.set(loc.driver, marker)
     } else {
-      // Update position
-      marker.position = { lat: loc.latitude, lng: loc.longitude }
+      // Smoothly animate to new position
+      const oldPos = marker.position
+      if (oldPos) {
+        const oLat = typeof oldPos.lat === 'function' ? oldPos.lat() : oldPos.lat
+        const oLng = typeof oldPos.lng === 'function' ? oldPos.lng() : oldPos.lng
+        if (Math.abs(oLat - loc.latitude) > 0.0001 || Math.abs(oLng - loc.longitude) > 0.0001) {
+          animateMarker(loc.driver, oLat, oLng, loc.latitude, loc.longitude)
+        }
+      } else {
+        marker.position = { lat: loc.latitude, lng: loc.longitude }
+      }
       // Update dot color based on online status
       const isOn = isOnline(loc)
       marker.content = createDotPin(isOn ? '#16a34a' : '#9ca3af', 14)
