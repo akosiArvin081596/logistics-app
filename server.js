@@ -409,10 +409,10 @@ function syncCarrierDriverHistory(carrierDBData, driverColName, carrierColName) 
 	});
 }
 
-// Helper: get ALL drivers for an investor via carrier_name (current from sheet + historical)
+// Helper: get ALL drivers for an investor via company_name on their user account
 function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColName) {
-	const inv = db.prepare("SELECT carrier_name FROM investors WHERE user_id = ?").get(userId);
-	const carrierName = inv ? (inv.carrier_name || "").trim() : "";
+	const usr = db.prepare("SELECT company_name FROM users WHERE id = ?").get(userId);
+	const carrierName = usr ? (usr.company_name || "").trim() : "";
 	const set = new Set();
 	// From live Carrier Database sheet
 	if (carrierName && carrierDBData && driverColName && carrierColName) {
