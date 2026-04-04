@@ -343,6 +343,18 @@ db.exec(`
 db.exec(`CREATE INDEX IF NOT EXISTS idx_cdh_carrier ON carrier_driver_history(carrier_name)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_cdh_driver ON carrier_driver_history(driver_name)`);
 
+// Geocode cache (address → lat/lng, persistent across restarts)
+db.exec(`
+	CREATE TABLE IF NOT EXISTS geocode_cache (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		address TEXT NOT NULL UNIQUE,
+		lat REAL,
+		lng REAL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_geocode_addr ON geocode_cache(address)`);
+
 // Seed history from current truck assignments (one-time backfill)
 {
 	const existing = db.prepare("SELECT COUNT(*) AS c FROM truck_driver_history").get().c;
@@ -4433,6 +4445,15 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 								const dLng = parseFloat(obj[destLngCol]);
 								if (!isNaN(dLat) && !isNaN(dLng)) { entry.destLat = dLat; entry.destLng = dLng; }
 							}
+							// Fallback: geocode from address if no coordinate columns
+							if (!entry.originLat && entry.pickupAddress) {
+								const cached = db.prepare("SELECT lat, lng FROM geocode_cache WHERE address = ?").get(entry.pickupAddress.trim().toLowerCase());
+								if (cached && cached.lat) { entry.originLat = cached.lat; entry.originLng = cached.lng; }
+							}
+							if (!entry.destLat && entry.dropoffAddress) {
+								const cached = db.prepare("SELECT lat, lng FROM geocode_cache WHERE address = ?").get(entry.dropoffAddress.trim().toLowerCase());
+								if (cached && cached.lat) { entry.destLat = cached.lat; entry.destLng = cached.lng; }
+							}
 							driverActiveLoadsMap[key].push(entry);
 						}
 					}
@@ -4627,6 +4648,28 @@ function decodePolyline(encoded) {
 		points.push({ latitude: lat / 1e5, longitude: lng / 1e5 });
 	}
 	return points;
+}
+
+// Forward geocode address → lat/lng with SQLite cache
+async function geocodeAddress(address) {
+	if (!address || address.trim().length < 5) return null;
+	const key = address.trim().toLowerCase();
+	// Check cache
+	const cached = db.prepare("SELECT lat, lng FROM geocode_cache WHERE address = ?").get(key);
+	if (cached) return cached.lat ? { lat: cached.lat, lng: cached.lng } : null;
+	// Call Google Geocoding API
+	try {
+		const resp = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_API_KEY}`);
+		const data = await resp.json();
+		if (data.status === "OK" && data.results && data.results.length > 0) {
+			const loc = data.results[0].geometry.location;
+			db.prepare("INSERT OR REPLACE INTO geocode_cache (address, lat, lng) VALUES (?, ?, ?)").run(key, loc.lat, loc.lng);
+			return { lat: loc.lat, lng: loc.lng };
+		}
+	} catch { /* silent */ }
+	// Cache null to avoid retrying
+	db.prepare("INSERT OR REPLACE INTO geocode_cache (address, lat, lng) VALUES (?, NULL, NULL)").run(key);
+	return null;
 }
 
 // Reverse geocode coordinates to a formatted address using Google Geocoding API
@@ -4983,6 +5026,75 @@ app.get("/api/geocode/search", requireAuth, async (req, res) => {
 		res.json({ results });
 	} catch {
 		res.json({ results: [] });
+	}
+});
+
+// GET /api/geocode/load/:loadId — get cached coordinates for a load's addresses
+app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
+	try {
+		const loadId = decodeURIComponent(req.params.loadId).trim();
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const rows = (resp.data.values || []);
+		if (rows.length < 2) return res.json({});
+		const headers = rows[0];
+		const loadIdIdx = headers.findIndex(h => /load.?id|job.?id/i.test(h));
+		const pickupIdx = headers.findIndex(h => /pickup.*address|pickup.*info/i.test(h));
+		const dropoffIdx = headers.findIndex(h => /drop.?off.*address|drop.?off.*info|dest.*address/i.test(h));
+		if (loadIdIdx === -1) return res.json({});
+		// Find the last row with this load ID (most recent)
+		let row = null;
+		const targetLid = loadId.toLowerCase().replace(/^#/, "");
+		for (let i = rows.length - 1; i >= 1; i--) {
+			const lid = (rows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
+			if (lid === targetLid) { row = rows[i]; break; }
+		}
+		if (!row) return res.json({});
+		const pickupAddr = pickupIdx !== -1 ? (row[pickupIdx] || "").trim() : "";
+		const dropoffAddr = dropoffIdx !== -1 ? (row[dropoffIdx] || "").trim() : "";
+		const result = {};
+		if (pickupAddr) {
+			const coords = await geocodeAddress(pickupAddr);
+			if (coords) { result.originLat = coords.lat; result.originLng = coords.lng; }
+		}
+		if (dropoffAddr) {
+			const coords = await geocodeAddress(dropoffAddr);
+			if (coords) { result.destLat = coords.lat; result.destLng = coords.lng; }
+		}
+		result.pickupAddress = pickupAddr;
+		result.dropoffAddress = dropoffAddr;
+		res.json(result);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/geocode/bulk — geocode all loads (Super Admin)
+app.get("/api/geocode/bulk", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const rows = (resp.data.values || []);
+		if (rows.length < 2) return res.json({ geocoded: 0, skipped: 0 });
+		const headers = rows[0];
+		const pickupIdx = headers.findIndex(h => /pickup.*address|pickup.*info/i.test(h));
+		const dropoffIdx = headers.findIndex(h => /drop.?off.*address|drop.?off.*info|dest.*address/i.test(h));
+		const addresses = new Set();
+		for (let i = 1; i < rows.length; i++) {
+			if (pickupIdx !== -1) { const a = (rows[i][pickupIdx] || "").trim(); if (a) addresses.add(a); }
+			if (dropoffIdx !== -1) { const a = (rows[i][dropoffIdx] || "").trim(); if (a) addresses.add(a); }
+		}
+		let geocoded = 0, skipped = 0;
+		for (const addr of addresses) {
+			const cached = db.prepare("SELECT id FROM geocode_cache WHERE address = ?").get(addr.trim().toLowerCase());
+			if (cached) { skipped++; continue; }
+			await geocodeAddress(addr);
+			geocoded++;
+			await new Promise(r => setTimeout(r, 50)); // rate limit
+		}
+		res.json({ geocoded, skipped, total: addresses.size });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
 	}
 });
 
@@ -5848,6 +5960,35 @@ server.listen(PORT, async () => {
 			return s.properties.title;
 		});
 		console.log(`Google Sheets connected — ${tabs.length} tabs cached`);
+
+		// Background: auto-geocode all load addresses
+		(async () => {
+			try {
+				const sheets2 = await getSheets();
+				const jtResp = await sheets2.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+				const jtRows = (jtResp.data.values || []);
+				if (jtRows.length < 2) return;
+				const hdr = jtRows[0];
+				const piIdx = hdr.findIndex(h => /pickup.*address|pickup.*info/i.test(h));
+				const doIdx = hdr.findIndex(h => /drop.?off.*address|drop.?off.*info|dest.*address/i.test(h));
+				const addresses = new Set();
+				for (let i = 1; i < jtRows.length; i++) {
+					if (piIdx !== -1) { const a = (jtRows[i][piIdx] || "").trim(); if (a) addresses.add(a); }
+					if (doIdx !== -1) { const a = (jtRows[i][doIdx] || "").trim(); if (a) addresses.add(a); }
+				}
+				let geocoded = 0;
+				for (const addr of addresses) {
+					const cached = db.prepare("SELECT id FROM geocode_cache WHERE address = ?").get(addr.trim().toLowerCase());
+					if (cached) continue;
+					await geocodeAddress(addr);
+					geocoded++;
+					await new Promise(r => setTimeout(r, 60)); // rate limit
+				}
+				if (geocoded) console.log(`Auto-geocoded ${geocoded} addresses on startup`);
+			} catch (err) {
+				console.error("Auto-geocode error:", err.message);
+			}
+		})();
 	} catch (error) {
 		console.error(`Google Sheets connection FAILED: ${error.message}`);
 		console.error("Server cannot operate without Google Sheets. Exiting.");

@@ -33,7 +33,7 @@
         <LoadDetail
           v-if="detailLoad"
           :load="detailLoad"
-          :headers="driverStore.headers.jobTracking"
+          :headers="driverMapHeaders"
           :driver-name="driverName"
           :has-active-job="driverStore.hasActiveJob"
           :driver-position="geo.lastPosition.value"
@@ -297,7 +297,8 @@ const driverStore = useDriverStore()
 const socket = useSocket()
 const toast = useToast()
 const router = useRouter()
-const geo = useGeolocation(useApi())
+const api = useApi()
+const geo = useGeolocation(api)
 
 const currentTab = ref('loads')
 const selectedStatusRowIndex = ref(null)
@@ -335,9 +336,37 @@ function clearFilters() {
 const driverName = computed(() => auth.user?.driverName || auth.user?.username || '')
 
 // Load detail page (shown when a load card is tapped)
-const detailLoad = computed(() => {
+const detailLoadRaw = computed(() => {
   if (!detailRowIndex.value) return null
   return driverStore.loads.find(l => l._rowIndex === detailRowIndex.value) || null
+})
+const detailLoad = ref(null)
+watch(detailLoadRaw, async (load) => {
+  if (!load) { detailLoad.value = null; return }
+  detailLoad.value = { ...load }
+  const hdrs = driverStore.headers.jobTracking || []
+  const hasLatCol = hdrs.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
+  if (!hasLatCol) {
+    const lc = hdrs.find(h => /load.?id|job.?id/i.test(h))
+    const lid = lc ? (load[lc] || '').toString().trim() : ''
+    if (lid) {
+      try {
+        const g = await api.get(`/api/geocode/load/${encodeURIComponent(lid)}`)
+        const enriched = { ...detailLoad.value }
+        if (g.originLat) { enriched['Origin Lat'] = g.originLat; enriched['Origin Lng'] = g.originLng }
+        if (g.destLat) { enriched['Dest Lat'] = g.destLat; enriched['Dest Lng'] = g.destLng }
+        detailLoad.value = enriched
+      } catch { /* silent */ }
+    }
+  }
+}, { immediate: true })
+
+const driverMapHeaders = computed(() => {
+  const h = [...(driverStore.headers.jobTracking || [])]
+  if (detailLoad.value && detailLoad.value['Origin Lat'] && !h.some(c => /origin.*lat/i.test(c))) {
+    h.push('Origin Lat', 'Origin Lng', 'Dest Lat', 'Dest Lng')
+  }
+  return h
 })
 
 const detailLoadExpenses = computed(() => {

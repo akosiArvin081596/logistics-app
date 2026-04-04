@@ -85,7 +85,7 @@
           </div>
           <div>
             <div class="dash-section-title">Route Map</div>
-            <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="selectedDriverPosition" dispatch-mode />
+            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="selectedDriverPosition" dispatch-mode />
           </div>
         </div>
       </DialogContent>
@@ -117,6 +117,13 @@ const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePaginat
 const statusOptions = ['At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false)
 watch(() => props.jobs, (jobs) => { jobs.forEach(j => { if (!(j._rowIndex in statusSelections)) statusSelections[j._rowIndex] = ''; if (!(j._rowIndex in reassignSelections)) reassignSelections[j._rowIndex] = '' }) }, { immediate: true })
+const mapHeaders = computed(() => {
+  const h = [...props.headers]
+  if (selectedJob.value && selectedJob.value['Origin Lat'] && !h.some(c => /origin.*lat/i.test(c))) {
+    h.push('Origin Lat', 'Origin Lng', 'Dest Lat', 'Dest Lng')
+  }
+  return h
+})
 const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || ''); const driverCol = computed(() => props.headers.find(h => /driver/i.test(h)) || '')
 function getCurrentStatus(j) { return statusCol.value ? (j[statusCol.value] || '') : '' }
 function getCurrentDriver(j) { return driverCol.value ? (j[driverCol.value] || '') : '' }
@@ -125,12 +132,18 @@ function confirmCancel(j) { if (confirm('Cancel this assignment?')) emit('cancel
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
 function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null }
 async function openDetail(job) {
-  selectedJob.value = job; selectedDriverPosition.value = null; loadDocs.value = []; loadingDocs.value = true
+  selectedJob.value = { ...job }; selectedDriverPosition.value = null; loadDocs.value = []; loadingDocs.value = true
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (job[dc] || '').trim() : ''
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []
   if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => x.driver.toLowerCase() === dn.toLowerCase() && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude } }).catch(() => {}))
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
+  // Geocode addresses if no coordinate columns
+  const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
+  if (!hasLatCol && lid) p.push(api.get(`/api/geocode/load/${encodeURIComponent(lid)}`).then(g => {
+    if (g.originLat) { selectedJob.value['Origin Lat'] = g.originLat; selectedJob.value['Origin Lng'] = g.originLng }
+    if (g.destLat) { selectedJob.value['Dest Lat'] = g.destLat; selectedJob.value['Dest Lng'] = g.destLng }
+  }).catch(() => {}))
   await Promise.all(p); loadingDocs.value = false
 }
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null); const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
