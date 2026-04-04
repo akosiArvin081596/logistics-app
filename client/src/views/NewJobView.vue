@@ -304,48 +304,48 @@ async function submit() {
 
   // Build values array matching header order
   const values = hdrs.map(h => {
-    const hl = h.toLowerCase()
+    const hl = h.trim().toLowerCase()
 
     // Load ID
-    if (/load.?id|job.?id/i.test(h)) return form.loadId.trim()
+    if (/load.?id|job.?id/i.test(hl)) return form.loadId.trim()
 
     // Status — always Unassigned on creation
-    if (/^(job.?)?status$/i.test(h)) return 'Unassigned'
+    if (/^(job.?)?status$/i.test(hl)) return 'Unassigned'
 
     // Driver — always empty on creation (assigned later from dashboard)
-    if (/^driver$/i.test(h)) return ''
+    if (/^driver$/i.test(hl)) return ''
 
-    // Rate
-    if (/^(rate|amount|revenue|pay|charge)$/i.test(h)) return form.rate ? String(form.rate) : ''
+    // Rate / Payment
+    if (/^(rate|amount|revenue|pay|payment|charge)$/i.test(hl)) return form.rate ? String(form.rate) : ''
 
     // Broker
-    if (/^(broker|shipper|customer|client)$/i.test(h)) return form.broker
-    if (/broker.*contact|contact.*name/i.test(h)) return form.brokerContact
-    if (/phone/i.test(h)) return form.brokerPhone
-    if (/email/i.test(h)) return form.brokerEmail
+    if (/^(broker|shipper|customer|client)$/i.test(hl)) return form.broker
+    if (/broker.*contact|contact.*name/i.test(hl)) return form.brokerContact
+    if (/phone/i.test(hl)) return form.brokerPhone
+    if (/email/i.test(hl)) return form.brokerEmail
 
     // Pickup
-    if (/pickup.*addr|origin.*addr|shipper.*addr|pickup.*info|origin.*info/i.test(h)) return form.pickupAddress
-    if (/origin.*city|pickup.*city|shipper.*city/i.test(h)) return form.pickupAddress
-    if (/(origin|pickup|shipper).*lat/i.test(h)) return form.pickupLat ? String(form.pickupLat) : ''
-    if (/(origin|pickup|shipper).*l(on|ng)/i.test(h)) return form.pickupLng ? String(form.pickupLng) : ''
-    if (/pickup.*date|pickup.*appoint/i.test(h)) return form.pickupDate || ''
+    if (/pickup.*addr|origin.*addr|shipper.*addr|pickup.*info|origin.*info/i.test(hl)) return form.pickupAddress
+    if (/origin.*city|pickup.*city|shipper.*city/i.test(hl)) return form.pickupAddress
+    if (/(origin|pickup|shipper).*lat/i.test(hl)) return form.pickupLat ? String(form.pickupLat) : ''
+    if (/(origin|pickup|shipper).*l(on|ng)/i.test(hl)) return form.pickupLng ? String(form.pickupLng) : ''
+    if (/pickup.*date|pickup.*appoint/i.test(hl)) return form.pickupDate || ''
 
     // Dropoff
-    if (/drop.*addr|dest.*addr|receiver.*addr|delivery.*addr|drop.*info|dest.*info/i.test(h)) return form.dropoffAddress
-    if (/dest.*city|drop.*city|receiver.*city|delivery.*city|consignee/i.test(h)) return form.dropoffAddress
-    if (/(dest|drop|receiver|delivery).*lat/i.test(h)) return form.dropoffLat ? String(form.dropoffLat) : ''
-    if (/(dest|drop|receiver|delivery).*l(on|ng)/i.test(h)) return form.dropoffLng ? String(form.dropoffLng) : ''
-    if (/drop.*date|deliv.*date|drop.*appoint|deliv.*appoint/i.test(h)) return form.deliveryDate || ''
+    if (/drop.*addr|dest.*addr|receiver.*addr|delivery.*addr|drop.*info|dest.*info/i.test(hl)) return form.dropoffAddress
+    if (/dest.*city|drop.*city|receiver.*city|delivery.*city|consignee/i.test(hl)) return form.dropoffAddress
+    if (/(dest|drop|receiver|delivery).*lat/i.test(hl)) return form.dropoffLat ? String(form.dropoffLat) : ''
+    if (/(dest|drop|receiver|delivery).*l(on|ng)/i.test(hl)) return form.dropoffLng ? String(form.dropoffLng) : ''
+    if (/drop.*date|deliv.*date|drop.*appoint|deliv.*appoint/i.test(hl)) return form.deliveryDate || ''
 
     // Details
-    if (/^details$/i.test(h)) return form.details
+    if (/^details$/i.test(hl)) return form.details
 
     // Auto-fill defaults
-    if (/phase.*progress/i.test(h)) return 'Heading to Pickup'
-    if (/carrier.*stage/i.test(h)) return 'Waiting on Documents'
-    if (/assigned.*date/i.test(h)) return today
-    if (/status.*update.*date/i.test(h)) return today
+    if (/phase.*progress/i.test(hl)) return 'Heading to Pickup'
+    if (/carrier.*stage/i.test(hl)) return 'Waiting on Documents'
+    if (/assigned.*date/i.test(hl)) return today
+    if (/status.*update.*date/i.test(hl)) return today
 
     return ''
   })
