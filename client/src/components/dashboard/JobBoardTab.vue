@@ -61,7 +61,7 @@
           </template>
           <div style="margin-bottom:1rem;">
             <div class="dash-section-title">Route Map</div>
-            <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="null" dispatch-mode />
+            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" dispatch-mode />
           </div>
         </div>
       </DialogContent>
@@ -72,6 +72,7 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
+import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -86,6 +87,7 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
 const emit = defineEmits(['assign'])
+const api = useApi()
 const { show: toast } = useToast()
 const assignSelections = reactive({})
 watch(() => props.jobs, (jobs) => { jobs.forEach(j => { if (!(j._rowIndex in assignSelections)) assignSelections[j._rowIndex] = '' }) }, { immediate: true })
@@ -95,7 +97,26 @@ const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.tes
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
 const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || null)
 function hideAssign(j) { if (statusCol.value && /^(completed|canceled)$/i.test((j[statusCol.value] || '').trim())) return true; return false }
-function openDetail(j) { selectedJob.value = j }
+async function openDetail(j) {
+  selectedJob.value = { ...j }
+  const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
+  if (!hasLatCol) {
+    const lc = props.headers.find(h => /load.?id|job.?id/i.test(h))
+    const lid = lc ? (j[lc] || '').toString().trim() : ''
+    if (lid) {
+      try {
+        const g = await api.get(`/api/geocode/load/${encodeURIComponent(lid)}`)
+        if (g.originLat) { selectedJob.value['Origin Lat'] = g.originLat; selectedJob.value['Origin Lng'] = g.originLng }
+        if (g.destLat) { selectedJob.value['Dest Lat'] = g.destLat; selectedJob.value['Dest Lng'] = g.destLng }
+      } catch { /* silent */ }
+    }
+  }
+}
+const mapHeaders = computed(() => {
+  const h = [...props.headers]
+  if (selectedJob.value && selectedJob.value['Origin Lat'] && !h.some(c => /origin.*lat/i.test(c))) h.push('Origin Lat', 'Origin Lng', 'Dest Lat', 'Dest Lng')
+  return h
+})
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null)
 const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)

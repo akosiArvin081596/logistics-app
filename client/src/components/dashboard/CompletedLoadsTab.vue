@@ -58,7 +58,7 @@
           </div>
           <div>
             <div class="dash-section-title">Route Map</div>
-            <DriverRouteMap :load="selectedJob" :headers="headers" :driver-position="null" dispatch-mode />
+            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" dispatch-mode />
           </div>
         </div>
       </DialogContent>
@@ -86,7 +86,23 @@ const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.tes
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
-async function openDetail(job) { selectedJob.value = job; loadDocs.value = []; loadingDocs.value = true; const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''; if (lid) { try { loadDocs.value = (await api.get(`/api/documents/${encodeURIComponent(lid)}`)).documents || [] } catch {} }; loadingDocs.value = false }
+async function openDetail(job) {
+  selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true
+  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
+  const p = []
+  if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
+  const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
+  if (!hasLatCol && lid) p.push(api.get(`/api/geocode/load/${encodeURIComponent(lid)}`).then(g => {
+    if (g.originLat) { selectedJob.value['Origin Lat'] = g.originLat; selectedJob.value['Origin Lng'] = g.originLng }
+    if (g.destLat) { selectedJob.value['Dest Lat'] = g.destLat; selectedJob.value['Dest Lng'] = g.destLng }
+  }).catch(() => {}))
+  await Promise.all(p); loadingDocs.value = false
+}
+const mapHeaders = computed(() => {
+  const h = [...props.headers]
+  if (selectedJob.value && selectedJob.value['Origin Lat'] && !h.some(c => /origin.*lat/i.test(c))) h.push('Origin Lat', 'Origin Lng', 'Dest Lat', 'Dest Lng')
+  return h
+})
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null); const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
 const displayCols = computed(() => { const kw = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery', 'date']; const m = []; for (const k of kw) { const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !m.includes(h)); if (c) m.push(c) }; return (m.length < 3 ? props.headers.slice(0, 8) : m).filter(c => c !== brokerSourceCol.value && c !== phoneSourceCol.value) })
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
