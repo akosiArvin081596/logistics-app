@@ -314,6 +314,7 @@ db.exec(`
 	)
 `);
 try { db.exec("ALTER TABLE investors ADD COLUMN carrier_name TEXT NOT NULL DEFAULT ''"); } catch {}
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inv_carrier ON investors(carrier_name)`);
 
 // Carrier-driver history (preserves pairings when drivers move between carriers)
 db.exec(`
