@@ -5077,10 +5077,12 @@ app.get("/api/geocode/bulk", requireRole("Super Admin"), async (req, res) => {
 		const rows = (resp.data.values || []);
 		if (rows.length < 2) return res.json({ geocoded: 0, skipped: 0 });
 		const headers = rows[0];
+		const loadIdIdx = headers.findIndex(h => /load.?id|job.?id/i.test(h));
 		const pickupIdx = headers.findIndex(h => /pickup.*address|pickup.*info/i.test(h));
 		const dropoffIdx = headers.findIndex(h => /drop.?off.*address|drop.?off.*info|dest.*address/i.test(h));
 		const addresses = new Set();
 		for (let i = 1; i < rows.length; i++) {
+			if (loadIdIdx !== -1 && !(rows[i][loadIdIdx] || "").trim()) continue;
 			if (pickupIdx !== -1) { const a = (rows[i][pickupIdx] || "").trim(); if (a) addresses.add(a); }
 			if (dropoffIdx !== -1) { const a = (rows[i][dropoffIdx] || "").trim(); if (a) addresses.add(a); }
 		}
@@ -5969,10 +5971,12 @@ server.listen(PORT, async () => {
 				const jtRows = (jtResp.data.values || []);
 				if (jtRows.length < 2) return;
 				const hdr = jtRows[0];
+				const lidIdx = hdr.findIndex(h => /load.?id|job.?id/i.test(h));
 				const piIdx = hdr.findIndex(h => /pickup.*address|pickup.*info/i.test(h));
 				const doIdx = hdr.findIndex(h => /drop.?off.*address|drop.?off.*info|dest.*address/i.test(h));
 				const addresses = new Set();
 				for (let i = 1; i < jtRows.length; i++) {
+					if (lidIdx !== -1 && !(jtRows[i][lidIdx] || "").trim()) continue; // skip rows without Load ID
 					if (piIdx !== -1) { const a = (jtRows[i][piIdx] || "").trim(); if (a) addresses.add(a); }
 					if (doIdx !== -1) { const a = (jtRows[i][doIdx] || "").trim(); if (a) addresses.add(a); }
 				}
