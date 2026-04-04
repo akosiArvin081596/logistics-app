@@ -301,21 +301,6 @@ function logAudit(req, action, entity, entityId, details) {
 	} catch (err) { console.error("Audit log error:", err.message); }
 }
 
-// Truck driver assignment history (tracks all past assignments for investor data continuity)
-db.exec(`
-	CREATE TABLE IF NOT EXISTS truck_driver_history (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		truck_id INTEGER NOT NULL,
-		unit_number TEXT NOT NULL,
-		owner_id INTEGER NOT NULL,
-		driver_name TEXT NOT NULL,
-		assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		unassigned_at DATETIME
-	)
-`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_tdh_owner ON truck_driver_history(owner_id)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_tdh_driver ON truck_driver_history(driver_name)`);
-
 // Investors table (links investor name to a carrier in the Google Sheet)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investors (
@@ -368,17 +353,6 @@ db.exec(`
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-
-// Seed history from current truck assignments (one-time backfill)
-{
-	const existing = db.prepare("SELECT COUNT(*) AS c FROM truck_driver_history").get().c;
-	if (existing === 0) {
-		const trucks = db.prepare("SELECT id, unit_number, owner_id, assigned_driver FROM trucks WHERE assigned_driver != ''").all();
-		const ins = db.prepare("INSERT INTO truck_driver_history (truck_id, unit_number, owner_id, driver_name) VALUES (?, ?, ?, ?)");
-		trucks.forEach(t => ins.run(t.id, t.unit_number, t.owner_id, t.assigned_driver));
-		if (trucks.length) console.log(`Backfilled ${trucks.length} driver assignment(s) to history`);
-	}
-}
 
 // Backfill carrier_driver_history from Carrier Database sheet on first startup
 {
@@ -457,18 +431,6 @@ function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColNa
 		historical.forEach(h => { if (h.driver_name) set.add(h.driver_name.trim().toLowerCase()); });
 	}
 	return set;
-}
-
-// Helper: log driver assignment change to history
-function logDriverAssignment(truckId, unitNumber, ownerId, driverName) {
-	// Close previous open assignment for this truck
-	db.prepare("UPDATE truck_driver_history SET unassigned_at = ? WHERE truck_id = ? AND unassigned_at IS NULL")
-		.run(new Date().toISOString(), truckId);
-	// Insert new assignment if driver is set
-	if (driverName && driverName.trim()) {
-		db.prepare("INSERT INTO truck_driver_history (truck_id, unit_number, owner_id, driver_name) VALUES (?, ?, ?, ?)")
-			.run(truckId, unitNumber, ownerId, driverName.trim());
-	}
 }
 
 // Legal documents table (per-truck legal files)
@@ -1195,10 +1157,6 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher"), async (req, re
 		const result = db.prepare(
 			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", parseInt(ownerId) || 0, parseFloat(driverPayDaily) || 0, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0);
-		// Log driver assignment to history
-		if (assignedDriver && assignedDriver.trim()) {
-			logDriverAssignment(result.lastInsertRowid, unitNumber.trim(), parseInt(ownerId) || 0, assignedDriver.trim());
-		}
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error creating truck:", error.message);
@@ -1263,9 +1221,6 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			const oldDriver = truck.assigned_driver;
 			const newOwnerId = ownerId !== undefined ? parseInt(ownerId) || 0 : truck.owner_id;
 			// Log to history if driver changed
-			if ((assignedDriver || '').trim().toLowerCase() !== (oldDriver || '').trim().toLowerCase()) {
-				logDriverAssignment(id, truck.unit_number, newOwnerId, (assignedDriver || '').trim());
-			}
 			if (assignedDriver && assignedDriver.trim()) {
 				syncDriverToCarrierSheet(assignedDriver.trim(), { action: "update" });
 			}
