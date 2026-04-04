@@ -342,9 +342,12 @@ try { db.exec("ALTER TABLE investors ADD COLUMN carrier_name TEXT NOT NULL DEFAU
 }
 
 // Helper: get ALL drivers ever assigned to an investor's trucks (current + historical)
+// userId = users.id (from login session) → look up investors.id first
 function getInvestorDriverSet(userId) {
-	const current = db.prepare("SELECT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver != ''").all(userId);
-	const historical = db.prepare("SELECT DISTINCT driver_name FROM truck_driver_history WHERE owner_id = ?").all(userId);
+	const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(userId);
+	const investorId = inv ? inv.id : userId; // fallback to userId for backwards compat
+	const current = db.prepare("SELECT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver != ''").all(investorId);
+	const historical = db.prepare("SELECT DISTINCT driver_name FROM truck_driver_history WHERE owner_id = ?").all(investorId);
 	const set = new Set();
 	current.forEach(t => { if (t.assigned_driver) set.add(t.assigned_driver.trim().toLowerCase()); });
 	historical.forEach(h => { if (h.driver_name) set.add(h.driver_name.trim().toLowerCase()); });
