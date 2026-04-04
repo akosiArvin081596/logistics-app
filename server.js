@@ -5039,8 +5039,8 @@ app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 		if (rows.length < 2) return res.json({});
 		const headers = rows[0];
 		const loadIdIdx = headers.findIndex(h => /load.?id|job.?id/i.test(h));
-		const pickupIdx = headers.findIndex(h => /pickup.*address|pickup.*info/i.test(h));
-		const dropoffIdx = headers.findIndex(h => /drop.?off.*address|drop.?off.*info|dest.*address/i.test(h));
+		const pickupIdx = headers.findIndex(h => /pickup.*address/i.test(h));
+		const dropoffIdx = headers.findIndex(h => /drop.?off.*address|dest.*address/i.test(h));
 		if (loadIdIdx === -1) return res.json({});
 		// Find the last row with this load ID (most recent)
 		let row = null;
@@ -5078,8 +5078,8 @@ app.get("/api/geocode/bulk", requireRole("Super Admin"), async (req, res) => {
 		if (rows.length < 2) return res.json({ geocoded: 0, skipped: 0 });
 		const headers = rows[0];
 		const loadIdIdx = headers.findIndex(h => /load.?id|job.?id/i.test(h));
-		const pickupIdx = headers.findIndex(h => /pickup.*address|pickup.*info/i.test(h));
-		const dropoffIdx = headers.findIndex(h => /drop.?off.*address|drop.?off.*info|dest.*address/i.test(h));
+		const pickupIdx = headers.findIndex(h => /pickup.*address/i.test(h));
+		const dropoffIdx = headers.findIndex(h => /drop.?off.*address|dest.*address/i.test(h));
 		const addresses = new Set();
 		for (let i = 1; i < rows.length; i++) {
 			if (loadIdIdx !== -1 && !(rows[i][loadIdIdx] || "").trim()) continue;
@@ -5972,8 +5972,8 @@ server.listen(PORT, async () => {
 				if (jtRows.length < 2) return;
 				const hdr = jtRows[0];
 				const lidIdx = hdr.findIndex(h => /load.?id|job.?id/i.test(h));
-				const piIdx = hdr.findIndex(h => /pickup.*address|pickup.*info/i.test(h));
-				const doIdx = hdr.findIndex(h => /drop.?off.*address|drop.?off.*info|dest.*address/i.test(h));
+				const piIdx = hdr.findIndex(h => /pickup.*address/i.test(h));
+				const doIdx = hdr.findIndex(h => /drop.?off.*address|dest.*address/i.test(h));
 				const addresses = new Set();
 				for (let i = 1; i < jtRows.length; i++) {
 					if (lidIdx !== -1 && !(jtRows[i][lidIdx] || "").trim()) continue; // skip rows without Load ID
