@@ -236,6 +236,7 @@ let lastRouteTime = 0
 watch(() => props.driverPosition, (pos) => {
   if (!pos || !destLatLng.value) return
   if (driverMarker && map) driverMarker.position = { lat: pos.latitude, lng: pos.longitude }
+  if (exDriverMarker && expandedMap) exDriverMarker.position = { lat: pos.latitude, lng: pos.longitude }
   if (!lastRoutePos) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute(true); return }
   const dist = haversineMi({ lat: pos.latitude, lng: pos.longitude }, { lat: lastRoutePos.latitude, lng: lastRoutePos.longitude })
   if (dist > 0.06 && Date.now() - lastRouteTime >= 60000) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute() }
