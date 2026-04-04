@@ -2552,7 +2552,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 
 		const jobTracking = parseSheet(rangeData[0]);
-		// jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers); // Disabled: show all rows including duplicates
+		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = parseSheet(rangeData[1]);
 		const payments = parseSheet(rangeData[2]);
 		const carrierHistory = parseSheet(rangeData[3]);
@@ -2787,25 +2787,24 @@ const STATUS_RANK = {
 function deduplicateLoads(data, headers, returnDuplicates = false) {
 	const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
 	if (!loadIdCol) return returnDuplicates ? { data, duplicates: [] } : data;
-	const statusCol = headers.find((h) => /^(job.?)?status$/i.test(h));
-	const seen = new Map();
+	// Track last (most recent) index per load ID — bottom row wins
+	const lastIndex = new Map();
 	for (let i = 0; i < data.length; i++) {
 		const lid = (data[i][loadIdCol] || "").trim().toLowerCase().replace(/^#/, "");
 		if (!lid) continue;
-		if (seen.has(lid)) seen.get(lid).push(i);
-		else seen.set(lid, [i]);
+		lastIndex.set(lid, i); // overwrite keeps the last occurrence
 	}
-	// Collect ALL indices for load IDs that have duplicates
-	const dupSet = new Set();
-	for (const [, indices] of seen) {
-		if (indices.length > 1) {
-			for (const idx of indices) dupSet.add(idx);
-		}
+	const keepSet = new Set(lastIndex.values());
+	const duplicates = [];
+	const filtered = [];
+	for (let i = 0; i < data.length; i++) {
+		const lid = (data[i][loadIdCol] || "").trim().toLowerCase().replace(/^#/, "");
+		if (!lid) { filtered.push(data[i]); continue; }
+		if (keepSet.has(i)) filtered.push(data[i]);
+		else duplicates.push(data[i]);
 	}
-	if (dupSet.size === 0) return returnDuplicates ? { data, duplicates: [] } : data;
-	const filtered = data.filter((_, i) => !dupSet.has(i));
 	if (!returnDuplicates) return filtered;
-	return { data: filtered, duplicates: data.filter((_, i) => dupSet.has(i)) };
+	return { data: filtered, duplicates };
 }
 
 function sanitizeBrokerContact(value) {
