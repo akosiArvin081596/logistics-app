@@ -233,12 +233,13 @@ export const useDriverStore = defineStore('driver', {
       await this.loadData()
     },
 
-    async updateStatus(loadId, newStatus, rowIndex) {
+    async updateStatus(loadId, newStatus, rowIndex, rowData) {
       await api.put('/api/driver/status', {
         driverName: this.driverName,
         loadId,
         newStatus,
         rowIndex,
+        rowData,
       })
       await this.loadData()
     },

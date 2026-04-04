@@ -3018,10 +3018,10 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 // PUT /api/driver/status — Update load status + log to Status Logs
 app.put("/api/driver/status", requireAuth, async (req, res) => {
 	try {
-		let { rowIndex, driverName, loadId, newStatus } = req.body;
+		let { rowIndex, driverName, loadId, newStatus, rowData } = req.body;
 		const sheets = await getSheets();
 
-		// Read entire sheet to verify exact row and find duplicates
+		// Read entire sheet to verify exact row
 		const allSheetRes = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
 			range: "Job Tracking",
@@ -3038,31 +3038,41 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 			return res.status(400).json({ error: "Status column not found in sheet" });
 		}
 
-		// Verify rowIndex points to the correct Load ID; if not, find the last (most recent) row
-		if (loadId && loadIdIdx !== -1) {
-			const targetLid = loadId.toString().trim().toLowerCase().replace(/^#/, "");
-			const rowAtIndex = dataRows[rowIndex - 2] || [];
-			const lidAtIndex = (rowAtIndex[loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
-			if (lidAtIndex !== targetLid) {
-				// Scan for the last row with this Load ID (bottom = most recent)
-				let foundRow = -1;
-				for (let i = dataRows.length - 1; i >= 0; i--) {
-					const lid = (dataRows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
-					if (lid === targetLid) { foundRow = i + 2; break; }
+		// Helper: check if a sheet row matches the frontend rowData on all columns
+		function rowMatchesData(sheetRow) {
+			if (!rowData || !sheetRow) return false;
+			for (let c = 0; c < headers.length; c++) {
+				const col = headers[c];
+				if (!col) continue;
+				const expected = (rowData[col] != null ? String(rowData[col]) : "").trim();
+				const actual = (sheetRow[c] || "").trim();
+				if (expected && expected !== actual) return false;
+			}
+			return true;
+		}
+
+		// Step 1: verify row at given rowIndex matches all column data
+		const rowAtIndex = dataRows[rowIndex - 2] || [];
+		if (rowData && !rowMatchesData(rowAtIndex)) {
+			// Step 2: scan all rows to find the exact match
+			let foundRow = -1;
+			for (let i = dataRows.length - 1; i >= 0; i--) {
+				if (rowMatchesData(dataRows[i])) { foundRow = i + 2; break; }
+			}
+			if (foundRow === -1) {
+				// Step 3: fallback to Load ID match (last row with that ID)
+				if (loadId && loadIdIdx !== -1) {
+					const targetLid = loadId.toString().trim().toLowerCase().replace(/^#/, "");
+					for (let i = dataRows.length - 1; i >= 0; i--) {
+						const lid = (dataRows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
+						if (lid === targetLid) { foundRow = i + 2; break; }
+					}
 				}
 				if (foundRow === -1) {
-					return res.status(404).json({ error: `Load ID ${loadId} not found in sheet` });
+					return res.status(404).json({ error: `Could not find exact row for Load ID ${loadId}` });
 				}
-				rowIndex = foundRow;
-			} else {
-				// Load ID matches but check if there's a more recent row (further down)
-				let lastRow = rowIndex;
-				for (let i = rowIndex - 1; i < dataRows.length; i++) {
-					const lid = (dataRows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
-					if (lid === targetLid) lastRow = i + 2;
-				}
-				rowIndex = lastRow;
 			}
+			rowIndex = foundRow;
 		}
 
 		// Enforce one active job at a time: block transition to "At Shipper" if another load is active

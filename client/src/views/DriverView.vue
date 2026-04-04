@@ -573,7 +573,7 @@ async function handleStatusUpdate({ newStatus, load }) {
   const loadId = loadIdCol ? load[loadIdCol] : ''
 
   try {
-    await driverStore.updateStatus(loadId, newStatus, load._rowIndex)
+    await driverStore.updateStatus(loadId, newStatus, load._rowIndex, load)
     toast.show(`Status updated to ${newStatus}`)
   } catch {
     toast.show('Failed to update status', 'error')
