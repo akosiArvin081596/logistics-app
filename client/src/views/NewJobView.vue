@@ -19,29 +19,36 @@
             <div v-if="duplicateWarning" class="field-warning">{{ duplicateWarning }}</div>
           </div>
           <div class="form-group">
+            <label class="form-label">Contract ID</label>
+            <input v-model="form.contractId" class="form-input" type="text" placeholder="Contract or reference ID" />
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
             <label class="form-label">Rate / Amount ($)</label>
             <input v-model.number="form.rate" class="form-input" type="number" min="0" step="0.01" placeholder="0.00" />
           </div>
+          <div class="form-group">
+            <label class="form-label">Trailer Number</label>
+            <input v-model="form.trailerNumber" class="form-input" type="text" placeholder="e.g. TR-1234" />
+          </div>
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Broker / Customer</label>
-            <input v-model="form.broker" class="form-input" type="text" placeholder="Broker or shipper name" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Broker Contact</label>
+            <label class="form-label">Broker Contact Name</label>
             <input v-model="form.brokerContact" class="form-input" type="text" placeholder="Contact name" />
           </div>
-        </div>
-        <div class="form-row">
           <div class="form-group">
             <label class="form-label">Broker Phone</label>
             <input v-model="form.brokerPhone" class="form-input" type="text" placeholder="Phone number" />
           </div>
+        </div>
+        <div class="form-row">
           <div class="form-group">
             <label class="form-label">Broker Email</label>
             <input v-model="form.brokerEmail" class="form-input" type="email" placeholder="Email" />
           </div>
+          <div class="form-group"></div>
         </div>
       </div>
 
@@ -56,6 +63,16 @@
           <div class="location-card-body">
             <div class="form-row">
               <div class="form-group flex-2">
+                <label class="form-label">Shipper / Facility Name</label>
+                <input v-model="form.pickupInfo" class="form-input" type="text" placeholder="Company or facility name at pickup" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Date</label>
+                <input v-model="form.pickupDate" class="form-input" type="date" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group flex-2">
                 <label class="form-label">Address</label>
                 <div class="address-input-wrap">
                   <input v-model="form.pickupAddress" class="form-input" type="text" placeholder="Search or pick on map..." @input="onPickupSearch" />
@@ -63,10 +80,6 @@
                     <div v-for="(s, i) in pickupSuggestions" :key="i" class="address-suggestion-item" @click="selectPickupSuggestion(s)">{{ s.displayName }}</div>
                   </div>
                 </div>
-              </div>
-              <div class="form-group">
-                <label class="form-label">Date</label>
-                <input v-model="form.pickupDate" class="form-input" type="date" />
               </div>
             </div>
             <div class="coord-row">
@@ -92,6 +105,16 @@
           <div class="location-card-body">
             <div class="form-row">
               <div class="form-group flex-2">
+                <label class="form-label">Receiver / Facility Name</label>
+                <input v-model="form.dropoffInfo" class="form-input" type="text" placeholder="Company or facility name at drop-off" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Date</label>
+                <input v-model="form.deliveryDate" class="form-input" type="date" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group flex-2">
                 <label class="form-label">Address</label>
                 <div class="address-input-wrap">
                   <input v-model="form.dropoffAddress" class="form-input" type="text" placeholder="Search or pick on map..." @input="onDropoffSearch" />
@@ -99,10 +122,6 @@
                     <div v-for="(s, i) in dropoffSuggestions" :key="i" class="address-suggestion-item" @click="selectDropoffSuggestion(s)">{{ s.displayName }}</div>
                   </div>
                 </div>
-              </div>
-              <div class="form-group">
-                <label class="form-label">Date</label>
-                <input v-model="form.deliveryDate" class="form-input" type="date" />
               </div>
             </div>
             <div class="coord-row">
@@ -172,20 +191,22 @@ const today = new Date().toISOString().split('T')[0]
 
 const form = reactive({
   loadId: '',
+  contractId: '',
   rate: '',
-  broker: '',
+  trailerNumber: '',
   brokerContact: '',
   brokerPhone: '',
   brokerEmail: '',
+  pickupInfo: '',
   pickupAddress: '',
   pickupDate: today,
   pickupLat: '',
   pickupLng: '',
+  dropoffInfo: '',
   dropoffAddress: '',
   deliveryDate: '',
   dropoffLat: '',
   dropoffLng: '',
-  driver: '',
   details: '',
 })
 
@@ -306,8 +327,14 @@ async function submit() {
   const values = hdrs.map(h => {
     const hl = h.trim().toLowerCase()
 
+    // Contract ID
+    if (/^contract.?id$/i.test(hl)) return form.contractId
+
     // Load ID
     if (/load.?id|job.?id/i.test(hl)) return form.loadId.trim()
+
+    // Trailer Number
+    if (/trailer.*num|trailer.?#/i.test(hl)) return form.trailerNumber
 
     // Status — always Unassigned on creation
     if (/^(job.?)?status$/i.test(hl)) return 'Unassigned'
@@ -319,20 +346,25 @@ async function submit() {
     if (/^(rate|amount|revenue|pay|payment|charge)$/i.test(hl)) return form.rate ? String(form.rate) : ''
 
     // Broker
-    if (/^(broker|shipper|customer|client)$/i.test(hl)) return form.broker
     if (/broker.*contact|contact.*name/i.test(hl)) return form.brokerContact
     if (/phone/i.test(hl)) return form.brokerPhone
     if (/email/i.test(hl)) return form.brokerEmail
 
-    // Pickup
-    if (/pickup.*addr|origin.*addr|shipper.*addr|pickup.*info|origin.*info/i.test(hl)) return form.pickupAddress
+    // Pickup Info (shipper/facility name) — must be before address regex
+    if (/pickup.*info|origin.*info/i.test(hl)) return form.pickupInfo
+
+    // Pickup Address
+    if (/pickup.*addr|origin.*addr|shipper.*addr/i.test(hl)) return form.pickupAddress
     if (/origin.*city|pickup.*city|shipper.*city/i.test(hl)) return form.pickupAddress
     if (/(origin|pickup|shipper).*lat/i.test(hl)) return form.pickupLat ? String(form.pickupLat) : ''
     if (/(origin|pickup|shipper).*l(on|ng)/i.test(hl)) return form.pickupLng ? String(form.pickupLng) : ''
     if (/pickup.*date|pickup.*appoint/i.test(hl)) return form.pickupDate || ''
 
-    // Dropoff
-    if (/drop.*addr|dest.*addr|receiver.*addr|delivery.*addr|drop.*info|dest.*info/i.test(hl)) return form.dropoffAddress
+    // Drop-off Info (receiver/facility name) — must be before address regex
+    if (/drop.*info|dest.*info/i.test(hl)) return form.dropoffInfo
+
+    // Drop-off Address
+    if (/drop.*addr|dest.*addr|receiver.*addr|delivery.*addr/i.test(hl)) return form.dropoffAddress
     if (/dest.*city|drop.*city|receiver.*city|delivery.*city|consignee/i.test(hl)) return form.dropoffAddress
     if (/(dest|drop|receiver|delivery).*lat/i.test(hl)) return form.dropoffLat ? String(form.dropoffLat) : ''
     if (/(dest|drop|receiver|delivery).*l(on|ng)/i.test(hl)) return form.dropoffLng ? String(form.dropoffLng) : ''
