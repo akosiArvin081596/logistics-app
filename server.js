@@ -938,7 +938,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 // List investor users (for owner dropdown)
 app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	const investors = db
-		.prepare("SELECT id, username FROM users WHERE role = 'Investor' ORDER BY username ASC")
+		.prepare("SELECT id, full_name AS username FROM investors ORDER BY full_name ASC")
 		.all();
 	res.json({ investors });
 });
@@ -1031,7 +1031,10 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 	const user = req.session.user;
 	let rows;
 	if (user.role === "Investor") {
-		rows = db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(user.id);
+		const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(user.id);
+		rows = inv
+			? db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(inv.id)
+			: [];
 	} else {
 		rows = db.prepare("SELECT * FROM trucks ORDER BY unit_number ASC").all();
 	}
