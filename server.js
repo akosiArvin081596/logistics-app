@@ -1033,7 +1033,7 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 		status: r.status,
 		notes: r.notes,
 		createdAt: r.created_at,
-		truckCount: db.prepare("SELECT COUNT(*) as n FROM trucks WHERE owner_id = ?").get(r.user_id || 0).n,
+		truckCount: db.prepare("SELECT COUNT(*) as n FROM trucks WHERE owner_id = ?").get(r.id).n,
 	}));
 	res.json({ investors });
 });
