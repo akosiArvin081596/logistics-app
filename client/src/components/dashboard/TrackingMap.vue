@@ -289,6 +289,7 @@ function clearSingleLoadOverlays() {
 function clearDriverRouteOverlays() {
   for (const o of driverRouteOverlays) {
     if (o.polyline) o.polyline.setMap(null)
+    if (o.traveledPolyline) o.traveledPolyline.setMap(null)
     if (o.originMarker) o.originMarker.map = null
     if (o.destMarker) o.destMarker.map = null
   }
@@ -373,15 +374,30 @@ function renderDriverRoutes() {
   for (const r of driverRoutes.value) {
     const entry = {}
 
+    // Traveled segment: origin → driver (orange dashed)
+    if (r.traveledRoute && r.traveledRoute.length >= 2) {
+      entry.traveledPolyline = new google.maps.Polyline({
+        path: r.traveledRoute.map(p => ({ lat: p[0], lng: p[1] })),
+        strokeColor: '#f97316',
+        strokeOpacity: 0,
+        strokeWeight: 4,
+        map,
+        icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#f97316', strokeOpacity: 0.8, scale: 3 }, offset: '0', repeat: '16px' }],
+      })
+    }
+
+    // Remaining segment: driver → dest (blue solid) or full route pre-pickup
     if (r.route.length >= 2) {
       entry.polyline = new google.maps.Polyline({
         path: r.route.map(p => ({ lat: p[0], lng: p[1] })),
-        strokeColor: r.color,
-        strokeOpacity: 0.7,
+        strokeColor: '#2563eb',
+        strokeOpacity: 0.8,
         strokeWeight: 4,
         map,
       })
     }
+
+    // Always show origin marker
     if (r.origin) {
       entry.originMarker = new google.maps.marker.AdvancedMarkerElement({
         position: { lat: r.origin[0], lng: r.origin[1] },
@@ -577,6 +593,7 @@ async function fetchDriverRoutes(loc) {
   if (loads.length === 0) return
 
   const hasDriverGps = loc.latitude != null && loc.longitude != null
+  const driverPt = hasDriverGps ? [loc.latitude, loc.longitude] : null
 
   // Show points immediately from known coords with straight-line routes
   const routes = []
@@ -588,15 +605,17 @@ async function fetchDriverRoutes(loc) {
     const dest = isFinite(dLat) && isFinite(dLng) ? [dLat, dLng] : null
     if (!origin && !dest) continue
     const isPastPickup = PAST_PICKUP_RE.test(al.status)
-    const routeFrom = (isPastPickup && hasDriverGps) ? [loc.latitude, loc.longitude] : origin
     routes.push({
       loadId: al.loadId,
-      route: routeFrom && dest ? [routeFrom, dest] : [],
+      // Traveled segment: origin → driver (orange), only after pickup
+      traveledRoute: (isPastPickup && origin && driverPt) ? [origin, driverPt] : [],
+      // Remaining segment: driver → dest (blue) after pickup, or origin → dest before
+      route: (isPastPickup && driverPt && dest) ? [driverPt, dest] : (origin && dest ? [origin, dest] : []),
       origin,
       dest,
       originAddress: al.pickupAddress || '',
       destAddress: al.dropoffAddress || '',
-      color: ROUTE_COLORS[i % ROUTE_COLORS.length],
+      isPastPickup,
     })
   }
   driverRoutes.value = routes
@@ -604,18 +623,29 @@ async function fetchDriverRoutes(loc) {
   // Fetch actual driving routes and replace straight lines
   for (let i = 0; i < routes.length; i++) {
     const r = routes[i]
-    if (!r.dest) continue
     const al = loads[i]
     const isPastPickup = PAST_PICKUP_RE.test(al?.status)
-    const fromPt = (isPastPickup && hasDriverGps) ? [loc.latitude, loc.longitude] : r.origin
-    if (!fromPt) continue
-    try {
-      const data = await api.get(`/api/route?fromLat=${fromPt[0]}&fromLng=${fromPt[1]}&toLat=${r.dest[0]}&toLng=${r.dest[1]}`)
-      if (data.route && data.route.length >= 2) {
-        routes[i] = { ...r, route: data.route.map(p => [p.latitude, p.longitude]) }
-        driverRoutes.value = [...routes]
-      }
-    } catch { /* keep straight line */ }
+    let updated = { ...r }
+
+    // Fetch remaining route (driver→dest or origin→dest)
+    const remainFrom = (isPastPickup && driverPt) ? driverPt : r.origin
+    if (remainFrom && r.dest) {
+      try {
+        const data = await api.get(`/api/route?fromLat=${remainFrom[0]}&fromLng=${remainFrom[1]}&toLat=${r.dest[0]}&toLng=${r.dest[1]}`)
+        if (data.route && data.route.length >= 2) updated.route = data.route.map(p => [p.latitude, p.longitude])
+      } catch { /* keep straight line */ }
+    }
+
+    // Fetch traveled route (origin→driver) if past pickup
+    if (isPastPickup && r.origin && driverPt) {
+      try {
+        const data = await api.get(`/api/route?fromLat=${r.origin[0]}&fromLng=${r.origin[1]}&toLat=${driverPt[0]}&toLng=${driverPt[1]}`)
+        if (data.route && data.route.length >= 2) updated.traveledRoute = data.route.map(p => [p.latitude, p.longitude])
+      } catch { /* keep straight line */ }
+    }
+
+    routes[i] = updated
+    driverRoutes.value = [...routes]
   }
 }
 
