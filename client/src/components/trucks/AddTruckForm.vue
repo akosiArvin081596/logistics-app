@@ -56,12 +56,19 @@
       </div>
     </div>
 
-    <div v-if="showOwner" class="form-row">
-      <div class="form-group">
+    <div class="form-row">
+      <div v-if="showOwner" class="form-group">
         <label class="form-label">Owner (Investor)</label>
         <select v-model="form.ownerId" class="form-select">
           <option :value="0">-- Unassigned --</option>
           <option v-for="inv in investorUsers" :key="inv.id" :value="inv.id">{{ inv.username }}</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Assigned Driver</label>
+        <select v-model="form.assignedDriver" class="form-select">
+          <option value="">-- None --</option>
+          <option v-for="name in driverNames" :key="name" :value="name">{{ name }}</option>
         </select>
       </div>
     </div>
