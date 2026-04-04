@@ -17,6 +17,7 @@
         :drivers="store.drivers"
         :headers="store.headers"
         :carrier-names="carrierNames"
+        :driver-ratings="driverRatings"
         @delete="handleDelete"
         @update="handleUpdate"
       />
@@ -25,15 +26,18 @@
 </template>
 
 <script setup>
-import { onMounted, computed } from 'vue'
+import { onMounted, computed, ref } from 'vue'
 import { useDriversDbStore } from '../stores/driversDb'
+import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import AddDriverForm from '../components/drivers-db/AddDriverForm.vue'
 import DriverTable from '../components/drivers-db/DriverTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
 
 const store = useDriversDbStore()
+const api = useApi()
 const { show: toast } = useToast()
+const driverRatings = ref({})
 
 const carrierNames = computed(() => {
   const col = store.headers.find(h => /carrier/i.test(h))
@@ -69,7 +73,8 @@ async function handleDelete(rowIndex) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   store.load()
+  try { const d = await api.get('/api/load-ratings/averages'); driverRatings.value = d.averages || {} } catch {}
 })
 </script>

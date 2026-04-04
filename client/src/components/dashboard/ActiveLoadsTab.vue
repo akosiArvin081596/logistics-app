@@ -83,6 +83,16 @@
               </div>
             </div>
           </div>
+          <div v-if="auth.isSuperAdmin && isSelectedLoadCompleted" style="margin-bottom:1rem;">
+            <div class="dash-section-title">Driver Rating</div>
+            <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
+              <div style="display:flex;align-items:center;gap:0.75rem;">
+                <StarRating v-model="loadRating" @update:model-value="submitRating" />
+                <span v-if="loadRating" style="font-size:0.8rem;color:#6b7280;">{{ loadRating }}/5</span>
+                <span v-else style="font-size:0.8rem;color:#9ca3af;">Not rated</span>
+              </div>
+            </div>
+          </div>
           <div>
             <div class="dash-section-title">Route Map</div>
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="selectedDriverPosition" dispatch-mode />
@@ -102,11 +112,14 @@ import { Button } from '@/components/ui/button'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import StatusBadge from '../shared/StatusBadge.vue'
+import StarRating from '../shared/StarRating.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
+import { useAuthStore } from '../../stores/auth'
 const api = useApi()
+const auth = useAuthStore()
 const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) { selectedJob.value = null; selectedDriverPosition.value = null } })
 const emit = defineEmits(['reassign', 'cancel', 'status-update'])
@@ -115,7 +128,12 @@ const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.tes
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 const statusOptions = ['At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
-const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false)
+const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0)
+const isSelectedLoadCompleted = computed(() => {
+  if (!selectedJob.value) return false
+  const sc = props.headers.find(h => /status/i.test(h))
+  return sc && /^(delivered|completed|pod received)$/i.test((selectedJob.value[sc] || '').trim())
+})
 watch(() => props.jobs, (jobs) => { jobs.forEach(j => { if (!(j._rowIndex in statusSelections)) statusSelections[j._rowIndex] = ''; if (!(j._rowIndex in reassignSelections)) reassignSelections[j._rowIndex] = '' }) }, { immediate: true })
 const mapHeaders = computed(() => {
   const h = [...props.headers]
@@ -132,19 +150,26 @@ function confirmCancel(j) { if (confirm('Cancel this assignment?')) emit('cancel
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
 function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null }
 async function openDetail(job) {
-  selectedJob.value = { ...job }; selectedDriverPosition.value = null; loadDocs.value = []; loadingDocs.value = true
+  selectedJob.value = { ...job }; selectedDriverPosition.value = null; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (job[dc] || '').trim() : ''
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []
   if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => x.driver.toLowerCase() === dn.toLowerCase() && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude } }).catch(() => {}))
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
-  // Geocode addresses if no coordinate columns
+  if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
   const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
   if (!hasLatCol && lid) p.push(api.get(`/api/geocode/load/${encodeURIComponent(lid)}`).then(g => {
     if (g.originLat) { selectedJob.value['Origin Lat'] = g.originLat; selectedJob.value['Origin Lng'] = g.originLng }
     if (g.destLat) { selectedJob.value['Dest Lat'] = g.destLat; selectedJob.value['Dest Lng'] = g.destLng }
   }).catch(() => {}))
   await Promise.all(p); loadingDocs.value = false
+}
+async function submitRating(r) {
+  if (!selectedJob.value) return
+  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (selectedJob.value[lc] || '').trim() : ''
+  const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (selectedJob.value[dc] || '').trim() : ''
+  if (!lid || !dn) return
+  try { await api.put(`/api/load-ratings/${encodeURIComponent(lid)}`, { rating: r, driverName: dn }); loadRating.value = r } catch {}
 }
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null); const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
 const displayCols = computed(() => { const kw = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery']; const m = []; for (const k of kw) { const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !m.includes(h)); if (c) m.push(c) }; return (m.length < 3 ? props.headers.slice(0, 8) : m).filter(c => c !== brokerSourceCol.value && c !== phoneSourceCol.value) })

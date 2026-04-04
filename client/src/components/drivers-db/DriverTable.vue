@@ -34,7 +34,13 @@
           <td class="mono">{{ d[h.mc] || '\u2014' }}</td>
           <td class="mono">{{ d[h.trucks] || '\u2014' }}</td>
           <td>{{ d[h.hazmat] || '\u2014' }}</td>
-          <td>{{ d[h.rating] || '\u2014' }}</td>
+          <td>
+            <template v-if="getDriverAvg(d)">
+              <StarRating :model-value="Math.round(getDriverAvg(d).average)" readonly />
+              <span style="font-size:0.7rem;color:#6b7280;margin-left:4px;">{{ getDriverAvg(d).average }} ({{ getDriverAvg(d).count }})</span>
+            </template>
+            <template v-else>{{ d[h.rating] || '\u2014' }}</template>
+          </td>
           <td style="text-align:right;" @click.stop>
             <div class="action-btns">
               <button class="btn-edit" @click="openEdit(d)">Edit</button>
@@ -178,11 +184,13 @@
 import { ref, reactive, computed } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+import StarRating from '../shared/StarRating.vue'
 
 const props = defineProps({
   drivers: { type: Array, default: () => [] },
   headers: { type: Array, default: () => [] },
   carrierNames: { type: Array, default: () => [] },
+  driverRatings: { type: Object, default: () => ({}) },
 })
 
 const emit = defineEmits(['delete', 'update'])
@@ -219,6 +227,13 @@ const editForm = reactive({
   trucks: '', hazmat: 'NO', phone: '', cell: '', email: '',
   dot: '', mc: '', rating: 'Not Rated',
 })
+
+function getDriverAvg(d) {
+  const name = (d[h.value.driver] || '').trim().toLowerCase()
+  if (!name) return null
+  const r = props.driverRatings[name]
+  return r && r.count > 0 ? r : null
+}
 
 function locStr(d) {
   const parts = [d[h.value.city], d[h.value.state]].filter(Boolean)

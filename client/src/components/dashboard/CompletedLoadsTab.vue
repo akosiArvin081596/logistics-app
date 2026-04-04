@@ -56,6 +56,16 @@
               </div>
             </div>
           </div>
+          <div v-if="auth.isSuperAdmin" style="margin-bottom:1rem;">
+            <div class="dash-section-title">Driver Rating</div>
+            <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
+              <div style="display:flex;align-items:center;gap:0.75rem;">
+                <StarRating v-model="loadRating" @update:model-value="submitRating" />
+                <span v-if="loadRating" style="font-size:0.8rem;color:#6b7280;">{{ loadRating }}/5</span>
+                <span v-else style="font-size:0.8rem;color:#9ca3af;">Not rated</span>
+              </div>
+            </div>
+          </div>
           <div>
             <div class="dash-section-title">Route Map</div>
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" dispatch-mode />
@@ -70,33 +80,45 @@
 import { computed, ref, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
+import { useAuthStore } from '../../stores/auth'
 import { Input } from '@/components/ui/input'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import StatusBadge from '../shared/StatusBadge.vue'
+import StarRating from '../shared/StarRating.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
 const api = useApi()
+const auth = useAuthStore()
 const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
 const searchQuery = ref('')
+const loadRating = ref(0)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
 async function openDetail(job) {
-  selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true
+  selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
+  if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
   const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
   if (!hasLatCol && lid) p.push(api.get(`/api/geocode/load/${encodeURIComponent(lid)}`).then(g => {
     if (g.originLat) { selectedJob.value['Origin Lat'] = g.originLat; selectedJob.value['Origin Lng'] = g.originLng }
     if (g.destLat) { selectedJob.value['Dest Lat'] = g.destLat; selectedJob.value['Dest Lng'] = g.destLng }
   }).catch(() => {}))
   await Promise.all(p); loadingDocs.value = false
+}
+async function submitRating(r) {
+  if (!selectedJob.value) return
+  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (selectedJob.value[lc] || '').trim() : ''
+  const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (selectedJob.value[dc] || '').trim() : ''
+  if (!lid || !dn) return
+  try { await api.put(`/api/load-ratings/${encodeURIComponent(lid)}`, { rating: r, driverName: dn }); loadRating.value = r } catch {}
 }
 const mapHeaders = computed(() => {
   const h = [...props.headers]

@@ -275,6 +275,19 @@ try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } ca
 // Migration: add rating to users (0-5 stars, Super Admin rates drivers)
 try { db.exec("ALTER TABLE users ADD COLUMN rating REAL DEFAULT 0"); } catch {}
 
+// Per-load driver ratings (1-5 stars, one rating per load)
+db.exec(`
+	CREATE TABLE IF NOT EXISTS load_ratings (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		load_id TEXT NOT NULL UNIQUE,
+		driver_name TEXT NOT NULL,
+		rating INTEGER NOT NULL CHECK(rating >= 1 AND rating <= 5),
+		rated_by INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
 // Audit trail table
 db.exec(`
 	CREATE TABLE IF NOT EXISTS audit_trail (
@@ -978,6 +991,40 @@ app.put("/api/users/:id/rating", requireRole("Super Admin"), (req, res) => {
 	if (user.role !== "Driver") return res.status(400).json({ error: "Only drivers can be rated" });
 	db.prepare("UPDATE users SET rating = ? WHERE id = ?").run(parseFloat(rating), id);
 	res.json({ success: true });
+});
+
+// Per-load rating: upsert
+app.put("/api/load-ratings/:loadId", requireRole("Super Admin"), (req, res) => {
+	const loadId = decodeURIComponent(req.params.loadId).trim();
+	const { rating, driverName } = req.body;
+	if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: "Rating must be 1-5" });
+	if (!driverName) return res.status(400).json({ error: "Driver name required" });
+	db.prepare(`
+		INSERT INTO load_ratings (load_id, driver_name, rating, rated_by, updated_at)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(load_id) DO UPDATE SET rating = excluded.rating, rated_by = excluded.rated_by, updated_at = CURRENT_TIMESTAMP
+	`).run(loadId, driverName.trim(), rating, req.session.user.id);
+	// Recompute driver average and update users.rating
+	const avg = db.prepare("SELECT AVG(rating) as avg FROM load_ratings WHERE LOWER(driver_name) = LOWER(?)").get(driverName.trim());
+	if (avg && avg.avg) {
+		db.prepare("UPDATE users SET rating = ? WHERE LOWER(driver_name) = LOWER(?)").run(Math.round(avg.avg * 10) / 10, driverName.trim());
+	}
+	res.json({ success: true, loadRating: rating, averageRating: avg?.avg || rating });
+});
+
+// Per-load rating: get single
+app.get("/api/load-ratings/:loadId", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	const loadId = decodeURIComponent(req.params.loadId).trim();
+	const row = db.prepare("SELECT rating FROM load_ratings WHERE load_id = ?").get(loadId);
+	res.json({ rating: row ? row.rating : null });
+});
+
+// Per-load rating: bulk averages for all drivers
+app.get("/api/load-ratings/averages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	const rows = db.prepare("SELECT LOWER(driver_name) as driver, AVG(rating) as average, COUNT(*) as count FROM load_ratings GROUP BY LOWER(driver_name)").all();
+	const averages = {};
+	rows.forEach(r => { averages[r.driver] = { average: Math.round(r.average * 10) / 10, count: r.count } });
+	res.json({ averages });
 });
 
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
