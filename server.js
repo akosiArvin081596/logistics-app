@@ -330,6 +330,19 @@ db.exec(`
 `);
 try { db.exec("ALTER TABLE investors ADD COLUMN carrier_name TEXT NOT NULL DEFAULT ''"); } catch {}
 
+// Carrier-driver history (preserves pairings when drivers move between carriers)
+db.exec(`
+	CREATE TABLE IF NOT EXISTS carrier_driver_history (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		carrier_name TEXT NOT NULL,
+		driver_name TEXT NOT NULL,
+		started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		ended_at DATETIME
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_cdh_carrier ON carrier_driver_history(carrier_name)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_cdh_driver ON carrier_driver_history(driver_name)`);
+
 // Seed history from current truck assignments (one-time backfill)
 {
 	const existing = db.prepare("SELECT COUNT(*) AS c FROM truck_driver_history").get().c;
@@ -341,16 +354,82 @@ try { db.exec("ALTER TABLE investors ADD COLUMN carrier_name TEXT NOT NULL DEFAU
 	}
 }
 
-// Helper: get ALL drivers ever assigned to an investor's trucks (current + historical)
-// userId = users.id (from login session) → look up investors.id first
-function getInvestorDriverSet(userId) {
-	const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(userId);
-	const investorId = inv ? inv.id : userId; // fallback to userId for backwards compat
-	const current = db.prepare("SELECT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver != ''").all(investorId);
-	const historical = db.prepare("SELECT DISTINCT driver_name FROM truck_driver_history WHERE owner_id = ?").all(investorId);
+// Backfill carrier_driver_history from Carrier Database sheet on first startup
+{
+	const cdhCount = db.prepare("SELECT COUNT(*) AS c FROM carrier_driver_history").get().c;
+	if (cdhCount === 0) {
+		(async () => {
+			try {
+				const sheets = await getSheets();
+				const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
+				const rows = (resp.data && resp.data.values) || [];
+				if (rows.length < 2) return;
+				const headers = rows[0];
+				const driverIdx = headers.findIndex(h => /driver/i.test(h));
+				const carrierIdx = headers.findIndex(h => /carrier/i.test(h));
+				if (carrierIdx === -1) return;
+				const di = driverIdx !== -1 ? driverIdx : 0;
+				const ins = db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name) VALUES (?, ?)");
+				let count = 0;
+				for (let i = 1; i < rows.length; i++) {
+					const driver = (rows[i][di] || "").trim();
+					const carrier = (rows[i][carrierIdx] || "").trim();
+					if (driver && carrier) { ins.run(carrier, driver); count++; }
+				}
+				if (count) console.log(`Backfilled ${count} carrier-driver pairing(s) to history`);
+			} catch (err) {
+				console.error("Carrier history backfill error:", err.message);
+			}
+		})();
+	}
+}
+
+// Helper: sync carrier-driver pairings from Carrier Database sheet into history table
+// Detects when a driver changes carriers and preserves the old pairing
+function syncCarrierDriverHistory(carrierDBData, driverColName, carrierColName) {
+	if (!driverColName || !carrierColName) return;
+	const now = new Date().toISOString();
+	carrierDBData.forEach(row => {
+		const driverName = (row[driverColName] || "").trim();
+		const carrierName = (row[carrierColName] || "").trim();
+		if (!driverName || !carrierName) return;
+		const driverLower = driverName.toLowerCase();
+		const carrierLower = carrierName.toLowerCase();
+		// Check for open record for this driver
+		const current = db.prepare(
+			"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL"
+		).get(driverLower);
+		if (current) {
+			if (current.carrier_name.toLowerCase() === carrierLower) return; // no change
+			// Carrier changed: close old record
+			db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?").run(now, current.id);
+		}
+		// Insert new open record
+		db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)").run(carrierName, driverName, now);
+	});
+}
+
+// Helper: get ALL drivers for an investor via carrier_name (current from sheet + historical)
+function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColName) {
+	const inv = db.prepare("SELECT carrier_name FROM investors WHERE user_id = ?").get(userId);
+	const carrierName = inv ? (inv.carrier_name || "").trim() : "";
 	const set = new Set();
-	current.forEach(t => { if (t.assigned_driver) set.add(t.assigned_driver.trim().toLowerCase()); });
-	historical.forEach(h => { if (h.driver_name) set.add(h.driver_name.trim().toLowerCase()); });
+	// From live Carrier Database sheet
+	if (carrierName && carrierDBData && driverColName && carrierColName) {
+		const carrierLower = carrierName.toLowerCase();
+		carrierDBData.forEach(row => {
+			const rowCarrier = (row[carrierColName] || "").trim().toLowerCase();
+			const rowDriver = (row[driverColName] || "").trim().toLowerCase();
+			if (rowCarrier === carrierLower && rowDriver) set.add(rowDriver);
+		});
+	}
+	// From carrier_driver_history (historical pairings)
+	if (carrierName) {
+		const historical = db.prepare(
+			"SELECT DISTINCT driver_name FROM carrier_driver_history WHERE LOWER(carrier_name) = ?"
+		).all(carrierName.toLowerCase());
+		historical.forEach(h => { if (h.driver_name) set.add(h.driver_name.trim().toLowerCase()); });
+	}
 	return set;
 }
 
@@ -3423,7 +3502,12 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 				 FROM documents ORDER BY uploaded_at DESC LIMIT 500`
 			).all();
 		} else {
-			const driverSet = getInvestorDriverSet(user.id);
+			const sheets = await getSheets();
+			const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
+			const cdb = parseSheet(resp.data);
+			const cDriverCol = findCol(cdb.headers, /driver/i) || cdb.headers[0];
+			const cCarrierCol = findCol(cdb.headers, /carrier/i);
+			const driverSet = getInvestorDriverSet(user.id, cdb.data, cDriverCol, cCarrierCol);
 			if (driverSet.size === 0) return res.json({ documents: [] });
 			const drivers = [...driverSet];
 			const placeholders = drivers.map(() => '?').join(',');
@@ -3467,15 +3551,18 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 		let netRevenueToDate = 0;
 		try {
 			const sheets = await getSheets();
-			const rng = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
-			const jt = parseSheet({ data: { values: rng.data.values } });
+			const rng = await sheets.spreadsheets.values.batchGet({ spreadsheetId: SPREADSHEET_ID, ranges: ["Job Tracking", "Carrier Database"] });
+			const jt = parseSheet(rng.data.valueRanges[0]);
+			const cdb = parseSheet(rng.data.valueRanges[1]);
+			const cDriverCol = findCol(cdb.headers, /driver/i) || cdb.headers[0];
+			const cCarrierCol = findCol(cdb.headers, /carrier/i);
 			const jtRateCol = findCol(jt.headers, /rate|amount|revenue|pay|charge|price|cost/i);
 			const jtDriverCol = findCol(jt.headers, /driver/i);
 			let totalRevenue = 0;
 			let driverSet = null;
 			const taxOwnerId = !isSuperAdmin ? user.id : null;
 			if (!isSuperAdmin) {
-				driverSet = getInvestorDriverSet(user.id);
+				driverSet = getInvestorDriverSet(user.id, cdb.data, cDriverCol, cCarrierCol);
 			}
 			const taxOwnerIdCol = findCol(jt.headers, /^owner.?id$/i);
 			jt.data.forEach(r => {
@@ -3493,7 +3580,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 			const expClause = isSuperAdmin
 				? db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM expenses").get().t
 				: (() => {
-					const drivers = [...getInvestorDriverSet(user.id)];
+					const drivers = [...getInvestorDriverSet(user.id, cdb.data, cDriverCol, cCarrierCol)];
 					if (!drivers.length) return 0;
 					const ph = drivers.map(() => "?").join(",");
 					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? OR LOWER(driver) IN (${ph})`).get(user.id, ...drivers).t;
@@ -3547,17 +3634,20 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		const sheets = await getSheets();
 		const response = await sheets.spreadsheets.values.batchGet({
 			spreadsheetId: SPREADSHEET_ID,
-			ranges: ["Job Tracking", "Payments Table"],
+			ranges: ["Job Tracking", "Payments Table", "Carrier Database"],
 		});
 		const rangeData = response.data.valueRanges || [];
 		const jobTracking = parseSheet(rangeData[0]);
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
 		const payments = parseSheet(rangeData[1]);
+		const rptCarrierDB = parseSheet(rangeData[2]);
+		const rptCDriverCol = findCol(rptCarrierDB.headers, /driver/i) || rptCarrierDB.headers[0];
+		const rptCCarrierCol = findCol(rptCarrierDB.headers, /carrier/i);
 
 		let investorDriverSet = null;
 		const reportOwnerId = !isSuperAdmin ? user.id : null;
 		if (!isSuperAdmin) {
-			investorDriverSet = getInvestorDriverSet(user.id);
+			investorDriverSet = getInvestorDriverSet(user.id, rptCarrierDB.data, rptCDriverCol, rptCCarrierCol);
 		}
 
 		const globalCfg = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all();
@@ -4914,11 +5004,16 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const user = req.session.user;
 		const isSuperAdmin = user.role === "Super Admin";
 
+		// Resolve carrier DB columns and sync history
+		const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+		const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
+		if (carrierCarrierCol) syncCarrierDriverHistory(carrierDB.data, carrierDriverCol, carrierCarrierCol);
+
 		// Get investor's driver names (current + historical) for data filtering
 		let investorDriverSet = null; // null = no filter (Super Admin)
 		const investorOwnerId = !isSuperAdmin ? user.id : null;
 		if (!isSuperAdmin) {
-			investorDriverSet = getInvestorDriverSet(user.id);
+			investorDriverSet = getInvestorDriverSet(user.id, carrierDB.data, carrierDriverCol, carrierCarrierCol);
 		}
 
 		// Load per-investor config with fallback to global defaults (owner_id=0)
@@ -4967,7 +5062,6 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			})
 			: payments.data;
 
-		const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
 		const filteredCarrierData = investorDriverSet
 			? carrierDB.data.filter(r => {
 				const driver = (r[carrierDriverCol] || "").trim().toLowerCase();
