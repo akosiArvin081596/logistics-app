@@ -351,7 +351,16 @@ async function submit() {
   })
 
   try {
-    const res = await api.post('/api/data?sheet=Job%20Tracking', { values })
+    const coordinates = (form.pickupLat || form.dropoffLat) ? {
+      loadId: form.loadId.trim(),
+      originLat: form.pickupLat || null,
+      originLng: form.pickupLng || null,
+      destLat: form.dropoffLat || null,
+      destLng: form.dropoffLng || null,
+      pickupAddress: form.pickupAddress || '',
+      dropoffAddress: form.dropoffAddress || '',
+    } : undefined
+    const res = await api.post('/api/data?sheet=Job%20Tracking', { values, coordinates })
     if (res.warning) duplicateWarning.value = res.warning
 
     toast('Job created successfully', 'success')
