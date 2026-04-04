@@ -3018,34 +3018,59 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 // PUT /api/driver/status — Update load status + log to Status Logs
 app.put("/api/driver/status", requireAuth, async (req, res) => {
 	try {
-		const { rowIndex, driverName, loadId, newStatus } = req.body;
+		let { rowIndex, driverName, loadId, newStatus } = req.body;
 		const sheets = await getSheets();
 
-		// Read headers to find the status and date columns dynamically
-		const headerRes = await sheets.spreadsheets.values.get({
+		// Read entire sheet to verify exact row and find duplicates
+		const allSheetRes = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking!1:1",
+			range: "Job Tracking",
 		});
-		const headers = (headerRes.data.values || [])[0] || [];
+		const allRows = (allSheetRes.data.values || []);
+		const headers = allRows[0] || [];
+		const dataRows = allRows.slice(1);
 
 		const statusIdx = headers.findIndex((h) => /status/i.test(h));
 		const dateIdx = headers.findIndex((h) => /status.*update.*date|update.*date/i.test(h));
+		const loadIdIdx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
 
 		if (statusIdx === -1) {
 			return res.status(400).json({ error: "Status column not found in sheet" });
+		}
+
+		// Verify rowIndex points to the correct Load ID; if not, find the last (most recent) row
+		if (loadId && loadIdIdx !== -1) {
+			const targetLid = loadId.toString().trim().toLowerCase().replace(/^#/, "");
+			const rowAtIndex = dataRows[rowIndex - 2] || [];
+			const lidAtIndex = (rowAtIndex[loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
+			if (lidAtIndex !== targetLid) {
+				// Scan for the last row with this Load ID (bottom = most recent)
+				let foundRow = -1;
+				for (let i = dataRows.length - 1; i >= 0; i--) {
+					const lid = (dataRows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
+					if (lid === targetLid) { foundRow = i + 2; break; }
+				}
+				if (foundRow === -1) {
+					return res.status(404).json({ error: `Load ID ${loadId} not found in sheet` });
+				}
+				rowIndex = foundRow;
+			} else {
+				// Load ID matches but check if there's a more recent row (further down)
+				let lastRow = rowIndex;
+				for (let i = rowIndex - 1; i < dataRows.length; i++) {
+					const lid = (dataRows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
+					if (lid === targetLid) lastRow = i + 2;
+				}
+				rowIndex = lastRow;
+			}
 		}
 
 		// Enforce one active job at a time: block transition to "At Shipper" if another load is active
 		if (/^at shipper$/i.test(newStatus)) {
 			const driverCol = headers.findIndex((h) => /driver/i.test(h));
 			if (driverCol !== -1) {
-				const allRows = await sheets.spreadsheets.values.get({
-					spreadsheetId: SPREADSHEET_ID,
-					range: "Job Tracking",
-				});
-				const allData = (allRows.data.values || []).slice(1);
 				const activeRe = /^(at shipper|loading|in transit|at receiver)$/i;
-				const hasActive = allData.some((row, i) => {
+				const hasActive = dataRows.some((row, i) => {
 					const rIdx = i + 2;
 					if (rIdx === rowIndex) return false;
 					const drv = (row[driverCol] || "").trim().toLowerCase();
@@ -3060,12 +3085,8 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 			}
 		}
 
-		// Read current row to get old status for logging
-		const rowRes = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: `Job Tracking!A${rowIndex}:${colLetter(headers.length - 1)}${rowIndex}`,
-		});
-		const currentRow = (rowRes.data.values || [])[0] || [];
+		// Read verified row to get old status for logging
+		const currentRow = dataRows[rowIndex - 2] || [];
 		const oldStatus = currentRow[statusIdx] || "";
 
 		// Build batch update for status column + date column
