@@ -2624,8 +2624,8 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const unassignedJobs = jobTracking.data.filter((r) => {
 			if (!hasLoadId(r)) return false;
 			const status = statusCol ? (r[statusCol] || "").trim() : "";
-			const hasDriver = driverCol ? !!(r[driverCol] || "").trim() : true;
-			return unassignedStatuses.test(status) || !status || !hasDriver;
+			if (activeStatuses.test(status) || completedStatuses.test(status)) return false;
+			return unassignedStatuses.test(status) || !status;
 		});
 		const completedJobs = jobTracking.data.filter(
 			(r) =>
