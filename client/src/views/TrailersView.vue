@@ -11,77 +11,68 @@
           <DialogTrigger as-child>
             <button class="px-4 py-2 text-sm font-semibold bg-[hsl(199,89%,48%)] text-white rounded-lg hover:bg-[hsl(199,89%,42%)] active:scale-[0.97] transition-all duration-150" @click="openAdd">+ Add Trailer</button>
           </DialogTrigger>
-          <DialogContent class="sm:max-w-[520px]" style="border-radius:14px;">
-            <DialogHeader>
-              <DialogTitle class="text-[1.1rem] font-bold text-gray-900">{{ editing ? 'Edit Trailer' : 'New Trailer' }}</DialogTitle>
-              <DialogDescription class="text-[13px] text-gray-400">{{ editing ? 'Update trailer details and assignment.' : 'Add a new trailer to the fleet.' }}</DialogDescription>
+          <DialogContent class="trailer-dialog sm:max-w-[520px]">
+            <DialogHeader class="trailer-dialog-header">
+              <DialogTitle>{{ editing ? 'Edit Trailer' : 'New Trailer' }}</DialogTitle>
+              <DialogDescription>{{ editing ? 'Update trailer details and assignment.' : 'Add a new trailer to the fleet.' }}</DialogDescription>
             </DialogHeader>
-            <form @submit.prevent="handleSubmit" class="space-y-4 mt-3">
-              <div class="grid grid-cols-2 gap-3">
-                <div class="space-y-1.5">
-                  <label class="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">Trailer Number *</label>
-                  <Input v-model="form.trailer_number" placeholder="e.g. TRL-2001" class="h-10" required />
+            <form @submit.prevent="handleSubmit" class="trailer-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">Trailer Number *</label>
+                  <input v-model="form.trailer_number" class="form-input" placeholder="e.g. TRL-2001" required />
                 </div>
-                <div class="space-y-1.5">
-                  <label class="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">Type</label>
-                  <Select v-model="form.type">
-                    <SelectTrigger class="h-10"><SelectValue placeholder="Select type" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem v-for="t in trailerTypes" :key="t" :value="t">{{ t }}</SelectItem>
-                    </SelectContent>
-                  </Select>
+                <div class="form-group">
+                  <label class="form-label">Type</label>
+                  <select v-model="form.type" class="form-select">
+                    <option v-for="t in trailerTypes" :key="t" :value="t">{{ t }}</option>
+                  </select>
                 </div>
               </div>
-              <div class="grid grid-cols-3 gap-3">
-                <div class="space-y-1.5">
-                  <label class="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">Length</label>
-                  <Input v-model="form.length" placeholder="53" class="h-10" />
+              <div class="form-row" style="grid-template-columns: 1fr 1fr 1fr;">
+                <div class="form-group">
+                  <label class="form-label">Length (ft)</label>
+                  <input v-model="form.length" class="form-input" placeholder="53" />
                 </div>
-                <div class="space-y-1.5">
-                  <label class="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">Year</label>
-                  <Input v-model.number="form.year" type="number" placeholder="2024" class="h-10" />
+                <div class="form-group">
+                  <label class="form-label">Year</label>
+                  <input v-model.number="form.year" class="form-input" type="number" placeholder="2024" />
                 </div>
-                <div class="space-y-1.5">
-                  <label class="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">Status</label>
-                  <Select v-model="form.status">
-                    <SelectTrigger class="h-10"><SelectValue placeholder="Status" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem v-for="s in statuses" :key="s" :value="s">{{ s }}</SelectItem>
-                    </SelectContent>
-                  </Select>
+                <div class="form-group">
+                  <label class="form-label">Status</label>
+                  <select v-model="form.status" class="form-select">
+                    <option v-for="s in statuses" :key="s" :value="s">{{ s }}</option>
+                  </select>
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-3">
-                <div class="space-y-1.5">
-                  <label class="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">VIN</label>
-                  <Input v-model="form.vin" placeholder="Vehicle ID number" class="h-10" />
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">VIN</label>
+                  <input v-model="form.vin" class="form-input" placeholder="Vehicle ID number" />
                 </div>
-                <div class="space-y-1.5">
-                  <label class="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">License Plate</label>
-                  <Input v-model="form.license_plate" placeholder="Plate number" class="h-10" />
+                <div class="form-group">
+                  <label class="form-label">License Plate</label>
+                  <input v-model="form.license_plate" class="form-input" placeholder="Plate number" />
                 </div>
               </div>
-              <div class="space-y-1.5">
-                <label class="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">Assign to Truck</label>
-                <Select v-model="form.truck_id">
-                  <SelectTrigger class="h-10"><SelectValue placeholder="Select truck (optional)" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">None</SelectItem>
-                    <SelectItem v-for="t in truckOptions" :key="t.id" :value="String(t.id)">
-                      {{ t.unit_number || 'Truck #' + t.id }} &mdash; {{ t.make }} {{ t.model }} ({{ t.assigned_driver || 'No driver' }})
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+              <div class="form-group">
+                <label class="form-label">Assign to Truck</label>
+                <select v-model="form.truck_id" class="form-select">
+                  <option value="">None</option>
+                  <option v-for="t in truckOptions" :key="t.id" :value="String(t.id)">
+                    {{ t.unit_number || 'Truck #' + t.id }} — {{ t.make }} {{ t.model }} ({{ t.assigned_driver || 'No driver' }})
+                  </option>
+                </select>
               </div>
-              <div class="space-y-1.5">
-                <label class="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">Notes</label>
-                <Input v-model="form.notes" placeholder="Optional notes" class="h-10" />
+              <div class="form-group">
+                <label class="form-label">Notes</label>
+                <input v-model="form.notes" class="form-input" placeholder="Optional notes" />
               </div>
-              <div v-if="formError" class="text-[13px] text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{{ formError }}</div>
-              <DialogFooter class="pt-2">
-                <button type="button" class="px-4 py-2 text-sm font-semibold bg-white text-gray-700 border border-gray-200 rounded-lg hover:border-gray-300 hover:shadow-sm transition-all duration-150" @click="showForm = false">Cancel</button>
-                <button type="submit" :disabled="submitting" class="px-4 py-2 text-sm font-semibold bg-[hsl(199,89%,48%)] text-white rounded-lg hover:bg-[hsl(199,89%,42%)] disabled:opacity-50 transition-all duration-150">{{ submitting ? 'Saving...' : (editing ? 'Update' : 'Create') }}</button>
-              </DialogFooter>
+              <div v-if="formError" class="form-error">{{ formError }}</div>
+              <div class="form-actions">
+                <button type="button" class="btn btn-secondary" @click="showForm = false">Cancel</button>
+                <button type="submit" :disabled="submitting" class="btn btn-primary">{{ submitting ? 'Saving...' : (editing ? 'Update' : 'Create') }}</button>
+              </div>
             </form>
           </DialogContent>
         </Dialog>
@@ -163,11 +154,9 @@
 import { ref, computed, onMounted } from 'vue'
 import { useTrailersStore } from '../stores/trailers'
 import { useToast } from '../composables/useToast'
-import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 
 const store = useTrailersStore()
 const { show: toast } = useToast()
@@ -294,3 +283,120 @@ function typeBadge(type) {
 
 onMounted(() => store.load())
 </script>
+
+<style scoped>
+.trailer-dialog {
+  border-radius: 14px !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06) !important;
+  padding: 0 !important;
+  overflow: hidden;
+}
+.trailer-dialog-header {
+  padding: 1.25rem 1.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(to bottom, #fafbfc, var(--surface));
+}
+.trailer-dialog-header :deep([class*="DialogTitle"]) {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #111827;
+}
+.trailer-dialog-header :deep([class*="DialogDescription"]) {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-top: 0.15rem;
+}
+.trailer-form {
+  padding: 1.25rem 1.5rem 1.5rem;
+}
+.trailer-form .form-group {
+  margin-bottom: 0.85rem;
+}
+.trailer-form .form-label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 0.35rem;
+}
+.trailer-form .form-input,
+.trailer-form .form-select {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  background: var(--bg);
+  color: #111827;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.trailer-form .form-input:focus,
+.trailer-form .form-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.trailer-form .form-input::placeholder {
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+.trailer-form .form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+.trailer-form .form-error {
+  font-size: 0.78rem;
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.trailer-form .form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  margin-top: 0.5rem;
+}
+.trailer-form .btn {
+  padding: 0.55rem 1.25rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border-radius: 8px;
+  border: 1.5px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+.trailer-form .btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.trailer-form .btn-primary:hover {
+  filter: brightness(0.92);
+}
+.trailer-form .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.trailer-form .btn-secondary {
+  background: var(--surface);
+  color: #374151;
+  border-color: var(--border);
+}
+.trailer-form .btn-secondary:hover {
+  border-color: #9ca3af;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+@media (max-width: 600px) {
+  .trailer-form .form-row { grid-template-columns: 1fr; }
+}
+</style>
