@@ -70,3 +70,10 @@ onMounted(() => {
 })
 </script>
 
+<style scoped>
+.users-page {
+  overflow-y: auto;
+  padding-bottom: 2rem;
+}
+</style>
+
