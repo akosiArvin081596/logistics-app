@@ -27,5 +27,7 @@ const showSidebar = computed(() => {
 .main.no-sidebar {
   margin-left: 0;
   width: 100%;
+  padding: 0;
+  height: 100vh;
 }
 </style>
