@@ -92,7 +92,7 @@
     <div class="kpi-grid" style="margin-bottom:1.25rem;">
       <Card v-for="card in kpiCards" :key="card.label" class="kpi-card" :class="card.theme">
         <CardContent class="flex items-center gap-4" style="padding:1rem 1.25rem;">
-          <div :class="['kpi-icon', card.iconTheme]">{{ card.icon }}</div>
+          <div :class="['kpi-icon', card.iconTheme]" v-html="card.icon"></div>
           <div class="kpi-info">
             <div class="kpi-label">{{ card.label }}</div>
             <div class="kpi-value">{{ card.value }}</div>
@@ -136,8 +136,14 @@
               <TableCell>
                 <span :class="['inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold', statusBadge(trailer.status)]">{{ trailer.status }}</span>
               </TableCell>
-              <TableCell class="text-[13px] text-gray-600">{{ trailer.truck_number || '<span class="text-gray-300">&mdash;</span>' }}</TableCell>
-              <TableCell class="text-[13px] text-gray-600">{{ trailer.assigned_driver || '<span class="text-gray-300">&mdash;</span>' }}</TableCell>
+              <TableCell class="text-[13px] text-gray-600">
+                <span v-if="trailer.truck_number">{{ trailer.truck_number }}</span>
+                <span v-else class="text-gray-300">&mdash;</span>
+              </TableCell>
+              <TableCell class="text-[13px] text-gray-600">
+                <span v-if="trailer.assigned_driver">{{ trailer.assigned_driver }}</span>
+                <span v-else class="text-gray-300">&mdash;</span>
+              </TableCell>
               <TableCell class="text-[13px] text-gray-500">{{ trailer.year || '---' }}</TableCell>
               <TableCell class="text-right">
                 <div class="flex items-center justify-end gap-1.5">
