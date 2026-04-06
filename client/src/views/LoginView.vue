@@ -4,7 +4,6 @@
     <div class="login-brand">
       <div class="brand-center">
         <img src="/logo.avif" alt="LogisX" class="brand-logo" />
-        <h1 class="brand-title">LOGISX</h1>
         <div class="brand-divider"></div>
         <p class="brand-tagline">Dispatch &amp; Fleet Management<br />Operations Platform</p>
       </div>
@@ -195,18 +194,9 @@ async function doLogin() {
 }
 
 .brand-logo {
-  width: 120px;
+  width: 220px;
   height: auto;
   margin-bottom: 1.5rem;
-  filter: brightness(0) invert(1);
-}
-
-.brand-title {
-  font-size: 2rem;
-  font-weight: 800;
-  letter-spacing: 0.25em;
-  color: white;
-  margin-bottom: 1.25rem;
 }
 
 .brand-divider {
