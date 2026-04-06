@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-col overflow-hidden h-full">
+  <div class="flex flex-col">
     <div class="dash-header">
       <div>
         <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Operations Dashboard</h2>
@@ -27,8 +27,8 @@
       </div>
     </template>
 
-    <Card class="flex-1 flex flex-col min-h-0 overflow-hidden" style="margin-top:1.25rem;border-radius:14px;border:1px solid #e8edf2;box-shadow:0 1px 4px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04);">
-      <Tabs class="flex-1 flex flex-col min-h-0" :model-value="activeTab" @update:model-value="v => activeTab = v">
+    <Card class="flex flex-col" style="margin-top:1.25rem;border-radius:14px;border:1px solid #e8edf2;box-shadow:0 1px 4px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04);">
+      <Tabs class="flex flex-col" :model-value="activeTab" @update:model-value="v => activeTab = v">
         <TabsList class="w-full justify-start rounded-none bg-muted/50 h-auto" style="padding:0 0.75rem;border-bottom:1px solid #e8edf2;">
           <TabsTrigger v-for="tab in tabs" :key="tab.key" :value="tab.key"
             class="rounded-none data-[state=active]:shadow-none data-[state=active]:bg-transparent"
@@ -37,7 +37,7 @@
             <Badge variant="secondary" class="font-mono" style="margin-left:0.5rem;">{{ tab.count }}</Badge>
           </TabsTrigger>
         </TabsList>
-        <CardContent class="flex-1 overflow-y-auto" style="padding:0;">
+        <CardContent style="padding:0;">
           <TabsContent value="jobBoard" style="margin-top:0;">
             <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" />
           </TabsContent>
