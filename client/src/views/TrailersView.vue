@@ -72,7 +72,7 @@
                   <SelectContent class="rounded-lg border-[#e2e4ea]">
                     <SelectItem value="">None</SelectItem>
                     <SelectItem v-for="t in truckOptions" :key="t.id" :value="String(t.id)">
-                      {{ t.unit_number || 'Truck #' + t.id }} — {{ t.make }} {{ t.model }} ({{ t.assigned_driver || 'No driver' }})
+                      {{ t.UnitNumber || 'Truck #' + t.id }} — {{ t.Make }} {{ t.Model }} ({{ t.AssignedDriver || 'No driver' }})
                     </SelectItem>
                   </SelectContent>
                 </Select>

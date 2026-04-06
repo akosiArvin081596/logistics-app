@@ -26,7 +26,7 @@ export const useTrailersStore = defineStore('trailers', {
           api.get('/api/trucks'),
         ])
         this.trailers = trailers
-        this.trucks = trucks
+        this.trucks = trucks.trucks || trucks
       } catch (err) {
         this.error = err.message
       } finally {
