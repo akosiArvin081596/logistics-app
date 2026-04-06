@@ -162,8 +162,7 @@ body {
 
 /* ---- Admin Page Layout ---- */
 .admin-page {
-  flex: 1;
-  min-height: 0;
+  flex: 1 0 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
