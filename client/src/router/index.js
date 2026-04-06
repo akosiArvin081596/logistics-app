@@ -89,6 +89,12 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    path: '/trailers',
+    name: 'trailers',
+    component: () => import('../views/TrailersView.vue'),
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
     path: '/admin/tools',
     name: 'admin-tools',
     component: () => import('../views/AdminToolsView.vue'),

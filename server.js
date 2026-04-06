@@ -269,6 +269,24 @@ try { db.exec("ALTER TABLE trucks ADD COLUMN title_status TEXT DEFAULT 'Clean'")
 try { db.prepare("SELECT maintenance_fund_monthly FROM trucks LIMIT 1").get(); }
 catch { try { db.exec("ALTER TABLE trucks ADD COLUMN maintenance_fund_monthly REAL DEFAULT 0"); } catch {} }
 
+// Trailers table
+db.exec(`
+	CREATE TABLE IF NOT EXISTS trailers (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		trailer_number TEXT NOT NULL UNIQUE,
+		type TEXT NOT NULL DEFAULT 'Dry Van' CHECK(type IN ('Dry Van','Reefer','Flatbed','Step Deck','Lowboy','Tanker','Other')),
+		length TEXT DEFAULT '53',
+		year INTEGER DEFAULT 0,
+		vin TEXT DEFAULT '',
+		license_plate TEXT DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'Available' CHECK(status IN ('Available','In Use','Maintenance','Out of Service')),
+		truck_id INTEGER,
+		notes TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (truck_id) REFERENCES trucks(id)
+	)
+`);
+
 // Migration: add asset_ref to messages (for "Share Asset" in chat)
 try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } catch {}
 
@@ -1296,6 +1314,88 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	}
 	db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
 	res.json({ success: true });
+});
+
+// ============================================================
+// TRAILERS CRUD
+// ============================================================
+app.get("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const trailers = db.prepare(`
+			SELECT t.*, tr.unit_number AS truck_number, tr.assigned_driver
+			FROM trailers t
+			LEFT JOIN trucks tr ON t.truck_id = tr.id
+			ORDER BY t.created_at DESC
+		`).all();
+		res.json(trailers);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+app.post("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { trailer_number, type, length, year, vin, license_plate, status, truck_id, notes } = req.body;
+		if (!trailer_number) return res.status(400).json({ error: "Trailer number is required" });
+		const existing = db.prepare("SELECT id FROM trailers WHERE trailer_number = ?").get(trailer_number);
+		if (existing) return res.status(409).json({ error: "Trailer number already exists" });
+		// If assigning to a truck, check no other trailer is already on that truck
+		if (truck_id) {
+			const onTruck = db.prepare("SELECT id, trailer_number FROM trailers WHERE truck_id = ?").get(truck_id);
+			if (onTruck) return res.status(409).json({ error: `Truck already has trailer ${onTruck.trailer_number} assigned` });
+		}
+		const result = db.prepare(`
+			INSERT INTO trailers (trailer_number, type, length, year, vin, license_plate, status, truck_id, notes)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(trailer_number, type || 'Dry Van', length || '53', year || 0, vin || '', license_plate || '', status || 'Available', truck_id || null, notes || '');
+		res.json({ success: true, id: result.lastInsertRowid });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		const trailer = db.prepare("SELECT * FROM trailers WHERE id = ?").get(id);
+		if (!trailer) return res.status(404).json({ error: "Trailer not found" });
+		const { trailer_number, type, length, year, vin, license_plate, status, truck_id, notes } = req.body;
+		// If changing truck assignment, check no other trailer is on that truck
+		if (truck_id && truck_id !== trailer.truck_id) {
+			const onTruck = db.prepare("SELECT id, trailer_number FROM trailers WHERE truck_id = ? AND id != ?").get(truck_id, id);
+			if (onTruck) return res.status(409).json({ error: `Truck already has trailer ${onTruck.trailer_number} assigned` });
+		}
+		db.prepare(`
+			UPDATE trailers SET trailer_number = ?, type = ?, length = ?, year = ?, vin = ?, license_plate = ?, status = ?, truck_id = ?, notes = ?
+			WHERE id = ?
+		`).run(
+			trailer_number ?? trailer.trailer_number,
+			type ?? trailer.type,
+			length ?? trailer.length,
+			year ?? trailer.year,
+			vin ?? trailer.vin,
+			license_plate ?? trailer.license_plate,
+			status ?? trailer.status,
+			truck_id === undefined ? trailer.truck_id : (truck_id || null),
+			notes ?? trailer.notes,
+			id
+		);
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+app.delete("/api/trailers/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		const trailer = db.prepare("SELECT * FROM trailers WHERE id = ?").get(id);
+		if (!trailer) return res.status(404).json({ error: "Trailer not found" });
+		db.prepare("DELETE FROM trailers WHERE id = ?").run(id);
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
 });
 
 // Admin: bulk-rename a misspelled driver name in Job Tracking sheet

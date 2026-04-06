@@ -83,6 +83,7 @@ const navConfig = {
     // { to: '/investor', icon: '&#128200;', label: 'Investor View' },
     { to: '/users', icon: '&#9881;', label: 'User Management' },
     { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
+    { to: '/trailers', icon: '&#128718;', label: 'Trailer Database' },
     { to: '/drivers', icon: '&#128100;', label: 'Driver Database' },
     { to: '/investors', icon: '&#128188;', label: 'Investor Database' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
