@@ -2,89 +2,88 @@
   <div class="login-split">
     <!-- Left Panel: Branding -->
     <div class="login-brand">
-      <div class="brand-content">
+      <div class="brand-center">
         <img src="/logo.avif" alt="LogisX" class="brand-logo" />
-        <h1 class="brand-title">LogisX</h1>
-        <p class="brand-tagline">Streamline your logistics operations with real-time tracking, dispatch management, and fleet oversight.</p>
-        <div class="brand-features">
-          <div class="feature">
-            <span class="feature-icon">&#128666;</span>
-            <span>Real-time Fleet Tracking</span>
-          </div>
-          <div class="feature">
-            <span class="feature-icon">&#128203;</span>
-            <span>Automated Dispatch</span>
-          </div>
-          <div class="feature">
-            <span class="feature-icon">&#128200;</span>
-            <span>Financial Analytics</span>
-          </div>
-        </div>
-      </div>
-      <div class="brand-footer">
-        <p>&copy; 2026 LogisX. All rights reserved.</p>
+        <h1 class="brand-title">LOGISX</h1>
+        <div class="brand-divider"></div>
+        <p class="brand-tagline">Dispatch &amp; Fleet Management<br />Operations Platform</p>
       </div>
     </div>
 
     <!-- Right Panel: Form -->
     <div class="login-form-panel">
       <div class="form-wrapper">
-        <!-- Mobile logo (visible on small screens only) -->
+        <!-- Mobile logo -->
         <div class="mobile-logo">
           <img src="/logo.avif" alt="LogisX" />
         </div>
 
         <!-- SETUP FORM -->
-        <Card v-if="showSetup" class="login-card">
-          <CardContent class="p-8">
-            <div class="form-header">
-              <h2 class="form-title">Get Started</h2>
-              <p class="form-desc">Create your admin account to begin.</p>
+        <template v-if="showSetup">
+          <div class="form-header">
+            <h2 class="form-title">Get Started</h2>
+            <p class="form-desc">Create your admin account to begin.</p>
+          </div>
+          <form @submit.prevent="doSetup" class="login-form">
+            <div class="field">
+              <label class="field-label">USERNAME</label>
+              <div class="input-wrap">
+                <span class="input-icon">&#128100;</span>
+                <input v-model="setupForm.username" type="text" placeholder="Choose a username" autocomplete="username" />
+              </div>
             </div>
-            <form @submit.prevent="doSetup" class="space-y-5">
-              <div class="space-y-1.5">
-                <label class="field-label">Username</label>
-                <Input v-model="setupForm.username" placeholder="Choose a username" autocomplete="username" class="login-input" />
+            <div class="field">
+              <label class="field-label">PASSWORD</label>
+              <div class="input-wrap">
+                <span class="input-icon">&#128274;</span>
+                <input v-model="setupForm.password" type="password" placeholder="Min. 4 characters" autocomplete="new-password" @keydown.enter="doSetup" />
               </div>
-              <div class="space-y-1.5">
-                <label class="field-label">Password</label>
-                <Input v-model="setupForm.password" type="password" placeholder="Min. 4 characters" autocomplete="new-password" class="login-input" @keydown.enter="doSetup" />
+            </div>
+            <div class="field">
+              <label class="field-label">EMAIL <span class="optional">(optional)</span></label>
+              <div class="input-wrap">
+                <span class="input-icon">&#9993;</span>
+                <input v-model="setupForm.email" type="email" placeholder="you@company.com" />
               </div>
-              <div class="space-y-1.5">
-                <label class="field-label">Email <span class="text-gray-400">(optional)</span></label>
-                <Input v-model="setupForm.email" type="email" placeholder="you@company.com" class="login-input" />
-              </div>
-              <Button type="submit" :disabled="setupLoading" class="login-btn w-full">
-                {{ setupLoading ? 'Creating...' : 'Create Admin Account' }}
-              </Button>
-              <p v-if="setupError" class="error-text">{{ setupError }}</p>
-            </form>
-          </CardContent>
-        </Card>
+            </div>
+            <button type="submit" class="submit-btn" :disabled="setupLoading">
+              {{ setupLoading ? 'CREATING...' : 'CREATE ACCOUNT' }}
+            </button>
+            <p v-if="setupError" class="error-text">{{ setupError }}</p>
+          </form>
+        </template>
 
         <!-- LOGIN FORM -->
-        <Card v-if="showLogin" class="login-card">
-          <CardContent class="p-8">
-            <div class="form-header">
-              <h2 class="form-title">Welcome back</h2>
-              <p class="form-desc">Sign in to your account to continue.</p>
+        <template v-if="showLogin">
+          <div class="form-header">
+            <h2 class="form-title">Welcome back</h2>
+            <p class="form-desc">Sign in to your account to continue</p>
+          </div>
+          <form @submit.prevent="doLogin" class="login-form">
+            <div class="field">
+              <label class="field-label">USERNAME</label>
+              <div class="input-wrap">
+                <span class="input-icon">&#128100;</span>
+                <input v-model="loginForm.username" type="text" placeholder="Enter your username" autocomplete="username" />
+              </div>
             </div>
-            <form @submit.prevent="doLogin" class="space-y-5">
-              <div class="space-y-1.5">
-                <label class="field-label">Username</label>
-                <Input v-model="loginForm.username" placeholder="Enter your username" autocomplete="username" class="login-input" />
+            <div class="field">
+              <label class="field-label">PASSWORD</label>
+              <div class="input-wrap">
+                <span class="input-icon">&#128274;</span>
+                <input v-model="loginForm.password" type="password" placeholder="Enter your password" autocomplete="current-password" @keydown.enter="doLogin" />
               </div>
-              <div class="space-y-1.5">
-                <label class="field-label">Password</label>
-                <Input v-model="loginForm.password" type="password" placeholder="Enter your password" autocomplete="current-password" class="login-input" @keydown.enter="doLogin" />
-              </div>
-              <Button type="submit" :disabled="loginLoading" class="login-btn w-full">
-                {{ loginLoading ? 'Signing in...' : 'Sign In' }}
-              </Button>
-              <p v-if="loginError" class="error-text">{{ loginError }}</p>
-            </form>
-          </CardContent>
-        </Card>
+            </div>
+            <button type="submit" class="submit-btn" :disabled="loginLoading">
+              {{ loginLoading ? 'SIGNING IN...' : 'SIGN IN' }}
+            </button>
+            <p v-if="loginError" class="error-text">{{ loginError }}</p>
+          </form>
+        </template>
+
+        <div class="form-footer">
+          <p>&copy; 2026 LogisX. All rights reserved.</p>
+        </div>
       </div>
     </div>
   </div>
@@ -94,9 +93,6 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
-import { Card, CardContent } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Button } from '@/components/ui/button'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -174,11 +170,9 @@ async function doLogin() {
 .login-brand {
   flex: 0 0 45%;
   background: linear-gradient(135deg, #0c1929 0%, #122a46 50%, #0f3460 100%);
-  color: white;
   display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 3rem;
+  align-items: center;
+  justify-content: center;
   position: relative;
   overflow: hidden;
 }
@@ -186,92 +180,47 @@ async function doLogin() {
 .login-brand::before {
   content: '';
   position: absolute;
-  top: -50%;
-  right: -30%;
-  width: 80%;
-  height: 200%;
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.08) 0%, transparent 70%);
+  top: -40%;
+  right: -20%;
+  width: 70%;
+  height: 180%;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.07) 0%, transparent 70%);
   pointer-events: none;
 }
 
-.login-brand::after {
-  content: '';
-  position: absolute;
-  bottom: -20%;
-  left: -20%;
-  width: 60%;
-  height: 60%;
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.05) 0%, transparent 70%);
-  pointer-events: none;
-}
-
-.brand-content {
+.brand-center {
+  text-align: center;
   position: relative;
   z-index: 1;
-  margin-top: 2rem;
 }
 
 .brand-logo {
-  width: 160px;
+  width: 120px;
   height: auto;
   margin-bottom: 1.5rem;
   filter: brightness(0) invert(1);
 }
 
 .brand-title {
-  font-size: 2.2rem;
+  font-size: 2rem;
   font-weight: 800;
-  letter-spacing: -0.02em;
-  margin-bottom: 0.75rem;
-  background: linear-gradient(135deg, #ffffff 0%, #94d4f7 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  letter-spacing: 0.25em;
+  color: white;
+  margin-bottom: 1.25rem;
+}
+
+.brand-divider {
+  width: 50px;
+  height: 3px;
+  background: rgba(56, 189, 248, 0.6);
+  margin: 0 auto 1.25rem;
+  border-radius: 2px;
 }
 
 .brand-tagline {
-  font-size: 1rem;
-  line-height: 1.7;
-  color: rgba(255, 255, 255, 0.6);
-  max-width: 380px;
-  margin-bottom: 3rem;
-}
-
-.brand-features {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.feature {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
   font-size: 0.9rem;
-  color: rgba(255, 255, 255, 0.75);
-}
-
-.feature-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  background: rgba(56, 189, 248, 0.12);
-  border: 1px solid rgba(56, 189, 248, 0.2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1rem;
-  flex-shrink: 0;
-}
-
-.brand-footer {
-  position: relative;
-  z-index: 1;
-}
-
-.brand-footer p {
-  font-size: 0.75rem;
-  color: rgba(255, 255, 255, 0.3);
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.5);
 }
 
 /* Right form panel */
@@ -281,7 +230,8 @@ async function doLogin() {
   align-items: center;
   justify-content: center;
   padding: 2rem;
-  background: #f8f9fb;
+  background: #ffffff;
+  position: relative;
 }
 
 .form-wrapper {
@@ -300,79 +250,136 @@ async function doLogin() {
   height: auto;
 }
 
-.login-card {
-  border-radius: 16px !important;
-  border: 1px solid #e8edf2 !important;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06) !important;
-  overflow: hidden;
-}
-
 .form-header {
-  margin-bottom: 1.75rem;
+  margin-bottom: 2rem;
 }
 
 .form-title {
-  font-size: 1.5rem;
+  font-size: 1.6rem;
   font-weight: 700;
   color: #111827;
-  letter-spacing: -0.01em;
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.4rem;
 }
 
 .form-desc {
-  font-size: 0.88rem;
-  color: #6b7280;
+  font-size: 0.9rem;
+  color: #9ca3af;
+}
+
+/* Form fields */
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
 }
 
 .field-label {
-  font-size: 0.82rem;
-  font-weight: 600;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   color: #374151;
 }
 
-.login-input {
-  height: 44px !important;
-  border-radius: 10px !important;
-  border-color: #e2e4ea !important;
-  background: white !important;
-  font-size: 0.9rem !important;
-  transition: all 0.15s !important;
+.field-label .optional {
+  font-weight: 400;
+  color: #9ca3af;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
-.login-input:focus {
-  border-color: hsl(199, 89%, 48%) !important;
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1) !important;
+.input-wrap {
+  display: flex;
+  align-items: center;
+  border: 1.5px solid #e2e4ea;
+  border-radius: 10px;
+  background: #f9fafb;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  overflow: hidden;
 }
 
-.login-btn {
-  height: 46px !important;
-  border-radius: 10px !important;
-  font-size: 0.9rem !important;
-  font-weight: 600 !important;
-  background: hsl(199, 89%, 48%) !important;
-  color: white !important;
-  transition: all 0.15s !important;
-  margin-top: 0.5rem !important;
+.input-wrap:focus-within {
+  border-color: hsl(199, 89%, 48%);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1);
+  background: #fff;
 }
 
-.login-btn:hover:not(:disabled) {
-  background: hsl(199, 89%, 42%) !important;
+.input-icon {
+  padding: 0 0 0 0.85rem;
+  font-size: 1rem;
+  color: #9ca3af;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.input-wrap input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 0.8rem 0.85rem;
+  font-size: 0.9rem;
+  font-family: inherit;
+  color: #111827;
+}
+
+.input-wrap input::placeholder {
+  color: #c4c8d0;
+}
+
+/* Submit button */
+.submit-btn {
+  width: 100%;
+  padding: 0.85rem;
+  margin-top: 0.5rem;
+  border: none;
+  border-radius: 10px;
+  background: hsl(199, 89%, 48%);
+  color: white;
+  font-size: 0.88rem;
+  font-weight: 700;
+  font-family: inherit;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.submit-btn:hover:not(:disabled) {
+  background: hsl(199, 89%, 42%);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+  box-shadow: 0 4px 14px rgba(56, 189, 248, 0.35);
 }
 
-.login-btn:disabled {
+.submit-btn:disabled {
   opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .error-text {
   font-size: 0.82rem;
   color: #dc2626;
   text-align: center;
-  margin-top: 0.5rem;
 }
 
-/* Mobile responsive */
+.form-footer {
+  position: absolute;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.form-footer p {
+  font-size: 0.72rem;
+  color: #d1d5db;
+  letter-spacing: 0.02em;
+}
+
+/* Mobile */
 @media (max-width: 768px) {
   .login-split {
     flex-direction: column;
@@ -385,7 +392,12 @@ async function doLogin() {
   }
   .login-form-panel {
     min-height: 100vh;
-    background: white;
+  }
+  .form-footer {
+    position: static;
+    transform: none;
+    text-align: center;
+    margin-top: 3rem;
   }
 }
 </style>
