@@ -3246,6 +3246,13 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 		if (dateIdx !== -1) {
 			updateData.push({ range: `Job Tracking!${colLetter(dateIdx)}${rowIndex}`, values: [[dateTime]] });
 		}
+		// Write Completion Date when status is a completed status
+		if (/^(delivered|completed|pod received)$/i.test(newStatus)) {
+			const compDateIdx = headers.findIndex((h) => /completion.*date/i.test(h));
+			if (compDateIdx !== -1) {
+				updateData.push({ range: `Job Tracking!${colLetter(compDateIdx)}${rowIndex}`, values: [[dateTime]] });
+			}
+		}
 
 		await sheets.spreadsheets.values.batchUpdate({
 			spreadsheetId: SPREADSHEET_ID,
