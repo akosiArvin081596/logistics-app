@@ -11,6 +11,12 @@ const routes = [
     meta: { public: true, noSidebar: true },
   },
   {
+    path: '/apply',
+    name: 'apply',
+    component: () => import('../views/ApplyView.vue'),
+    meta: { public: true, noSidebar: true },
+  },
+  {
     path: '/dashboard',
     name: 'dashboard',
     component: () => import('../views/DashboardView.vue'),

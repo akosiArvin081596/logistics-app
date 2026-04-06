@@ -287,6 +287,38 @@ db.exec(`
 	)
 `);
 
+// Job applications table (public employment form)
+db.exec(`
+	CREATE TABLE IF NOT EXISTS job_applications (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		full_name TEXT NOT NULL,
+		email TEXT NOT NULL,
+		phone TEXT NOT NULL,
+		dob TEXT NOT NULL,
+		address TEXT NOT NULL,
+		ssn TEXT NOT NULL,
+		drivers_license TEXT NOT NULL,
+		position TEXT NOT NULL,
+		experience TEXT NOT NULL,
+		has_cdl TEXT NOT NULL,
+		work_authorized TEXT NOT NULL,
+		felony_convicted TEXT NOT NULL,
+		felony_explanation TEXT DEFAULT '',
+		accident_history TEXT NOT NULL,
+		accident_description TEXT DEFAULT '',
+		traffic_citations TEXT DEFAULT '',
+		certifications TEXT DEFAULT '',
+		availability TEXT DEFAULT '[]',
+		skills TEXT NOT NULL,
+		reference_info TEXT DEFAULT '',
+		additional_info TEXT DEFAULT '',
+		signature TEXT NOT NULL,
+		signature_date TEXT DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'New' CHECK(status IN ('New','Reviewed','Accepted','Rejected')),
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
 // Migration: add asset_ref to messages (for "Share Asset" in chat)
 try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } catch {}
 
@@ -726,6 +758,47 @@ function requireRole(...roles) {
 		next();
 	};
 }
+
+// ============================================================
+// PUBLIC: Job Application
+// ============================================================
+app.post("/api/public/apply", (req, res) => {
+	try {
+		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date } = req.body;
+		if (!full_name || !email || !phone || !dob || !address || !ssn || !drivers_license || !position || !experience || !has_cdl || !work_authorized || !felony_convicted || !accident_history || !skills || !signature) {
+			return res.status(400).json({ error: "Please fill in all required fields." });
+		}
+		const result = db.prepare(`
+			INSERT INTO job_applications (full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation || '', accident_history, accident_description || '', traffic_citations || '', certifications || '', JSON.stringify(availability || []), skills, reference_info || '', additional_info || '', signature, signature_date || new Date().toLocaleDateString('en-US'));
+		res.json({ success: true, id: result.lastInsertRowid });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
+	try {
+		const apps = db.prepare("SELECT * FROM job_applications ORDER BY created_at DESC").all();
+		res.json(apps);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+app.put("/api/applications/:id/status", requireRole("Super Admin"), (req, res) => {
+	try {
+		const { status } = req.body;
+		if (!['New', 'Reviewed', 'Accepted', 'Rejected'].includes(status)) {
+			return res.status(400).json({ error: "Invalid status" });
+		}
+		db.prepare("UPDATE job_applications SET status = ? WHERE id = ?").run(status, parseInt(req.params.id));
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
 
 // Check if any users exist (for first-time setup)
 app.get("/api/auth/setup-check", (req, res) => {
