@@ -1,0 +1,249 @@
+<template>
+  <div class="flex flex-col">
+    <div class="dash-header">
+      <div>
+        <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Job Applications</h2>
+        <p class="text-[13px] text-gray-400 mt-0.5">Review and manage employment applications</p>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ applications.length }} applications</span>
+        <button class="px-4 py-2 text-sm font-semibold bg-white text-gray-700 border border-gray-200 rounded-lg hover:border-gray-300 hover:shadow-sm transition-all duration-150" @click="load">&#8635; Refresh</button>
+      </div>
+    </div>
+
+    <!-- KPI Cards -->
+    <div class="kpi-grid" style="margin-bottom:1.25rem;">
+      <Card v-for="card in kpiCards" :key="card.label" class="kpi-card" :class="card.theme">
+        <CardContent class="flex items-center gap-4" style="padding:1rem 1.25rem;">
+          <div :class="['kpi-icon', card.iconTheme]" v-html="card.icon"></div>
+          <div class="kpi-info">
+            <div class="kpi-label">{{ card.label }}</div>
+            <div class="kpi-value">{{ card.value }}</div>
+            <div class="kpi-sub">{{ card.sub }}</div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+
+    <!-- Table -->
+    <Card class="flex flex-col" style="border-radius:14px;border:1px solid #e8edf2;box-shadow:0 1px 4px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04);">
+      <CardContent style="padding:0;">
+        <div v-if="loading" class="flex items-center justify-center py-16">
+          <div class="text-[13px] text-gray-400">Loading applications...</div>
+        </div>
+        <div v-else-if="applications.length === 0" class="flex flex-col items-center justify-center py-16 gap-2">
+          <div class="text-[2rem]">&#128203;</div>
+          <div class="text-[14px] text-gray-500 font-medium">No applications yet</div>
+          <div class="text-[12px] text-gray-400">Applications submitted at /apply will appear here</div>
+        </div>
+        <Table v-else>
+          <TableHeader>
+            <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Name</TableHead>
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Position</TableHead>
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Email</TableHead>
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Phone</TableHead>
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">CDL</TableHead>
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Experience</TableHead>
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Status</TableHead>
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Applied</TableHead>
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider text-right">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            <TableRow v-for="app in applications" :key="app.id" class="hover:bg-blue-50/30 transition-colors duration-100">
+              <TableCell class="font-semibold text-[13px] text-gray-900">{{ app.full_name }}</TableCell>
+              <TableCell><Badge :class="positionBadge(app.position)">{{ app.position }}</Badge></TableCell>
+              <TableCell class="text-[13px] text-gray-600">{{ app.email }}</TableCell>
+              <TableCell class="text-[13px] text-gray-600">{{ app.phone }}</TableCell>
+              <TableCell class="text-[13px]">
+                <span :class="app.has_cdl === 'Yes' ? 'text-emerald-600' : 'text-gray-400'">{{ app.has_cdl }}</span>
+              </TableCell>
+              <TableCell class="text-[13px] text-gray-600">{{ app.experience }}</TableCell>
+              <TableCell>
+                <Badge :class="statusBadge(app.status)">{{ app.status }}</Badge>
+              </TableCell>
+              <TableCell class="text-[13px] text-gray-500">{{ formatDate(app.created_at) }}</TableCell>
+              <TableCell class="text-right">
+                <div class="flex items-center justify-end gap-1.5">
+                  <Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8" @click="openDetail(app)">View</Button>
+                  <select class="text-[12px] border border-[#e2e4ea] rounded-md px-2 py-1 bg-white" :value="app.status" @change="updateStatus(app.id, $event.target.value)">
+                    <option v-for="s in statuses" :key="s" :value="s">{{ s }}</option>
+                  </select>
+                </div>
+              </TableCell>
+            </TableRow>
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+
+    <!-- Detail Modal -->
+    <Dialog v-model:open="showDetail">
+      <DialogContent class="sm:max-w-[600px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden max-h-[85vh]">
+        <DialogHeader class="px-6 pt-5 pb-4 border-b border-[#e8edf2] bg-gradient-to-b from-gray-50/80 to-white">
+          <DialogTitle class="text-[1.1rem] font-bold text-gray-900">{{ selectedApp?.full_name }}</DialogTitle>
+          <DialogDescription class="text-[13px] text-gray-400">Applied for {{ selectedApp?.position }} on {{ formatDate(selectedApp?.created_at) }}</DialogDescription>
+        </DialogHeader>
+        <div v-if="selectedApp" class="px-6 py-5 overflow-y-auto" style="max-height:60vh;">
+          <div class="detail-grid">
+            <div class="detail-section">
+              <h4>Personal Information</h4>
+              <div class="detail-row"><span>Email:</span><span>{{ selectedApp.email }}</span></div>
+              <div class="detail-row"><span>Phone:</span><span>{{ selectedApp.phone }}</span></div>
+              <div class="detail-row"><span>DOB:</span><span>{{ selectedApp.dob }}</span></div>
+              <div class="detail-row"><span>Address:</span><span>{{ selectedApp.address }}</span></div>
+              <div class="detail-row"><span>SSN:</span><span>{{ maskSSN(selectedApp.ssn) }}</span></div>
+              <div class="detail-row"><span>License:</span><span>{{ selectedApp.drivers_license }}</span></div>
+            </div>
+            <div class="detail-section">
+              <h4>Experience &amp; Qualifications</h4>
+              <div class="detail-row"><span>Experience:</span><span>{{ selectedApp.experience }}</span></div>
+              <div class="detail-row"><span>CDL:</span><span>{{ selectedApp.has_cdl }}</span></div>
+              <div class="detail-row"><span>Work Authorized:</span><span>{{ selectedApp.work_authorized }}</span></div>
+              <div class="detail-row"><span>Felony:</span><span>{{ selectedApp.felony_convicted }}</span></div>
+              <div v-if="selectedApp.felony_explanation" class="detail-row"><span>Explanation:</span><span>{{ selectedApp.felony_explanation }}</span></div>
+            </div>
+            <div class="detail-section">
+              <h4>Driving History</h4>
+              <div class="detail-row"><span>Accident History:</span><span>{{ selectedApp.accident_history }}</span></div>
+              <div v-if="selectedApp.accident_description" class="detail-row"><span>Description:</span><span>{{ selectedApp.accident_description }}</span></div>
+              <div class="detail-row"><span>Traffic Citations:</span><span>{{ selectedApp.traffic_citations || 'N/A' }}</span></div>
+            </div>
+            <div class="detail-section">
+              <h4>Certifications &amp; Availability</h4>
+              <div v-if="selectedApp.certifications" class="detail-row"><span>Certifications:</span><span>{{ selectedApp.certifications }}</span></div>
+              <div class="detail-row"><span>Availability:</span><span>{{ parseAvailability(selectedApp.availability) }}</span></div>
+              <div class="detail-row"><span>Skills:</span><span>{{ selectedApp.skills }}</span></div>
+            </div>
+            <div class="detail-section">
+              <h4>References</h4>
+              <div v-if="selectedApp.reference_info" class="detail-row"><span>Reference:</span><span>{{ selectedApp.reference_info }}</span></div>
+              <div v-if="selectedApp.additional_info" class="detail-row"><span>Additional:</span><span>{{ selectedApp.additional_info }}</span></div>
+              <div class="detail-row"><span>Signature:</span><span class="font-italic">{{ selectedApp.signature }}</span></div>
+              <div class="detail-row"><span>Date:</span><span>{{ selectedApp.signature_date }}</span></div>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted } from 'vue'
+import { useApi } from '../composables/useApi'
+import { useToast } from '../composables/useToast'
+import { Card, CardContent } from '@/components/ui/card'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+
+const api = useApi()
+const { show: toast } = useToast()
+const applications = ref([])
+const loading = ref(false)
+const showDetail = ref(false)
+const selectedApp = ref(null)
+const statuses = ['New', 'Reviewed', 'Accepted', 'Rejected']
+
+const kpiCards = computed(() => {
+  const a = applications.value
+  return [
+    { label: 'Total', value: a.length, sub: 'Applications', icon: '&#128203;', theme: 'kpi-blue', iconTheme: 'kpi-icon-blue' },
+    { label: 'New', value: a.filter(x => x.status === 'New').length, sub: 'Pending review', icon: '&#10071;', theme: 'kpi-amber', iconTheme: 'kpi-icon-amber' },
+    { label: 'Accepted', value: a.filter(x => x.status === 'Accepted').length, sub: 'Approved', icon: '&#10003;', theme: 'kpi-emerald', iconTheme: 'kpi-icon-emerald' },
+    { label: 'Rejected', value: a.filter(x => x.status === 'Rejected').length, sub: 'Declined', icon: '&#10007;', theme: 'kpi-violet', iconTheme: 'kpi-icon-violet' },
+  ]
+})
+
+async function load() {
+  loading.value = true
+  try {
+    applications.value = await api.get('/api/applications')
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function updateStatus(id, status) {
+  try {
+    await api.put(`/api/applications/${id}/status`, { status })
+    toast(`Status updated to ${status}`, 'success')
+    await load()
+  } catch (err) {
+    toast(err.message, 'error')
+  }
+}
+
+function openDetail(app) {
+  selectedApp.value = app
+  showDetail.value = true
+}
+
+function formatDate(d) {
+  if (!d) return ''
+  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function maskSSN(ssn) {
+  if (!ssn || ssn.length < 4) return '***-**-****'
+  return '***-**-' + ssn.slice(-4)
+}
+
+function parseAvailability(val) {
+  try { return JSON.parse(val).join(', ') } catch { return val || 'N/A' }
+}
+
+function statusBadge(status) {
+  if (status === 'New') return 'bg-blue-50 text-blue-700 border border-blue-200 text-[11px] font-semibold'
+  if (status === 'Reviewed') return 'bg-amber-50 text-amber-700 border border-amber-200 text-[11px] font-semibold'
+  if (status === 'Accepted') return 'bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold'
+  return 'bg-red-50 text-red-700 border border-red-200 text-[11px] font-semibold'
+}
+
+function positionBadge(pos) {
+  if (pos === 'Company Driver') return 'bg-cyan-50 text-cyan-700 border border-cyan-200 text-[11px] font-semibold'
+  if (pos === 'Owner Operator') return 'bg-purple-50 text-purple-700 border border-purple-200 text-[11px] font-semibold'
+  return 'bg-gray-50 text-gray-600 border border-gray-200 text-[11px] font-semibold'
+}
+
+onMounted(load)
+</script>
+
+<style scoped>
+.detail-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+.detail-section h4 {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: hsl(199, 89%, 48%);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.6rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid #e8edf2;
+}
+.detail-row {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  padding: 0.3rem 0;
+}
+.detail-row span:first-child {
+  font-weight: 600;
+  color: #6b7280;
+  min-width: 120px;
+  flex-shrink: 0;
+}
+.detail-row span:last-child {
+  color: #111827;
+}
+.font-italic { font-style: italic; }
+</style>

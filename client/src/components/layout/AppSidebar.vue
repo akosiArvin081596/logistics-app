@@ -86,6 +86,7 @@ const navConfig = {
     { to: '/trailers', icon: '&#128718;', label: 'Trailer Database' },
     { to: '/drivers', icon: '&#128100;', label: 'Driver Database' },
     { to: '/investors', icon: '&#128188;', label: 'Investor Database' },
+    { to: '/applications', icon: '&#128221;', label: 'Applications' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
     // { to: '/archive', icon: '&#128451;', label: 'Archive' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
