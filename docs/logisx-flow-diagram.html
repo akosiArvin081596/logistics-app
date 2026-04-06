@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LogisX — System Flow Diagram</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #f8fafc; color: #1e293b; padding: 2rem; }
+h1 { font-size: 1.8rem; font-weight: 800; margin-bottom: 0.5rem; }
+h2 { font-size: 1.3rem; font-weight: 700; margin: 2.5rem 0 1rem; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.5rem; }
+h3 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; color: #475569; }
+.subtitle { font-size: 0.9rem; color: #64748b; margin-bottom: 2rem; }
+.container { max-width: 1200px; margin: 0 auto; }
+
+/* Flow Chart Styles */
+.flow { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; margin: 1.5rem 0; }
+.flow-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; justify-content: center; }
+.node { padding: 0.65rem 1.2rem; border-radius: 10px; font-size: 0.82rem; font-weight: 600; text-align: center; min-width: 140px; position: relative; }
+.node-start { background: #0f172a; color: #fff; border-radius: 20px; }
+.node-process { background: #fff; border: 2px solid #3b82f6; color: #1e40af; }
+.node-decision { background: #fef3c7; border: 2px solid #f59e0b; color: #92400e; transform: rotate(0deg); border-radius: 4px; }
+.node-action { background: #ecfdf5; border: 2px solid #10b981; color: #065f46; }
+.node-data { background: #eff6ff; border: 2px solid #3b82f6; color: #1e40af; border-radius: 4px 16px; }
+.node-end { background: #dc2626; color: #fff; border-radius: 20px; }
+.node-status { background: #f0f9ff; border: 2px solid #0ea5e9; color: #0369a1; font-size: 0.75rem; padding: 0.4rem 0.8rem; }
+.node-auto { background: #faf5ff; border: 2px dashed #a855f7; color: #7c3aed; font-size: 0.75rem; }
+.node-role { background: #fff; border: 2px solid #64748b; color: #334155; font-size: 0.75rem; min-width: 100px; }
+
+.arrow { font-size: 1.2rem; color: #94a3b8; font-weight: 700; }
+.arrow-down { display: block; text-align: center; font-size: 1.2rem; color: #94a3b8; }
+.arrow-label { font-size: 0.68rem; color: #94a3b8; font-weight: 500; text-align: center; }
+
+/* Section Cards */
+.section-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+.section-card h3 { margin-top: 0; }
+
+/* Data Flow Table */
+.data-table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.82rem; }
+.data-table th { background: #f1f5f9; padding: 0.6rem 1rem; text-align: left; font-weight: 600; text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.05em; color: #64748b; }
+.data-table td { padding: 0.6rem 1rem; border-bottom: 1px solid #f1f5f9; }
+.data-table tr:hover td { background: #f8fafc; }
+
+/* Role badges */
+.badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.7rem; font-weight: 600; }
+.badge-sa { background: #fee2e2; color: #dc2626; }
+.badge-disp { background: #dbeafe; color: #2563eb; }
+.badge-driver { background: #d1fae5; color: #059669; }
+.badge-inv { background: #fef3c7; color: #d97706; }
+.badge-auto { background: #f3e8ff; color: #7c3aed; }
+.badge-db { background: #e2e8f0; color: #475569; }
+
+/* Entity Diagram */
+.entity-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin: 1rem 0; }
+.entity { background: #fff; border: 2px solid #e2e8f0; border-radius: 10px; overflow: hidden; }
+.entity-header { background: #0f172a; color: #fff; padding: 0.5rem 0.75rem; font-weight: 700; font-size: 0.82rem; }
+.entity-header.sqlite { background: #2563eb; }
+.entity-header.gsheet { background: #059669; }
+.entity-fields { padding: 0.5rem 0.75rem; font-size: 0.75rem; }
+.entity-fields div { padding: 0.2rem 0; border-bottom: 1px solid #f1f5f9; }
+.entity-fields .pk { font-weight: 700; color: #d97706; }
+.entity-fields .fk { color: #2563eb; }
+
+@media print { body { padding: 1rem; } .section-card { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>LogisX — System Flow Diagram</h1>
+<p class="subtitle">Complete data flow, user roles, and load lifecycle — Updated April 3, 2026</p>
+
+<!-- ==================== SECTION 1: USER ROLES ==================== -->
+<h2>1. User Roles & Access</h2>
+<div class="section-card">
+<div class="flow">
+  <div class="flow-row">
+    <div class="node node-role"><span class="badge badge-sa">Super Admin</span><br>Full access to everything</div>
+    <div class="node node-role"><span class="badge badge-disp">Dispatcher</span><br>Assign loads, manage trucks</div>
+    <div class="node node-role"><span class="badge badge-driver">Driver</span><br>Accept loads, update status</div>
+    <div class="node node-role"><span class="badge badge-inv">Investor</span><br>View financials for own trucks</div>
+  </div>
+</div>
+</div>
+
+<!-- ==================== SECTION 2: SETUP FLOW ==================== -->
+<h2>2. Initial Setup Flow</h2>
+<div class="section-card">
+<div class="flow">
+  <div class="node node-start">Fresh App — No Users</div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-process">Super Admin creates account (setup screen)</div>
+  <div class="arrow-down">▼</div>
+  <div class="flow-row">
+    <div class="node node-action">Create Investors<br><small>User Mgmt → Role: Investor</small></div>
+    <div class="node node-action">Create Dispatchers<br><small>User Mgmt → Role: Dispatcher</small></div>
+    <div class="node node-action">Create Drivers<br><small>User Mgmt → Role: Driver</small></div>
+  </div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-auto">Auto-sync: Driver → Carrier Database (Google Sheet)</div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-action">Add Trucks in Truck Database<br><small>Assign owner (investor) + driver + business config</small></div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-end">Ready for Operations</div>
+</div>
+</div>
+
+<!-- ==================== SECTION 3: LOAD LIFECYCLE ==================== -->
+<h2>3. Load Lifecycle (Complete Flow)</h2>
+<div class="section-card">
+<div class="flow">
+  <div class="node node-start">Broker/Customer Provides Load Details</div>
+  <div class="arrow-down">▼</div>
+
+  <div class="flow-row">
+    <span class="badge badge-sa">Super Admin</span>
+  </div>
+  <div class="node node-process">Create New Job (/jobs/new)<br><small>Broker, rate, pickup/dropoff addresses, coordinates</small></div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-status">STATUS: Unassigned</div>
+  <div class="arrow-down">▼</div>
+  <div class="flow-row">
+    <div class="node node-data">Google Sheet: Job Tracking</div>
+  </div>
+  <div class="arrow-down">▼</div>
+
+  <div class="flow-row">
+    <span class="badge badge-sa">Super Admin</span> / <span class="badge badge-disp">Dispatcher</span>
+  </div>
+  <div class="node node-process">Assign Driver (Dashboard → Job Board)<br><small>Select driver from dropdown → click Assign</small></div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-status">STATUS: Dispatched</div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-auto">Socket.IO: push notification to driver</div>
+  <div class="arrow-down">▼</div>
+
+  <div class="flow-row">
+    <span class="badge badge-driver">Driver</span>
+  </div>
+  <div class="node node-decision">Driver reviews load details<br>Accept or Reject?</div>
+  <div class="arrow-down">▼</div>
+  <div class="flow-row">
+    <div class="node node-action">Accept Load</div>
+    <div class="arrow">or</div>
+    <div class="node node-end" style="font-size:0.78rem;">Reject → Unassigned<br><small>Back to Job Board</small></div>
+  </div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-status">STATUS: Assigned</div>
+  <div class="arrow-down">▼</div>
+
+  <div class="node node-process">Driver heads to pickup<br><small>GPS tracking active, route guide on map</small></div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-auto">Geofence: within 500m of pickup<br><small>Auto-trigger → "Driver has arrived at pickup location"</small></div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-status">STATUS: At Shipper</div>
+  <div class="arrow-down">▼</div>
+
+  <div class="flow-row">
+    <div class="node node-status">Loading</div>
+    <div class="arrow">→</div>
+    <div class="node node-status">In Transit</div>
+    <div class="arrow">→</div>
+    <div class="node node-auto">Geofence: 500m of delivery</div>
+    <div class="arrow">→</div>
+    <div class="node node-status">At Receiver</div>
+  </div>
+  <div class="arrow-down">▼</div>
+
+  <div class="node node-status">STATUS: Delivered</div>
+  <div class="arrow-down">▼</div>
+
+  <div class="flow-row">
+    <span class="badge badge-driver">Driver</span>
+  </div>
+  <div class="node node-process">Upload POD (Proof of Delivery)<br><small>Photo/PDF → Google Drive</small></div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-status">STATUS: POD Received ✓</div>
+  <div class="arrow-down">▼</div>
+  <div class="node node-end">Load Complete</div>
+</div>
+</div>
+
+<!-- ==================== SECTION 4: DATA FLOW ==================== -->
+<h2>4. Data Flow Diagram</h2>
+<div class="section-card">
+<h3>Where Data Lives</h3>
+<table class="data-table">
+<tr><th>Data</th><th>Storage</th><th>Written By</th><th>Read By</th></tr>
+<tr><td>Load/Job details</td><td><span class="badge badge-db">Google Sheet: Job Tracking</span></td><td><span class="badge badge-sa">SA</span></td><td>All roles</td></tr>
+<tr><td>Status changes</td><td><span class="badge badge-db">Google Sheet: Status Logs</span></td><td><span class="badge badge-driver">Driver</span> <span class="badge badge-auto">Geofence</span></td><td><span class="badge badge-sa">SA</span> <span class="badge badge-disp">Disp</span></td></tr>
+<tr><td>Driver roster</td><td><span class="badge badge-db">Google Sheet: Carrier Database</span></td><td><span class="badge badge-auto">Auto-sync from SQLite</span></td><td><span class="badge badge-sa">SA</span> <span class="badge badge-disp">Disp</span></td></tr>
+<tr><td>Payments/Revenue</td><td><span class="badge badge-db">Google Sheet: Payments Table</span></td><td><span class="badge badge-sa">SA</span></td><td><span class="badge badge-sa">SA</span> <span class="badge badge-inv">Inv</span></td></tr>
+<tr><td>User accounts</td><td><span class="badge badge-db">SQLite: users</span></td><td><span class="badge badge-sa">SA</span></td><td>Auth system</td></tr>
+<tr><td>Trucks & config</td><td><span class="badge badge-db">SQLite: trucks</span></td><td><span class="badge badge-sa">SA</span> <span class="badge badge-disp">Disp</span></td><td>All roles</td></tr>
+<tr><td>GPS locations</td><td><span class="badge badge-db">SQLite: driver_locations</span></td><td><span class="badge badge-driver">Driver</span> (auto)</td><td><span class="badge badge-sa">SA</span> <span class="badge badge-disp">Disp</span></td></tr>
+<tr><td>Expenses</td><td><span class="badge badge-db">SQLite: expenses</span></td><td><span class="badge badge-driver">Driver</span></td><td><span class="badge badge-sa">SA</span> <span class="badge badge-disp">Disp</span> <span class="badge badge-inv">Inv</span></td></tr>
+<tr><td>Messages</td><td><span class="badge badge-db">SQLite: messages</span></td><td><span class="badge badge-driver">Driver</span> <span class="badge badge-disp">Disp</span></td><td><span class="badge badge-driver">Driver</span> <span class="badge badge-disp">Disp</span></td></tr>
+<tr><td>POD / Documents</td><td><span class="badge badge-db">Google Drive + SQLite: documents</span></td><td><span class="badge badge-driver">Driver</span></td><td>All roles</td></tr>
+<tr><td>Legal docs (per truck)</td><td><span class="badge badge-db">SQLite: legal_documents</span></td><td><span class="badge badge-sa">SA</span></td><td><span class="badge badge-sa">SA</span> <span class="badge badge-inv">Inv</span></td></tr>
+</table>
+</div>
+
+<!-- ==================== SECTION 5: ENTITY RELATIONSHIPS ==================== -->
+<h2>5. Entity Relationships</h2>
+<div class="section-card">
+<div class="flow" style="align-items:stretch;">
+  <div class="flow-row" style="align-items:stretch; gap:1.5rem; flex-wrap:wrap;">
+    <div style="text-align:center;">
+      <div class="node node-role" style="margin-bottom:0.5rem;"><span class="badge badge-inv">Investor</span><br>Kevin (KC Trucking)</div>
+      <div class="arrow-down">▼ owns</div>
+      <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+        <div class="node node-process" style="min-width:100px;font-size:0.75rem;">TRK-101<br>Freightliner</div>
+        <div class="node node-process" style="min-width:100px;font-size:0.75rem;">TRK-102<br>Kenworth</div>
+      </div>
+      <div class="arrow-down">▼ assigned</div>
+      <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+        <div class="node node-action" style="min-width:100px;font-size:0.75rem;">Lesline<br>Johnson</div>
+        <div class="node node-action" style="min-width:100px;font-size:0.75rem;">Kenrick<br>Davis</div>
+      </div>
+    </div>
+
+    <div style="text-align:center;">
+      <div class="node node-role" style="margin-bottom:0.5rem;"><span class="badge badge-inv">Investor</span><br>Deshorn (ABC Inc)</div>
+      <div class="arrow-down">▼ owns</div>
+      <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+        <div class="node node-process" style="min-width:100px;font-size:0.75rem;">TRK-201<br>Peterbilt</div>
+        <div class="node node-process" style="min-width:100px;font-size:0.75rem;">TRK-202<br>Volvo</div>
+      </div>
+      <div class="arrow-down">▼ assigned</div>
+      <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+        <div class="node node-action" style="min-width:100px;font-size:0.75rem;">Andrew<br>Raczkowski</div>
+        <div class="node node-action" style="min-width:100px;font-size:0.75rem;">Marcus<br>Williams</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3 style="margin-top:1.5rem;">Relationship Rules</h3>
+<table class="data-table">
+<tr><th>Relationship</th><th>Type</th><th>Rule</th></tr>
+<tr><td>Investor → Trucks</td><td>One-to-Many</td><td>An investor can own multiple trucks (via <code>owner_id</code>)</td></tr>
+<tr><td>Truck → Drivers</td><td>Many-to-Many</td><td>A truck can have multiple drivers; a driver can be on multiple trucks. <strong>Guard:</strong> driver with active load cannot be reassigned.</td></tr>
+<tr><td>Driver → Loads</td><td>One-to-Many</td><td>A driver can have multiple loads, but only one active at a time (409 conflict if dispatched while busy)</td></tr>
+<tr><td>Load → Documents</td><td>One-to-Many</td><td>A load can have multiple PODs/documents</td></tr>
+<tr><td>Truck → Business Config</td><td>One-to-One</td><td>Each truck has its own purchase price, title status, maintenance fund, and fixed costs</td></tr>
+</table>
+</div>
+
+<!-- ==================== SECTION 6: REAL-TIME EVENTS ==================== -->
+<h2>6. Real-Time Events (Socket.IO)</h2>
+<div class="section-card">
+<table class="data-table">
+<tr><th>Event</th><th>Trigger</th><th>Sent To</th><th>Data</th></tr>
+<tr><td><code>load-assigned</code></td><td>Dispatcher assigns load</td><td>Driver</td><td>loadId, origin, destination</td></tr>
+<tr><td><code>load-accepted</code></td><td>Driver accepts</td><td>Dispatch room</td><td>loadId, driverName</td></tr>
+<tr><td><code>load-declined</code></td><td>Driver rejects</td><td>Dispatch room</td><td>loadId, driverName</td></tr>
+<tr><td><code>status-updated</code></td><td>Driver changes status</td><td>Dispatch room</td><td>loadId, newStatus</td></tr>
+<tr><td><code>geofence-trigger</code></td><td>GPS within 500m of pickup/delivery</td><td>Driver + Dispatch</td><td>loadId, status (At Shipper / At Receiver)</td></tr>
+<tr><td><code>location-update</code></td><td>Driver GPS report</td><td>Dispatch room</td><td>lat, lng, speed, accuracy</td></tr>
+<tr><td><code>new-message</code></td><td>Chat message sent</td><td>All connected</td><td>from, to, text</td></tr>
+<tr><td><code>pod-uploaded</code></td><td>Driver uploads POD</td><td>Dispatch room</td><td>loadId, fileName</td></tr>
+</table>
+</div>
+
+<!-- ==================== SECTION 7: FINANCIAL FLOW ==================== -->
+<h2>7. Investor Financial Flow</h2>
+<div class="section-card">
+<div class="flow">
+  <div class="node node-data">Google Sheet: Payments Table<br><small>Load rates, payment status</small></div>
+  <div class="arrow-down">▼ Total Revenue</div>
+  <div class="flow-row">
+    <div class="node node-data">SQLite: expenses<br><small>Driver fuel, maintenance, tolls</small></div>
+    <div class="node node-data">SQLite: trucks<br><small>Insurance, ELD, HVUT, IRP, driver pay, maint fund</small></div>
+    <div class="node node-data">SQLite: maintenance_fund<br><small>Service costs</small></div>
+    <div class="node node-data">SQLite: compliance_fees<br><small>2290, Registration, IFTA</small></div>
+  </div>
+  <div class="arrow-down">▼ Total Expenses (summed × months of operation)</div>
+  <div class="node node-action" style="font-size:0.9rem;"><strong>Net Cash Flow</strong> = Total Revenue − Total Expenses</div>
+  <div class="arrow-down">▼</div>
+  <div class="flow-row">
+    <div class="node node-process">Owner Earnings<br><small>Net Cash Flow ÷ 2 (50% split)</small></div>
+    <div class="node node-process">Break-Even<br><small>(Purchase + $5K) ÷ Monthly Earnings</small></div>
+    <div class="node node-process">Business ROI<br><small>Net Revenue ÷ Gross × 100</small></div>
+  </div>
+</div>
+</div>
+
+<!-- ==================== SECTION 8: STATUS PROGRESSION ==================== -->
+<h2>8. Load Status Progression</h2>
+<div class="section-card">
+<div class="flow">
+  <div class="flow-row" style="flex-wrap:wrap;gap:0.4rem;">
+    <div class="node node-status">Unassigned</div>
+    <div class="arrow">→</div>
+    <div class="node node-status">Dispatched</div>
+    <div class="arrow">→</div>
+    <div class="node node-status">Assigned</div>
+    <div class="arrow">→</div>
+    <div class="node node-status" style="border-color:#a855f7;">At Shipper ⚡</div>
+    <div class="arrow">→</div>
+    <div class="node node-status">Loading</div>
+    <div class="arrow">→</div>
+    <div class="node node-status">In Transit</div>
+    <div class="arrow">→</div>
+    <div class="node node-status" style="border-color:#a855f7;">At Receiver ⚡</div>
+    <div class="arrow">→</div>
+    <div class="node node-status">Delivered</div>
+    <div class="arrow">→</div>
+    <div class="node node-status" style="background:#d1fae5;border-color:#059669;">POD Received ✓</div>
+  </div>
+  <div style="margin-top:0.75rem;font-size:0.75rem;color:#7c3aed;">⚡ = Auto-triggered by geofence (500m radius)</div>
+</div>
+</div>
+
+<!-- ==================== SECTION 9: TECH STACK ==================== -->
+<h2>9. Technology Stack</h2>
+<div class="section-card">
+<table class="data-table">
+<tr><th>Layer</th><th>Technology</th><th>Purpose</th></tr>
+<tr><td>Backend</td><td>Node.js + Express</td><td>Single-file server (~5500 lines)</td></tr>
+<tr><td>Primary DB</td><td>Google Sheets API v4</td><td>Job Tracking, Status Logs, Carrier DB, Payments</td></tr>
+<tr><td>App DB</td><td>SQLite (better-sqlite3)</td><td>Users, trucks, expenses, locations, messages, docs</td></tr>
+<tr><td>File Storage</td><td>Google Drive API v3</td><td>POD uploads, legal documents</td></tr>
+<tr><td>Real-time</td><td>Socket.IO</td><td>Push notifications, live tracking</td></tr>
+<tr><td>Frontend</td><td>Vue 3 + Vite + Pinia</td><td>SPA with stores and composables</td></tr>
+<tr><td>UI (Desktop)</td><td>Tailwind CSS + shadcn-vue</td><td>Dashboard, data tables, dialogs</td></tr>
+<tr><td>UI (Mobile)</td><td>Vant 4</td><td>Driver app (pickers, forms, tabs)</td></tr>
+<tr><td>Maps</td><td>Google Maps JS API</td><td>Route maps, tracking, location picker</td></tr>
+<tr><td>Geocoding</td><td>Google Places + Geocoding</td><td>Address search, reverse geocode</td></tr>
+<tr><td>Routing</td><td>Google Routes API</td><td>Driving directions, polylines, ETA</td></tr>
+<tr><td>Deployment</td><td>VPS (Hostinger) + PM2 + nginx</td><td>Production + Staging environments</td></tr>
+</table>
+</div>
+
+<p style="text-align:center;color:#94a3b8;font-size:0.75rem;margin-top:2rem;">Generated April 3, 2026 — LogisX v1.0</p>
+</div>
+</body>
+</html>

@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LogisX — Complete System Simulation Guide</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; }
+
+  /* ===== LAYOUT ===== */
+  .page-wrapper { display: flex; min-height: 100vh; }
+  .toc-sidebar { width: 280px; position: fixed; top: 0; left: 0; height: 100vh; background: #0c1322; border-right: 1px solid #1e293b; overflow-y: auto; padding: 1.5rem 1rem; z-index: 100; }
+  .content { margin-left: 280px; padding: 2rem 3rem; max-width: 900px; flex: 1; }
+
+  /* ===== TOC ===== */
+  .toc-title { font-size: 0.75rem; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 1rem; }
+  .toc-phase { margin-bottom: 0.6rem; }
+  .toc-phase-title { font-size: 0.72rem; font-weight: 700; color: #94a3b8; padding: 0.3rem 0.5rem; display: block; }
+  .toc-link { display: block; font-size: 0.68rem; color: #64748b; text-decoration: none; padding: 0.2rem 0.5rem 0.2rem 1.2rem; border-left: 2px solid transparent; transition: all 0.15s; }
+  .toc-link:hover { color: #e2e8f0; border-left-color: #38bdf8; background: rgba(56,189,248,0.05); }
+  .toc-brand { font-size: 1rem; font-weight: 800; color: #fff; margin-bottom: 0.3rem; }
+  .toc-sub { font-size: 0.6rem; color: #475569; margin-bottom: 1.5rem; }
+  .toc-divider { border: none; border-top: 1px solid #1e293b; margin: 0.8rem 0; }
+  .toc-cross-link { display: block; font-size: 0.65rem; color: #38bdf8; text-decoration: none; padding: 0.4rem 0.5rem; margin-top: 0.5rem; opacity: 0.7; }
+  .toc-cross-link:hover { opacity: 1; }
+
+  /* ===== HEADER ===== */
+  .page-header { text-align: center; margin-bottom: 2.5rem; padding-bottom: 1.5rem; border-bottom: 1px solid #1e293b; }
+  .page-header h1 { font-size: 1.8rem; color: #fff; margin-bottom: 0.3rem; }
+  .page-header .subtitle { font-size: 0.85rem; color: #64748b; }
+
+  /* ===== SECTIONS ===== */
+  .phase { margin-bottom: 3rem; }
+  .phase-header { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1.2rem; }
+  .phase-num { font-size: 0.7rem; font-weight: 800; color: #0f172a; background: #38bdf8; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .phase-title { font-size: 1.15rem; font-weight: 700; color: #fff; }
+  .phase-desc { font-size: 0.8rem; color: #94a3b8; margin-bottom: 1.2rem; padding-left: 2.8rem; }
+
+  details { margin-bottom: 1rem; }
+  summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; color: #e2e8f0; padding: 0.7rem 1rem; background: #1e293b; border: 1px solid #334155; border-radius: 8px; list-style: none; display: flex; align-items: center; gap: 0.5rem; transition: background 0.15s; }
+  summary:hover { background: #253348; }
+  summary::before { content: '\25B6'; font-size: 0.55rem; color: #64748b; transition: transform 0.2s; display: inline-block; }
+  details[open] > summary::before { transform: rotate(90deg); }
+  summary::-webkit-details-marker { display: none; }
+  .detail-body { padding: 1rem 1.2rem; border: 1px solid #334155; border-top: none; border-radius: 0 0 8px 8px; background: #162032; }
+
+  /* ===== STEPS ===== */
+  .step { display: flex; gap: 0.8rem; margin-bottom: 1rem; }
+  .step-marker { width: 24px; height: 24px; border-radius: 50%; background: #334155; color: #94a3b8; font-size: 0.6rem; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 0.15rem; }
+  .step-content { flex: 1; }
+  .step-content h4 { font-size: 0.82rem; font-weight: 600; color: #f1f5f9; margin-bottom: 0.2rem; }
+  .step-content p { font-size: 0.75rem; color: #94a3b8; }
+
+  /* ===== INLINE ELEMENTS ===== */
+  code { font-family: 'Consolas', 'Courier New', monospace; font-size: 0.75rem; background: rgba(56,189,248,0.1); color: #7dd3fc; padding: 0.1rem 0.4rem; border-radius: 4px; }
+  .url { color: #38bdf8; font-weight: 600; }
+  .field { color: #fbbf24; font-weight: 600; font-size: 0.75rem; }
+  .role-sa { color: #f87171; font-weight: 600; }
+  .role-disp { color: #60a5fa; font-weight: 600; }
+  .role-drv { color: #34d399; font-weight: 600; }
+  .role-inv { color: #fbbf24; font-weight: 600; }
+
+  /* ===== STATUS PILLS ===== */
+  .status-flow { display: flex; align-items: center; gap: 0; flex-wrap: wrap; justify-content: center; margin: 1rem 0; }
+  .status-pill { font-size: 0.62rem; font-weight: 600; padding: 0.25rem 0.6rem; border-radius: 12px; white-space: nowrap; }
+  .status-pill.new { background: rgba(148,163,184,0.15); color: #94a3b8; }
+  .status-pill.dispatched { background: rgba(96,165,250,0.15); color: #60a5fa; }
+  .status-pill.active { background: rgba(251,191,36,0.15); color: #fbbf24; }
+  .status-pill.transit { background: rgba(168,85,247,0.15); color: #a855f7; }
+  .status-pill.done { background: rgba(52,211,153,0.15); color: #34d399; }
+  .sarrow { color: #475569; font-size: 0.7rem; padding: 0 0.25rem; }
+
+  /* ===== BOXES ===== */
+  .tip-box { background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.25); border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; font-size: 0.75rem; }
+  .tip-box::before { content: 'TIP'; font-size: 0.6rem; font-weight: 800; color: #34d399; display: block; margin-bottom: 0.2rem; letter-spacing: 0.05em; }
+  .tip-box p { color: #94a3b8; }
+  .warn-box { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.25); border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; font-size: 0.75rem; }
+  .warn-box::before { content: 'IMPORTANT'; font-size: 0.6rem; font-weight: 800; color: #fbbf24; display: block; margin-bottom: 0.2rem; letter-spacing: 0.05em; }
+  .warn-box p { color: #94a3b8; }
+  .info-box { background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.25); border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; font-size: 0.75rem; }
+  .info-box::before { content: 'NOTE'; font-size: 0.6rem; font-weight: 800; color: #60a5fa; display: block; margin-bottom: 0.2rem; letter-spacing: 0.05em; }
+  .info-box p { color: #94a3b8; }
+
+  /* ===== TABLES ===== */
+  .tbl { width: 100%; font-size: 0.72rem; border-collapse: collapse; margin: 0.8rem 0; }
+  .tbl th { text-align: left; padding: 0.4rem 0.6rem; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.6rem; border-bottom: 1px solid #334155; }
+  .tbl td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #1e293b; color: #cbd5e1; }
+  .tbl td:first-child { font-weight: 600; color: #f1f5f9; white-space: nowrap; }
+
+  /* ===== FLOW DIAGRAM ===== */
+  .actor-badge { font-size: 0.58rem; font-weight: 600; padding: 0.1rem 0.45rem; border-radius: 8px; display: inline-block; margin-left: 0.3rem; }
+  .actor-badge.sa { background: rgba(248,113,113,0.15); color: #f87171; }
+  .actor-badge.disp { background: rgba(96,165,250,0.15); color: #60a5fa; }
+  .actor-badge.drv { background: rgba(52,211,153,0.15); color: #34d399; }
+  .actor-badge.inv { background: rgba(251,191,36,0.15); color: #fbbf24; }
+  .actor-badge.auto { background: rgba(168,85,247,0.15); color: #a855f7; }
+
+  /* ===== CARD LIST ===== */
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 0.8rem; }
+  .card h4 { font-size: 0.82rem; color: #f1f5f9; margin-bottom: 0.4rem; }
+  .card p { font-size: 0.73rem; color: #94a3b8; }
+  .card ul { list-style: none; font-size: 0.73rem; color: #94a3b8; margin-top: 0.3rem; }
+  .card li { padding: 0.15rem 0; padding-left: 0.8rem; position: relative; }
+  .card li::before { content: ''; position: absolute; left: 0; top: 0.55rem; width: 4px; height: 4px; background: #475569; border-radius: 50%; }
+
+  /* ===== BTN ===== */
+  .expand-btn { position: fixed; bottom: 1.5rem; right: 1.5rem; background: #1e293b; border: 1px solid #334155; color: #94a3b8; padding: 0.5rem 0.8rem; border-radius: 8px; font-size: 0.65rem; cursor: pointer; z-index: 99; }
+  .expand-btn:hover { background: #334155; color: #e2e8f0; }
+
+  /* ===== PRINT ===== */
+  @media print {
+    body { background: #fff; color: #1e293b; }
+    .toc-sidebar { display: none; }
+    .content { margin-left: 0; padding: 1rem; }
+    .expand-btn { display: none; }
+    details[open] > summary, details > summary { background: #f1f5f9; color: #1e293b; border-color: #d1d5db; }
+    details { break-inside: avoid; }
+    details:not([open]) { display: block; }
+    details:not([open]) > .detail-body { display: block; }
+    .detail-body { background: #fff; border-color: #d1d5db; }
+    .phase-header { break-after: avoid; }
+    code { background: #f1f5f9; color: #0369a1; }
+    .tip-box, .warn-box, .info-box { border-color: #d1d5db; background: #f8fafc; }
+    .tbl th { border-color: #d1d5db; }
+    .tbl td { border-color: #e2e8f0; }
+  }
+
+  /* ===== RESPONSIVE ===== */
+  @media (max-width: 900px) {
+    .toc-sidebar { display: none; }
+    .content { margin-left: 0; padding: 1.5rem 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<!-- TOC Sidebar -->
+<nav class="toc-sidebar">
+  <div class="toc-brand">LogisX</div>
+  <div class="toc-sub">System Simulation Guide</div>
+  <hr class="toc-divider">
+  <div class="toc-title">Phases</div>
+
+  <div class="toc-phase">
+    <span class="toc-phase-title">1 &mdash; System Initialization</span>
+    <a class="toc-link" href="#p1-prereqs">Prerequisites</a>
+    <a class="toc-link" href="#p1-launch">First Launch</a>
+    <a class="toc-link" href="#p1-setup">Create Super Admin</a>
+  </div>
+  <div class="toc-phase">
+    <span class="toc-phase-title">2 &mdash; User &amp; Fleet Setup</span>
+    <a class="toc-link" href="#p2-investor">Create Investor Accounts</a>
+    <a class="toc-link" href="#p2-dispatcher">Create Dispatcher Account</a>
+    <a class="toc-link" href="#p2-driver">Create Driver Accounts</a>
+    <a class="toc-link" href="#p2-trucks">Add Trucks to Fleet</a>
+  </div>
+  <div class="toc-phase">
+    <span class="toc-phase-title">3 &mdash; Load Lifecycle</span>
+    <a class="toc-link" href="#p3-create">Create a New Job</a>
+    <a class="toc-link" href="#p3-dispatch">Dispatch Load to Driver</a>
+    <a class="toc-link" href="#p3-accept">Driver Accepts Load</a>
+    <a class="toc-link" href="#p3-status">Status Progression</a>
+    <a class="toc-link" href="#p3-geofence">Geofence Auto-Triggers</a>
+    <a class="toc-link" href="#p3-pod">POD Upload &amp; Completion</a>
+  </div>
+  <div class="toc-phase">
+    <span class="toc-phase-title">4 &mdash; Expense Tracking</span>
+    <a class="toc-link" href="#p4-submit">Driver Submits Expenses</a>
+    <a class="toc-link" href="#p4-review">Dispatch Reviews Expenses</a>
+  </div>
+  <div class="toc-phase">
+    <span class="toc-phase-title">5 &mdash; Messaging</span>
+    <a class="toc-link" href="#p5-chat">Dispatch &harr; Driver Chat</a>
+  </div>
+  <div class="toc-phase">
+    <span class="toc-phase-title">6 &mdash; Financial Review</span>
+    <a class="toc-link" href="#p6-investor">Investor Dashboard</a>
+  </div>
+  <div class="toc-phase">
+    <span class="toc-phase-title">7 &mdash; Data Management</span>
+    <a class="toc-link" href="#p7-data">Data Manager</a>
+    <a class="toc-link" href="#p7-admin">Admin Tools</a>
+  </div>
+  <div class="toc-phase">
+    <span class="toc-phase-title">8 &mdash; Compliance</span>
+    <a class="toc-link" href="#p8-ifta">IFTA Mileage</a>
+  </div>
+  <div class="toc-phase">
+    <span class="toc-phase-title">9 &mdash; Live Tracking</span>
+    <a class="toc-link" href="#p9-tracking">Real-Time Map</a>
+  </div>
+
+  <hr class="toc-divider">
+  <a class="toc-cross-link" href="user-guides.html">&#8594; Per-Role User Guides</a>
+</nav>
+
+<!-- Content -->
+<main class="content">
+  <div class="page-header">
+    <h1>LogisX &mdash; Complete System Simulation Guide</h1>
+    <div class="subtitle">End-to-end walkthrough from fresh install to daily operations</div>
+  </div>
+
+  <!-- ======================== PHASE 1 ======================== -->
+  <section class="phase" id="phase-1">
+    <div class="phase-header">
+      <span class="phase-num">1</span>
+      <span class="phase-title">System Initialization</span>
+    </div>
+    <p class="phase-desc">Set up the environment, launch the server, and create the first Super Admin account.</p>
+
+    <details open id="p1-prereqs">
+      <summary>Prerequisites</summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.8rem;">Before launching LogisX, ensure you have:</p>
+        <table class="tbl">
+          <thead><tr><th>Requirement</th><th>Details</th></tr></thead>
+          <tbody>
+            <tr><td>Node.js</td><td>v18+ recommended. Run <code>node -v</code> to verify.</td></tr>
+            <tr><td>Google Cloud Project</td><td>Sheets API v4 and Drive API enabled. Service account created.</td></tr>
+            <tr><td><code>service-account-key.json</code></td><td>Downloaded from Google Cloud Console. Place at project root.</td></tr>
+            <tr><td>Google Sheet</td><td>Create a spreadsheet with tabs: <code>Job Tracking</code>, <code>Carrier Database</code>, <code>Payments Table</code>, <code>Status Logs</code>. Share with service account email as Editor.</td></tr>
+            <tr><td><code>.env</code> file</td><td>At project root with <code>GOOGLE_MAPS_API_KEY</code> (required) and <code>GOOGLE_DRIVE_FOLDER_ID</code> (optional).</td></tr>
+          </tbody>
+        </table>
+        <div class="tip-box"><p>The Google Sheet spreadsheet ID is configured in <code>server.js</code>. Update it if using a different sheet.</p></div>
+      </div>
+    </details>
+
+    <details id="p1-launch">
+      <summary>First Launch</summary>
+      <div class="detail-body">
+        <div class="step">
+          <span class="step-marker">1</span>
+          <div class="step-content">
+            <h4>Install dependencies</h4>
+            <p>Run <code>npm install</code> at the project root. This automatically runs <code>cd client && npm install</code> via the postinstall hook, installing both backend and frontend packages.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">2</span>
+          <div class="step-content">
+            <h4>Start the development servers</h4>
+            <p>Open two terminals:</p>
+            <p><strong>Terminal 1 (Backend):</strong> <code>npm run dev</code> &mdash; starts Express on port 3000 with nodemon auto-restart.</p>
+            <p><strong>Terminal 2 (Frontend):</strong> <code>npm run dev:client</code> &mdash; starts Vite dev server on port 5173 with proxy to backend.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">3</span>
+          <div class="step-content">
+            <h4>Open the application</h4>
+            <p>Navigate to <code class="url">http://localhost:5173</code> in your browser. The system detects that no users exist and displays the <strong>First-Time Setup</strong> screen.</p>
+          </div>
+        </div>
+        <div class="info-box"><p>For production: run <code>npm run build:client</code> then <code>npm start</code>. Express serves the built SPA from <code>client/dist/</code> on port 3000.</p></div>
+      </div>
+    </details>
+
+    <details id="p1-setup">
+      <summary>Create the Super Admin Account</summary>
+      <div class="detail-body">
+        <div class="step">
+          <span class="step-marker">1</span>
+          <div class="step-content">
+            <h4>Fill the setup form</h4>
+            <p>Enter a <span class="field">Username</span> (e.g., <code>admin</code>), <span class="field">Password</span> (minimum 4 characters), and optionally an <span class="field">Email</span>.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">2</span>
+          <div class="step-content">
+            <h4>Click "Create Super Admin Account"</h4>
+            <p>The system calls <code>POST /api/auth/setup</code>, creates the user in SQLite with role <span class="role-sa">Super Admin</span>, and auto-logs you in.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">3</span>
+          <div class="step-content">
+            <h4>Redirected to Dashboard</h4>
+            <p>You're taken to <code class="url">/dashboard</code> &mdash; the operations command center. It will be empty until we create loads and users.</p>
+          </div>
+        </div>
+        <div class="warn-box"><p>The setup endpoint is only available when no users exist. Once the Super Admin is created, the setup form is permanently hidden and login is shown instead.</p></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ======================== PHASE 2 ======================== -->
+  <section class="phase" id="phase-2">
+    <div class="phase-header">
+      <span class="phase-num">2</span>
+      <span class="phase-title">User &amp; Fleet Setup</span>
+    </div>
+    <p class="phase-desc">Create user accounts for all four roles and add trucks to the fleet.</p>
+
+    <details open id="p2-investor">
+      <summary>Create Investor Accounts</summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.6rem;">Navigate to <strong>User Management</strong> in the sidebar (<code class="url">/users</code>). The "Add User" form appears at the top of the page.</p>
+        <table class="tbl">
+          <thead><tr><th>Field</th><th>Example Value</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Username</td><td><code>kevin</code></td><td>Used for login</td></tr>
+            <tr><td>Password</td><td><code>investor123</code></td><td>Min 4 characters</td></tr>
+            <tr><td>Role</td><td><span class="role-inv">Investor</span></td><td>Select from dropdown</td></tr>
+            <tr><td>Full Name</td><td><code>Kevin Canunayon</code></td><td>Display name</td></tr>
+            <tr><td>Company Name</td><td><code>KC Trucking LLC</code></td><td>Shows on investor dashboard header</td></tr>
+            <tr><td>Email</td><td><code>kevin@example.com</code></td><td>Optional contact email</td></tr>
+          </tbody>
+        </table>
+        <p style="font-size:0.75rem; color:#94a3b8; margin-top:0.5rem;">Click <strong>"Add User"</strong>. Repeat for additional investors (e.g., <code>deshorn</code> / "Deshorn King" / "DK Transport Inc").</p>
+        <div class="tip-box"><p>The Investor role represents the truck company owner &mdash; they see financial dashboards, fleet valuation, tax shields, and legal documents for their owned trucks.</p></div>
+      </div>
+    </details>
+
+    <details id="p2-dispatcher">
+      <summary>Create Dispatcher Account</summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.6rem;">Still on <code class="url">/users</code>, add a dispatcher:</p>
+        <table class="tbl">
+          <thead><tr><th>Field</th><th>Example Value</th></tr></thead>
+          <tbody>
+            <tr><td>Username</td><td><code>dispatch1</code></td></tr>
+            <tr><td>Password</td><td><code>dispatcher123</code></td></tr>
+            <tr><td>Role</td><td><span class="role-disp">Dispatcher</span></td></tr>
+            <tr><td>Full Name</td><td><code>Azure Estelle</code></td></tr>
+          </tbody>
+        </table>
+        <div class="info-box"><p>Dispatchers can manage loads, track drivers, and communicate &mdash; but cannot access user management, data tools, or financial data.</p></div>
+      </div>
+    </details>
+
+    <details id="p2-driver">
+      <summary>Create Driver Accounts</summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.6rem;">Add a driver account with the critical <span class="field">Driver Name</span> field:</p>
+        <table class="tbl">
+          <thead><tr><th>Field</th><th>Example Value</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Username</td><td><code>lesline</code></td><td>Login credential</td></tr>
+            <tr><td>Password</td><td><code>driver123</code></td><td></td></tr>
+            <tr><td>Role</td><td><span class="role-drv">Driver</span></td><td></td></tr>
+            <tr><td>Full Name</td><td><code>Lesline Johnson</code></td><td></td></tr>
+            <tr><td>Driver Name</td><td><code>Lesline Johnson</code></td><td>This is the KEY that links SQLite to Google Sheets</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box"><p>The <strong>Driver Name</strong> field must match exactly how the driver appears in the Google Sheet "Carrier Database" tab. This name is used for case-insensitive matching across all load assignments, status updates, and data filtering. Creating a driver automatically syncs a row to the Carrier Database sheet.</p></div>
+        <p style="font-size:0.75rem; color:#94a3b8; margin-top:0.5rem;">Repeat for additional drivers (e.g., <code>marcus</code> / "Marcus Williams").</p>
+      </div>
+    </details>
+
+    <details id="p2-trucks">
+      <summary>Add Trucks to the Fleet</summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.6rem;">Navigate to <strong>Truck Database</strong> in the sidebar (<code class="url">/trucks</code>). Click "Add Truck" to open the form.</p>
+        <table class="tbl">
+          <thead><tr><th>Field</th><th>Example Value</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Unit Number</td><td><code>TRK-101</code></td><td>Unique fleet identifier</td></tr>
+            <tr><td>Make</td><td><code>Freightliner</code></td><td></td></tr>
+            <tr><td>Model</td><td><code>Cascadia</code></td><td></td></tr>
+            <tr><td>Year</td><td><code>2022</code></td><td></td></tr>
+            <tr><td>VIN</td><td><code>1FUJGLDR8NSAB1234</code></td><td>Vehicle Identification Number</td></tr>
+            <tr><td>License Plate</td><td><code>TX-ABC-1234</code></td><td></td></tr>
+            <tr><td>Status</td><td><code>Active</code></td><td>Active, Inactive, Maintenance, or OOS</td></tr>
+            <tr><td>Assigned Driver</td><td><code>Lesline Johnson</code></td><td>Dropdown of available drivers</td></tr>
+            <tr><td>Owner</td><td><code>Kevin Canunayon</code></td><td>Dropdown of Investor users (Super Admin only)</td></tr>
+          </tbody>
+        </table>
+        <p style="font-size:0.78rem; color:#94a3b8; margin-top:0.6rem;"><strong>Business Configuration</strong> (expand the section below the main form):</p>
+        <table class="tbl">
+          <thead><tr><th>Field</th><th>Example</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td>Purchase Price</td><td><code>$85,000</code></td><td>Asset valuation &amp; depreciation</td></tr>
+            <tr><td>Title Status</td><td><code>Clean</code></td><td>Clean, Lien, or Mixed</td></tr>
+            <tr><td>Insurance Monthly</td><td><code>$1,200</code></td><td>Fixed cost for investor P&amp;L</td></tr>
+            <tr><td>ELD Monthly</td><td><code>$45</code></td><td>Electronic Logging Device cost</td></tr>
+            <tr><td>Maintenance Fund</td><td><code>$800</code></td><td>Monthly sinking fund target</td></tr>
+            <tr><td>Driver Pay Daily</td><td><code>$200</code></td><td>Daily driver compensation</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box"><p>A driver with an active load cannot be reassigned to a different truck. Complete or cancel their current load first.</p></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ======================== PHASE 3 ======================== -->
+  <section class="phase" id="phase-3">
+    <div class="phase-header">
+      <span class="phase-num">3</span>
+      <span class="phase-title">Load Lifecycle</span>
+    </div>
+    <p class="phase-desc">The core workflow &mdash; from creating a job through delivery and proof of delivery.</p>
+
+    <div class="status-flow" style="margin-bottom:1.5rem;">
+      <span class="status-pill new">Unassigned</span><span class="sarrow">&#10140;</span>
+      <span class="status-pill dispatched">Dispatched</span><span class="sarrow">&#10140;</span>
+      <span class="status-pill dispatched">Assigned</span><span class="sarrow">&#10140;</span>
+      <span class="status-pill active">At Shipper</span><span class="sarrow">&#10140;</span>
+      <span class="status-pill active">Loading</span><span class="sarrow">&#10140;</span>
+      <span class="status-pill transit">In Transit</span><span class="sarrow">&#10140;</span>
+      <span class="status-pill active">At Receiver</span><span class="sarrow">&#10140;</span>
+      <span class="status-pill done">Delivered</span><span class="sarrow">&#10140;</span>
+      <span class="status-pill done">POD Received</span>
+    </div>
+
+    <details open id="p3-create">
+      <summary>Create a New Job <span class="actor-badge sa">Super Admin</span></summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.6rem;">Navigate to <strong>New Job</strong> in the sidebar (<code class="url">/jobs/new</code>).</p>
+        <div class="step">
+          <span class="step-marker">1</span>
+          <div class="step-content">
+            <h4>Load Information</h4>
+            <p><span class="field">Load ID</span> &mdash; enter manually or click "Auto" to generate (e.g., <code>LD-20260403-001</code>).<br>
+            <span class="field">Rate/Amount</span> &mdash; the payment for this load (e.g., <code>$3,500</code>).<br>
+            <span class="field">Broker/Customer</span> &mdash; who booked the load (e.g., <code>CH Robinson</code>).<br>
+            <span class="field">Broker Contact, Phone, Email</span> &mdash; contact details (visible only to Super Admin).</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">2</span>
+          <div class="step-content">
+            <h4>Pickup Details</h4>
+            <p><span class="field">Address</span> &mdash; type to search with Google Places autocomplete. Select a result to auto-fill coordinates.<br>
+            <span class="field">Date</span> &mdash; scheduled pickup date/time.<br>
+            <span class="field">Map Picker</span> &mdash; click the map icon to visually place the pickup pin on a map.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">3</span>
+          <div class="step-content">
+            <h4>Drop-off Details</h4>
+            <p>Same fields as pickup: address search, date picker, and optional map placement.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">4</span>
+          <div class="step-content">
+            <h4>Submit</h4>
+            <p>Click <strong>"Create Load"</strong>. The load is written to the Google Sheet "Job Tracking" tab with status <span class="status-pill new">Unassigned</span>. It appears on the Dashboard in the Job Board tab.</p>
+          </div>
+        </div>
+        <div class="tip-box"><p>The system warns if a duplicate Load ID is detected. Each Load ID should be unique across the entire sheet.</p></div>
+      </div>
+    </details>
+
+    <details id="p3-dispatch">
+      <summary>Dispatch Load to Driver <span class="actor-badge sa">Super Admin</span> <span class="actor-badge disp">Dispatcher</span></summary>
+      <div class="detail-body">
+        <div class="step">
+          <span class="step-marker">1</span>
+          <div class="step-content">
+            <h4>Go to the Dashboard Job Board</h4>
+            <p>Navigate to <code class="url">/dashboard</code> and click the <strong>"Job Board"</strong> tab. All unassigned loads appear here.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">2</span>
+          <div class="step-content">
+            <h4>Select a driver</h4>
+            <p>Find your load in the table. Use the <strong>Driver dropdown</strong> in the row to select an available driver (e.g., "Lesline Johnson").</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">3</span>
+          <div class="step-content">
+            <h4>Click "Assign"</h4>
+            <p>The system:</p>
+            <ul style="font-size:0.75rem; color:#94a3b8; list-style:none; margin-top:0.3rem;">
+              <li style="padding:0.15rem 0;">&#x2022; Updates the Driver column in Google Sheet</li>
+              <li style="padding:0.15rem 0;">&#x2022; Sets status to <span class="status-pill dispatched">Dispatched</span></li>
+              <li style="padding:0.15rem 0;">&#x2022; Logs the action to "Status Logs" sheet</li>
+              <li style="padding:0.15rem 0;">&#x2022; Sends a real-time Socket.IO notification to the driver</li>
+              <li style="padding:0.15rem 0;">&#x2022; Persists a notification in the driver's notifications table</li>
+            </ul>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">4</span>
+          <div class="step-content">
+            <h4>Load moves to Active Loads tab</h4>
+            <p>The load disappears from Job Board and appears under <strong>"Active Loads"</strong> where you can monitor progress.</p>
+          </div>
+        </div>
+        <div class="info-box"><p>You can also <strong>reassign</strong> a load to a different driver or <strong>cancel</strong> the assignment (returns to Unassigned) from the Active Loads tab.</p></div>
+      </div>
+    </details>
+
+    <details id="p3-accept">
+      <summary>Driver Accepts (or Declines) the Load <span class="actor-badge drv">Driver</span></summary>
+      <div class="detail-body">
+        <div class="step">
+          <span class="step-marker">1</span>
+          <div class="step-content">
+            <h4>Driver sees notification banner</h4>
+            <p>When logged in to the Driver App (<code class="url">/driver</code>), a prominent banner appears at the top: <em>"New Load Assigned: LD-20260403-001"</em> with a "View Load" button.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">2</span>
+          <div class="step-content">
+            <h4>Review load details</h4>
+            <p>The load appears in the <strong>Pending</strong> sub-tab under Loads. Tap the load card to see full details: truck info, pickup/dropoff addresses, route map, broker details, and scheduled dates.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">3a</span>
+          <div class="step-content">
+            <h4>Accept the load</h4>
+            <p>Tap the green <strong>"Accept"</strong> button. Status changes to <span class="status-pill dispatched">Assigned</span>. The load moves to the <strong>Active</strong> sub-tab. Dispatch is notified the driver confirmed.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">3b</span>
+          <div class="step-content">
+            <h4>Decline the load (alternative)</h4>
+            <p>Tap the red <strong>"Decline"</strong> button. The load returns to <span class="status-pill new">Unassigned</span> on the dispatch board. Dispatch is notified the driver declined.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details id="p3-status">
+      <summary>Status Progression <span class="actor-badge drv">Driver</span></summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.8rem;">The driver progresses through each status using the <strong>Status Stepper</strong> component. Each step requires a single tap with confirmation.</p>
+
+        <div class="card">
+          <h4>Step 1: At Shipper</h4>
+          <p>Driver arrives at the pickup location. Tap <strong>"Arrived at Shipper"</strong> on the status stepper. Status changes to <span class="status-pill active">At Shipper</span>.</p>
+        </div>
+        <div class="card">
+          <h4>Step 2: Loading</h4>
+          <p>Truck is being loaded with cargo. Tap <strong>"Loading"</strong>. Status changes to <span class="status-pill active">Loading</span>.</p>
+        </div>
+        <div class="card">
+          <h4>Step 3: In Transit</h4>
+          <p>Departing with cargo en route to delivery. Tap <strong>"In Transit"</strong>. Status changes to <span class="status-pill transit">In Transit</span>. GPS tracking actively reports position to dispatch.</p>
+        </div>
+        <div class="card">
+          <h4>Step 4: At Receiver</h4>
+          <p>Driver arrives at the delivery location. Tap <strong>"Arrived at Receiver"</strong>. Status changes to <span class="status-pill active">At Receiver</span>. A POD reminder modal may appear prompting document upload.</p>
+        </div>
+        <div class="card">
+          <h4>Step 5: Delivered</h4>
+          <p>Cargo has been unloaded and delivery is complete. Tap <strong>"Delivered"</strong>. Status changes to <span class="status-pill done">Delivered</span>.</p>
+        </div>
+
+        <div class="warn-box"><p><strong>One-Active-Job Constraint:</strong> A driver cannot start a new load (transition to "At Shipper") if they already have another load in an active state (At Shipper, Loading, In Transit, At Receiver). The system returns a 409 Conflict error. Complete or cancel the current load first.</p></div>
+        <div class="warn-box"><p><strong>POD Gate:</strong> The "Delivered" button is disabled until at least one document (POD) has been uploaded for the load.</p></div>
+      </div>
+    </details>
+
+    <details id="p3-geofence">
+      <summary>Geofence Auto-Triggers <span class="actor-badge auto">System</span></summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.8rem;">LogisX uses GPS geofencing to automatically advance load status when the driver physically arrives at pickup or delivery locations.</p>
+        <div class="card">
+          <h4>How It Works</h4>
+          <ul>
+            <li>The driver's phone continuously reports GPS coordinates via <code>POST /api/location</code></li>
+            <li>The server checks if the driver is within a <strong>500-meter radius</strong> of either the pickup or delivery coordinates</li>
+            <li>Uses <code>geolib.isPointWithinRadius()</code> for distance calculation</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>Auto-Trigger Rules</h4>
+          <ul>
+            <li><strong>Near Pickup:</strong> If current status is "Dispatched" or "Assigned" &rarr; auto-changes to <span class="status-pill active">At Shipper</span></li>
+            <li><strong>Near Delivery:</strong> If current status is "In Transit" &rarr; auto-changes to <span class="status-pill active">At Receiver</span></li>
+            <li>Both the driver and dispatch receive notifications when a geofence triggers</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>GPS Reporting Details</h4>
+          <ul>
+            <li><strong>Movement threshold:</strong> Reports when driver moves 50+ meters</li>
+            <li><strong>Minimum interval:</strong> No more than one report per 10 seconds</li>
+            <li><strong>Heartbeat:</strong> Reports every 60 seconds even if stationary</li>
+            <li><strong>Accuracy filter:</strong> Readings with accuracy &gt;100m are discarded</li>
+            <li><strong>Distance warning:</strong> If driver is 500+ km from target, a warning banner appears</li>
+          </ul>
+        </div>
+        <div class="tip-box"><p>Geofence errors are silently caught &mdash; they never block the location report. Even if geofence logic fails, the driver's location is still recorded and visible on the tracking map.</p></div>
+      </div>
+    </details>
+
+    <details id="p3-pod">
+      <summary>POD Upload &amp; Completion <span class="actor-badge drv">Driver</span></summary>
+      <div class="detail-body">
+        <div class="step">
+          <span class="step-marker">1</span>
+          <div class="step-content">
+            <h4>Navigate to Documents section</h4>
+            <p>In the Load Detail view, scroll to the <strong>Documents</strong> section, or use the Status tab's document upload area.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">2</span>
+          <div class="step-content">
+            <h4>Upload proof of delivery</h4>
+            <p>Choose <span class="field">Document Type</span> = "POD" from the dropdown. Either capture a photo with the camera or select a file. Multiple images can be combined into a single PDF.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">3</span>
+          <div class="step-content">
+            <h4>Server processing</h4>
+            <p>The server converts camera photos to PDF via <code>pdfkit</code>, saves locally to <code>uploads/</code>, and optionally uploads to Google Drive. OCR is attempted on receipts via <code>tesseract.js</code> (silent failure if OCR fails).</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">4</span>
+          <div class="step-content">
+            <h4>Complete the delivery</h4>
+            <p>With POD uploaded, the <strong>"Delivered"</strong> button on the status stepper becomes enabled. Tap to finalize. The load moves to <span class="status-pill done">Delivered</span> and eventually <span class="status-pill done">POD Received</span>.</p>
+          </div>
+        </div>
+        <p style="font-size:0.75rem; color:#94a3b8; margin-top:0.5rem;">Dispatch receives a <code>pod-uploaded</code> Socket.IO event and sees the document in the Dashboard's completed loads section.</p>
+      </div>
+    </details>
+  </section>
+
+  <!-- ======================== PHASE 4 ======================== -->
+  <section class="phase" id="phase-4">
+    <div class="phase-header">
+      <span class="phase-num">4</span>
+      <span class="phase-title">Expense Tracking</span>
+    </div>
+    <p class="phase-desc">Drivers log expenses during loads; dispatch reviews and approves them.</p>
+
+    <details open id="p4-submit">
+      <summary>Driver Submits Expenses <span class="actor-badge drv">Driver</span></summary>
+      <div class="detail-body">
+        <div class="step">
+          <span class="step-marker">1</span>
+          <div class="step-content">
+            <h4>Open the Expenses tab</h4>
+            <p>In the Driver App, tap the <strong>Expenses</strong> icon in the bottom navigation. The expense form appears if the driver has active/working loads.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">2</span>
+          <div class="step-content">
+            <h4>Fill the expense form</h4>
+            <p>Select the <span class="field">Load</span> from the dropdown (shows active loads only).<br>
+            Choose <span class="field">Type</span>: Fuel, Repair, Maintenance, Wear &amp; Tear, Toll, Food, or Other.<br>
+            Enter the <span class="field">Amount</span> and <span class="field">Description</span>.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">3</span>
+          <div class="step-content">
+            <h4>Fuel-specific fields</h4>
+            <p>When "Fuel" is selected, additional fields appear: <span class="field">Gallons</span> and <span class="field">Odometer</span> reading. These feed into fuel analytics and IFTA calculations.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">4</span>
+          <div class="step-content">
+            <h4>Attach receipt photo (optional)</h4>
+            <p>Tap the camera icon to capture or select a receipt image. Photos are auto-compressed. OCR extracts text for record keeping.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">5</span>
+          <div class="step-content">
+            <h4>Submit</h4>
+            <p>The expense is stored in SQLite and appears in the driver's expense history. Status starts as <strong>Pending</strong>.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details id="p4-review">
+      <summary>Dispatch Reviews Expenses <span class="actor-badge sa">Super Admin</span> <span class="actor-badge disp">Dispatcher</span></summary>
+      <div class="detail-body">
+        <div class="step">
+          <span class="step-marker">1</span>
+          <div class="step-content">
+            <h4>Navigate to Expenses page</h4>
+            <p>Go to <code class="url">/expenses</code> from the sidebar. The <strong>"All Expenses"</strong> sub-tab lists every driver expense with filtering options.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">2</span>
+          <div class="step-content">
+            <h4>Review and approve/reject</h4>
+            <p>Each expense row shows: driver name, load ID, type, amount, receipt thumbnail, and status. Use the <strong>Approve</strong> or <strong>Reject</strong> buttons to update status.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-marker">3</span>
+          <div class="step-content">
+            <h4>Fuel Analytics</h4>
+            <p>Switch to the <strong>"Fuel Analytics"</strong> sub-tab for cost-per-gallon trends, monthly fuel spend, and per-driver fuel efficiency breakdowns.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ======================== PHASE 5 ======================== -->
+  <section class="phase" id="phase-5">
+    <div class="phase-header">
+      <span class="phase-num">5</span>
+      <span class="phase-title">Messaging</span>
+    </div>
+    <p class="phase-desc">Real-time communication between dispatch and drivers.</p>
+
+    <details open id="p5-chat">
+      <summary>Dispatch &harr; Driver Chat</summary>
+      <div class="detail-body">
+        <div class="card">
+          <h4>Dispatch Side <span class="actor-badge sa">Super Admin</span> <span class="actor-badge disp">Dispatcher</span></h4>
+          <ul>
+            <li>Navigate to <strong>Messages</strong> (<code class="url">/messages</code>) in the sidebar</li>
+            <li>Left panel shows the <strong>driver list</strong> with unread message counts</li>
+            <li>Click a driver to open the chat thread on the right</li>
+            <li>Type a message, optionally attach files, and send</li>
+            <li>Messages can be tagged with a Load ID for context</li>
+            <li>Real-time delivery &mdash; messages appear instantly via Socket.IO</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>Driver Side <span class="actor-badge drv">Driver</span></h4>
+          <ul>
+            <li>Tap <strong>Messages</strong> in the bottom navigation bar</li>
+            <li>Shows conversation thread with dispatch</li>
+            <li>Send text messages and file attachments</li>
+            <li>Load ID tags appear on related messages</li>
+            <li>Unread badge on the Messages tab icon</li>
+          </ul>
+        </div>
+        <div class="tip-box"><p>Messages are stored in SQLite and persist across sessions. Both parties see timestamps and read receipts.</p></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ======================== PHASE 6 ======================== -->
+  <section class="phase" id="phase-6">
+    <div class="phase-header">
+      <span class="phase-num">6</span>
+      <span class="phase-title">Financial Review (Investor)</span>
+    </div>
+    <p class="phase-desc">The investor (truck company owner) reviews financial performance and fleet health.</p>
+
+    <details open id="p6-investor">
+      <summary>Investor Dashboard Walkthrough <span class="actor-badge inv">Investor</span></summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.8rem;">Log in with an investor account (e.g., <code>kevin</code>). You're directed to <code class="url">/investor</code>.</p>
+
+        <div class="card">
+          <h4>Hero Header</h4>
+          <p>Shows "<em>KC Trucking LLC &mdash; Asset Dashboard</em>" (company name from account). Today's date. Action buttons: Contact Operations, Contact Tech Support, Download Report (with date range), Refresh.</p>
+        </div>
+        <div class="card">
+          <h4>Quick Stats Strip</h4>
+          <ul>
+            <li><strong>Total Revenue</strong> &mdash; sum of all payments for investor's drivers</li>
+            <li><strong>Completed Loads</strong> &mdash; count of delivered/completed jobs</li>
+            <li><strong>Fleet Size</strong> &mdash; number of trucks owned by this investor</li>
+            <li><strong>Avg / Day</strong> &mdash; 30-day rolling average revenue</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>Production Metrics</h4>
+          <p>Total jobs, completed jobs, completion rate, revenue per job, average monthly owner earnings. All filtered to the investor's owned trucks and their assigned drivers.</p>
+        </div>
+        <div class="card">
+          <h4>Revenue Trends</h4>
+          <p>Monthly revenue data visualization showing income trajectory over time.</p>
+        </div>
+        <div class="card">
+          <h4>Asset Overview</h4>
+          <p>Fleet valuation (aggregate purchase price), current value (80% of purchase &mdash; 20% flat depreciation), total fleet miles, revenue per mile, cost per mile.</p>
+        </div>
+        <div class="card">
+          <h4>Per-Truck Breakdown</h4>
+          <p>Table showing each truck: unit number, make/model, assigned driver, status, monthly gross, monthly expenses, estimated annual revenue, total miles, ROI percentage.</p>
+        </div>
+        <div class="card">
+          <h4>Cash Flow &amp; Projections</h4>
+          <p>Net revenue to date (revenue &minus; all expenses), owner earnings estimate, break-even timeline with progress bar, ROI calculation.</p>
+        </div>
+        <div class="card">
+          <h4>Tax Shield (Section 179)</h4>
+          <p>100% deductibility of truck purchase price under Section 179. Shows at-risk capital: max of (purchase price + startup expenses) minus net revenue. Write-off percentage: 100%.</p>
+        </div>
+        <div class="card">
+          <h4>Legal Document Portal</h4>
+          <p>View and download per-truck legal documents: insurance, registration, titles, permits. Super Admin uploads these; investor can view/download.</p>
+        </div>
+        <div class="card">
+          <h4>Investor Chat</h4>
+          <p>Direct messaging with operations team for questions about loads, payments, or fleet status.</p>
+        </div>
+
+        <div class="info-box"><p>All financial data is filtered by the investor's owned trucks. The investor only sees revenue, expenses, and loads associated with drivers assigned to their trucks.</p></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ======================== PHASE 7 ======================== -->
+  <section class="phase" id="phase-7">
+    <div class="phase-header">
+      <span class="phase-num">7</span>
+      <span class="phase-title">Data Management &amp; Admin Tools</span>
+    </div>
+    <p class="phase-desc">Super Admin tools for data quality, sheet management, and system health.</p>
+
+    <details open id="p7-data">
+      <summary>Data Manager <span class="actor-badge sa">Super Admin</span></summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.6rem;">Navigate to <strong>Data Manager</strong> (<code class="url">/data</code>) in the sidebar. This is the direct interface to Google Sheets data.</p>
+        <div class="card">
+          <h4>Sheet Navigation</h4>
+          <p>Left sidebar lists all Google Sheet tabs (Job Tracking, Carrier Database, Payments Table, Status Logs, etc.). Click a tab to load its data.</p>
+        </div>
+        <div class="card">
+          <h4>Data Table Operations</h4>
+          <ul>
+            <li><strong>View:</strong> Paginated table with search across all columns</li>
+            <li><strong>Edit:</strong> Click a row to edit inline. Save or cancel changes.</li>
+            <li><strong>Add:</strong> "Add Row" button opens a modal with fields based on sheet headers</li>
+            <li><strong>Delete:</strong> Delete button with confirmation modal (Super Admin only)</li>
+            <li><strong>Duplicates:</strong> Toggle duplicate detection to find duplicate Load IDs</li>
+          </ul>
+        </div>
+        <div class="warn-box"><p>Editing Google Sheets directly bypasses business logic (status guards, validation). Use the Dashboard for normal operations; Data Manager is for corrections and administration.</p></div>
+      </div>
+    </details>
+
+    <details id="p7-admin">
+      <summary>Admin Tools <span class="actor-badge sa">Super Admin</span></summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.6rem;">Navigate to <strong>Data Tools</strong> (<code class="url">/admin/tools</code>) in the sidebar.</p>
+
+        <div class="card">
+          <h4>1. Duplicate Load ID Scanner</h4>
+          <p>Scans Job Tracking for duplicate Load IDs. Groups duplicates and flags "dangerous" ones (same ID with different statuses). One-click remove for problematic rows.</p>
+        </div>
+        <div class="card">
+          <h4>2. Driver Name Mismatch Scanner</h4>
+          <p>Cross-references driver names across: User Accounts, Carrier Database sheet, and Job Tracking sheet. Detects spelling inconsistencies, missing accounts, and name conflicts. One-click rename to fix mismatches.</p>
+        </div>
+        <div class="card">
+          <h4>3. Orphan Record Scanner</h4>
+          <p>Finds SQLite records (expenses, messages, locations) referencing driver names that don't exist in the Carrier Database. Shows count per orphan driver.</p>
+        </div>
+        <div class="card">
+          <h4>4. Stale Location Data Scanner</h4>
+          <p>Identifies GPS location records older than 7 days or referencing completed/non-existent loads. Option to retag or clean up stale entries.</p>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ======================== PHASE 8 ======================== -->
+  <section class="phase" id="phase-8">
+    <div class="phase-header">
+      <span class="phase-num">8</span>
+      <span class="phase-title">IFTA Compliance</span>
+    </div>
+    <p class="phase-desc">State-by-state mileage reporting for fuel tax compliance.</p>
+
+    <details open id="p8-ifta">
+      <summary>IFTA Mileage Report <span class="actor-badge sa">Super Admin</span> <span class="actor-badge disp">Dispatcher</span></summary>
+      <div class="detail-body">
+        <div class="card">
+          <h4>What is IFTA?</h4>
+          <p>The International Fuel Tax Agreement requires carriers to report miles driven per state for quarterly fuel tax filings. LogisX automatically calculates this from GPS data.</p>
+        </div>
+        <div class="card">
+          <h4>How It Works</h4>
+          <ul>
+            <li>GPS location history is analyzed by the server (<code>GET /api/compliance/ifta</code>)</li>
+            <li>Distance between consecutive GPS points is calculated using <code>geolib.getDistance()</code></li>
+            <li>Gaps greater than 30 minutes are treated as separate trips</li>
+            <li>Distances greater than 50 miles between points are filtered out (GPS drift)</li>
+            <li>Each GPS midpoint is classified by state using built-in bounding boxes (~24 US states)</li>
+            <li>Miles are summed per state per driver</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>Report Output</h4>
+          <ul>
+            <li><strong>Total miles</strong> across the fleet</li>
+            <li><strong>Per-state breakdown</strong> with miles, percentage, and contributing drivers</li>
+            <li><strong>Date range</strong> defaults to last 2 months (configurable)</li>
+            <li>Data can be used for quarterly IFTA filings</li>
+          </ul>
+        </div>
+        <div class="info-box"><p>Covered states include: TX, OK, LA, AR, NM, MS, AL, TN, GA, FL, MO, KS, CO, AZ, CA, NV, IL, IN, OH, PA, NY, NC, SC, VA, and more.</p></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ======================== PHASE 9 ======================== -->
+  <section class="phase" id="phase-9">
+    <div class="phase-header">
+      <span class="phase-num">9</span>
+      <span class="phase-title">Live Tracking</span>
+    </div>
+    <p class="phase-desc">Real-time fleet visualization on an interactive map.</p>
+
+    <details open id="p9-tracking">
+      <summary>Real-Time Tracking Map <span class="actor-badge sa">Super Admin</span> <span class="actor-badge disp">Dispatcher</span></summary>
+      <div class="detail-body">
+        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:0.6rem;">Navigate to <strong>Tracking</strong> (<code class="url">/tracking</code>) in the sidebar.</p>
+        <div class="card">
+          <h4>Map Features</h4>
+          <ul>
+            <li><strong>Driver markers</strong> &mdash; Each active driver appears as a pin on the Google Map</li>
+            <li><strong>Route polylines</strong> &mdash; Lines showing the planned route from pickup to delivery</li>
+            <li><strong>Info windows</strong> &mdash; Click a driver marker to see: name, current status, speed, active load ID, ETA</li>
+            <li><strong>Map type toggle</strong> &mdash; Switch between roadmap and satellite views</li>
+            <li><strong>Real-time updates</strong> &mdash; Positions refresh as drivers report GPS via Socket.IO</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>ETA Calculation</h4>
+          <ul>
+            <li>Uses <code>geolib.getDistance()</code> from current position to destination</li>
+            <li>Default speed: <strong>24.587 m/s (~55 mph)</strong> when GPS speed is unreliable</li>
+            <li>Compares ETA vs scheduled delivery date to flag <strong>"on-time"</strong> or <strong>"delayed"</strong></li>
+          </ul>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ======================== QUICK REFERENCE ======================== -->
+  <section class="phase" id="quick-ref" style="margin-top:2rem; padding-top:2rem; border-top:1px solid #1e293b;">
+    <div class="phase-header">
+      <span class="phase-num" style="background:#a855f7;">R</span>
+      <span class="phase-title">Quick Reference</span>
+    </div>
+
+    <details open>
+      <summary>Status Progression Chain</summary>
+      <div class="detail-body">
+        <div class="status-flow">
+          <span class="status-pill new">Unassigned</span><span class="sarrow">&#10140;</span>
+          <span class="status-pill dispatched">Dispatched</span><span class="sarrow">&#10140;</span>
+          <span class="status-pill dispatched">Assigned</span><span class="sarrow">&#10140;</span>
+          <span class="status-pill active">At Shipper</span><span class="sarrow">&#10140;</span>
+          <span class="status-pill active">Loading</span><span class="sarrow">&#10140;</span>
+          <span class="status-pill transit">In Transit</span><span class="sarrow">&#10140;</span>
+          <span class="status-pill active">At Receiver</span><span class="sarrow">&#10140;</span>
+          <span class="status-pill done">Delivered</span><span class="sarrow">&#10140;</span>
+          <span class="status-pill done">POD Received</span>
+        </div>
+        <table class="tbl" style="margin-top:1rem;">
+          <thead><tr><th>Transition</th><th>Actor</th><th>Trigger</th></tr></thead>
+          <tbody>
+            <tr><td>Unassigned &rarr; Dispatched</td><td><span class="role-sa">Super Admin</span> / <span class="role-disp">Dispatcher</span></td><td>Assigns driver from Dashboard Job Board</td></tr>
+            <tr><td>Dispatched &rarr; Assigned</td><td><span class="role-drv">Driver</span></td><td>Accepts load in Driver App</td></tr>
+            <tr><td>Assigned &rarr; At Shipper</td><td><span class="role-drv">Driver</span> or <span style="color:#a855f7;font-weight:600;">Geofence</span></td><td>Manual status update or arrives within 500m of pickup</td></tr>
+            <tr><td>At Shipper &rarr; Loading</td><td><span class="role-drv">Driver</span></td><td>Manual status update</td></tr>
+            <tr><td>Loading &rarr; In Transit</td><td><span class="role-drv">Driver</span></td><td>Manual status update</td></tr>
+            <tr><td>In Transit &rarr; At Receiver</td><td><span class="role-drv">Driver</span> or <span style="color:#a855f7;font-weight:600;">Geofence</span></td><td>Manual status update or arrives within 500m of delivery</td></tr>
+            <tr><td>At Receiver &rarr; Delivered</td><td><span class="role-drv">Driver</span></td><td>Manual (requires POD upload first)</td></tr>
+            <tr><td>Delivered &rarr; POD Received</td><td><span style="color:#a855f7;font-weight:600;">System</span></td><td>Automatic after POD document confirmed</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <details>
+      <summary>System Constants</summary>
+      <div class="detail-body">
+        <table class="tbl">
+          <thead><tr><th>Parameter</th><th>Value</th><th>Context</th></tr></thead>
+          <tbody>
+            <tr><td>Geofence Radius</td><td>500 meters</td><td>Auto-status trigger distance</td></tr>
+            <tr><td>GPS Movement Threshold</td><td>50 meters</td><td>Minimum distance to report new position</td></tr>
+            <tr><td>GPS Min Interval</td><td>10 seconds</td><td>Minimum time between reports</td></tr>
+            <tr><td>GPS Heartbeat</td><td>60 seconds</td><td>Reports even when stationary</td></tr>
+            <tr><td>GPS Accuracy Filter</td><td>&gt;100m discarded</td><td>Prevents map jumping on bad readings</td></tr>
+            <tr><td>Default ETA Speed</td><td>55 mph (24.587 m/s)</td><td>Used when GPS speed is unreliable</td></tr>
+            <tr><td>Session Duration</td><td>24 hours</td><td>Cookie max age, SQLite store</td></tr>
+            <tr><td>Sheets Rate Limit</td><td>300 req/min</td><td>Google Sheets API quota</td></tr>
+            <tr><td>Pagination Max</td><td>200 rows/page</td><td>API data endpoint limit</td></tr>
+            <tr><td>Maintenance Fund Target</td><td>$800/month</td><td>Default per-truck sinking fund</td></tr>
+            <tr><td>Distance Warning</td><td>500 km</td><td>Warns driver if far from target</td></tr>
+            <tr><td>IFTA Gap Threshold</td><td>30 minutes</td><td>Separates trips in mileage calc</td></tr>
+            <tr><td>IFTA Drift Filter</td><td>50 miles</td><td>Max single-hop distance allowed</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <details>
+      <summary>Expense Types</summary>
+      <div class="detail-body">
+        <table class="tbl">
+          <thead><tr><th>Type</th><th>Extra Fields</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Fuel</td><td>Gallons, Odometer</td><td>Feeds fuel analytics &amp; IFTA data</td></tr>
+            <tr><td>Repair</td><td>&mdash;</td><td>Unplanned mechanical repairs</td></tr>
+            <tr><td>Maintenance</td><td>&mdash;</td><td>Scheduled service items</td></tr>
+            <tr><td>Wear &amp; Tear</td><td>&mdash;</td><td>Tires, brakes, etc.</td></tr>
+            <tr><td>Toll</td><td>&mdash;</td><td>Highway tolls</td></tr>
+            <tr><td>Food</td><td>&mdash;</td><td>Driver meals on the road</td></tr>
+            <tr><td>Other</td><td>&mdash;</td><td>Miscellaneous expenses</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <details>
+      <summary>URL &amp; Role Access Matrix</summary>
+      <div class="detail-body">
+        <table class="tbl">
+          <thead><tr><th>Route</th><th style="color:#f87171;">SA</th><th style="color:#60a5fa;">Disp</th><th style="color:#34d399;">Driver</th><th style="color:#fbbf24;">Inv</th></tr></thead>
+          <tbody>
+            <tr><td><code>/dashboard</code></td><td>&#10003;</td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td></tr>
+            <tr><td><code>/jobs/new</code></td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
+            <tr><td><code>/tracking</code></td><td>&#10003;</td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td></tr>
+            <tr><td><code>/expenses</code></td><td>&#10003;</td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td></tr>
+            <tr><td><code>/messages</code></td><td>&#10003;</td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td></tr>
+            <tr><td><code>/notifications</code></td><td>&#10003;</td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td></tr>
+            <tr><td><code>/data</code></td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
+            <tr><td><code>/driver</code></td><td>&#10003;</td><td>&mdash;</td><td>&#10003;</td><td>&mdash;</td></tr>
+            <tr><td><code>/investor</code></td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td><td>&#10003;</td></tr>
+            <tr><td><code>/users</code></td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
+            <tr><td><code>/trucks</code></td><td>&#10003;</td><td>&#10003;</td><td>&mdash;</td><td>&#10003;</td></tr>
+            <tr><td><code>/admin/tools</code></td><td>&#10003;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+
+</main>
+
+<button class="expand-btn" onclick="document.querySelectorAll('details').forEach(d => d.open = !d.open)">Toggle All Sections</button>
+
+</body>
+</html>
