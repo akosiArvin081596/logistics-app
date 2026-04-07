@@ -5269,7 +5269,7 @@ app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async 
 });
 
 // GET /api/config/maps-key — expose Google Maps API key for client-side map rendering
-app.get("/api/config/maps-key", requireAuth, (req, res) => {
+app.get("/api/config/maps-key", (req, res) => {
 	res.json({ key: GOOGLE_MAPS_API_KEY });
 });
 
