@@ -5,7 +5,7 @@
     </div>
 
     <details class="form-accordion">
-      <summary class="form-toggle">+ Add Driver</summary>
+      <summary class="form-toggle">+ Add Driver <span class="form-toggle-note">(Case-by-case basis only — should go through the proper application process)</span></summary>
       <AddDriverForm
         :carrier-names="carrierNames"
         @submit="handleAdd"
