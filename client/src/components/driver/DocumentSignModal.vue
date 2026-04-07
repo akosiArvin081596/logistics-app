@@ -231,7 +231,9 @@ function formatDate(d) {
 .sign-input {
   width: 100%; padding: 0.5rem 0.75rem;
   border: 1px solid var(--bg); border-radius: 8px;
-  font-size: 0.88rem; background: var(--bg);
+  font-size: 1.1rem; background: var(--bg);
+  font-family: 'Dancing Script', 'Brush Script MT', 'Segoe Script', cursive;
+  font-style: italic;
 }
 .sign-input:disabled { opacity: 0.5; }
 .canvas-wrapper { position: relative; }
