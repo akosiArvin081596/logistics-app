@@ -10,19 +10,21 @@
       <p v-show="!collapsed" class="subtitle">Logistics Management</p>
     </div>
     <div class="sidebar-section">
-      <router-link
-        v-for="item in navItems"
-        :key="item.to"
-        :to="item.to"
-        class="nav-item"
-        active-class="active"
-        :title="collapsed ? item.label : ''"
-      >
-        <span class="nav-icon" v-html="item.icon"></span>
-        <span v-show="!collapsed" class="nav-label">{{ item.label }}</span>
-        <span v-if="!collapsed && item.to === '/notifications' && notifStore.unreadCount > 0" class="nav-badge">{{ notifStore.unreadCount }}</span>
-        <span v-if="collapsed && item.to === '/notifications' && notifStore.unreadCount > 0" class="nav-badge-dot"></span>
-      </router-link>
+      <template v-for="item in navItems" :key="item.to || item.label">
+        <div v-if="item.divider" v-show="!collapsed" class="nav-divider">{{ item.label }}</div>
+        <router-link
+          v-else
+          :to="item.to"
+          class="nav-item"
+          active-class="active"
+          :title="collapsed ? item.label : ''"
+        >
+          <span class="nav-icon" v-html="item.icon"></span>
+          <span v-show="!collapsed" class="nav-label">{{ item.label }}</span>
+          <span v-if="!collapsed && item.to === '/notifications' && notifStore.unreadCount > 0" class="nav-badge">{{ notifStore.unreadCount }}</span>
+          <span v-if="collapsed && item.to === '/notifications' && notifStore.unreadCount > 0" class="nav-badge-dot"></span>
+        </router-link>
+      </template>
       <div id="sidebarExtra"></div>
     </div>
     <div class="sidebar-footer">
@@ -79,16 +81,15 @@ const navConfig = {
     { to: '/notifications', icon: '&#128276;', label: 'Notifications' },
     { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
     { to: '/messages', icon: '&#128172;', label: 'Messages' },
-    // { to: '/driver', icon: '&#128666;', label: 'Driver App' },
-    // { to: '/investor', icon: '&#128200;', label: 'Investor View' },
+    { divider: true, label: 'Administration' },
     { to: '/users', icon: '&#9881;', label: 'User Management' },
-    { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
-    { to: '/trailers', icon: '&#128718;', label: 'Trailer Database' },
-    { to: '/drivers', icon: '&#128100;', label: 'Driver Database' },
     { to: '/investors', icon: '&#128188;', label: 'Investor Database' },
+    { to: '/drivers', icon: '&#128100;', label: 'Driver Database' },
+    { to: '/trailers', icon: '&#128718;', label: 'Trailer Database' },
     { to: '/applications', icon: '&#128221;', label: 'Applications' },
+    { divider: true, label: 'System' },
+    { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
-    // { to: '/archive', icon: '&#128451;', label: 'Archive' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
   ],
   Dispatcher: [
@@ -140,6 +141,15 @@ async function handleLogout() {
 .nav-label {
   white-space: nowrap;
   overflow: hidden;
+}
+.nav-divider {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim, #8b8fa3);
+  padding: 0.8rem 0.75rem 0.3rem;
+  margin-top: 0.2rem;
 }
 
 /* Header layout */
