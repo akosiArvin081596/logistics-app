@@ -13,8 +13,7 @@
         <CardContent class="p-8 text-center">
           <div class="success-icon">&#10003;</div>
           <h2 class="text-xl font-bold text-gray-900 mt-4">Application Submitted!</h2>
-          <p class="text-gray-500 mt-2">Thank you for applying. We'll review your application and contact you soon.</p>
-          <button class="submit-btn" style="max-width:240px;margin:1.5rem auto 0;" @click="resetForm">Submit Another Application</button>
+          <p class="text-gray-500 mt-2">Thank you for applying to LogisX. We'll review your application and contact you soon.</p>
         </CardContent>
       </Card>
 
@@ -66,7 +65,7 @@ const submitted = ref(false)
 const error = ref('')
 
 const defaultForm = () => ({
-  full_name: '', email: '', phone: '', dob: '', address: '', ssn: '', drivers_license: '', position: '',
+  first_name: '', last_name: '', email: '', phone: '', dob: '', address: '', ssn: '', drivers_license: '', position: '',
   experience: '', has_cdl: '', work_authorized: '', felony_convicted: '', felony_explanation: '',
   accident_history: '', accident_description: '', traffic_citations: '',
   certifications: '', availability: [], skills: '',
@@ -77,7 +76,7 @@ const form = reactive(defaultForm())
 
 function validate(s) {
   if (s === 0) {
-    if (!form.full_name || !form.email || !form.phone || !form.dob || !form.address || !form.ssn || !form.drivers_license || !form.position) return 'Please fill in all required fields in this section.'
+    if (!form.first_name || !form.last_name || !form.email || !form.phone || !form.dob || !form.address || !form.ssn || !form.drivers_license || !form.position) return 'Please fill in all required fields in this section.'
   }
   if (s === 1) {
     if (!form.experience || !form.has_cdl || !form.work_authorized || !form.felony_convicted) return 'Please answer all required questions.'
@@ -108,10 +107,11 @@ async function submitForm() {
   error.value = ''
   submitting.value = true
   try {
+    const payload = { ...form, full_name: `${form.first_name} ${form.last_name}`.trim() }
     const res = await fetch('/api/public/apply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...form }),
+      body: JSON.stringify(payload),
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || 'Submission failed')

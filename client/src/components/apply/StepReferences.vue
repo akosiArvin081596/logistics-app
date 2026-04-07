@@ -22,7 +22,7 @@
       </div>
       <div class="field">
         <label class="field-label">Date</label>
-        <div class="input-wrap"><input v-model="form.signature_date" type="date" /></div>
+        <div class="input-wrap"><input :value="form.signature_date" type="date" readonly class="readonly-date" /></div>
       </div>
     </div>
   </div>
@@ -32,9 +32,7 @@
 import { onMounted } from 'vue'
 const props = defineProps({ form: { type: Object, required: true } })
 onMounted(() => {
-  if (!props.form.signature_date) {
-    props.form.signature_date = new Date().toISOString().split('T')[0]
-  }
+  props.form.signature_date = new Date().toISOString().split('T')[0]
 })
 </script>
 
@@ -56,5 +54,10 @@ onMounted(() => {
 .signature-input {
   font-family: 'Segoe Script', 'Dancing Script', cursive, serif !important;
   font-size: 1.1rem !important;
+}
+.readonly-date {
+  background: #f3f4f6 !important;
+  color: #6b7280 !important;
+  cursor: not-allowed !important;
 }
 </style>
