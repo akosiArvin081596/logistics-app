@@ -213,11 +213,6 @@ function openDoc(doc) {
 
 async function handleSigned() {
   showSignModal.value = false
-  // Sign via investor endpoint (not driver endpoint)
-  if (!selectedDoc.value) return
-  const docKey = selectedDoc.value.doc_key
-  // The DocumentSignModal calls driverStore.signDocument — we need to intercept.
-  // Since we're reusing the modal, we'll handle signing directly here instead.
   await loadOnboarding()
 }
 

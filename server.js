@@ -1342,10 +1342,14 @@ app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
 		if (!bank_name || !routing_number || !account_number) {
 			return res.status(400).json({ error: "Bank name, routing number, and account number are required" });
 		}
+		// Verify all documents are signed before accepting banking info
+		const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
+		if (signedCount < INVESTOR_ONBOARDING_DOCS.length) {
+			return res.status(400).json({ error: "All documents must be signed before submitting banking info" });
+		}
 		db.prepare(`INSERT OR REPLACE INTO investor_payment_info (application_id, bank_name, account_type, routing_number, account_number, account_name)
 			VALUES (?, ?, ?, ?, ?, ?)`).run(appId, bank_name, account_type || "", routing_number, account_number, account_name || "");
 
-		// Mark as fully onboarded
 		db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=? WHERE application_id=?")
 			.run(new Date().toISOString(), appId);
 
