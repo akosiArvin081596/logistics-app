@@ -16,6 +16,8 @@ const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { generateContractorAgreement } = require("./lib/generate-contractor-pdf");
 const { generateEquipmentPolicy } = require("./lib/generate-equipment-policy-pdf");
 const { generateMobilePolicy } = require("./lib/generate-mobile-policy-pdf");
+const { generateSubstancePolicy } = require("./lib/generate-substance-policy-pdf");
+const { generateServiceInvoice } = require("./lib/generate-service-invoice-pdf");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -1187,12 +1189,34 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 				signatureImage: signatureImage || null,
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
+		} else if (docKey === "substance_policy") {
+			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+			const pdfBuffer = await generateSubstancePolicy({
+				fullName: user?.driver_name || signatureText.trim(),
+				effectiveDate,
+				signatureImage: signatureImage || null,
+			});
+			fs.writeFileSync(signedPath, pdfBuffer);
+		} else if (docKey === "service_invoice") {
+			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+			const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
+			const payInfo = db.prepare("SELECT * FROM driver_payment_info WHERE user_id = ?").get(userId);
+			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+			const pdfBuffer = await generateServiceInvoice({
+				fullName: user?.driver_name || signatureText.trim(),
+				address: application?.address || "",
+				phone: application?.phone || "",
+				effectiveDate,
+				signatureImage: signatureImage || null,
+				bankName: payInfo?.bank_name || "",
+				accountType: payInfo?.account_type || "",
+			});
+			fs.writeFileSync(signedPath, pdfBuffer);
 		} else {
-			// Stamp overlay on existing template PDF (for remaining documents)
+			// Stamp overlay on existing template PDF (W-9 only — IRS form, can't recreate)
 			const fileMap = {
 				w9: "fw9.pdf",
-				substance_policy: "LogisX SUBSTANCE POLICY AND PROCEDURE.pdf",
-				service_invoice: "Logistics Service Invoice.pdf",
 			};
 			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", fileMap[docKey]);
 			if (fs.existsSync(templatePath)) {
@@ -1322,6 +1346,25 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) =
 			});
 			res.setHeader("Content-Type", "application/pdf");
 			res.setHeader("Content-Disposition", 'inline; filename="Mobile Policy Preview.pdf"');
+			return res.send(pdfBuffer);
+		}
+
+		if (docKey === "substance_policy") {
+			const pdfBuffer = await generateSubstancePolicy({
+				fullName: driverName, effectiveDate, signatureImage: null,
+			});
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", 'inline; filename="Substance Policy Preview.pdf"');
+			return res.send(pdfBuffer);
+		}
+
+		if (docKey === "service_invoice") {
+			const pdfBuffer = await generateServiceInvoice({
+				fullName: driverName, address: application?.address || "", phone: application?.phone || "",
+				effectiveDate, signatureImage: null, bankName: "", accountType: "",
+			});
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", 'inline; filename="Service Invoice Preview.pdf"');
 			return res.send(pdfBuffer);
 		}
 
