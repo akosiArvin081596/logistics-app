@@ -2,12 +2,19 @@
   <div class="step-section">
     <div class="section-header">
       <h3>References &amp; Signature</h3>
-      <p>Add any additional information along with a reference contact</p>
+      <p>Provide 3 professional references and sign your application</p>
     </div>
-    <div class="field">
-      <label class="field-label">Please provide the name and contact information for at least one professional reference</label>
-      <div class="input-wrap"><textarea v-model="form.reference_info" rows="3" placeholder="Name, phone, email, relationship..."></textarea></div>
+
+    <!-- 3 References -->
+    <div v-for="(ref, i) in form.references" :key="i" class="reference-block">
+      <label class="field-label ref-title">Reference {{ i + 1 }} <span class="req">*</span></label>
+      <div class="grid grid-cols-3 gap-3">
+        <div class="field"><div class="input-wrap"><input v-model="ref.name" placeholder="Full name" /></div></div>
+        <div class="field"><div class="input-wrap"><input v-model="ref.phone" type="tel" placeholder="Phone number" /></div></div>
+        <div class="field"><div class="input-wrap"><input v-model="ref.relationship" placeholder="Relationship" /></div></div>
+      </div>
     </div>
+
     <div class="field">
       <label class="field-label">Is there anything else you would like for us to know?</label>
       <div class="input-wrap"><textarea v-model="form.additional_info" rows="3" placeholder="Any additional information..."></textarea></div>
@@ -18,19 +25,19 @@
       <h4 class="policy-title">Company Policies &amp; Documents</h4>
       <p class="policy-desc">Please review the following documents before signing your application.</p>
       <div class="policy-cards">
-        <a href="/policies/Employment-History-Verification-Form.docx" target="_blank" class="policy-card">
-          <div class="policy-icon">&#128196;</div>
+        <a href="/policies/LogisX-Mobile-Policy.pdf" target="_blank" class="policy-card">
+          <div class="policy-icon">&#128241;</div>
           <div class="policy-info">
-            <div class="policy-name">Employment History Verification Form</div>
-            <div class="policy-meta">DOCX &middot; Download &amp; review</div>
+            <div class="policy-name">LogisX Inc. Mobile Policy</div>
+            <div class="policy-meta">PDF &middot; View &amp; review</div>
           </div>
-          <div class="policy-action">&#8595;</div>
+          <div class="policy-action">&#128065;</div>
         </a>
-        <a href="/policies/LogisX-Certificate-of-Completion.png" target="_blank" class="policy-card">
-          <div class="policy-icon">&#127942;</div>
+        <a href="/policies/LogisX-Substance-Policy.pdf" target="_blank" class="policy-card">
+          <div class="policy-icon">&#128203;</div>
           <div class="policy-info">
-            <div class="policy-name">LogisX Certificate of Completion</div>
-            <div class="policy-meta">Driver Training &amp; Orientation Program</div>
+            <div class="policy-name">LogisX Substance Policy and Procedure</div>
+            <div class="policy-meta">PDF &middot; View &amp; review</div>
           </div>
           <div class="policy-action">&#128065;</div>
         </a>
@@ -63,6 +70,17 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.reference-block {
+  margin-bottom: 1rem;
+  padding: 1rem;
+  background: #f8fafc;
+  border: 1px solid #e8edf2;
+  border-radius: 10px;
+}
+.ref-title {
+  margin-bottom: 0.5rem !important;
+  font-size: 0.85rem !important;
+}
 .policy-section {
   margin-bottom: 1.5rem;
   padding: 1.25rem;
@@ -70,83 +88,27 @@ onMounted(() => {
   border: 1px solid #e8edf2;
   border-radius: 12px;
 }
-.policy-title {
-  font-size: 0.88rem;
-  font-weight: 700;
-  color: #111827;
-  margin-bottom: 0.25rem;
-}
-.policy-desc {
-  font-size: 0.78rem;
-  color: #9ca3af;
-  margin-bottom: 1rem;
-}
-.policy-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
-}
+.policy-title { font-size: 0.88rem; font-weight: 700; color: #111827; margin-bottom: 0.25rem; }
+.policy-desc { font-size: 0.78rem; color: #9ca3af; margin-bottom: 1rem; }
+.policy-cards { display: flex; flex-direction: column; gap: 0.65rem; }
 .policy-card {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-  padding: 0.85rem 1rem;
-  border: 1.5px solid #e2e4ea;
-  border-radius: 10px;
-  background: white;
-  text-decoration: none;
-  color: inherit;
-  transition: all 0.15s;
+  display: flex; align-items: center; gap: 0.85rem;
+  padding: 0.85rem 1rem; border: 1.5px solid #e2e4ea; border-radius: 10px;
+  background: white; text-decoration: none; color: inherit; transition: all 0.15s;
 }
-.policy-card:hover {
-  border-color: hsl(199, 89%, 48%);
-  box-shadow: 0 2px 8px rgba(56, 189, 248, 0.1);
-  transform: translateY(-1px);
-}
-.policy-icon {
-  font-size: 1.5rem;
-  flex-shrink: 0;
-}
-.policy-info {
-  flex: 1;
-  min-width: 0;
-}
-.policy-name {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: #111827;
-}
-.policy-meta {
-  font-size: 0.72rem;
-  color: #9ca3af;
-  margin-top: 0.1rem;
-}
-.policy-action {
-  font-size: 1.1rem;
-  color: hsl(199, 89%, 48%);
-  flex-shrink: 0;
-}
+.policy-card:hover { border-color: hsl(199, 89%, 48%); box-shadow: 0 2px 8px rgba(56, 189, 248, 0.1); transform: translateY(-1px); }
+.policy-icon { font-size: 1.5rem; flex-shrink: 0; }
+.policy-info { flex: 1; min-width: 0; }
+.policy-name { font-size: 0.85rem; font-weight: 600; color: #111827; }
+.policy-meta { font-size: 0.72rem; color: #9ca3af; margin-top: 0.1rem; }
+.policy-action { font-size: 1.1rem; color: hsl(199, 89%, 48%); flex-shrink: 0; }
 .certification-box {
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
-  border-left: 4px solid hsl(199, 89%, 48%);
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
-  margin-bottom: 1.25rem;
+  background: #f0f9ff; border: 1px solid #bae6fd; border-left: 4px solid hsl(199, 89%, 48%);
+  border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.25rem;
 }
-.certification-box p {
-  font-size: 0.82rem;
-  color: #374151;
-  line-height: 1.6;
-  font-style: italic;
-}
-.signature-input {
-  font-family: 'Segoe Script', 'Dancing Script', cursive, serif !important;
-  font-size: 1.1rem !important;
-}
-.readonly-date {
-  background: #f3f4f6 !important;
-  color: #6b7280 !important;
-  cursor: not-allowed !important;
-}
+.certification-box p { font-size: 0.82rem; color: #374151; line-height: 1.6; font-style: italic; }
+.signature-input { font-family: 'Segoe Script', 'Dancing Script', cursive, serif !important; font-size: 1.1rem !important; }
+.readonly-date { background: #f3f4f6 !important; color: #6b7280 !important; cursor: not-allowed !important; }
+.grid-cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 640px) { .grid-cols-3 { grid-template-columns: 1fr; } }
 </style>

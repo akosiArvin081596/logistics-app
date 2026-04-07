@@ -6,14 +6,14 @@
         <p class="text-[13px] text-gray-400 mt-0.5">Review and manage employment applications</p>
       </div>
       <div class="flex items-center gap-3">
-        <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ applications.length }} applications</span>
+        <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ filteredApplications.length }} {{ activeFilter || 'total' }}</span>
         <button class="px-4 py-2 text-sm font-semibold bg-white text-gray-700 border border-gray-200 rounded-lg hover:border-gray-300 hover:shadow-sm transition-all duration-150" @click="load">&#8635; Refresh</button>
       </div>
     </div>
 
     <!-- KPI Cards -->
     <div class="kpi-grid" style="margin-bottom:1.25rem;">
-      <Card v-for="card in kpiCards" :key="card.label" class="kpi-card" :class="card.theme">
+      <Card v-for="card in kpiCards" :key="card.label" class="kpi-card" :class="[card.theme, { 'kpi-active': activeFilter === card.filter }]" style="cursor:pointer;" @click="handleKpiClick(card.filter)">
         <CardContent class="flex items-center gap-4" style="padding:1rem 1.25rem;">
           <div :class="['kpi-icon', card.iconTheme]" v-html="card.icon"></div>
           <div class="kpi-info">
@@ -31,7 +31,7 @@
         <div v-if="loading" class="flex items-center justify-center py-16">
           <div class="text-[13px] text-gray-400">Loading applications...</div>
         </div>
-        <div v-else-if="applications.length === 0" class="flex flex-col items-center justify-center py-16 gap-2">
+        <div v-else-if="filteredApplications.length === 0" class="flex flex-col items-center justify-center py-16 gap-2">
           <div class="text-[2rem]">&#128203;</div>
           <div class="text-[14px] text-gray-500 font-medium">No applications yet</div>
           <div class="text-[12px] text-gray-400">Applications submitted at /apply will appear here</div>
@@ -51,7 +51,7 @@
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow v-for="app in applications" :key="app.id" class="hover:bg-blue-50/30 transition-colors duration-100">
+            <TableRow v-for="app in filteredApplications" :key="app.id" class="hover:bg-blue-50/30 transition-colors duration-100">
               <TableCell class="font-semibold text-[13px] text-gray-900">{{ app.full_name }}</TableCell>
               <TableCell><Badge :class="positionBadge(app.position)">{{ app.position }}</Badge></TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.email }}</TableCell>
@@ -67,6 +67,7 @@
               <TableCell class="text-right">
                 <div class="flex items-center justify-end gap-1.5">
                   <Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8" @click="openDetail(app)">View</Button>
+                  <a :href="'/api/applications/' + app.id + '/pdf'" target="_blank"><Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8">PDF</Button></a>
                   <select class="text-[12px] border border-[#e2e4ea] rounded-md px-2 py-1 bg-white" :value="app.status" @change="updateStatus(app.id, $event.target.value)">
                     <option v-for="s in statuses" :key="s" :value="s">{{ s }}</option>
                   </select>
@@ -118,7 +119,10 @@
             </div>
             <div class="detail-section">
               <h4>References</h4>
-              <div v-if="selectedApp.reference_info" class="detail-row"><span>Reference:</span><span>{{ selectedApp.reference_info }}</span></div>
+              <template v-if="parsedReferences.length">
+                <div v-for="(ref, i) in parsedReferences" :key="i" class="detail-row"><span>Reference {{ i + 1 }}:</span><span>{{ ref.name }} | {{ ref.phone }} | {{ ref.relationship }}</span></div>
+              </template>
+              <div v-else-if="selectedApp.reference_info" class="detail-row"><span>Reference:</span><span>{{ selectedApp.reference_info }}</span></div>
               <div v-if="selectedApp.additional_info" class="detail-row"><span>Additional:</span><span>{{ selectedApp.additional_info }}</span></div>
               <div class="detail-row"><span>Signature:</span><span class="font-italic">{{ selectedApp.signature }}</span></div>
               <div class="detail-row"><span>Date:</span><span>{{ selectedApp.signature_date }}</span></div>
@@ -146,17 +150,35 @@ const applications = ref([])
 const loading = ref(false)
 const showDetail = ref(false)
 const selectedApp = ref(null)
+const activeFilter = ref(null)
 const statuses = ['New', 'Reviewed', 'Accepted', 'Rejected']
+
+const filteredApplications = computed(() => {
+  if (!activeFilter.value) return applications.value
+  return applications.value.filter(a => a.status === activeFilter.value)
+})
+
+const parsedReferences = computed(() => {
+  if (!selectedApp.value?.reference_info) return []
+  try {
+    const refs = JSON.parse(selectedApp.value.reference_info)
+    return Array.isArray(refs) ? refs : []
+  } catch { return [] }
+})
 
 const kpiCards = computed(() => {
   const a = applications.value
   return [
-    { label: 'Total', value: a.length, sub: 'Applications', icon: '&#128203;', theme: 'kpi-blue', iconTheme: 'kpi-icon-blue' },
-    { label: 'New', value: a.filter(x => x.status === 'New').length, sub: 'Pending review', icon: '&#10071;', theme: 'kpi-amber', iconTheme: 'kpi-icon-amber' },
-    { label: 'Accepted', value: a.filter(x => x.status === 'Accepted').length, sub: 'Approved', icon: '&#10003;', theme: 'kpi-emerald', iconTheme: 'kpi-icon-emerald' },
-    { label: 'Rejected', value: a.filter(x => x.status === 'Rejected').length, sub: 'Declined', icon: '&#10007;', theme: 'kpi-violet', iconTheme: 'kpi-icon-violet' },
+    { label: 'Total', value: a.length, sub: 'Applications', icon: '&#128203;', theme: 'kpi-blue', iconTheme: 'kpi-icon-blue', filter: null },
+    { label: 'New', value: a.filter(x => x.status === 'New').length, sub: 'Pending review', icon: '&#10071;', theme: 'kpi-amber', iconTheme: 'kpi-icon-amber', filter: 'New' },
+    { label: 'Accepted', value: a.filter(x => x.status === 'Accepted').length, sub: 'Approved', icon: '&#10003;', theme: 'kpi-emerald', iconTheme: 'kpi-icon-emerald', filter: 'Accepted' },
+    { label: 'Rejected', value: a.filter(x => x.status === 'Rejected').length, sub: 'Declined', icon: '&#10007;', theme: 'kpi-violet', iconTheme: 'kpi-icon-violet', filter: 'Rejected' },
   ]
 })
+
+function handleKpiClick(filter) {
+  activeFilter.value = activeFilter.value === filter ? null : filter
+}
 
 async function load() {
   loading.value = true
@@ -246,4 +268,8 @@ onMounted(load)
   color: #111827;
 }
 .font-italic { font-style: italic; }
+:deep(.kpi-active) {
+  border: 2px solid hsl(199, 89%, 48%) !important;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12) !important;
+}
 </style>

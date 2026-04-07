@@ -319,6 +319,11 @@ db.exec(`
 	)
 `);
 
+// Migration: add CDL + medical card columns to job_applications
+try { db.exec("ALTER TABLE job_applications ADD COLUMN cdl_front TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE job_applications ADD COLUMN cdl_back TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE job_applications ADD COLUMN medical_card TEXT DEFAULT ''"); } catch {}
+
 // Migration: add asset_ref to messages (for "Share Asset" in chat)
 try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } catch {}
 
@@ -764,14 +769,14 @@ function requireRole(...roles) {
 // ============================================================
 app.post("/api/public/apply", (req, res) => {
 	try {
-		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date } = req.body;
+		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card } = req.body;
 		if (!full_name || !email || !phone || !dob || !address || !ssn || !drivers_license || !position || !experience || !has_cdl || !work_authorized || !felony_convicted || !accident_history || !skills || !signature) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
 		const result = db.prepare(`
-			INSERT INTO job_applications (full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`).run(full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation || '', accident_history, accident_description || '', traffic_citations || '', certifications || '', JSON.stringify(availability || []), skills, reference_info || '', additional_info || '', signature, signature_date || new Date().toLocaleDateString('en-US'));
+			INSERT INTO job_applications (full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation || '', accident_history, accident_description || '', traffic_citations || '', certifications || '', JSON.stringify(availability || []), skills, typeof reference_info === 'string' ? reference_info : JSON.stringify(reference_info || ''), additional_info || '', signature, signature_date || new Date().toLocaleDateString('en-US'), cdl_front || '', cdl_back || '', medical_card || '');
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -795,6 +800,96 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), (req, res) =
 		}
 		db.prepare("UPDATE job_applications SET status = ? WHERE id = ?").run(status, parseInt(req.params.id));
 		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
+	try {
+		const app = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(parseInt(req.params.id));
+		if (!app) return res.status(404).json({ error: "Application not found" });
+
+		const doc = new PDFDocument({ size: "LETTER", margin: 50 });
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader("Content-Disposition", `inline; filename=application-${app.full_name.replace(/\s+/g, "-")}.pdf`);
+		doc.pipe(res);
+
+		// Header
+		doc.fontSize(20).font("Helvetica-Bold").text("LogisX Employment Application", { align: "center" });
+		doc.moveDown(0.3);
+		doc.fontSize(10).font("Helvetica").fillColor("#6b7280").text(`Application ID: ${app.id} | Status: ${app.status} | Submitted: ${app.created_at}`, { align: "center" });
+		doc.moveDown(0.5);
+		doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor("#e2e4ea").stroke();
+		doc.moveDown(0.8);
+
+		const section = (title) => { doc.fontSize(12).font("Helvetica-Bold").fillColor("#0ea5e9").text(title); doc.moveDown(0.2); doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor("#e8edf2").stroke(); doc.moveDown(0.4); };
+		const field = (label, value) => { doc.fontSize(9).font("Helvetica-Bold").fillColor("#374151").text(label + ": ", { continued: true }); doc.font("Helvetica").fillColor("#111827").text(value || "N/A"); doc.moveDown(0.15); };
+
+		section("Personal Information");
+		field("Full Name", app.full_name);
+		field("Email", app.email);
+		field("Phone", app.phone);
+		field("Date of Birth", app.dob);
+		field("Address", app.address);
+		field("SSN", app.ssn ? "***-**-" + app.ssn.slice(-4) : "N/A");
+		field("Drivers License", app.drivers_license);
+		field("Position", app.position);
+		doc.moveDown(0.5);
+
+		section("Experience & Qualifications");
+		field("Years of Experience", app.experience);
+		field("Valid CDL", app.has_cdl);
+		field("Work Authorized", app.work_authorized);
+		field("Felony Conviction", app.felony_convicted);
+		if (app.felony_explanation) field("Explanation", app.felony_explanation);
+		doc.moveDown(0.5);
+
+		section("Driving & Accident History");
+		field("Commercial Accident", app.accident_history);
+		if (app.accident_description) field("Description", app.accident_description);
+		field("Traffic Citations (3 yrs)", app.traffic_citations || "N/A");
+		doc.moveDown(0.5);
+
+		section("Certifications & Availability");
+		field("Certifications", app.certifications || "None listed");
+		try { field("Availability", JSON.parse(app.availability).join(", ")); } catch { field("Availability", app.availability); }
+		field("Skills", app.skills);
+		doc.moveDown(0.5);
+
+		section("References");
+		try {
+			const refs = JSON.parse(app.reference_info);
+			if (Array.isArray(refs)) {
+				refs.forEach((r, i) => { field("Reference " + (i + 1), `${r.name || ""} | ${r.phone || ""} | ${r.relationship || ""}`); });
+			} else { field("Reference Info", app.reference_info); }
+		} catch { field("Reference Info", app.reference_info || "None"); }
+		if (app.additional_info) field("Additional Info", app.additional_info);
+		doc.moveDown(0.5);
+
+		section("Applicant Signature");
+		doc.fontSize(10).font("Helvetica-Oblique").fillColor("#111827").text(app.signature || "");
+		doc.moveDown(0.2);
+		field("Date", app.signature_date);
+		doc.moveDown(0.5);
+
+		// Embed CDL/Medical images if present
+		const embedImage = (label, base64) => {
+			if (!base64) return;
+			try {
+				const data = base64.replace(/^data:image\/\w+;base64,/, "");
+				const buf = Buffer.from(data, "base64");
+				doc.addPage();
+				doc.fontSize(14).font("Helvetica-Bold").fillColor("#0ea5e9").text(label, { align: "center" });
+				doc.moveDown(0.5);
+				doc.image(buf, { fit: [500, 600], align: "center" });
+			} catch { /* skip if image is invalid */ }
+		};
+		embedImage("CDL - Front", app.cdl_front);
+		embedImage("CDL - Back", app.cdl_back);
+		embedImage("Medical Card", app.medical_card);
+
+		doc.end();
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}

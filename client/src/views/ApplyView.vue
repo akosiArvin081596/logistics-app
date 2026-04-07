@@ -66,10 +66,16 @@ const error = ref('')
 
 const defaultForm = () => ({
   first_name: '', last_name: '', email: '', phone: '', dob: '', address: '', ssn: '', drivers_license: '', position: '',
+  cdl_front: '', cdl_back: '', medical_card: '',
   experience: '', has_cdl: '', work_authorized: '', felony_convicted: '', felony_explanation: '',
   accident_history: '', accident_description: '', traffic_citations: '',
   certifications: '', availability: [], skills: '',
-  reference_info: '', additional_info: '', signature: '', signature_date: '',
+  references: [
+    { name: '', phone: '', relationship: '' },
+    { name: '', phone: '', relationship: '' },
+    { name: '', phone: '', relationship: '' },
+  ],
+  additional_info: '', signature: '', signature_date: '',
 })
 
 const form = reactive(defaultForm())
@@ -77,6 +83,7 @@ const form = reactive(defaultForm())
 function validate(s) {
   if (s === 0) {
     if (!form.first_name || !form.last_name || !form.email || !form.phone || !form.dob || !form.address || !form.ssn || !form.drivers_license || !form.position) return 'Please fill in all required fields in this section.'
+    if (!form.cdl_front || !form.cdl_back || !form.medical_card) return 'Please upload CDL (front and back) and medical card images.'
   }
   if (s === 1) {
     if (!form.experience || !form.has_cdl || !form.work_authorized || !form.felony_convicted) return 'Please answer all required questions.'
@@ -88,6 +95,8 @@ function validate(s) {
     if (form.availability.length === 0 || !form.skills) return 'Please select availability and list your skills.'
   }
   if (s === 4) {
+    const missingRef = form.references.some(r => !r.name || !r.phone)
+    if (missingRef) return 'Please provide name and phone for all 3 references.'
     if (!form.signature) return 'Please type your full name as a signature.'
   }
   return ''
@@ -107,7 +116,7 @@ async function submitForm() {
   error.value = ''
   submitting.value = true
   try {
-    const payload = { ...form, full_name: `${form.first_name} ${form.last_name}`.trim() }
+    const payload = { ...form, full_name: `${form.first_name} ${form.last_name}`.trim(), reference_info: JSON.stringify(form.references) }
     const res = await fetch('/api/public/apply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
