@@ -11,6 +11,45 @@
       </div>
     </div>
 
+    <!-- Outreach Email Section -->
+    <details class="form-accordion" style="margin-bottom:1rem;">
+      <summary class="form-toggle">+ Send Investor Invite</summary>
+      <div style="padding:1rem;">
+        <div style="margin-bottom:0.75rem;">
+          <label class="text-[12px] font-semibold text-gray-600 block mb-1">Email Addresses (comma-separated)</label>
+          <textarea v-model="outreach.emailsRaw" rows="2" class="w-full px-3 py-2 text-[13px] border border-gray-200 rounded-lg" placeholder="investor1@email.com, investor2@email.com"></textarea>
+        </div>
+        <div style="margin-bottom:0.75rem;">
+          <label class="text-[12px] font-semibold text-gray-600 block mb-1">Subject</label>
+          <input v-model="outreach.subject" class="w-full px-3 py-2 text-[13px] border border-gray-200 rounded-lg" />
+        </div>
+        <div style="margin-bottom:0.75rem;">
+          <label class="text-[12px] font-semibold text-gray-600 block mb-1">Message</label>
+          <textarea v-model="outreach.body" rows="12" class="w-full px-3 py-2 text-[13px] border border-gray-200 rounded-lg font-mono" style="line-height:1.5;"></textarea>
+        </div>
+        <div class="flex items-center justify-between">
+          <span v-if="outreach.result" class="text-[12px]" :class="outreach.result.failures?.length ? 'text-amber-600' : 'text-emerald-600'">
+            Sent {{ outreach.result.sentCount }}/{{ outreach.result.total }} emails
+          </span>
+          <span v-else></span>
+          <button class="px-5 py-2 text-sm font-bold bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-all" :disabled="outreach.sending || !outreach.emailsRaw.trim()" @click="sendOutreach">
+            {{ outreach.sending ? 'Sending...' : 'Send Invites' }}
+          </button>
+        </div>
+        <!-- Recent sends -->
+        <div v-if="outreachLog.length" style="margin-top:1rem;border-top:1px solid #e8edf2;padding-top:0.75rem;">
+          <div class="text-[11px] font-bold text-gray-400 uppercase mb-2">Recent Sends</div>
+          <div v-for="log in outreachLog" :key="log.id" class="flex items-center justify-between py-1 text-[12px]">
+            <span class="text-gray-700">{{ log.email }}</span>
+            <span class="flex items-center gap-2">
+              <span :class="log.status === 'sent' ? 'text-emerald-600' : 'text-red-500'">{{ log.status }}</span>
+              <span class="text-gray-400">{{ formatDate(log.created_at) }}</span>
+            </span>
+          </div>
+        </div>
+      </div>
+    </details>
+
     <Card class="flex flex-col" style="border-radius:14px;border:1px solid #e8edf2;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
       <CardContent style="padding:0;">
         <div v-if="loading" class="flex items-center justify-center py-16">
@@ -111,7 +150,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { Card, CardContent } from '@/components/ui/card'
@@ -175,5 +214,71 @@ function viewDetail(app) {
   showDetail.value = true
 }
 
-onMounted(load)
+// Outreach
+const investUrl = `${window.location.origin}/invest`
+const outreach = reactive({
+  emailsRaw: '',
+  subject: 'LogisX Investor Onboarding Invitation',
+  body: `Dear Investor,
+
+You are invited to join LogisX Inc. as a fleet participant.
+
+To begin the onboarding process, please visit the link below and complete the 3-step wizard:
+
+${investUrl}
+
+Step 1: Complete your application
+Step 2: Review and sign the Master Participation Agreement and Vehicle Lease
+Step 3: Submit your W-9 and banking information
+
+If you have questions, contact us at info@logisx.com or call our office.
+
+Best regards,
+Deshorn King, CEO
+LogisX Inc.
+4576 Research Forest Dr, Suite 200
+The Woodlands, TX 77381
+USDOT# 4302683`,
+  sending: false,
+  result: null,
+})
+const outreachLog = ref([])
+
+async function sendOutreach() {
+  if (outreach.sending) return
+  outreach.sending = true
+  outreach.result = null
+  try {
+    const emails = outreach.emailsRaw.split(',').map(e => e.trim()).filter(Boolean)
+    if (emails.length === 0) { toast('Enter at least one email', 'error'); return }
+    const result = await api.post('/api/investor-outreach/send', {
+      emails,
+      subject: outreach.subject,
+      body: outreach.body,
+    })
+    outreach.result = result
+    if (result.sentCount > 0) toast(`${result.sentCount} invite(s) sent`, 'success')
+    if (result.failures?.length) toast(`${result.failures.length} failed`, 'error')
+    outreach.emailsRaw = ''
+    await loadOutreachLog()
+  } catch (err) {
+    toast(err.message || 'Send failed', 'error')
+  } finally {
+    outreach.sending = false
+  }
+}
+
+async function loadOutreachLog() {
+  try {
+    const data = await api.get('/api/investor-outreach/log')
+    outreachLog.value = data.logs || []
+  } catch { /* ignore */ }
+}
+
+function formatDate(d) {
+  if (!d) return ''
+  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+onMounted(() => { load(); loadOutreachLog() })
 </script>

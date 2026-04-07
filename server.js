@@ -12,6 +12,7 @@ const geolib = require("geolib");
 const PDFDocument = require("pdfkit");
 const compression = require("compression");
 const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { generateContractorAgreement } = require("./lib/generate-contractor-pdf");
 const { generateEquipmentPolicy } = require("./lib/generate-equipment-policy-pdf");
@@ -779,6 +780,17 @@ db.exec(`
 	)
 `);
 
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_outreach_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		email TEXT NOT NULL,
+		subject TEXT NOT NULL,
+		sent_by TEXT NOT NULL,
+		status TEXT DEFAULT 'sent',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
 const INVESTOR_ONBOARDING_DOCS = [
 	{ key: "master_agreement", name: "Master Participation & Management Agreement" },
 	{ key: "vehicle_lease", name: "Commercial Vehicle Lease Agreement" },
@@ -1436,6 +1448,74 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 		}
 
 		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/investor-outreach/send — Send invite emails to potential investors
+app.post("/api/investor-outreach/send", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const { emails, subject, body } = req.body;
+		if (!emails || !Array.isArray(emails) || emails.length === 0) {
+			return res.status(400).json({ error: "At least one email is required" });
+		}
+		if (emails.length > 50) {
+			return res.status(400).json({ error: "Maximum 50 emails per batch" });
+		}
+		if (!subject || !body) {
+			return res.status(400).json({ error: "Subject and body are required" });
+		}
+
+		const gmailUser = process.env.GMAIL_USER;
+		const gmailPass = process.env.GMAIL_APP_PASSWORD;
+		if (!gmailUser || !gmailPass) {
+			return res.status(500).json({ error: "Email not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD in .env" });
+		}
+
+		const transporter = nodemailer.createTransport({
+			service: "gmail",
+			auth: { user: gmailUser, pass: gmailPass },
+		});
+
+		const sentBy = req.session.user.username;
+		const logInsert = db.prepare("INSERT INTO investor_outreach_log (email, subject, sent_by, status) VALUES (?, ?, ?, ?)");
+		let sentCount = 0;
+		const failures = [];
+
+		for (const email of emails) {
+			const trimmed = email.trim();
+			if (!trimmed || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+				failures.push({ email: trimmed, error: "Invalid email format" });
+				continue;
+			}
+			try {
+				await transporter.sendMail({
+					from: `"LogisX Inc." <${gmailUser}>`,
+					to: trimmed,
+					subject,
+					text: body,
+					html: body.replace(/\n/g, "<br>"),
+				});
+				logInsert.run(trimmed, subject, sentBy, "sent");
+				sentCount++;
+			} catch (mailErr) {
+				logInsert.run(trimmed, subject, sentBy, "failed");
+				failures.push({ email: trimmed, error: mailErr.message });
+			}
+		}
+
+		res.json({ success: true, sentCount, failures, total: emails.length });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/investor-outreach/log — Recent outreach history
+app.get("/api/investor-outreach/log", requireRole("Super Admin"), (req, res) => {
+	try {
+		const logs = db.prepare("SELECT * FROM investor_outreach_log ORDER BY created_at DESC LIMIT 100").all();
+		res.json({ logs });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
