@@ -17,6 +17,12 @@ const routes = [
     meta: { public: true, noSidebar: true },
   },
   {
+    path: '/invest',
+    name: 'invest',
+    component: () => import('../views/InvestorApplyView.vue'),
+    meta: { public: true, noSidebar: true },
+  },
+  {
     path: '/dashboard',
     name: 'dashboard',
     component: () => import('../views/DashboardView.vue'),
@@ -104,6 +110,12 @@ const routes = [
     path: '/applications',
     name: 'applications',
     component: () => import('../views/ApplicationsView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/investor-applications',
+    name: 'investor-applications',
+    component: () => import('../views/InvestorApplicationsView.vue'),
     meta: { roles: ['Super Admin'] },
   },
   {

@@ -702,6 +702,86 @@ const ONBOARDING_DOCS = [
 	{ key: "substance_policy", name: "Substance Policy and Procedure", confidential: 0 },
 ];
 
+// --- Investor Onboarding ---
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_applications (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		legal_name TEXT NOT NULL,
+		dba TEXT DEFAULT '',
+		entity_type TEXT DEFAULT '',
+		address TEXT DEFAULT '',
+		contact_person TEXT DEFAULT '',
+		contact_title TEXT DEFAULT '',
+		phone TEXT DEFAULT '',
+		email TEXT DEFAULT '',
+		years_in_operation TEXT DEFAULT '',
+		industry_experience TEXT DEFAULT '',
+		fleet_size TEXT DEFAULT '',
+		preferred_communication TEXT DEFAULT '',
+		tax_classification TEXT DEFAULT '',
+		ein_ssn TEXT DEFAULT '',
+		bankruptcy_liens TEXT DEFAULT '',
+		reporting_preference TEXT DEFAULT '',
+		vehicle_year TEXT DEFAULT '',
+		vehicle_make TEXT DEFAULT '',
+		vehicle_model TEXT DEFAULT '',
+		vehicle_vin TEXT DEFAULT '',
+		vehicle_mileage TEXT DEFAULT '',
+		vehicle_title_state TEXT DEFAULT '',
+		vehicle_liens TEXT DEFAULT '',
+		vehicle_registered_owner TEXT DEFAULT '',
+		status TEXT DEFAULT 'New' CHECK(status IN ('New','Reviewed','Accepted','Rejected')),
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_onboarding (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		application_id INTEGER NOT NULL UNIQUE,
+		status TEXT DEFAULT 'documents_pending'
+			CHECK(status IN ('documents_pending','banking_pending','fully_onboarded')),
+		onboarded_at TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (application_id) REFERENCES investor_applications(id)
+	)
+`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_onboarding_documents (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		application_id INTEGER NOT NULL,
+		doc_key TEXT NOT NULL,
+		doc_name TEXT NOT NULL,
+		signed INTEGER DEFAULT 0,
+		signature_text TEXT DEFAULT '',
+		signed_at TEXT DEFAULT '',
+		signed_pdf_url TEXT DEFAULT '',
+		UNIQUE(application_id, doc_key),
+		FOREIGN KEY (application_id) REFERENCES investor_applications(id)
+	)
+`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_payment_info (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		application_id INTEGER NOT NULL UNIQUE,
+		bank_name TEXT DEFAULT '',
+		account_type TEXT DEFAULT '',
+		routing_number TEXT DEFAULT '',
+		account_number TEXT DEFAULT '',
+		account_name TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (application_id) REFERENCES investor_applications(id)
+	)
+`);
+
+const INVESTOR_ONBOARDING_DOCS = [
+	{ key: "master_agreement", name: "Master Participation & Management Agreement" },
+	{ key: "vehicle_lease", name: "Commercial Vehicle Lease Agreement" },
+	{ key: "w9", name: "W-9 Tax Form" },
+];
+
 // Session store in SQLite (persists across server restarts)
 app.use(
 	session({
@@ -1043,6 +1123,297 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 		embedImage("Medical Card", app.medical_card);
 
 		doc.end();
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// === INVESTOR ONBOARDING ENDPOINTS (Public) ===
+
+// POST /api/public/investor-apply — Step 1: Submit investor application
+app.post("/api/public/investor-apply", (req, res) => {
+	try {
+		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
+			years_in_operation, industry_experience, fleet_size, preferred_communication,
+			tax_classification, ein_ssn, bankruptcy_liens, reporting_preference } = req.body;
+		if (!legal_name || !email || !phone || !address || !ein_ssn) {
+			return res.status(400).json({ error: "Please fill in all required fields." });
+		}
+		const result = db.prepare(`
+			INSERT INTO investor_applications (legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
+				years_in_operation, industry_experience, fleet_size, preferred_communication,
+				tax_classification, ein_ssn, bankruptcy_liens, reporting_preference)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(legal_name, dba || "", entity_type || "", address, contact_person || "", contact_title || "",
+			phone, email, years_in_operation || "", industry_experience || "", fleet_size || "",
+			preferred_communication || "", tax_classification || "", ein_ssn, bankruptcy_liens || "", reporting_preference || "");
+
+		const appId = result.lastInsertRowid;
+		// Create onboarding record + seed documents
+		db.prepare("INSERT INTO investor_onboarding (application_id, status) VALUES (?, 'documents_pending')").run(appId);
+		const seedDoc = db.prepare("INSERT OR IGNORE INTO investor_onboarding_documents (application_id, doc_key, doc_name) VALUES (?, ?, ?)");
+		for (const doc of INVESTOR_ONBOARDING_DOCS) {
+			seedDoc.run(appId, doc.key, doc.name);
+		}
+		res.json({ success: true, applicationId: appId });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/public/investor-onboarding/:id — Get application + onboarding status
+app.get("/api/public/investor-onboarding/:id", (req, res) => {
+	try {
+		const appId = parseInt(req.params.id);
+		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
+		if (!application) return res.status(404).json({ error: "Application not found" });
+		const onboarding = db.prepare("SELECT * FROM investor_onboarding WHERE application_id = ?").get(appId);
+		const documents = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id").all(appId);
+		const payment = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
+		res.json({ application, onboarding, documents, payment, totalDocs: INVESTOR_ONBOARDING_DOCS.length });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/public/investor-onboarding/:id/sign/:docKey — Sign a document
+app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) => {
+	try {
+		const appId = parseInt(req.params.id);
+		const { docKey } = req.params;
+		const { signatureText, signatureImage, vehicleInfo } = req.body;
+		if (!signatureText || !signatureText.trim()) return res.status(400).json({ error: "Signature required" });
+
+		const docRow = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(appId, docKey);
+		if (!docRow) return res.status(404).json({ error: "Document not found" });
+		if (docRow.signed) return res.json({ success: true, message: "Already signed" });
+
+		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
+		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
+		const signedFileName = `${docKey}-inv-${appId}-signed.pdf`;
+		const signedPath = path.join(signedDir, signedFileName);
+		let signedPdfUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
+
+		// Save vehicle info if provided (for Exhibit A)
+		if (vehicleInfo) {
+			db.prepare(`UPDATE investor_applications SET
+				vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
+				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=? WHERE id=?`
+			).run(vehicleInfo.year || "", vehicleInfo.make || "", vehicleInfo.model || "",
+				vehicleInfo.vin || "", vehicleInfo.mileage || "", vehicleInfo.titleState || "",
+				vehicleInfo.liens || "", vehicleInfo.registeredOwner || "", appId);
+		}
+
+		if (docKey === "w9") {
+			// W-9: overlay investor data onto the IRS form
+			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", "w9.pdf");
+			if (fs.existsSync(templatePath)) {
+				const templateBytes = fs.readFileSync(templatePath);
+				const pdfDoc = await PdfLibDocument.load(templateBytes);
+				const page1 = pdfDoc.getPages()[0];
+				const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+				const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+				const blue = rgb(0.1, 0.34, 0.86);
+				const name = application?.legal_name || signatureText.trim();
+				const addr = application?.address || "";
+				const ssn = application?.ein_ssn || "";
+				// Line 1: Name
+				page1.drawText(name, { x: 68, y: 660, size: 11, font: fontBold, color: blue });
+				// Line 2: DBA
+				if (application?.dba) page1.drawText(application.dba, { x: 68, y: 638, size: 10, font, color: blue });
+				// Line 3a: entity type checkbox
+				const entityMap = { "Sole Prop": 64, "C-Corp": 170, "S-Corp": 268, "Partnership": 356, "LLC": 64 };
+				const checkX = entityMap[application?.entity_type] || 64;
+				if (application?.entity_type === "LLC") {
+					page1.drawText("X", { x: 64, y: 580, size: 12, font: fontBold, color: blue });
+				} else {
+					page1.drawText("X", { x: checkX, y: 595, size: 12, font: fontBold, color: blue });
+				}
+				// Line 5-6: Address
+				if (addr) {
+					const parts = addr.split(",").map(s => s.trim());
+					page1.drawText(parts[0] || addr, { x: 68, y: 502, size: 10, font, color: blue });
+					if (parts.length > 1) page1.drawText(parts.slice(1).join(", "), { x: 68, y: 482, size: 10, font, color: blue });
+				}
+				// EIN/SSN
+				if (ssn) {
+					const digits = ssn.replace(/\D/g, "");
+					if (digits.length === 9) {
+						page1.drawText(digits.slice(0, 3), { x: 462, y: 432, size: 11, font: fontBold, color: blue });
+						page1.drawText(digits.slice(3, 5), { x: 510, y: 432, size: 11, font: fontBold, color: blue });
+						page1.drawText(digits.slice(5, 9), { x: 545, y: 432, size: 11, font: fontBold, color: blue });
+					}
+				}
+				// Signature
+				page1.drawText(signatureText.trim(), { x: 120, y: 328, size: 10, font: fontBold, color: blue });
+				page1.drawText(effectiveDate, { x: 455, y: 328, size: 9, font, color: blue });
+				if (signatureImage) {
+					try {
+						const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
+						const sigImg = await pdfDoc.embedPng(sigBytes);
+						page1.drawImage(sigImg, { x: 200, y: 320, width: 140, height: 35 });
+					} catch { /* skip */ }
+				}
+				fs.writeFileSync(signedPath, await pdfDoc.save());
+			} else {
+				signedPdfUrl = "";
+			}
+		} else {
+			// For master_agreement and vehicle_lease: use stamp overlay on the template PDFs
+			const fileMap = {
+				master_agreement: "MASTER PARTICIPATION & MANAGEMENT AGREEMENT.pdf",
+				vehicle_lease: "COMMERCIAL VEHICLE LEASE AGREEMENT_ Investor onboarding .pdf",
+			};
+			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", fileMap[docKey]);
+			if (fs.existsSync(templatePath)) {
+				const templateBytes = fs.readFileSync(templatePath);
+				const pdfDoc = await PdfLibDocument.load(templateBytes);
+				const pages = pdfDoc.getPages();
+				const lastPage = pages[pages.length - 1];
+				const { width } = lastPage.getSize();
+				const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+				const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+				// Stamp signature block at bottom of last page
+				const blockY = 60;
+				lastPage.drawRectangle({ x: 30, y: blockY - 10, width: width - 60, height: 65, color: rgb(0.95, 0.96, 0.97) });
+				lastPage.drawLine({ start: { x: 30, y: blockY + 55 }, end: { x: width - 30, y: blockY + 55 }, thickness: 1, color: rgb(0.7, 0.72, 0.75) });
+				lastPage.drawText("ELECTRONICALLY SIGNED", { x: 40, y: blockY + 40, size: 7, font: fontBold, color: rgb(0.4, 0.4, 0.45) });
+				lastPage.drawText(signatureText.trim(), { x: 40, y: blockY + 22, size: 14, font: fontBold, color: rgb(0.06, 0.13, 0.22) });
+				lastPage.drawText(`Date: ${effectiveDate}`, { x: 40, y: blockY + 5, size: 8, font, color: rgb(0.4, 0.4, 0.45) });
+				if (signatureImage) {
+					try {
+						const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
+						const sigImg = await pdfDoc.embedPng(sigBytes);
+						lastPage.drawImage(sigImg, { x: width - 230, y: blockY + 5, width: 180, height: 50 });
+					} catch { /* skip */ }
+				}
+				fs.writeFileSync(signedPath, await pdfDoc.save());
+			} else {
+				signedPdfUrl = "";
+			}
+		}
+
+		const now = new Date().toISOString();
+		db.prepare("UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signed_at=?, signed_pdf_url=? WHERE application_id=? AND doc_key=?")
+			.run(signatureText.trim(), now, signedPdfUrl, appId, docKey);
+
+		// Check if all docs signed → advance to banking_pending
+		const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
+		if (signedCount === INVESTOR_ONBOARDING_DOCS.length) {
+			db.prepare("UPDATE investor_onboarding SET status='banking_pending' WHERE application_id=?").run(appId);
+		}
+
+		res.json({ success: true });
+	} catch (err) {
+		console.error("Investor sign error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// Serve investor onboarding document PDFs (preview)
+app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", (req, res) => {
+	try {
+		const { docKey } = req.params;
+		const fileMap = {
+			master_agreement: "MASTER PARTICIPATION & MANAGEMENT AGREEMENT.pdf",
+			vehicle_lease: "COMMERCIAL VEHICLE LEASE AGREEMENT_ Investor onboarding .pdf",
+			w9: "w9.pdf",
+		};
+		const fileName = fileMap[docKey];
+		if (!fileName) return res.status(404).json({ error: "Unknown document" });
+		const filePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", fileName);
+		if (!fs.existsSync(filePath)) return res.status(404).json({ error: "PDF not found" });
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
+		fs.createReadStream(filePath).pipe(res);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/public/investor-onboarding/:id/banking — Step 3: Submit banking info
+app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
+	try {
+		const appId = parseInt(req.params.id);
+		const { bank_name, account_type, routing_number, account_number, account_name } = req.body;
+		if (!bank_name || !routing_number || !account_number) {
+			return res.status(400).json({ error: "Bank name, routing number, and account number are required" });
+		}
+		db.prepare(`INSERT OR REPLACE INTO investor_payment_info (application_id, bank_name, account_type, routing_number, account_number, account_name)
+			VALUES (?, ?, ?, ?, ?, ?)`).run(appId, bank_name, account_type || "", routing_number, account_number, account_name || "");
+
+		// Mark as fully onboarded
+		db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=? WHERE application_id=?")
+			.run(new Date().toISOString(), appId);
+
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// Serve signed investor PDFs
+app.use("/uploads/investor-onboarding-signed", express.static(path.join(__dirname, "uploads", "investor-onboarding-signed")));
+
+// Admin: list investor applications
+app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => {
+	try {
+		const apps = db.prepare(`SELECT ia.*, io.status AS onboarding_status,
+			(SELECT COUNT(*) FROM investor_onboarding_documents WHERE application_id=ia.id AND signed=1) AS signed_count
+			FROM investor_applications ia
+			LEFT JOIN investor_onboarding io ON io.application_id = ia.id
+			ORDER BY ia.created_at DESC`).all();
+		res.json(apps);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// Admin: accept/reject investor application
+app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const { status } = req.body;
+		if (!["New", "Reviewed", "Accepted", "Rejected"].includes(status)) {
+			return res.status(400).json({ error: "Invalid status" });
+		}
+		const appId = parseInt(req.params.id);
+		db.prepare("UPDATE investor_applications SET status=? WHERE id=?").run(status, appId);
+
+		if (status === "Accepted") {
+			const application = db.prepare("SELECT * FROM investor_applications WHERE id=?").get(appId);
+			if (!application) return res.status(404).json({ error: "Application not found" });
+			// Check if user already exists
+			const existingUser = db.prepare("SELECT id FROM users WHERE LOWER(email)=LOWER(?)").get(application.email);
+			if (existingUser) return res.json({ success: true, message: "Accepted (user already exists)" });
+
+			// Auto-create investor user account
+			const fullName = application.legal_name.trim();
+			let baseUsername = fullName.toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9.]/g, "");
+			let username = baseUsername;
+			let suffix = 1;
+			while (db.prepare("SELECT id FROM users WHERE LOWER(username)=LOWER(?)").get(username)) {
+				username = `${baseUsername}${suffix}`;
+				suffix++;
+			}
+			const tempPassword = crypto.randomBytes(4).toString("hex");
+			const hash = await bcrypt.hash(tempPassword, 10);
+			const userResult = db.prepare(
+				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, 'Investor', '', ?, ?, ?)"
+			).run(username, hash, application.email || "", fullName, application.dba || fullName);
+			const userId = userResult.lastInsertRowid;
+
+			// Create investor record
+			db.prepare("INSERT OR IGNORE INTO investors (user_id, full_name, carrier_name, status) VALUES (?, ?, ?, 'Active')")
+				.run(userId, fullName, application.dba || fullName);
+
+			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}"`);
+			return res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName } });
+		}
+
+		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
