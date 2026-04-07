@@ -1393,6 +1393,43 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) =
 			return res.send(pdfBuffer);
 		}
 
+		if (docKey === "w9") {
+			// W-9: overlay driver data onto the IRS form for preview
+			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
+			if (!fs.existsSync(templatePath)) return res.status(404).json({ error: "W-9 template not found" });
+			const templateBytes = fs.readFileSync(templatePath);
+			const pdfDoc = await PdfLibDocument.load(templateBytes);
+			const page1 = pdfDoc.getPages()[0];
+			const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+			const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+			const blue = rgb(0.1, 0.34, 0.86);
+			const addr = application?.address || "";
+			const ssn = application?.ssn || "";
+			// Line 1: Name
+			if (driverName) page1.drawText(driverName, { x: 68, y: 681, size: 11, font: fontBold, color: blue });
+			// Line 3a: Individual/sole proprietor checkbox
+			page1.drawText("X", { x: 69, y: 614, size: 10, font: fontBold, color: blue });
+			// Line 5-6: Address
+			if (addr) {
+				const parts = addr.split(",").map(s => s.trim());
+				page1.drawText(parts[0] || addr, { x: 68, y: 556, size: 10, font, color: blue });
+				if (parts.length > 1) page1.drawText(parts.slice(1).join(", "), { x: 68, y: 537, size: 10, font, color: blue });
+			}
+			// SSN
+			if (ssn) {
+				const digits = ssn.replace(/\D/g, "");
+				if (digits.length === 9) {
+					page1.drawText(digits.slice(0, 3), { x: 462, y: 476, size: 10, font: fontBold, color: blue });
+					page1.drawText(digits.slice(3, 5), { x: 502, y: 476, size: 10, font: fontBold, color: blue });
+					page1.drawText(digits.slice(5, 9), { x: 533, y: 476, size: 10, font: fontBold, color: blue });
+				}
+			}
+			const pdfBytes = await pdfDoc.save();
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", 'inline; filename="W-9 Preview.pdf"');
+			return res.send(Buffer.from(pdfBytes));
+		}
+
 		// All other docs: serve static template
 		const fileMap = {
 			equipment_policy: "Contracted Provider Equipment Policy.pdf",
