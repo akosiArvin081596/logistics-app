@@ -1263,16 +1263,35 @@ app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async 
 	}
 });
 
-// GET /api/onboarding/documents/:docKey/pdf — serve static onboarding PDF template
-app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, (req, res) => {
+// GET /api/onboarding/documents/:docKey/pdf — serve onboarding PDF (dynamic for contractor agreement)
+app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) => {
 	try {
 		const { docKey } = req.params;
 		const docDef = ONBOARDING_DOCS.find(d => d.key === docKey);
 		if (!docDef) return res.status(404).json({ error: "Unknown document" });
 
-		// Map doc_key to actual filename
+		// Contractor Agreement: generate pre-filled preview with driver data
+		if (docKey === "contractor_agreement") {
+			const userId = req.session.user.id;
+			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+			const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
+			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+
+			const pdfBuffer = await generateContractorAgreement({
+				fullName: user?.driver_name || application?.full_name || "",
+				address: application?.address || "",
+				effectiveDate,
+				signatureImage: null,
+				paymentMethod: "", checkName: "", bankName: "", bankAddress: "",
+				bankPhone: "", bankRouting: "", bankAccount: "", bankAcctName: "", accountType: "",
+			});
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", 'inline; filename="Contractor Agreement Preview.pdf"');
+			return res.send(pdfBuffer);
+		}
+
+		// All other docs: serve static template
 		const fileMap = {
-			contractor_agreement: "Contractor Agreement v1.57.pdf",
 			equipment_policy: "Contracted Provider Equipment Policy.pdf",
 			w9: "fw9.pdf",
 			mobile_policy: "LogisX Inc. Mobile Policy.pdf",
