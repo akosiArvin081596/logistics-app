@@ -14,6 +14,7 @@ const compression = require("compression");
 const crypto = require("crypto");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { generateContractorAgreement } = require("./lib/generate-contractor-pdf");
+const { generateEquipmentPolicy } = require("./lib/generate-equipment-policy-pdf");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -1167,10 +1168,18 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 				accountType: paymentInfo?.accountType || "",
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
+		} else if (docKey === "equipment_policy") {
+			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+			const pdfBuffer = await generateEquipmentPolicy({
+				fullName: user?.driver_name || signatureText.trim(),
+				effectiveDate,
+				signatureImage: signatureImage || null,
+			});
+			fs.writeFileSync(signedPath, pdfBuffer);
 		} else {
-			// Stamp overlay on existing template PDF (for all other documents)
+			// Stamp overlay on existing template PDF (for remaining documents)
 			const fileMap = {
-				equipment_policy: "Contracted Provider Equipment Policy.pdf",
 				w9: "fw9.pdf",
 				mobile_policy: "LogisX Inc. Mobile Policy.pdf",
 				substance_policy: "LogisX SUBSTANCE POLICY AND PROCEDURE.pdf",
@@ -1270,23 +1279,31 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) =
 		const docDef = ONBOARDING_DOCS.find(d => d.key === docKey);
 		if (!docDef) return res.status(404).json({ error: "Unknown document" });
 
-		// Contractor Agreement: generate pre-filled preview with driver data
-		if (docKey === "contractor_agreement") {
-			const userId = req.session.user.id;
-			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-			const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
-			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		// Dynamic PDF generation for docs we've recreated
+		const userId = req.session.user.id;
+		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+		const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
+		const driverName = user?.driver_name || application?.full_name || "";
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
+		if (docKey === "contractor_agreement") {
 			const pdfBuffer = await generateContractorAgreement({
-				fullName: user?.driver_name || application?.full_name || "",
-				address: application?.address || "",
-				effectiveDate,
+				fullName: driverName, address: application?.address || "", effectiveDate,
 				signatureImage: null,
 				paymentMethod: "", checkName: "", bankName: "", bankAddress: "",
 				bankPhone: "", bankRouting: "", bankAccount: "", bankAcctName: "", accountType: "",
 			});
 			res.setHeader("Content-Type", "application/pdf");
 			res.setHeader("Content-Disposition", 'inline; filename="Contractor Agreement Preview.pdf"');
+			return res.send(pdfBuffer);
+		}
+
+		if (docKey === "equipment_policy") {
+			const pdfBuffer = await generateEquipmentPolicy({
+				fullName: driverName, effectiveDate, signatureImage: null,
+			});
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", 'inline; filename="Equipment Policy Preview.pdf"');
 			return res.send(pdfBuffer);
 		}
 
