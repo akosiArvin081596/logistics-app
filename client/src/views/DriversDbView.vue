@@ -21,6 +21,7 @@
         :headers="store.headers"
         :carrier-names="carrierNames"
         :driver-ratings="driverRatings"
+        :truck-assignments="truckAssignments"
         @delete="handleDelete"
         @update="handleUpdate"
       />
@@ -41,6 +42,7 @@ const store = useDriversDbStore()
 const api = useApi()
 const { show: toast } = useToast()
 const driverRatings = ref({})
+const truckAssignments = ref([])
 
 const carrierNames = computed(() => {
   const col = store.headers.find(h => /carrier/i.test(h))
@@ -79,5 +81,6 @@ async function handleDelete(rowIndex) {
 onMounted(async () => {
   store.load()
   try { const d = await api.get('/api/load-ratings/averages'); driverRatings.value = d.averages || {} } catch {}
+  try { const d = await api.get('/api/truck-assignments'); truckAssignments.value = d.assignments || [] } catch {}
 })
 </script>

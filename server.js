@@ -791,6 +791,38 @@ db.exec(`
 	)
 `);
 
+// Truck ↔ Driver assignment history
+db.exec(`
+	CREATE TABLE IF NOT EXISTS truck_assignments (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		truck_id INTEGER NOT NULL,
+		driver_name TEXT NOT NULL,
+		start_date TEXT NOT NULL,
+		end_date TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (truck_id) REFERENCES trucks(id)
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_truck ON truck_assignments(truck_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(driver_name)`);
+
+// Helper: assign a driver to a truck (closes previous assignments, updates trucks.assigned_driver)
+function assignDriverToTruck(truckId, driverName) {
+	const now = new Date().toISOString();
+	const nameLower = driverName.trim().toLowerCase();
+	// Close any active assignment for this truck
+	db.prepare("UPDATE truck_assignments SET end_date = ? WHERE truck_id = ? AND end_date = ''").run(now, truckId);
+	// Close any active assignment for this driver (can only drive one truck)
+	db.prepare("UPDATE truck_assignments SET end_date = ? WHERE LOWER(driver_name) = ? AND end_date = ''").run(now, nameLower);
+	// Insert new assignment
+	if (driverName.trim()) {
+		db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, ?)").run(truckId, driverName.trim(), now);
+	}
+	// Sync trucks.assigned_driver for backward compat
+	db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ? AND id != ?").run(nameLower, truckId);
+	db.prepare("UPDATE trucks SET assigned_driver = ? WHERE id = ?").run(driverName.trim(), truckId);
+}
+
 const INVESTOR_ONBOARDING_DOCS = [
 	{ key: "master_agreement", name: "Master Participation & Management Agreement" },
 	{ key: "vehicle_lease", name: "Commercial Vehicle Lease Agreement" },
@@ -2822,6 +2854,23 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 	res.json({ trucks });
 });
 
+// GET /api/truck-assignments — current active truck↔driver assignments
+app.get("/api/truck-assignments", requireAuth, (req, res) => {
+	try {
+		const assignments = db.prepare(`
+			SELECT ta.id, ta.truck_id, ta.driver_name, ta.start_date,
+				t.unit_number, t.make, t.model, t.year
+			FROM truck_assignments ta
+			JOIN trucks t ON t.id = ta.truck_id
+			WHERE ta.end_date = ''
+			ORDER BY ta.start_date DESC
+		`).all();
+		res.json({ assignments });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // Truck Database: add a new truck
 app.post("/api/trucks", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
@@ -2834,16 +2883,18 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher"), async (req, re
 			return res.status(400).json({ error: "Unit number already exists" });
 		}
 		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
-		// Check if driver has an active load before allowing assignment, then unassign from previous truck
+		// Check if driver has an active load before allowing assignment
 		if (assignedDriver && assignedDriver.trim()) {
 			const activeCheck = await checkDriverActiveLoad(assignedDriver.trim());
 			if (activeCheck) return res.status(409).json({ error: activeCheck });
-			db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = LOWER(?) AND unit_number != ?")
-				.run(assignedDriver.trim(), unitNumber.trim());
 		}
 		const result = db.prepare(
 			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", parseInt(ownerId) || 0, parseFloat(driverPayDaily) || 0, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0);
+		// Create truck assignment record
+		if (assignedDriver && assignedDriver.trim()) {
+			assignDriverToTruck(result.lastInsertRowid, assignedDriver.trim());
+		}
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error creating truck:", error.message);
@@ -2878,13 +2929,13 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			updates.push("status = ?"); params.push(status);
 		}
 		if (assignedDriver !== undefined) {
-			// Check if driver has an active load before allowing reassignment, then unassign from previous truck
+			// Check if driver has an active load before allowing reassignment
 			if (assignedDriver && assignedDriver.trim() && assignedDriver.trim().toLowerCase() !== (truck.assigned_driver || "").trim().toLowerCase()) {
 				const activeCheck = await checkDriverActiveLoad(assignedDriver.trim());
 				if (activeCheck) return res.status(409).json({ error: activeCheck });
-				db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = LOWER(?) AND id != ?")
-					.run(assignedDriver.trim(), id);
 			}
+			// Use the assignment helper (handles history + backward compat)
+			assignDriverToTruck(id, assignedDriver || "");
 			updates.push("assigned_driver = ?"); params.push(assignedDriver);
 		}
 		if (ownerId !== undefined) { updates.push("owner_id = ?"); params.push(parseInt(ownerId) || 0); }

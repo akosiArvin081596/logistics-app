@@ -32,7 +32,7 @@
           <td>{{ d[h.email] || '\u2014' }}</td>
           <td class="mono">{{ d[h.dot] || '\u2014' }}</td>
           <td class="mono">{{ d[h.mc] || '\u2014' }}</td>
-          <td class="mono">{{ d[h.trucks] || '\u2014' }}</td>
+          <td class="mono">{{ getAssignedTruck(d) }}</td>
           <td>{{ d[h.hazmat] || '\u2014' }}</td>
           <td>
             <template v-if="getDriverAvg(d)">
@@ -191,7 +191,17 @@ const props = defineProps({
   headers: { type: Array, default: () => [] },
   carrierNames: { type: Array, default: () => [] },
   driverRatings: { type: Object, default: () => ({}) },
+  truckAssignments: { type: Array, default: () => [] },
 })
+
+function getAssignedTruck(driver) {
+  const driverCol = props.headers.find(h => /driver/i.test(h)) || props.headers[0]
+  const name = (driver[driverCol] || '').trim().toLowerCase()
+  if (!name) return '\u2014'
+  const assignment = props.truckAssignments.find(a => (a.driver_name || '').toLowerCase() === name)
+  if (!assignment) return '\u2014'
+  return `${assignment.unit_number} (${assignment.year || ''} ${assignment.make || ''} ${assignment.model || ''})`.trim()
+}
 
 const emit = defineEmits(['delete', 'update'])
 
