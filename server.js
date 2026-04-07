@@ -807,6 +807,19 @@ app.use(
 		cookie: { maxAge: 24 * 60 * 60 * 1000 },
 	}),
 );
+// Shared email helper
+async function sendEmail(to, subject, htmlBody) {
+	const gmailUser = process.env.GMAIL_USER;
+	const gmailPass = process.env.GMAIL_APP_PASSWORD;
+	if (!gmailUser || !gmailPass) return;
+	try {
+		const transporter = nodemailer.createTransport({ service: "gmail", auth: { user: gmailUser, pass: gmailPass } });
+		await transporter.sendMail({ from: `"LogisX Inc." <${gmailUser}>`, to, subject, html: htmlBody });
+	} catch (err) {
+		console.error("Email send failed:", err.message);
+	}
+}
+
 // Serve Vue SPA build (client/dist) if it exists, otherwise fall back to public/
 const fs = require("fs");
 const clientDistPath = path.join(__dirname, "client", "dist");
@@ -971,6 +984,24 @@ app.post("/api/public/apply", (req, res) => {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation || '', accident_history, accident_description || '', traffic_citations || '', certifications || '', JSON.stringify(availability || []), skills, typeof reference_info === 'string' ? reference_info : JSON.stringify(reference_info || ''), additional_info || '', signature, signature_date || new Date().toLocaleDateString('en-US'), cdl_front || '', cdl_back || '', medical_card || '');
 		res.json({ success: true, id: result.lastInsertRowid });
+
+		// Send confirmation emails (async, don't block response)
+		const appSummary = `<h2>LogisX Driver Application Received</h2>
+			<p>Hi ${full_name},</p>
+			<p>Thank you for applying to LogisX Inc. We have received your driver application. Our team will review it and get back to you shortly.</p>
+			<h3>Application Summary</h3>
+			<ul>
+				<li><b>Name:</b> ${full_name}</li>
+				<li><b>Email:</b> ${email}</li>
+				<li><b>Phone:</b> ${phone}</li>
+				<li><b>Position:</b> ${position}</li>
+				<li><b>Experience:</b> ${experience}</li>
+				<li><b>CDL:</b> ${has_cdl}</li>
+				<li><b>Address:</b> ${address}</li>
+			</ul>
+			<p>Best regards,<br>LogisX Inc.</p>`;
+		sendEmail(email, "LogisX - Application Received", appSummary);
+		sendEmail(process.env.GMAIL_USER || "info@logisx.com", `New Driver Application: ${full_name}`, appSummary);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -1039,6 +1070,19 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			}
 
 			logAudit(req, "accept_application", "application", appId, `Accepted and created driver account "${username}" for ${fullName}`);
+
+			// Email temp credentials to driver
+			const credEmail = `<h2>Welcome to LogisX!</h2>
+				<p>Hi ${fullName},</p>
+				<p>Your driver application has been <b>accepted</b>. A temporary account has been created for you to continue the onboarding process.</p>
+				<h3>Your Login Credentials</h3>
+				<table style="border-collapse:collapse;margin:1rem 0;">
+					<tr><td style="padding:8px 16px;background:#f9fafb;font-weight:600;">Username</td><td style="padding:8px 16px;font-family:monospace;color:#1d4ed8;font-weight:700;">${username}</td></tr>
+					<tr><td style="padding:8px 16px;background:#fef3c7;font-weight:600;">Temp Password</td><td style="padding:8px 16px;font-family:monospace;color:#b45309;font-weight:700;">${tempPassword}</td></tr>
+				</table>
+				<p>Please log in at <a href="https://app.logisx.com/login">app.logisx.com/login</a> to sign your onboarding documents.</p>
+				<p>Best regards,<br>LogisX Inc.</p>`;
+			sendEmail(application.email, "LogisX - Your Application Has Been Accepted!", credEmail);
 
 			return res.json({
 				success: true,
@@ -1125,12 +1169,21 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 		const embedImage = (label, base64) => {
 			if (!base64) return;
 			try {
+				let buf;
+				if (base64.startsWith("data:application/pdf")) {
+					// PDF uploads: skip embedding (can't embed PDF inside PDF with pdfkit)
+					doc.addPage();
+					doc.fontSize(14).font("Helvetica-Bold").fillColor("#0ea5e9").text(label, { align: "center" });
+					doc.moveDown(0.5);
+					doc.fontSize(10).font("Helvetica").fillColor("#6b7280").text("[PDF document uploaded — see original file]", { align: "center" });
+					return;
+				}
 				const data = base64.replace(/^data:image\/\w+;base64,/, "");
-				const buf = Buffer.from(data, "base64");
+				buf = Buffer.from(data, "base64");
 				doc.addPage();
 				doc.fontSize(14).font("Helvetica-Bold").fillColor("#0ea5e9").text(label, { align: "center" });
 				doc.moveDown(0.5);
-				doc.image(buf, { fit: [500, 600], align: "center" });
+				doc.image(buf, 50, doc.y, { fit: [512, 380], align: "center" });
 			} catch { /* skip if image is invalid */ }
 		};
 		embedImage("CDL - Front", app.cdl_front);

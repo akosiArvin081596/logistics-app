@@ -7,13 +7,18 @@
       </div>
 
       <!-- PDF viewer -->
-      <div class="pdf-container">
+      <div class="pdf-container" :style="{ flex: pdfFlex }">
         <iframe v-if="pdfUrl" :src="pdfUrl" class="pdf-frame"></iframe>
         <div v-else class="pdf-placeholder">Loading document...</div>
       </div>
 
+      <!-- Drag handle to resize -->
+      <div v-if="doc && !doc.signed" class="resize-handle" @pointerdown="startResize">
+        <div class="resize-bar"></div>
+      </div>
+
       <!-- Signing area -->
-      <div v-if="doc && !doc.signed" class="sign-area">
+      <div v-if="doc && !doc.signed" class="sign-area" :style="{ maxHeight: signAreaHeight + 'px', overflowY: 'auto' }">
         <label class="sign-checkbox">
           <input type="checkbox" v-model="agreed" />
           <span>I have read and agree to the terms of this document</span>
@@ -113,6 +118,26 @@ const signing = ref(false)
 const canvasRef = ref(null)
 const isDrawing = ref(false)
 const hasDrawn = ref(false)
+const signAreaHeight = ref(280)
+const pdfFlex = ref('1')
+const isResizing = ref(false)
+
+function startResize(e) {
+  isResizing.value = true
+  const startY = e.clientY
+  const startH = signAreaHeight.value
+  const onMove = (ev) => {
+    const diff = startY - ev.clientY
+    signAreaHeight.value = Math.max(150, Math.min(600, startH + diff))
+  }
+  const onUp = () => {
+    isResizing.value = false
+    document.removeEventListener('pointermove', onMove)
+    document.removeEventListener('pointerup', onUp)
+  }
+  document.addEventListener('pointermove', onMove)
+  document.addEventListener('pointerup', onUp)
+}
 
 // Payment info (contractor_agreement only)
 const paymentMethod = ref('')
@@ -318,6 +343,14 @@ function formatDate(d) {
   border-radius: 8px; font-weight: 700; font-size: 0.9rem; cursor: pointer;
 }
 .sign-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.resize-handle {
+  height: 16px; display: flex; align-items: center; justify-content: center;
+  cursor: ns-resize; background: var(--card); border-top: 1px solid var(--bg);
+  touch-action: none; flex-shrink: 0;
+}
+.resize-bar {
+  width: 40px; height: 4px; border-radius: 2px; background: #d1d5db;
+}
 .payment-section {
   border: 1px solid var(--bg); border-radius: 8px; padding: 0.6rem;
   background: #fafbfc;

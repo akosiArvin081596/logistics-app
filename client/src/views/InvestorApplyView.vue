@@ -28,7 +28,7 @@
             <div class="form-group"><label>Entity Type</label>
               <select v-model="form.entity_type"><option value="">Select...</option><option>LLC</option><option>Corp</option><option>Sole Prop</option><option>Other</option></select>
             </div>
-            <div class="form-group full"><label>Principal Address *</label><input v-model="form.address" required /></div>
+            <div class="form-group full"><label>Principal Address *</label><input ref="addressInput" v-model="form.address" required /></div>
             <div class="form-group"><label>Primary Contact Person</label><input v-model="form.contact_person" /></div>
             <div class="form-group"><label>Title</label><input v-model="form.contact_title" /></div>
             <div class="form-group"><label>Phone *</label><input v-model="form.phone" type="tel" required /></div>
@@ -145,12 +145,13 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import StepIndicator from '../components/apply/StepIndicator.vue'
 import InvestorSignModal from '../components/invest/InvestorSignModal.vue'
 
+const addressInput = ref(null)
 const api = useApi()
 const { show: toast } = useToast()
 
@@ -179,6 +180,27 @@ const vehicle = reactive({
 const banking = reactive({
   bank_name: '', account_type: '', routing_number: '', account_number: '', account_name: '',
 })
+
+// Google Places autocomplete for address
+onMounted(async () => {
+  try {
+    const { key } = await api.get('/api/maps-key')
+    if (!key) return
+    if (window.google?.maps?.places) { initAddrAutocomplete(); return }
+    const script = document.createElement('script')
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places`
+    script.onload = () => initAddrAutocomplete()
+    document.head.appendChild(script)
+  } catch { /* skip */ }
+})
+function initAddrAutocomplete() {
+  if (!addressInput.value) return
+  const ac = new window.google.maps.places.Autocomplete(addressInput.value, { types: ['address'], componentRestrictions: { country: 'us' } })
+  ac.addListener('place_changed', () => {
+    const place = ac.getPlace()
+    if (place?.formatted_address) form.address = place.formatted_address
+  })
+}
 
 const canProceedStep1 = computed(() => form.legal_name && form.email && form.phone && form.address && form.ein_ssn)
 const signedCount = computed(() => documents.value.filter(d => d.signed).length)

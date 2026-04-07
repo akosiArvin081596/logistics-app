@@ -48,6 +48,19 @@
               <div class="ob-step-sub" v-else>Waiting for administrator to upload results</div>
             </div>
           </div>
+          <!-- Next-steps alert when all docs are signed -->
+          <div v-if="allDocsSigned && !drugTestPassed" class="ob-next-steps">
+            <div class="ob-next-title">Onboarding Status: Documents Received!</div>
+            <p>Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
+            <p><b>Here is what happens next:</b></p>
+            <ul>
+              <li><b>Pre-Employment Screening:</b> A member of our safety team will contact you shortly to schedule your <b>pre-appointment drug test</b>. If you've already completed one recently for another carrier, let us know, but expect to be sent for a new one under the LogisX account.</li>
+              <li><b>FMCSA Clearinghouse: This is mandatory.</b> If you haven't already, make sure you are enrolled in the <b>FMCSA Clearinghouse</b> and have granted LogisX Inc. permission to run your full query. We cannot put you in a truck until this is cleared.</li>
+              <li><b>Driver Training:</b> While we finalize your background check, it's time to get in the right mindset. At LogisX, we pride ourselves on professional, elite operation.</li>
+            </ul>
+            <p>Stand by for a call from our safety coordinator.</p>
+            <p><b>The LogisX Safety Team</b></p>
+          </div>
         </div>
 
         <!-- Step 3: Complete -->
@@ -955,6 +968,16 @@ onUnmounted(() => {
   font-size: 0.72rem; font-weight: 700; color: var(--accent);
   padding: 0.2rem 0.6rem; border-radius: 99px; background: var(--accent-dim);
 }
+.ob-next-steps {
+  margin-top: 1rem; padding: 1rem; background: #f0fdf4; border-radius: 10px;
+  border: 1px solid #bbf7d0; font-size: 0.82rem; line-height: 1.6;
+}
+.ob-next-title {
+  font-weight: 800; font-size: 0.95rem; color: #065f46; margin-bottom: 0.5rem;
+}
+.ob-next-steps ul { margin: 0.5rem 0; padding-left: 1.2rem; }
+.ob-next-steps li { margin-bottom: 0.4rem; }
+.ob-next-steps p { margin-bottom: 0.4rem; }
 
 /* Distance Warning Banner */
 .distance-warning {
