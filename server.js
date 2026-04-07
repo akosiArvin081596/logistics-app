@@ -700,7 +700,6 @@ const ONBOARDING_DOCS = [
 	{ key: "w9", name: "W-9 Tax Form", confidential: 1 },
 	{ key: "mobile_policy", name: "LogisX Inc. Mobile Policy", confidential: 0 },
 	{ key: "substance_policy", name: "Substance Policy and Procedure", confidential: 0 },
-	{ key: "service_invoice", name: "Logistics Service Invoice", confidential: 1 },
 ];
 
 // Session store in SQLite (persists across server restarts)
