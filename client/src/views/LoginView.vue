@@ -6,6 +6,11 @@
         <img src="/logo.avif" alt="LogisX" class="brand-logo" />
         <div class="brand-divider"></div>
         <p class="brand-tagline">Dispatch &amp; Fleet Management<br />Operations Platform</p>
+        <div class="brand-features">
+          <div class="feature-pill">&#128666; Real-time Tracking</div>
+          <div class="feature-pill">&#128203; Automated Dispatch</div>
+          <div class="feature-pill">&#128200; Fleet Analytics</div>
+        </div>
       </div>
     </div>
 
@@ -200,17 +205,51 @@ async function doLogin() {
 }
 
 .brand-divider {
-  width: 50px;
+  width: 60px;
   height: 3px;
-  background: rgba(56, 189, 248, 0.6);
-  margin: 0 auto 1.25rem;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.3), rgba(56, 189, 248, 0.8), rgba(56, 189, 248, 0.3));
+  margin: 0 auto 1.5rem;
   border-radius: 2px;
 }
 
 .brand-tagline {
-  font-size: 0.9rem;
+  font-size: 1.15rem;
   line-height: 1.7;
-  color: rgba(255, 255, 255, 0.5);
+  font-weight: 300;
+  letter-spacing: 0.03em;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.3);
+  margin-bottom: 2.5rem;
+}
+
+.brand-features {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.feature-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1.25rem;
+  border-radius: 50px;
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  background: rgba(56, 189, 248, 0.08);
+  backdrop-filter: blur(4px);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  transition: all 0.3s;
+}
+
+.feature-pill:hover {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: rgba(56, 189, 248, 0.4);
+  color: rgba(255, 255, 255, 0.95);
+  transform: translateX(4px);
 }
 
 /* Right form panel */
