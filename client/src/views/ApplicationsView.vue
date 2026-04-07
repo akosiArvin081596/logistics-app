@@ -79,6 +79,33 @@
       </CardContent>
     </Card>
 
+    <!-- Credentials Dialog (shown after accepting an application) -->
+    <Dialog v-model:open="showCredentials">
+      <DialogContent class="sm:max-w-[420px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden">
+        <DialogHeader class="px-6 pt-5 pb-4 border-b border-[#e8edf2] bg-gradient-to-b from-emerald-50/80 to-white">
+          <DialogTitle class="text-[1.1rem] font-bold text-gray-900">Driver Account Created</DialogTitle>
+          <DialogDescription class="text-[13px] text-gray-500">Share these credentials with the driver so they can log in and complete onboarding.</DialogDescription>
+        </DialogHeader>
+        <div v-if="createdCredentials" class="px-6 py-5">
+          <div class="space-y-3">
+            <div class="flex justify-between items-center py-2 px-3 bg-gray-50 rounded-lg">
+              <span class="text-[12px] text-gray-500 font-medium">Driver</span>
+              <span class="text-[14px] font-bold text-gray-900">{{ createdCredentials.driverName }}</span>
+            </div>
+            <div class="flex justify-between items-center py-2 px-3 bg-gray-50 rounded-lg">
+              <span class="text-[12px] text-gray-500 font-medium">Username</span>
+              <span class="text-[14px] font-mono font-bold text-blue-700">{{ createdCredentials.username }}</span>
+            </div>
+            <div class="flex justify-between items-center py-2 px-3 bg-amber-50 rounded-lg border border-amber-100">
+              <span class="text-[12px] text-gray-500 font-medium">Temp Password</span>
+              <span class="text-[14px] font-mono font-bold text-amber-700">{{ createdCredentials.tempPassword }}</span>
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-400 mt-4 text-center">The driver can now log in to sign onboarding documents.</p>
+        </div>
+      </DialogContent>
+    </Dialog>
+
     <!-- Detail Modal -->
     <Dialog v-model:open="showDetail">
       <DialogContent class="sm:max-w-[600px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden max-h-[85vh]">
@@ -191,10 +218,19 @@ async function load() {
   }
 }
 
+const showCredentials = ref(false)
+const createdCredentials = ref(null)
+
 async function updateStatus(id, status) {
   try {
-    await api.put(`/api/applications/${id}/status`, { status })
-    toast(`Status updated to ${status}`, 'success')
+    const result = await api.put(`/api/applications/${id}/status`, { status })
+    if (result.accountCreated && result.credentials) {
+      createdCredentials.value = result.credentials
+      showCredentials.value = true
+      toast('Application accepted — driver account created', 'success')
+    } else {
+      toast(`Status updated to ${status}`, 'success')
+    }
     await load()
   } catch (err) {
     toast(err.message, 'error')

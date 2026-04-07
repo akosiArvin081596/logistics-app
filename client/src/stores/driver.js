@@ -15,6 +15,8 @@ export const useDriverStore = defineStore('driver', {
     drivers: [],
     headers: { jobTracking: [], carrierDB: [] },
     acceptedLoadIds: new Set(),
+    onboarding: null,
+    invoices: [],
     currentTab: 'loads',
     selectedStatusLoad: null,
     isLoading: true,
@@ -204,6 +206,8 @@ export const useDriverStore = defineStore('driver', {
         this.expenses = data.expenses || []
         this.drivers = data.drivers || []
         this.headers = data.headers || { jobTracking: [], carrierDB: [] }
+        this.onboarding = data.onboarding || null
+        this.invoices = data.invoices || []
 
         // Keep selected status load in sync
         if (this.selectedStatusLoad) {
@@ -296,6 +300,29 @@ export const useDriverStore = defineStore('driver', {
 
     addNotification(notif) {
       this.notifications.unshift(notif)
+    },
+
+    async signDocument(docKey, signatureText) {
+      const userId = this.onboarding?.user_id
+      if (!userId) throw new Error('No onboarding record')
+      const data = await api.post(`/api/onboarding/${userId}/documents/${docKey}/sign`, { signatureText })
+      // Refresh onboarding data
+      await this.loadData()
+      return data
+    },
+
+    async generateInvoice(weekEnd) {
+      const data = await api.post('/api/invoices/generate', {
+        driver: this.driverName,
+        weekEnd,
+      })
+      await this.loadData()
+      return data
+    },
+
+    async submitInvoice(invoiceId) {
+      await api.put(`/api/invoices/${invoiceId}/submit`)
+      await this.loadData()
     },
 
     addIncomingMessage(msg) {

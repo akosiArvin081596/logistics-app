@@ -1,5 +1,78 @@
 <template>
   <div class="driver-app">
+    <!-- ONBOARDING LOCK SCREEN — shown when driver is not fully onboarded -->
+    <template v-if="isOnboarding">
+      <DriverHeader :driver-name="driverName" @logout="handleLogout" />
+      <main class="app-content onboarding-locked">
+        <div class="ob-welcome">
+          <div class="ob-welcome-icon">&#128075;</div>
+          <div class="ob-welcome-title">Welcome, {{ driverName }}</div>
+          <div class="ob-welcome-sub">Complete the steps below to get started with LogisX.</div>
+        </div>
+
+        <!-- Overall progress -->
+        <div class="card ob-progress-card">
+          <div class="ob-progress-header">
+            <span class="ob-progress-label">Onboarding Progress</span>
+            <span class="ob-progress-pct">{{ onboardingPct }}%</span>
+          </div>
+          <div class="ob-bar-track"><div class="ob-bar-fill" :style="{ width: onboardingPct + '%' }"></div></div>
+        </div>
+
+        <!-- Step 1: Sign documents -->
+        <div class="card ob-step">
+          <div class="ob-step-header">
+            <div :class="['ob-step-num', allDocsSigned ? 'ob-done' : 'ob-active']">1</div>
+            <div class="ob-step-info">
+              <div class="ob-step-title">Sign Onboarding Documents</div>
+              <div class="ob-step-sub">{{ signedCount }}/{{ totalDocs }} completed</div>
+            </div>
+          </div>
+          <div class="ob-doc-list">
+            <div v-for="doc in onboardingDocs" :key="doc.doc_key" class="ob-doc-item" @click="openOnboardingDoc(doc)">
+              <div class="ob-doc-icon" v-html="doc.signed ? '&#9989;' : '&#9723;'"></div>
+              <div class="ob-doc-name">{{ doc.doc_name }}</div>
+              <div class="ob-doc-action">{{ doc.signed ? 'View' : 'Sign' }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 2: Drug test -->
+        <div class="card ob-step">
+          <div class="ob-step-header">
+            <div :class="['ob-step-num', drugTestPassed ? 'ob-done' : (allDocsSigned ? 'ob-active' : 'ob-pending')]">2</div>
+            <div class="ob-step-info">
+              <div class="ob-step-title">Pre-Employment Drug Test</div>
+              <div class="ob-step-sub" v-if="drugTestPassed">Passed</div>
+              <div class="ob-step-sub" v-else-if="driverStore.onboarding?.drug_test_result === 'fail'">Failed — contact your administrator</div>
+              <div class="ob-step-sub" v-else>Waiting for administrator to upload results</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 3: Complete -->
+        <div class="card ob-step">
+          <div class="ob-step-header">
+            <div :class="['ob-step-num', 'ob-pending']">3</div>
+            <div class="ob-step-info">
+              <div class="ob-step-title">Start Driving</div>
+              <div class="ob-step-sub">You'll be added to the fleet once all steps are complete</div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- Document sign modal -->
+      <DocumentSignModal
+        :show="showSignModal"
+        :doc="selectedDoc"
+        @close="showSignModal = false"
+        @signed="showSignModal = false"
+      />
+    </template>
+
+    <!-- NORMAL DRIVER UI — shown when fully onboarded (or no onboarding record) -->
+    <template v-else>
     <!-- Load Assigned Notification -->
     <LoadAssignedBanner
       :notification="assignedNotification"
@@ -225,6 +298,12 @@
           />
         </div>
       </section>
+
+      <!-- INVOICES TAB -->
+      <section v-if="currentTab === 'invoices'" class="tab-panel">
+        <div class="section-header">Invoices</div>
+        <InvoiceTab />
+      </section>
     </main>
 
     <!-- Bottom Navigation -->
@@ -246,6 +325,7 @@
         </div>
       </div>
     </div>
+    </template><!-- end normal driver UI -->
   </div>
 </template>
 
@@ -289,6 +369,9 @@ import DocumentUpload from '../components/driver/DocumentUpload.vue'
 import DocumentList from '../components/driver/DocumentList.vue'
 import LoadAssignedBanner from '../components/driver/LoadAssignedBanner.vue'
 import NotificationList from '../components/driver/NotificationList.vue'
+import OnboardingPanel from '../components/driver/OnboardingPanel.vue'
+import DocumentSignModal from '../components/driver/DocumentSignModal.vue'
+import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
 
@@ -299,6 +382,28 @@ const toast = useToast()
 const router = useRouter()
 const api = useApi()
 const geo = useGeolocation(api)
+
+// Onboarding lock screen
+const showSignModal = ref(false)
+const selectedDoc = ref(null)
+function openOnboardingDoc(doc) {
+  selectedDoc.value = doc
+  showSignModal.value = true
+}
+const isOnboarding = computed(() => {
+  const ob = driverStore.onboarding
+  return ob && ob.status !== 'fully_onboarded'
+})
+const onboardingDocs = computed(() => driverStore.onboarding?.documents || [])
+const totalDocs = computed(() => driverStore.onboarding?.totalDocs || 6)
+const signedCount = computed(() => onboardingDocs.value.filter(d => d.signed).length)
+const allDocsSigned = computed(() => signedCount.value === totalDocs.value)
+const drugTestPassed = computed(() => driverStore.onboarding?.drug_test_result === 'pass')
+const onboardingPct = computed(() => {
+  const docPct = (signedCount.value / totalDocs.value) * 80
+  const drugPct = drugTestPassed.value ? 20 : 0
+  return Math.round(Math.min(docPct + drugPct, 100))
+})
 
 const currentTab = ref('loads')
 const selectedStatusRowIndex = ref(null)
@@ -802,6 +907,53 @@ onUnmounted(() => {
   padding-top: calc(52px + env(safe-area-inset-top, 0px));
   padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px));
   font-size: 0.95rem;
+}
+
+/* Onboarding Lock Screen */
+.onboarding-locked {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.ob-welcome {
+  text-align: center;
+  padding: 1.5rem 1rem 0.5rem;
+}
+.ob-welcome-icon { font-size: 2.2rem; }
+.ob-welcome-title { font-size: 1.2rem; font-weight: 800; margin-top: 0.25rem; }
+.ob-welcome-sub { font-size: 0.82rem; color: var(--text-dim); margin-top: 0.2rem; }
+.ob-progress-card { padding: 1rem; }
+.ob-progress-header { display: flex; justify-content: space-between; margin-bottom: 0.4rem; }
+.ob-progress-label { font-weight: 700; font-size: 0.88rem; }
+.ob-progress-pct { font-weight: 700; font-size: 0.88rem; color: var(--accent); }
+.ob-bar-track { height: 10px; border-radius: 5px; background: var(--bg); overflow: hidden; }
+.ob-bar-fill { height: 100%; border-radius: 5px; background: var(--accent); transition: width 0.4s ease; }
+.ob-step { padding: 1rem; }
+.ob-step-header { display: flex; align-items: center; gap: 0.75rem; }
+.ob-step-num {
+  width: 32px; height: 32px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 0.85rem; flex-shrink: 0;
+}
+.ob-done { background: #d1fae5; color: #065f46; }
+.ob-active { background: #dbeafe; color: #1e40af; }
+.ob-pending { background: #f3f4f6; color: #9ca3af; }
+.ob-step-info { flex: 1; }
+.ob-step-title { font-weight: 700; font-size: 0.92rem; }
+.ob-step-sub { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.1rem; }
+.ob-doc-list { margin-top: 0.75rem; display: flex; flex-direction: column; gap: 0.25rem; }
+.ob-doc-item {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.55rem 0.5rem; border-radius: 8px; cursor: pointer;
+  transition: background 0.15s;
+}
+.ob-doc-item:active { background: var(--bg); }
+.ob-doc-icon { font-size: 1.1rem; flex-shrink: 0; }
+.ob-doc-name { flex: 1; font-size: 0.82rem; font-weight: 500; }
+.ob-doc-action {
+  font-size: 0.72rem; font-weight: 700; color: var(--accent);
+  padding: 0.2rem 0.6rem; border-radius: 99px; background: var(--accent-dim);
 }
 
 /* Distance Warning Banner */

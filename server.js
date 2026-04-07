@@ -11,6 +11,7 @@ const SqliteStore = require("better-sqlite3-session-store")(session);
 const geolib = require("geolib");
 const PDFDocument = require("pdfkit");
 const compression = require("compression");
+const crypto = require("crypto");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -604,6 +605,78 @@ if (configCount === 0) {
 	]);
 }
 
+// --- Driver Onboarding ---
+db.exec(`
+	CREATE TABLE IF NOT EXISTS driver_onboarding (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL UNIQUE,
+		application_id INTEGER NOT NULL,
+		driver_name TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'documents_pending'
+			CHECK(status IN ('documents_pending','documents_signed','fully_onboarded')),
+		drug_test_result TEXT DEFAULT '',
+		drug_test_file_url TEXT DEFAULT '',
+		drug_test_uploaded_at TEXT DEFAULT '',
+		onboarded_at TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (user_id) REFERENCES users(id),
+		FOREIGN KEY (application_id) REFERENCES job_applications(id)
+	)
+`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS onboarding_documents (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		doc_key TEXT NOT NULL,
+		doc_name TEXT NOT NULL,
+		signed INTEGER DEFAULT 0,
+		signature_text TEXT DEFAULT '',
+		signed_at TEXT DEFAULT '',
+		confidential INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(user_id, doc_key),
+		FOREIGN KEY (user_id) REFERENCES users(id)
+	)
+`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS invoices (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		invoice_number TEXT NOT NULL UNIQUE,
+		driver TEXT NOT NULL,
+		week_start TEXT NOT NULL,
+		week_end TEXT NOT NULL,
+		loads_count INTEGER NOT NULL DEFAULT 0,
+		rate_per_load REAL NOT NULL DEFAULT 250.00,
+		total_earnings REAL NOT NULL DEFAULT 0,
+		expenses_total REAL NOT NULL DEFAULT 0,
+		status TEXT NOT NULL DEFAULT 'Draft'
+			CHECK(status IN ('Draft','Submitted','Approved','Rejected','Paid')),
+		rejection_note TEXT DEFAULT '',
+		pdf_file_name TEXT DEFAULT '',
+		load_ids TEXT DEFAULT '[]',
+		expense_ids TEXT DEFAULT '[]',
+		submitted_at TEXT DEFAULT '',
+		approved_at TEXT DEFAULT '',
+		approved_by TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_driver ON invoices(driver)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_week ON invoices(week_start, week_end)`);
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_driver_week ON invoices(driver, week_start)`);
+
+// Onboarding document definitions
+const ONBOARDING_DOCS = [
+	{ key: "contractor_agreement", name: "Contractor Agreement", confidential: 1 },
+	{ key: "equipment_policy", name: "Contracted Provider Equipment Policy", confidential: 0 },
+	{ key: "w9", name: "W-9 Tax Form", confidential: 1 },
+	{ key: "mobile_policy", name: "LogisX Inc. Mobile Policy", confidential: 0 },
+	{ key: "substance_policy", name: "Substance Policy and Procedure", confidential: 0 },
+	{ key: "service_invoice", name: "Logistics Service Invoice", confidential: 1 },
+];
+
 // Session store in SQLite (persists across server restarts)
 app.use(
 	session({
@@ -792,13 +865,68 @@ app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
 	}
 });
 
-app.put("/api/applications/:id/status", requireRole("Super Admin"), (req, res) => {
+app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { status } = req.body;
 		if (!['New', 'Reviewed', 'Accepted', 'Rejected'].includes(status)) {
 			return res.status(400).json({ error: "Invalid status" });
 		}
-		db.prepare("UPDATE job_applications SET status = ? WHERE id = ?").run(status, parseInt(req.params.id));
+		const appId = parseInt(req.params.id);
+		db.prepare("UPDATE job_applications SET status = ? WHERE id = ?").run(status, appId);
+
+		// Auto-create driver account on acceptance
+		if (status === "Accepted") {
+			const application = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(appId);
+			if (!application) return res.status(404).json({ error: "Application not found" });
+
+			// Check if already onboarded for this application
+			const existingOnboarding = db.prepare("SELECT id FROM driver_onboarding WHERE application_id = ?").get(appId);
+			if (existingOnboarding) {
+				return res.json({ success: true, message: "Application accepted (account already exists)" });
+			}
+
+			// Generate username from full_name (e.g., "Lesline Johnson" -> "lesline.johnson")
+			const fullName = application.full_name.trim();
+			let baseUsername = fullName.toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9.]/g, "");
+			let username = baseUsername;
+			let suffix = 1;
+			while (db.prepare("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(username)) {
+				username = `${baseUsername}${suffix}`;
+				suffix++;
+			}
+
+			// Generate random temp password
+			const tempPassword = crypto.randomBytes(4).toString("hex"); // 8 char hex string
+			const hash = await bcrypt.hash(tempPassword, 10);
+
+			// Create user (do NOT sync to Carrier Database yet — that happens at full onboarding)
+			const userResult = db.prepare(
+				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, 'Driver', ?, ?, ?, '')"
+			).run(username, hash, fullName, application.email || "", fullName);
+			const userId = userResult.lastInsertRowid;
+
+			// Create onboarding record
+			db.prepare(
+				"INSERT INTO driver_onboarding (user_id, application_id, driver_name, status) VALUES (?, ?, ?, 'documents_pending')"
+			).run(userId, appId, fullName);
+
+			// Seed 6 onboarding documents
+			const seedDoc = db.prepare(
+				"INSERT OR IGNORE INTO onboarding_documents (user_id, doc_key, doc_name, confidential) VALUES (?, ?, ?, ?)"
+			);
+			for (const doc of ONBOARDING_DOCS) {
+				seedDoc.run(userId, doc.key, doc.name, doc.confidential);
+			}
+
+			logAudit(req, "accept_application", "application", appId, `Accepted and created driver account "${username}" for ${fullName}`);
+
+			return res.json({
+				success: true,
+				accountCreated: true,
+				credentials: { username, tempPassword, userId, driverName: fullName },
+			});
+		}
+
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -894,6 +1022,540 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 		res.status(500).json({ error: err.message });
 	}
 });
+
+// === DRIVER ONBOARDING ENDPOINTS ===
+
+// Helper: check if onboarding is complete and finalize
+async function checkAndCompleteOnboarding(userId) {
+	const ob = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
+	if (!ob || ob.status === "fully_onboarded") return ob;
+	const signedCount = db.prepare(
+		"SELECT COUNT(*) AS cnt FROM onboarding_documents WHERE user_id = ? AND signed = 1"
+	).get(userId).cnt;
+	const allSigned = signedCount === ONBOARDING_DOCS.length;
+	// Update to documents_signed if all docs signed
+	if (allSigned && ob.status === "documents_pending") {
+		db.prepare("UPDATE driver_onboarding SET status = 'documents_signed' WHERE user_id = ?").run(userId);
+	}
+	// Fully onboarded if all signed AND drug test passed
+	if (allSigned && ob.drug_test_result === "pass") {
+		const now = new Date().toISOString();
+		db.prepare("UPDATE driver_onboarding SET status = 'fully_onboarded', onboarded_at = ? WHERE user_id = ?").run(now, userId);
+		// Sync driver to Carrier Database sheet
+		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+		if (user) {
+			syncDriverToCarrierSheet(user.driver_name, { email: user.email, companyName: user.company_name, action: "add" });
+			insertNotification.run(
+				user.driver_name.trim().toLowerCase(), "onboarding_complete",
+				"Onboarding Complete", "You are now fully onboarded. Welcome to LogisX!",
+				JSON.stringify({ userId })
+			);
+		}
+		return { ...ob, status: "fully_onboarded", onboarded_at: now };
+	}
+	return db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
+}
+
+// GET /api/onboarding — list all onboarding records (Super Admin)
+app.get("/api/onboarding", requireRole("Super Admin"), (req, res) => {
+	try {
+		const records = db.prepare(`
+			SELECT o.*, u.username, u.email,
+				(SELECT COUNT(*) FROM onboarding_documents WHERE user_id = o.user_id AND signed = 1) AS signed_count
+			FROM driver_onboarding o
+			JOIN users u ON u.id = o.user_id
+			ORDER BY o.created_at DESC
+		`).all();
+		res.json({ records, totalDocs: ONBOARDING_DOCS.length });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/onboarding/:userId — get onboarding status + doc statuses
+app.get("/api/onboarding/:userId", requireAuth, (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		// Drivers can only access their own
+		if (req.session.user.role === "Driver" && req.session.user.id !== userId) {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+		const onboarding = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
+		if (!onboarding) return res.status(404).json({ error: "No onboarding record" });
+		const documents = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId);
+		res.json({ onboarding, documents, totalDocs: ONBOARDING_DOCS.length });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/onboarding/:userId/documents/:docKey/sign — driver signs a document
+app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		const { docKey } = req.params;
+		const { signatureText } = req.body;
+		// Only the driver themselves can sign
+		if (req.session.user.id !== userId) {
+			return res.status(403).json({ error: "You can only sign your own documents" });
+		}
+		if (!signatureText || !signatureText.trim()) {
+			return res.status(400).json({ error: "Signature is required" });
+		}
+		const doc = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? AND doc_key = ?").get(userId, docKey);
+		if (!doc) return res.status(404).json({ error: "Document not found" });
+		if (doc.signed) return res.json({ success: true, message: "Already signed" });
+
+		const now = new Date().toISOString();
+		db.prepare(
+			"UPDATE onboarding_documents SET signed = 1, signature_text = ?, signed_at = ? WHERE user_id = ? AND doc_key = ?"
+		).run(signatureText.trim(), now, userId, docKey);
+
+		const updated = await checkAndCompleteOnboarding(userId);
+		res.json({ success: true, onboarding: updated });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/onboarding/:userId/drug-test — Super Admin uploads drug test result
+app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		const { result, fileData, fileName } = req.body;
+		if (!["pass", "fail"].includes(result)) {
+			return res.status(400).json({ error: "Result must be 'pass' or 'fail'" });
+		}
+		const ob = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
+		if (!ob) return res.status(404).json({ error: "No onboarding record" });
+
+		let fileUrl = "";
+		if (fileData && fileName) {
+			// Save file to uploads/onboarding/
+			const uploadsDir = path.join(__dirname, "uploads", "onboarding");
+			if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+			const ext = path.extname(fileName) || ".pdf";
+			const safeName = `drug-test-${userId}-${Date.now()}${ext}`;
+			const filePath = path.join(uploadsDir, safeName);
+			const buffer = Buffer.from(fileData, "base64");
+			fs.writeFileSync(filePath, buffer);
+			fileUrl = `/uploads/onboarding/${safeName}`;
+		}
+
+		const now = new Date().toISOString();
+		db.prepare(
+			"UPDATE driver_onboarding SET drug_test_result = ?, drug_test_file_url = ?, drug_test_uploaded_at = ? WHERE user_id = ?"
+		).run(result, fileUrl, now, userId);
+
+		const updated = await checkAndCompleteOnboarding(userId);
+		logAudit(req, "upload_drug_test", "onboarding", userId, `Drug test: ${result} for ${ob.driver_name}`);
+		res.json({ success: true, onboarding: updated });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/onboarding/documents/:docKey/pdf — serve static onboarding PDF template
+app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, (req, res) => {
+	try {
+		const { docKey } = req.params;
+		const docDef = ONBOARDING_DOCS.find(d => d.key === docKey);
+		if (!docDef) return res.status(404).json({ error: "Unknown document" });
+
+		// Map doc_key to actual filename
+		const fileMap = {
+			contractor_agreement: "Contractor Agreement v1.57.pdf",
+			equipment_policy: "Contracted Provider Equipment Policy.pdf",
+			w9: "fw9.pdf",
+			mobile_policy: "LogisX Inc. Mobile Policy.pdf",
+			substance_policy: "LogisX SUBSTANCE POLICY AND PROCEDURE.pdf",
+			service_invoice: "Logistics Service Invoice.pdf",
+		};
+		const fileName = fileMap[docKey];
+		const filePath = path.join(__dirname, "uploads", "onboarding-templates", fileName);
+		if (!fs.existsSync(filePath)) {
+			return res.status(404).json({ error: "PDF file not found. Please upload the template." });
+		}
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
+		fs.createReadStream(filePath).pipe(res);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// Serve uploaded onboarding files (drug test results)
+app.use("/uploads/onboarding", express.static(path.join(__dirname, "uploads", "onboarding")));
+
+// === INVOICE ENDPOINTS ===
+
+// Helper: compute LogisX week range (Saturday–Friday) in CST
+function getWeekRange(referenceDate) {
+	const d = referenceDate ? new Date(referenceDate) : new Date();
+	// Convert to CST (America/Chicago)
+	const cstStr = d.toLocaleString("en-US", { timeZone: "America/Chicago" });
+	const cst = new Date(cstStr);
+	const day = cst.getDay(); // 0=Sun..6=Sat
+	// Find the most recent Saturday
+	const satOffset = day === 6 ? 0 : day + 1;
+	const weekStart = new Date(cst);
+	weekStart.setDate(cst.getDate() - satOffset);
+	weekStart.setHours(0, 0, 0, 0);
+	// Friday = Saturday + 6
+	const weekEnd = new Date(weekStart);
+	weekEnd.setDate(weekStart.getDate() + 6);
+	weekEnd.setHours(23, 59, 59, 999);
+	const fmt = (dt) => dt.toISOString().split("T")[0];
+	return { weekStart: fmt(weekStart), weekEnd: fmt(weekEnd) };
+}
+
+function isAfterDeadline(weekEndDate) {
+	const nowStr = new Date().toLocaleString("en-US", { timeZone: "America/Chicago" });
+	const now = new Date(nowStr);
+	const deadline = new Date(weekEndDate + "T18:00:00");
+	return now > deadline;
+}
+
+function generateInvoiceNumber(driverName, weekStart) {
+	const initials = driverName.split(/\s+/).map(w => w[0]).join("").toUpperCase().slice(0, 3);
+	const d = new Date(weekStart);
+	const year = d.getFullYear();
+	// ISO week number
+	const jan1 = new Date(year, 0, 1);
+	const days = Math.floor((d - jan1) / 86400000);
+	const weekNum = Math.ceil((days + jan1.getDay() + 1) / 7);
+	const weekStr = String(weekNum).padStart(2, "0");
+	// Check for existing invoices this week for this driver
+	const existing = db.prepare("SELECT COUNT(*) AS cnt FROM invoices WHERE driver = ? AND week_start = ?")
+		.get(driverName.toLowerCase(), weekStart).cnt;
+	const seq = String(existing + 1).padStart(2, "0");
+	return `INV-${initials}-${year}W${weekStr}-${seq}`;
+}
+
+// POST /api/invoices/generate — driver generates weekly invoice
+app.post("/api/invoices/generate", requireAuth, async (req, res) => {
+	try {
+		const user = req.session.user;
+		const driverName = user.role === "Driver" ? user.driverName : (req.body.driver || "");
+		if (!driverName) return res.status(400).json({ error: "Driver name required" });
+
+		// Only driver for themselves or Super Admin
+		if (user.role === "Driver" && user.driverName.toLowerCase() !== driverName.toLowerCase()) {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+
+		const { weekEnd } = req.body;
+		const range = weekEnd ? getWeekRange(weekEnd) : getWeekRange();
+		const { weekStart, weekEnd: computedWeekEnd } = range;
+
+		// Check for existing invoice this week
+		const existing = db.prepare("SELECT * FROM invoices WHERE LOWER(driver) = ? AND week_start = ?")
+			.get(driverName.toLowerCase(), weekStart);
+		if (existing && existing.status !== "Draft") {
+			return res.status(409).json({ error: "Invoice already submitted for this week", invoice: existing });
+		}
+
+		// Fetch loads from Google Sheets
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const rows = resp.data.values || [];
+		if (rows.length < 2) return res.status(400).json({ error: "No data in Job Tracking" });
+		const headers = rows[0];
+		const data = rows.slice(1).map((r, i) => {
+			const obj = {};
+			headers.forEach((h, j) => { obj[h] = r[j] || ""; });
+			obj._rowIndex = i + 2;
+			return obj;
+		});
+
+		const driverCol = headers.find(h => /driver/i.test(h));
+		const statusCol = headers.find(h => /^status$/i.test(h));
+		const loadIdCol = headers.find(h => /load.?id|job.?id/i.test(h));
+		const dateCol = headers.find(h => /status.*update.*date|completion.*date|drop.?off.*date|deliv.*date/i.test(h))
+			|| headers.find(h => /date/i.test(h));
+
+		// Filter completed loads for this driver in the week
+		const completedRe = /delivered|completed|pod received/i;
+		const nameLower = driverName.toLowerCase();
+		const weekLoads = data.filter(row => {
+			if (!driverCol || (row[driverCol] || "").trim().toLowerCase() !== nameLower) return false;
+			if (!statusCol || !completedRe.test(row[statusCol])) return false;
+			if (!dateCol) return true; // if no date column, include all completed
+			// Parse date and check if in week range
+			const rawDate = (row[dateCol] || "").replace(/^date:\s*/i, "").trim();
+			if (!rawDate) return true; // no date? include to be safe
+			const parsed = new Date(rawDate);
+			if (isNaN(parsed.getTime())) return true;
+			const dateStr = parsed.toISOString().split("T")[0];
+			return dateStr >= weekStart && dateStr <= computedWeekEnd;
+		});
+
+		// Deduplicate by load ID (keep last)
+		const loadMap = new Map();
+		for (const load of weekLoads) {
+			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
+			if (lid) loadMap.set(lid, load);
+			else loadMap.set(`_row_${load._rowIndex}`, load);
+		}
+		const uniqueLoads = [...loadMap.values()];
+
+		if (uniqueLoads.length === 0) {
+			return res.status(400).json({ error: "No completed loads found for this week", weekStart, weekEnd: computedWeekEnd });
+		}
+
+		// Fetch expenses for this week
+		const expenses = db.prepare(
+			`SELECT * FROM expenses WHERE LOWER(driver) = ? AND date >= ? AND date <= ? ORDER BY date ASC`
+		).all(nameLower, weekStart, computedWeekEnd);
+
+		const loadsCount = uniqueLoads.length;
+		const ratePerLoad = 250;
+		const totalEarnings = loadsCount * ratePerLoad;
+		const expensesTotal = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+		const loadIds = uniqueLoads.map(l => loadIdCol ? l[loadIdCol] : "").filter(Boolean);
+		const expenseIds = expenses.map(e => e.id);
+
+		// Generate invoice number
+		// Delete existing draft if any
+		if (existing && existing.status === "Draft") {
+			db.prepare("DELETE FROM invoices WHERE id = ?").run(existing.id);
+		}
+		const invoiceNumber = generateInvoiceNumber(driverName, weekStart);
+
+		// Generate PDF
+		const uploadsDir = path.join(__dirname, "uploads", "invoices");
+		if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+		const pdfFileName = `${invoiceNumber}.pdf`;
+		const pdfPath = path.join(uploadsDir, pdfFileName);
+
+		await new Promise((resolve, reject) => {
+			const doc = new PDFDocument({ size: "LETTER", margin: 50 });
+			const stream = fs.createWriteStream(pdfPath);
+			doc.pipe(stream);
+
+			// Header
+			doc.rect(0, 0, 612, 80).fill("#0f3460");
+			doc.font("Helvetica-Bold").fontSize(24).fillColor("#ffffff").text("LogisX", 50, 20);
+			doc.fontSize(12).text("Weekly Driver Invoice", 50, 48);
+			doc.fontSize(10).font("Helvetica").text(invoiceNumber, 400, 30, { align: "right", width: 162 });
+			doc.fillColor("#000000");
+			doc.moveDown(2);
+			doc.y = 100;
+
+			// Invoice details
+			doc.font("Helvetica-Bold").fontSize(11).text("Driver: ", 50, doc.y, { continued: true });
+			doc.font("Helvetica").text(driverName);
+			doc.font("Helvetica-Bold").text("Week: ", 50, doc.y, { continued: true });
+			doc.font("Helvetica").text(`${weekStart}  to  ${computedWeekEnd}`);
+			doc.font("Helvetica-Bold").text("Generated: ", 50, doc.y, { continued: true });
+			doc.font("Helvetica").text(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
+			doc.moveDown(1);
+
+			// Loads table
+			doc.font("Helvetica-Bold").fontSize(13).text("Completed Loads", 50, doc.y);
+			doc.moveDown(0.5);
+			const tableTop = doc.y;
+			const col = { num: 50, loadId: 80, pickup: 200, delivery: 340, rate: 480 };
+			doc.fontSize(9).font("Helvetica-Bold");
+			doc.rect(50, tableTop - 2, 512, 16).fill("#e8edf3");
+			doc.fillColor("#000000");
+			doc.text("#", col.num, tableTop, { width: 25 });
+			doc.text("Load ID", col.loadId, tableTop, { width: 110 });
+			doc.text("Pickup Date", col.pickup, tableTop, { width: 130 });
+			doc.text("Delivery Date", col.delivery, tableTop, { width: 130 });
+			doc.text("Rate", col.rate, tableTop, { width: 80, align: "right" });
+			doc.font("Helvetica").fontSize(9);
+			let rowY = tableTop + 18;
+			const pickupDateCol = headers.find(h => /pickup.*date|pickup.*appoint/i.test(h));
+			const delivDateCol = headers.find(h => /drop.?off.*date|deliv.*date|deliv.*appoint/i.test(h)) || dateCol;
+			uniqueLoads.forEach((load, i) => {
+				if (rowY > 700) { doc.addPage(); rowY = 50; }
+				if (i % 2 === 1) doc.rect(50, rowY - 2, 512, 15).fill("#f7f8fa").fillColor("#000000");
+				doc.fillColor("#000000");
+				doc.text(String(i + 1), col.num, rowY, { width: 25 });
+				doc.text(loadIdCol ? load[loadIdCol] || "-" : "-", col.loadId, rowY, { width: 110 });
+				doc.text(pickupDateCol ? load[pickupDateCol] || "-" : "-", col.pickup, rowY, { width: 130 });
+				doc.text(delivDateCol ? load[delivDateCol] || "-" : "-", col.delivery, rowY, { width: 130 });
+				doc.text(`$${ratePerLoad.toFixed(2)}`, col.rate, rowY, { width: 80, align: "right" });
+				rowY += 16;
+			});
+			// Subtotal
+			doc.moveTo(50, rowY).lineTo(562, rowY).strokeColor("#cccccc").stroke();
+			rowY += 6;
+			doc.font("Helvetica-Bold").fontSize(10);
+			doc.text(`Total: ${loadsCount} load${loadsCount !== 1 ? "s" : ""} x $${ratePerLoad.toFixed(2)}`, 50, rowY, { width: 430 });
+			doc.text(`$${totalEarnings.toFixed(2)}`, col.rate, rowY, { width: 80, align: "right" });
+			rowY += 24;
+
+			// Expenses table
+			if (expenses.length > 0) {
+				if (rowY > 650) { doc.addPage(); rowY = 50; }
+				doc.font("Helvetica-Bold").fontSize(13).fillColor("#000000");
+				doc.text("Expenses This Week", 50, rowY);
+				rowY += 20;
+				const eCol = { date: 50, type: 130, loadId: 230, amount: 350, desc: 420 };
+				doc.fontSize(9).font("Helvetica-Bold");
+				doc.rect(50, rowY - 2, 512, 16).fill("#e8edf3").fillColor("#000000");
+				doc.text("Date", eCol.date, rowY, { width: 70 });
+				doc.text("Type", eCol.type, rowY, { width: 90 });
+				doc.text("Load ID", eCol.loadId, rowY, { width: 110 });
+				doc.text("Amount", eCol.amount, rowY, { width: 60, align: "right" });
+				doc.text("Description", eCol.desc, rowY, { width: 142 });
+				doc.font("Helvetica").fontSize(9);
+				rowY += 18;
+				expenses.forEach((exp, i) => {
+					if (rowY > 700) { doc.addPage(); rowY = 50; }
+					if (i % 2 === 1) doc.rect(50, rowY - 2, 512, 15).fill("#f7f8fa").fillColor("#000000");
+					doc.fillColor("#000000");
+					doc.text(exp.date || "-", eCol.date, rowY, { width: 70 });
+					doc.text(exp.type || "-", eCol.type, rowY, { width: 90 });
+					doc.text(exp.load_id || "-", eCol.loadId, rowY, { width: 110 });
+					doc.text(`$${(exp.amount || 0).toFixed(2)}`, eCol.amount, rowY, { width: 60, align: "right" });
+					doc.text((exp.description || "").slice(0, 30), eCol.desc, rowY, { width: 142 });
+					rowY += 16;
+				});
+				doc.moveTo(50, rowY).lineTo(562, rowY).strokeColor("#cccccc").stroke();
+				rowY += 6;
+				doc.font("Helvetica-Bold").fontSize(10);
+				doc.text("Total Expenses:", 50, rowY, { width: 300 });
+				doc.text(`$${expensesTotal.toFixed(2)}`, eCol.amount, rowY, { width: 60, align: "right" });
+				doc.fontSize(8).font("Helvetica").fillColor("#888888");
+				rowY += 16;
+				doc.text("Expenses listed for reference. Reimbursement handled separately.", 50, rowY);
+				rowY += 20;
+			}
+
+			// Grand total
+			if (rowY > 700) { doc.addPage(); rowY = 50; }
+			doc.fillColor("#000000");
+			doc.rect(50, rowY, 512, 30).fill("#0f3460");
+			doc.font("Helvetica-Bold").fontSize(14).fillColor("#ffffff");
+			doc.text("Total Earnings:", 60, rowY + 8, { width: 300 });
+			doc.text(`$${totalEarnings.toFixed(2)}`, 400, rowY + 8, { width: 152, align: "right" });
+
+			// Footer
+			doc.fillColor("#888888").font("Helvetica").fontSize(8);
+			doc.text("Generated by LogisX Dispatch System", 50, 740, { align: "center", width: 512 });
+			doc.text("Invoice must be submitted by Friday 6:00 PM CST", 50, 750, { align: "center", width: 512 });
+
+			doc.end();
+			stream.on("finish", resolve);
+			stream.on("error", reject);
+		});
+
+		// Insert into DB
+		const result = db.prepare(
+			`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, ?, ?)`
+		).run(
+			invoiceNumber, driverName.toLowerCase(), weekStart, computedWeekEnd,
+			loadsCount, ratePerLoad, totalEarnings, expensesTotal,
+			pdfFileName, JSON.stringify(loadIds), JSON.stringify(expenseIds)
+		);
+
+		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(result.lastInsertRowid);
+		const late = isAfterDeadline(computedWeekEnd);
+		res.json({ success: true, invoice, isLate: late });
+	} catch (err) {
+		console.error("Invoice generation error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/invoices — list invoices
+app.get("/api/invoices", requireAuth, (req, res) => {
+	try {
+		const user = req.session.user;
+		let invoices;
+		if (user.role === "Super Admin") {
+			const driverFilter = req.query.driver;
+			const statusFilter = req.query.status;
+			let sql = "SELECT * FROM invoices WHERE 1=1";
+			const params = [];
+			if (driverFilter) { sql += " AND LOWER(driver) = ?"; params.push(driverFilter.toLowerCase()); }
+			if (statusFilter) { sql += " AND status = ?"; params.push(statusFilter); }
+			sql += " ORDER BY created_at DESC";
+			invoices = db.prepare(sql).all(...params);
+		} else {
+			const driverName = user.driverName || "";
+			invoices = db.prepare("SELECT * FROM invoices WHERE LOWER(driver) = ? ORDER BY created_at DESC")
+				.all(driverName.toLowerCase());
+		}
+		res.json({ invoices });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/invoices/:id/pdf — serve invoice PDF
+app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {
+	try {
+		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
+		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
+		// Drivers can only access their own
+		const user = req.session.user;
+		if (user.role === "Driver" && invoice.driver !== (user.driverName || "").toLowerCase()) {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+		const pdfPath = path.join(__dirname, "uploads", "invoices", invoice.pdf_file_name);
+		if (!fs.existsSync(pdfPath)) return res.status(404).json({ error: "PDF file not found" });
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader("Content-Disposition", `inline; filename="${invoice.pdf_file_name}"`);
+		fs.createReadStream(pdfPath).pipe(res);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// PUT /api/invoices/:id/submit — driver submits invoice
+app.put("/api/invoices/:id/submit", requireAuth, (req, res) => {
+	try {
+		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
+		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
+		const user = req.session.user;
+		if (user.role === "Driver" && invoice.driver !== (user.driverName || "").toLowerCase()) {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+		if (invoice.status !== "Draft") {
+			return res.status(400).json({ error: `Cannot submit invoice with status "${invoice.status}"` });
+		}
+		const now = new Date().toISOString();
+		db.prepare("UPDATE invoices SET status = 'Submitted', submitted_at = ? WHERE id = ?").run(now, invoice.id);
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// PUT /api/invoices/:id/approve — Super Admin approves or rejects
+app.put("/api/invoices/:id/approve", requireRole("Super Admin"), (req, res) => {
+	try {
+		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
+		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
+		const { action, rejectionNote } = req.body; // action: "approve" | "reject" | "paid"
+		if (!["approve", "reject", "paid"].includes(action)) {
+			return res.status(400).json({ error: "Action must be 'approve', 'reject', or 'paid'" });
+		}
+		const now = new Date().toISOString();
+		const adminName = req.session.user.username;
+		if (action === "approve") {
+			db.prepare("UPDATE invoices SET status = 'Approved', approved_at = ?, approved_by = ? WHERE id = ?")
+				.run(now, adminName, invoice.id);
+		} else if (action === "reject") {
+			db.prepare("UPDATE invoices SET status = 'Rejected', rejection_note = ?, approved_at = ?, approved_by = ? WHERE id = ?")
+				.run(rejectionNote || "", now, adminName, invoice.id);
+		} else if (action === "paid") {
+			db.prepare("UPDATE invoices SET status = 'Paid', approved_at = ?, approved_by = ? WHERE id = ?")
+				.run(now, adminName, invoice.id);
+		}
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// Serve invoice PDFs
+app.use("/uploads/invoices", express.static(path.join(__dirname, "uploads", "invoices")));
 
 // Check if any users exist (for first-time setup)
 app.get("/api/auth/setup-check", (req, res) => {
@@ -3302,6 +3964,18 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			 FROM trucks WHERE LOWER(assigned_driver) = ?`
 		).get(nameLower) || null;
 
+		// Onboarding data (if driver has an onboarding record)
+		const userId = req.session.user.id;
+		const onboarding = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId) || null;
+		const onboardingDocs = onboarding
+			? db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId)
+			: [];
+		// Recent invoices
+		const driverInvoices = db.prepare(
+			`SELECT id, invoice_number, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at, created_at
+			 FROM invoices WHERE LOWER(driver) = ? ORDER BY created_at DESC LIMIT 20`
+		).all(nameLower);
+
 		res.json({
 			loads: filteredLoads,
 			driverInfo: driverInfo || null,
@@ -3314,6 +3988,12 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 				jobTracking: filteredHeaders,
 				carrierDB: carrierDB.headers,
 			},
+			onboarding: onboarding ? {
+				...onboarding,
+				documents: onboardingDocs,
+				totalDocs: ONBOARDING_DOCS.length,
+			} : null,
+			invoices: driverInvoices,
 		});
 	} catch (error) {
 		console.error("Error fetching driver data:", error.message);

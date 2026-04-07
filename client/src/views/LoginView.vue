@@ -181,16 +181,7 @@ async function doLogin() {
   overflow: hidden;
 }
 
-.login-brand::before {
-  content: '';
-  position: absolute;
-  top: -40%;
-  right: -20%;
-  width: 70%;
-  height: 180%;
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.07) 0%, transparent 70%);
-  pointer-events: none;
-}
+/* removed radial gradient overlay — caused visible color seam */
 
 .brand-center {
   text-align: center;
