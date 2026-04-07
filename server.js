@@ -12,6 +12,7 @@ const geolib = require("geolib");
 const PDFDocument = require("pdfkit");
 const compression = require("compression");
 const crypto = require("crypto");
+const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -639,6 +640,8 @@ db.exec(`
 		FOREIGN KEY (user_id) REFERENCES users(id)
 	)
 `);
+// Migration: add signed_pdf_url column
+try { db.exec("ALTER TABLE onboarding_documents ADD COLUMN signed_pdf_url TEXT DEFAULT ''"); } catch { /* exists */ }
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS invoices (
@@ -1094,7 +1097,7 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 	try {
 		const userId = parseInt(req.params.userId);
 		const { docKey } = req.params;
-		const { signatureText } = req.body;
+		const { signatureText, signatureImage } = req.body; // signatureImage = base64 PNG from canvas
 		// Only the driver themselves can sign
 		if (req.session.user.id !== userId) {
 			return res.status(403).json({ error: "You can only sign your own documents" });
@@ -1102,21 +1105,84 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 		if (!signatureText || !signatureText.trim()) {
 			return res.status(400).json({ error: "Signature is required" });
 		}
-		const doc = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? AND doc_key = ?").get(userId, docKey);
-		if (!doc) return res.status(404).json({ error: "Document not found" });
-		if (doc.signed) return res.json({ success: true, message: "Already signed" });
+		const docRow = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? AND doc_key = ?").get(userId, docKey);
+		if (!docRow) return res.status(404).json({ error: "Document not found" });
+		if (docRow.signed) return res.json({ success: true, message: "Already signed" });
 
-		const now = new Date().toISOString();
+		// Load the template PDF
+		const fileMap = {
+			contractor_agreement: "Contractor Agreement v1.57.pdf",
+			equipment_policy: "Contracted Provider Equipment Policy.pdf",
+			w9: "fw9.pdf",
+			mobile_policy: "LogisX Inc. Mobile Policy.pdf",
+			substance_policy: "LogisX SUBSTANCE POLICY AND PROCEDURE.pdf",
+			service_invoice: "Logistics Service Invoice.pdf",
+		};
+		const templatePath = path.join(__dirname, "uploads", "onboarding-templates", fileMap[docKey]);
+		let signedPdfUrl = "";
+
+		if (fs.existsSync(templatePath)) {
+			const templateBytes = fs.readFileSync(templatePath);
+			const pdfDoc = await PdfLibDocument.load(templateBytes);
+			const pages = pdfDoc.getPages();
+			const lastPage = pages[pages.length - 1];
+			const { width, height } = lastPage.getSize();
+			const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+			const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+			const now = new Date();
+			const dateStr = now.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+
+			// Draw signature block at bottom of last page
+			const blockY = 60;
+			// Background bar
+			lastPage.drawRectangle({ x: 30, y: blockY - 10, width: width - 60, height: 65, color: rgb(0.95, 0.96, 0.97) });
+			// Divider line
+			lastPage.drawLine({ start: { x: 30, y: blockY + 55 }, end: { x: width - 30, y: blockY + 55 }, thickness: 1, color: rgb(0.7, 0.72, 0.75) });
+			// Signature label + text
+			lastPage.drawText("ELECTRONICALLY SIGNED", { x: 40, y: blockY + 40, size: 7, font: fontBold, color: rgb(0.4, 0.4, 0.45) });
+			lastPage.drawText(signatureText.trim(), { x: 40, y: blockY + 22, size: 14, font: fontBold, color: rgb(0.06, 0.13, 0.22) });
+			lastPage.drawText(`Date: ${dateStr}`, { x: 40, y: blockY + 5, size: 8, font, color: rgb(0.4, 0.4, 0.45) });
+
+			// Embed drawn signature image if provided
+			if (signatureImage) {
+				try {
+					const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
+					const sigImg = await pdfDoc.embedPng(sigBytes);
+					const sigDims = sigImg.scale(0.4);
+					const sigW = Math.min(sigDims.width, 180);
+					const sigH = Math.min(sigDims.height, 50);
+					lastPage.drawImage(sigImg, { x: width - sigW - 50, y: blockY + 5, width: sigW, height: sigH });
+				} catch (imgErr) {
+					console.error("Signature image embed failed:", imgErr.message);
+					// Continue without the drawn signature — typed name is still there
+				}
+			}
+
+			// Save signed PDF
+			const signedDir = path.join(__dirname, "uploads", "onboarding-signed");
+			if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
+			const signedFileName = `${docKey}-${userId}-signed.pdf`;
+			const signedPath = path.join(signedDir, signedFileName);
+			const signedBytes = await pdfDoc.save();
+			fs.writeFileSync(signedPath, signedBytes);
+			signedPdfUrl = `/uploads/onboarding-signed/${signedFileName}`;
+		}
+
+		const nowIso = new Date().toISOString();
 		db.prepare(
-			"UPDATE onboarding_documents SET signed = 1, signature_text = ?, signed_at = ? WHERE user_id = ? AND doc_key = ?"
-		).run(signatureText.trim(), now, userId, docKey);
+			"UPDATE onboarding_documents SET signed = 1, signature_text = ?, signed_at = ?, signed_pdf_url = ? WHERE user_id = ? AND doc_key = ?"
+		).run(signatureText.trim(), nowIso, signedPdfUrl, userId, docKey);
 
 		const updated = await checkAndCompleteOnboarding(userId);
 		res.json({ success: true, onboarding: updated });
 	} catch (err) {
+		console.error("Sign document error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
+
+// Serve signed PDFs
+app.use("/uploads/onboarding-signed", requireAuth, express.static(path.join(__dirname, "uploads", "onboarding-signed")));
 
 // POST /api/onboarding/:userId/drug-test — Super Admin uploads drug test result
 app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async (req, res) => {
