@@ -1230,43 +1230,42 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 				const ssn = application?.ssn || "";
 				const dateStr = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
-				// W-9 page 1 field positions (measured from bottom-left, PDF coordinate system)
-				// Line 1: Name — y ~681, x ~68
-				page1.drawText(driverName, { x: 68, y: 681, size: 11, font: fontBold, color: blue });
-				// Line 3a: Check "Individual/sole proprietor" — draw an X in the checkbox
-				page1.drawText("X", { x: 69, y: 614, size: 10, font: fontBold, color: blue });
-				// Line 5: Address — y ~556, x ~68
+				// W-9 page 1 field positions (PDF coordinate system: 0,0 = bottom-left)
+				// Line 1: Name field (the blank area below the label)
+				page1.drawText(driverName, { x: 68, y: 660, size: 11, font: fontBold, color: blue });
+				// Line 3a: "Individual/sole proprietor" checkbox
+				page1.drawText("X", { x: 64, y: 595, size: 12, font: fontBold, color: blue });
+				// Line 5: Address
 				if (addr) {
-					// Split address: try to extract city/state/zip
 					const parts = addr.split(",").map(s => s.trim());
 					const street = parts[0] || addr;
 					const cityStateZip = parts.slice(1).join(", ");
-					page1.drawText(street, { x: 68, y: 556, size: 10, font, color: blue });
-					// Line 6: City, state, ZIP — y ~537
+					page1.drawText(street, { x: 68, y: 502, size: 10, font, color: blue });
+					// Line 6: City, state, ZIP
 					if (cityStateZip) {
-						page1.drawText(cityStateZip, { x: 68, y: 537, size: 10, font, color: blue });
+						page1.drawText(cityStateZip, { x: 68, y: 482, size: 10, font, color: blue });
 					}
 				}
-				// SSN — top box area, y ~476, x ~462 (first 3 digits), ~500 (middle 2), ~535 (last 4)
+				// SSN boxes — Part I area
 				if (ssn && ssn.length >= 9) {
 					const digits = ssn.replace(/\D/g, "");
 					if (digits.length === 9) {
-						page1.drawText(digits.slice(0, 3), { x: 462, y: 476, size: 10, font: fontBold, color: blue });
-						page1.drawText(digits.slice(3, 5), { x: 502, y: 476, size: 10, font: fontBold, color: blue });
-						page1.drawText(digits.slice(5, 9), { x: 533, y: 476, size: 10, font: fontBold, color: blue });
+						page1.drawText(digits.slice(0, 3), { x: 462, y: 432, size: 11, font: fontBold, color: blue });
+						page1.drawText(digits.slice(3, 5), { x: 510, y: 432, size: 11, font: fontBold, color: blue });
+						page1.drawText(digits.slice(5, 9), { x: 545, y: 432, size: 11, font: fontBold, color: blue });
 					}
 				}
-				// Signature — y ~386, x ~100
-				page1.drawText(driverName, { x: 100, y: 386, size: 10, font: fontBold, color: blue });
-				// Date — y ~386, x ~455
-				page1.drawText(dateStr, { x: 455, y: 386, size: 9, font, color: blue });
+				// Signature line — "Sign Here" section
+				page1.drawText(driverName, { x: 120, y: 328, size: 10, font: fontBold, color: blue });
+				// Date next to signature
+				page1.drawText(dateStr, { x: 455, y: 328, size: 9, font, color: blue });
 
 				// Embed drawn signature image near the signature line
 				if (signatureImage) {
 					try {
 						const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
 						const sigImg = await pdfDoc.embedPng(sigBytes);
-						page1.drawImage(sigImg, { x: 200, y: 378, width: 140, height: 35 });
+						page1.drawImage(sigImg, { x: 200, y: 320, width: 140, height: 35 });
 					} catch { /* skip */ }
 				}
 
@@ -1406,22 +1405,22 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) =
 			const addr = application?.address || "";
 			const ssn = application?.ssn || "";
 			// Line 1: Name
-			if (driverName) page1.drawText(driverName, { x: 68, y: 681, size: 11, font: fontBold, color: blue });
+			if (driverName) page1.drawText(driverName, { x: 68, y: 660, size: 11, font: fontBold, color: blue });
 			// Line 3a: Individual/sole proprietor checkbox
-			page1.drawText("X", { x: 69, y: 614, size: 10, font: fontBold, color: blue });
+			page1.drawText("X", { x: 64, y: 595, size: 12, font: fontBold, color: blue });
 			// Line 5-6: Address
 			if (addr) {
 				const parts = addr.split(",").map(s => s.trim());
-				page1.drawText(parts[0] || addr, { x: 68, y: 556, size: 10, font, color: blue });
-				if (parts.length > 1) page1.drawText(parts.slice(1).join(", "), { x: 68, y: 537, size: 10, font, color: blue });
+				page1.drawText(parts[0] || addr, { x: 68, y: 502, size: 10, font, color: blue });
+				if (parts.length > 1) page1.drawText(parts.slice(1).join(", "), { x: 68, y: 482, size: 10, font, color: blue });
 			}
 			// SSN
 			if (ssn) {
 				const digits = ssn.replace(/\D/g, "");
 				if (digits.length === 9) {
-					page1.drawText(digits.slice(0, 3), { x: 462, y: 476, size: 10, font: fontBold, color: blue });
-					page1.drawText(digits.slice(3, 5), { x: 502, y: 476, size: 10, font: fontBold, color: blue });
-					page1.drawText(digits.slice(5, 9), { x: 533, y: 476, size: 10, font: fontBold, color: blue });
+					page1.drawText(digits.slice(0, 3), { x: 462, y: 432, size: 11, font: fontBold, color: blue });
+					page1.drawText(digits.slice(3, 5), { x: 510, y: 432, size: 11, font: fontBold, color: blue });
+					page1.drawText(digits.slice(5, 9), { x: 545, y: 432, size: 11, font: fontBold, color: blue });
 				}
 			}
 			const pdfBytes = await pdfDoc.save();
