@@ -1214,34 +1214,59 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
 		} else {
-			// Stamp overlay on existing template PDF (W-9 only — IRS form, can't recreate)
-			const fileMap = {
-				w9: "fw9.pdf",
-			};
-			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", fileMap[docKey]);
+			// W-9: overlay driver data onto the official IRS form (page 1 only)
+			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
 			if (fs.existsSync(templatePath)) {
+				const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+				const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
 				const templateBytes = fs.readFileSync(templatePath);
 				const pdfDoc = await PdfLibDocument.load(templateBytes);
-				const pages = pdfDoc.getPages();
-				const lastPage = pages[pages.length - 1];
-				const { width } = lastPage.getSize();
+				const page1 = pdfDoc.getPages()[0];
 				const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 				const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+				const blue = rgb(0.1, 0.34, 0.86);
+				const driverName = user?.driver_name || signatureText.trim();
+				const addr = application?.address || "";
+				const ssn = application?.ssn || "";
 				const dateStr = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
-				const blockY = 60;
-				lastPage.drawRectangle({ x: 30, y: blockY - 10, width: width - 60, height: 65, color: rgb(0.95, 0.96, 0.97) });
-				lastPage.drawLine({ start: { x: 30, y: blockY + 55 }, end: { x: width - 30, y: blockY + 55 }, thickness: 1, color: rgb(0.7, 0.72, 0.75) });
-				lastPage.drawText("ELECTRONICALLY SIGNED", { x: 40, y: blockY + 40, size: 7, font: fontBold, color: rgb(0.4, 0.4, 0.45) });
-				lastPage.drawText(signatureText.trim(), { x: 40, y: blockY + 22, size: 14, font: fontBold, color: rgb(0.06, 0.13, 0.22) });
-				lastPage.drawText(`Date: ${dateStr}`, { x: 40, y: blockY + 5, size: 8, font, color: rgb(0.4, 0.4, 0.45) });
+				// W-9 page 1 field positions (measured from bottom-left, PDF coordinate system)
+				// Line 1: Name — y ~681, x ~68
+				page1.drawText(driverName, { x: 68, y: 681, size: 11, font: fontBold, color: blue });
+				// Line 3a: Check "Individual/sole proprietor" — draw an X in the checkbox
+				page1.drawText("X", { x: 69, y: 614, size: 10, font: fontBold, color: blue });
+				// Line 5: Address — y ~556, x ~68
+				if (addr) {
+					// Split address: try to extract city/state/zip
+					const parts = addr.split(",").map(s => s.trim());
+					const street = parts[0] || addr;
+					const cityStateZip = parts.slice(1).join(", ");
+					page1.drawText(street, { x: 68, y: 556, size: 10, font, color: blue });
+					// Line 6: City, state, ZIP — y ~537
+					if (cityStateZip) {
+						page1.drawText(cityStateZip, { x: 68, y: 537, size: 10, font, color: blue });
+					}
+				}
+				// SSN — top box area, y ~476, x ~462 (first 3 digits), ~500 (middle 2), ~535 (last 4)
+				if (ssn && ssn.length >= 9) {
+					const digits = ssn.replace(/\D/g, "");
+					if (digits.length === 9) {
+						page1.drawText(digits.slice(0, 3), { x: 462, y: 476, size: 10, font: fontBold, color: blue });
+						page1.drawText(digits.slice(3, 5), { x: 502, y: 476, size: 10, font: fontBold, color: blue });
+						page1.drawText(digits.slice(5, 9), { x: 533, y: 476, size: 10, font: fontBold, color: blue });
+					}
+				}
+				// Signature — y ~386, x ~100
+				page1.drawText(driverName, { x: 100, y: 386, size: 10, font: fontBold, color: blue });
+				// Date — y ~386, x ~455
+				page1.drawText(dateStr, { x: 455, y: 386, size: 9, font, color: blue });
 
+				// Embed drawn signature image near the signature line
 				if (signatureImage) {
 					try {
 						const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
 						const sigImg = await pdfDoc.embedPng(sigBytes);
-						const sigDims = sigImg.scale(0.4);
-						lastPage.drawImage(sigImg, { x: width - Math.min(sigDims.width, 180) - 50, y: blockY + 5, width: Math.min(sigDims.width, 180), height: Math.min(sigDims.height, 50) });
+						page1.drawImage(sigImg, { x: 200, y: 378, width: 140, height: 35 });
 					} catch { /* skip */ }
 				}
 
