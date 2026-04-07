@@ -15,6 +15,7 @@ const crypto = require("crypto");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { generateContractorAgreement } = require("./lib/generate-contractor-pdf");
 const { generateEquipmentPolicy } = require("./lib/generate-equipment-policy-pdf");
+const { generateMobilePolicy } = require("./lib/generate-mobile-policy-pdf");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -1177,11 +1178,19 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 				signatureImage: signatureImage || null,
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
+		} else if (docKey === "mobile_policy") {
+			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+			const pdfBuffer = await generateMobilePolicy({
+				fullName: user?.driver_name || signatureText.trim(),
+				effectiveDate,
+				signatureImage: signatureImage || null,
+			});
+			fs.writeFileSync(signedPath, pdfBuffer);
 		} else {
 			// Stamp overlay on existing template PDF (for remaining documents)
 			const fileMap = {
 				w9: "fw9.pdf",
-				mobile_policy: "LogisX Inc. Mobile Policy.pdf",
 				substance_policy: "LogisX SUBSTANCE POLICY AND PROCEDURE.pdf",
 				service_invoice: "Logistics Service Invoice.pdf",
 			};
@@ -1304,6 +1313,15 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) =
 			});
 			res.setHeader("Content-Type", "application/pdf");
 			res.setHeader("Content-Disposition", 'inline; filename="Equipment Policy Preview.pdf"');
+			return res.send(pdfBuffer);
+		}
+
+		if (docKey === "mobile_policy") {
+			const pdfBuffer = await generateMobilePolicy({
+				fullName: driverName, effectiveDate, signatureImage: null,
+			});
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", 'inline; filename="Mobile Policy Preview.pdf"');
 			return res.send(pdfBuffer);
 		}
 
