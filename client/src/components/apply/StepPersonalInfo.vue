@@ -28,24 +28,33 @@
       <p class="upload-hint">Upload clear photos of your CDL (front and back) and medical card</p>
       <div class="upload-grid">
         <div class="upload-card" @click="$refs.cdlFrontInput.click()">
-          <input ref="cdlFrontInput" type="file" accept="image/*" hidden @change="handleFile($event, 'cdl_front')" />
-          <img v-if="form.cdl_front" :src="form.cdl_front" class="upload-preview" />
+          <input ref="cdlFrontInput" type="file" accept="image/*,.pdf" hidden @change="handleFile($event, 'cdl_front')" />
+          <template v-if="form.cdl_front">
+            <img v-if="!fileTypes.cdl_front" :src="form.cdl_front" class="upload-preview" />
+            <div v-else class="pdf-preview"><div class="pdf-icon">&#128196;</div><div class="upload-label">PDF uploaded</div></div>
+          </template>
           <template v-else>
             <div class="upload-placeholder">&#128247;</div>
             <div class="upload-label">CDL Front</div>
           </template>
         </div>
         <div class="upload-card" @click="$refs.cdlBackInput.click()">
-          <input ref="cdlBackInput" type="file" accept="image/*" hidden @change="handleFile($event, 'cdl_back')" />
-          <img v-if="form.cdl_back" :src="form.cdl_back" class="upload-preview" />
+          <input ref="cdlBackInput" type="file" accept="image/*,.pdf" hidden @change="handleFile($event, 'cdl_back')" />
+          <template v-if="form.cdl_back">
+            <img v-if="!fileTypes.cdl_back" :src="form.cdl_back" class="upload-preview" />
+            <div v-else class="pdf-preview"><div class="pdf-icon">&#128196;</div><div class="upload-label">PDF uploaded</div></div>
+          </template>
           <template v-else>
             <div class="upload-placeholder">&#128247;</div>
             <div class="upload-label">CDL Back</div>
           </template>
         </div>
         <div class="upload-card" @click="$refs.medicalInput.click()">
-          <input ref="medicalInput" type="file" accept="image/*" hidden @change="handleFile($event, 'medical_card')" />
-          <img v-if="form.medical_card" :src="form.medical_card" class="upload-preview" />
+          <input ref="medicalInput" type="file" accept="image/*,.pdf" hidden @change="handleFile($event, 'medical_card')" />
+          <template v-if="form.medical_card">
+            <img v-if="!fileTypes.medical_card" :src="form.medical_card" class="upload-preview" />
+            <div v-else class="pdf-preview"><div class="pdf-icon">&#128196;</div><div class="upload-label">PDF uploaded</div></div>
+          </template>
           <template v-else>
             <div class="upload-placeholder">&#128247;</div>
             <div class="upload-label">Medical Card</div>
@@ -64,15 +73,17 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 
 const props = defineProps({ form: { type: Object, required: true } })
 const positions = ['Company Driver', 'Owner Operator', 'Other']
 const addressInput = ref(null)
+const fileTypes = reactive({ cdl_front: false, cdl_back: false, medical_card: false })
 
 function handleFile(event, field) {
   const file = event.target.files[0]
   if (!file) return
+  fileTypes[field] = file.type === 'application/pdf'
   const reader = new FileReader()
   reader.onload = (e) => { props.form[field] = e.target.result }
   reader.readAsDataURL(file)
@@ -144,6 +155,15 @@ function initAutocomplete() {
   height: 100px;
   object-fit: cover;
   border-radius: 6px;
+}
+.pdf-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+.pdf-icon {
+  font-size: 2rem;
 }
 @media (max-width: 640px) {
   .upload-grid { grid-template-columns: 1fr; }
