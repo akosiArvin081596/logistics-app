@@ -61,6 +61,7 @@
         <TrendSection :production="store.production" />
       </div>
       <AssetSection :asset="store.asset" :config="store.config" />
+      <MyTrucks :trucks="trucks" @reload="loadData" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
@@ -96,6 +97,7 @@ import TaxShieldSection from '../components/investor/TaxShieldSection.vue'
 import InvestorChat from '../components/investor/InvestorChat.vue'
 import DocumentPortal from '../components/investor/DocumentPortal.vue'
 import LegalDocumentPortal from '../components/investor/LegalDocumentPortal.vue'
+import MyTrucks from '../components/investor/MyTrucks.vue'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 

@@ -2872,9 +2872,15 @@ app.get("/api/truck-assignments", requireAuth, (req, res) => {
 });
 
 // Truck Database: add a new truck
-app.post("/api/trucks", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	try {
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
+		// Investors auto-set owner_id to their own investor record
+		let finalOwnerId = parseInt(ownerId) || 0;
+		if (req.session.user.role === "Investor") {
+			const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(req.session.user.id);
+			if (inv) finalOwnerId = inv.id;
+		}
 		if (!unitNumber || !unitNumber.trim()) {
 			return res.status(400).json({ error: "Unit number is required" });
 		}
@@ -2890,7 +2896,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher"), async (req, re
 		}
 		const result = db.prepare(
 			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", parseInt(ownerId) || 0, parseFloat(driverPayDaily) || 0, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0);
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", finalOwnerId, parseFloat(driverPayDaily) || 0, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0);
 		// Create truck assignment record
 		if (assignedDriver && assignedDriver.trim()) {
 			assignDriverToTruck(result.lastInsertRowid, assignedDriver.trim());
