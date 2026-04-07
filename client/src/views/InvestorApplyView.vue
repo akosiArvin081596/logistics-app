@@ -101,7 +101,7 @@
               <div class="doc-action">{{ doc.signed ? 'View' : 'Sign' }}</div>
             </div>
             <div class="step-actions">
-              <button class="btn-secondary" @click="step = 0">Back</button>
+              <div></div> <!-- no back from Step 2 — application already submitted -->
               <button class="btn-primary" :disabled="signedCount < totalDocs" @click="step = 2">Next: Banking</button>
             </div>
           </div>
@@ -135,6 +135,7 @@
         :doc="selectedDoc"
         :pdf-url="selectedPdfUrl"
         :application-id="applicationId"
+        :access-token="accessToken"
         :vehicle-info="vehicleInfoDone ? vehicle : null"
         @close="showSignModal = false"
         @signed="handleSigned"
@@ -157,6 +158,7 @@ const step = ref(0)
 const submitting = ref(false)
 const completed = ref(false)
 const applicationId = ref(null)
+const accessToken = ref('')
 const documents = ref([])
 const totalDocs = ref(3)
 const showSignModal = ref(false)
@@ -188,6 +190,7 @@ async function submitApplication() {
   try {
     const result = await api.post('/api/public/investor-apply', { ...form })
     applicationId.value = result.applicationId
+    accessToken.value = result.accessToken
     await loadOnboarding()
     step.value = 1
     toast('Application submitted', 'success')
@@ -200,14 +203,14 @@ async function submitApplication() {
 
 async function loadOnboarding() {
   if (!applicationId.value) return
-  const data = await api.get(`/api/public/investor-onboarding/${applicationId.value}`)
+  const data = await api.get(`/api/public/investor-onboarding/${applicationId.value}?token=${accessToken.value}`)
   documents.value = data.documents || []
   totalDocs.value = data.totalDocs || 3
 }
 
 function openDoc(doc) {
   selectedDoc.value = doc
-  selectedPdfUrl.value = `/api/public/investor-onboarding/${applicationId.value}/documents/${doc.doc_key}/pdf`
+  selectedPdfUrl.value = `/api/public/investor-onboarding/${applicationId.value}/documents/${doc.doc_key}/pdf?token=${accessToken.value}`
   showSignModal.value = true
 }
 
@@ -220,7 +223,7 @@ async function submitBanking() {
   if (submitting.value) return
   submitting.value = true
   try {
-    await api.post(`/api/public/investor-onboarding/${applicationId.value}/banking`, { ...banking })
+    await api.post(`/api/public/investor-onboarding/${applicationId.value}/banking`, { ...banking, accessToken: accessToken.value })
     completed.value = true
     toast('Onboarding complete!', 'success')
   } catch (err) {

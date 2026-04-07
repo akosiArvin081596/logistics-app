@@ -730,10 +730,13 @@ db.exec(`
 		vehicle_title_state TEXT DEFAULT '',
 		vehicle_liens TEXT DEFAULT '',
 		vehicle_registered_owner TEXT DEFAULT '',
+		access_token TEXT DEFAULT '',
 		status TEXT DEFAULT 'New' CHECK(status IN ('New','Reviewed','Accepted','Rejected')),
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
+// Migration: add access_token if missing
+try { db.exec("ALTER TABLE investor_applications ADD COLUMN access_token TEXT DEFAULT ''"); } catch { /* exists */ }
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_onboarding (
@@ -1139,14 +1142,15 @@ app.post("/api/public/investor-apply", (req, res) => {
 		if (!legal_name || !email || !phone || !address || !ein_ssn) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
+		const accessToken = crypto.randomUUID();
 		const result = db.prepare(`
 			INSERT INTO investor_applications (legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
 				years_in_operation, industry_experience, fleet_size, preferred_communication,
-				tax_classification, ein_ssn, bankruptcy_liens, reporting_preference)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				tax_classification, ein_ssn, bankruptcy_liens, reporting_preference, access_token)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(legal_name, dba || "", entity_type || "", address, contact_person || "", contact_title || "",
 			phone, email, years_in_operation || "", industry_experience || "", fleet_size || "",
-			preferred_communication || "", tax_classification || "", ein_ssn, bankruptcy_liens || "", reporting_preference || "");
+			preferred_communication || "", tax_classification || "", ein_ssn, bankruptcy_liens || "", reporting_preference || "", accessToken);
 
 		const appId = result.lastInsertRowid;
 		// Create onboarding record + seed documents
@@ -1155,31 +1159,42 @@ app.post("/api/public/investor-apply", (req, res) => {
 		for (const doc of INVESTOR_ONBOARDING_DOCS) {
 			seedDoc.run(appId, doc.key, doc.name);
 		}
-		res.json({ success: true, applicationId: appId });
+		res.json({ success: true, applicationId: appId, accessToken });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
 });
 
-// GET /api/public/investor-onboarding/:id — Get application + onboarding status
+// Helper: verify investor access token
+function verifyInvestorToken(req, res) {
+	const appId = parseInt(req.params.id);
+	const token = req.query.token || req.body?.accessToken || req.headers["x-access-token"] || "";
+	if (!appId || isNaN(appId)) { res.status(400).json({ error: "Invalid application ID" }); return null; }
+	const app = db.prepare("SELECT id, access_token FROM investor_applications WHERE id = ?").get(appId);
+	if (!app) { res.status(404).json({ error: "Application not found" }); return null; }
+	if (!app.access_token || app.access_token !== token) { res.status(403).json({ error: "Invalid access token" }); return null; }
+	return appId;
+}
+
+// GET /api/public/investor-onboarding/:id — Get application + onboarding status (token required)
 app.get("/api/public/investor-onboarding/:id", (req, res) => {
 	try {
-		const appId = parseInt(req.params.id);
-		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
-		if (!application) return res.status(404).json({ error: "Application not found" });
+		const appId = verifyInvestorToken(req, res);
+		if (!appId) return;
+		const application = db.prepare("SELECT id, legal_name, dba, entity_type, address, contact_person, email, phone, status FROM investor_applications WHERE id = ?").get(appId);
 		const onboarding = db.prepare("SELECT * FROM investor_onboarding WHERE application_id = ?").get(appId);
 		const documents = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id").all(appId);
-		const payment = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
-		res.json({ application, onboarding, documents, payment, totalDocs: INVESTOR_ONBOARDING_DOCS.length });
+		res.json({ application, onboarding, documents, totalDocs: INVESTOR_ONBOARDING_DOCS.length });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
 });
 
-// POST /api/public/investor-onboarding/:id/sign/:docKey — Sign a document
+// POST /api/public/investor-onboarding/:id/sign/:docKey — Sign a document (token required)
 app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) => {
 	try {
-		const appId = parseInt(req.params.id);
+		const appId = verifyInvestorToken(req, res);
+		if (!appId) return;
 		const { docKey } = req.params;
 		const { signatureText, signatureImage, vehicleInfo } = req.body;
 		if (!signatureText || !signatureText.trim()) return res.status(400).json({ error: "Signature required" });
@@ -1313,9 +1328,11 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 	}
 });
 
-// Serve investor onboarding document PDFs (preview)
+// Serve investor onboarding document PDFs (preview, token required)
 app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", (req, res) => {
 	try {
+		const appId = verifyInvestorToken(req, res);
+		if (!appId) return;
 		const { docKey } = req.params;
 		const fileMap = {
 			master_agreement: "MASTER PARTICIPATION & MANAGEMENT AGREEMENT.pdf",
@@ -1334,10 +1351,11 @@ app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", (req, res) 
 	}
 });
 
-// POST /api/public/investor-onboarding/:id/banking — Step 3: Submit banking info
+// POST /api/public/investor-onboarding/:id/banking — Step 3: Submit banking info (token required)
 app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
 	try {
-		const appId = parseInt(req.params.id);
+		const appId = verifyInvestorToken(req, res);
+		if (!appId) return;
 		const { bank_name, account_type, routing_number, account_number, account_name } = req.body;
 		if (!bank_name || !routing_number || !account_number) {
 			return res.status(400).json({ error: "Bank name, routing number, and account number are required" });

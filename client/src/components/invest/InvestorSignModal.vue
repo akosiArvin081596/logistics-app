@@ -47,6 +47,7 @@ const props = defineProps({
   doc: { type: Object, default: null },
   pdfUrl: { type: String, default: '' },
   applicationId: { type: Number, default: 0 },
+  accessToken: { type: String, default: '' },
   vehicleInfo: { type: Object, default: null },
 })
 const emit = defineEmits(['close', 'signed'])
@@ -89,7 +90,7 @@ function initCanvas() {
 function getPos(e) {
   const canvas = canvasRef.value
   const rect = canvas.getBoundingClientRect()
-  return { x: (e.clientX || 0) - rect.left, y: (e.clientY || 0) - rect.top }
+  return { x: (e.clientX || e.touches?.[0]?.clientX || 0) - rect.left, y: (e.clientY || e.touches?.[0]?.clientY || 0) - rect.top }
 }
 
 function startDraw(e) {
@@ -123,6 +124,7 @@ async function handleSign() {
       signatureText: signatureText.value.trim(),
       signatureImage,
       vehicleInfo: props.vehicleInfo || undefined,
+      accessToken: props.accessToken,
     })
     toast('Document signed', 'success')
     emit('signed', props.doc.doc_key)
