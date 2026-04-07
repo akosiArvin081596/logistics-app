@@ -3948,19 +3948,6 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			requestBody: { valueInputOption: "USER_ENTERED", data: updates },
 		});
 
-		// Log to Status Logs
-		const now = new Date();
-		const logId = `LOG-${now.getTime()}`;
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
-		await sheets.spreadsheets.values.append({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Status Logs",
-			valueInputOption: "USER_ENTERED",
-			requestBody: {
-				values: [[logId, loadId || "", driver, dateTime, "Dispatched", `Assigned to ${driver}`]],
-			},
-		});
-
 		// Persist notification and notify the driver in real-time
 		const route = [origin, destination].filter(Boolean).join(' → ') || '';
 		const notifResult = insertNotification.run(
@@ -4024,19 +4011,6 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			range: `Job Tracking!${driverColLetter}${rowIndex}`,
 			valueInputOption: "USER_ENTERED",
 			requestBody: { values: [[newDriver]] },
-		});
-
-		// Log to Status Logs
-		const now = new Date();
-		const logId = `LOG-${now.getTime()}`;
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
-		await sheets.spreadsheets.values.append({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Status Logs",
-			valueInputOption: "USER_ENTERED",
-			requestBody: {
-				values: [[logId, loadId || "", newDriver, dateTime, "Reassigned", `Reassigned from ${oldDriver || "unknown"} to ${newDriver}`]],
-			},
 		});
 
 		// Notify new driver
@@ -4120,19 +4094,6 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin", "Dispatcher"), async
 			});
 		}
 
-		// Log to Status Logs
-		const now = new Date();
-		const logId = `LOG-${now.getTime()}`;
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
-		await sheets.spreadsheets.values.append({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Status Logs",
-			valueInputOption: "USER_ENTERED",
-			requestBody: {
-				values: [[logId, loadId || "", driver || "", dateTime, "Unassigned", `Assignment cancelled (was ${driver || "unknown"})`]],
-			},
-		});
-
 		// Notify driver
 		if (driver) {
 			const cancelNotif = insertNotification.run(
@@ -4212,16 +4173,6 @@ app.post("/api/driver/respond", requireAuth, async (req, res) => {
 				});
 			}
 
-			// Log to Status Logs
-			await sheets.spreadsheets.values.append({
-				spreadsheetId: SPREADSHEET_ID,
-				range: "Status Logs",
-				valueInputOption: "USER_ENTERED",
-				requestBody: {
-					values: [[logId, loadId, driverName, dateTime, "Assigned", "Driver confirmed assignment"]],
-				},
-			});
-
 			// Notify dispatch
 			insertDispatchNotification.run(
 				'load-accepted',
@@ -4261,16 +4212,6 @@ app.post("/api/driver/respond", requireAuth, async (req, res) => {
 					requestBody: { values: [["Unassigned"]] },
 				});
 			}
-
-			// Log to Status Logs
-			await sheets.spreadsheets.values.append({
-				spreadsheetId: SPREADSHEET_ID,
-				range: "Status Logs",
-				valueInputOption: "USER_ENTERED",
-				requestBody: {
-					values: [[logId, loadId, driverName, dateTime, "Unassigned", "Driver declined assignment"]],
-				},
-			});
 
 			// Notify dispatch
 			insertDispatchNotification.run(
@@ -4955,17 +4896,6 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 			requestBody: {
 				valueInputOption: "USER_ENTERED",
 				data: updateData,
-			},
-		});
-
-		// Append log entry to Status Logs
-		const logId = `LOG-${now.getTime()}`;
-		await sheets.spreadsheets.values.append({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Status Logs",
-			valueInputOption: "USER_ENTERED",
-			requestBody: {
-				values: [[logId, loadId, driverName, dateTime, newStatus, `Changed from ${oldStatus}`]],
 			},
 		});
 
@@ -6029,19 +5959,6 @@ app.post("/api/location", requireAuth, async (req, res) => {
 									range: `Job Tracking!${statusColLetter}${i + 1}`,
 									valueInputOption: "USER_ENTERED",
 									requestBody: { values: [[geofenceTriggered]] },
-								});
-
-								// Log to Status Logs
-								const now = new Date();
-								const logId = `LOG-${now.getTime()}`;
-								const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
-								await sheets.spreadsheets.values.append({
-									spreadsheetId: SPREADSHEET_ID,
-									range: "Status Logs",
-									valueInputOption: "USER_ENTERED",
-									requestBody: {
-										values: [[logId, loadId, driverName, dateTime, geofenceTriggered, `Auto-triggered by geofence (was ${currentStatus})`]],
-									},
 								});
 								const geoMsg = geofenceTriggered === "At Shipper"
 									? `You have arrived at the pickup location`
