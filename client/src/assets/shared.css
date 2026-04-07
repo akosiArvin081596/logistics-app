@@ -168,6 +168,29 @@ body {
   flex-direction: column;
   overflow-x: hidden;
 }
+.form-accordion {
+  margin-bottom: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.form-accordion[open] { box-shadow: var(--shadow-card); }
+.form-toggle {
+  padding: 0.65rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--accent);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.form-toggle::-webkit-details-marker { display: none; }
+.form-toggle::marker { display: none; content: ''; }
+.form-accordion[open] .form-toggle {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-hover);
+}
 .status-bar {
   display: flex;
   gap: 0.75rem;

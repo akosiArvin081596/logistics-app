@@ -4,10 +4,13 @@
       <h2>Investor Database</h2>
     </div>
 
-    <AddInvestorForm
-      :carrier-names="store.carrierNames"
-      @submit="handleAdd"
-    />
+    <details class="form-accordion">
+      <summary class="form-toggle">+ Add Investor</summary>
+      <AddInvestorForm
+        :carrier-names="store.carrierNames"
+        @submit="handleAdd"
+      />
+    </details>
 
     <template v-if="store.isLoading">
       <SkeletonLoader :rows="4" :cols="6" />

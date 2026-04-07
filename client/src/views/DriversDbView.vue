@@ -4,10 +4,13 @@
       <h2>Driver Database</h2>
     </div>
 
-    <AddDriverForm
-      :carrier-names="carrierNames"
-      @submit="handleAdd"
-    />
+    <details class="form-accordion">
+      <summary class="form-toggle">+ Add Driver</summary>
+      <AddDriverForm
+        :carrier-names="carrierNames"
+        @submit="handleAdd"
+      />
+    </details>
 
     <template v-if="store.isLoading">
       <SkeletonLoader :rows="4" :cols="10" />

@@ -4,7 +4,10 @@
       <h2>User Management</h2>
     </div>
 
-    <AddUserForm :driver-names="store.availableDriverNames" :carrier-names="store.carrierNames" @submit="handleAddUser" />
+    <details class="form-accordion">
+      <summary class="form-toggle">+ Add User</summary>
+      <AddUserForm :driver-names="store.availableDriverNames" :carrier-names="store.carrierNames" @submit="handleAddUser" />
+    </details>
 
     <template v-if="store.isLoading">
       <SkeletonLoader :rows="4" :cols="5" />

@@ -4,13 +4,15 @@
       <h2>Truck Database</h2>
     </div>
 
-    <AddTruckForm
-      v-if="authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Dispatcher'"
-      :driver-names="store.driverNames"
-      :investor-users="store.investorUsers"
-      :show-owner="true"
-      @submit="handleAddTruck"
-    />
+    <details v-if="authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Dispatcher'" class="form-accordion">
+      <summary class="form-toggle">+ Add Truck</summary>
+      <AddTruckForm
+        :driver-names="store.driverNames"
+        :investor-users="store.investorUsers"
+        :show-owner="true"
+        @submit="handleAddTruck"
+      />
+    </details>
 
     <template v-if="store.isLoading">
       <SkeletonLoader :rows="4" :cols="7" />
