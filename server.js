@@ -4849,7 +4849,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 	}
 });
 
-// PUT /api/driver/status — Update load status + log to Status Logs
+// PUT /api/driver/status — Update load status
 app.put("/api/driver/status", requireAuth, async (req, res) => {
 	try {
 		let { rowIndex, driverName, loadId, newStatus, rowData } = req.body;
