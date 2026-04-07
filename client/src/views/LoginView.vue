@@ -173,7 +173,7 @@ async function doLogin() {
 /* Left brand panel */
 .login-brand {
   flex: 0 0 45%;
-  background: linear-gradient(135deg, #0c1929 0%, #122a46 50%, #0f3460 100%);
+  background: #0f2137;
   display: flex;
   align-items: center;
   justify-content: center;
