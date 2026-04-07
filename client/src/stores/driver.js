@@ -302,12 +302,13 @@ export const useDriverStore = defineStore('driver', {
       this.notifications.unshift(notif)
     },
 
-    async signDocument(docKey, signatureText, signatureImage) {
+    async signDocument(docKey, signatureText, signatureImage, paymentInfo) {
       const userId = this.onboarding?.user_id
       if (!userId) throw new Error('No onboarding record')
       const data = await api.post(`/api/onboarding/${userId}/documents/${docKey}/sign`, {
         signatureText,
         signatureImage: signatureImage || undefined,
+        paymentInfo: paymentInfo || undefined,
       })
       await this.loadData()
       return data

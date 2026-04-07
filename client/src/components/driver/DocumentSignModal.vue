@@ -28,6 +28,29 @@
           :disabled="!agreed"
         />
 
+        <!-- Payment info (Contractor Agreement only) -->
+        <div v-if="isContractorAgreement" class="payment-section">
+          <div class="payment-title">Payment Method (Exhibit A)</div>
+          <div class="payment-radios">
+            <label><input type="radio" v-model="paymentMethod" value="check" :disabled="!agreed" /> Check</label>
+            <label><input type="radio" v-model="paymentMethod" value="ach" :disabled="!agreed" /> Direct Deposit (ACH)</label>
+          </div>
+          <input v-if="paymentMethod === 'check'" v-model="checkName" class="pay-input" placeholder="Name on Account" :disabled="!agreed" />
+          <template v-if="paymentMethod === 'ach'">
+            <input v-model="bankName" class="pay-input" placeholder="Name of Bank" :disabled="!agreed" />
+            <input v-model="bankAddress" class="pay-input" placeholder="Bank Address" :disabled="!agreed" />
+            <input v-model="bankPhone" class="pay-input" placeholder="Bank Phone #" :disabled="!agreed" />
+            <input v-model="bankRouting" class="pay-input" placeholder="Routing #" :disabled="!agreed" />
+            <input v-model="bankAccount" class="pay-input" placeholder="Account #" :disabled="!agreed" />
+            <input v-model="bankAcctName" class="pay-input" placeholder="Name(s) on Account" :disabled="!agreed" />
+            <select v-model="accountType" class="pay-input" :disabled="!agreed">
+              <option value="">Account Type...</option>
+              <option value="Checking">Checking</option>
+              <option value="Savings">Savings</option>
+            </select>
+          </template>
+        </div>
+
         <!-- Signature canvas -->
         <div class="canvas-wrapper" :class="{ disabled: !agreed }">
           <div class="canvas-label">
@@ -91,13 +114,32 @@ const canvasRef = ref(null)
 const isDrawing = ref(false)
 const hasDrawn = ref(false)
 
+// Payment info (contractor_agreement only)
+const paymentMethod = ref('')
+const checkName = ref('')
+const bankName = ref('')
+const bankAddress = ref('')
+const bankPhone = ref('')
+const bankRouting = ref('')
+const bankAccount = ref('')
+const bankAcctName = ref('')
+const accountType = ref('')
+
+const isContractorAgreement = computed(() => props.doc?.doc_key === 'contractor_agreement')
+
 const pdfUrl = computed(() => {
   if (!props.doc) return ''
   return `/api/onboarding/documents/${props.doc.doc_key}/pdf`
 })
 
 const canSign = computed(() => {
-  return agreed.value && signatureText.value.trim() && hasDrawn.value && !signing.value
+  if (!agreed.value || !signatureText.value.trim() || !hasDrawn.value || signing.value) return false
+  if (isContractorAgreement.value) {
+    if (!paymentMethod.value) return false
+    if (paymentMethod.value === 'check' && !checkName.value.trim()) return false
+    if (paymentMethod.value === 'ach' && (!bankName.value.trim() || !bankRouting.value.trim() || !bankAccount.value.trim() || !accountType.value)) return false
+  }
+  return true
 })
 
 watch(() => props.show, async (v) => {
@@ -106,6 +148,15 @@ watch(() => props.show, async (v) => {
     signatureText.value = ''
     signing.value = false
     hasDrawn.value = false
+    paymentMethod.value = ''
+    checkName.value = ''
+    bankName.value = ''
+    bankAddress.value = ''
+    bankPhone.value = ''
+    bankRouting.value = ''
+    bankAccount.value = ''
+    bankAcctName.value = ''
+    accountType.value = ''
     await nextTick()
     initCanvas()
   }
@@ -174,7 +225,18 @@ async function handleSign() {
   signing.value = true
   try {
     const signatureImage = getSignatureImage()
-    await driverStore.signDocument(props.doc.doc_key, signatureText.value.trim(), signatureImage)
+    const payInfo = isContractorAgreement.value ? {
+      paymentMethod: paymentMethod.value,
+      checkName: checkName.value,
+      bankName: bankName.value,
+      bankAddress: bankAddress.value,
+      bankPhone: bankPhone.value,
+      bankRouting: bankRouting.value,
+      bankAccount: bankAccount.value,
+      bankAcctName: bankAcctName.value,
+      accountType: accountType.value,
+    } : undefined
+    await driverStore.signDocument(props.doc.doc_key, signatureText.value.trim(), signatureImage, payInfo)
     toast('Document signed successfully', 'success')
     emit('signed', props.doc.doc_key)
     emit('close')
@@ -256,6 +318,22 @@ function formatDate(d) {
   border-radius: 8px; font-weight: 700; font-size: 0.9rem; cursor: pointer;
 }
 .sign-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.payment-section {
+  border: 1px solid var(--bg); border-radius: 8px; padding: 0.6rem;
+  background: #fafbfc;
+}
+.payment-title {
+  font-weight: 700; font-size: 0.82rem; margin-bottom: 0.4rem;
+}
+.payment-radios {
+  display: flex; gap: 1rem; font-size: 0.82rem; margin-bottom: 0.4rem;
+}
+.payment-radios label { display: flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+.pay-input {
+  width: 100%; padding: 0.4rem 0.6rem; margin-top: 0.3rem;
+  border: 1px solid var(--bg); border-radius: 6px; font-size: 0.82rem; background: white;
+}
+.pay-input:disabled { opacity: 0.5; }
 .sign-done {
   padding: 1rem; text-align: center;
   font-size: 0.88rem; color: #059669; font-weight: 600;
