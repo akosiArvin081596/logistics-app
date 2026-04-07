@@ -25,7 +25,7 @@
     <!-- CDL + Medical Card Uploads -->
     <div class="upload-section">
       <label class="field-label">CDL &amp; Medical Card Uploads <span class="req">*</span></label>
-      <p class="upload-hint">Upload clear photos of your CDL (front and back) and medical card</p>
+      <p class="upload-hint">Upload clear photos or PDFs of your CDL (front and back) and medical card</p>
       <div class="upload-grid">
         <div class="upload-card" @click="$refs.cdlFrontInput.click()">
           <input ref="cdlFrontInput" type="file" accept="image/*,.pdf" hidden @change="handleFile($event, 'cdl_front')" />
@@ -34,8 +34,9 @@
             <div v-else class="pdf-preview"><div class="pdf-icon">&#128196;</div><div class="upload-label">PDF uploaded</div></div>
           </template>
           <template v-else>
-            <div class="upload-placeholder">&#128247;</div>
+            <div class="upload-placeholder">&#128247; / &#128196;</div>
             <div class="upload-label">CDL Front</div>
+            <div class="upload-formats">Image or PDF</div>
           </template>
         </div>
         <div class="upload-card" @click="$refs.cdlBackInput.click()">
@@ -45,8 +46,9 @@
             <div v-else class="pdf-preview"><div class="pdf-icon">&#128196;</div><div class="upload-label">PDF uploaded</div></div>
           </template>
           <template v-else>
-            <div class="upload-placeholder">&#128247;</div>
+            <div class="upload-placeholder">&#128247; / &#128196;</div>
             <div class="upload-label">CDL Back</div>
+            <div class="upload-formats">Image or PDF</div>
           </template>
         </div>
         <div class="upload-card" @click="$refs.medicalInput.click()">
@@ -56,8 +58,9 @@
             <div v-else class="pdf-preview"><div class="pdf-icon">&#128196;</div><div class="upload-label">PDF uploaded</div></div>
           </template>
           <template v-else>
-            <div class="upload-placeholder">&#128247;</div>
+            <div class="upload-placeholder">&#128247; / &#128196;</div>
             <div class="upload-label">Medical Card</div>
+            <div class="upload-formats">Image or PDF</div>
           </template>
         </div>
       </div>
@@ -150,6 +153,7 @@ function initAutocomplete() {
 .upload-card:hover { border-color: hsl(199, 89%, 48%); background: #f0f9ff; }
 .upload-placeholder { font-size: 1.75rem; margin-bottom: 0.35rem; }
 .upload-label { font-size: 0.75rem; font-weight: 600; color: #6b7280; }
+.upload-formats { font-size: 0.65rem; color: #9ca3af; margin-top: 0.15rem; }
 .upload-preview {
   width: 100%;
   height: 100px;
