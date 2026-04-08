@@ -195,7 +195,7 @@ function initCanvas() {
   if (!canvas) return
   const rect = canvas.parentElement.getBoundingClientRect()
   canvas.width = rect.width
-  canvas.height = 150
+  canvas.height = 120
   const ctx = canvas.getContext('2d')
   ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, canvas.width, canvas.height)
@@ -346,7 +346,7 @@ function formatDate(d) {
   border: none; cursor: pointer; font-weight: 600;
 }
 .sig-canvas {
-  width: 100%; height: 150px; border: 1px solid var(--bg);
+  width: 100%; height: 120px; border: 1px solid var(--bg);
   border-radius: 8px; cursor: crosshair; touch-action: none;
 }
 .sign-btn {

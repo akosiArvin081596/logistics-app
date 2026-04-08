@@ -83,7 +83,7 @@ function initCanvas() {
   if (!canvas) return
   const rect = canvas.parentElement.getBoundingClientRect()
   canvas.width = rect.width
-  canvas.height = 150
+  canvas.height = 120
   const ctx = canvas.getContext('2d')
   ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, canvas.width, canvas.height)
@@ -157,10 +157,10 @@ async function handleSign() {
 }
 .modal-title { font-weight: 700; font-size: 1rem; }
 .modal-close { font-size: 1.5rem; background: none; border: none; cursor: pointer; color: #6b7085; }
-.pdf-container { flex: 1; min-height: 500px; background: #f5f5f5; overflow: hidden; }
-.pdf-frame { width: 100%; height: 100%; min-height: 500px; border: none; }
-.pdf-placeholder { display: flex; align-items: center; justify-content: center; height: 300px; color: #6b7085; }
-.sign-area-collapse { border-top: 1px solid #e8edf2; }
+.pdf-container { flex: 1; min-height: 200px; background: #f5f5f5; overflow: hidden; }
+.pdf-frame { width: 100%; height: 100%; border: none; }
+.pdf-placeholder { display: flex; align-items: center; justify-content: center; height: 200px; color: #6b7085; }
+.sign-area-collapse { border-top: 1px solid #e8edf2; flex-shrink: 0; }
 .sign-toggle {
   display: flex; align-items: center; gap: 0.5rem;
   padding: 0.65rem 1.25rem; cursor: pointer; user-select: none;
@@ -181,7 +181,7 @@ async function handleSign() {
 .canvas-wrapper.disabled { opacity: 0.4; pointer-events: none; }
 .canvas-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: #6b7085; margin-bottom: 0.25rem; }
 .canvas-clear { font-size: 0.72rem; color: #38bdf8; background: none; border: none; cursor: pointer; font-weight: 600; }
-.sig-canvas { width: 100%; height: 150px; border: 1px solid #e2e4ea; border-radius: 8px; cursor: crosshair; touch-action: none; }
+.sig-canvas { width: 100%; height: 120px; border: 1px solid #e2e4ea; border-radius: 8px; cursor: crosshair; touch-action: none; }
 .sign-btn {
   width: 100%; padding: 0.65rem; background: #38bdf8; color: white; border: none;
   border-radius: 8px; font-weight: 700; font-size: 0.9rem; cursor: pointer;
