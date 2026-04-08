@@ -283,8 +283,13 @@
                   <div class="field full">
                     <label>Truck Photo <span class="opt">(optional)</span></label>
                     <div class="photo-row">
-                      <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
-                      <a v-if="vehicles[activeVehicleTab].photo" href="#" class="photo-view-link" @click.prevent="photoPreviewUrl = vehicles[activeVehicleTab].photo">View uploaded photo</a>
+                      <label class="photo-choose-btn">
+                        Choose File
+                        <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" class="photo-file-hidden" />
+                      </label>
+                      <span v-if="vehicles[activeVehicleTab].photoName" class="photo-filename">{{ vehicles[activeVehicleTab].photoName }}</span>
+                      <span v-else class="photo-filename dim">No file chosen</span>
+                      <a v-if="vehicles[activeVehicleTab].photo" href="#" class="photo-view-link" @click.prevent="photoPreviewUrl = vehicles[activeVehicleTab].photo">View</a>
                     </div>
                   </div>
                 </div>
@@ -480,7 +485,7 @@ function emptyVehicle() {
     make: '', model: '', year: '', vin: '',
     licensePlate: '', status: 'Active',
     mileage: '', titleState: '', liens: '', registeredOwner: '',
-    notes: '', photo: '',
+    notes: '', photo: '', photoName: '',
     purchasePrice: 0, titleStatus: 'Clean',
   }
 }
@@ -607,6 +612,8 @@ function initAddrAutocomplete() {
 function onVehiclePhoto(e) {
   const file = e.target.files[0]
   if (!file) return
+  const v = vehicles.value[activeVehicleTab.value]
+  v.photoName = file.name
   const img = new Image()
   img.onload = () => {
     const MAX = 1600
@@ -620,7 +627,7 @@ function onVehiclePhoto(e) {
     canvas.height = height
     const ctx = canvas.getContext('2d')
     ctx.drawImage(img, 0, 0, width, height)
-    vehicles.value[activeVehicleTab.value].photo = canvas.toDataURL('image/jpeg', 0.92)
+    v.photo = canvas.toDataURL('image/jpeg', 0.92)
   }
   img.src = URL.createObjectURL(file)
 }
@@ -1117,13 +1124,27 @@ async function submitBanking() {
 .photo-row {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.6rem;
 }
+.photo-choose-btn {
+  display: inline-flex; align-items: center;
+  padding: 0.4rem 0.85rem; border: 1.5px solid #e2e8f0; border-radius: 8px;
+  background: #fff; font-size: 0.8rem; font-weight: 600; color: #475569;
+  cursor: pointer; transition: all 0.15s; white-space: nowrap;
+}
+.photo-choose-btn:hover { background: #f8fafc; border-color: #cbd5e1; }
+.photo-file-hidden { display: none; }
+.photo-filename {
+  font-size: 0.78rem; color: #0f172a; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.photo-filename.dim { color: #94a3b8; }
 .photo-view-link {
   font-size: 0.78rem;
   font-weight: 600;
   color: #3b82f6;
   white-space: nowrap;
+  margin-left: auto;
 }
 .photo-view-link:hover { text-decoration: underline; }
 .photo-overlay {
