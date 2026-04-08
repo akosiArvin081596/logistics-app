@@ -183,8 +183,8 @@
         <div v-if="step === 1" class="step-panel">
           <div class="content-header">
             <span class="step-label">Step 2 of 3</span>
-            <h2>Fleet Information</h2>
-            <p>Add your vehicles to be placed under management</p>
+            <h2>Fleet &amp; Documents</h2>
+            <p>Add your vehicles and sign onboarding documents</p>
           </div>
 
           <!-- Accordion 1: Fleet Information -->
@@ -310,9 +310,48 @@
             </div>
           </details>
 
+          <!-- Submit gate: submit all data before documents appear -->
+          <div v-if="!applicationId" class="submit-gate">
+            <button class="btn-primary" :disabled="!allVehiclesValid || submitting" @click="submitApplication">
+              <span v-if="submitting" class="spinner light"></span>
+              {{ submitting ? 'Submitting...' : 'Submit & Continue to Documents' }}
+              <svg v-if="!submitting" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </button>
+          </div>
+
+          <!-- Accordion 2: Onboarding Documents (visible after application submitted) -->
+          <details v-if="applicationId" class="accordion" open>
+            <summary class="accordion-toggle">
+              <div class="accordion-title">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                Onboarding Documents
+              </div>
+              <span class="accordion-badge" :class="signedCount >= totalDocs ? 'badge-done' : 'badge-pending'">
+                {{ signedCount }} / {{ totalDocs }} signed
+              </span>
+            </summary>
+            <div class="accordion-body">
+              <div class="doc-list">
+                <div v-for="doc in documents" :key="doc.doc_key" class="doc-card" :class="{ signed: doc.signed }" @click="openDoc(doc)">
+                  <div class="doc-icon-wrap" :class="doc.signed ? 'done' : 'pending'">
+                    <svg v-if="doc.signed" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                    <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  </div>
+                  <div class="doc-info">
+                    <div class="doc-name">{{ doc.doc_name }}</div>
+                    <div class="doc-meta">{{ doc.signed ? 'Completed' : 'Awaiting your signature' }}</div>
+                  </div>
+                  <span class="doc-chip" :class="doc.signed ? 'chip-done' : 'chip-sign'">
+                    {{ doc.signed ? 'View' : 'Sign' }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </details>
+
           <div class="step-actions">
             <div></div>
-            <button class="btn-primary" :disabled="!allVehiclesValid" @click="vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
+            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" @click="vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
               Continue
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
@@ -371,49 +410,13 @@
             <div class="field"><label>Account Number <span class="req">*</span></label><input v-model="banking.account_number" placeholder="Account number" required /></div>
           </div>
 
-          <!-- Submit gate: submit all data (company + vehicles + banking) -->
-          <div v-if="!applicationId" class="submit-gate">
-            <button class="btn-primary" :disabled="!canSubmitBanking || submitting" @click="showReviewModal = true">
-              <span v-if="submitting" class="spinner light"></span>
-              {{ 'Review & Submit Application' }}
-            </button>
-          </div>
-
-          <!-- Onboarding Documents (visible after application submitted) -->
-          <details v-if="applicationId" class="accordion" open>
-            <summary class="accordion-toggle">
-              <div class="accordion-title">
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                Onboarding Documents
-              </div>
-              <span class="accordion-badge" :class="signedCount >= totalDocs ? 'badge-done' : 'badge-pending'">
-                {{ signedCount }} / {{ totalDocs }} signed
-              </span>
-            </summary>
-            <div class="accordion-body">
-              <div class="doc-list">
-                <div v-for="doc in documents" :key="doc.doc_key" class="doc-card" :class="{ signed: doc.signed }" @click="openDoc(doc)">
-                  <div class="doc-icon-wrap" :class="doc.signed ? 'done' : 'pending'">
-                    <svg v-if="doc.signed" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-                    <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                  </div>
-                  <div class="doc-info">
-                    <div class="doc-name">{{ doc.doc_name }}</div>
-                    <div class="doc-meta">{{ doc.signed ? 'Completed' : 'Awaiting your signature' }}</div>
-                  </div>
-                  <span class="doc-chip" :class="doc.signed ? 'chip-done' : 'chip-sign'">
-                    {{ doc.signed ? 'View' : 'Sign' }}
-                  </span>
-                </div>
-              </div>
-              <p v-if="signedCount >= totalDocs" class="docs-complete-note">All documents signed. Your onboarding is complete!</p>
-            </div>
-          </details>
-
           <div class="step-actions">
             <button class="btn-ghost" @click="step = 1">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
               Back
+            </button>
+            <button class="btn-primary" :disabled="!canSubmitBanking || submitting" @click="showReviewModal = true">
+              {{ 'Review & Complete' }}
             </button>
           </div>
         </div>
@@ -475,6 +478,29 @@
             </div>
           </div>
 
+          <!-- Step 2: Documents -->
+          <div class="review-section">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              Documents ({{ signedCount }}/{{ totalDocs }} signed)
+            </div>
+            <div class="review-docs">
+              <div v-for="doc in documents" :key="doc.doc_key" class="review-doc-row">
+                <a
+                  v-if="doc.signed && doc.signed_pdf_url"
+                  :href="doc.signed_pdf_url" target="_blank"
+                  class="review-doc-link"
+                  @click.prevent="reviewPdfUrl = doc.signed_pdf_url; reviewPdfTitle = doc.doc_name"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  <span>{{ doc.doc_name }}</span>
+                </a>
+                <span v-else class="review-doc-unsigned">{{ doc.doc_name }}</span>
+                <span class="review-doc-status" :class="doc.signed ? 'text-green' : 'text-amber'">{{ doc.signed ? 'Signed' : 'Pending' }}</span>
+              </div>
+            </div>
+          </div>
+
           <!-- Step 3: Banking -->
           <div class="review-section">
             <div class="review-section-title">
@@ -493,9 +519,9 @@
 
         <div class="review-footer">
           <button class="btn-ghost" @click="showReviewModal = false">Go Back & Edit</button>
-          <button class="btn-primary" :disabled="submitting" @click="showReviewModal = false; submitApplication()">
+          <button class="btn-primary" :disabled="submitting" @click="showReviewModal = false; submitBanking()">
             <span v-if="submitting" class="spinner light"></span>
-            {{ submitting ? 'Submitting...' : 'Confirm & Submit Application' }}
+            {{ submitting ? 'Submitting...' : 'Confirm & Complete Onboarding' }}
           </button>
         </div>
       </div>
@@ -820,13 +846,11 @@ async function submitApplication() {
   submitting.value = true
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
-    const result = await api.post('/api/public/investor-apply', {
-      ...form, vehicles: stripped, ...banking,
-    })
+    const result = await api.post('/api/public/investor-apply', { ...form, vehicles: stripped })
     applicationId.value = result.applicationId
     accessToken.value = result.accessToken
     await loadOnboarding()
-    toast('Application submitted — please sign the documents below', 'success')
+    toast('Application submitted', 'success')
   } catch (err) {
     toast(err.message || 'Submission failed', 'error')
   } finally {
@@ -857,11 +881,20 @@ async function handleSigned(docKey) {
     selectedDoc.value = signedDoc
     selectedPdfUrl.value = signedDoc.signed_pdf_url || selectedPdfUrl.value
   }
-  // All docs signed → onboarding complete (banking already submitted with application)
-  if (signedCount.value >= totalDocs.value) {
+}
+
+async function submitBanking() {
+  if (submitting.value) return
+  submitting.value = true
+  try {
+    await api.post(`/api/public/investor-onboarding/${applicationId.value}/banking`, { ...banking, accessToken: accessToken.value })
     completed.value = true
     localStorage.removeItem(STORAGE_KEY)
     toast('Onboarding complete!', 'success')
+  } catch (err) {
+    toast(err.message || 'Submission failed', 'error')
+  } finally {
+    submitting.value = false
   }
 }
 
