@@ -594,9 +594,22 @@ function initAddrAutocomplete() {
 function onVehiclePhoto(e) {
   const file = e.target.files[0]
   if (!file) return
-  const reader = new FileReader()
-  reader.onload = ev => { vehicles.value[activeVehicleTab.value].photo = ev.target.result }
-  reader.readAsDataURL(file)
+  const img = new Image()
+  img.onload = () => {
+    const MAX = 1600
+    let { width, height } = img
+    if (width > MAX || height > MAX) {
+      if (width > height) { height = Math.round(height * MAX / width); width = MAX }
+      else { width = Math.round(width * MAX / height); height = MAX }
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(img, 0, 0, width, height)
+    vehicles.value[activeVehicleTab.value].photo = canvas.toDataURL('image/jpeg', 0.92)
+  }
+  img.src = URL.createObjectURL(file)
 }
 
 function onMapConfirm({ displayName }) {
@@ -1089,9 +1102,14 @@ async function submitBanking() {
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 .photo-preview {
-  max-height: 80px;
-  border-radius: 6px;
-  margin-top: 0.4rem;
+  max-width: 100%;
+  max-height: 200px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+  margin-top: 0.5rem;
+  border: 1px solid #e2e8f0;
 }
 /* ─── State searchable dropdown ─── */
 .state-field { position: relative; }
