@@ -1962,6 +1962,26 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 	}
 });
 
+// Admin: get full investor application detail
+app.get("/api/investor-applications/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const appId = parseInt(req.params.id);
+		const application = db.prepare(`SELECT ia.*, io.status AS onboarding_status,
+			(SELECT COUNT(*) FROM investor_onboarding_documents WHERE application_id=ia.id AND signed=1) AS signed_count
+			FROM investor_applications ia
+			LEFT JOIN investor_onboarding io ON io.application_id = ia.id
+			WHERE ia.id = ?`).get(appId);
+		if (!application) return res.status(404).json({ error: "Application not found" });
+		let vehicles = [];
+		try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
+		const banking = db.prepare("SELECT bank_name, account_type, routing_number, account_number, account_name FROM investor_payment_info WHERE application_id=?").get(appId) || {};
+		const documents = db.prepare("SELECT doc_key, doc_name, signed, signature_text, signed_at, signed_pdf_url FROM investor_onboarding_documents WHERE application_id=? ORDER BY id").all(appId);
+		res.json({ application, vehicles, banking, documents });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // Admin: accept/reject investor application
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
