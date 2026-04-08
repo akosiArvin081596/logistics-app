@@ -271,7 +271,6 @@
                     <select v-model="vehicles[activeVehicleTab].titleStatus">
                       <option value="Clean">Clean</option>
                       <option value="Lien">Lien</option>
-                      <option value="Accident/Salvage">Accident/Salvage</option>
                     </select>
                   </div>
                 </div>

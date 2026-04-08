@@ -141,7 +141,6 @@
                 <select v-model="editForm.titleStatus" style="width:100%;padding:0.4rem 0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.82rem;">
                   <option value="Clean">Clean</option>
                   <option value="Lien">Lien</option>
-                  <option value="Accident/Salvage">Accident/Salvage</option>
                 </select>
               </div>
             </div>
