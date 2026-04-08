@@ -595,7 +595,6 @@ async function submitBanking() {
   flex: 1;
   padding: 2rem 3rem 2rem;
   width: 100%;
-  max-width: 880px;
 }
 
 /* ─── Content header ─── */
