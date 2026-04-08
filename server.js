@@ -19,6 +19,8 @@ const { generateEquipmentPolicy } = require("./lib/generate-equipment-policy-pdf
 const { generateMobilePolicy } = require("./lib/generate-mobile-policy-pdf");
 const { generateSubstancePolicy } = require("./lib/generate-substance-policy-pdf");
 const { generateServiceInvoice } = require("./lib/generate-service-invoice-pdf");
+const { generateMasterAgreement } = require("./lib/generate-master-agreement-pdf");
+const { generateVehicleLease } = require("./lib/generate-vehicle-lease-pdf");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -1466,40 +1468,33 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 			} else {
 				signedPdfUrl = "";
 			}
-		} else {
-			// For master_agreement and vehicle_lease: use stamp overlay on the template PDFs
-			const fileMap = {
-				master_agreement: "MASTER PARTICIPATION & MANAGEMENT AGREEMENT.pdf",
-				vehicle_lease: "COMMERCIAL VEHICLE LEASE AGREEMENT_ Investor onboarding .pdf",
-			};
-			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", fileMap[docKey]);
-			if (fs.existsSync(templatePath)) {
-				const templateBytes = fs.readFileSync(templatePath);
-				const pdfDoc = await PdfLibDocument.load(templateBytes);
-				const pages = pdfDoc.getPages();
-				const lastPage = pages[pages.length - 1];
-				const { width } = lastPage.getSize();
-				const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-				const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-
-				// Stamp signature block at bottom of last page
-				const blockY = 60;
-				lastPage.drawRectangle({ x: 30, y: blockY - 10, width: width - 60, height: 65, color: rgb(0.95, 0.96, 0.97) });
-				lastPage.drawLine({ start: { x: 30, y: blockY + 55 }, end: { x: width - 30, y: blockY + 55 }, thickness: 1, color: rgb(0.7, 0.72, 0.75) });
-				lastPage.drawText("ELECTRONICALLY SIGNED", { x: 40, y: blockY + 40, size: 7, font: fontBold, color: rgb(0.4, 0.4, 0.45) });
-				lastPage.drawText(signatureText.trim(), { x: 40, y: blockY + 22, size: 14, font: fontBold, color: rgb(0.06, 0.13, 0.22) });
-				lastPage.drawText(`Date: ${effectiveDate}`, { x: 40, y: blockY + 5, size: 8, font, color: rgb(0.4, 0.4, 0.45) });
-				if (signatureImage) {
-					try {
-						const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
-						const sigImg = await pdfDoc.embedPng(sigBytes);
-						lastPage.drawImage(sigImg, { x: width - 230, y: blockY + 5, width: 180, height: 50 });
-					} catch { /* skip */ }
-				}
-				fs.writeFileSync(signedPath, await pdfDoc.save());
-			} else {
-				signedPdfUrl = "";
+		} else if (docKey === "master_agreement") {
+			const pdfBuffer = await generateMasterAgreement({
+				legalName: application?.legal_name || "", dba: application?.dba || "",
+				entityType: application?.entity_type || "", address: application?.address || "",
+				contactPerson: application?.contact_person || "", contactTitle: application?.contact_title || "",
+				phone: application?.phone || "", email: application?.email || "",
+				einSsn: application?.ein_ssn || "", effectiveDate,
+				signatureText: signatureText.trim(), signatureImage,
+			});
+			fs.writeFileSync(signedPath, pdfBuffer);
+		} else if (docKey === "vehicle_lease") {
+			const vehicles = [];
+			if (application?.vehicle_year || application?.vehicle_make) {
+				vehicles.push({
+					year: application.vehicle_year || "", make: application.vehicle_make || "",
+					model: application.vehicle_model || "", vin: application.vehicle_vin || "",
+					licensePlate: "", titleState: application.vehicle_title_state || "",
+				});
 			}
+			const pdfBuffer = await generateVehicleLease({
+				legalName: application?.legal_name || "", dba: application?.dba || "",
+				entityType: application?.entity_type || "", address: application?.address || "",
+				contactPerson: application?.contact_person || "", phone: application?.phone || "",
+				email: application?.email || "", effectiveDate,
+				signatureText: signatureText.trim(), signatureImage, vehicles,
+			});
+			fs.writeFileSync(signedPath, pdfBuffer);
 		}
 
 		const now = new Date().toISOString();
@@ -1520,23 +1515,56 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 });
 
 // Serve investor onboarding document PDFs (preview, token required)
-app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", (req, res) => {
+app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", async (req, res) => {
 	try {
 		const appId = verifyInvestorToken(req, res);
 		if (!appId) return;
 		const { docKey } = req.params;
-		const fileMap = {
-			master_agreement: "MASTER PARTICIPATION & MANAGEMENT AGREEMENT.pdf",
-			vehicle_lease: "COMMERCIAL VEHICLE LEASE AGREEMENT_ Investor onboarding .pdf",
-			w9: "w9.pdf",
-		};
-		const fileName = fileMap[docKey];
-		if (!fileName) return res.status(404).json({ error: "Unknown document" });
-		const filePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", fileName);
-		if (!fs.existsSync(filePath)) return res.status(404).json({ error: "PDF not found" });
-		res.setHeader("Content-Type", "application/pdf");
-		res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
-		fs.createReadStream(filePath).pipe(res);
+		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+
+		if (docKey === "master_agreement") {
+			const pdfBuffer = await generateMasterAgreement({
+				legalName: application?.legal_name || "", dba: application?.dba || "",
+				entityType: application?.entity_type || "", address: application?.address || "",
+				contactPerson: application?.contact_person || "", contactTitle: application?.contact_title || "",
+				phone: application?.phone || "", email: application?.email || "",
+				einSsn: application?.ein_ssn || "", effectiveDate,
+			});
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", 'inline; filename="Master Agreement Preview.pdf"');
+			return res.send(pdfBuffer);
+		}
+
+		if (docKey === "vehicle_lease") {
+			const vehicles = [];
+			if (application?.vehicle_year || application?.vehicle_make) {
+				vehicles.push({
+					year: application.vehicle_year || "", make: application.vehicle_make || "",
+					model: application.vehicle_model || "", vin: application.vehicle_vin || "",
+					licensePlate: "", titleState: application.vehicle_title_state || "",
+				});
+			}
+			const pdfBuffer = await generateVehicleLease({
+				legalName: application?.legal_name || "", dba: application?.dba || "",
+				entityType: application?.entity_type || "", address: application?.address || "",
+				contactPerson: application?.contact_person || "", phone: application?.phone || "",
+				email: application?.email || "", effectiveDate, vehicles,
+			});
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", 'inline; filename="Vehicle Lease Preview.pdf"');
+			return res.send(pdfBuffer);
+		}
+
+		if (docKey === "w9") {
+			const filePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", "w9.pdf");
+			if (!fs.existsSync(filePath)) return res.status(404).json({ error: "W-9 template not found" });
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form.pdf"');
+			return fs.createReadStream(filePath).pipe(res);
+		}
+
+		return res.status(404).json({ error: "Unknown document" });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
