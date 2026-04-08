@@ -1142,7 +1142,7 @@ function requireRole(...roles) {
 app.post("/api/public/apply", (req, res) => {
 	try {
 		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card } = req.body;
-		if (!full_name || !email || !phone || !dob || !address || !ssn || !drivers_license || !position || !experience || !has_cdl || !work_authorized || !felony_convicted || !accident_history || !skills || !signature) {
+		if (!full_name || !email || !phone || !dob || !address || !ssn || !drivers_license || !position || !experience || !has_cdl || !work_authorized || !felony_convicted || !accident_history || !signature) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
 		const result = db.prepare(`
@@ -1367,7 +1367,9 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 		try {
 			const refs = JSON.parse(app.reference_info);
 			if (Array.isArray(refs)) {
-				refs.forEach((r, i) => { field("Reference " + (i + 1), `${r.name || ""} | ${r.phone || ""} | ${r.relationship || ""}`); });
+				refs.forEach((r, i) => {
+						field("Reference " + (i + 1), `Company: ${r.name || "—"} | Phone: ${r.phone || "—"} | Email: ${r.relationship || "—"}${r.contactPerson ? " | Contact: " + r.contactPerson : ""}`);
+					});
 			} else { field("Reference Info", app.reference_info); }
 		} catch { field("Reference Info", app.reference_info || "None"); }
 		if (app.additional_info) field("Additional Info", app.additional_info);
