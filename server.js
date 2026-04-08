@@ -1422,7 +1422,7 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 
 		if (docKey === "w9") {
 			// W-9: overlay investor data onto the IRS form
-			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", "w9.pdf");
+			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
 			if (fs.existsSync(templatePath)) {
 				const templateBytes = fs.readFileSync(templatePath);
 				const pdfDoc = await PdfLibDocument.load(templateBytes);
@@ -1558,7 +1558,7 @@ app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", async (req,
 		}
 
 		if (docKey === "w9") {
-			const filePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", "w9.pdf");
+			const filePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
 			if (!fs.existsSync(filePath)) return res.status(404).json({ error: "W-9 template not found" });
 			res.setHeader("Content-Type", "application/pdf");
 			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form.pdf"');
