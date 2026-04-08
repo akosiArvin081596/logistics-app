@@ -39,8 +39,8 @@
           </td>
           <td v-if="canEdit" style="text-align: right;">
             <div class="action-btns">
-              <button class="btn-edit" @click="openEdit(truck)">Edit</button>
-              <button class="btn-remove" @click="confirmDelete(truck)">Remove</button>
+              <button class="btn-edit" @click.stop="openEdit(truck)">Edit</button>
+              <button class="btn-remove" @click.stop="confirmDelete(truck)">Remove</button>
             </div>
           </td>
         </tr>
