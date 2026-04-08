@@ -182,9 +182,10 @@
             <div v-for="(r, i) in form.references" :key="i" class="review-ref">
               <div class="review-ref-label">Reference {{ i + 1 }}</div>
               <div class="review-grid">
-                <div class="review-item"><span class="review-label">Name</span><span class="review-value">{{ r.name }}</span></div>
+                <div class="review-item"><span class="review-label">Company</span><span class="review-value">{{ r.name }}</span></div>
                 <div class="review-item"><span class="review-label">Phone</span><span class="review-value">{{ r.phone }}</span></div>
-                <div v-if="r.relationship" class="review-item"><span class="review-label">Relationship</span><span class="review-value">{{ r.relationship }}</span></div>
+                <div v-if="r.relationship" class="review-item"><span class="review-label">Email</span><span class="review-value">{{ r.relationship }}</span></div>
+                <div v-if="r.contactPerson" class="review-item"><span class="review-label">Contact Person</span><span class="review-value">{{ r.contactPerson }}</span></div>
               </div>
             </div>
             <div class="review-grid" style="margin-top:0.75rem;">
@@ -254,9 +255,9 @@ const defaultForm = () => ({
   accident_history: '', accident_description: '', traffic_citations: '',
   certifications: '', availability: [], skills: '',
   references: [
-    { name: '', phone: '', relationship: '' },
-    { name: '', phone: '', relationship: '' },
-    { name: '', phone: '', relationship: '' },
+    { name: '', phone: '', relationship: '', contactPerson: '' },
+    { name: '', phone: '', relationship: '', contactPerson: '' },
+    { name: '', phone: '', relationship: '', contactPerson: '' },
   ],
   additional_info: '', signature: '', signature_date: '',
 })
@@ -373,7 +374,7 @@ function validate(s) {
   }
   if (s === 4) {
     const missingRef = form.references.some(r => !r.name || !r.phone)
-    if (missingRef) return 'Please provide name and phone for all 3 references.'
+    if (missingRef) return 'Please provide company and phone for all 3 references.'
     if (!form.signature) return 'Please type your full name as a signature.'
   }
   return ''

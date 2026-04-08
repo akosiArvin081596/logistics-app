@@ -8,10 +8,11 @@
     <!-- 3 References -->
     <div v-for="(ref, i) in form.references" :key="i" class="reference-block">
       <label class="field-label ref-title">Reference {{ i + 1 }} <span class="req">*</span></label>
-      <div class="grid grid-cols-3 gap-3">
-        <div class="field"><div class="input-wrap"><input v-model="ref.name" placeholder="Full name" /></div></div>
-        <div class="field"><div class="input-wrap"><input v-model="ref.phone" type="tel" placeholder="Phone number" /></div></div>
-        <div class="field"><div class="input-wrap"><input v-model="ref.relationship" placeholder="Relationship" /></div></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div class="field"><label class="field-label">Company</label><div class="input-wrap"><input v-model="ref.name" placeholder="Company name" /></div></div>
+        <div class="field"><label class="field-label">Phone Number</label><div class="input-wrap"><input v-model="ref.phone" type="tel" placeholder="Phone number" /></div></div>
+        <div class="field"><label class="field-label">Email</label><div class="input-wrap"><input v-model="ref.relationship" type="email" placeholder="Email address" /></div></div>
+        <div class="field"><label class="field-label">Contact Person</label><div class="input-wrap"><input v-model="ref.contactPerson" placeholder="Contact person name" /></div></div>
       </div>
     </div>
 
@@ -109,6 +110,7 @@ onMounted(() => {
 .certification-box p { font-size: 0.82rem; color: #374151; line-height: 1.6; font-style: italic; }
 .signature-input { font-family: 'Segoe Script', 'Dancing Script', cursive, serif !important; font-size: 1.1rem !important; }
 .readonly-date { background: #f3f4f6 !important; color: #6b7280 !important; cursor: not-allowed !important; }
+.grid-cols-2 { grid-template-columns: 1fr 1fr; }
 .grid-cols-3 { grid-template-columns: 1fr 1fr 1fr; }
-@media (max-width: 640px) { .grid-cols-3 { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .grid-cols-2, .grid-cols-3 { grid-template-columns: 1fr; } }
 </style>
