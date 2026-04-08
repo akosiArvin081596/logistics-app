@@ -408,8 +408,14 @@ function loadState() {
   } catch { /* corrupt data */ }
 }
 
-// Auto-save on any change
-watch([step, completed, vehicleInfoDone, activeVehicleTab, () => ({ ...form }), vehicles, () => ({ ...banking })], saveState, { deep: true })
+// Auto-save on any change (individual watchers for reliability)
+watch(step, saveState)
+watch(completed, saveState)
+watch(vehicleInfoDone, saveState)
+watch(activeVehicleTab, saveState)
+watch(vehicles, saveState, { deep: true })
+watch(form, saveState, { deep: true })
+watch(banking, saveState, { deep: true })
 
 // Sidebar navigation
 function goToStep(i) {
