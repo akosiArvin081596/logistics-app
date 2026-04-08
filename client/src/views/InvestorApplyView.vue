@@ -479,11 +479,7 @@
             <div class="review-grid">
               <div v-for="doc in documents" :key="doc.doc_key" class="review-item full">
                 <span class="review-label">{{ doc.doc_name }}</span>
-                <span v-if="doc.signed && doc.signed_pdf_url" class="review-value text-green doc-view-link" @click="previewPdfUrl = doc.signed_pdf_url; previewPdfName = doc.doc_name">
-                  Signed &mdash; View Document
-                  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:2px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                </span>
-                <span v-else class="review-value" :class="doc.signed ? 'text-green' : 'text-amber'">{{ doc.signed ? 'Signed' : 'Pending' }}</span>
+                <span class="review-value" :class="doc.signed ? 'text-green' : 'text-amber'">{{ doc.signed ? 'Signed' : 'Pending' }}</span>
               </div>
             </div>
           </div>
@@ -506,7 +502,7 @@
 
         <div class="review-footer">
           <button class="btn-ghost" @click="showReviewModal = false">Go Back & Edit</button>
-          <button class="btn-primary" :disabled="submitting" @click="showReviewModal = false; submitBanking()">
+          <button class="btn-primary" :disabled="submitting" @click="showReviewModal = false; submitOnboarding()">
             <span v-if="submitting" class="spinner light"></span>
             {{ submitting ? 'Submitting...' : 'Confirm & Complete Onboarding' }}
           </button>
@@ -516,9 +512,9 @@
 
     <!-- Modals -->
     <InvestorSignModal
-      :show="showSignModal" :doc="selectedDoc" :pdf-url="selectedPdfUrl"
-      :application-id="applicationId" :access-token="accessToken"
+      :show="showSignModal" :doc="selectedDoc"
       :suggested-names="[form.contact_person, form.legal_name].filter(Boolean)"
+      :applicant-name="form.legal_name" :applicant-entity="form.entity_type"
       @close="showSignModal = false" @signed="handleSigned"
     />
     <LocationPickerModal
@@ -526,16 +522,6 @@
       @close="showMapPicker = false" @confirm="onMapConfirm"
     />
 
-    <!-- Signed PDF Viewer -->
-    <div v-if="previewPdfUrl" class="pdf-viewer-overlay" @click.self="previewPdfUrl = ''">
-      <div class="pdf-viewer-panel">
-        <div class="pdf-viewer-header">
-          <span class="pdf-viewer-title">{{ previewPdfName }}</span>
-          <button class="review-close" @click="previewPdfUrl = ''">&times;</button>
-        </div>
-        <iframe :src="previewPdfUrl" class="pdf-viewer-frame" />
-      </div>
-    </div>
   </div>
 </template>
 
@@ -563,14 +549,23 @@ const step = ref(0)
 const maxStep = ref(0)
 const submitting = ref(false)
 const completed = ref(false)
-const applicationId = ref(null)
-const accessToken = ref('')
-const documents = ref([])
-const totalDocs = ref(3)
 const showSignModal = ref(false)
 const selectedDoc = ref(null)
-const selectedPdfUrl = ref('')
 const vehicleInfoDone = ref(false)
+
+// Local document tracking — no server needed until final submit
+const ONBOARDING_DOCS = [
+  { doc_key: 'master_agreement', doc_name: 'Master Participation & Management Agreement' },
+  { doc_key: 'vehicle_lease', doc_name: 'Commercial Vehicle Lease Agreement' },
+  { doc_key: 'w9', doc_name: 'W-9 Tax Form' },
+]
+const signatures = reactive({})
+const documents = computed(() => ONBOARDING_DOCS.map(d => ({
+  ...d,
+  signed: !!signatures[d.doc_key],
+  signatureText: signatures[d.doc_key]?.text || '',
+})))
+const totalDocs = ONBOARDING_DOCS.length
 
 const form = reactive({
   legal_name: '', dba: '', entity_type: '', address: '', contact_person: '', contact_title: '',
@@ -626,8 +621,6 @@ const activeModelOptions = computed(() => truckModels[vehicles.value[activeVehic
 const stateDropOpen = ref(false)
 const photoPreviewUrl = ref('')
 const showReviewModal = ref(false)
-const previewPdfUrl = ref('')
-const previewPdfName = ref('')
 const bankDropOpen = ref(false)
 const usBanks = [
   'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
@@ -694,7 +687,7 @@ function saveState() {
       step: step.value, maxStep: maxStep.value, form: { ...form },
       vehicles: vehiclesLite, banking: { ...banking },
       vehicleInfoDone: vehicleInfoDone.value, activeVehicleTab: activeVehicleTab.value,
-      applicationId: applicationId.value, accessToken: accessToken.value,
+      signatures: { ...signatures },
       completed: completed.value,
     }))
   } catch { /* full storage */ }
@@ -712,8 +705,7 @@ function loadState() {
     if (s.banking) Object.assign(banking, s.banking)
     if (s.vehicleInfoDone != null) vehicleInfoDone.value = s.vehicleInfoDone
     if (s.activeVehicleTab != null) activeVehicleTab.value = s.activeVehicleTab
-    if (s.applicationId) applicationId.value = s.applicationId
-    if (s.accessToken) accessToken.value = s.accessToken
+    if (s.signatures) Object.assign(signatures, s.signatures)
     if (s.completed) completed.value = s.completed
     // Ensure maxStep is at least the current step
     maxStep.value = Math.max(maxStep.value, step.value)
@@ -728,6 +720,7 @@ watch(activeVehicleTab, saveState)
 watch(vehicles, saveState, { deep: true })
 watch(form, saveState, { deep: true })
 watch(banking, saveState, { deep: true })
+watch(() => signatures, saveState, { deep: true })
 
 // Sidebar navigation
 function goToStep(i) {
@@ -738,10 +731,6 @@ function goToStep(i) {
 // Restore state + Google Places autocomplete
 onMounted(async () => {
   loadState()
-  // Reload documents if we have an active onboarding session
-  if (applicationId.value && accessToken.value && !completed.value) {
-    loadOnboarding().catch(() => {})
-  }
   try {
     const { key } = await api.get('/api/config/maps-key')
     if (!key) return
@@ -828,70 +817,37 @@ const allVehiclesValid = computed(() => vehicles.value.every(v => v.year && v.ma
 const signedCount = computed(() => documents.value.filter(d => d.signed).length)
 const canSubmitBanking = computed(() => banking.bank_name && banking.routing_number && banking.account_number)
 
-async function submitApplication() {
-  // If already submitted, just navigate to Step 2
-  if (applicationId.value && accessToken.value) {
-    await loadOnboarding()
-    step.value = 1
-    maxStep.value = Math.max(maxStep.value, 1)
-    return
-  }
-  if (submitting.value) return
-  submitting.value = true
-  try {
-    const result = await api.post('/api/public/investor-apply', { ...form })
-    applicationId.value = result.applicationId
-    accessToken.value = result.accessToken
-    await loadOnboarding()
-    step.value = 1
-    maxStep.value = Math.max(maxStep.value, 1)
-    toast('Application submitted', 'success')
-  } catch (err) {
-    toast(err.message || 'Submission failed', 'error')
-  } finally {
-    submitting.value = false
-  }
+// Step 0 → Step 1: just navigate, no server call
+function submitApplication() {
+  step.value = 1
+  maxStep.value = Math.max(maxStep.value, 1)
 }
 
-async function loadOnboarding() {
-  if (!applicationId.value) return
-  const data = await api.get(`/api/public/investor-onboarding/${applicationId.value}?token=${accessToken.value}`)
-  documents.value = data.documents || []
-  totalDocs.value = data.totalDocs || 3
-}
-
-async function openDoc(doc) {
-  // Save vehicles to server first (strip photos to keep payload small)
-  if (applicationId.value && vehicles.value.length) {
-    try {
-      const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
-      await api.post(`/api/public/investor-onboarding/${applicationId.value}/vehicles`, {
-        vehicles: stripped, accessToken: accessToken.value,
-      })
-    } catch { /* skip */ }
-  }
+// Open sign modal — purely local
+function openDoc(doc) {
   selectedDoc.value = doc
-  selectedPdfUrl.value = doc.signed && doc.signed_pdf_url
-    ? doc.signed_pdf_url
-    : `/api/public/investor-onboarding/${applicationId.value}/documents/${doc.doc_key}/pdf?token=${accessToken.value}`
   showSignModal.value = true
 }
 
-async function handleSigned(docKey) {
-  await loadOnboarding()
-  // Refresh the modal to show the signed PDF
-  const signedDoc = documents.value.find(d => d.doc_key === docKey)
-  if (signedDoc) {
-    selectedDoc.value = signedDoc
-    selectedPdfUrl.value = signedDoc.signed_pdf_url || selectedPdfUrl.value
-  }
+// Capture signature locally — no server call
+function handleSigned({ docKey, text, image }) {
+  signatures[docKey] = { text, image }
+  // Update selected doc so modal shows signed state
+  selectedDoc.value = documents.value.find(d => d.doc_key === docKey) || selectedDoc.value
 }
 
-async function submitBanking() {
+// Final single submission — all data in one request
+async function submitOnboarding() {
   if (submitting.value) return
   submitting.value = true
   try {
-    await api.post(`/api/public/investor-onboarding/${applicationId.value}/banking`, { ...banking, accessToken: accessToken.value })
+    const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
+    await api.post('/api/public/investor-apply', {
+      ...form,
+      vehicles: stripped,
+      banking: { ...banking },
+      signatures: { ...signatures },
+    })
     completed.value = true
     localStorage.removeItem(STORAGE_KEY)
     toast('Onboarding complete!', 'success')
@@ -1533,22 +1489,6 @@ async function submitBanking() {
 .review-value { font-size: 0.85rem; color: #0f172a; font-weight: 500; }
 .text-green { color: #16a34a; }
 .text-amber { color: #d97706; }
-.doc-view-link { cursor: pointer; display: inline-flex; align-items: center; gap: 2px; transition: color 0.15s; }
-.doc-view-link:hover { color: #15803d; text-decoration: underline; }
-.pdf-viewer-overlay {
-  position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.6);
-  display: flex; align-items: center; justify-content: center; padding: 1.5rem;
-}
-.pdf-viewer-panel {
-  background: #fff; border-radius: 12px; width: 100%; max-width: 900px; height: 85vh;
-  display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25);
-}
-.pdf-viewer-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0.85rem 1.25rem; border-bottom: 1px solid #e2e8f0; flex-shrink: 0;
-}
-.pdf-viewer-title { font-weight: 600; font-size: 0.95rem; color: #0f172a; }
-.pdf-viewer-frame { flex: 1; border: none; width: 100%; }
 .review-vehicle {
   margin-bottom: 0.75rem; padding: 0.65rem 0.85rem;
   background: #fafbfd; border-radius: 8px; border: 1px solid #f1f5f9;

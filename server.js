@@ -1363,32 +1363,52 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 
 // === INVESTOR ONBOARDING ENDPOINTS (Public) ===
 
-// POST /api/public/investor-apply — Submit investor application + vehicles (atomic)
-app.post("/api/public/investor-apply", (req, res) => {
+// POST /api/public/investor-apply — Single atomic submission: form + vehicles + banking + signatures
+app.post("/api/public/investor-apply", async (req, res) => {
 	try {
 		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
 			years_in_operation, industry_experience, fleet_size, preferred_communication,
 			tax_classification, ein_ssn, bankruptcy_liens, reporting_preference,
-			vehicles, bank_name, account_type, routing_number, account_number, account_name } = req.body;
+			vehicles, banking, signatures } = req.body;
+
+		// Validate required fields
 		if (!legal_name || !email || !phone || !address || !ein_ssn) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
+		if (!banking || !banking.bank_name || !banking.routing_number || !banking.account_number) {
+			return res.status(400).json({ error: "Banking information is required." });
+		}
+		if (!signatures || Object.keys(signatures).length < INVESTOR_ONBOARDING_DOCS.length) {
+			return res.status(400).json({ error: "All documents must be signed." });
+		}
+		for (const doc of INVESTOR_ONBOARDING_DOCS) {
+			const sig = signatures[doc.key];
+			if (!sig || !sig.text || !sig.text.trim()) {
+				return res.status(400).json({ error: `Signature required for ${doc.name}.` });
+			}
+		}
+
 		const accessToken = crypto.randomUUID();
 		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
+		const now = new Date().toISOString();
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 
+		// 1. Insert all DB records in a single transaction
 		const applyTx = db.transaction(() => {
+			// Application record
 			const result = db.prepare(`
 				INSERT INTO investor_applications (legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
 					years_in_operation, industry_experience, fleet_size, preferred_communication,
-					tax_classification, ein_ssn, bankruptcy_liens, reporting_preference, access_token)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					tax_classification, ein_ssn, bankruptcy_liens, reporting_preference, access_token, status)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New')
 			`).run(legal_name, dba || "", entity_type || "", address, contact_person || "", contact_title || "",
 				phone, email, years_in_operation || "", industry_experience || "", fleet_size || "",
 				preferred_communication || "", tax_classification || "", ein_ssn, bankruptcy_liens || "", reporting_preference || "", accessToken);
 
 			const appId = result.lastInsertRowid;
 
-			// Save vehicles if provided
+			// Vehicles
 			if (vehiclesArr.length > 0) {
 				const v = vehiclesArr[0];
 				db.prepare(`UPDATE investor_applications SET
@@ -1400,23 +1420,54 @@ app.post("/api/public/investor-apply", (req, res) => {
 					JSON.stringify(vehiclesArr), appId);
 			}
 
-			// Save banking if provided
-			if (bank_name && routing_number && account_number) {
-				db.prepare(`INSERT OR REPLACE INTO investor_payment_info (application_id, bank_name, account_type, routing_number, account_number, account_name)
-					VALUES (?, ?, ?, ?, ?, ?)`).run(appId, bank_name, account_type || "", routing_number, account_number, account_name || "");
+			// Banking
+			db.prepare(`INSERT INTO investor_payment_info (application_id, bank_name, account_type, routing_number, account_number, account_name)
+				VALUES (?, ?, ?, ?, ?, ?)`).run(appId, banking.bank_name, banking.account_type || "", banking.routing_number, banking.account_number, banking.account_name || "");
+
+			// Onboarding — fully onboarded immediately
+			db.prepare("INSERT INTO investor_onboarding (application_id, status, onboarded_at) VALUES (?, 'fully_onboarded', ?)").run(appId, now);
+
+			// Documents — all signed
+			const insertDoc = db.prepare("INSERT INTO investor_onboarding_documents (application_id, doc_key, doc_name, signed, signature_text, signature_image, signed_at, signed_pdf_url) VALUES (?, ?, ?, 1, ?, ?, ?, ?)");
+			for (const doc of INVESTOR_ONBOARDING_DOCS) {
+				const sig = signatures[doc.key];
+				const signedFileName = `${doc.key}-inv-${appId}-signed.pdf`;
+				const signedPdfUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
+				insertDoc.run(appId, doc.key, doc.name, sig.text.trim(), sig.image || "", now, signedPdfUrl);
 			}
 
-			// Create onboarding record + seed documents
-			db.prepare("INSERT INTO investor_onboarding (application_id, status) VALUES (?, 'documents_pending')").run(appId);
-			const seedDoc = db.prepare("INSERT OR IGNORE INTO investor_onboarding_documents (application_id, doc_key, doc_name) VALUES (?, ?, ?)");
-			for (const doc of INVESTOR_ONBOARDING_DOCS) {
-				seedDoc.run(appId, doc.key, doc.name);
-			}
 			return appId;
 		});
 
 		const appId = applyTx();
-		res.json({ success: true, applicationId: appId, accessToken });
+
+		// 2. Generate signed PDFs (outside transaction — file I/O)
+		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
+		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
+
+		const appData = { legalName: legal_name, dba: dba || "", entityType: entity_type || "", address, contactPerson: contact_person || "", contactTitle: contact_title || "", phone, email, einSsn: ein_ssn, effectiveDate };
+
+		for (const doc of INVESTOR_ONBOARDING_DOCS) {
+			const sig = signatures[doc.key];
+			const signedFileName = `${doc.key}-inv-${appId}-signed.pdf`;
+			const signedPath = path.join(signedDir, signedFileName);
+			try {
+				if (doc.key === "w9") {
+					const pdfBytes = await fillW9Form({ ...appData, signatureText: sig.text.trim(), signatureImage: sig.image });
+					if (pdfBytes) fs.writeFileSync(signedPath, pdfBytes);
+				} else if (doc.key === "master_agreement") {
+					const pdfBuffer = await generateMasterAgreement({ ...appData, signatureText: sig.text.trim(), signatureImage: sig.image, signedAt });
+					fs.writeFileSync(signedPath, pdfBuffer);
+				} else if (doc.key === "vehicle_lease") {
+					const pdfBuffer = await generateVehicleLease({ ...appData, signatureText: sig.text.trim(), signatureImage: sig.image, signedAt, vehicles: vehiclesArr });
+					fs.writeFileSync(signedPath, pdfBuffer);
+				}
+			} catch (pdfErr) {
+				console.error(`PDF generation failed for ${doc.key}:`, pdfErr.message);
+			}
+		}
+
+		res.json({ success: true, applicationId: appId });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}

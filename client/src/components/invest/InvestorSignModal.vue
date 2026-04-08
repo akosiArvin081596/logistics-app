@@ -9,10 +9,21 @@
 
       <!-- Two-panel body -->
       <div class="modal-body">
-        <!-- Left: PDF viewer -->
+        <!-- Left: Document info -->
         <div class="pdf-panel">
-          <iframe v-if="pdfUrl" :src="pdfUrl" class="pdf-frame"></iframe>
-          <div v-else class="pdf-placeholder">Loading document...</div>
+          <div class="doc-info">
+            <div class="doc-info-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            </div>
+            <h3 class="doc-info-title">{{ doc?.doc_name }}</h3>
+            <p class="doc-info-desc">{{ docDescription }}</p>
+            <div class="doc-info-details">
+              <div class="detail-row"><span class="detail-label">Applicant</span><span class="detail-value">{{ applicantName }}</span></div>
+              <div v-if="applicantEntity" class="detail-row"><span class="detail-label">Entity</span><span class="detail-value">{{ applicantEntity }}</span></div>
+              <div class="detail-row"><span class="detail-label">Date</span><span class="detail-value">{{ effectiveDate }}</span></div>
+            </div>
+            <p class="doc-info-note">By signing below, you acknowledge that you have read and agree to the terms of this document. The final signed PDF will be generated upon submission.</p>
+          </div>
         </div>
 
         <!-- Right: Sign panel -->
@@ -34,7 +45,7 @@
                 v-model="signatureText" type="text" class="sign-input"
                 placeholder="Type your full name" :disabled="!agreed"
                 @focus="nameDropOpen = true"
-                @blur="setTimeout(() => nameDropOpen = false, 200)"
+                @blur="window.setTimeout(() => nameDropOpen = false, 200)"
               />
               <div v-if="nameDropOpen && agreed && filteredNames.length" class="name-dropdown">
                 <div
@@ -54,8 +65,8 @@
               </div>
             </div>
 
-            <button class="sign-btn" :disabled="!agreed || !signatureText.trim() || !hasDrawn || signing" @click="handleSign">
-              {{ signing ? 'Signing...' : 'Sign Document' }}
+            <button class="sign-btn" :disabled="!agreed || !signatureText.trim() || !hasDrawn" @click="handleSign">
+              Sign Document
             </button>
           </div>
 
@@ -64,8 +75,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
             </div>
             <div class="sign-done-title">Document Signed</div>
-            <div class="sign-done-text">Signed by {{ doc.signature_text }}</div>
-            <a v-if="doc.signed_pdf_url" :href="doc.signed_pdf_url" target="_blank" class="view-link">Download Signed PDF</a>
+            <div class="sign-done-text">Signed by {{ doc.signatureText }}</div>
           </div>
         </div>
       </div>
@@ -75,29 +85,33 @@
 
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
-import { useApi } from '../../composables/useApi'
-import { useToast } from '../../composables/useToast'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
   doc: { type: Object, default: null },
-  pdfUrl: { type: String, default: '' },
-  applicationId: { type: Number, default: 0 },
-  accessToken: { type: String, default: '' },
-  vehicleInfo: { type: Array, default: () => [] },
   suggestedNames: { type: Array, default: () => [] },
+  applicantName: { type: String, default: '' },
+  applicantEntity: { type: String, default: '' },
 })
 const emit = defineEmits(['close', 'signed'])
 
-const api = useApi()
-const { show: toast } = useToast()
 const agreed = ref(false)
 const signatureText = ref('')
-const signing = ref(false)
 const canvasRef = ref(null)
 const isDrawing = ref(false)
 const hasDrawn = ref(false)
 const nameDropOpen = ref(false)
+
+const effectiveDate = computed(() => new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }))
+
+const docDescription = computed(() => {
+  const key = props.doc?.doc_key
+  if (key === 'master_agreement') return 'This agreement establishes the terms of participation and management responsibilities between you and LogisX Logistics for fleet operations, revenue sharing, and service obligations.'
+  if (key === 'vehicle_lease') return 'This lease agreement covers the commercial vehicles you are registering with LogisX, including maintenance responsibilities, insurance requirements, and usage terms.'
+  if (key === 'w9') return 'IRS Form W-9 is required for tax reporting purposes. Your taxpayer identification number (EIN/SSN) will be used to issue 1099 forms as required by federal law.'
+  return ''
+})
+
 const filteredNames = computed(() => {
   const q = signatureText.value.toLowerCase()
   const names = props.suggestedNames.filter(n => n)
@@ -109,7 +123,6 @@ watch(() => props.show, async (v) => {
   if (v) {
     agreed.value = false
     signatureText.value = ''
-    signing.value = false
     hasDrawn.value = false
     await nextTick()
     initCanvas()
@@ -158,24 +171,13 @@ function draw(e) {
 function endDraw() { isDrawing.value = false }
 function clearCanvas() { hasDrawn.value = false; initCanvas() }
 
-async function handleSign() {
-  if (signing.value) return
-  signing.value = true
-  try {
-    const signatureImage = canvasRef.value?.toDataURL('image/png') || null
-    await api.post(`/api/public/investor-onboarding/${props.applicationId}/sign/${props.doc.doc_key}`, {
-      signatureText: signatureText.value.trim(),
-      signatureImage,
-      vehicleInfo: (props.vehicleInfo || []).map(({ photo, photoName, ...rest }) => rest),
-      accessToken: props.accessToken,
-    })
-    toast('Document signed', 'success')
-    emit('signed', props.doc.doc_key)
-  } catch (err) {
-    toast(err.message || 'Signing failed', 'error')
-  } finally {
-    signing.value = false
-  }
+function handleSign() {
+  const signatureImage = canvasRef.value?.toDataURL('image/png') || null
+  emit('signed', {
+    docKey: props.doc.doc_key,
+    text: signatureText.value.trim(),
+    image: signatureImage,
+  })
 }
 </script>
 
@@ -210,14 +212,32 @@ async function handleSign() {
   flex: 1; display: flex; overflow: hidden;
 }
 
-/* ─── Left: PDF ─── */
+/* ─── Left: Document info ─── */
 .pdf-panel {
-  flex: 1; background: #f5f5f5; overflow: hidden;
-}
-.pdf-frame { width: 100%; height: 100%; border: none; }
-.pdf-placeholder {
+  flex: 1; background: #f8fafc; overflow-y: auto;
   display: flex; align-items: center; justify-content: center;
-  height: 100%; color: #6b7085; font-size: 0.9rem;
+}
+.doc-info {
+  max-width: 520px; padding: 2.5rem; text-align: center;
+}
+.doc-info-icon { color: #3b82f6; margin-bottom: 1.25rem; }
+.doc-info-title { font-size: 1.3rem; font-weight: 700; color: #0f172a; margin: 0 0 0.75rem; }
+.doc-info-desc { font-size: 0.9rem; color: #475569; line-height: 1.6; margin: 0 0 1.5rem; }
+.doc-info-details {
+  background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+  padding: 1rem; margin-bottom: 1.5rem; text-align: left;
+}
+.detail-row {
+  display: flex; justify-content: space-between; padding: 0.4rem 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+.detail-row:last-child { border-bottom: none; }
+.detail-label { font-size: 0.78rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em; }
+.detail-value { font-size: 0.88rem; font-weight: 500; color: #0f172a; }
+.doc-info-note {
+  font-size: 0.8rem; color: #94a3b8; line-height: 1.5;
+  background: #fffbeb; border: 1px solid #fef3c7; border-radius: 8px;
+  padding: 0.75rem; text-align: left;
 }
 
 /* ─── Right: Sign panel ─── */
@@ -302,12 +322,6 @@ async function handleSign() {
 }
 .sign-done-title { font-size: 1.1rem; font-weight: 700; color: #0f172a; }
 .sign-done-text { font-size: 0.85rem; color: #64748b; }
-.view-link {
-  display: inline-flex; align-items: center; gap: 0.3rem;
-  margin-top: 0.5rem; font-size: 0.82rem; color: #3b82f6;
-  font-weight: 600; text-decoration: none;
-}
-.view-link:hover { text-decoration: underline; }
 
 /* ─── Mobile ─── */
 @media (max-width: 768px) {
