@@ -318,13 +318,16 @@ async function clearState() {
   } catch { /* skip */ }
 }
 
-// Load state first, then start watching
-loadState().then(() => {
+// Register watchers immediately (saveState guards with dbReady flag)
+watch(step, saveState)
+watch(submitted, saveState)
+watch(form, saveState, { deep: true })
+
+// Load state on mount, then enable saving
+onMounted(async () => {
+  await loadState()
   dbReady = true
   if (saveQueued) saveState()
-  watch(step, saveState)
-  watch(submitted, saveState)
-  watch(form, saveState, { deep: true })
 })
 
 // Migrate: remove old localStorage entry if exists
