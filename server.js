@@ -1469,16 +1469,18 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 				signedPdfUrl = "";
 			}
 		} else if (docKey === "master_agreement") {
+			const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 			const pdfBuffer = await generateMasterAgreement({
 				legalName: application?.legal_name || "", dba: application?.dba || "",
 				entityType: application?.entity_type || "", address: application?.address || "",
 				contactPerson: application?.contact_person || "", contactTitle: application?.contact_title || "",
 				phone: application?.phone || "", email: application?.email || "",
 				einSsn: application?.ein_ssn || "", effectiveDate,
-				signatureText: signatureText.trim(), signatureImage,
+				signatureText: signatureText.trim(), signatureImage, signedAt,
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
 		} else if (docKey === "vehicle_lease") {
+			const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 			const vehicles = [];
 			if (application?.vehicle_year || application?.vehicle_make) {
 				vehicles.push({
@@ -1492,7 +1494,7 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 				entityType: application?.entity_type || "", address: application?.address || "",
 				contactPerson: application?.contact_person || "", phone: application?.phone || "",
 				email: application?.email || "", effectiveDate,
-				signatureText: signatureText.trim(), signatureImage, vehicles,
+				signatureText: signatureText.trim(), signatureImage, signedAt, vehicles,
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
 		}

@@ -650,13 +650,20 @@ async function loadOnboarding() {
 
 function openDoc(doc) {
   selectedDoc.value = doc
-  selectedPdfUrl.value = `/api/public/investor-onboarding/${applicationId.value}/documents/${doc.doc_key}/pdf?token=${accessToken.value}`
+  selectedPdfUrl.value = doc.signed && doc.signed_pdf_url
+    ? doc.signed_pdf_url
+    : `/api/public/investor-onboarding/${applicationId.value}/documents/${doc.doc_key}/pdf?token=${accessToken.value}`
   showSignModal.value = true
 }
 
-async function handleSigned() {
-  showSignModal.value = false
+async function handleSigned(docKey) {
   await loadOnboarding()
+  // Refresh the modal to show the signed PDF
+  const signedDoc = documents.value.find(d => d.doc_key === docKey)
+  if (signedDoc) {
+    selectedDoc.value = signedDoc
+    selectedPdfUrl.value = signedDoc.signed_pdf_url || selectedPdfUrl.value
+  }
 }
 
 async function submitBanking() {

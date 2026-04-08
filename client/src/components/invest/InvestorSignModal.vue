@@ -134,7 +134,6 @@ async function handleSign() {
     })
     toast('Document signed', 'success')
     emit('signed', props.doc.doc_key)
-    emit('close')
   } catch (err) {
     toast(err.message || 'Signing failed', 'error')
   } finally {
