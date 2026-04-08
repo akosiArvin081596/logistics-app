@@ -1,103 +1,106 @@
 <template>
-  <van-popup v-model:show="visible" position="center" round :style="{ width: '95%', maxWidth: '1100px', height: '92vh', borderRadius: '14px' }" @close="$emit('close')">
-    <div class="sign-modal">
-      <div class="sign-header">
-        <div class="sign-title">{{ doc?.doc_name || 'Document' }}</div>
-        <button class="sign-close" @click="$emit('close')">&times;</button>
+  <div v-if="show" class="modal-overlay">
+    <div class="modal-fullscreen">
+      <!-- Header bar -->
+      <div class="modal-header">
+        <div class="modal-title">{{ doc?.doc_name || 'Document' }}</div>
+        <button class="modal-close" @click="$emit('close')">&times;</button>
       </div>
 
-      <!-- PDF viewer -->
-      <div class="pdf-container" :style="{ flex: pdfFlex }">
-        <iframe v-if="pdfUrl" :src="pdfUrl" class="pdf-frame"></iframe>
-        <div v-else class="pdf-placeholder">Loading document...</div>
-      </div>
-
-      <!-- Drag handle to resize -->
-      <div v-if="doc && !doc.signed" class="resize-handle" @pointerdown="startResize">
-        <div class="resize-bar"></div>
-      </div>
-
-      <!-- Signing area -->
-      <details v-if="doc && !doc.signed" class="sign-area-collapse">
-        <summary class="sign-toggle">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-          Sign this document
-        </summary>
-        <div class="sign-area" :style="{ maxHeight: signAreaHeight + 'px', overflowY: 'auto' }">
-          <label class="sign-checkbox">
-            <input type="checkbox" v-model="agreed" />
-            <span>I have read and agree to the terms of this document</span>
-          </label>
-
-          <input
-            v-model="signatureText"
-            type="text"
-            class="sign-input"
-            placeholder="Type your full name"
-            :disabled="!agreed"
-          />
-
-          <div v-if="isContractorAgreement" class="payment-section">
-            <div class="payment-title">Payment Method (Exhibit A)</div>
-            <div class="payment-radios">
-              <label><input type="radio" v-model="paymentMethod" value="check" :disabled="!agreed" /> Check</label>
-              <label><input type="radio" v-model="paymentMethod" value="ach" :disabled="!agreed" /> Direct Deposit (ACH)</label>
-            </div>
-            <input v-if="paymentMethod === 'check'" v-model="checkName" class="pay-input" placeholder="Name on Account" :disabled="!agreed" />
-            <template v-if="paymentMethod === 'ach'">
-              <input v-model="bankName" class="pay-input" placeholder="Name of Bank" :disabled="!agreed" />
-              <input v-model="bankAddress" class="pay-input" placeholder="Bank Address" :disabled="!agreed" />
-              <input v-model="bankPhone" class="pay-input" placeholder="Bank Phone #" :disabled="!agreed" />
-              <input v-model="bankRouting" class="pay-input" placeholder="Routing #" :disabled="!agreed" />
-              <input v-model="bankAccount" class="pay-input" placeholder="Account #" :disabled="!agreed" />
-              <input v-model="bankAcctName" class="pay-input" placeholder="Name(s) on Account" :disabled="!agreed" />
-              <select v-model="accountType" class="pay-input" :disabled="!agreed">
-                <option value="">Account Type...</option>
-                <option value="Checking">Checking</option>
-                <option value="Savings">Savings</option>
-              </select>
-            </template>
-          </div>
-
-          <div class="canvas-wrapper" :class="{ disabled: !agreed }">
-            <div class="canvas-label">
-              <span>Draw your signature below</span>
-              <button v-if="hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
-            </div>
-            <canvas
-              ref="canvasRef"
-              class="sig-canvas"
-              @pointerdown="startDraw"
-              @pointermove="draw"
-              @pointerup="endDraw"
-              @pointerleave="endDraw"
-            ></canvas>
-          </div>
-
-          <button
-            class="sign-btn"
-            :disabled="!canSign"
-            @click="handleSign"
-          >
-            {{ signing ? 'Signing...' : 'Sign Document' }}
-          </button>
+      <!-- Two-panel body -->
+      <div class="modal-body">
+        <!-- Left: PDF viewer -->
+        <div class="pdf-panel">
+          <iframe v-if="pdfUrl" :src="pdfUrl" class="pdf-frame"></iframe>
+          <div v-else class="pdf-placeholder">Loading document...</div>
         </div>
-      </details>
 
-      <!-- Already signed -->
-      <div v-else-if="doc?.signed" class="sign-done">
-        <span class="sign-done-icon">&#9989;</span>
-        <div>Signed by {{ doc.signature_text }}</div>
-        <div class="sign-done-date">{{ formatDate(doc.signed_at) }}</div>
-        <a v-if="doc.signed_pdf_url" :href="doc.signed_pdf_url" target="_blank" class="view-signed-link">View Signed PDF</a>
+        <!-- Right: Sign panel -->
+        <div class="sign-panel">
+          <div v-if="doc && !doc.signed" class="sign-content">
+            <div class="sign-panel-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+              Sign Document
+            </div>
+
+            <label class="sign-checkbox">
+              <input type="checkbox" v-model="agreed" />
+              <span>I have read and agree to the terms of this document</span>
+            </label>
+
+            <div class="sign-field">
+              <label class="sign-field-label">Full Name</label>
+              <input
+                v-model="signatureText" type="text" class="sign-input"
+                placeholder="Type your full name" :disabled="!agreed"
+              />
+            </div>
+
+            <!-- Payment section (Contractor Agreement only) -->
+            <div v-if="isContractorAgreement" class="payment-section">
+              <div class="payment-title">Payment Method (Exhibit A)</div>
+              <div class="payment-radios">
+                <label class="payment-radio"><input type="radio" v-model="paymentMethod" value="check" :disabled="!agreed" /> Check</label>
+                <label class="payment-radio"><input type="radio" v-model="paymentMethod" value="ach" :disabled="!agreed" /> Direct Deposit (ACH)</label>
+              </div>
+              <div v-if="paymentMethod === 'check'" class="sign-field">
+                <label class="sign-field-label">Name on Account</label>
+                <input v-model="checkName" class="pay-input" placeholder="Name on Account" :disabled="!agreed" />
+              </div>
+              <template v-if="paymentMethod === 'ach'">
+                <div class="sign-field"><label class="sign-field-label">Bank Name</label><input v-model="bankName" class="pay-input" placeholder="Name of Bank" :disabled="!agreed" /></div>
+                <div class="sign-field"><label class="sign-field-label">Bank Address</label><input v-model="bankAddress" class="pay-input" placeholder="Bank Address" :disabled="!agreed" /></div>
+                <div class="sign-field"><label class="sign-field-label">Bank Phone</label><input v-model="bankPhone" class="pay-input" placeholder="Bank Phone #" :disabled="!agreed" /></div>
+                <div class="pay-row">
+                  <div class="sign-field"><label class="sign-field-label">Routing #</label><input v-model="bankRouting" class="pay-input" placeholder="Routing #" :disabled="!agreed" /></div>
+                  <div class="sign-field"><label class="sign-field-label">Account #</label><input v-model="bankAccount" class="pay-input" placeholder="Account #" :disabled="!agreed" /></div>
+                </div>
+                <div class="pay-row">
+                  <div class="sign-field"><label class="sign-field-label">Name on Account</label><input v-model="bankAcctName" class="pay-input" placeholder="Name(s) on Account" :disabled="!agreed" /></div>
+                  <div class="sign-field">
+                    <label class="sign-field-label">Account Type</label>
+                    <select v-model="accountType" class="pay-input" :disabled="!agreed">
+                      <option value="">Select...</option>
+                      <option value="Checking">Checking</option>
+                      <option value="Savings">Savings</option>
+                    </select>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <div class="sign-field">
+              <label class="sign-field-label">
+                Draw your signature
+                <button v-if="hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
+              </label>
+              <div class="canvas-wrapper" :class="{ disabled: !agreed }">
+                <canvas ref="canvasRef" class="sig-canvas" @pointerdown="startDraw" @pointermove="draw" @pointerup="endDraw" @pointerleave="endDraw"></canvas>
+              </div>
+            </div>
+
+            <button class="sign-btn" :disabled="!canSign" @click="handleSign">
+              {{ signing ? 'Signing...' : 'Sign Document' }}
+            </button>
+          </div>
+
+          <div v-else-if="doc?.signed" class="sign-done">
+            <div class="sign-done-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            </div>
+            <div class="sign-done-title">Document Signed</div>
+            <div class="sign-done-text">Signed by {{ doc.signature_text }}</div>
+            <div v-if="doc.signed_at" class="sign-done-date">{{ formatDate(doc.signed_at) }}</div>
+            <a v-if="doc.signed_pdf_url" :href="doc.signed_pdf_url" target="_blank" class="view-link">Download Signed PDF</a>
+          </div>
+        </div>
       </div>
     </div>
-  </van-popup>
+  </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
-import { Popup as VanPopup } from 'vant'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
 
@@ -110,37 +113,12 @@ const emit = defineEmits(['close', 'signed'])
 const driverStore = useDriverStore()
 const { show: toast } = useToast()
 
-const visible = computed({
-  get: () => props.show,
-  set: (v) => { if (!v) emit('close') },
-})
-
 const agreed = ref(false)
 const signatureText = ref('')
 const signing = ref(false)
 const canvasRef = ref(null)
 const isDrawing = ref(false)
 const hasDrawn = ref(false)
-const signAreaHeight = ref(280)
-const pdfFlex = ref('1')
-const isResizing = ref(false)
-
-function startResize(e) {
-  isResizing.value = true
-  const startY = e.clientY
-  const startH = signAreaHeight.value
-  const onMove = (ev) => {
-    const diff = startY - ev.clientY
-    signAreaHeight.value = Math.max(150, Math.min(600, startH + diff))
-  }
-  const onUp = () => {
-    isResizing.value = false
-    document.removeEventListener('pointermove', onMove)
-    document.removeEventListener('pointerup', onUp)
-  }
-  document.addEventListener('pointermove', onMove)
-  document.addEventListener('pointerup', onUp)
-}
 
 // Payment info (contractor_agreement only)
 const paymentMethod = ref('')
@@ -195,7 +173,7 @@ function initCanvas() {
   if (!canvas) return
   const rect = canvas.parentElement.getBoundingClientRect()
   canvas.width = rect.width
-  canvas.height = 120
+  canvas.height = rect.height || 140
   const ctx = canvas.getContext('2d')
   ctx.clearRect(0, 0, canvas.width, canvas.height)
   ctx.strokeStyle = '#1a1d27'
@@ -207,10 +185,7 @@ function initCanvas() {
 function getPos(e) {
   const canvas = canvasRef.value
   const rect = canvas.getBoundingClientRect()
-  return {
-    x: (e.clientX || e.touches?.[0]?.clientX || 0) - rect.left,
-    y: (e.clientY || e.touches?.[0]?.clientY || 0) - rect.top,
-  }
+  return { x: (e.clientX || e.touches?.[0]?.clientX || 0) - rect.left, y: (e.clientY || e.touches?.[0]?.clientY || 0) - rect.top }
 }
 
 function startDraw(e) {
@@ -232,26 +207,14 @@ function draw(e) {
   hasDrawn.value = true
 }
 
-function endDraw() {
-  isDrawing.value = false
-}
-
-function clearCanvas() {
-  hasDrawn.value = false
-  initCanvas()
-}
-
-function getSignatureImage() {
-  const canvas = canvasRef.value
-  if (!canvas) return null
-  return canvas.toDataURL('image/png')
-}
+function endDraw() { isDrawing.value = false }
+function clearCanvas() { hasDrawn.value = false; initCanvas() }
 
 async function handleSign() {
   if (!canSign.value) return
   signing.value = true
   try {
-    const signatureImage = getSignatureImage()
+    const signatureImage = canvasRef.value?.toDataURL('image/png') || null
     const payInfo = isContractorAgreement.value ? {
       paymentMethod: paymentMethod.value,
       checkName: checkName.value,
@@ -281,112 +244,139 @@ function formatDate(d) {
 </script>
 
 <style scoped>
-.sign-modal {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
+/* ─── Fullscreen overlay ─── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 999;
+  display: flex; align-items: center; justify-content: center;
 }
-.sign-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--bg);
+.modal-fullscreen {
+  background: #fff; width: 100vw; height: 100vh;
+  display: flex; flex-direction: column;
 }
-.sign-title { font-weight: 700; font-size: 1rem; }
-.sign-close {
-  font-size: 1.5rem; background: none; border: none;
-  cursor: pointer; color: var(--text-dim); line-height: 1;
+
+/* ─── Header ─── */
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.75rem 1.25rem; border-bottom: 1px solid #e8edf2; flex-shrink: 0;
 }
-.pdf-container { flex: 1; overflow: hidden; background: #f5f5f5; }
+.modal-title { font-weight: 700; font-size: 1.05rem; color: #0f172a; }
+.modal-close {
+  font-size: 1.6rem; background: none; border: none; cursor: pointer;
+  color: #6b7085; width: 36px; height: 36px; display: flex;
+  align-items: center; justify-content: center; border-radius: 8px;
+  transition: background 0.15s;
+}
+.modal-close:hover { background: #f1f5f9; }
+
+/* ─── Two-panel body ─── */
+.modal-body { flex: 1; display: flex; overflow: hidden; }
+
+/* ─── Left: PDF ─── */
+.pdf-panel { flex: 1; background: #f5f5f5; overflow: hidden; }
 .pdf-frame { width: 100%; height: 100%; border: none; }
 .pdf-placeholder {
   display: flex; align-items: center; justify-content: center;
-  height: 100%; color: var(--text-dim); font-size: 0.9rem;
+  height: 100%; color: #6b7085; font-size: 0.9rem;
 }
-.sign-area-collapse { border-top: 1px solid var(--bg); }
-.sign-toggle {
+
+/* ─── Right: Sign panel ─── */
+.sign-panel {
+  width: 360px; flex-shrink: 0;
+  border-left: 1px solid #e8edf2;
+  display: flex; flex-direction: column;
+  background: #fafbfd;
+}
+.sign-content {
+  flex: 1; display: flex; flex-direction: column;
+  padding: 1.25rem; gap: 0.85rem; overflow-y: auto;
+}
+.sign-panel-title {
   display: flex; align-items: center; gap: 0.5rem;
-  padding: 0.65rem 1rem; cursor: pointer; user-select: none;
-  font-size: 0.85rem; font-weight: 700; color: var(--text);
-  list-style: none; background: var(--card);
+  font-size: 1rem; font-weight: 700; color: #0f172a;
+  padding-bottom: 0.75rem; border-bottom: 1px solid #e8edf2;
 }
-.sign-toggle::-webkit-details-marker { display: none; }
-.sign-toggle svg { color: #3b82f6; }
-.sign-area-collapse[open] .sign-toggle { border-bottom: 1px solid var(--bg); }
-.sign-area {
-  padding: 0.75rem 1rem;
-  background: var(--card);
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
+.sign-panel-title svg { color: #3b82f6; }
+
+/* ─── Fields ─── */
 .sign-checkbox {
   display: flex; align-items: flex-start; gap: 0.5rem;
-  font-size: 0.8rem; cursor: pointer;
+  font-size: 0.82rem; cursor: pointer; color: #475569;
 }
-.sign-checkbox input { margin-top: 0.15rem; }
-.sign-input {
-  width: 100%; padding: 0.5rem 0.75rem;
-  border: 1px solid var(--bg); border-radius: 8px;
-  font-size: 1.1rem; background: var(--bg);
-  font-family: 'Dancing Script', 'Brush Script MT', 'Segoe Script', cursive;
-  font-style: italic;
-}
-.sign-input:disabled { opacity: 0.5; }
-.canvas-wrapper { position: relative; }
-.canvas-wrapper.disabled { opacity: 0.4; pointer-events: none; }
-.canvas-label {
+.sign-field { display: flex; flex-direction: column; gap: 0.3rem; }
+.sign-field-label {
   display: flex; justify-content: space-between; align-items: center;
-  font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.25rem;
+  font-size: 0.78rem; font-weight: 600; color: #475569;
 }
+.sign-input {
+  width: 100%; padding: 0.55rem 0.75rem; border: 1px solid #e2e4ea; border-radius: 8px;
+  font-size: 1.1rem; font-family: 'Dancing Script', cursive; font-style: italic; background: #fff;
+}
+.sign-input:disabled { opacity: 0.4; }
+
+/* ─── Payment section ─── */
+.payment-section {
+  background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 10px; padding: 0.85rem;
+}
+.payment-title { font-size: 0.82rem; font-weight: 700; color: #0369a1; margin-bottom: 0.5rem; }
+.payment-radios { display: flex; gap: 1rem; margin-bottom: 0.5rem; }
+.payment-radio {
+  display: flex; align-items: center; gap: 0.35rem;
+  font-size: 0.82rem; color: #334155; cursor: pointer;
+}
+.pay-input {
+  width: 100%; padding: 0.45rem 0.65rem; border: 1px solid #e2e4ea; border-radius: 8px;
+  font-size: 0.82rem; background: #fff; font-family: inherit;
+}
+.pay-input:disabled { opacity: 0.4; }
+.pay-row { display: flex; gap: 0.5rem; }
+.pay-row .sign-field { flex: 1; }
+
+/* ─── Canvas ─── */
+.canvas-wrapper { position: relative; }
+.canvas-wrapper.disabled { opacity: 0.35; pointer-events: none; }
 .canvas-clear {
-  font-size: 0.72rem; color: var(--accent); background: none;
+  font-size: 0.72rem; color: #3b82f6; background: none;
   border: none; cursor: pointer; font-weight: 600;
 }
 .sig-canvas {
-  width: 100%; height: 120px; border: 1px solid var(--bg);
-  border-radius: 8px; cursor: crosshair; touch-action: none;
+  width: 100%; height: 140px; border: 1px solid #e2e4ea;
+  border-radius: 8px; cursor: crosshair; touch-action: none; background: #fff;
 }
+
+/* ─── Sign button ─── */
 .sign-btn {
-  width: 100%; padding: 0.65rem;
-  background: var(--accent); color: white; border: none;
-  border-radius: 8px; font-weight: 700; font-size: 0.9rem; cursor: pointer;
+  width: 100%; padding: 0.7rem; background: #0f2847; color: white; border: none;
+  border-radius: 10px; font-weight: 700; font-size: 0.9rem; cursor: pointer;
+  transition: background 0.15s; margin-top: auto;
 }
-.sign-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.resize-handle {
-  height: 16px; display: flex; align-items: center; justify-content: center;
-  cursor: ns-resize; background: var(--card); border-top: 1px solid var(--bg);
-  touch-action: none; flex-shrink: 0;
-}
-.resize-bar {
-  width: 40px; height: 4px; border-radius: 2px; background: #d1d5db;
-}
-.payment-section {
-  border: 1px solid var(--bg); border-radius: 8px; padding: 0.6rem;
-  background: #fafbfc;
-}
-.payment-title {
-  font-weight: 700; font-size: 0.82rem; margin-bottom: 0.4rem;
-}
-.payment-radios {
-  display: flex; gap: 1rem; font-size: 0.82rem; margin-bottom: 0.4rem;
-}
-.payment-radios label { display: flex; align-items: center; gap: 0.3rem; cursor: pointer; }
-.pay-input {
-  width: 100%; padding: 0.4rem 0.6rem; margin-top: 0.3rem;
-  border: 1px solid var(--bg); border-radius: 6px; font-size: 0.82rem; background: white;
-}
-.pay-input:disabled { opacity: 0.5; }
+.sign-btn:hover:not(:disabled) { background: #1a3a6b; }
+.sign-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ─── Signed state ─── */
 .sign-done {
-  padding: 1rem; text-align: center;
-  font-size: 0.88rem; color: #059669; font-weight: 600;
-  border-top: 1px solid var(--bg);
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 0.75rem;
+  padding: 2rem; text-align: center;
 }
-.sign-done-icon { font-size: 1.5rem; display: block; margin-bottom: 0.25rem; }
-.sign-done-date { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.15rem; }
-.view-signed-link {
-  display: inline-block; margin-top: 0.5rem; font-size: 0.82rem;
-  color: var(--accent); font-weight: 600;
+.sign-done-icon {
+  width: 56px; height: 56px; border-radius: 50%;
+  background: #dcfce7; color: #16a34a;
+  display: flex; align-items: center; justify-content: center;
+}
+.sign-done-title { font-size: 1.1rem; font-weight: 700; color: #0f172a; }
+.sign-done-text { font-size: 0.85rem; color: #64748b; }
+.sign-done-date { font-size: 0.75rem; color: #94a3b8; }
+.view-link {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  margin-top: 0.5rem; font-size: 0.82rem; color: #3b82f6;
+  font-weight: 600; text-decoration: none;
+}
+.view-link:hover { text-decoration: underline; }
+
+/* ─── Mobile ─── */
+@media (max-width: 768px) {
+  .modal-body { flex-direction: column; }
+  .sign-panel { width: 100%; border-left: none; border-top: 1px solid #e8edf2; max-height: 50vh; }
+  .pdf-panel { min-height: 40vh; }
 }
 </style>
