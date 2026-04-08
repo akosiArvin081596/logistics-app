@@ -1333,7 +1333,8 @@ app.post("/api/public/investor-apply", (req, res) => {
 	try {
 		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
 			years_in_operation, industry_experience, fleet_size, preferred_communication,
-			tax_classification, ein_ssn, bankruptcy_liens, reporting_preference, vehicles } = req.body;
+			tax_classification, ein_ssn, bankruptcy_liens, reporting_preference,
+			vehicles, bank_name, account_type, routing_number, account_number, account_name } = req.body;
 		if (!legal_name || !email || !phone || !address || !ein_ssn) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
@@ -1362,6 +1363,12 @@ app.post("/api/public/investor-apply", (req, res) => {
 				).run(v.year || "", v.make || "", v.model || "", v.vin || "",
 					v.mileage || "", v.titleState || "", v.liens || "", v.registeredOwner || "",
 					JSON.stringify(vehiclesArr), appId);
+			}
+
+			// Save banking if provided
+			if (bank_name && routing_number && account_number) {
+				db.prepare(`INSERT OR REPLACE INTO investor_payment_info (application_id, bank_name, account_type, routing_number, account_number, account_name)
+					VALUES (?, ?, ?, ?, ?, ?)`).run(appId, bank_name, account_type || "", routing_number, account_number, account_name || "");
 			}
 
 			// Create onboarding record + seed documents
@@ -1560,10 +1567,16 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		db.prepare("UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signature_image=?, signed_at=?, signed_pdf_url=? WHERE application_id=? AND doc_key=?")
 			.run(signatureText.trim(), signatureImage || "", now, signedPdfUrl, appId, docKey);
 
-		// Check if all docs signed → advance to banking_pending
+		// Check if all docs signed → advance status
 		const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
 		if (signedCount === INVESTOR_ONBOARDING_DOCS.length) {
-			db.prepare("UPDATE investor_onboarding SET status='banking_pending' WHERE application_id=?").run(appId);
+			const hasBanking = db.prepare("SELECT 1 FROM investor_payment_info WHERE application_id=?").get(appId);
+			if (hasBanking) {
+				db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=? WHERE application_id=?")
+					.run(new Date().toISOString(), appId);
+			} else {
+				db.prepare("UPDATE investor_onboarding SET status='banking_pending' WHERE application_id=?").run(appId);
+			}
 		}
 
 		res.json({ success: true });
