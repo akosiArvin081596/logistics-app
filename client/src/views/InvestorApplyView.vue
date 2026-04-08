@@ -812,6 +812,13 @@ const signedCount = computed(() => documents.value.filter(d => d.signed).length)
 const canSubmitBanking = computed(() => banking.bank_name && banking.routing_number && banking.account_number)
 
 async function submitApplication() {
+  // If already submitted, just navigate to Step 2
+  if (applicationId.value && accessToken.value) {
+    await loadOnboarding()
+    step.value = 1
+    maxStep.value = Math.max(maxStep.value, 1)
+    return
+  }
   if (submitting.value) return
   submitting.value = true
   try {
