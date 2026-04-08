@@ -2027,13 +2027,16 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			// Create trucks from application vehicles
 			let vehicles = [];
 			try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
-			for (const v of vehicles) {
-				const unitNum = `INV-${appId}-${v.vin ? v.vin.slice(-6) : Date.now()}`;
+			const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
+			for (let i = 0; i < vehicles.length; i++) {
+				const v = vehicles[i];
+				const unitNum = `INV-${appId}-${String.fromCharCode(65 + i)}`;
+				const truckStatus = validTruckStatus.includes(v.status) ? v.status : "Active";
 				try {
 					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, notes)
 						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
-						v.status === "OOS" ? "OOS" : "Active", userId, parseFloat(v.purchasePrice) || 0,
+						truckStatus, userId, parseFloat(v.purchasePrice) || 0,
 						v.titleStatus || "Clean", v.titleState ? `Title State: ${v.titleState}` : "");
 				} catch { /* skip duplicate */ }
 			}
