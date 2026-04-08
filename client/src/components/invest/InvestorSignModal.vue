@@ -83,7 +83,7 @@ function initCanvas() {
   if (!canvas) return
   const rect = canvas.parentElement.getBoundingClientRect()
   canvas.width = rect.width
-  canvas.height = 100
+  canvas.height = 150
   const ctx = canvas.getContext('2d')
   ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, canvas.width, canvas.height)
@@ -148,7 +148,7 @@ async function handleSign() {
   display: flex; align-items: center; justify-content: center; padding: 1rem;
 }
 .modal-content {
-  background: white; border-radius: 14px; width: 100%; max-width: 1100px; max-height: 92vh;
+  background: white; border-radius: 14px; width: 100%; max-width: 1100px; max-height: 95vh;
   display: flex; flex-direction: column; overflow: hidden;
 }
 .modal-header {
@@ -181,7 +181,7 @@ async function handleSign() {
 .canvas-wrapper.disabled { opacity: 0.4; pointer-events: none; }
 .canvas-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: #6b7085; margin-bottom: 0.25rem; }
 .canvas-clear { font-size: 0.72rem; color: #38bdf8; background: none; border: none; cursor: pointer; font-weight: 600; }
-.sig-canvas { width: 100%; height: 100px; border: 1px solid #e2e4ea; border-radius: 8px; cursor: crosshair; touch-action: none; }
+.sig-canvas { width: 100%; height: 150px; border: 1px solid #e2e4ea; border-radius: 8px; cursor: crosshair; touch-action: none; }
 .sign-btn {
   width: 100%; padding: 0.65rem; background: #38bdf8; color: white; border: none;
   border-radius: 8px; font-weight: 700; font-size: 0.9rem; cursor: pointer;
