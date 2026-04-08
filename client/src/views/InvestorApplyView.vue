@@ -688,7 +688,13 @@ async function loadOnboarding() {
   totalDocs.value = data.totalDocs || 3
 }
 
-function openDoc(doc) {
+async function openDoc(doc) {
+  // Save vehicles to server so preview PDFs include all vehicles
+  if (applicationId.value && vehicles.value.length) {
+    api.post(`/api/public/investor-onboarding/${applicationId.value}/vehicles`, {
+      vehicles: vehicles.value, accessToken: accessToken.value,
+    }).catch(() => {})
+  }
   selectedDoc.value = doc
   selectedPdfUrl.value = doc.signed && doc.signed_pdf_url
     ? doc.signed_pdf_url

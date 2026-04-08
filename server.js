@@ -1570,6 +1570,30 @@ app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", async (req,
 	}
 });
 
+// POST /api/public/investor-onboarding/:id/vehicles — Save vehicles JSON (token required)
+app.post("/api/public/investor-onboarding/:id/vehicles", (req, res) => {
+	try {
+		const appId = verifyInvestorToken(req, res);
+		if (!appId) return;
+		const { vehicles } = req.body;
+		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
+		db.prepare("UPDATE investor_applications SET vehicles_json=? WHERE id=?")
+			.run(JSON.stringify(vehiclesArr), appId);
+		// Also update the legacy single-vehicle columns from the first vehicle
+		if (vehiclesArr.length > 0) {
+			const v = vehiclesArr[0];
+			db.prepare(`UPDATE investor_applications SET
+				vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
+				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=? WHERE id=?`
+			).run(v.year || "", v.make || "", v.model || "", v.vin || "",
+				v.mileage || "", v.titleState || "", v.liens || "", v.registeredOwner || "", appId);
+		}
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // POST /api/public/investor-onboarding/:id/banking — Step 3: Submit banking info (token required)
 app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
 	try {
