@@ -130,9 +130,9 @@
         <div v-if="detailLoading" class="flex items-center justify-center py-16">
           <div class="text-[13px] text-gray-400">Loading...</div>
         </div>
-        <div v-else-if="detail.application" class="px-6 py-5 overflow-y-auto space-y-5" style="max-height:68vh;">
+        <div v-else-if="detail.application" class="px-6 py-5 overflow-y-auto" style="max-height:68vh;">
           <!-- Application Info -->
-          <div>
+          <div class="detail-section">
             <div class="detail-section-title">
               <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
               Application Details
@@ -155,7 +155,7 @@
           </div>
 
           <!-- Fleet -->
-          <div v-if="detail.vehicles.length">
+          <div v-if="detail.vehicles.length" class="detail-section">
             <div class="detail-section-title">
               <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
               Fleet ({{ detail.vehicles.length }} vehicle{{ detail.vehicles.length > 1 ? 's' : '' }})
@@ -176,7 +176,7 @@
           </div>
 
           <!-- Documents -->
-          <div v-if="detail.documents.length">
+          <div v-if="detail.documents.length" class="detail-section">
             <div class="detail-section-title">
               <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               Documents ({{ detail.documents.filter(d => d.signed).length }}/{{ detail.documents.length }} signed)
@@ -195,7 +195,7 @@
           </div>
 
           <!-- Banking -->
-          <div v-if="detail.banking?.bank_name">
+          <div v-if="detail.banking?.bank_name" class="detail-section last">
             <div class="detail-section-title">
               <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
               Banking Information
@@ -365,15 +365,21 @@ onMounted(() => { load(); loadOutreachLog() })
 </script>
 
 <style scoped>
+.detail-section {
+  margin-bottom: 1.25rem; padding-bottom: 1rem;
+  border-bottom: 1px solid #f1f5f9;
+}
+.detail-section.last { border-bottom: none; margin-bottom: 0; }
 .detail-section-title {
-  display: flex; align-items: center; gap: 0.4rem;
+  display: flex; align-items: center; gap: 0.5rem;
   font-size: 0.82rem; font-weight: 700; color: #0f172a;
-  margin-bottom: 0.6rem; padding-bottom: 0.4rem;
-  border-bottom: 1px solid #e8edf2;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 0.75rem;
 }
 .detail-section-title svg { color: #3b82f6; }
 .detail-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem 1.25rem;
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 0.5rem 1rem;
 }
 .detail-item { display: flex; flex-direction: column; gap: 0.1rem; }
 .detail-item.col-span-2 { grid-column: 1 / -1; }
