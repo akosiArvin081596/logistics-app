@@ -3395,7 +3395,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 // List investor users (for owner dropdown)
 app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	const investors = db
-		.prepare("SELECT id, full_name AS username FROM investors ORDER BY full_name ASC")
+		.prepare("SELECT user_id AS id, full_name AS username, full_name AS CompanyName FROM investors ORDER BY full_name ASC")
 		.all();
 	res.json({ investors });
 });
