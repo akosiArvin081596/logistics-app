@@ -263,38 +263,72 @@ const defaultForm = () => ({
 
 const form = reactive(defaultForm())
 
-// ── State persistence (same pattern as /invest) ──
-const STORAGE_KEY = 'logisx_apply_state'
+// ── State persistence via IndexedDB (handles large uploads) ──
+const DB_NAME = 'logisx_apply'
+const STORE_NAME = 'state'
+let dbReady = false
+let saveQueued = false
 
-function saveState() {
-  try {
-    // Strip base64 uploads to avoid localStorage 5MB limit
-    const { cdl_front, cdl_back, medical_card, ...lite } = form
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      step: step.value, maxStep: maxStep.value, form: lite,
-      submitted: submitted.value,
-    }))
-  } catch { /* full storage */ }
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1)
+    req.onupgradeneeded = () => { req.result.createObjectStore(STORE_NAME) }
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
 }
 
-function loadState() {
+async function saveState() {
+  if (!dbReady) { saveQueued = true; return }
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return
-    const s = JSON.parse(raw)
+    const db = await openDB()
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    tx.objectStore(STORE_NAME).put({
+      step: step.value, maxStep: maxStep.value,
+      form: { ...form },
+      submitted: submitted.value,
+    }, 'data')
+    db.close()
+  } catch { /* skip */ }
+}
+
+async function loadState() {
+  try {
+    const db = await openDB()
+    const tx = db.transaction(STORE_NAME, 'readonly')
+    const req = tx.objectStore(STORE_NAME).get('data')
+    await new Promise((resolve, reject) => { req.onsuccess = resolve; req.onerror = reject })
+    const s = req.result
+    db.close()
+    if (!s) return
     if (s.step != null) step.value = s.step
     if (s.maxStep != null) maxStep.value = s.maxStep
     if (s.form) Object.assign(form, s.form)
     if (s.submitted) submitted.value = s.submitted
     maxStep.value = Math.max(maxStep.value, step.value)
-  } catch { /* corrupt data */ }
+  } catch { /* corrupt or missing */ }
 }
 
-// Load state FIRST, then start watching (prevents watchers from overwriting with empty defaults)
-loadState()
-watch(step, saveState)
-watch(submitted, saveState)
-watch(form, saveState, { deep: true })
+async function clearState() {
+  try {
+    const db = await openDB()
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    tx.objectStore(STORE_NAME).delete('data')
+    db.close()
+  } catch { /* skip */ }
+}
+
+// Load state first, then start watching
+loadState().then(() => {
+  dbReady = true
+  if (saveQueued) saveState()
+  watch(step, saveState)
+  watch(submitted, saveState)
+  watch(form, saveState, { deep: true })
+})
+
+// Migrate: remove old localStorage entry if exists
+try { localStorage.removeItem('logisx_apply_state') } catch {}
 
 function goToStep(i) {
   if (submitted.value) return
@@ -350,7 +384,7 @@ async function submitForm() {
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || 'Submission failed')
     submitted.value = true
-    localStorage.removeItem(STORAGE_KEY)
+    clearState()
     window.scrollTo({ top: 0, behavior: 'smooth' })
   } catch (err) {
     error.value = err.message
