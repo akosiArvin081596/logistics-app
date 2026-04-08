@@ -923,13 +923,13 @@ app.use(
 	}),
 );
 // Shared email helper
-async function sendEmail(to, subject, htmlBody) {
+async function sendEmail(to, subject, htmlBody, attachments = []) {
 	const gmailUser = process.env.GMAIL_USER;
 	const gmailPass = process.env.GMAIL_APP_PASSWORD;
 	if (!gmailUser || !gmailPass) return;
 	try {
 		const transporter = nodemailer.createTransport({ service: "gmail", auth: { user: gmailUser, pass: gmailPass } });
-		await transporter.sendMail({ from: `"LogisX Inc." <${gmailUser}>`, to, subject, html: htmlBody });
+		await transporter.sendMail({ from: `"LogisX Inc." <${gmailUser}>`, to, subject, html: htmlBody, attachments });
 	} catch (err) {
 		console.error("Email send failed:", err.message);
 	}
@@ -1468,6 +1468,116 @@ app.post("/api/public/investor-apply", async (req, res) => {
 		}
 
 		res.json({ success: true, applicationId: appId });
+
+		// Send emails (async, don't block response)
+		const vehicleRows = vehiclesArr.map((v, i) => `<tr>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${i + 1}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.year || ""} ${v.make || ""} ${v.model || ""}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.vin || ""}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.licensePlate || ""}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.titleState || ""}</td>
+			<td style="padding:6px 10px;border-bottom:1px solid #f1f5f9">${v.purchasePrice ? "$" + Number(v.purchasePrice).toLocaleString() : ""}</td>
+		</tr>`).join("");
+
+		// Email A: Applicant confirmation (simple)
+		const applicantHtml = `
+		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
+			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
+				<h1 style="color:#fff;margin:0;font-size:22px">LogisX</h1>
+			</div>
+			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
+				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Application Received</h2>
+				<p>Hi <b>${legal_name}</b>,</p>
+				<p>Thank you for submitting your investor application with LogisX. We have received all your information and signed documents.</p>
+				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:20px 0">
+					<table style="width:100%;border-collapse:collapse;font-size:14px">
+						<tr><td style="padding:4px 0;color:#64748b;width:140px">Company</td><td style="padding:4px 0;font-weight:600">${legal_name}${dba ? ` (DBA: ${dba})` : ""}</td></tr>
+						${entity_type ? `<tr><td style="padding:4px 0;color:#64748b">Entity Type</td><td style="padding:4px 0">${entity_type}</td></tr>` : ""}
+						<tr><td style="padding:4px 0;color:#64748b">Fleet Size</td><td style="padding:4px 0">${vehiclesArr.length} vehicle(s)</td></tr>
+						<tr><td style="padding:4px 0;color:#64748b">Documents</td><td style="padding:4px 0;color:#16a34a;font-weight:600">3/3 Signed</td></tr>
+					</table>
+				</div>
+				<h3 style="font-size:15px;margin:24px 0 8px;color:#0f172a">What happens next?</h3>
+				<ul style="padding-left:20px;color:#475569;line-height:1.8">
+					<li>Our team will review your application within <b>1-2 business days</b></li>
+					<li>You'll receive login credentials via email once approved</li>
+					<li>Access your investor dashboard to track fleet performance and financials</li>
+				</ul>
+				<p style="color:#64748b;font-size:13px;margin-top:24px">If you have any questions, reply to this email or contact us at info@logisx.com.</p>
+				<p style="margin-top:24px">Best regards,<br><b>LogisX Team</b></p>
+			</div>
+		</div>`;
+		sendEmail(email, "LogisX - Investor Application Received", applicantHtml);
+
+		// Email B: Admin notification (detailed + attachments)
+		const adminHtml = `
+		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:700px;margin:0 auto;color:#1e293b">
+			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
+				<h1 style="color:#fff;margin:0;font-size:22px">New Investor Application</h1>
+			</div>
+			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
+				<p style="margin:0 0 20px;color:#475569">A new investor application has been submitted and is ready for review.</p>
+
+				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Company Information</h3>
+				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
+					<tr><td style="padding:5px 0;color:#64748b;width:180px">Legal Name</td><td style="padding:5px 0;font-weight:600">${legal_name}</td></tr>
+					${dba ? `<tr><td style="padding:5px 0;color:#64748b">DBA</td><td style="padding:5px 0">${dba}</td></tr>` : ""}
+					${entity_type ? `<tr><td style="padding:5px 0;color:#64748b">Entity Type</td><td style="padding:5px 0">${entity_type}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b">Address</td><td style="padding:5px 0">${address}</td></tr>
+					${contact_person ? `<tr><td style="padding:5px 0;color:#64748b">Contact Person</td><td style="padding:5px 0">${contact_person}${contact_title ? " (" + contact_title + ")" : ""}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${phone}</td></tr>
+					<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${email}">${email}</a></td></tr>
+					${ein_ssn ? `<tr><td style="padding:5px 0;color:#64748b">EIN/SSN</td><td style="padding:5px 0">${ein_ssn}</td></tr>` : ""}
+					${tax_classification ? `<tr><td style="padding:5px 0;color:#64748b">Tax Classification</td><td style="padding:5px 0">${tax_classification}</td></tr>` : ""}
+					${years_in_operation ? `<tr><td style="padding:5px 0;color:#64748b">Years in Operation</td><td style="padding:5px 0">${years_in_operation}</td></tr>` : ""}
+					${industry_experience ? `<tr><td style="padding:5px 0;color:#64748b">Industry Experience</td><td style="padding:5px 0">${industry_experience}</td></tr>` : ""}
+					${bankruptcy_liens ? `<tr><td style="padding:5px 0;color:#64748b">Bankruptcy/Liens</td><td style="padding:5px 0">${bankruptcy_liens}</td></tr>` : ""}
+				</table>
+
+				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Fleet (${vehiclesArr.length} Vehicle${vehiclesArr.length !== 1 ? "s" : ""})</h3>
+				<table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:24px">
+					<thead><tr style="background:#f8fafc">
+						<th style="padding:8px 10px;text-align:left;font-weight:600;color:#64748b;font-size:11px;text-transform:uppercase">#</th>
+						<th style="padding:8px 10px;text-align:left;font-weight:600;color:#64748b;font-size:11px;text-transform:uppercase">Vehicle</th>
+						<th style="padding:8px 10px;text-align:left;font-weight:600;color:#64748b;font-size:11px;text-transform:uppercase">VIN</th>
+						<th style="padding:8px 10px;text-align:left;font-weight:600;color:#64748b;font-size:11px;text-transform:uppercase">Plate</th>
+						<th style="padding:8px 10px;text-align:left;font-weight:600;color:#64748b;font-size:11px;text-transform:uppercase">State</th>
+						<th style="padding:8px 10px;text-align:left;font-weight:600;color:#64748b;font-size:11px;text-transform:uppercase">Price</th>
+					</tr></thead>
+					<tbody>${vehicleRows}</tbody>
+				</table>
+
+				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Banking</h3>
+				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
+					<tr><td style="padding:5px 0;color:#64748b;width:180px">Bank</td><td style="padding:5px 0">${banking.bank_name}</td></tr>
+					${banking.account_type ? `<tr><td style="padding:5px 0;color:#64748b">Account Type</td><td style="padding:5px 0">${banking.account_type}</td></tr>` : ""}
+					<tr><td style="padding:5px 0;color:#64748b">Routing Number</td><td style="padding:5px 0">${banking.routing_number}</td></tr>
+					<tr><td style="padding:5px 0;color:#64748b">Account Number</td><td style="padding:5px 0">${"••••" + banking.account_number.slice(-4)}</td></tr>
+					${banking.account_name ? `<tr><td style="padding:5px 0;color:#64748b">Name on Account</td><td style="padding:5px 0">${banking.account_name}</td></tr>` : ""}
+				</table>
+
+				<h3 style="font-size:15px;margin:0 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">Signed Documents</h3>
+				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
+					${INVESTOR_ONBOARDING_DOCS.map(doc => {
+						const sig = signatures[doc.key];
+						return `<tr><td style="padding:5px 0;color:#64748b">${doc.name}</td><td style="padding:5px 0;color:#16a34a;font-weight:600">Signed by ${sig.text.trim()}</td></tr>`;
+					}).join("")}
+				</table>
+				<p style="font-size:13px;color:#64748b">Signed PDFs are attached to this email.</p>
+
+				<div style="margin-top:28px;text-align:center">
+					<a href="https://app.logisx.com/investor-applications" style="display:inline-block;background:#0f2847;color:#fff;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">Review Application</a>
+				</div>
+			</div>
+		</div>`;
+
+		const pdfAttachments = INVESTOR_ONBOARDING_DOCS.map(doc => {
+			const filename = `${doc.key}-inv-${appId}-signed.pdf`;
+			const filepath = path.join(signedDir, filename);
+			return fs.existsSync(filepath) ? { filename: `${doc.name}.pdf`, path: filepath } : null;
+		}).filter(Boolean);
+
+		sendEmail("info@logisx.com", `New Investor Application: ${legal_name}`, adminHtml, pdfAttachments);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
