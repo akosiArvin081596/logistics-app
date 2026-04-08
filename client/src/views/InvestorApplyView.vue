@@ -207,10 +207,23 @@ onMounted(async () => {
     const { key } = await api.get('/api/config/maps-key')
     if (!key) return
     if (window.google?.maps?.places) { initAddrAutocomplete(); return }
-    const script = document.createElement('script')
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places,marker&v=weekly`
-    script.onload = () => initAddrAutocomplete()
-    document.head.appendChild(script)
+    const existing = document.querySelector('script[src*="maps.googleapis.com/maps/api"]')
+    if (existing) {
+      const check = setInterval(() => {
+        if (window.google?.maps?.places) { clearInterval(check); initAddrAutocomplete() }
+      }, 200)
+      return
+    }
+    await new Promise((resolve, reject) => {
+      const cbName = '_gmInvestReady' + Date.now()
+      window[cbName] = () => { delete window[cbName]; resolve() }
+      const script = document.createElement('script')
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places,marker&v=weekly&loading=async&callback=${cbName}`
+      script.async = true
+      script.onerror = reject
+      document.head.appendChild(script)
+    })
+    initAddrAutocomplete()
   } catch { /* skip */ }
 })
 function initAddrAutocomplete() {
