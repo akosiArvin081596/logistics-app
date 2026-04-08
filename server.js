@@ -791,6 +791,7 @@ try {
 	db.prepare("INSERT INTO investor_applications (legal_name, ein_ssn, phone, email, address, status) VALUES ('__test__','__t__','__t__','__t__','__t__','Draft')").run();
 	db.prepare("DELETE FROM investor_applications WHERE legal_name='__test__'").run();
 } catch {
+	db.pragma("foreign_keys = OFF");
 	db.exec(`
 		ALTER TABLE investor_applications RENAME TO investor_applications_old;
 		CREATE TABLE investor_applications (
@@ -819,6 +820,7 @@ try {
 			vehicles_json, status, created_at FROM investor_applications_old;
 		DROP TABLE investor_applications_old;
 	`);
+	db.pragma("foreign_keys = ON");
 }
 
 db.exec(`
