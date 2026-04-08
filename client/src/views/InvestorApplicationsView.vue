@@ -160,7 +160,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
               Fleet ({{ detail.vehicles.length }} vehicle{{ detail.vehicles.length > 1 ? 's' : '' }})
             </div>
-            <div v-for="(v, i) in detail.vehicles" :key="i" class="mb-2 p-3 bg-[#fafbfd] rounded-lg border border-[#f1f5f9]">
+            <div v-for="(v, i) in detail.vehicles" :key="i" class="mb-3 mt-1 p-3 bg-[#fafbfd] rounded-lg border border-[#f1f5f9]">
               <div class="text-[11px] font-bold text-gray-400 uppercase mb-2">Vehicle {{ String.fromCharCode(65 + i) }}</div>
               <div class="detail-grid">
                 <div class="detail-item"><span class="detail-label">Make</span><span class="detail-value">{{ v.make }}</span></div>
