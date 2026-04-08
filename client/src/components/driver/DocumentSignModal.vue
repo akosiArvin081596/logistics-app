@@ -219,18 +219,7 @@ async function handleSign() {
   if (!canSign.value) return
   signing.value = true
   try {
-    // Export canvas with white background (transparent PNGs can be invisible in PDFs)
-    let signatureImage = null
-    const canvas = canvasRef.value
-    if (canvas) {
-      const tmp = document.createElement('canvas')
-      tmp.width = canvas.width; tmp.height = canvas.height
-      const ctx = tmp.getContext('2d')
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, tmp.width, tmp.height)
-      ctx.drawImage(canvas, 0, 0)
-      signatureImage = tmp.toDataURL('image/png')
-    }
+    const signatureImage = canvasRef.value?.toDataURL('image/png') || null
     const payInfo = isContractorAgreement.value ? {
       paymentMethod: paymentMethod.value,
       checkName: checkName.value,
