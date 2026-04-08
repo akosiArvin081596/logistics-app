@@ -87,6 +87,7 @@ const navConfig = {
     { to: '/drivers', icon: '&#128100;', label: 'Driver Database' },
     { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
     { to: '/trailers', icon: '&#128718;', label: 'Trailer Database' },
+    { divider: true, label: 'Applications' },
     { to: '/applications', icon: '&#128221;', label: 'Driver Applications' },
     { to: '/investor-applications', icon: '&#128188;', label: 'Investor Applications' },
     { divider: true, label: 'System' },
