@@ -248,12 +248,23 @@
                 <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].vin" placeholder="Vehicle Identification Number" required /></div>
                 <div class="field"><label>License Plate</label><input v-model="vehicles[activeVehicleTab].licensePlate" placeholder="e.g. ABC-1234" /></div>
                 <div class="field"><label>Current Mileage</label><input v-model="vehicles[activeVehicleTab].mileage" placeholder="e.g. 120,000" /></div>
-                <div class="field">
+                <div class="field state-field">
                   <label>Title State</label>
-                  <input v-model="vehicles[activeVehicleTab].titleState" list="us-states-list" placeholder="Search state..." />
-                  <datalist id="us-states-list">
-                    <option v-for="st in usStates" :key="st" :value="st" />
-                  </datalist>
+                  <input
+                    v-model="vehicles[activeVehicleTab].titleState"
+                    placeholder="Type to search state..."
+                    autocomplete="off"
+                    @focus="stateDropOpen = true"
+                    @blur="setTimeout(() => stateDropOpen = false, 200)"
+                  />
+                  <div v-if="stateDropOpen && filteredStates.length" class="state-dropdown">
+                    <div
+                      v-for="st in filteredStates"
+                      :key="st"
+                      class="state-option"
+                      @mousedown.prevent="vehicles[activeVehicleTab].titleState = st; stateDropOpen = false"
+                    >{{ st }}</div>
+                  </div>
                 </div>
                 <div class="field"><label>Existing Liens</label><input v-model="vehicles[activeVehicleTab].liens" placeholder="None or lien holder name" /></div>
                 <div class="field"><label>Registered Owner</label><input v-model="vehicles[activeVehicleTab].registeredOwner" placeholder="Owner on title" /></div>
@@ -454,6 +465,12 @@ function emptyVehicle() {
 const vehicles = ref([emptyVehicle()])
 const activeVehicleTab = ref(0)
 const activeModelOptions = computed(() => truckModels[vehicles.value[activeVehicleTab.value]?.make] || [])
+const stateDropOpen = ref(false)
+const filteredStates = computed(() => {
+  const q = (vehicles.value[activeVehicleTab.value]?.titleState || '').toLowerCase()
+  if (!q) return usStates
+  return usStates.filter(s => s.toLowerCase().includes(q))
+})
 
 // Reset model when make changes
 watch(() => vehicles.value[activeVehicleTab.value]?.make, (newMake, oldMake) => {
@@ -1011,6 +1028,20 @@ async function submitBanking() {
   border-radius: 6px;
   margin-top: 0.4rem;
 }
+/* ─── State searchable dropdown ─── */
+.state-field { position: relative; }
+.state-dropdown {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 50;
+  background: #fff; border: 1.5px solid #e2e8f0; border-radius: 9px;
+  margin-top: 2px; max-height: 180px; overflow-y: auto;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.1);
+}
+.state-option {
+  padding: 0.5rem 0.8rem; font-size: 0.84rem; cursor: pointer;
+  color: #0f172a; transition: background 0.1s;
+}
+.state-option:hover { background: #f1f5f9; }
+
 .biz-config {
   margin-top: 1.25rem;
   padding-top: 0.75rem;
