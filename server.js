@@ -1801,28 +1801,29 @@ app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
 app.post("/api/public/investor-preview-pdf/:docKey", async (req, res) => {
 	try {
 		const { docKey } = req.params;
-		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email, ein_ssn, vehicles } = req.body;
+		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email, ein_ssn, vehicles, signatureText, signatureImage } = req.body;
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-		const appData = { legalName: legal_name || "", dba: dba || "", entityType: entity_type || "", address: address || "", contactPerson: contact_person || "", contactTitle: contact_title || "", phone: phone || "", email: email || "", einSsn: ein_ssn || "", effectiveDate };
+		const signedAt = signatureText ? new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" }) : undefined;
+		const appData = { legalName: legal_name || "", dba: dba || "", entityType: entity_type || "", address: address || "", contactPerson: contact_person || "", contactTitle: contact_title || "", phone: phone || "", email: email || "", einSsn: ein_ssn || "", effectiveDate, signatureText: signatureText || undefined, signatureImage: signatureImage || undefined, signedAt };
 
 		if (docKey === "master_agreement") {
 			const pdfBuffer = await generateMasterAgreement(appData);
 			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Master Agreement Preview.pdf"');
+			res.setHeader("Content-Disposition", 'inline; filename="Master Agreement.pdf"');
 			return res.send(pdfBuffer);
 		}
 		if (docKey === "vehicle_lease") {
 			const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
 			const pdfBuffer = await generateVehicleLease({ ...appData, vehicles: vehiclesArr });
 			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Vehicle Lease Preview.pdf"');
+			res.setHeader("Content-Disposition", 'inline; filename="Vehicle Lease.pdf"');
 			return res.send(pdfBuffer);
 		}
 		if (docKey === "w9") {
 			const pdfBytes = await fillW9Form(appData);
 			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
 			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form Preview.pdf"');
+			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form.pdf"');
 			return res.send(Buffer.from(pdfBytes));
 		}
 		return res.status(404).json({ error: "Unknown document" });

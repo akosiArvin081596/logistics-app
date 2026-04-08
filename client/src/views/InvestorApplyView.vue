@@ -823,23 +823,31 @@ function submitApplication() {
   maxStep.value = Math.max(maxStep.value, 1)
 }
 
-// Open sign modal — fetch stateless PDF preview
-async function openDoc(doc) {
-  selectedDoc.value = doc
-  previewPdfUrl.value = ''
-  showSignModal.value = true
+// Fetch PDF preview (with optional signature data for signed docs)
+async function fetchPreview(docKey, sig) {
+  revokePreview()
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
-    const res = await fetch(`/api/public/investor-preview-pdf/${doc.doc_key}`, {
+    const payload = { ...form, vehicles: stripped }
+    if (sig) { payload.signatureText = sig.text; payload.signatureImage = sig.image }
+    const res = await fetch(`/api/public/investor-preview-pdf/${docKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...form, vehicles: stripped }),
+      body: JSON.stringify(payload),
     })
     if (res.ok) {
       const blob = await res.blob()
       previewPdfUrl.value = URL.createObjectURL(blob)
     }
   } catch { /* preview failed, modal still works */ }
+}
+
+// Open sign modal
+async function openDoc(doc) {
+  selectedDoc.value = doc
+  previewPdfUrl.value = ''
+  showSignModal.value = true
+  await fetchPreview(doc.doc_key, signatures[doc.doc_key])
 }
 
 function revokePreview() {
@@ -849,11 +857,11 @@ function revokePreview() {
   }
 }
 
-// Capture signature locally — no server call
-function handleSigned({ docKey, text, image }) {
+// Capture signature locally, then refresh preview with signature overlay
+async function handleSigned({ docKey, text, image }) {
   signatures[docKey] = { text, image }
-  // Update selected doc so modal shows signed state
   selectedDoc.value = documents.value.find(d => d.doc_key === docKey) || selectedDoc.value
+  await fetchPreview(docKey, { text, image })
 }
 
 // Final single submission — all data in one request
