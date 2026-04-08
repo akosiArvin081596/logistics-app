@@ -195,24 +195,44 @@
 
           <!-- Vehicle info (for Exhibit A) -->
           <div v-if="!vehicleInfoDone" class="vehicle-card">
-            <div class="section-divider">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
-              <span>Vehicle Information (Exhibit A)</span>
+            <div class="form-grid" style="margin-bottom: 1.25rem;">
+              <div class="field">
+                <label>Total Fleet Size (Currently Owned) <span class="req">*</span></label>
+                <input v-model="form.fleet_size" type="number" min="1" max="20" placeholder="How many vehicles?" />
+              </div>
             </div>
-            <div class="form-grid">
-              <div class="field"><label>Year <span class="req">*</span></label><input v-model="vehicle.year" placeholder="e.g. 2022" required /></div>
-              <div class="field"><label>Make <span class="req">*</span></label><input v-model="vehicle.make" placeholder="e.g. Freightliner" required /></div>
-              <div class="field"><label>Model <span class="req">*</span></label><input v-model="vehicle.model" placeholder="e.g. Cascadia" required /></div>
-              <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicle.vin" placeholder="17-character VIN" required /></div>
-              <div class="field"><label>Current Mileage</label><input v-model="vehicle.mileage" placeholder="e.g. 120,000" /></div>
-              <div class="field"><label>Title State</label><input v-model="vehicle.titleState" placeholder="e.g. Texas" /></div>
-              <div class="field"><label>Existing Liens</label><input v-model="vehicle.liens" placeholder="None or lien holder name" /></div>
-              <div class="field"><label>Registered Owner</label><input v-model="vehicle.registeredOwner" placeholder="Owner on title" /></div>
-              <div class="field"><label>Total Fleet Size (Currently Owned)</label><input v-model="form.fleet_size" type="number" min="1" placeholder="e.g. 3" /></div>
+
+            <div v-if="parseInt(form.fleet_size) > 0">
+              <!-- Vehicle tabs -->
+              <div class="vehicle-tabs">
+                <button
+                  v-for="(v, i) in vehicles"
+                  :key="i"
+                  class="vehicle-tab"
+                  :class="{ active: activeVehicleTab === i, valid: v.year && v.make && v.model && v.vin }"
+                  @click="activeVehicleTab = i"
+                >
+                  <svg v-if="v.year && v.make && v.model && v.vin" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                  Vehicle {{ String.fromCharCode(65 + i) }}
+                </button>
+              </div>
+
+              <!-- Active vehicle form -->
+              <div class="form-grid">
+                <div class="field"><label>Year <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].year" placeholder="e.g. 2022" required /></div>
+                <div class="field"><label>Make <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].make" placeholder="e.g. Freightliner" required /></div>
+                <div class="field"><label>Model <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].model" placeholder="e.g. Cascadia" required /></div>
+                <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].vin" placeholder="17-character VIN" required /></div>
+                <div class="field"><label>Current Mileage</label><input v-model="vehicles[activeVehicleTab].mileage" placeholder="e.g. 120,000" /></div>
+                <div class="field"><label>Title State</label><input v-model="vehicles[activeVehicleTab].titleState" placeholder="e.g. Texas" /></div>
+                <div class="field"><label>Existing Liens</label><input v-model="vehicles[activeVehicleTab].liens" placeholder="None or lien holder name" /></div>
+                <div class="field"><label>Registered Owner</label><input v-model="vehicles[activeVehicleTab].registeredOwner" placeholder="Owner on title" /></div>
+              </div>
             </div>
+
             <div class="step-actions">
               <div></div>
-              <button class="btn-primary" :disabled="!vehicle.year || !vehicle.make || !vehicle.model || !vehicle.vin" @click="vehicleInfoDone = true">
+              <button class="btn-primary" :disabled="!parseInt(form.fleet_size) || !allVehiclesValid" @click="vehicleInfoDone = true">
                 Save &amp; Continue
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
               </button>
@@ -287,7 +307,7 @@
     <InvestorSignModal
       :show="showSignModal" :doc="selectedDoc" :pdf-url="selectedPdfUrl"
       :application-id="applicationId" :access-token="accessToken"
-      :vehicle-info="vehicleInfoDone ? vehicle : null"
+      :vehicle-info="vehicleInfoDone ? vehicles[0] : null"
       @close="showSignModal = false" @signed="handleSigned"
     />
     <LocationPickerModal
@@ -298,7 +318,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted } from 'vue'
+import { ref, computed, reactive, onMounted, watch } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import InvestorSignModal from '../components/invest/InvestorSignModal.vue'
@@ -334,8 +354,17 @@ const form = reactive({
   preferred_communication: '', tax_classification: '', ein_ssn: '', bankruptcy_liens: '', reporting_preference: '',
 })
 
-const vehicle = reactive({
-  year: '', make: '', model: '', vin: '', mileage: '', titleState: '', liens: '', registeredOwner: '',
+function emptyVehicle() {
+  return { year: '', make: '', model: '', vin: '', mileage: '', titleState: '', liens: '', registeredOwner: '' }
+}
+const vehicles = ref([emptyVehicle()])
+const activeVehicleTab = ref(0)
+
+watch(() => form.fleet_size, (val) => {
+  const count = Math.max(1, Math.min(parseInt(val) || 1, 20))
+  while (vehicles.value.length < count) vehicles.value.push(emptyVehicle())
+  if (vehicles.value.length > count) vehicles.value.splice(count)
+  if (activeVehicleTab.value >= count) activeVehicleTab.value = count - 1
 })
 
 const banking = reactive({
@@ -403,6 +432,7 @@ async function useCurrentLocation() {
 }
 
 const canProceedStep1 = computed(() => form.legal_name && form.email && form.phone && form.address && form.ein_ssn)
+const allVehiclesValid = computed(() => vehicles.value.every(v => v.year && v.make && v.model && v.vin))
 const signedCount = computed(() => documents.value.filter(d => d.signed).length)
 const canSubmitBanking = computed(() => banking.bank_name && banking.routing_number && banking.account_number)
 
@@ -791,6 +821,42 @@ async function submitBanking() {
 /* ─── Vehicle card ─── */
 .vehicle-card {
   background: #fafbfd; border: 1.5px solid #f1f5f9; border-radius: 14px; padding: 1.5rem;
+}
+
+/* ─── Vehicle tabs ─── */
+.vehicle-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 1.25rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid #e9edf3;
+  flex-wrap: wrap;
+}
+.vehicle-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.45rem 1rem;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #64748b;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.vehicle-tab:hover { border-color: #cbd5e1; color: #475569; }
+.vehicle-tab.active {
+  background: #0f2847;
+  border-color: #0f2847;
+  color: #fff;
+}
+.vehicle-tab.valid:not(.active) {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #16a34a;
 }
 
 /* ─── Banking security ─── */
