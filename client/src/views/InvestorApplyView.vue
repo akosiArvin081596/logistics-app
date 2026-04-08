@@ -310,17 +310,8 @@
             </div>
           </details>
 
-          <!-- Submit gate: submit all data before documents appear -->
-          <div v-if="!applicationId" class="submit-gate">
-            <button class="btn-primary" :disabled="!allVehiclesValid || submitting" @click="submitApplication">
-              <span v-if="submitting" class="spinner light"></span>
-              {{ submitting ? 'Submitting...' : 'Submit & Continue to Documents' }}
-              <svg v-if="!submitting" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-            </button>
-          </div>
-
-          <!-- Accordion 2: Onboarding Documents (visible after application submitted) -->
-          <details v-if="applicationId" class="accordion" open>
+          <!-- Accordion 2: Onboarding Documents -->
+          <details class="accordion" open>
             <summary class="accordion-toggle">
               <div class="accordion-title">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -484,19 +475,10 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               Documents ({{ signedCount }}/{{ totalDocs }} signed)
             </div>
-            <div class="review-docs">
-              <div v-for="doc in documents" :key="doc.doc_key" class="review-doc-row">
-                <a
-                  v-if="doc.signed && doc.signed_pdf_url"
-                  :href="doc.signed_pdf_url" target="_blank"
-                  class="review-doc-link"
-                  @click.prevent="reviewPdfUrl = doc.signed_pdf_url; reviewPdfTitle = doc.doc_name"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                  <span>{{ doc.doc_name }}</span>
-                </a>
-                <span v-else class="review-doc-unsigned">{{ doc.doc_name }}</span>
-                <span class="review-doc-status" :class="doc.signed ? 'text-green' : 'text-amber'">{{ doc.signed ? 'Signed' : 'Pending' }}</span>
+            <div class="review-grid">
+              <div v-for="doc in documents" :key="doc.doc_key" class="review-item full">
+                <span class="review-label">{{ doc.doc_name }}</span>
+                <span class="review-value" :class="doc.signed ? 'text-green' : 'text-amber'">{{ doc.signed ? 'Signed' : 'Pending' }}</span>
               </div>
             </div>
           </div>
@@ -524,17 +506,6 @@
             {{ submitting ? 'Submitting...' : 'Confirm & Complete Onboarding' }}
           </button>
         </div>
-      </div>
-    </div>
-
-    <!-- Review PDF Viewer -->
-    <div v-if="reviewPdfUrl" class="review-pdf-overlay" @click.self="reviewPdfUrl = ''">
-      <div class="review-pdf-viewer">
-        <div class="review-pdf-header">
-          <span>{{ reviewPdfTitle }}</span>
-          <button @click="reviewPdfUrl = ''">&times;</button>
-        </div>
-        <iframe :src="reviewPdfUrl" class="review-pdf-frame"></iframe>
       </div>
     </div>
 
@@ -639,8 +610,6 @@ const activeModelOptions = computed(() => truckModels[vehicles.value[activeVehic
 const stateDropOpen = ref(false)
 const photoPreviewUrl = ref('')
 const showReviewModal = ref(false)
-const reviewPdfUrl = ref('')
-const reviewPdfTitle = ref('')
 const bankDropOpen = ref(false)
 const usBanks = [
   'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
@@ -845,11 +814,12 @@ async function submitApplication() {
   if (submitting.value) return
   submitting.value = true
   try {
-    const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
-    const result = await api.post('/api/public/investor-apply', { ...form, vehicles: stripped })
+    const result = await api.post('/api/public/investor-apply', { ...form })
     applicationId.value = result.applicationId
     accessToken.value = result.accessToken
     await loadOnboarding()
+    step.value = 1
+    maxStep.value = Math.max(maxStep.value, 1)
     toast('Application submitted', 'success')
   } catch (err) {
     toast(err.message || 'Submission failed', 'error')
@@ -866,6 +836,15 @@ async function loadOnboarding() {
 }
 
 async function openDoc(doc) {
+  // Save vehicles to server first (strip photos to keep payload small)
+  if (applicationId.value && vehicles.value.length) {
+    try {
+      const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
+      await api.post(`/api/public/investor-onboarding/${applicationId.value}/vehicles`, {
+        vehicles: stripped, accessToken: accessToken.value,
+      })
+    } catch { /* skip */ }
+  }
   selectedDoc.value = doc
   selectedPdfUrl.value = doc.signed && doc.signed_pdf_url
     ? doc.signed_pdf_url
@@ -897,8 +876,6 @@ async function submitBanking() {
     submitting.value = false
   }
 }
-
-
 </script>
 
 <style scoped>
@@ -1239,11 +1216,6 @@ async function submitBanking() {
   padding-top: 1.25rem;
   border-top: 1px solid #f1f5f9;
 }
-.submit-gate {
-  display: flex; justify-content: center;
-  margin: 1.5rem 0; padding: 1.25rem 0;
-  border-top: 1px solid #f1f5f9;
-}
 
 /* ─── Document progress ─── */
 .doc-progress { margin-bottom: 1.75rem; }
@@ -1544,45 +1516,6 @@ async function submitBanking() {
   font-size: 0.75rem; font-weight: 700; color: #475569;
   margin-bottom: 0.5rem;
 }
-.review-docs { display: flex; flex-direction: column; gap: 0.5rem; }
-.review-doc-row {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0.5rem 0.65rem; border-radius: 8px; background: #fafbfd;
-  border: 1px solid #f1f5f9;
-}
-.review-doc-link {
-  display: flex; align-items: center; gap: 0.5rem;
-  font-size: 0.82rem; font-weight: 600; color: #3b82f6;
-  text-decoration: none; cursor: pointer;
-}
-.review-doc-link:hover { text-decoration: underline; }
-.review-doc-link svg { flex-shrink: 0; }
-.review-doc-unsigned {
-  font-size: 0.82rem; font-weight: 500; color: #94a3b8;
-}
-.review-doc-status { font-size: 0.75rem; font-weight: 700; }
-
-.review-pdf-overlay {
-  position: fixed; inset: 0; z-index: 1100;
-  background: rgba(0,0,0,0.7);
-  display: flex; align-items: center; justify-content: center;
-  padding: 1rem;
-}
-.review-pdf-viewer {
-  background: #fff; border-radius: 12px; width: 100%; max-width: 900px;
-  height: 85vh; display: flex; flex-direction: column; overflow: hidden;
-}
-.review-pdf-header {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 0.75rem 1.25rem; border-bottom: 1px solid #e9edf3;
-  font-weight: 700; font-size: 0.95rem; color: #0f172a;
-}
-.review-pdf-header button {
-  font-size: 1.5rem; background: none; border: none;
-  cursor: pointer; color: #94a3b8; line-height: 1;
-}
-.review-pdf-frame { flex: 1; border: none; width: 100%; }
-
 .review-footer {
   display: flex; justify-content: space-between; align-items: center;
   padding: 1rem 1.5rem; border-top: 1px solid #e9edf3; gap: 1rem;

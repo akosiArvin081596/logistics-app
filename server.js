@@ -1510,7 +1510,7 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		const appId = verifyInvestorToken(req, res);
 		if (!appId) return;
 		const { docKey } = req.params;
-		const { signatureText, signatureImage } = req.body;
+		const { signatureText, signatureImage, vehicleInfo } = req.body;
 		if (!signatureText || !signatureText.trim()) return res.status(400).json({ error: "Signature required" });
 
 		const docRow = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(appId, docKey);
@@ -1525,8 +1525,19 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		const signedPath = path.join(signedDir, signedFileName);
 		let signedPdfUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
 
-		// Read vehicles from DB (already saved via /vehicles endpoint)
-		const vehiclesArr = application?.vehicles_json ? JSON.parse(application.vehicles_json) : [];
+		// Save vehicle info if provided (for Exhibit A)
+		const vehiclesArr = Array.isArray(vehicleInfo) ? vehicleInfo : (vehicleInfo ? [vehicleInfo] : []);
+		if (vehiclesArr.length > 0) {
+			const v = vehiclesArr[0];
+			db.prepare(`UPDATE investor_applications SET
+				vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
+				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=?,
+				vehicles_json=? WHERE id=?`
+			).run(v.year || "", v.make || "", v.model || "",
+				v.vin || "", v.mileage || "", v.titleState || "",
+				v.liens || "", v.registeredOwner || "",
+				JSON.stringify(vehiclesArr), appId);
+		}
 
 		if (docKey === "w9") {
 			const pdfBytes = await fillW9Form({
