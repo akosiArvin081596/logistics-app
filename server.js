@@ -4345,17 +4345,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 	try {
 		const sheets = await getSheets();
 
-		const response = await sheets.spreadsheets.values.batchGet({
+		const response = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
-			ranges: [
-				"Job Tracking",
-				"Payments Table",
-				"Carrier History",
-				"Job Summary Sheet",
-			],
+			range: "Job Tracking",
 		});
-
-		const rangeData = response.data.valueRanges || [];
 
 		function parseSheet(valueRange) {
 			const rows = (valueRange && valueRange.values) || [];
@@ -4375,12 +4368,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			return headers.find((h) => regex.test(h)) || null;
 		}
 
-		const jobTracking = parseSheet(rangeData[0]);
+		const jobTracking = parseSheet(response.data);
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = getCarrierDBFromSQLite();
-		const payments = parseSheet(rangeData[1]);
-		const carrierHistory = parseSheet(rangeData[2]);
-		const jobSummary = parseSheet(rangeData[3]);
 
 		// Identify key columns
 		const statusCol = findCol(jobTracking.headers, /status/i);
@@ -4420,29 +4410,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 				completedStatuses.test((r[statusCol] || "").trim()),
 		);
 
-		// Also pull completed loads from Job Summary Sheet
-		const summaryStatusCol = findCol(jobSummary.headers, /status/i);
-		const summaryLoadIdCol = findCol(jobSummary.headers, /load.?id|job.?id/i);
-		const summaryCompletedJobs = jobSummary.data.filter(
-			(r) => summaryStatusCol && completedStatuses.test((r[summaryStatusCol] || "").trim()),
-		);
-
-		// Merge, de-duplicate by load ID (Job Tracking takes priority)
-		const existingLoadIds = new Set(
-			completedJobs
-				.map((r) => (loadIdCol ? (r[loadIdCol] || "").trim().toLowerCase() : ""))
-				.filter(Boolean),
-		);
-		const extraCompleted = summaryCompletedJobs.filter((r) => {
-			const id = summaryLoadIdCol ? (r[summaryLoadIdCol] || "").trim().toLowerCase() : "";
-			return id && !existingLoadIds.has(id);
-		});
-		const allCompletedJobs = [...completedJobs, ...extraCompleted];
-
 		// Sort completed jobs by most recent first
 		const sortDateCol = findCol(jobTracking.headers, /completion.*date|status.*update.*date|drop.?off.*date|assigned.*date/i);
 		if (sortDateCol) {
-			allCompletedJobs.sort((a, b) => {
+			completedJobs.sort((a, b) => {
 				const da = new Date((a[sortDateCol] || '').replace(/^Date:\s*/i, '').trim());
 				const db2 = new Date((b[sortDateCol] || '').replace(/^Date:\s*/i, '').trim());
 				const ta = isNaN(da) ? 0 : da.getTime();
@@ -4460,20 +4431,15 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		weekStart.setHours(0, 0, 0, 0);
 		const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-		// Find delivery date column across both sheets
-		const summaryDelivDateCol = findCol(jobSummary.headers, /deliv|drop.?off.*date|completion.*date/i);
-
-		const completedThisWeek = allCompletedJobs.filter((r) => {
-			const dCol = r[delivDateCol] != null ? delivDateCol : summaryDelivDateCol;
-			if (!dCol) return false;
-			const d = new Date(r[dCol]);
+		const completedThisWeek = completedJobs.filter((r) => {
+			if (!delivDateCol) return false;
+			const d = new Date(r[delivDateCol]);
 			return !isNaN(d) && d >= weekStart && d <= now;
 		}).length;
 
-		const completedThisMonth = allCompletedJobs.filter((r) => {
-			const dCol = r[delivDateCol] != null ? delivDateCol : summaryDelivDateCol;
-			if (!dCol) return false;
-			const d = new Date(r[dCol]);
+		const completedThisMonth = completedJobs.filter((r) => {
+			if (!delivDateCol) return false;
+			const d = new Date(r[delivDateCol]);
 			return !isNaN(d) && d >= monthStart && d <= now;
 		}).length;
 
@@ -4533,9 +4499,8 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 						? currentLoad[loadIdCol]
 						: ""
 					: "",
-				CompletedLoads: allCompletedJobs.filter((j) => {
-					const jDriverCol = driverCol || findCol(jobSummary.headers, /driver/i);
-					return jDriverCol && (j[jDriverCol] || "").trim().toLowerCase() === nameLower;
+				CompletedLoads: completedJobs.filter((j) => {
+					return driverCol && (j[driverCol] || "").trim().toLowerCase() === nameLower;
 				}).length,
 			};
 		});
@@ -4547,11 +4512,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const respActive = req.session.user.role !== "Super Admin"
 			? sanitizeBrokerColumns(jobTracking.headers, activeJobs)
 			: activeJobs;
-		// Merge headers from both sheets for completed loads display
-		const completedHeaders = [...new Set([...jobTracking.headers, ...jobSummary.headers])];
 		const respCompleted = req.session.user.role !== "Super Admin"
-			? sanitizeBrokerColumns(completedHeaders, allCompletedJobs)
-			: allCompletedJobs;
+			? sanitizeBrokerColumns(jobTracking.headers, completedJobs)
+			: completedJobs;
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -4569,7 +4532,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			},
 			unassignedJobs: respUnassigned,
 			jobTrackingHeaders: jobTracking.headers,
-			completedHeaders,
+			completedHeaders: jobTracking.headers,
 			activeJobs: respActive,
 			completedJobs: respCompleted,
 			fleet,
@@ -5498,15 +5461,13 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 
 		// Fetch the same investor data inline (mirrors /api/investor logic summary)
 		const sheets = await getSheets();
-		const response = await sheets.spreadsheets.values.batchGet({
+		const response = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
-			ranges: ["Job Tracking", "Payments Table"],
+			range: "Job Tracking",
 		});
-		const rangeData = response.data.valueRanges || [];
-		const jobTracking = parseSheet(rangeData[0]);
+		const jobTracking = parseSheet(response.data);
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
-		const payments = parseSheet(rangeData[1]);
-		const rptCarrierDB = parseSheet(rangeData[2]);
+		const rptCarrierDB = getCarrierDBFromSQLite();
 		const rptCDriverCol = findCol(rptCarrierDB.headers, /driver/i) || rptCarrierDB.headers[0];
 		const rptCCarrierCol = findCol(rptCarrierDB.headers, /carrier/i);
 
@@ -5546,38 +5507,18 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			return true;
 		});
 
-		const rateCol = findCol(payments.headers, /rate|amount|total|pay/i);
-		const payStatusCol = findCol(payments.headers, /pay.*status|status/i);
-		const payLoadIdCol = findCol(payments.headers, /load.?id|job.?id/i);
-		const jobLoadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
-		const investorLoadIds = investorDriverSet && jobLoadIdCol
-			? new Set(filteredJobData.map(r => (r[jobLoadIdCol] || "").trim().toLowerCase()).filter(Boolean))
-			: null;
-		const filteredPayments = investorDriverSet
-			? payments.data.filter(r => {
-				if (payLoadIdCol && investorLoadIds) {
-					const lid = (r[payLoadIdCol] || "").trim().toLowerCase();
-					if (lid && investorLoadIds.has(lid)) return true;
-				}
-				return false;
-			}) : payments.data;
-
 		const jtRateCol2 = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
-		const jtDateCol2 = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(jobTracking.headers, /date/i);
-		const paymentsHaveDates2 = filteredPayments.some(r => findCol(payments.headers, /date/i) && r[findCol(payments.headers, /date/i)]);
+		const rptStatusCol = findCol(jobTracking.headers, /status/i);
+		const rptCompletedStatuses = /^(delivered|completed|pod received)$/i;
 
 		let totalRevenue = 0, paidRevenue = 0;
-		filteredPayments.forEach(r => {
-			const amt = parseFloat(String(rateCol ? r[rateCol] : "0").replace(/[$,]/g, "")) || 0;
+		filteredJobData.forEach(r => {
+			const amt = parseFloat(String((jtRateCol2 ? r[jtRateCol2] : "0")).replace(/[$,]/g, "")) || 0;
+			if (!amt) return;
 			totalRevenue += amt;
-			const ps = payStatusCol ? (r[payStatusCol] || "").trim() : "";
-			if (/^paid$/i.test(ps)) paidRevenue += amt;
+			const st = rptStatusCol ? (r[rptStatusCol] || "").trim() : "";
+			if (rptCompletedStatuses.test(st)) paidRevenue += amt;
 		});
-		if (!paymentsHaveDates2 && paidRevenue === 0) {
-			filteredJobData.forEach(r => {
-				paidRevenue += parseFloat(String((r[jtRateCol2] || "0")).replace(/[$,]/g, "")) || 0;
-			});
-		}
 
 		const purchasePrice = parseFloat(config.truck_purchase_price) || 58000;
 		const ownedTrucks2 = isSuperAdmin
@@ -6911,15 +6852,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 	try {
 		const sheets = await getSheets();
 
-		const response = await sheets.spreadsheets.values.batchGet({
+		const response = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
-			ranges: ["Job Tracking", "Payments Table"],
+			range: "Job Tracking",
 		});
 
-		const rangeData = response.data.valueRanges || [];
-		const jobTracking = parseSheet(rangeData[0]);
+		const jobTracking = parseSheet(response.data);
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
-		const payments = parseSheet(rangeData[1]);
 		const carrierDB = getCarrierDBFromSQLite();
 
 		const user = req.session.user;
@@ -6962,27 +6901,6 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			})
 			: jobTracking.data;
 
-		const payDriverCol = findCol(payments.headers, /driver/i);
-		const payLoadIdCol = findCol(payments.headers, /load.?id|job.?id/i);
-		const jobLoadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
-		const investorLoadIds = investorDriverSet && jobLoadIdCol
-			? new Set(filteredJobData.map(r => (r[jobLoadIdCol] || "").trim().toLowerCase()).filter(Boolean))
-			: null;
-
-		const filteredPayments = investorDriverSet
-			? payments.data.filter(r => {
-				if (payDriverCol) {
-					const driver = (r[payDriverCol] || "").trim().toLowerCase();
-					if (driver && investorDriverSet.has(driver)) return true;
-				}
-				if (payLoadIdCol && investorLoadIds) {
-					const lid = (r[payLoadIdCol] || "").trim().toLowerCase();
-					if (lid && investorLoadIds.has(lid)) return true;
-				}
-				return false;
-			})
-			: payments.data;
-
 		const filteredCarrierData = investorDriverSet
 			? carrierDB.data.filter(r => {
 				const driver = (r[carrierDriverCol] || "").trim().toLowerCase();
@@ -7013,16 +6931,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			totalExpenses += compSum.total;
 		}
 
-		// ---- Production Performance ----
-		const rateCol = findCol(payments.headers, /rate|amount|total|pay/i);
-		const payStatusCol = findCol(payments.headers, /pay.*status|status/i);
-		const dateCol = findCol(payments.headers, /date/i);
-
-		// Job Tracking cols used for per-truck revenue and daily avg fallback
+		// ---- Production Performance (from Job Tracking) ----
 		const jtRateCol = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
 		const jtDateCol = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i)
 			|| findCol(jobTracking.headers, /date/i);
 		const jtDriverCol = findCol(jobTracking.headers, /^driver$/i);
+		const statusCol = findCol(jobTracking.headers, /status/i);
+		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
 		let totalRevenue = 0;
 		let paidRevenue = 0;
@@ -7032,20 +6947,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-		// Detect if Payments Table has usable date data; fall back to Job Tracking if not
-		const paymentsHaveDates = filteredPayments.some(r => dateCol && r[dateCol]);
-
-		filteredPayments.forEach((r) => {
-			const amt =
-				parseFloat(String(rateCol ? r[rateCol] : "0").replace(/[$,]/g, "")) || 0;
+		filteredJobData.forEach((r) => {
+			const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
+			if (!amt) return;
 			totalRevenue += amt;
-			const ps = payStatusCol ? (r[payStatusCol] || "").trim() : "";
-			if (/^paid$/i.test(ps)) paidRevenue += amt;
-
-			if (dateCol && r[dateCol]) {
-				const d = new Date(r[dateCol]);
+			const st = statusCol ? (r[statusCol] || "").trim() : "";
+			if (completedStatuses.test(st)) paidRevenue += amt;
+			if (jtDateCol && r[jtDateCol]) {
+				const d = new Date(r[jtDateCol]);
 				if (!isNaN(d)) {
-					// 30-day window (S2)
 					if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
 					const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 					monthlyRevenue[key] = (monthlyRevenue[key] || 0) + amt;
@@ -7053,38 +6963,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			}
 		});
 
-		// If Payments Table has no dates, derive date-based metrics from Job Tracking
-		if (!paymentsHaveDates && jtDateCol && jtRateCol) {
-			filteredJobData.forEach((r) => {
-				const amt = parseFloat(String((r[jtRateCol] || "0")).replace(/[$,]/g, "")) || 0;
-				if (!amt) return;
-				const d = new Date(r[jtDateCol]);
-				if (!isNaN(d)) {
-					if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
-					const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-					monthlyRevenue[key] = (monthlyRevenue[key] || 0) + amt;
-				}
-			});
-			// Also treat all job amounts as "paid" for paidRevenue when no payment status exists
-			if (paidRevenue === 0) {
-				filteredJobData.forEach((r) => {
-					const amt = parseFloat(String((r[jtRateCol] || "0")).replace(/[$,]/g, "")) || 0;
-					paidRevenue += amt;
-				});
-			}
-		}
-
 		// Avg daily revenue = 30-day average (S2)
 		const avgDailyRevenue = last30DaysRevenue / 30;
 
-		// Operating period (earliest to latest — from Job Tracking dates if Payments Table lacks them)
+		// Operating period (earliest to latest from Job Tracking)
 		let earliestDate = null;
 		let latestDate = null;
-		const dateSource = paymentsHaveDates ? filteredPayments : filteredJobData;
-		const dateSourceCol = paymentsHaveDates ? dateCol : jtDateCol;
-		dateSource.forEach((r) => {
-			if (dateSourceCol && r[dateSourceCol]) {
-				const d = new Date(r[dateSourceCol]);
+		filteredJobData.forEach((r) => {
+			if (jtDateCol && r[jtDateCol]) {
+				const d = new Date(r[jtDateCol]);
 				if (!isNaN(d)) {
 					if (!earliestDate || d < earliestDate) earliestDate = d;
 					if (!latestDate || d > latestDate) latestDate = d;
@@ -7194,10 +7081,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		// ---- Recession-Proof Metrics (kept in API for backward compat) ----
 		const brokerCol = findCol(jobTracking.headers, /broker|shipper|customer|client/i);
-		const statusCol = findCol(jobTracking.headers, /status/i);
-		let totalJobs = filteredJobData.length;
-		const completedStatuses = /^(delivered|completed|pod received)$/i;
-		const completedJobs = statusCol
+		const totalJobs = filteredJobData.length;
+		const completedJobCount = statusCol
 			? filteredJobData.filter((r) => completedStatuses.test((r[statusCol] || "").trim())).length
 			: 0;
 
@@ -7217,7 +7102,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				monthsOfOperation,
 				investorSplitPct: 50,
 				totalJobs,
-				completedJobs,
+				completedJobs: completedJobCount,
 				totalExpenses: Math.round(totalExpenses),
 				netRevenueToDate,
 				totalPurchasePrice,
@@ -7242,7 +7127,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			},
 			recessionProof: {
 				totalJobs,
-				completedJobs,
+				completedJobs: completedJobCount,
 			},
 			config,
 		});
