@@ -5,9 +5,8 @@
       <div class="sidebar-top">
         <div class="sidebar-logo">
           <img src="/logo.avif" alt="LogisX" class="sidebar-logo-img" />
-          <span class="sidebar-logo-text">LogisX</span>
         </div>
-        <div class="sidebar-subtitle">Investor Portal</div>
+        <div class="sidebar-subtitle">Investor Onboarding Wizard</div>
       </div>
 
       <nav class="sidebar-steps">
@@ -486,13 +485,6 @@ async function submitBanking() {
   display: block;
   filter: brightness(0) invert(1);
 }
-.sidebar-logo-text {
-  font-size: 1.25rem;
-  font-weight: 800;
-  color: #fff;
-  letter-spacing: -0.02em;
-}
-
 .sidebar-subtitle {
   margin-top: 0.6rem;
   font-size: 0.78rem;
