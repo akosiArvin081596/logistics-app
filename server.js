@@ -21,6 +21,7 @@ const { generateSubstancePolicy } = require("./lib/generate-substance-policy-pdf
 const { generateServiceInvoice } = require("./lib/generate-service-invoice-pdf");
 const { generateMasterAgreement } = require("./lib/generate-master-agreement-pdf");
 const { generateVehicleLease } = require("./lib/generate-vehicle-lease-pdf");
+const { generateW9 } = require("./lib/generate-w9-pdf");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -1421,59 +1422,16 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		}
 
 		if (docKey === "w9") {
-			// W-9: overlay investor data onto the IRS form
-			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", "w9.pdf");
-			if (fs.existsSync(templatePath)) {
-				const templateBytes = fs.readFileSync(templatePath);
-				const pdfDoc = await PdfLibDocument.load(templateBytes);
-				const page1 = pdfDoc.getPages()[0];
-				const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-				const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-				const blue = rgb(0.1, 0.34, 0.86);
-				const name = application?.legal_name || signatureText.trim();
-				const addr = application?.address || "";
-				const ssn = application?.ein_ssn || "";
-				// Line 1: Name
-				page1.drawText(name, { x: 68, y: 660, size: 11, font: fontBold, color: blue });
-				// Line 2: DBA
-				if (application?.dba) page1.drawText(application.dba, { x: 68, y: 638, size: 10, font, color: blue });
-				// Line 3a: entity type checkbox
-				const entityMap = { "Sole Prop": 64, "C-Corp": 170, "S-Corp": 268, "Partnership": 356, "LLC": 64 };
-				const checkX = entityMap[application?.entity_type] || 64;
-				if (application?.entity_type === "LLC") {
-					page1.drawText("X", { x: 64, y: 580, size: 12, font: fontBold, color: blue });
-				} else {
-					page1.drawText("X", { x: checkX, y: 595, size: 12, font: fontBold, color: blue });
-				}
-				// Line 5-6: Address
-				if (addr) {
-					const parts = addr.split(",").map(s => s.trim());
-					page1.drawText(parts[0] || addr, { x: 68, y: 502, size: 10, font, color: blue });
-					if (parts.length > 1) page1.drawText(parts.slice(1).join(", "), { x: 68, y: 482, size: 10, font, color: blue });
-				}
-				// EIN/SSN
-				if (ssn) {
-					const digits = ssn.replace(/\D/g, "");
-					if (digits.length === 9) {
-						page1.drawText(digits.slice(0, 3), { x: 462, y: 432, size: 11, font: fontBold, color: blue });
-						page1.drawText(digits.slice(3, 5), { x: 510, y: 432, size: 11, font: fontBold, color: blue });
-						page1.drawText(digits.slice(5, 9), { x: 545, y: 432, size: 11, font: fontBold, color: blue });
-					}
-				}
-				// Signature
-				page1.drawText(signatureText.trim(), { x: 120, y: 328, size: 10, font: fontBold, color: blue });
-				page1.drawText(effectiveDate, { x: 455, y: 328, size: 9, font, color: blue });
-				if (signatureImage) {
-					try {
-						const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
-						const sigImg = await pdfDoc.embedPng(sigBytes);
-						page1.drawImage(sigImg, { x: 200, y: 320, width: 140, height: 35 });
-					} catch { /* skip */ }
-				}
-				fs.writeFileSync(signedPath, await pdfDoc.save());
-			} else {
-				signedPdfUrl = "";
-			}
+			const signedAtW9 = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
+			const pdfBuffer = await generateW9({
+				legalName: application?.legal_name || "", dba: application?.dba || "",
+				entityType: application?.entity_type || "", address: application?.address || "",
+				einSsn: application?.ein_ssn || "",
+				taxClassification: application?.tax_classification || "",
+				effectiveDate, signatureText: signatureText.trim(), signatureImage,
+				signedAt: signedAtW9,
+			});
+			fs.writeFileSync(signedPath, pdfBuffer);
 		} else if (docKey === "master_agreement") {
 			const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 			const pdfBuffer = await generateMasterAgreement({
@@ -1558,11 +1516,16 @@ app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", async (req,
 		}
 
 		if (docKey === "w9") {
-			const filePath = path.join(__dirname, "uploads", "onboarding-templates", "investor", "w9.pdf");
-			if (!fs.existsSync(filePath)) return res.status(404).json({ error: "W-9 template not found" });
+			const pdfBuffer = await generateW9({
+				legalName: application?.legal_name || "", dba: application?.dba || "",
+				entityType: application?.entity_type || "", address: application?.address || "",
+				einSsn: application?.ein_ssn || "",
+				taxClassification: application?.tax_classification || "",
+				effectiveDate,
+			});
 			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form.pdf"');
-			return fs.createReadStream(filePath).pipe(res);
+			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form Preview.pdf"');
+			return res.send(pdfBuffer);
 		}
 
 		return res.status(404).json({ error: "Unknown document" });
