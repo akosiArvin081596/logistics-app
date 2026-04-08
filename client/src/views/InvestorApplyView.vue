@@ -479,7 +479,11 @@
             <div class="review-grid">
               <div v-for="doc in documents" :key="doc.doc_key" class="review-item full">
                 <span class="review-label">{{ doc.doc_name }}</span>
-                <span class="review-value" :class="doc.signed ? 'text-green' : 'text-amber'">{{ doc.signed ? 'Signed' : 'Pending' }}</span>
+                <span v-if="doc.signed" class="review-value text-green doc-view-link" @click="openReviewPdf(doc)">
+                  Signed &mdash; View Document
+                  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:2px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                </span>
+                <span v-else class="review-value text-amber">Pending</span>
               </div>
             </div>
           </div>
@@ -521,6 +525,16 @@
       @close="showMapPicker = false" @confirm="onMapConfirm"
     />
 
+    <!-- Signed PDF Viewer (from review modal) -->
+    <div v-if="reviewPdfUrl" class="pdf-viewer-overlay" @click.self="closeReviewPdf">
+      <div class="pdf-viewer-panel">
+        <div class="pdf-viewer-header">
+          <span class="pdf-viewer-title">{{ reviewPdfName }}</span>
+          <button class="review-close" @click="closeReviewPdf">&times;</button>
+        </div>
+        <iframe :src="reviewPdfUrl" class="pdf-viewer-frame" />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -621,6 +635,8 @@ const stateDropOpen = ref(false)
 const photoPreviewUrl = ref('')
 const showReviewModal = ref(false)
 const previewPdfUrl = ref('')
+const reviewPdfUrl = ref('')
+const reviewPdfName = ref('')
 const bankDropOpen = ref(false)
 const usBanks = [
   'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
@@ -855,6 +871,32 @@ function revokePreview() {
     URL.revokeObjectURL(previewPdfUrl.value)
     previewPdfUrl.value = ''
   }
+}
+
+// Open signed PDF viewer from review modal
+async function openReviewPdf(doc) {
+  const sig = signatures[doc.doc_key]
+  if (!sig) return
+  reviewPdfName.value = doc.doc_name
+  reviewPdfUrl.value = ''
+  try {
+    const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
+    const res = await fetch(`/api/public/investor-preview-pdf/${doc.doc_key}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...form, vehicles: stripped, signatureText: sig.text, signatureImage: sig.image }),
+    })
+    if (res.ok) {
+      const blob = await res.blob()
+      reviewPdfUrl.value = URL.createObjectURL(blob)
+    }
+  } catch { /* skip */ }
+}
+
+function closeReviewPdf() {
+  if (reviewPdfUrl.value) URL.revokeObjectURL(reviewPdfUrl.value)
+  reviewPdfUrl.value = ''
+  reviewPdfName.value = ''
 }
 
 // Capture signature locally, then refresh preview with signature overlay
@@ -1517,6 +1559,22 @@ async function submitOnboarding() {
 .review-value { font-size: 0.85rem; color: #0f172a; font-weight: 500; }
 .text-green { color: #16a34a; }
 .text-amber { color: #d97706; }
+.doc-view-link { cursor: pointer; display: inline-flex; align-items: center; gap: 2px; transition: color 0.15s; }
+.doc-view-link:hover { color: #15803d; text-decoration: underline; }
+.pdf-viewer-overlay {
+  position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center; padding: 1.5rem;
+}
+.pdf-viewer-panel {
+  background: #fff; border-radius: 12px; width: 100%; max-width: 900px; height: 85vh;
+  display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25);
+}
+.pdf-viewer-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.85rem 1.25rem; border-bottom: 1px solid #e2e8f0; flex-shrink: 0;
+}
+.pdf-viewer-title { font-weight: 600; font-size: 0.95rem; color: #0f172a; }
+.pdf-viewer-frame { flex: 1; border: none; width: 100%; }
 .review-vehicle {
   margin-bottom: 0.75rem; padding: 0.65rem 0.85rem;
   background: #fafbfd; border-radius: 8px; border: 1px solid #f1f5f9;
