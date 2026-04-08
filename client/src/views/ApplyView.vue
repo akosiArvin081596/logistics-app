@@ -112,7 +112,7 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, watch, onMounted } from 'vue'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import StepPersonalInfo from '../components/apply/StepPersonalInfo.vue'
 import StepExperience from '../components/apply/StepExperience.vue'
@@ -155,6 +155,39 @@ const defaultForm = () => ({
 })
 
 const form = reactive(defaultForm())
+
+// ── State persistence (same pattern as /invest) ──
+const STORAGE_KEY = 'logisx_apply_state'
+
+function saveState() {
+  try {
+    // Strip base64 uploads to avoid localStorage 5MB limit
+    const { cdl_front, cdl_back, medical_card, ...lite } = form
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      step: step.value, maxStep: maxStep.value, form: lite,
+      submitted: submitted.value,
+    }))
+  } catch { /* full storage */ }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return
+    const s = JSON.parse(raw)
+    if (s.step != null) step.value = s.step
+    if (s.maxStep != null) maxStep.value = s.maxStep
+    if (s.form) Object.assign(form, s.form)
+    if (s.submitted) submitted.value = s.submitted
+    maxStep.value = Math.max(maxStep.value, step.value)
+  } catch { /* corrupt data */ }
+}
+
+watch(step, saveState)
+watch(submitted, saveState)
+watch(form, saveState, { deep: true })
+
+onMounted(() => { loadState() })
 
 function goToStep(i) {
   if (submitted.value) return
@@ -210,6 +243,7 @@ async function submitForm() {
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || 'Submission failed')
     submitted.value = true
+    localStorage.removeItem(STORAGE_KEY)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   } catch (err) {
     error.value = err.message
