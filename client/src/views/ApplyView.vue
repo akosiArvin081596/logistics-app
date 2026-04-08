@@ -95,14 +95,113 @@
               Continue
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
-            <button v-else class="btn-primary" :disabled="submitting" @click="submitForm">
-              <span v-if="submitting" class="spinner light"></span>
-              {{ submitting ? 'Submitting...' : 'Submit Application' }}
+            <button v-else class="btn-primary" @click="openReview">
+              Review &amp; Submit
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
           </div>
         </div>
       </template>
     </main>
+
+    <!-- Review Modal -->
+    <div v-if="showReviewModal" class="review-overlay" @click.self="showReviewModal = false">
+      <div class="review-modal">
+        <div class="review-header">
+          <h3>Review Your Application</h3>
+          <button class="review-close" @click="showReviewModal = false">&times;</button>
+        </div>
+        <div class="review-body">
+          <!-- Personal Info -->
+          <div class="review-section">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              Personal Information
+            </div>
+            <div class="review-grid">
+              <div class="review-item"><span class="review-label">Full Name</span><span class="review-value">{{ form.first_name }} {{ form.last_name }}</span></div>
+              <div class="review-item"><span class="review-label">Email</span><span class="review-value">{{ form.email }}</span></div>
+              <div class="review-item"><span class="review-label">Phone</span><span class="review-value">{{ form.phone }}</span></div>
+              <div class="review-item"><span class="review-label">Date of Birth</span><span class="review-value">{{ form.dob }}</span></div>
+              <div class="review-item full"><span class="review-label">Address</span><span class="review-value">{{ form.address }}</span></div>
+              <div class="review-item"><span class="review-label">Driver's License</span><span class="review-value">{{ form.drivers_license }}</span></div>
+              <div class="review-item"><span class="review-label">Position</span><span class="review-value">{{ form.position }}</span></div>
+              <div class="review-item"><span class="review-label">CDL Front</span><span class="review-value" :class="form.cdl_front ? 'text-green' : 'text-amber'">{{ form.cdl_front ? 'Uploaded' : 'Missing' }}</span></div>
+              <div class="review-item"><span class="review-label">CDL Back</span><span class="review-value" :class="form.cdl_back ? 'text-green' : 'text-amber'">{{ form.cdl_back ? 'Uploaded' : 'Missing' }}</span></div>
+              <div class="review-item"><span class="review-label">Medical Card</span><span class="review-value" :class="form.medical_card ? 'text-green' : 'text-amber'">{{ form.medical_card ? 'Uploaded' : 'Missing' }}</span></div>
+            </div>
+          </div>
+
+          <!-- Experience -->
+          <div class="review-section">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+              Experience
+            </div>
+            <div class="review-grid">
+              <div class="review-item"><span class="review-label">Years of Experience</span><span class="review-value">{{ form.experience }}</span></div>
+              <div class="review-item"><span class="review-label">Valid CDL</span><span class="review-value">{{ form.has_cdl }}</span></div>
+              <div class="review-item"><span class="review-label">Work Authorized</span><span class="review-value">{{ form.work_authorized }}</span></div>
+              <div class="review-item"><span class="review-label">Felony Conviction</span><span class="review-value">{{ form.felony_convicted }}</span></div>
+              <div v-if="form.felony_explanation" class="review-item full"><span class="review-label">Felony Explanation</span><span class="review-value">{{ form.felony_explanation }}</span></div>
+            </div>
+          </div>
+
+          <!-- Driving History -->
+          <div class="review-section">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+              Driving History
+            </div>
+            <div class="review-grid">
+              <div class="review-item"><span class="review-label">Accident History</span><span class="review-value">{{ form.accident_history }}</span></div>
+              <div v-if="form.accident_description" class="review-item full"><span class="review-label">Accident Description</span><span class="review-value">{{ form.accident_description }}</span></div>
+              <div v-if="form.traffic_citations" class="review-item full"><span class="review-label">Traffic Citations</span><span class="review-value">{{ form.traffic_citations }}</span></div>
+            </div>
+          </div>
+
+          <!-- Certifications -->
+          <div class="review-section">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+              Certifications &amp; Availability
+            </div>
+            <div class="review-grid">
+              <div v-if="form.certifications" class="review-item full"><span class="review-label">Certifications</span><span class="review-value">{{ form.certifications }}</span></div>
+              <div class="review-item full"><span class="review-label">Availability</span><span class="review-value">{{ form.availability.join(', ') || 'None' }}</span></div>
+              <div class="review-item full"><span class="review-label">Skills</span><span class="review-value">{{ form.skills }}</span></div>
+            </div>
+          </div>
+
+          <!-- References -->
+          <div class="review-section" style="border-bottom:none;margin-bottom:0;">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              References &amp; Signature
+            </div>
+            <div v-for="(r, i) in form.references" :key="i" class="review-ref">
+              <div class="review-ref-label">Reference {{ i + 1 }}</div>
+              <div class="review-grid">
+                <div class="review-item"><span class="review-label">Name</span><span class="review-value">{{ r.name }}</span></div>
+                <div class="review-item"><span class="review-label">Phone</span><span class="review-value">{{ r.phone }}</span></div>
+                <div v-if="r.relationship" class="review-item"><span class="review-label">Relationship</span><span class="review-value">{{ r.relationship }}</span></div>
+              </div>
+            </div>
+            <div class="review-grid" style="margin-top:0.75rem;">
+              <div class="review-item full"><span class="review-label">Signature</span><span class="review-value" style="font-family:'Dancing Script',cursive;font-size:1.1rem;font-style:italic">{{ form.signature }}</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="review-footer">
+          <button class="btn-ghost" @click="showReviewModal = false">Go Back &amp; Edit</button>
+          <button class="btn-primary" :disabled="submitting" @click="showReviewModal = false; submitForm()">
+            <span v-if="submitting" class="spinner light"></span>
+            {{ submitting ? 'Submitting...' : 'Submit Application' }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <LocationPickerModal
       :open="showMapPicker" label="Current Address"
@@ -134,6 +233,14 @@ const submitting = ref(false)
 const submitted = ref(false)
 const error = ref('')
 const showMapPicker = ref(false)
+const showReviewModal = ref(false)
+
+function openReview() {
+  const err = validate(step.value)
+  if (err) { error.value = err; return }
+  error.value = ''
+  showReviewModal.value = true
+}
 
 function onMapConfirm({ displayName }) {
   if (displayName) form.address = displayName
@@ -452,5 +559,52 @@ async function submitForm() {
   .step-panel { padding: 1.5rem 1.25rem 2rem; }
   .content-header h2 { font-size: 1.25rem; }
   :deep(.grid-cols-2) { grid-template-columns: 1fr; }
+}
+
+/* ─── Review Modal ─── */
+.review-overlay {
+  position: fixed; inset: 0; z-index: 999;
+  background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center; padding: 1rem;
+}
+.review-modal {
+  background: #fff; border-radius: 14px;
+  width: 100%; max-width: 700px; max-height: 90vh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.review-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 1rem 1.5rem; border-bottom: 1px solid #e9edf3;
+}
+.review-header h3 { font-size: 1.1rem; font-weight: 700; color: #0f172a; margin: 0; }
+.review-close {
+  font-size: 1.5rem; background: none; border: none;
+  cursor: pointer; color: #94a3b8; line-height: 1;
+}
+.review-body { flex: 1; overflow-y: auto; padding: 1.25rem 1.5rem; }
+.review-section {
+  margin-bottom: 1.25rem; padding-bottom: 1rem; border-bottom: 1px solid #f1f5f9;
+}
+.review-section-title {
+  display: flex; align-items: center; gap: 0.5rem;
+  font-size: 0.82rem; font-weight: 700; color: #0f172a;
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.75rem;
+}
+.review-section-title svg { color: #3b82f6; }
+.review-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1rem; }
+.review-item { display: flex; flex-direction: column; gap: 0.1rem; }
+.review-item.full { grid-column: 1 / -1; }
+.review-label { font-size: 0.7rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.04em; }
+.review-value { font-size: 0.85rem; color: #0f172a; font-weight: 500; }
+.text-green { color: #16a34a; }
+.text-amber { color: #d97706; }
+.review-ref {
+  margin-bottom: 0.75rem; padding: 0.65rem 0.85rem;
+  background: #fafbfd; border-radius: 8px; border: 1px solid #f1f5f9;
+}
+.review-ref-label { font-size: 0.75rem; font-weight: 700; color: #475569; margin-bottom: 0.5rem; }
+.review-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 1rem 1.5rem; border-top: 1px solid #e9edf3; gap: 1rem;
 }
 </style>

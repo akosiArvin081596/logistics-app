@@ -1151,23 +1151,69 @@ app.post("/api/public/apply", (req, res) => {
 		`).run(full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation || '', accident_history, accident_description || '', traffic_citations || '', certifications || '', JSON.stringify(availability || []), skills, typeof reference_info === 'string' ? reference_info : JSON.stringify(reference_info || ''), additional_info || '', signature, signature_date || new Date().toLocaleDateString('en-US'), cdl_front || '', cdl_back || '', medical_card || '');
 		res.json({ success: true, id: result.lastInsertRowid });
 
-		// Send confirmation emails (async, don't block response)
-		const appSummary = `<h2>LogisX Driver Application Received</h2>
-			<p>Hi ${full_name},</p>
-			<p>Thank you for applying to LogisX Inc. We have received your driver application. Our team will review it and get back to you shortly.</p>
-			<h3>Application Summary</h3>
-			<ul>
-				<li><b>Name:</b> ${full_name}</li>
-				<li><b>Email:</b> ${email}</li>
-				<li><b>Phone:</b> ${phone}</li>
-				<li><b>Position:</b> ${position}</li>
-				<li><b>Experience:</b> ${experience}</li>
-				<li><b>CDL:</b> ${has_cdl}</li>
-				<li><b>Address:</b> ${address}</li>
-			</ul>
-			<p>Best regards,<br>LogisX Inc.</p>`;
-		sendEmail(email, "LogisX - Application Received", appSummary);
-		sendEmail(process.env.GMAIL_USER || "info@logisx.com", `New Driver Application: ${full_name}`, appSummary);
+		// Send confirmation email to applicant (branded HTML)
+		const applicantDriverHtml = `
+		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
+			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
+				<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
+			</div>
+			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
+				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Application Received</h2>
+				<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${full_name}</b>,</p>
+				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Thank you for applying to LogisX Inc. We have received your driver application and our team will review it shortly.</p>
+				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
+					<table style="width:100%;border-collapse:collapse;font-size:14px">
+						<tr><td style="padding:4px 0;color:#64748b;width:140px">Name</td><td style="padding:4px 0;font-weight:600">${full_name}</td></tr>
+						<tr><td style="padding:4px 0;color:#64748b">Position</td><td style="padding:4px 0">${position}</td></tr>
+						<tr><td style="padding:4px 0;color:#64748b">Experience</td><td style="padding:4px 0">${experience} years</td></tr>
+						<tr><td style="padding:4px 0;color:#64748b">CDL</td><td style="padding:4px 0">${has_cdl}</td></tr>
+					</table>
+				</div>
+				<h3 style="font-size:15px;margin:24px 0 8px;color:#0f172a">What happens next?</h3>
+				<ul style="padding-left:20px;color:#475569;line-height:1.8">
+					<li>Our team will review your application within <b>1-2 business days</b></li>
+					<li>You'll receive login credentials via email if accepted</li>
+					<li>Complete onboarding documents to start driving</li>
+				</ul>
+				<p style="color:#64748b;font-size:13px;margin-top:24px">If you have any questions, contact us at <a href="mailto:info@logisx.com" style="color:#3b82f6;text-decoration:none">info@logisx.com</a>.</p>
+			</div>
+			<div style="padding:16px 32px;text-align:center">
+				<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
+			</div>
+		</div>`;
+		sendEmail(email, "LogisX - Driver Application Received", applicantDriverHtml);
+
+		// Send admin notification (detailed)
+		const adminDriverHtml = `
+		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
+			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
+				<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
+			</div>
+			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
+				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">New Driver Application</h2>
+				<p style="margin:0 0 20px;line-height:1.6;color:#334155">A new driver application has been submitted and is ready for review.</p>
+				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
+					<table style="width:100%;border-collapse:collapse;font-size:14px">
+						<tr><td style="padding:5px 0;color:#64748b;width:140px">Name</td><td style="padding:5px 0;font-weight:600">${full_name}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${email}">${email}</a></td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${phone}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${position}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Experience</td><td style="padding:5px 0">${experience} years</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">CDL</td><td style="padding:5px 0">${has_cdl}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Work Authorized</td><td style="padding:5px 0">${work_authorized}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Felony</td><td style="padding:5px 0">${felony_convicted}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Address</td><td style="padding:5px 0">${address}</td></tr>
+					</table>
+				</div>
+				<div style="text-align:center;margin:24px 0">
+					<a href="https://app.logisx.com/applications" style="display:inline-block;background:#0f2847;color:#ffffff;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">Review Application</a>
+				</div>
+			</div>
+			<div style="padding:16px 32px;text-align:center">
+				<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
+			</div>
+		</div>`;
+		sendEmail("info@logisx.com", `New Driver Application: ${full_name}`, adminDriverHtml);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
