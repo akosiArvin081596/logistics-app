@@ -486,8 +486,12 @@ const filteredStates = computed(() => {
   return usStates.filter(s => s.toLowerCase().includes(q))
 })
 
-// Reset model when make changes
+// Reset model when make changes (but not when switching tabs)
+let lastTab = activeVehicleTab.value
 watch(() => vehicles.value[activeVehicleTab.value]?.make, (newMake, oldMake) => {
+  const tabSwitched = activeVehicleTab.value !== lastTab
+  lastTab = activeVehicleTab.value
+  if (tabSwitched) return
   if (oldMake && newMake !== oldMake && vehicles.value[activeVehicleTab.value]) {
     vehicles.value[activeVehicleTab.value].model = ''
   }
