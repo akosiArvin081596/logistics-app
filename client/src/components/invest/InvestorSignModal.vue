@@ -143,7 +143,7 @@ async function handleSign() {
   display: flex; align-items: center; justify-content: center; padding: 1rem;
 }
 .modal-content {
-  background: white; border-radius: 14px; width: 100%; max-width: 700px; max-height: 90vh;
+  background: white; border-radius: 14px; width: 100%; max-width: 1100px; max-height: 92vh;
   display: flex; flex-direction: column; overflow: hidden;
 }
 .modal-header {
@@ -152,8 +152,8 @@ async function handleSign() {
 }
 .modal-title { font-weight: 700; font-size: 1rem; }
 .modal-close { font-size: 1.5rem; background: none; border: none; cursor: pointer; color: #6b7085; }
-.pdf-container { flex: 1; min-height: 300px; background: #f5f5f5; overflow: hidden; }
-.pdf-frame { width: 100%; height: 100%; min-height: 300px; border: none; }
+.pdf-container { flex: 1; min-height: 500px; background: #f5f5f5; overflow: hidden; }
+.pdf-frame { width: 100%; height: 100%; min-height: 500px; border: none; }
 .pdf-placeholder { display: flex; align-items: center; justify-content: center; height: 300px; color: #6b7085; }
 .sign-area { padding: 0.75rem 1.25rem; border-top: 1px solid #e8edf2; display: flex; flex-direction: column; gap: 0.5rem; }
 .sign-checkbox { display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.8rem; cursor: pointer; }
