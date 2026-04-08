@@ -431,33 +431,17 @@ db.exec(`
 	)
 `);
 
-// Backfill carrier_driver_history from Carrier Database sheet on first startup
+// Backfill carrier_driver_history from drivers_directory on first startup
 {
 	const cdhCount = db.prepare("SELECT COUNT(*) AS c FROM carrier_driver_history").get().c;
 	if (cdhCount === 0) {
-		(async () => {
-			try {
-				const sheets = await getSheets();
-				const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
-				const rows = (resp.data && resp.data.values) || [];
-				if (rows.length < 2) return;
-				const headers = rows[0];
-				const driverIdx = headers.findIndex(h => /driver/i.test(h));
-				const carrierIdx = headers.findIndex(h => /carrier/i.test(h));
-				if (carrierIdx === -1) return;
-				const di = driverIdx !== -1 ? driverIdx : 0;
-				const ins = db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name) VALUES (?, ?)");
-				let count = 0;
-				for (let i = 1; i < rows.length; i++) {
-					const driver = (rows[i][di] || "").trim();
-					const carrier = (rows[i][carrierIdx] || "").trim();
-					if (driver && carrier) { ins.run(carrier, driver); count++; }
-				}
-				if (count) console.log(`Backfilled ${count} carrier-driver pairing(s) to history`);
-			} catch (err) {
-				console.error("Carrier history backfill error:", err.message);
-			}
-		})();
+		const drivers = db.prepare("SELECT driver_name, carrier_name FROM drivers_directory WHERE carrier_name != ''").all();
+		const ins = db.prepare("INSERT OR IGNORE INTO carrier_driver_history (carrier_name, driver_name) VALUES (?, ?)");
+		let count = 0;
+		for (const d of drivers) {
+			if (d.driver_name && d.carrier_name) { ins.run(d.carrier_name, d.driver_name); count++; }
+		}
+		if (count) console.log(`Backfilled ${count} carrier-driver pairing(s) to history`);
 	}
 }
 
@@ -3219,29 +3203,8 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			}
 		}
 
-		// Also fix Carrier Database sheet
-		const carrierResp = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Carrier Database",
-		});
-		const carrierRows = carrierResp.data.values || [];
-		if (carrierRows.length > 0) {
-			const carrierHeaders = carrierRows[0];
-			const carrierDriverIdx = carrierHeaders.findIndex((h) => /driver/i.test(h));
-			if (carrierDriverIdx === -1 && carrierHeaders.length > 0) {
-				// Fall back to first column if no driver header
-			}
-			const cIdx = carrierDriverIdx !== -1 ? carrierDriverIdx : 0;
-			const cColLtr = String.fromCharCode(65 + cIdx);
-			for (let i = 1; i < carrierRows.length; i++) {
-				if ((carrierRows[i][cIdx] || "").trim().toLowerCase() === oldName.trim().toLowerCase()) {
-					updates.push({
-						range: `Carrier Database!${cColLtr}${i + 1}`,
-						values: [[newName.trim()]],
-					});
-				}
-			}
-		}
+		// Also fix drivers_directory in SQLite
+		db.prepare("UPDATE drivers_directory SET driver_name = ? WHERE LOWER(driver_name) = LOWER(?)").run(newName.trim(), oldName.trim());
 
 		if (updates.length > 0) {
 			await sheets.spreadsheets.values.batchUpdate({
@@ -3320,7 +3283,7 @@ app.get("/api/admin/scan-driver-mismatches", requireRole("Super Admin"), async (
 		const sheets = await getSheets();
 		const resp = await sheets.spreadsheets.values.batchGet({
 			spreadsheetId: SPREADSHEET_ID,
-			ranges: ["Job Tracking", "Carrier Database"],
+			ranges: ["Job Tracking"],
 		});
 		const rangeData = resp.data.valueRanges || [];
 		const jtRows = (rangeData[0]?.values || []);
@@ -4380,7 +4343,6 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			spreadsheetId: SPREADSHEET_ID,
 			ranges: [
 				"Job Tracking",
-				"Carrier Database",
 				"Payments Table",
 				"Carrier History",
 				"Job Summary Sheet",
@@ -4409,10 +4371,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 
 		const jobTracking = parseSheet(rangeData[0]);
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
-		const carrierDB = parseSheet(rangeData[1]);
-		const payments = parseSheet(rangeData[2]);
-		const carrierHistory = parseSheet(rangeData[3]);
-		const jobSummary = parseSheet(rangeData[4]);
+		const carrierDB = getCarrierDBFromSQLite();
+		const payments = parseSheet(rangeData[1]);
+		const carrierHistory = parseSheet(rangeData[2]);
+		const jobSummary = parseSheet(rangeData[3]);
 
 		// Identify key columns
 		const statusCol = findCol(jobTracking.headers, /status/i);
@@ -4716,13 +4678,13 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 
 		const response = await sheets.spreadsheets.values.batchGet({
 			spreadsheetId: SPREADSHEET_ID,
-			ranges: ["Job Tracking", "Carrier Database"],
+			ranges: ["Job Tracking"],
 		});
 
 		const rangeData = response.data.valueRanges || [];
 		const jobTracking = parseSheet(rangeData[0]);
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
-		const carrierDB = parseSheet(rangeData[1]);
+		const carrierDB = getCarrierDBFromSQLite();
 
 		// Find driver column in Job Tracking
 		const driverCol = findCol(jobTracking.headers, /driver/i);
@@ -5402,9 +5364,7 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 				 FROM documents ORDER BY uploaded_at DESC LIMIT 500`
 			).all();
 		} else {
-			const sheets = await getSheets();
-			const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
-			const cdb = parseSheet(resp.data);
+			const cdb = getCarrierDBFromSQLite();
 			const cDriverCol = findCol(cdb.headers, /driver/i) || cdb.headers[0];
 			const cCarrierCol = findCol(cdb.headers, /carrier/i);
 			const driverSet = getInvestorDriverSet(user.id, cdb.data, cDriverCol, cCarrierCol);
@@ -5451,7 +5411,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 		let netRevenueToDate = 0;
 		try {
 			const sheets = await getSheets();
-			const rng = await sheets.spreadsheets.values.batchGet({ spreadsheetId: SPREADSHEET_ID, ranges: ["Job Tracking", "Carrier Database"] });
+			const rng = await sheets.spreadsheets.values.batchGet({ spreadsheetId: SPREADSHEET_ID, ranges: ["Job Tracking"] });
 			const jt = parseSheet(rng.data.valueRanges[0]);
 			const cdb = parseSheet(rng.data.valueRanges[1]);
 			const cDriverCol = findCol(cdb.headers, /driver/i) || cdb.headers[0];
@@ -5534,7 +5494,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		const sheets = await getSheets();
 		const response = await sheets.spreadsheets.values.batchGet({
 			spreadsheetId: SPREADSHEET_ID,
-			ranges: ["Job Tracking", "Payments Table", "Carrier Database"],
+			ranges: ["Job Tracking", "Payments Table"],
 		});
 		const rangeData = response.data.valueRanges || [];
 		const jobTracking = parseSheet(rangeData[0]);
@@ -6177,19 +6137,9 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		let allDriverNames = [];
 		try {
 			const sheets = await getSheets();
-			const carrierResp = await sheets.spreadsheets.values.get({
-				spreadsheetId: SPREADSHEET_ID,
-				range: "Carrier Database",
-			});
-			const cRows = carrierResp.data.values || [];
-			if (cRows.length > 1) {
-				const cHeaders = cRows[0];
-				const driverCol = cHeaders.find((h) => /driver/i.test(h)) || cHeaders[0];
-				const driverColIdx = cHeaders.indexOf(driverCol);
-				for (let i = 1; i < cRows.length; i++) {
-					const name = (cRows[i][driverColIdx] || "").trim();
-					if (name) allDriverNames.push(name);
-				}
+			const dirDrivers = db.prepare("SELECT driver_name FROM drivers_directory").all();
+			for (const d of dirDrivers) {
+				if (d.driver_name) allDriverNames.push(d.driver_name);
 			}
 		} catch { /* silent */ }
 
@@ -6957,14 +6907,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		const response = await sheets.spreadsheets.values.batchGet({
 			spreadsheetId: SPREADSHEET_ID,
-			ranges: ["Job Tracking", "Payments Table", "Carrier Database"],
+			ranges: ["Job Tracking", "Payments Table"],
 		});
 
 		const rangeData = response.data.valueRanges || [];
 		const jobTracking = parseSheet(rangeData[0]);
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
 		const payments = parseSheet(rangeData[1]);
-		const carrierDB = parseSheet(rangeData[2]);
+		const carrierDB = getCarrierDBFromSQLite();
 
 		const user = req.session.user;
 		const isSuperAdmin = user.role === "Super Admin";
