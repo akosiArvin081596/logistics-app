@@ -135,7 +135,13 @@ watch(() => props.open, async (isOpen) => {
   if (!hasInitial && navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        if (map) { map.panTo({ lat: pos.coords.latitude, lng: pos.coords.longitude }); map.setZoom(15) }
+        const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+        if (map) { map.panTo(loc); map.setZoom(15) }
+        placeMarker(loc)
+        markerPos.value = loc
+        geocode.reverseGeocode(loc.lat, loc.lng).then(r => {
+          if (r) selectedAddress.value = r.displayName
+        })
       },
       () => {},
       { timeout: 8000, enableHighAccuracy: false }
