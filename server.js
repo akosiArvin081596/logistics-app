@@ -431,6 +431,57 @@ db.exec(`
 	)
 `);
 
+// Drivers directory (replaces Carrier Database Google Sheet)
+db.exec(`
+	CREATE TABLE IF NOT EXISTS drivers_directory (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		driver_name TEXT NOT NULL UNIQUE,
+		carrier_name TEXT DEFAULT '',
+		state TEXT DEFAULT '',
+		city TEXT DEFAULT '',
+		zip TEXT DEFAULT '',
+		address TEXT DEFAULT '',
+		phone TEXT DEFAULT '',
+		cell TEXT DEFAULT '',
+		email TEXT DEFAULT '',
+		dot TEXT DEFAULT '',
+		mc TEXT DEFAULT '',
+		trucks TEXT DEFAULT '',
+		hazmat TEXT DEFAULT '',
+		rating TEXT DEFAULT '',
+		user_id INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
+// One-time seed: import Carrier Database from Google Sheet into SQLite on first boot
+const driverCount = db.prepare("SELECT COUNT(*) AS cnt FROM drivers_directory").get().cnt;
+if (driverCount === 0) {
+	(async () => {
+		try {
+			const sheets = await getSheets();
+			const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
+			const rows = resp.data.values || [];
+			if (rows.length < 2) return;
+			const h = rows[0];
+			const find = (regex) => h.findIndex(x => regex.test(x));
+			const di = find(/driver/i); const ci = find(/carrier/i); const si = find(/state/i);
+			const cti = find(/city/i); const zi = find(/zip/i); const ai = find(/address/i);
+			const ti = find(/truck/i); const hzi = find(/hazmat/i); const pi = find(/phone/i);
+			const cli = find(/cell/i); const ei = find(/email/i); const doi = find(/dot/i);
+			const mi = find(/mc/i); const ri = find(/rating/i);
+			const ins = db.prepare(`INSERT OR IGNORE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+			for (let i = 1; i < rows.length; i++) {
+				const r = rows[i];
+				const name = (r[di] || "").trim();
+				if (!name) continue;
+				ins.run(name, r[ci]||"", r[si]||"", r[cti]||"", r[zi]||"", r[ai]||"", r[pi]||"", r[cli]||"", r[ei]||"", r[doi]||"", r[mi]||"", r[ti]||"", r[hzi]||"", r[ri]||"");
+			}
+			console.log(`Seeded ${rows.length - 1} drivers from Carrier Database sheet into SQLite`);
+		} catch (err) { console.error("Driver seed error:", err.message); }
+	})();
+}
+
 // Backfill carrier_driver_history from drivers_directory on first startup
 {
 	const cdhCount = db.prepare("SELECT COUNT(*) AS c FROM carrier_driver_history").get().c;
@@ -774,57 +825,6 @@ db.exec(`
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-
-// Drivers directory (replaces Carrier Database Google Sheet)
-db.exec(`
-	CREATE TABLE IF NOT EXISTS drivers_directory (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		driver_name TEXT NOT NULL UNIQUE,
-		carrier_name TEXT DEFAULT '',
-		state TEXT DEFAULT '',
-		city TEXT DEFAULT '',
-		zip TEXT DEFAULT '',
-		address TEXT DEFAULT '',
-		phone TEXT DEFAULT '',
-		cell TEXT DEFAULT '',
-		email TEXT DEFAULT '',
-		dot TEXT DEFAULT '',
-		mc TEXT DEFAULT '',
-		trucks TEXT DEFAULT '',
-		hazmat TEXT DEFAULT '',
-		rating TEXT DEFAULT '',
-		user_id INTEGER DEFAULT 0,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	)
-`);
-
-// One-time seed: import Carrier Database from Google Sheet into SQLite on first boot
-const driverCount = db.prepare("SELECT COUNT(*) AS cnt FROM drivers_directory").get().cnt;
-if (driverCount === 0) {
-	(async () => {
-		try {
-			const sheets = await getSheets();
-			const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
-			const rows = resp.data.values || [];
-			if (rows.length < 2) return;
-			const h = rows[0];
-			const find = (regex) => h.findIndex(x => regex.test(x));
-			const di = find(/driver/i); const ci = find(/carrier/i); const si = find(/state/i);
-			const cti = find(/city/i); const zi = find(/zip/i); const ai = find(/address/i);
-			const ti = find(/truck/i); const hzi = find(/hazmat/i); const pi = find(/phone/i);
-			const cli = find(/cell/i); const ei = find(/email/i); const doi = find(/dot/i);
-			const mi = find(/mc/i); const ri = find(/rating/i);
-			const ins = db.prepare(`INSERT OR IGNORE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-			for (let i = 1; i < rows.length; i++) {
-				const r = rows[i];
-				const name = (r[di] || "").trim();
-				if (!name) continue;
-				ins.run(name, r[ci]||"", r[si]||"", r[cti]||"", r[zi]||"", r[ai]||"", r[pi]||"", r[cli]||"", r[ei]||"", r[doi]||"", r[mi]||"", r[ti]||"", r[hzi]||"", r[ri]||"");
-			}
-			console.log(`Seeded ${rows.length - 1} drivers from Carrier Database sheet into SQLite`);
-		} catch (err) { console.error("Driver seed error:", err.message); }
-	})();
-}
 
 // Truck ↔ Driver assignment history
 db.exec(`
