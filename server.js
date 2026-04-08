@@ -3466,6 +3466,7 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 		status: r.status,
 		notes: r.notes,
 		createdAt: r.created_at,
+		applicationId: r.application_id || 0,
 		truckCount: db.prepare("SELECT COUNT(*) as n FROM trucks WHERE owner_id = ?").get(r.user_id).n,
 	}));
 	res.json({ investors });
