@@ -1,5 +1,5 @@
 <template>
-  <van-popup v-model:show="visible" position="bottom" round :style="{ height: '92%' }" @close="$emit('close')">
+  <van-popup v-model:show="visible" position="center" round :style="{ width: '95%', maxWidth: '1100px', height: '92vh', borderRadius: '14px' }" @close="$emit('close')">
     <div class="sign-modal">
       <div class="sign-header">
         <div class="sign-title">{{ doc?.doc_name || 'Document' }}</div>
