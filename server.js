@@ -2563,63 +2563,21 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
 		} else {
-			// W-9: overlay driver data onto the official IRS form (page 1 only)
-			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
-			if (fs.existsSync(templatePath)) {
-				const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-				const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
-				const templateBytes = fs.readFileSync(templatePath);
-				const pdfDoc = await PdfLibDocument.load(templateBytes);
-				const page1 = pdfDoc.getPages()[0];
-				const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-				const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-				const blue = rgb(0.1, 0.34, 0.86);
-				const driverName = user?.driver_name || signatureText.trim();
-				const addr = application?.address || "";
-				const ssn = application?.ssn || "";
-				const dateStr = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-
-				// W-9 page 1 field positions (PDF coordinate system: 0,0 = bottom-left)
-				// Line 1: Name field (the blank area below the label)
-				page1.drawText(driverName, { x: 68, y: 660, size: 11, font: fontBold, color: blue });
-				// Line 3a: "Individual/sole proprietor" checkbox
-				page1.drawText("X", { x: 64, y: 595, size: 12, font: fontBold, color: blue });
-				// Line 5: Address
-				if (addr) {
-					const parts = addr.split(",").map(s => s.trim());
-					const street = parts[0] || addr;
-					const cityStateZip = parts.slice(1).join(", ");
-					page1.drawText(street, { x: 68, y: 502, size: 10, font, color: blue });
-					// Line 6: City, state, ZIP
-					if (cityStateZip) {
-						page1.drawText(cityStateZip, { x: 68, y: 482, size: 10, font, color: blue });
-					}
-				}
-				// SSN boxes — Part I area
-				if (ssn && ssn.length >= 9) {
-					const digits = ssn.replace(/\D/g, "");
-					if (digits.length === 9) {
-						page1.drawText(digits.slice(0, 3), { x: 462, y: 432, size: 11, font: fontBold, color: blue });
-						page1.drawText(digits.slice(3, 5), { x: 510, y: 432, size: 11, font: fontBold, color: blue });
-						page1.drawText(digits.slice(5, 9), { x: 545, y: 432, size: 11, font: fontBold, color: blue });
-					}
-				}
-				// Signature line — "Sign Here" section
-				page1.drawText(driverName, { x: 120, y: 328, size: 10, font: fontBold, color: blue });
-				// Date next to signature
-				page1.drawText(dateStr, { x: 455, y: 328, size: 9, font, color: blue });
-
-				// Embed drawn signature image near the signature line
-				if (signatureImage) {
-					try {
-						const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
-						const sigImg = await pdfDoc.embedPng(sigBytes);
-						page1.drawImage(sigImg, { x: 200, y: 320, width: 140, height: 35 });
-					} catch { /* skip */ }
-				}
-
-				const signedBytes = await pdfDoc.save();
-				fs.writeFileSync(signedPath, signedBytes);
+			// W-9: fill form fields (same as investor) + overlay signature and date
+			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+			const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
+			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+			const pdfBytes = await fillW9Form({
+				legalName: user?.driver_name || signatureText.trim(),
+				entityType: "Sole Prop",
+				address: application?.address || "",
+				einSsn: application?.ssn || "",
+				signatureText: signatureText.trim(),
+				signatureImage: signatureImage || undefined,
+				effectiveDate,
+			});
+			if (pdfBytes) {
+				fs.writeFileSync(signedPath, pdfBytes);
 			} else {
 				signedPdfUrl = "";
 			}
@@ -2742,37 +2700,15 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) =
 		}
 
 		if (docKey === "w9") {
-			// W-9: overlay driver data onto the IRS form for preview
-			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
-			if (!fs.existsSync(templatePath)) return res.status(404).json({ error: "W-9 template not found" });
-			const templateBytes = fs.readFileSync(templatePath);
-			const pdfDoc = await PdfLibDocument.load(templateBytes);
-			const page1 = pdfDoc.getPages()[0];
-			const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-			const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-			const blue = rgb(0.1, 0.34, 0.86);
-			const addr = application?.address || "";
-			const ssn = application?.ssn || "";
-			// Line 1: Name
-			if (driverName) page1.drawText(driverName, { x: 68, y: 660, size: 11, font: fontBold, color: blue });
-			// Line 3a: Individual/sole proprietor checkbox
-			page1.drawText("X", { x: 64, y: 595, size: 12, font: fontBold, color: blue });
-			// Line 5-6: Address
-			if (addr) {
-				const parts = addr.split(",").map(s => s.trim());
-				page1.drawText(parts[0] || addr, { x: 68, y: 502, size: 10, font, color: blue });
-				if (parts.length > 1) page1.drawText(parts.slice(1).join(", "), { x: 68, y: 482, size: 10, font, color: blue });
-			}
-			// SSN
-			if (ssn) {
-				const digits = ssn.replace(/\D/g, "");
-				if (digits.length === 9) {
-					page1.drawText(digits.slice(0, 3), { x: 462, y: 432, size: 11, font: fontBold, color: blue });
-					page1.drawText(digits.slice(3, 5), { x: 510, y: 432, size: 11, font: fontBold, color: blue });
-					page1.drawText(digits.slice(5, 9), { x: 545, y: 432, size: 11, font: fontBold, color: blue });
-				}
-			}
-			const pdfBytes = await pdfDoc.save();
+			// W-9: fill form fields (same as investor) — preview without signature
+			const pdfBytes = await fillW9Form({
+				legalName: driverName,
+				entityType: "Sole Prop",
+				address: application?.address || "",
+				einSsn: application?.ssn || "",
+				effectiveDate,
+			});
+			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
 			res.setHeader("Content-Type", "application/pdf");
 			res.setHeader("Content-Disposition", 'inline; filename="W-9 Preview.pdf"');
 			return res.send(Buffer.from(pdfBytes));
