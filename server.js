@@ -6739,7 +6739,7 @@ app.get("/api/config/maps-key", (req, res) => {
 });
 
 // GET /api/geocode — reverse geocode via Google Geocoding API
-app.get("/api/geocode", requireAuth, async (req, res) => {
+app.get("/api/geocode", async (req, res) => {
 	const { lat, lng } = req.query;
 	if (!lat || !lng) return res.status(400).json({ error: "lat and lng required" });
 	try {
@@ -6768,7 +6768,7 @@ app.get("/api/geocode", requireAuth, async (req, res) => {
 });
 
 // GET /api/geocode/search — Forward geocode via Google Places API (New)
-app.get("/api/geocode/search", requireAuth, async (req, res) => {
+app.get("/api/geocode/search", async (req, res) => {
 	const { q } = req.query;
 	if (!q || q.trim().length < 3) return res.json({ results: [] });
 	try {
