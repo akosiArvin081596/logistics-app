@@ -1366,12 +1366,27 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 	if (!fs.existsSync(templatePath)) return null;
 	const templateBytes = fs.readFileSync(templatePath);
 	const pdfDoc = await PdfLibDocument.load(templateBytes);
+	const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 	const form = pdfDoc.getForm();
 
+	// Set default font for all fields so appearances render correctly
+	const rawUpdateFAs = (fieldName) => {
+		try { form.getTextField(fieldName).updateAppearances(font); } catch {}
+	};
+
+	// Helper to set text and update appearance
+	const setField = (name, value) => {
+		try {
+			const f = form.getTextField(name);
+			f.setText(value);
+			f.updateAppearances(font);
+		} catch {}
+	};
+
 	// Line 1: Name
-	try { form.getTextField("topmostSubform[0].Page1[0].f1_01[0]").setText(legalName); } catch {}
+	if (legalName) setField("topmostSubform[0].Page1[0].f1_01[0]", legalName);
 	// Line 2: DBA
-	try { if (dba) form.getTextField("topmostSubform[0].Page1[0].f1_02[0]").setText(dba); } catch {}
+	if (dba) setField("topmostSubform[0].Page1[0].f1_02[0]", dba);
 
 	// Line 3a: Entity type checkboxes
 	const entityCheckMap = {
@@ -1383,15 +1398,15 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 	}
 	// LLC tax classification letter
 	if (entityType === "LLC") {
-		try { form.getTextField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]").setText("P"); } catch {}
+		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", "P");
 	}
 
 	// Line 5-6: Address
 	if (address) {
 		const parts = address.split(",").map(s => s.trim());
-		try { form.getTextField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_07[0]").setText(parts[0] || address); } catch {}
+		setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_07[0]", parts[0] || address);
 		if (parts.length > 1) {
-			try { form.getTextField("topmostSubform[0].Page1[0].f1_09[0]").setText(parts.slice(1).join(", ")); } catch {}
+			setField("topmostSubform[0].Page1[0].f1_09[0]", parts.slice(1).join(", "));
 		}
 	}
 
@@ -1400,12 +1415,12 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		const digits = einSsn.replace(/\D/g, "");
 		if (digits.length === 9) {
 			// SSN fields (3 + 2 + 4 digits)
-			try { form.getTextField("topmostSubform[0].Page1[0].f1_11[0]").setText(digits.slice(0, 3)); } catch {}
-			try { form.getTextField("topmostSubform[0].Page1[0].f1_12[0]").setText(digits.slice(3, 5)); } catch {}
-			try { form.getTextField("topmostSubform[0].Page1[0].f1_13[0]").setText(digits.slice(5)); } catch {}
+			setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3));
+			setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5));
+			setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5));
 			// EIN fields (2 + 7 digits)
-			try { form.getTextField("topmostSubform[0].Page1[0].f1_14[0]").setText(digits.slice(0, 2)); } catch {}
-			try { form.getTextField("topmostSubform[0].Page1[0].f1_15[0]").setText(digits.slice(2)); } catch {}
+			setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2));
+			setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2));
 		}
 	}
 
