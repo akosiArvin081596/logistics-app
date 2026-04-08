@@ -364,7 +364,21 @@
           </div>
 
           <div class="form-grid">
-            <div class="field full"><label>Bank Name <span class="req">*</span></label><input v-model="banking.bank_name" placeholder="e.g. Chase, Wells Fargo" required /></div>
+            <div class="field full bank-field">
+              <label>Bank Name <span class="req">*</span></label>
+              <input
+                v-model="banking.bank_name" placeholder="Start typing bank name..."
+                autocomplete="off" required
+                @focus="bankDropOpen = true"
+                @blur="setTimeout(() => bankDropOpen = false, 200)"
+              />
+              <div v-if="bankDropOpen && filteredBanks.length" class="bank-dropdown">
+                <div
+                  v-for="b in filteredBanks" :key="b" class="bank-option"
+                  @mousedown.prevent="banking.bank_name = b; bankDropOpen = false"
+                >{{ b }}</div>
+              </div>
+            </div>
             <div class="field">
               <label>Account Type</label>
               <select v-model="banking.account_type"><option value="">Select...</option><option>Business Checking</option><option>Personal Checking</option><option>Savings</option></select>
@@ -495,6 +509,27 @@ const activeVehicleTab = ref(0)
 const activeModelOptions = computed(() => truckModels[vehicles.value[activeVehicleTab.value]?.make] || [])
 const stateDropOpen = ref(false)
 const photoPreviewUrl = ref('')
+const bankDropOpen = ref(false)
+const usBanks = [
+  'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
+  'PNC Bank','Truist','Goldman Sachs','TD Bank','Capital One',
+  'Fifth Third Bank','Citizens Bank','Ally Bank','KeyBank','Huntington Bank',
+  'M&T Bank','Regions Bank','First Citizens Bank','BMO Harris','HSBC',
+  'Discover Bank','Charles Schwab Bank','American Express Bank','USAA',
+  'Navy Federal Credit Union','Comerica','Zions Bank','Webster Bank',
+  'Valley National Bank','First Horizon','Frost Bank','Culberson Bank',
+  'Associated Bank','Atlantic Capital','Axos Bank','BancorpSouth',
+  'Banner Bank','Columbia Bank','East West Bank','Glacier Bank',
+  'Independent Bank','Pacific Premier','Pinnacle Financial','Renasant Bank',
+  'Seacoast Bank','ServisFirst Bank','South State Bank','Synovus',
+  'Texas Capital Bank','Triumph Bank','UMB Bank','United Bank',
+  'Washington Federal','Western Alliance Bank',
+]
+const filteredBanks = computed(() => {
+  const q = (banking.bank_name || '').toLowerCase()
+  if (!q) return usBanks.slice(0, 10)
+  return usBanks.filter(b => b.toLowerCase().includes(q))
+})
 const filteredStates = computed(() => {
   const q = (vehicles.value[activeVehicleTab.value]?.titleState || '').toLowerCase()
   if (!q) return usStates
@@ -1187,6 +1222,20 @@ async function submitBanking() {
   color: #0f172a; transition: background 0.1s;
 }
 .state-option:hover { background: #f1f5f9; }
+
+/* ─── Bank searchable dropdown ─── */
+.bank-field { position: relative; }
+.bank-dropdown {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 50;
+  background: #fff; border: 1.5px solid #e2e8f0; border-radius: 9px;
+  margin-top: 2px; max-height: 180px; overflow-y: auto;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.1);
+}
+.bank-option {
+  padding: 0.5rem 0.8rem; font-size: 0.84rem; cursor: pointer;
+  color: #0f172a; transition: background 0.1s;
+}
+.bank-option:hover { background: #f1f5f9; }
 
 .biz-config {
   margin-top: 1.25rem;
