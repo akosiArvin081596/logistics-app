@@ -267,7 +267,14 @@
                   </div>
                 </div>
                 <div class="field"><label>Existing Liens</label><input v-model="vehicles[activeVehicleTab].liens" placeholder="None or lien holder name" /></div>
-                <div class="field"><label>Registered Owner</label><input v-model="vehicles[activeVehicleTab].registeredOwner" placeholder="Owner on title" /></div>
+                <div class="field">
+                  <label>Registered Owner</label>
+                  <select v-model="vehicles[activeVehicleTab].registeredOwner">
+                    <option value="">-- Select --</option>
+                    <option v-if="form.legal_name" :value="form.legal_name">{{ form.legal_name }}</option>
+                    <option v-if="form.contact_person && form.contact_person !== form.legal_name" :value="form.contact_person">{{ form.contact_person }}</option>
+                  </select>
+                </div>
                 <div class="field full">
                   <label>Notes <span class="opt">(optional)</span></label>
                   <textarea v-model="vehicles[activeVehicleTab].notes" class="form-textarea" rows="2" placeholder="Any additional notes..."></textarea>
