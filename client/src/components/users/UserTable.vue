@@ -11,6 +11,7 @@
       <thead>
         <tr>
           <th>User</th>
+          <th>Username</th>
           <th>Role</th>
           <th>Full Name</th>
           <th>Details</th>
@@ -22,9 +23,10 @@
       <tbody>
         <tr v-for="user in users" :key="user.id">
           <td>
-            <span :class="['user-avatar', avatarClass(user.Role)]">{{ initials(user.Username) }}</span>
-            {{ user.Username || '' }}
+            <span :class="['user-avatar', avatarClass(user.Role)]">{{ initials(user.FullName || user.Username) }}</span>
+            {{ user.FullName || user.Username || '' }}
           </td>
+          <td class="mono" style="font-size:0.8rem;color:var(--text-dim);">{{ user.Username || '' }}</td>
           <td>
             <span :class="['role-badge', roleClass(user.Role)]">{{ user.Role || '' }}</span>
           </td>
