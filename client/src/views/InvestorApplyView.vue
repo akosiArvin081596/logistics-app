@@ -525,9 +525,11 @@ const banking = reactive({
 // ── State persistence ──
 function saveState() {
   try {
+    // Strip photo base64 from vehicles to avoid exceeding localStorage 5MB limit
+    const vehiclesLite = vehicles.value.map(({ photo, ...rest }) => rest)
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       step: step.value, maxStep: maxStep.value, form: { ...form },
-      vehicles: vehicles.value, banking: { ...banking },
+      vehicles: vehiclesLite, banking: { ...banking },
       vehicleInfoDone: vehicleInfoDone.value, activeVehicleTab: activeVehicleTab.value,
       applicationId: applicationId.value, accessToken: accessToken.value,
       completed: completed.value,
