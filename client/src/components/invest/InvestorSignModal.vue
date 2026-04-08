@@ -73,7 +73,7 @@ const props = defineProps({
   pdfUrl: { type: String, default: '' },
   applicationId: { type: Number, default: 0 },
   accessToken: { type: String, default: '' },
-  vehicleInfo: { type: Object, default: null },
+  vehicleInfo: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['close', 'signed'])
 

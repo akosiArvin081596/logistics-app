@@ -784,6 +784,7 @@ db.exec(`
 `);
 // Migration: add access_token if missing
 try { db.exec("ALTER TABLE investor_applications ADD COLUMN access_token TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE investor_applications ADD COLUMN vehicles_json TEXT DEFAULT '[]'"); } catch { /* exists */ }
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_onboarding (
@@ -1405,13 +1406,17 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		let signedPdfUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
 
 		// Save vehicle info if provided (for Exhibit A)
-		if (vehicleInfo) {
+		const vehiclesArr = Array.isArray(vehicleInfo) ? vehicleInfo : (vehicleInfo ? [vehicleInfo] : []);
+		if (vehiclesArr.length > 0) {
+			const v = vehiclesArr[0];
 			db.prepare(`UPDATE investor_applications SET
 				vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
-				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=? WHERE id=?`
-			).run(vehicleInfo.year || "", vehicleInfo.make || "", vehicleInfo.model || "",
-				vehicleInfo.vin || "", vehicleInfo.mileage || "", vehicleInfo.titleState || "",
-				vehicleInfo.liens || "", vehicleInfo.registeredOwner || "", appId);
+				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=?,
+				vehicles_json=? WHERE id=?`
+			).run(v.year || "", v.make || "", v.model || "",
+				v.vin || "", v.mileage || "", v.titleState || "",
+				v.liens || "", v.registeredOwner || "",
+				JSON.stringify(vehiclesArr), appId);
 		}
 
 		if (docKey === "w9") {
@@ -1481,20 +1486,12 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 			fs.writeFileSync(signedPath, pdfBuffer);
 		} else if (docKey === "vehicle_lease") {
 			const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
-			const vehicles = [];
-			if (application?.vehicle_year || application?.vehicle_make) {
-				vehicles.push({
-					year: application.vehicle_year || "", make: application.vehicle_make || "",
-					model: application.vehicle_model || "", vin: application.vehicle_vin || "",
-					licensePlate: "", titleState: application.vehicle_title_state || "",
-				});
-			}
 			const pdfBuffer = await generateVehicleLease({
 				legalName: application?.legal_name || "", dba: application?.dba || "",
 				entityType: application?.entity_type || "", address: application?.address || "",
 				contactPerson: application?.contact_person || "", phone: application?.phone || "",
 				email: application?.email || "", effectiveDate,
-				signatureText: signatureText.trim(), signatureImage, signedAt, vehicles,
+				signatureText: signatureText.trim(), signatureImage, signedAt, vehicles: vehiclesArr,
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
 		}
@@ -1539,8 +1536,9 @@ app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", async (req,
 		}
 
 		if (docKey === "vehicle_lease") {
-			const vehicles = [];
-			if (application?.vehicle_year || application?.vehicle_make) {
+			let vehicles = [];
+			try { vehicles = JSON.parse(application?.vehicles_json || "[]"); } catch { /* skip */ }
+			if (!vehicles.length && (application?.vehicle_year || application?.vehicle_make)) {
 				vehicles.push({
 					year: application.vehicle_year || "", make: application.vehicle_make || "",
 					model: application.vehicle_model || "", vin: application.vehicle_vin || "",

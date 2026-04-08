@@ -398,7 +398,7 @@
     <InvestorSignModal
       :show="showSignModal" :doc="selectedDoc" :pdf-url="selectedPdfUrl"
       :application-id="applicationId" :access-token="accessToken"
-      :vehicle-info="vehicleInfoDone ? vehicles[0] : null"
+      :vehicle-info="vehicles"
       @close="showSignModal = false" @signed="handleSigned"
     />
     <LocationPickerModal
