@@ -283,10 +283,8 @@
                   <div class="field full">
                     <label>Truck Photo <span class="opt">(optional)</span></label>
                     <div class="photo-row">
-                      <div class="photo-input-wrap">
-                        <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
-                      </div>
-                      <img v-if="vehicles[activeVehicleTab].photo" :src="vehicles[activeVehicleTab].photo" class="photo-preview" />
+                      <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
+                      <a v-if="vehicles[activeVehicleTab].photo" href="#" class="photo-view-link" @click.prevent="photoPreviewUrl = vehicles[activeVehicleTab].photo">View uploaded photo</a>
                     </div>
                   </div>
                 </div>
@@ -384,6 +382,12 @@
         </div>
       </template>
     </main>
+
+    <!-- Photo fullscreen preview -->
+    <div v-if="photoPreviewUrl" class="photo-overlay" @click="photoPreviewUrl = ''">
+      <button class="photo-overlay-close">&times;</button>
+      <img :src="photoPreviewUrl" class="photo-overlay-img" />
+    </div>
 
     <!-- Modals -->
     <InvestorSignModal
@@ -484,6 +488,7 @@ const vehicles = ref([emptyVehicle()])
 const activeVehicleTab = ref(0)
 const activeModelOptions = computed(() => truckModels[vehicles.value[activeVehicleTab.value]?.make] || [])
 const stateDropOpen = ref(false)
+const photoPreviewUrl = ref('')
 const filteredStates = computed(() => {
   const q = (vehicles.value[activeVehicleTab.value]?.titleState || '').toLowerCase()
   if (!q) return usStates
@@ -1111,17 +1116,30 @@ async function submitBanking() {
 }
 .photo-row {
   display: flex;
-  align-items: flex-start;
-  gap: 1rem;
+  align-items: center;
+  gap: 0.75rem;
 }
-.photo-input-wrap { flex: 1; min-width: 0; }
-.photo-preview {
-  width: 160px;
-  height: 100px;
-  object-fit: cover;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  flex-shrink: 0;
+.photo-view-link {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #3b82f6;
+  white-space: nowrap;
+}
+.photo-view-link:hover { text-decoration: underline; }
+.photo-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+.photo-overlay-close {
+  position: absolute; top: 1rem; right: 1.5rem;
+  font-size: 2rem; color: #fff; background: none; border: none;
+  cursor: pointer; z-index: 1001;
+}
+.photo-overlay-img {
+  max-width: 90vw; max-height: 90vh;
+  object-fit: contain; border-radius: 8px;
 }
 /* ─── State searchable dropdown ─── */
 .state-field { position: relative; }
