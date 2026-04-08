@@ -1410,17 +1410,19 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		}
 	}
 
-	// EIN/SSN — fill both SSN and EIN fields
+	// EIN/SSN — fill available digits into both SSN and EIN fields
 	if (einSsn) {
 		const digits = einSsn.replace(/\D/g, "");
+		// SSN fields (3 + 2 + 4) — only if exactly 9 digits
 		if (digits.length === 9) {
-			// SSN fields (3 + 2 + 4 digits)
 			setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3));
 			setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5));
 			setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5));
-			// EIN fields (2 + 7 digits)
+		}
+		// EIN fields (2 + remaining) — fill if at least 2 digits
+		if (digits.length >= 2) {
 			setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2));
-			setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2));
+			if (digits.length > 2) setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2));
 		}
 	}
 
@@ -1434,7 +1436,7 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 		const blue = rgb(0.1, 0.34, 0.86);
 		// "Sign Here" line on page 1 — "Signature of U.S. person" field
-		const sigY = 140;
+		const sigY = 128;
 		page1.drawText(signatureText, { x: 120, y: sigY, size: 10, font: fontBold, color: blue });
 		if (effectiveDate) page1.drawText(effectiveDate, { x: 460, y: sigY, size: 9, font, color: blue });
 		if (signatureImage) {
