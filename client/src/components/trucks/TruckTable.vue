@@ -199,6 +199,7 @@
     />
 
     <!-- View Truck Detail Modal -->
+    <Teleport to="body">
     <div v-if="viewTruck" class="confirm-overlay" @click.self="viewTruck = null">
       <div class="confirm-box" style="max-width:700px;max-height:85vh;overflow-y:auto;">
         <h3 style="margin-bottom:1rem;">{{ viewTruck.UnitNumber }} — {{ [viewTruck.Make, viewTruck.Model].filter(Boolean).join(' ') }}</h3>
@@ -224,6 +225,7 @@
         </div>
       </div>
     </div>
+    </Teleport>
   </div>
 </template>
 
