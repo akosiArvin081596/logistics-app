@@ -2024,7 +2024,9 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 					application.email || "", application.ein_ssn || "", application.tax_classification || "",
 					application.contact_person || "", application.contact_title || "");
 
-			// Create trucks from application vehicles
+			// Create trucks from application vehicles (owner_id = investor record ID, matching /api/trucks query)
+			const investorRecord = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(userId);
+			const ownerId = investorRecord ? investorRecord.id : userId;
 			let vehicles = [];
 			try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
 			const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
@@ -2036,7 +2038,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, notes)
 						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
-						truckStatus, userId, parseFloat(v.purchasePrice) || 0,
+						truckStatus, ownerId, parseFloat(v.purchasePrice) || 0,
 						v.titleStatus || "Clean", v.titleState ? `Title State: ${v.titleState}` : "");
 				} catch { /* skip duplicate */ }
 			}
