@@ -147,7 +147,7 @@
             <div class="detail-section">
               <h4>References</h4>
               <template v-if="parsedReferences.length">
-                <div v-for="(ref, i) in parsedReferences" :key="i" class="detail-row"><span>Reference {{ i + 1 }}:</span><span>{{ ref.name }} | {{ ref.phone }} | {{ ref.relationship }}</span></div>
+                <div v-for="(ref, i) in parsedReferences" :key="i" class="detail-row"><span>Reference {{ i + 1 }}:</span><span>Company: {{ ref.name || '—' }} | Phone: {{ ref.phone || '—' }} | Email: {{ ref.relationship || '—' }}{{ ref.contactPerson ? ' | Contact: ' + ref.contactPerson : '' }}</span></div>
               </template>
               <div v-else-if="selectedApp.reference_info" class="detail-row"><span>Reference:</span><span>{{ selectedApp.reference_info }}</span></div>
               <div v-if="selectedApp.additional_info" class="detail-row"><span>Additional:</span><span>{{ selectedApp.additional_info }}</span></div>
