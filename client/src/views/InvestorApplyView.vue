@@ -415,7 +415,7 @@ async function submitBanking() {
 /* ─── Page ─── */
 .invest-page {
   min-height: 100vh;
-  background: linear-gradient(170deg, #f0f2f7 0%, #e4e9f2 100%);
+  background: #f0f2f7;
   padding: 2.5rem 1rem 3rem;
   font-family: 'DM Sans', system-ui, sans-serif;
 }
