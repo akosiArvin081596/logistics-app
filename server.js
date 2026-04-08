@@ -274,6 +274,7 @@ try { db.exec("ALTER TABLE trucks ADD COLUMN driver_pay_daily REAL DEFAULT 0"); 
 // Migration: add per-truck business config columns
 try { db.exec("ALTER TABLE trucks ADD COLUMN purchase_price REAL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE trucks ADD COLUMN title_status TEXT DEFAULT 'Clean'"); } catch {}
+try { db.exec("ALTER TABLE trucks ADD COLUMN title_state TEXT DEFAULT ''"); } catch {}
 // Note: maintenance_fund_monthly already added via rename-recreate if needed;
 // safe ALTER in case column doesn't exist yet on this instance
 try { db.prepare("SELECT maintenance_fund_monthly FROM trucks LIMIT 1").get(); }
@@ -2033,11 +2034,11 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				const unitNum = `INV-${appId}-${String.fromCharCode(65 + i)}`;
 				const truckStatus = validTruckStatus.includes(v.status) ? v.status : "Active";
 				try {
-					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, notes)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, title_state, notes)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
 						truckStatus, userId, parseFloat(v.purchasePrice) || 0,
-						v.titleStatus || "Clean", v.titleState ? `Title State: ${v.titleState}` : "");
+						v.titleStatus || "Clean", v.titleState || "", "");
 				} catch { /* skip duplicate */ }
 			}
 
@@ -3524,6 +3525,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 		DriverPayDaily: t.driver_pay_daily || 0,
 		PurchasePrice: t.purchase_price || 0,
 		TitleStatus: t.title_status || 'Clean',
+		TitleState: t.title_state || '',
 		MaintenanceFundMonthly: t.maintenance_fund_monthly || 0,
 	}));
 	res.json({ trucks });
