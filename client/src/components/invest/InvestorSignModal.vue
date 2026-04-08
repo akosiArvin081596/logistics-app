@@ -28,9 +28,20 @@
               <span>I have read and agree to the terms of this document</span>
             </label>
 
-            <div class="sign-field">
+            <div class="sign-field name-field">
               <label class="sign-field-label">Full Name</label>
-              <input v-model="signatureText" type="text" class="sign-input" placeholder="Type your full name" :disabled="!agreed" />
+              <input
+                v-model="signatureText" type="text" class="sign-input"
+                placeholder="Type your full name" :disabled="!agreed"
+                @focus="nameDropOpen = true"
+                @blur="setTimeout(() => nameDropOpen = false, 200)"
+              />
+              <div v-if="nameDropOpen && agreed && filteredNames.length" class="name-dropdown">
+                <div
+                  v-for="name in filteredNames" :key="name" class="name-option"
+                  @mousedown.prevent="signatureText = name; nameDropOpen = false"
+                >{{ name }}</div>
+              </div>
             </div>
 
             <div class="sign-field">
@@ -74,6 +85,7 @@ const props = defineProps({
   applicationId: { type: Number, default: 0 },
   accessToken: { type: String, default: '' },
   vehicleInfo: { type: Array, default: () => [] },
+  suggestedNames: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['close', 'signed'])
 
@@ -85,6 +97,13 @@ const signing = ref(false)
 const canvasRef = ref(null)
 const isDrawing = ref(false)
 const hasDrawn = ref(false)
+const nameDropOpen = ref(false)
+const filteredNames = computed(() => {
+  const q = signatureText.value.toLowerCase()
+  const names = props.suggestedNames.filter(n => n)
+  if (!q) return names
+  return names.filter(n => n.toLowerCase().includes(q))
+})
 
 watch(() => props.show, async (v) => {
   if (v) {
@@ -227,6 +246,18 @@ async function handleSign() {
   font-size: 0.82rem; cursor: pointer; color: #475569;
 }
 .sign-field { display: flex; flex-direction: column; gap: 0.3rem; }
+.name-field { position: relative; }
+.name-dropdown {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 10;
+  background: #fff; border: 1px solid #e2e4ea; border-radius: 8px;
+  margin-top: 2px; max-height: 120px; overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.name-option {
+  padding: 0.5rem 0.75rem; font-size: 0.85rem; cursor: pointer;
+  color: #0f172a; transition: background 0.1s;
+}
+.name-option:hover { background: #f1f5f9; }
 .sign-field-label {
   display: flex; justify-content: space-between; align-items: center;
   font-size: 0.78rem; font-weight: 600; color: #475569;

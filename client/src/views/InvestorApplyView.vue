@@ -399,6 +399,7 @@
       :show="showSignModal" :doc="selectedDoc" :pdf-url="selectedPdfUrl"
       :application-id="applicationId" :access-token="accessToken"
       :vehicle-info="vehicles"
+      :suggested-names="[form.contact_person, form.legal_name].filter(Boolean)"
       @close="showSignModal = false" @signed="handleSigned"
     />
     <LocationPickerModal
