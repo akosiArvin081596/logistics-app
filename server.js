@@ -2064,6 +2064,91 @@ app.post("/api/investor-outreach/send", requireRole("Super Admin"), async (req, 
 		let sentCount = 0;
 		const failures = [];
 
+		// Build professional HTML email template wrapping admin's message
+		const bodyHtml = body.split(/\n\n+/).map(p => `<p style="margin:0 0 14px;line-height:1.7;color:#334155">${p.replace(/\n/g, "<br>")}</p>`).join("");
+		const investLink = "https://app.logisx.com/invest";
+		const outreachHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+		<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Helvetica Neue',Arial,sans-serif">
+		<div style="max-width:620px;margin:0 auto;padding:24px 16px">
+			<!-- Header -->
+			<div style="background:#0f2847;padding:28px 32px;border-radius:14px 14px 0 0;text-align:center">
+				<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:38px" />
+			</div>
+			<!-- Body -->
+			<div style="background:#ffffff;padding:36px 32px 28px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0">
+				${bodyHtml}
+
+				<!-- CTA Button -->
+				<div style="text-align:center;margin:32px 0">
+					<a href="${investLink}" style="display:inline-block;background:#0f2847;color:#ffffff;padding:16px 44px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px;letter-spacing:0.02em">Start Your Application &rarr;</a>
+				</div>
+
+				<!-- Value Props -->
+				<div style="margin:28px 0 8px">
+					<div style="font-size:13px;font-weight:700;color:#0f172a;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:14px;text-align:center">Why Partner With LogisX?</div>
+					<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
+						<tr>
+							<td style="width:33%;padding:0 6px;vertical-align:top">
+								<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:18px 14px;text-align:center">
+									<div style="font-size:24px;margin-bottom:6px">&#128666;</div>
+									<div style="font-size:12px;font-weight:700;color:#0369a1;margin-bottom:4px">Fleet Management</div>
+									<div style="font-size:11px;color:#64748b;line-height:1.4">Full operational support for your vehicles</div>
+								</div>
+							</td>
+							<td style="width:33%;padding:0 6px;vertical-align:top">
+								<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:18px 14px;text-align:center">
+									<div style="font-size:24px;margin-bottom:6px">&#128200;</div>
+									<div style="font-size:12px;font-weight:700;color:#15803d;margin-bottom:4px">Revenue Tracking</div>
+									<div style="font-size:11px;color:#64748b;line-height:1.4">Real-time financial dashboard &amp; reporting</div>
+								</div>
+							</td>
+							<td style="width:33%;padding:0 6px;vertical-align:top">
+								<div style="background:#fefce8;border:1px solid #fef08a;border-radius:10px;padding:18px 14px;text-align:center">
+									<div style="font-size:24px;margin-bottom:6px">&#9889;</div>
+									<div style="font-size:12px;font-weight:700;color:#a16207;margin-bottom:4px">Simple Onboarding</div>
+									<div style="font-size:11px;color:#64748b;line-height:1.4">3-step digital process, done in minutes</div>
+								</div>
+							</td>
+						</tr>
+					</table>
+				</div>
+
+				<!-- Steps -->
+				<div style="margin:24px 0 0">
+					<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
+						<tr>
+							<td style="text-align:center;padding:10px 4px">
+								<div style="width:32px;height:32px;border-radius:50%;background:#0f2847;color:#fff;font-weight:700;font-size:14px;line-height:32px;margin:0 auto 6px">1</div>
+								<div style="font-size:11px;font-weight:600;color:#0f172a">Application</div>
+								<div style="font-size:10px;color:#94a3b8">Company &amp; contact info</div>
+							</td>
+							<td style="text-align:center;color:#cbd5e1;font-size:18px">&rarr;</td>
+							<td style="text-align:center;padding:10px 4px">
+								<div style="width:32px;height:32px;border-radius:50%;background:#0f2847;color:#fff;font-weight:700;font-size:14px;line-height:32px;margin:0 auto 6px">2</div>
+								<div style="font-size:11px;font-weight:600;color:#0f172a">Documents</div>
+								<div style="font-size:10px;color:#94a3b8">Sign agreements &amp; W-9</div>
+							</td>
+							<td style="text-align:center;color:#cbd5e1;font-size:18px">&rarr;</td>
+							<td style="text-align:center;padding:10px 4px">
+								<div style="width:32px;height:32px;border-radius:50%;background:#0f2847;color:#fff;font-weight:700;font-size:14px;line-height:32px;margin:0 auto 6px">3</div>
+								<div style="font-size:11px;font-weight:600;color:#0f172a">Banking</div>
+								<div style="font-size:10px;color:#94a3b8">ACH settlement details</div>
+							</td>
+						</tr>
+					</table>
+				</div>
+			</div>
+			<!-- Footer -->
+			<div style="background:#f8fafc;padding:24px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 14px 14px;text-align:center">
+				<div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:4px">LogisX Inc.</div>
+				<div style="font-size:11px;color:#94a3b8;line-height:1.6">
+					4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381<br>
+					USDOT# 4302683 | <a href="mailto:info@logisx.com" style="color:#3b82f6;text-decoration:none">info@logisx.com</a>
+				</div>
+			</div>
+		</div>
+		</body></html>`;
+
 		for (const email of emails) {
 			const trimmed = email.trim();
 			if (!trimmed || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
@@ -2076,7 +2161,7 @@ app.post("/api/investor-outreach/send", requireRole("Super Admin"), async (req, 
 					to: trimmed,
 					subject,
 					text: body,
-					html: body.replace(/\n/g, "<br>"),
+					html: outreachHtml,
 				});
 				logInsert.run(trimmed, subject, sentBy, "sent");
 				sentCount++;
