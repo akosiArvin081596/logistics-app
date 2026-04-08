@@ -2411,6 +2411,113 @@ async function checkAndCompleteOnboarding(userId) {
 	// Update to documents_signed if all docs signed
 	if (allSigned && ob.status === "documents_pending") {
 		db.prepare("UPDATE driver_onboarding SET status = 'documents_signed' WHERE user_id = ?").run(userId);
+
+		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+		const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
+		const driverName = user?.driver_name || "";
+		const driverEmail = user?.email || application?.email || "";
+
+		// Add driver to drivers_directory immediately
+		if (driverName) {
+			syncDriverToCarrierSheet(driverName, { email: driverEmail, companyName: user?.company_name || "", action: "add" });
+		}
+
+		// Notify driver
+		if (driverName) {
+			insertNotification.run(
+				driverName.trim().toLowerCase(), "documents_signed",
+				"Documents Received", "All onboarding documents have been signed. Stand by for the next steps.",
+				JSON.stringify({ userId })
+			);
+		}
+
+		// Collect signed PDF attachments
+		const signedDocs = db.prepare("SELECT doc_key, doc_name, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND signed = 1").all(userId);
+		const pdfAttachments = signedDocs.map(d => {
+			if (!d.signed_pdf_url) return null;
+			const filepath = path.join(__dirname, d.signed_pdf_url.replace(/^\//, ""));
+			return fs.existsSync(filepath) ? { filename: `${d.doc_name}.pdf`, path: filepath } : null;
+		}).filter(Boolean);
+
+		// Email to driver — documents received + next steps
+		const driverDocsHtml = `
+		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
+			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
+				<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
+			</div>
+			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none">
+				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Onboarding Status: Documents Received!</h2>
+				<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${driverName}</b>,</p>
+				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
+
+				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 24px">
+					<div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:12px">Here is what happens next:</div>
+					<table style="width:100%;border-collapse:collapse;font-size:13px;color:#334155">
+						<tr>
+							<td style="padding:8px 10px 8px 0;vertical-align:top;width:24px"><div style="width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px">1</div></td>
+							<td style="padding:8px 0;line-height:1.5;border-bottom:1px solid #f1f5f9"><b>Pre-Employment Screening:</b> A member of our safety team will contact you shortly to schedule your <b>pre-appointment drug test</b>.</td>
+						</tr>
+						<tr>
+							<td style="padding:8px 10px 8px 0;vertical-align:top"><div style="width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px">2</div></td>
+							<td style="padding:8px 0;line-height:1.5;border-bottom:1px solid #f1f5f9"><b>FMCSA Clearinghouse:</b> Make sure you are enrolled and have granted LogisX Inc. permission to run your full query.</td>
+						</tr>
+						<tr>
+							<td style="padding:8px 10px 8px 0;vertical-align:top"><div style="width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px">3</div></td>
+							<td style="padding:8px 0;line-height:1.5"><b>Driver Training:</b> While we finalize your background check, it's time to get in the right mindset.</td>
+						</tr>
+					</table>
+				</div>
+
+				<div style="background:#fffbeb;border:1px solid #fef3c7;border-left:4px solid #f59e0b;border-radius:8px;padding:14px 18px;margin:0 0 24px">
+					<div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:6px">Pro-Tip: Don't end up on the internet for the wrong reasons.</div>
+					<p style="margin:0;font-size:13px;color:#78350f;line-height:1.5">Check out <b>Bonehead Truckers</b> — study them so you don't repeat them.</p>
+				</div>
+
+				<div style="text-align:center;margin:0 0 24px">
+					<a href="https://www.youtube.com/watch?v=KpHxeBQ3TSc&list=PL7DBE50EBBC23F024" style="display:inline-block;background:#dc2626;color:#ffffff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">&#9654; Watch Bonehead Truckers</a>
+				</div>
+
+				<p style="margin:0 0 6px;font-size:14px;color:#334155;text-align:center">Stand by for a call from our safety coordinator.</p>
+				<p style="margin:0;font-size:14px;font-weight:700;color:#0f172a;text-align:center">&mdash; The LogisX Safety Team</p>
+			</div>
+			<div style="padding:16px 32px;text-align:center;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
+				<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
+			</div>
+		</div>`;
+		if (driverEmail) sendEmail(driverEmail, "LogisX - Onboarding Status: Documents Received!", driverDocsHtml);
+
+		// Email to admin — all docs signed + attachments
+		const adminDocsHtml = `
+		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
+			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
+				<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
+			</div>
+			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
+				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Driver Documents Signed</h2>
+				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Driver <b>${driverName}</b> has signed all ${ONBOARDING_DOCS.length} onboarding documents. Signed copies are attached.</p>
+
+				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
+					<table style="width:100%;border-collapse:collapse;font-size:14px">
+						<tr><td style="padding:5px 0;color:#64748b;width:140px">Driver Name</td><td style="padding:5px 0;font-weight:600">${driverName}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${driverEmail}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${application?.phone || "—"}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${application?.position || "—"}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Documents</td><td style="padding:5px 0;font-weight:600;color:#16a34a">${ONBOARDING_DOCS.length}/${ONBOARDING_DOCS.length} Signed</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Status</td><td style="padding:5px 0;font-weight:600;color:#d97706">Awaiting Drug Test</td></tr>
+					</table>
+				</div>
+
+				<p style="font-size:13px;color:#64748b">Signed PDFs are attached to this email.</p>
+
+				<div style="text-align:center;margin:24px 0">
+					<a href="https://app.logisx.com/applications" style="display:inline-block;background:#0f2847;color:#ffffff;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">View Applications</a>
+				</div>
+			</div>
+			<div style="padding:16px 32px;text-align:center">
+				<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
+			</div>
+		</div>`;
+		sendEmail("info@logisx.com", `Driver Documents Signed: ${driverName}`, adminDocsHtml, pdfAttachments);
 	}
 	// Fully onboarded if all signed AND drug test passed
 	if (allSigned && ob.drug_test_result === "pass") {
