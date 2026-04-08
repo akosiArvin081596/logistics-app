@@ -79,6 +79,7 @@
       <DocumentSignModal
         :show="showSignModal"
         :doc="selectedDoc"
+        :driver-name="driverStore.driverName"
         @close="showSignModal = false"
         @signed="onDocSigned"
       />

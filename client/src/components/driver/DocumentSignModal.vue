@@ -107,6 +107,7 @@ import { useToast } from '../../composables/useToast'
 const props = defineProps({
   show: { type: Boolean, default: false },
   doc: { type: Object, default: null },
+  driverName: { type: String, default: '' },
 })
 const emit = defineEmits(['close', 'signed'])
 
@@ -155,7 +156,7 @@ const canSign = computed(() => {
 watch(() => props.show, async (v) => {
   if (v) {
     agreed.value = false
-    signatureText.value = ''
+    signatureText.value = props.driverName || ''
     signing.value = false
     hasDrawn.value = false
     pdfUrlOverride.value = ''
