@@ -1436,7 +1436,7 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 		const blue = rgb(0.1, 0.34, 0.86);
 		// "Sign Here" line on page 1 — "Signature of U.S. person" field
-		const sigY = 165;
+		const sigY = 185;
 		page1.drawText(signatureText, { x: 120, y: sigY, size: 10, font: fontBold, color: blue });
 		if (effectiveDate) page1.drawText(effectiveDate, { x: 460, y: sigY, size: 9, font, color: blue });
 		if (signatureImage) {
