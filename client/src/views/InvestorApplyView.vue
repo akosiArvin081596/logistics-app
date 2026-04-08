@@ -281,7 +281,7 @@
                 </div>
                 <div class="field full">
                   <label>Truck Photo <span class="opt">(optional)</span></label>
-                  <input type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
+                  <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
                   <img v-if="vehicles[activeVehicleTab].photo" :src="vehicles[activeVehicleTab].photo" class="photo-preview" />
                 </div>
               </div>
