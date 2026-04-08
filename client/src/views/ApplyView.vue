@@ -77,7 +77,7 @@
             <p>{{ sidebarSteps[step].desc }}</p>
           </div>
 
-          <StepPersonalInfo v-if="step === 0" :form="form" />
+          <StepPersonalInfo v-if="step === 0" :form="form" @open-map="showMapPicker = true" />
           <StepExperience v-if="step === 1" :form="form" />
           <StepDrivingHistory v-if="step === 2" :form="form" />
           <StepCertifications v-if="step === 3" :form="form" />
@@ -103,11 +103,17 @@
         </div>
       </template>
     </main>
+
+    <LocationPickerModal
+      :open="showMapPicker" label="Current Address"
+      @close="showMapPicker = false" @confirm="onMapConfirm"
+    />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive } from 'vue'
+import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import StepPersonalInfo from '../components/apply/StepPersonalInfo.vue'
 import StepExperience from '../components/apply/StepExperience.vue'
 import StepDrivingHistory from '../components/apply/StepDrivingHistory.vue'
@@ -127,6 +133,12 @@ const maxStep = ref(0)
 const submitting = ref(false)
 const submitted = ref(false)
 const error = ref('')
+const showMapPicker = ref(false)
+
+function onMapConfirm({ displayName }) {
+  if (displayName) form.address = displayName
+  showMapPicker.value = false
+}
 
 const defaultForm = () => ({
   first_name: '', last_name: '', email: '', phone: '', dob: '', address: '', ssn: '', drivers_license: '', position: '',

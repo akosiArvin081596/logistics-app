@@ -15,7 +15,18 @@
     <div class="field"><label class="field-label">Date of Birth <span class="req">*</span></label><div class="input-wrap"><input v-model="form.dob" type="date" required /></div></div>
     <div class="field">
       <label class="field-label">Current Address and Zip Code <span class="req">*</span></label>
-      <div class="input-wrap"><input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" /></div>
+      <div class="address-row">
+        <div class="address-input-wrap">
+          <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" />
+          <button type="button" class="addr-action-btn" :disabled="geolocating" @click="useCurrentLocation" title="Use my current location">
+            <svg v-if="!geolocating" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+            <span v-else class="spinner"></span>
+          </button>
+        </div>
+        <button type="button" class="map-btn" @click="$emit('open-map')" title="Pick on map">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
+        </button>
+      </div>
     </div>
     <div class="grid grid-cols-2 gap-4">
       <div class="field"><label class="field-label">Social Security Number (SSN) <span class="req">*</span></label><div class="input-wrap"><input v-model="form.ssn" placeholder="XXX-XX-XXXX" required /></div></div>
@@ -79,9 +90,30 @@
 import { ref, reactive, onMounted } from 'vue'
 
 const props = defineProps({ form: { type: Object, required: true } })
+const emit = defineEmits(['open-map'])
 const positions = ['Company Driver', 'Owner Operator', 'Other']
 const addressInput = ref(null)
+const geolocating = ref(false)
 const fileTypes = reactive({ cdl_front: false, cdl_back: false, medical_card: false })
+
+async function useCurrentLocation() {
+  if (!navigator.geolocation) return
+  geolocating.value = true
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      try {
+        const res = await fetch(`/api/geocode?lat=${pos.coords.latitude}&lng=${pos.coords.longitude}`)
+        if (res.ok) {
+          const data = await res.json()
+          if (data.results?.[0]?.formatted_address) props.form.address = data.results[0].formatted_address
+        }
+      } catch { /* skip */ }
+      geolocating.value = false
+    },
+    () => { geolocating.value = false },
+    { timeout: 8000, enableHighAccuracy: false }
+  )
+}
 
 function handleFile(event, field) {
   const file = event.target.files[0]
@@ -169,6 +201,32 @@ function initAutocomplete() {
 .pdf-icon {
   font-size: 2rem;
 }
+.address-row { display: flex; gap: 0.5rem; }
+.address-input-wrap { flex: 1; position: relative; }
+.address-input-wrap input { width: 100%; padding: 0.7rem 0.85rem; padding-right: 38px; border: 1.5px solid #e2e4ea; border-radius: 10px; background: #f9fafb; font-size: 0.88rem; font-family: inherit; color: #111827; transition: border-color 0.15s, box-shadow 0.15s; }
+.address-input-wrap input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); background: #fff; outline: none; }
+.address-input-wrap input::placeholder { color: #c4c8d0; }
+.addr-action-btn {
+  position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
+  width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 6px; background: transparent;
+  color: #94a3b8; cursor: pointer; transition: all 0.15s;
+}
+.addr-action-btn:hover { background: #f1f5f9; color: #475569; }
+.addr-action-btn:disabled { cursor: wait; opacity: 0.4; }
+.map-btn {
+  flex-shrink: 0; width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid #e2e4ea; border-radius: 10px; background: #fff;
+  color: #94a3b8; cursor: pointer; transition: all 0.15s;
+}
+.map-btn:hover { border-color: #3b82f6; color: #3b82f6; }
+.spinner {
+  display: inline-block; width: 14px; height: 14px;
+  border: 2px solid #94a3b8; border-top-color: transparent;
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 640px) {
   .upload-grid { grid-template-columns: 1fr; }
 }
