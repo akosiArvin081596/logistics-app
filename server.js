@@ -1298,26 +1298,90 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 				seedDoc.run(userId, doc.key, doc.name, doc.confidential);
 			}
 
-			logAudit(req, "accept_application", "application", appId, `Accepted and created driver account "${username}" for ${fullName}`);
+			logAudit(req, "accept_application", "application", appId, `Accepted driver "${fullName}", created account "${username}"`);
 
-			// Email temp credentials to driver
-			const credEmail = `<h2>Welcome to LogisX!</h2>
-				<p>Hi ${fullName},</p>
-				<p>Your driver application has been <b>accepted</b>. A temporary account has been created for you to continue the onboarding process.</p>
-				<h3>Your Login Credentials</h3>
-				<table style="border-collapse:collapse;margin:1rem 0;">
-					<tr><td style="padding:8px 16px;background:#f9fafb;font-weight:600;">Username</td><td style="padding:8px 16px;font-family:monospace;color:#1d4ed8;font-weight:700;">${username}</td></tr>
-					<tr><td style="padding:8px 16px;background:#fef3c7;font-weight:600;">Temp Password</td><td style="padding:8px 16px;font-family:monospace;color:#b45309;font-weight:700;">${tempPassword}</td></tr>
-				</table>
-				<p>Please log in at <a href="https://app.logisx.com/login">app.logisx.com/login</a> to sign your onboarding documents.</p>
-				<p>Best regards,<br>LogisX Inc.</p>`;
-			sendEmail(application.email, "LogisX - Your Application Has Been Accepted!", credEmail);
-
-			return res.json({
+			res.json({
 				success: true,
 				accountCreated: true,
 				credentials: { username, tempPassword, userId, driverName: fullName },
 			});
+
+			// Welcome email to driver (branded)
+			const driverWelcomeHtml = `
+			<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
+				<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
+					<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
+				</div>
+				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none">
+					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Welcome to LogisX!</h2>
+					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${fullName}</b>,</p>
+					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Congratulations! Your driver application has been <b style="color:#16a34a">approved</b>. Your account is ready — please log in and complete your onboarding documents to get on the road.</p>
+
+					<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px;margin:0 0 20px">
+						<div style="font-size:12px;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Your Login Credentials</div>
+						<table style="width:100%;border-collapse:collapse;font-size:14px">
+							<tr><td style="padding:6px 0;color:#64748b;width:130px">Username</td><td style="padding:6px 0;font-weight:700;color:#0f172a;font-family:monospace">${username}</td></tr>
+							<tr><td style="padding:6px 0;color:#64748b">Temporary Password</td><td style="padding:6px 0;font-weight:700;color:#d97706;font-family:monospace">${tempPassword}</td></tr>
+						</table>
+					</div>
+
+					<div style="text-align:center;margin:28px 0">
+						<a href="https://app.logisx.com/login" style="display:inline-block;background:#0f2847;color:#ffffff;padding:14px 40px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px">Login &amp; Start Onboarding &rarr;</a>
+					</div>
+
+					<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
+						<div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:8px">What to expect:</div>
+						<table style="width:100%;border-collapse:collapse;font-size:13px;color:#334155">
+							<tr><td style="padding:5px 8px 5px 0;vertical-align:top;width:20px"><b>1.</b></td><td style="padding:5px 0;border-bottom:1px solid #f1f5f9">Sign 5 onboarding documents (Contractor Agreement, Equipment Policy, W-9, Mobile Policy, Substance Policy)</td></tr>
+							<tr><td style="padding:5px 8px 5px 0;vertical-align:top"><b>2.</b></td><td style="padding:5px 0;border-bottom:1px solid #f1f5f9">Complete pre-employment drug test (our safety team will contact you)</td></tr>
+							<tr><td style="padding:5px 8px 5px 0;vertical-align:top"><b>3.</b></td><td style="padding:5px 0">Once cleared, you'll be fully onboarded and ready to receive loads</td></tr>
+						</table>
+					</div>
+
+					<div style="background:#fffbeb;border:1px solid #fef3c7;border-radius:8px;padding:12px 16px;margin:0 0 20px">
+						<p style="margin:0;font-size:13px;color:#92400e;line-height:1.5"><b>Important:</b> Please change your password after your first login for security.</p>
+					</div>
+
+					<p style="color:#64748b;font-size:13px;margin:20px 0 0">Questions? Contact us at <a href="mailto:info@logisx.com" style="color:#3b82f6;text-decoration:none">info@logisx.com</a>.</p>
+				</div>
+				<div style="padding:16px 32px;text-align:center;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
+					<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
+				</div>
+			</div>`;
+			sendEmail(application.email, "Welcome to LogisX — Your Driver Account is Ready", driverWelcomeHtml);
+
+			// Admin notification
+			const adminDriverAcceptHtml = `
+			<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
+				<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
+					<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
+				</div>
+				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
+					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Driver Application Accepted</h2>
+					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Driver <b>${fullName}</b> has been accepted and their account has been created. They will now proceed to the onboarding phase.</p>
+
+					<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
+						<table style="width:100%;border-collapse:collapse;font-size:14px">
+							<tr><td style="padding:5px 0;color:#64748b;width:140px">Driver Name</td><td style="padding:5px 0;font-weight:600">${fullName}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${username}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${application.email}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${application.phone}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${application.position}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Onboarding Status</td><td style="padding:5px 0;font-weight:600;color:#d97706">Documents Pending (5 docs)</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${req.session.user.username}</td></tr>
+						</table>
+					</div>
+
+					<div style="text-align:center;margin:24px 0">
+						<a href="https://app.logisx.com/applications" style="display:inline-block;background:#0f2847;color:#ffffff;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">View Applications</a>
+					</div>
+				</div>
+				<div style="padding:16px 32px;text-align:center">
+					<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
+				</div>
+			</div>`;
+			sendEmail("info@logisx.com", `Driver Accepted: ${fullName}`, adminDriverAcceptHtml);
+			return;
 		}
 
 		res.json({ success: true });
