@@ -180,159 +180,166 @@
           </div>
         </div>
 
-        <!-- STEP 2: Document Signing -->
+        <!-- STEP 2: Fleet & Documents -->
         <div v-if="step === 1" class="step-panel">
           <div class="content-header">
             <span class="step-label">Step 2 of 3</span>
-            <h2>Sign Onboarding Documents</h2>
-            <p>Review and sign each document to proceed</p>
+            <h2>Fleet &amp; Documents</h2>
+            <p>Add your vehicles and sign onboarding documents</p>
           </div>
 
-          <div class="doc-progress">
-            <div class="doc-progress-bar">
-              <div class="doc-progress-fill" :style="{ width: (signedCount / totalDocs * 100) + '%' }"></div>
-            </div>
-            <span class="doc-progress-text">{{ signedCount }} of {{ totalDocs }} signed</span>
-          </div>
-
-          <!-- Vehicle info (for Exhibit A) -->
-          <div v-if="!vehicleInfoDone" class="vehicle-card">
-            <div class="form-grid" style="margin-bottom: 1.25rem;">
-              <div class="field">
-                <label>Total Fleet Size (Currently Owned) <span class="req">*</span></label>
-                <input v-model="form.fleet_size" type="number" min="1" max="20" placeholder="How many vehicles?" />
+          <!-- Accordion 1: Fleet Information -->
+          <details class="accordion" open>
+            <summary class="accordion-toggle">
+              <div class="accordion-title">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+                Fleet Information
               </div>
-            </div>
-
-            <div v-if="parseInt(form.fleet_size) > 0">
-              <!-- Vehicle tabs -->
-              <div class="vehicle-tabs">
-                <button
-                  v-for="(v, i) in vehicles"
-                  :key="i"
-                  class="vehicle-tab"
-                  :class="{ active: activeVehicleTab === i, valid: v.year && v.make && v.model && v.vin }"
-                  @click="activeVehicleTab = i"
-                >
-                  <svg v-if="v.year && v.make && v.model && v.vin" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-                  Vehicle {{ String.fromCharCode(65 + i) }}
-                </button>
-              </div>
-
-              <!-- Active vehicle form -->
-              <div class="form-grid">
+              <span class="accordion-badge" :class="allVehiclesValid ? 'badge-done' : 'badge-pending'">
+                {{ allVehiclesValid ? 'Complete' : 'Required' }}
+              </span>
+            </summary>
+            <div class="accordion-body">
+              <div class="form-grid" style="margin-bottom: 1.25rem;">
                 <div class="field">
-                  <label>Status</label>
-                  <select v-model="vehicles[activeVehicleTab].status">
-                    <option value="Active">Active</option>
-                    <option value="Inactive">Inactive</option>
-                    <option value="Maintenance">Maintenance</option>
-                    <option value="OOS">OOS</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label>Make <span class="req">*</span></label>
-                  <select v-model="vehicles[activeVehicleTab].make">
-                    <option value="">-- Select make --</option>
-                    <option v-for="m in truckMakes" :key="m" :value="m">{{ m }}</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label>Model <span class="req">*</span></label>
-                  <select v-model="vehicles[activeVehicleTab].model" :disabled="!vehicles[activeVehicleTab].make">
-                    <option value="">{{ vehicles[activeVehicleTab].make ? '-- Select model --' : '-- Select make first --' }}</option>
-                    <option v-for="m in activeModelOptions" :key="m" :value="m">{{ m }}</option>
-                  </select>
-                </div>
-                <div class="field"><label>Year <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].year" type="number" placeholder="e.g. 2022" required /></div>
-                <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].vin" placeholder="Vehicle Identification Number" required /></div>
-                <div class="field"><label>License Plate</label><input v-model="vehicles[activeVehicleTab].licensePlate" placeholder="e.g. ABC-1234" /></div>
-                <div class="field"><label>Current Mileage</label><input v-model="vehicles[activeVehicleTab].mileage" placeholder="e.g. 120,000" /></div>
-                <div class="field state-field">
-                  <label>Title State</label>
-                  <input
-                    v-model="vehicles[activeVehicleTab].titleState"
-                    placeholder="Type to search state..."
-                    autocomplete="off"
-                    @focus="stateDropOpen = true"
-                    @blur="setTimeout(() => stateDropOpen = false, 200)"
-                  />
-                  <div v-if="stateDropOpen && filteredStates.length" class="state-dropdown">
-                    <div
-                      v-for="st in filteredStates"
-                      :key="st"
-                      class="state-option"
-                      @mousedown.prevent="vehicles[activeVehicleTab].titleState = st; stateDropOpen = false"
-                    >{{ st }}</div>
-                  </div>
-                </div>
-                <div class="field"><label>Existing Liens</label><input v-model="vehicles[activeVehicleTab].liens" placeholder="None or lien holder name" /></div>
-                <div class="field">
-                  <label>Registered Owner</label>
-                  <select v-model="vehicles[activeVehicleTab].registeredOwner">
-                    <option value="">-- Select --</option>
-                    <option v-if="form.legal_name" :value="form.legal_name">{{ form.legal_name }}</option>
-                    <option v-if="form.contact_person && form.contact_person !== form.legal_name" :value="form.contact_person">{{ form.contact_person }}</option>
-                  </select>
-                </div>
-                <div class="field full">
-                  <label>Notes <span class="opt">(optional)</span></label>
-                  <textarea v-model="vehicles[activeVehicleTab].notes" class="form-textarea" rows="2" placeholder="Any additional notes..."></textarea>
-                </div>
-                <div class="field full">
-                  <label>Truck Photo <span class="opt">(optional)</span></label>
-                  <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
-                  <img v-if="vehicles[activeVehicleTab].photo" :src="vehicles[activeVehicleTab].photo" class="photo-preview" />
+                  <label>Total Fleet Size (Currently Owned) <span class="req">*</span></label>
+                  <input v-model="form.fleet_size" type="number" min="1" max="20" placeholder="How many vehicles?" />
                 </div>
               </div>
 
-              <details class="biz-config" open>
-                <summary class="biz-config-label">Business Configuration</summary>
-                <div class="form-grid" style="margin-top: 0.75rem;">
-                  <div class="field"><label>Purchase Price ($)</label><input v-model.number="vehicles[activeVehicleTab].purchasePrice" type="number" min="0" placeholder="58000" /></div>
+              <div v-if="parseInt(form.fleet_size) > 0">
+                <div class="vehicle-tabs">
+                  <button
+                    v-for="(v, i) in vehicles"
+                    :key="i"
+                    class="vehicle-tab"
+                    :class="{ active: activeVehicleTab === i, valid: v.year && v.make && v.model && v.vin }"
+                    @click="activeVehicleTab = i"
+                  >
+                    <svg v-if="v.year && v.make && v.model && v.vin" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                    Vehicle {{ String.fromCharCode(65 + i) }}
+                  </button>
+                </div>
+
+                <div class="form-grid">
                   <div class="field">
-                    <label>Title Status</label>
-                    <select v-model="vehicles[activeVehicleTab].titleStatus">
-                      <option value="Clean">Clean</option>
-                      <option value="Lien">Lien</option>
+                    <label>Status</label>
+                    <select v-model="vehicles[activeVehicleTab].status">
+                      <option value="Active">Active</option>
+                      <option value="Inactive">Inactive</option>
+                      <option value="Maintenance">Maintenance</option>
+                      <option value="OOS">OOS</option>
                     </select>
                   </div>
+                  <div class="field">
+                    <label>Make <span class="req">*</span></label>
+                    <select v-model="vehicles[activeVehicleTab].make">
+                      <option value="">-- Select make --</option>
+                      <option v-for="m in truckMakes" :key="m" :value="m">{{ m }}</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>Model <span class="req">*</span></label>
+                    <select v-model="vehicles[activeVehicleTab].model" :disabled="!vehicles[activeVehicleTab].make">
+                      <option value="">{{ vehicles[activeVehicleTab].make ? '-- Select model --' : '-- Select make first --' }}</option>
+                      <option v-for="m in activeModelOptions" :key="m" :value="m">{{ m }}</option>
+                    </select>
+                  </div>
+                  <div class="field"><label>Year <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].year" type="number" placeholder="e.g. 2022" required /></div>
+                  <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].vin" placeholder="Vehicle Identification Number" required /></div>
+                  <div class="field"><label>License Plate</label><input v-model="vehicles[activeVehicleTab].licensePlate" placeholder="e.g. ABC-1234" /></div>
+                  <div class="field"><label>Current Mileage</label><input v-model="vehicles[activeVehicleTab].mileage" placeholder="e.g. 120,000" /></div>
+                  <div class="field state-field">
+                    <label>Title State</label>
+                    <input
+                      v-model="vehicles[activeVehicleTab].titleState"
+                      placeholder="Type to search state..."
+                      autocomplete="off"
+                      @focus="stateDropOpen = true"
+                      @blur="setTimeout(() => stateDropOpen = false, 200)"
+                    />
+                    <div v-if="stateDropOpen && filteredStates.length" class="state-dropdown">
+                      <div
+                        v-for="st in filteredStates"
+                        :key="st"
+                        class="state-option"
+                        @mousedown.prevent="vehicles[activeVehicleTab].titleState = st; stateDropOpen = false"
+                      >{{ st }}</div>
+                    </div>
+                  </div>
+                  <div class="field"><label>Existing Liens</label><input v-model="vehicles[activeVehicleTab].liens" placeholder="None or lien holder name" /></div>
+                  <div class="field">
+                    <label>Registered Owner</label>
+                    <select v-model="vehicles[activeVehicleTab].registeredOwner">
+                      <option value="">-- Select --</option>
+                      <option v-if="form.legal_name" :value="form.legal_name">{{ form.legal_name }}</option>
+                      <option v-if="form.contact_person && form.contact_person !== form.legal_name" :value="form.contact_person">{{ form.contact_person }}</option>
+                    </select>
+                  </div>
+                  <div class="field full">
+                    <label>Notes <span class="opt">(optional)</span></label>
+                    <textarea v-model="vehicles[activeVehicleTab].notes" class="form-textarea" rows="2" placeholder="Any additional notes..."></textarea>
+                  </div>
+                  <div class="field full">
+                    <label>Truck Photo <span class="opt">(optional)</span></label>
+                    <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
+                    <img v-if="vehicles[activeVehicleTab].photo" :src="vehicles[activeVehicleTab].photo" class="photo-preview" />
+                  </div>
                 </div>
-              </details>
-            </div>
 
-            <div class="step-actions">
-              <div></div>
-              <button class="btn-primary" :disabled="!parseInt(form.fleet_size) || !allVehiclesValid" @click="vehicleInfoDone = true">
-                Save &amp; Continue
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-              </button>
+                <details class="biz-config" open>
+                  <summary class="biz-config-label">Business Configuration</summary>
+                  <div class="form-grid" style="margin-top: 0.75rem;">
+                    <div class="field"><label>Purchase Price ($)</label><input v-model.number="vehicles[activeVehicleTab].purchasePrice" type="number" min="0" placeholder="58000" /></div>
+                    <div class="field">
+                      <label>Title Status</label>
+                      <select v-model="vehicles[activeVehicleTab].titleStatus">
+                        <option value="Clean">Clean</option>
+                        <option value="Lien">Lien</option>
+                      </select>
+                    </div>
+                  </div>
+                </details>
+              </div>
             </div>
-          </div>
+          </details>
 
-          <!-- Document list -->
-          <div v-else class="doc-list">
-            <div v-for="doc in documents" :key="doc.doc_key" class="doc-card" :class="{ signed: doc.signed }" @click="openDoc(doc)">
-              <div class="doc-icon-wrap" :class="doc.signed ? 'done' : 'pending'">
-                <svg v-if="doc.signed" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-                <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <!-- Accordion 2: Onboarding Documents -->
+          <details class="accordion" open>
+            <summary class="accordion-toggle">
+              <div class="accordion-title">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                Onboarding Documents
               </div>
-              <div class="doc-info">
-                <div class="doc-name">{{ doc.doc_name }}</div>
-                <div class="doc-meta">{{ doc.signed ? 'Completed' : 'Awaiting your signature' }}</div>
-              </div>
-              <span class="doc-chip" :class="doc.signed ? 'chip-done' : 'chip-sign'">
-                {{ doc.signed ? 'View' : 'Sign' }}
+              <span class="accordion-badge" :class="signedCount >= totalDocs ? 'badge-done' : 'badge-pending'">
+                {{ signedCount }} / {{ totalDocs }} signed
               </span>
+            </summary>
+            <div class="accordion-body">
+              <div class="doc-list">
+                <div v-for="doc in documents" :key="doc.doc_key" class="doc-card" :class="{ signed: doc.signed }" @click="openDoc(doc)">
+                  <div class="doc-icon-wrap" :class="doc.signed ? 'done' : 'pending'">
+                    <svg v-if="doc.signed" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                    <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  </div>
+                  <div class="doc-info">
+                    <div class="doc-name">{{ doc.doc_name }}</div>
+                    <div class="doc-meta">{{ doc.signed ? 'Completed' : 'Awaiting your signature' }}</div>
+                  </div>
+                  <span class="doc-chip" :class="doc.signed ? 'chip-done' : 'chip-sign'">
+                    {{ doc.signed ? 'View' : 'Sign' }}
+                  </span>
+                </div>
+              </div>
             </div>
+          </details>
 
-            <div class="step-actions">
-              <div></div>
-              <button class="btn-primary" :disabled="signedCount < totalDocs" @click="step = 2; maxStep = Math.max(maxStep, 2)">
-                Continue
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-              </button>
-            </div>
+          <div class="step-actions">
+            <div></div>
+            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" @click="vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
+              Continue
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </button>
           </div>
         </div>
 
@@ -814,6 +821,50 @@ async function submitBanking() {
   color: rgba(255, 255, 255, 0.25);
   padding-top: 1.5rem;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* ─── Accordions ─── */
+.accordion {
+  border: 1.5px solid #e9edf3;
+  border-radius: 12px;
+  margin-bottom: 1rem;
+  overflow: hidden;
+  background: #fff;
+}
+.accordion-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.85rem 1.15rem;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  background: #fafbfd;
+  transition: background 0.15s;
+}
+.accordion-toggle:hover { background: #f1f5f9; }
+.accordion-toggle::-webkit-details-marker { display: none; }
+.accordion-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+.accordion-title svg { color: #64748b; }
+.accordion[open] .accordion-title svg { color: #3b82f6; }
+.accordion-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.2rem 0.6rem;
+  border-radius: 99px;
+}
+.badge-done { background: #dcfce7; color: #16a34a; }
+.badge-pending { background: #fef3c7; color: #b45309; }
+.accordion-body {
+  padding: 1.15rem;
+  border-top: 1px solid #e9edf3;
 }
 
 /* ─── MOBILE TOPBAR (hidden desktop) ─── */
