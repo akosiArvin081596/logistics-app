@@ -1397,7 +1397,7 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 				doc.addPage();
 				doc.fontSize(14).font("Helvetica-Bold").fillColor("#0ea5e9").text(label, { align: "center" });
 				doc.moveDown(0.5);
-				doc.image(buf, 50, doc.y, { fit: [512, 380], align: "center" });
+				doc.image(buf, 56, doc.y, { fit: [500, 600], align: "center", valign: "center" });
 			} catch { /* skip if image is invalid */ }
 		};
 		embedImage("CDL - Front", app.cdl_front);

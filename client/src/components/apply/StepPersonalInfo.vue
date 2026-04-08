@@ -119,9 +119,26 @@ function handleFile(event, field) {
   const file = event.target.files[0]
   if (!file) return
   fileTypes[field] = file.type === 'application/pdf'
-  const reader = new FileReader()
-  reader.onload = (e) => { props.form[field] = e.target.result }
-  reader.readAsDataURL(file)
+  if (file.type === 'application/pdf') {
+    const reader = new FileReader()
+    reader.onload = (e) => { props.form[field] = e.target.result }
+    reader.readAsDataURL(file)
+  } else {
+    const img = new Image()
+    img.onload = () => {
+      const MAX = 2400
+      let { width, height } = img
+      if (width > MAX || height > MAX) {
+        if (width > height) { height = Math.round(height * MAX / width); width = MAX }
+        else { width = Math.round(width * MAX / height); height = MAX }
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width; canvas.height = height
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height)
+      props.form[field] = canvas.toDataURL('image/jpeg', 0.92)
+    }
+    img.src = URL.createObjectURL(file)
+  }
 }
 
 onMounted(async () => {
