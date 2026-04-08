@@ -601,33 +601,34 @@ async function submitBanking() {
 
 .step-panel {
   flex: 1;
-  padding: 1.75rem 2.5rem 1.5rem;
+  padding: 2rem 3rem 2rem;
   width: 100%;
+  max-width: 880px;
 }
 
 /* ─── Content header ─── */
-.content-header { margin-bottom: 1rem; }
+.content-header { margin-bottom: 1.5rem; }
 
 .step-label {
   display: inline-block;
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: #94a3b8;
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.35rem;
 }
 
 .content-header h2 {
-  font-size: 1.35rem;
+  font-size: 1.45rem;
   font-weight: 800;
   color: #0f172a;
   letter-spacing: -0.02em;
-  margin-bottom: 0.15rem;
+  margin-bottom: 0.2rem;
 }
 
 .content-header p {
-  font-size: 0.82rem;
+  font-size: 0.85rem;
   color: #94a3b8;
 }
 
@@ -649,8 +650,8 @@ async function submitBanking() {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin: 1.15rem 0 0.65rem;
-  padding-bottom: 0.4rem;
+  margin: 1.5rem 0 0.85rem;
+  padding-bottom: 0.5rem;
   border-bottom: 1px solid #f1f5f9;
   color: #64748b;
   font-size: 0.72rem;
@@ -663,9 +664,9 @@ async function submitBanking() {
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.7rem 1rem;
+  gap: 0.9rem 1.1rem;
 }
-.field { display: flex; flex-direction: column; gap: 0.2rem; }
+.field { display: flex; flex-direction: column; gap: 0.3rem; }
 .field.full { grid-column: 1 / -1; }
 .field label { font-size: 0.75rem; font-weight: 600; color: #475569; }
 .req { color: #ef4444; }
@@ -673,10 +674,10 @@ async function submitBanking() {
 
 .field input,
 .field select {
-  padding: 0.5rem 0.75rem;
+  padding: 0.55rem 0.8rem;
   border: 1.5px solid #e2e8f0;
-  border-radius: 8px;
-  font-size: 0.84rem;
+  border-radius: 9px;
+  font-size: 0.85rem;
   color: #0f172a;
   background: #fff;
   font-family: inherit;
@@ -742,8 +743,8 @@ async function submitBanking() {
 
 .step-actions {
   display: flex; justify-content: space-between; align-items: center;
-  margin-top: 1.25rem; gap: 1rem;
-  padding-top: 1rem;
+  margin-top: 1.75rem; gap: 1rem;
+  padding-top: 1.25rem;
   border-top: 1px solid #f1f5f9;
 }
 
