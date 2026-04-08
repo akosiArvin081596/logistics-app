@@ -1414,15 +1414,16 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 		const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 		const blue = rgb(0.1, 0.34, 0.86);
-		// Find approximate signature line position (bottom of page 1)
-		page1.drawText(signatureText, { x: 80, y: 60, size: 10, font: fontBold, color: blue });
-		if (effectiveDate) page1.drawText(effectiveDate, { x: 420, y: 60, size: 9, font, color: blue });
+		// "Sign Here" line on page 1 — "Signature of U.S. person" field
+		const sigY = 110;
+		page1.drawText(signatureText, { x: 120, y: sigY, size: 10, font: fontBold, color: blue });
+		if (effectiveDate) page1.drawText(effectiveDate, { x: 460, y: sigY, size: 9, font, color: blue });
 		if (signatureImage) {
 			try {
 				const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
 				const sigImg = await pdfDoc.embedPng(sigBytes);
 				const nameW = fontBold.widthOfTextAtSize(signatureText, 10);
-				page1.drawImage(sigImg, { x: 80 + nameW + 10, y: 50, width: 120, height: 35 });
+				page1.drawImage(sigImg, { x: 120 + nameW + 10, y: sigY - 10, width: 120, height: 35 });
 			} catch { /* skip */ }
 		}
 	}
