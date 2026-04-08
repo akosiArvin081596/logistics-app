@@ -1360,6 +1360,76 @@ app.post("/api/public/investor-apply", (req, res) => {
 	}
 });
 
+// Helper: fill W-9 PDF form fields
+async function fillW9Form({ legalName = "", dba = "", entityType = "", address = "", einSsn = "", signatureText = "", signatureImage, effectiveDate = "" }) {
+	const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
+	if (!fs.existsSync(templatePath)) return null;
+	const templateBytes = fs.readFileSync(templatePath);
+	const pdfDoc = await PdfLibDocument.load(templateBytes);
+	const form = pdfDoc.getForm();
+
+	// Line 1: Name
+	try { form.getTextField("topmostSubform[0].Page1[0].f1_01[0]").setText(legalName); } catch {}
+	// Line 2: DBA
+	try { if (dba) form.getTextField("topmostSubform[0].Page1[0].f1_02[0]").setText(dba); } catch {}
+
+	// Line 3a: Entity type checkboxes
+	const entityCheckMap = {
+		"Sole Prop": 0, "C-Corp": 1, "S-Corp": 2, "Partnership": 3, "Trust": 4, "LLC": 5, "Other": 6,
+	};
+	const cbIdx = entityCheckMap[entityType];
+	if (cbIdx !== undefined) {
+		try { form.getCheckBox(`topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].c1_1[${cbIdx}]`).check(); } catch {}
+	}
+	// LLC tax classification letter
+	if (entityType === "LLC") {
+		try { form.getTextField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]").setText("P"); } catch {}
+	}
+
+	// Line 5-6: Address
+	if (address) {
+		const parts = address.split(",").map(s => s.trim());
+		try { form.getTextField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_07[0]").setText(parts[0] || address); } catch {}
+		if (parts.length > 1) {
+			try { form.getTextField("topmostSubform[0].Page1[0].f1_09[0]").setText(parts.slice(1).join(", ")); } catch {}
+		}
+	}
+
+	// EIN/SSN
+	if (einSsn) {
+		const digits = einSsn.replace(/\D/g, "");
+		if (digits.length === 9) {
+			// Fill EIN fields (2 + 7 digits)
+			try { form.getTextField("topmostSubform[0].Page1[0].f1_14[0]").setText(digits.slice(0, 2)); } catch {}
+			try { form.getTextField("topmostSubform[0].Page1[0].f1_15[0]").setText(digits.slice(2)); } catch {}
+		}
+	}
+
+	// Flatten form so fields become static text
+	form.flatten();
+
+	// Add signature overlay (after flattening, so we draw on top)
+	if (signatureText) {
+		const page1 = pdfDoc.getPages()[0];
+		const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+		const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+		const blue = rgb(0.1, 0.34, 0.86);
+		// Find approximate signature line position (bottom of page 1)
+		page1.drawText(signatureText, { x: 80, y: 60, size: 10, font: fontBold, color: blue });
+		if (effectiveDate) page1.drawText(effectiveDate, { x: 420, y: 60, size: 9, font, color: blue });
+		if (signatureImage) {
+			try {
+				const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
+				const sigImg = await pdfDoc.embedPng(sigBytes);
+				const nameW = fontBold.widthOfTextAtSize(signatureText, 10);
+				page1.drawImage(sigImg, { x: 80 + nameW + 10, y: 50, width: 120, height: 35 });
+			} catch { /* skip */ }
+		}
+	}
+
+	return await pdfDoc.save();
+}
+
 // Helper: verify investor access token
 function verifyInvestorToken(req, res) {
 	const appId = parseInt(req.params.id);
@@ -1421,56 +1491,14 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		}
 
 		if (docKey === "w9") {
-			// W-9: overlay investor data onto the IRS form
-			const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
-			if (fs.existsSync(templatePath)) {
-				const templateBytes = fs.readFileSync(templatePath);
-				const pdfDoc = await PdfLibDocument.load(templateBytes);
-				const page1 = pdfDoc.getPages()[0];
-				const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-				const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-				const blue = rgb(0.1, 0.34, 0.86);
-				const name = application?.legal_name || signatureText.trim();
-				const addr = application?.address || "";
-				const ssn = application?.ein_ssn || "";
-				// Line 1: Name
-				page1.drawText(name, { x: 68, y: 660, size: 11, font: fontBold, color: blue });
-				// Line 2: DBA
-				if (application?.dba) page1.drawText(application.dba, { x: 68, y: 638, size: 10, font, color: blue });
-				// Line 3a: entity type checkbox
-				const entityMap = { "Sole Prop": 64, "C-Corp": 170, "S-Corp": 268, "Partnership": 356, "LLC": 64 };
-				const checkX = entityMap[application?.entity_type] || 64;
-				if (application?.entity_type === "LLC") {
-					page1.drawText("X", { x: 64, y: 580, size: 12, font: fontBold, color: blue });
-				} else {
-					page1.drawText("X", { x: checkX, y: 595, size: 12, font: fontBold, color: blue });
-				}
-				// Line 5-6: Address
-				if (addr) {
-					const parts = addr.split(",").map(s => s.trim());
-					page1.drawText(parts[0] || addr, { x: 68, y: 502, size: 10, font, color: blue });
-					if (parts.length > 1) page1.drawText(parts.slice(1).join(", "), { x: 68, y: 482, size: 10, font, color: blue });
-				}
-				// EIN/SSN
-				if (ssn) {
-					const digits = ssn.replace(/\D/g, "");
-					if (digits.length === 9) {
-						page1.drawText(digits.slice(0, 3), { x: 462, y: 432, size: 11, font: fontBold, color: blue });
-						page1.drawText(digits.slice(3, 5), { x: 510, y: 432, size: 11, font: fontBold, color: blue });
-						page1.drawText(digits.slice(5, 9), { x: 545, y: 432, size: 11, font: fontBold, color: blue });
-					}
-				}
-				// Signature
-				page1.drawText(signatureText.trim(), { x: 120, y: 328, size: 10, font: fontBold, color: blue });
-				page1.drawText(effectiveDate, { x: 455, y: 328, size: 9, font, color: blue });
-				if (signatureImage) {
-					try {
-						const sigBytes = Buffer.from(signatureImage.replace(/^data:image\/\w+;base64,/, ""), "base64");
-						const sigImg = await pdfDoc.embedPng(sigBytes);
-						page1.drawImage(sigImg, { x: 200, y: 320, width: 140, height: 35 });
-					} catch { /* skip */ }
-				}
-				fs.writeFileSync(signedPath, await pdfDoc.save());
+			const pdfBytes = await fillW9Form({
+				legalName: application?.legal_name || "", dba: application?.dba || "",
+				entityType: application?.entity_type || "", address: application?.address || "",
+				einSsn: application?.ein_ssn || "", signatureText: signatureText.trim(),
+				signatureImage, effectiveDate,
+			});
+			if (pdfBytes) {
+				fs.writeFileSync(signedPath, pdfBytes);
 			} else {
 				signedPdfUrl = "";
 			}
@@ -1558,11 +1586,15 @@ app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", async (req,
 		}
 
 		if (docKey === "w9") {
-			const filePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
-			if (!fs.existsSync(filePath)) return res.status(404).json({ error: "W-9 template not found" });
+			const pdfBytes = await fillW9Form({
+				legalName: application?.legal_name || "", dba: application?.dba || "",
+				entityType: application?.entity_type || "", address: application?.address || "",
+				einSsn: application?.ein_ssn || "", effectiveDate,
+			});
+			if (!pdfBytes) return res.status(404).json({ error: "W-9 template not found" });
 			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form.pdf"');
-			return fs.createReadStream(filePath).pipe(res);
+			res.setHeader("Content-Disposition", 'inline; filename="W-9 Form Preview.pdf"');
+			return res.send(Buffer.from(pdfBytes));
 		}
 
 		return res.status(404).json({ error: "Unknown document" });
