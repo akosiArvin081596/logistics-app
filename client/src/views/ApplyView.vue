@@ -290,11 +290,11 @@ function loadState() {
   } catch { /* corrupt data */ }
 }
 
+// Load state FIRST, then start watching (prevents watchers from overwriting with empty defaults)
+loadState()
 watch(step, saveState)
 watch(submitted, saveState)
 watch(form, saveState, { deep: true })
-
-onMounted(() => { loadState() })
 
 function goToStep(i) {
   if (submitted.value) return
