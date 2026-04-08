@@ -1485,7 +1485,7 @@ app.post("/api/public/investor-apply", async (req, res) => {
 		const applicantHtml = `
 		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
 			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
-				<h1 style="color:#fff;margin:0;font-size:22px">LogisX</h1>
+				<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
 			</div>
 			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Application Received</h2>
@@ -1515,7 +1515,7 @@ app.post("/api/public/investor-apply", async (req, res) => {
 		const adminHtml = `
 		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:700px;margin:0 auto;color:#1e293b">
 			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
-				<h1 style="color:#fff;margin:0;font-size:22px">New Investor Application</h1>
+				<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
 			</div>
 			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 				<p style="margin:0 0 20px;color:#475569">A new investor application has been submitted and is ready for review.</p>
