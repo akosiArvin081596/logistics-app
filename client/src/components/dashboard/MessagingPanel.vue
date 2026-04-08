@@ -10,14 +10,14 @@
       </div>
       <div v-if="showNewMsg" class="new-msg-form">
         <select v-model="newDriver" class="new-msg-select" @change="newLoadId = ''">
-          <option value="" disabled>Select driver</option>
+          <option value="" disabled>Select recipient</option>
           <option v-for="d in props.driverNames" :key="d" :value="d">{{ d }}</option>
         </select>
-        <select v-model="newLoadId" class="new-msg-select" :disabled="!newDriver || loadsForDriver.length === 0">
-          <option value="" disabled>{{ !newDriver ? 'Pick driver first' : loadsForDriver.length === 0 ? 'No active loads' : 'Select load' }}</option>
+        <select v-model="newLoadId" class="new-msg-select" :disabled="!newDriver">
+          <option value="">General</option>
           <option v-for="id in loadsForDriver" :key="id" :value="id">Load {{ id }}</option>
         </select>
-        <button class="new-msg-start" :disabled="!newDriver || !newLoadId" @click="startConversation">Open Chat</button>
+        <button class="new-msg-start" :disabled="!newDriver" @click="startConversation">Open Chat</button>
       </div>
       <div class="msg-driver-list">
         <div

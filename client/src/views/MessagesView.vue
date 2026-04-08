@@ -11,19 +11,23 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useDashboardStore } from '../stores/dashboard'
 import { useMessagesStore } from '../stores/messages'
 import { useSocket } from '../composables/useSocket'
+import { useApi } from '../composables/useApi'
 import MessagingPanel from '../components/dashboard/MessagingPanel.vue'
 
 const store = useDashboardStore()
 const msgStore = useMessagesStore()
 const socket = useSocket()
+const api = useApi()
+const investorNames = ref([])
 
-const driverNames = computed(() =>
-  store.fleet.map((f) => f.Driver || '').filter(Boolean)
-)
+const driverNames = computed(() => {
+  const drivers = store.fleet.map((f) => f.Driver || '').filter(Boolean)
+  return [...new Set([...drivers, ...investorNames.value])].sort()
+})
 
 function onNewMessage(msg) {
   msgStore.addIncomingMessage(msg)
@@ -35,6 +39,10 @@ onMounted(async () => {
   socket.connect()
   socket.register('dispatch')
   socket.on('new-message', onNewMessage)
+  try {
+    const data = await api.get('/api/users/investors')
+    investorNames.value = (data.investors || []).map(i => i.username)
+  } catch { /* skip */ }
 })
 
 onUnmounted(() => {
