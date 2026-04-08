@@ -18,68 +18,71 @@
       </div>
 
       <!-- Signing area -->
-      <div v-if="doc && !doc.signed" class="sign-area" :style="{ maxHeight: signAreaHeight + 'px', overflowY: 'auto' }">
-        <label class="sign-checkbox">
-          <input type="checkbox" v-model="agreed" />
-          <span>I have read and agree to the terms of this document</span>
-        </label>
+      <details v-if="doc && !doc.signed" class="sign-area-collapse">
+        <summary class="sign-toggle">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          Sign this document
+        </summary>
+        <div class="sign-area" :style="{ maxHeight: signAreaHeight + 'px', overflowY: 'auto' }">
+          <label class="sign-checkbox">
+            <input type="checkbox" v-model="agreed" />
+            <span>I have read and agree to the terms of this document</span>
+          </label>
 
-        <!-- Typed name -->
-        <input
-          v-model="signatureText"
-          type="text"
-          class="sign-input"
-          placeholder="Type your full name"
-          :disabled="!agreed"
-        />
+          <input
+            v-model="signatureText"
+            type="text"
+            class="sign-input"
+            placeholder="Type your full name"
+            :disabled="!agreed"
+          />
 
-        <!-- Payment info (Contractor Agreement only) -->
-        <div v-if="isContractorAgreement" class="payment-section">
-          <div class="payment-title">Payment Method (Exhibit A)</div>
-          <div class="payment-radios">
-            <label><input type="radio" v-model="paymentMethod" value="check" :disabled="!agreed" /> Check</label>
-            <label><input type="radio" v-model="paymentMethod" value="ach" :disabled="!agreed" /> Direct Deposit (ACH)</label>
+          <div v-if="isContractorAgreement" class="payment-section">
+            <div class="payment-title">Payment Method (Exhibit A)</div>
+            <div class="payment-radios">
+              <label><input type="radio" v-model="paymentMethod" value="check" :disabled="!agreed" /> Check</label>
+              <label><input type="radio" v-model="paymentMethod" value="ach" :disabled="!agreed" /> Direct Deposit (ACH)</label>
+            </div>
+            <input v-if="paymentMethod === 'check'" v-model="checkName" class="pay-input" placeholder="Name on Account" :disabled="!agreed" />
+            <template v-if="paymentMethod === 'ach'">
+              <input v-model="bankName" class="pay-input" placeholder="Name of Bank" :disabled="!agreed" />
+              <input v-model="bankAddress" class="pay-input" placeholder="Bank Address" :disabled="!agreed" />
+              <input v-model="bankPhone" class="pay-input" placeholder="Bank Phone #" :disabled="!agreed" />
+              <input v-model="bankRouting" class="pay-input" placeholder="Routing #" :disabled="!agreed" />
+              <input v-model="bankAccount" class="pay-input" placeholder="Account #" :disabled="!agreed" />
+              <input v-model="bankAcctName" class="pay-input" placeholder="Name(s) on Account" :disabled="!agreed" />
+              <select v-model="accountType" class="pay-input" :disabled="!agreed">
+                <option value="">Account Type...</option>
+                <option value="Checking">Checking</option>
+                <option value="Savings">Savings</option>
+              </select>
+            </template>
           </div>
-          <input v-if="paymentMethod === 'check'" v-model="checkName" class="pay-input" placeholder="Name on Account" :disabled="!agreed" />
-          <template v-if="paymentMethod === 'ach'">
-            <input v-model="bankName" class="pay-input" placeholder="Name of Bank" :disabled="!agreed" />
-            <input v-model="bankAddress" class="pay-input" placeholder="Bank Address" :disabled="!agreed" />
-            <input v-model="bankPhone" class="pay-input" placeholder="Bank Phone #" :disabled="!agreed" />
-            <input v-model="bankRouting" class="pay-input" placeholder="Routing #" :disabled="!agreed" />
-            <input v-model="bankAccount" class="pay-input" placeholder="Account #" :disabled="!agreed" />
-            <input v-model="bankAcctName" class="pay-input" placeholder="Name(s) on Account" :disabled="!agreed" />
-            <select v-model="accountType" class="pay-input" :disabled="!agreed">
-              <option value="">Account Type...</option>
-              <option value="Checking">Checking</option>
-              <option value="Savings">Savings</option>
-            </select>
-          </template>
-        </div>
 
-        <!-- Signature canvas -->
-        <div class="canvas-wrapper" :class="{ disabled: !agreed }">
-          <div class="canvas-label">
-            <span>Draw your signature below</span>
-            <button v-if="hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
+          <div class="canvas-wrapper" :class="{ disabled: !agreed }">
+            <div class="canvas-label">
+              <span>Draw your signature below</span>
+              <button v-if="hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
+            </div>
+            <canvas
+              ref="canvasRef"
+              class="sig-canvas"
+              @pointerdown="startDraw"
+              @pointermove="draw"
+              @pointerup="endDraw"
+              @pointerleave="endDraw"
+            ></canvas>
           </div>
-          <canvas
-            ref="canvasRef"
-            class="sig-canvas"
-            @pointerdown="startDraw"
-            @pointermove="draw"
-            @pointerup="endDraw"
-            @pointerleave="endDraw"
-          ></canvas>
-        </div>
 
-        <button
-          class="sign-btn"
-          :disabled="!canSign"
-          @click="handleSign"
-        >
-          {{ signing ? 'Signing...' : 'Sign Document' }}
-        </button>
-      </div>
+          <button
+            class="sign-btn"
+            :disabled="!canSign"
+            @click="handleSign"
+          >
+            {{ signing ? 'Signing...' : 'Sign Document' }}
+          </button>
+        </div>
+      </details>
 
       <!-- Already signed -->
       <div v-else-if="doc?.signed" class="sign-done">
@@ -302,9 +305,18 @@ function formatDate(d) {
   display: flex; align-items: center; justify-content: center;
   height: 100%; color: var(--text-dim); font-size: 0.9rem;
 }
+.sign-area-collapse { border-top: 1px solid var(--bg); }
+.sign-toggle {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.65rem 1rem; cursor: pointer; user-select: none;
+  font-size: 0.85rem; font-weight: 700; color: var(--text);
+  list-style: none; background: var(--card);
+}
+.sign-toggle::-webkit-details-marker { display: none; }
+.sign-toggle svg { color: #3b82f6; }
+.sign-area-collapse[open] .sign-toggle { border-bottom: 1px solid var(--bg); }
 .sign-area {
   padding: 0.75rem 1rem;
-  border-top: 1px solid var(--bg);
   background: var(--card);
   display: flex;
   flex-direction: column;

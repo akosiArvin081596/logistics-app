@@ -11,23 +11,29 @@
         <div v-else class="pdf-placeholder">Loading document...</div>
       </div>
 
-      <div v-if="doc && !doc.signed" class="sign-area">
-        <label class="sign-checkbox">
-          <input type="checkbox" v-model="agreed" />
-          <span>I have read and agree to the terms of this document</span>
-        </label>
-        <input v-model="signatureText" type="text" class="sign-input" placeholder="Type your full name" :disabled="!agreed" />
-        <div class="canvas-wrapper" :class="{ disabled: !agreed }">
-          <div class="canvas-label">
-            <span>Draw your signature</span>
-            <button v-if="hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
+      <details v-if="doc && !doc.signed" class="sign-area-collapse">
+        <summary class="sign-toggle">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          Sign this document
+        </summary>
+        <div class="sign-area">
+          <label class="sign-checkbox">
+            <input type="checkbox" v-model="agreed" />
+            <span>I have read and agree to the terms of this document</span>
+          </label>
+          <input v-model="signatureText" type="text" class="sign-input" placeholder="Type your full name" :disabled="!agreed" />
+          <div class="canvas-wrapper" :class="{ disabled: !agreed }">
+            <div class="canvas-label">
+              <span>Draw your signature</span>
+              <button v-if="hasDrawn" class="canvas-clear" @click="clearCanvas">Clear</button>
+            </div>
+            <canvas ref="canvasRef" class="sig-canvas" @pointerdown="startDraw" @pointermove="draw" @pointerup="endDraw" @pointerleave="endDraw"></canvas>
           </div>
-          <canvas ref="canvasRef" class="sig-canvas" @pointerdown="startDraw" @pointermove="draw" @pointerup="endDraw" @pointerleave="endDraw"></canvas>
+          <button class="sign-btn" :disabled="!agreed || !signatureText.trim() || !hasDrawn || signing" @click="handleSign">
+            {{ signing ? 'Signing...' : 'Sign Document' }}
+          </button>
         </div>
-        <button class="sign-btn" :disabled="!agreed || !signatureText.trim() || !hasDrawn || signing" @click="handleSign">
-          {{ signing ? 'Signing...' : 'Sign Document' }}
-        </button>
-      </div>
+      </details>
 
       <div v-else-if="doc?.signed" class="sign-done">
         <span>&#9989;</span> Signed by {{ doc.signature_text }}
@@ -155,7 +161,17 @@ async function handleSign() {
 .pdf-container { flex: 1; min-height: 500px; background: #f5f5f5; overflow: hidden; }
 .pdf-frame { width: 100%; height: 100%; min-height: 500px; border: none; }
 .pdf-placeholder { display: flex; align-items: center; justify-content: center; height: 300px; color: #6b7085; }
-.sign-area { padding: 0.75rem 1.25rem; border-top: 1px solid #e8edf2; display: flex; flex-direction: column; gap: 0.5rem; }
+.sign-area-collapse { border-top: 1px solid #e8edf2; }
+.sign-toggle {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.65rem 1.25rem; cursor: pointer; user-select: none;
+  font-size: 0.85rem; font-weight: 700; color: #0f172a;
+  list-style: none;
+}
+.sign-toggle::-webkit-details-marker { display: none; }
+.sign-toggle svg { color: #3b82f6; }
+.sign-area-collapse[open] .sign-toggle { border-bottom: 1px solid #f1f5f9; }
+.sign-area { padding: 0.75rem 1.25rem; display: flex; flex-direction: column; gap: 0.5rem; }
 .sign-checkbox { display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.8rem; cursor: pointer; }
 .sign-input {
   width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #e2e4ea; border-radius: 8px;
