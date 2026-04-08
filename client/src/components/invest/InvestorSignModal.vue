@@ -104,8 +104,7 @@ function initCanvas() {
   canvas.width = rect.width
   canvas.height = rect.height || 150
   const ctx = canvas.getContext('2d')
-  ctx.fillStyle = '#ffffff'
-  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
   ctx.strokeStyle = '#1a1d27'
   ctx.lineWidth = 2
   ctx.lineCap = 'round'
