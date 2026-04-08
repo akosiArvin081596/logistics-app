@@ -221,15 +221,61 @@
 
               <!-- Active vehicle form -->
               <div class="form-grid">
-                <div class="field"><label>Year <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].year" placeholder="e.g. 2022" required /></div>
-                <div class="field"><label>Make <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].make" placeholder="e.g. Freightliner" required /></div>
-                <div class="field"><label>Model <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].model" placeholder="e.g. Cascadia" required /></div>
-                <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].vin" placeholder="17-character VIN" required /></div>
+                <div class="field">
+                  <label>Status</label>
+                  <select v-model="vehicles[activeVehicleTab].status">
+                    <option value="Active">Active</option>
+                    <option value="Inactive">Inactive</option>
+                    <option value="Maintenance">Maintenance</option>
+                    <option value="OOS">OOS</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Make <span class="req">*</span></label>
+                  <select v-model="vehicles[activeVehicleTab].make">
+                    <option value="">-- Select make --</option>
+                    <option v-for="m in truckMakes" :key="m" :value="m">{{ m }}</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Model <span class="req">*</span></label>
+                  <select v-model="vehicles[activeVehicleTab].model" :disabled="!vehicles[activeVehicleTab].make">
+                    <option value="">{{ vehicles[activeVehicleTab].make ? '-- Select model --' : '-- Select make first --' }}</option>
+                    <option v-for="m in activeModelOptions" :key="m" :value="m">{{ m }}</option>
+                  </select>
+                </div>
+                <div class="field"><label>Year <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].year" type="number" placeholder="e.g. 2022" required /></div>
+                <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].vin" placeholder="Vehicle Identification Number" required /></div>
+                <div class="field"><label>License Plate</label><input v-model="vehicles[activeVehicleTab].licensePlate" placeholder="e.g. ABC-1234" /></div>
                 <div class="field"><label>Current Mileage</label><input v-model="vehicles[activeVehicleTab].mileage" placeholder="e.g. 120,000" /></div>
                 <div class="field"><label>Title State</label><input v-model="vehicles[activeVehicleTab].titleState" placeholder="e.g. Texas" /></div>
                 <div class="field"><label>Existing Liens</label><input v-model="vehicles[activeVehicleTab].liens" placeholder="None or lien holder name" /></div>
                 <div class="field"><label>Registered Owner</label><input v-model="vehicles[activeVehicleTab].registeredOwner" placeholder="Owner on title" /></div>
+                <div class="field full">
+                  <label>Notes <span class="opt">(optional)</span></label>
+                  <textarea v-model="vehicles[activeVehicleTab].notes" class="form-textarea" rows="2" placeholder="Any additional notes..."></textarea>
+                </div>
+                <div class="field full">
+                  <label>Truck Photo <span class="opt">(optional)</span></label>
+                  <input type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
+                  <img v-if="vehicles[activeVehicleTab].photo" :src="vehicles[activeVehicleTab].photo" class="photo-preview" />
+                </div>
               </div>
+
+              <details class="biz-config" open>
+                <summary class="biz-config-label">Business Configuration</summary>
+                <div class="form-grid" style="margin-top: 0.75rem;">
+                  <div class="field"><label>Purchase Price ($)</label><input v-model.number="vehicles[activeVehicleTab].purchasePrice" type="number" min="0" placeholder="58000" /></div>
+                  <div class="field">
+                    <label>Title Status</label>
+                    <select v-model="vehicles[activeVehicleTab].titleStatus">
+                      <option value="Clean">Clean</option>
+                      <option value="Lien">Lien</option>
+                      <option value="Accident/Salvage">Accident/Salvage</option>
+                    </select>
+                  </div>
+                </div>
+              </details>
             </div>
 
             <div class="step-actions">
@@ -358,11 +404,48 @@ const form = reactive({
   preferred_communication: '', tax_classification: '', ein_ssn: '', bankruptcy_liens: '', reporting_preference: '',
 })
 
+const truckMakes = [
+  'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
+  'Mack', 'Western Star', 'Hino', 'Isuzu', 'Ford', 'Chevrolet',
+  'RAM', 'GMC', 'Tesla', 'Nikola', 'Other',
+]
+const truckModels = {
+  Freightliner: ['Cascadia', 'Columbia', 'Coronado', 'M2 106', 'M2 112', '114SD', '122SD'],
+  Kenworth: ['T680', 'T880', 'W900', 'W990', 'T270', 'T370', 'T440', 'T470'],
+  Peterbilt: ['579', '389', '567', '520', '337', '348', '365', '367'],
+  Volvo: ['VNL 760', 'VNL 860', 'VNL 300', 'VNR 300', 'VNR 400', 'VNR 600', 'VHD 300', 'VHD 400'],
+  International: ['LT', 'RH', 'HV', 'HX', 'MV', 'CV'],
+  Mack: ['Anthem', 'Pinnacle', 'Granite', 'LR', 'MD', 'TerraPro'],
+  'Western Star': ['4900', '5700XE', '4700', '49X', '47X'],
+  Hino: ['L6', 'L7', 'XL7', 'XL8', '268', '338'],
+  Isuzu: ['NRR', 'NQR', 'NPR', 'NPR-HD', 'FTR', 'FVR'],
+  Ford: ['F-650', 'F-750', 'F-59'],
+  Chevrolet: ['Silverado 4500HD', 'Silverado 5500HD', 'Silverado 6500HD'],
+  RAM: ['3500', '4500', '5500'],
+  GMC: ['Sierra 3500HD', 'Sierra 4500HD', 'Sierra 5500HD'],
+  Tesla: ['Semi'],
+  Nikola: ['Tre BEV', 'Tre FCEV', 'Two'],
+}
+
 function emptyVehicle() {
-  return { year: '', make: '', model: '', vin: '', mileage: '', titleState: '', liens: '', registeredOwner: '' }
+  return {
+    make: '', model: '', year: '', vin: '',
+    licensePlate: '', status: 'Active',
+    mileage: '', titleState: '', liens: '', registeredOwner: '',
+    notes: '', photo: '',
+    purchasePrice: 0, titleStatus: 'Clean',
+  }
 }
 const vehicles = ref([emptyVehicle()])
 const activeVehicleTab = ref(0)
+const activeModelOptions = computed(() => truckModels[vehicles.value[activeVehicleTab.value]?.make] || [])
+
+// Reset model when make changes
+watch(() => vehicles.value[activeVehicleTab.value]?.make, (newMake, oldMake) => {
+  if (oldMake && newMake !== oldMake && vehicles.value[activeVehicleTab.value]) {
+    vehicles.value[activeVehicleTab.value].model = ''
+  }
+})
 
 watch(() => form.fleet_size, (val) => {
   const count = Math.max(1, Math.min(parseInt(val) || 1, 20))
@@ -460,6 +543,14 @@ function initAddrAutocomplete() {
     const place = ac.getPlace()
     if (place?.formatted_address) form.address = place.formatted_address
   })
+}
+
+function onVehiclePhoto(e) {
+  const file = e.target.files[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = ev => { vehicles.value[activeVehicleTab.value].photo = ev.target.result }
+  reader.readAsDataURL(file)
 }
 
 function onMapConfirm({ displayName }) {
@@ -883,6 +974,41 @@ async function submitBanking() {
 /* ─── Vehicle card ─── */
 .vehicle-card {
   background: #fafbfd; border: 1.5px solid #f1f5f9; border-radius: 14px; padding: 1.5rem;
+}
+.form-textarea {
+  padding: 0.55rem 0.8rem;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 9px;
+  font-size: 0.85rem;
+  color: #0f172a;
+  background: #fff;
+  font-family: inherit;
+  resize: vertical;
+  transition: all 0.15s ease;
+}
+.form-textarea:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+.photo-preview {
+  max-height: 80px;
+  border-radius: 6px;
+  margin-top: 0.4rem;
+}
+.biz-config {
+  margin-top: 1.25rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #e9edf3;
+}
+.biz-config-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+  cursor: pointer;
+  user-select: none;
 }
 
 /* ─── Vehicle tabs ─── */
