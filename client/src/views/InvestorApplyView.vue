@@ -689,11 +689,12 @@ async function loadOnboarding() {
 }
 
 async function openDoc(doc) {
-  // Save vehicles to server first, then open preview
+  // Save vehicles to server first (strip photos to keep payload small)
   if (applicationId.value && vehicles.value.length) {
     try {
+      const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
       await api.post(`/api/public/investor-onboarding/${applicationId.value}/vehicles`, {
-        vehicles: vehicles.value, accessToken: accessToken.value,
+        vehicles: stripped, accessToken: accessToken.value,
       })
     } catch { /* skip */ }
   }
