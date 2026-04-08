@@ -689,11 +689,13 @@ async function loadOnboarding() {
 }
 
 async function openDoc(doc) {
-  // Save vehicles to server so preview PDFs include all vehicles
+  // Save vehicles to server first, then open preview
   if (applicationId.value && vehicles.value.length) {
-    api.post(`/api/public/investor-onboarding/${applicationId.value}/vehicles`, {
-      vehicles: vehicles.value, accessToken: accessToken.value,
-    }).catch(() => {})
+    try {
+      await api.post(`/api/public/investor-onboarding/${applicationId.value}/vehicles`, {
+        vehicles: vehicles.value, accessToken: accessToken.value,
+      })
+    } catch { /* skip */ }
   }
   selectedDoc.value = doc
   selectedPdfUrl.value = doc.signed && doc.signed_pdf_url
