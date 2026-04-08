@@ -403,6 +403,8 @@ function loadState() {
     if (s.applicationId) applicationId.value = s.applicationId
     if (s.accessToken) accessToken.value = s.accessToken
     if (s.completed) completed.value = s.completed
+    // Ensure maxStep is at least the current step
+    maxStep.value = Math.max(maxStep.value, step.value)
   } catch { /* corrupt data */ }
 }
 
