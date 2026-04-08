@@ -601,34 +601,33 @@ async function submitBanking() {
 
 .step-panel {
   flex: 1;
-  padding: 3rem 3.5rem 2.5rem;
-  max-width: 720px;
+  padding: 1.75rem 2.5rem 1.5rem;
   width: 100%;
 }
 
 /* ─── Content header ─── */
-.content-header { margin-bottom: 2rem; }
+.content-header { margin-bottom: 1rem; }
 
 .step-label {
   display: inline-block;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: #94a3b8;
-  margin-bottom: 0.5rem;
-}
-
-.content-header h2 {
-  font-size: 1.6rem;
-  font-weight: 800;
-  color: #0f172a;
-  letter-spacing: -0.02em;
   margin-bottom: 0.25rem;
 }
 
+.content-header h2 {
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: #0f172a;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.15rem;
+}
+
 .content-header p {
-  font-size: 0.88rem;
+  font-size: 0.82rem;
   color: #94a3b8;
 }
 
@@ -650,11 +649,11 @@ async function submitBanking() {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin: 2rem 0 1rem;
-  padding-bottom: 0.55rem;
+  margin: 1.15rem 0 0.65rem;
+  padding-bottom: 0.4rem;
   border-bottom: 1px solid #f1f5f9;
   color: #64748b;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -664,20 +663,20 @@ async function submitBanking() {
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 1.1rem;
+  gap: 0.7rem 1rem;
 }
-.field { display: flex; flex-direction: column; gap: 0.35rem; }
+.field { display: flex; flex-direction: column; gap: 0.2rem; }
 .field.full { grid-column: 1 / -1; }
-.field label { font-size: 0.78rem; font-weight: 600; color: #475569; }
+.field label { font-size: 0.75rem; font-weight: 600; color: #475569; }
 .req { color: #ef4444; }
 .opt { font-weight: 400; color: #94a3b8; font-size: 0.72rem; }
 
 .field input,
 .field select {
-  padding: 0.65rem 0.85rem;
+  padding: 0.5rem 0.75rem;
   border: 1.5px solid #e2e8f0;
-  border-radius: 10px;
-  font-size: 0.88rem;
+  border-radius: 8px;
+  font-size: 0.84rem;
   color: #0f172a;
   background: #fff;
   font-family: inherit;
@@ -706,7 +705,7 @@ async function submitBanking() {
 .addr-action-btn:hover { background: #f1f5f9; color: #475569; }
 .addr-action-btn:disabled { cursor: wait; opacity: 0.4; }
 .map-btn {
-  flex-shrink: 0; width: 42px; height: 42px;
+  flex-shrink: 0; width: 36px; height: 36px;
   display: flex; align-items: center; justify-content: center;
   border: 1.5px solid #e2e8f0; border-radius: 10px; background: #fff;
   color: #94a3b8; cursor: pointer; transition: all 0.15s;
@@ -743,8 +742,8 @@ async function submitBanking() {
 
 .step-actions {
   display: flex; justify-content: space-between; align-items: center;
-  margin-top: 2.5rem; gap: 1rem;
-  padding-top: 1.5rem;
+  margin-top: 1.25rem; gap: 1rem;
+  padding-top: 1rem;
   border-top: 1px solid #f1f5f9;
 }
 
