@@ -30,8 +30,16 @@
             </div>
             <div class="form-group full"><label>Principal Address *</label>
               <div class="address-row">
-                <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" />
-                <button type="button" class="map-pick-btn" @click="showMapPicker = true" title="Pick on map">&#128205;</button>
+                <div class="address-input-wrap">
+                  <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" />
+                  <button type="button" class="addr-inline-btn" :disabled="geolocating" @click="useCurrentLocation" title="Use my current location">
+                    <svg v-if="!geolocating" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+                    <span v-else class="spin-icon">&#8635;</span>
+                  </button>
+                </div>
+                <button type="button" class="map-pick-btn" @click="showMapPicker = true" title="Pick on map">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
+                </button>
               </div>
             </div>
             <div class="form-group"><label>Primary Contact Person</label><input v-model="form.contact_person" /></div>
@@ -163,6 +171,7 @@ import LocationPickerModal from '../components/data-manager/LocationPickerModal.
 
 const addressInput = ref(null)
 const showMapPicker = ref(false)
+const geolocating = ref(false)
 const api = useApi()
 const { show: toast } = useToast()
 
@@ -216,6 +225,27 @@ function initAddrAutocomplete() {
 function onMapConfirm({ displayName }) {
   if (displayName) form.address = displayName
   showMapPicker.value = false
+}
+
+async function useCurrentLocation() {
+  if (!navigator.geolocation) return
+  geolocating.value = true
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      try {
+        const res = await fetch(`/api/geocode?lat=${pos.coords.latitude}&lng=${pos.coords.longitude}`)
+        if (res.ok) {
+          const data = await res.json()
+          if (data.results?.[0]?.formatted_address) {
+            form.address = data.results[0].formatted_address
+          }
+        }
+      } catch { /* skip */ }
+      geolocating.value = false
+    },
+    () => { geolocating.value = false },
+    { timeout: 8000, enableHighAccuracy: false }
+  )
 }
 
 const canProceedStep1 = computed(() => form.legal_name && form.email && form.phone && form.address && form.ein_ssn)
@@ -274,14 +304,25 @@ async function submitBanking() {
 
 <style scoped>
 .address-row { display: flex; gap: 0.5rem; }
-.address-row input { flex: 1; }
+.address-input-wrap { flex: 1; position: relative; }
+.address-input-wrap input { width: 100%; padding-right: 36px; }
+.addr-inline-btn {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 4px; background: transparent;
+  color: #888; cursor: pointer;
+}
+.addr-inline-btn:hover { background: #f0f0f0; color: #333; }
+.addr-inline-btn:disabled { cursor: wait; opacity: 0.5; }
+.spin-icon { display: inline-block; animation: spin 0.8s linear infinite; font-size: 1rem; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .map-pick-btn {
   flex-shrink: 0; width: 38px; height: 38px;
   display: flex; align-items: center; justify-content: center;
   border: 1px solid #ddd; border-radius: 6px; background: #fff;
-  font-size: 1.1rem; cursor: pointer;
+  color: #555; cursor: pointer;
 }
-.map-pick-btn:hover { background: #f0f0f0; border-color: #bbb; }
+.map-pick-btn:hover { background: #f0f0f0; border-color: #bbb; color: #333; }
 .invest-page {
   min-height: 100vh;
   background: #f5f6fa;
