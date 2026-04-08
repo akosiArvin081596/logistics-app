@@ -68,6 +68,7 @@
                 <div class="flex items-center justify-end gap-1.5">
                   <Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8" @click="openDetail(app)">View</Button>
                   <a :href="'/api/applications/' + app.id + '/pdf'" target="_blank"><Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8">PDF</Button></a>
+                  <Button v-if="app.status === 'Accepted' && app.onboarding_user_id && app.drug_test_result !== 'pass'" size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8 text-amber-600 border-amber-200 hover:bg-amber-50" @click="openDrugTest(app)">Drug Test</Button>
                   <select class="text-[12px] border border-[#e2e4ea] rounded-md px-2 py-1 bg-white" :value="app.status" @change="updateStatus(app.id, $event.target.value)">
                     <option v-for="s in statuses" :key="s" :value="s">{{ s }}</option>
                   </select>
@@ -158,6 +159,14 @@
         </div>
       </DialogContent>
     </Dialog>
+
+    <DrugTestUpload
+      :show="showDrugTest"
+      :user-id="drugTestApp?.onboarding_user_id || 0"
+      :driver-name="drugTestApp?.full_name || ''"
+      @close="showDrugTest = false"
+      @uploaded="showDrugTest = false; load()"
+    />
   </div>
 </template>
 
@@ -170,11 +179,19 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import DrugTestUpload from '../components/users/DrugTestUpload.vue'
 
 const api = useApi()
 const { show: toast } = useToast()
 const applications = ref([])
 const loading = ref(false)
+const showDrugTest = ref(false)
+const drugTestApp = ref(null)
+
+function openDrugTest(app) {
+  drugTestApp.value = app
+  showDrugTest.value = true
+}
 const showDetail = ref(false)
 const selectedApp = ref(null)
 const activeFilter = ref(null)

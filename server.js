@@ -1236,7 +1236,10 @@ app.post("/api/public/apply", (req, res) => {
 
 app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
 	try {
-		const apps = db.prepare("SELECT * FROM job_applications ORDER BY created_at DESC").all();
+		const apps = db.prepare(`SELECT ja.*, do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result
+			FROM job_applications ja
+			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
+			ORDER BY ja.created_at DESC`).all();
 		res.json(apps);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
