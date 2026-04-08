@@ -390,6 +390,15 @@ db.exec(`
 	)
 `);
 try { db.exec("ALTER TABLE investors ADD COLUMN carrier_name TEXT NOT NULL DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN application_id INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN entity_type TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN address TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN phone TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN email TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN ein_ssn TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN tax_classification TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN contact_person TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN contact_title TEXT DEFAULT ''"); } catch {}
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inv_carrier ON investors(carrier_name)`);
 
 // Carrier-driver history (preserves pairings when drivers move between carriers)
@@ -1609,9 +1618,14 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			).run(username, hash, application.email || "", fullName, application.dba || fullName);
 			const userId = userResult.lastInsertRowid;
 
-			// Create investor record
-			db.prepare("INSERT OR IGNORE INTO investors (user_id, full_name, carrier_name, status) VALUES (?, ?, ?, 'Active')")
-				.run(userId, fullName, application.dba || fullName);
+			// Create investor record with full business info from application
+			db.prepare(`INSERT OR IGNORE INTO investors
+				(user_id, full_name, carrier_name, status, application_id, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
+				VALUES (?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+				.run(userId, fullName, application.dba || fullName, appId,
+					application.entity_type || "", application.address || "", application.phone || "",
+					application.email || "", application.ein_ssn || "", application.tax_classification || "",
+					application.contact_person || "", application.contact_title || "");
 
 			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}"`);
 			return res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName } });
@@ -2846,12 +2860,14 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 });
 
 app.post("/api/investors", requireRole("Super Admin"), (req, res) => {
-	const { userId, fullName, carrierName, status, notes } = req.body;
+	const { userId, fullName, carrierName, status, notes, entityType, address, phone, email, einSsn, taxClassification, contactPerson, contactTitle } = req.body;
 	if (!fullName || !fullName.trim()) return res.status(400).json({ error: "Full name is required" });
 	const result = db.prepare(`
-		INSERT INTO investors (user_id, full_name, carrier_name, status, notes)
-		VALUES (?, ?, ?, ?, ?)
-	`).run(userId || null, fullName.trim(), (carrierName || "").trim(), status || "Active", (notes || "").trim());
+		INSERT INTO investors (user_id, full_name, carrier_name, status, notes, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).run(userId || null, fullName.trim(), (carrierName || "").trim(), status || "Active", (notes || "").trim(),
+		(entityType || "").trim(), (address || "").trim(), (phone || "").trim(), (email || "").trim(),
+		(einSsn || "").trim(), (taxClassification || "").trim(), (contactPerson || "").trim(), (contactTitle || "").trim());
 	res.json({ success: true, id: result.lastInsertRowid });
 });
 
@@ -2859,11 +2875,19 @@ app.put("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 	const { id } = req.params;
 	const existing = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
 	if (!existing) return res.status(404).json({ error: "Investor not found" });
-	const { userId, fullName, carrierName, status, notes } = req.body;
+	const { userId, fullName, carrierName, status, notes, entityType, address, phone, email, einSsn, taxClassification, contactPerson, contactTitle } = req.body;
 	db.prepare(`
-		UPDATE investors SET user_id=?, full_name=?, carrier_name=?, status=?, notes=?
+		UPDATE investors SET user_id=?, full_name=?, carrier_name=?, status=?, notes=?,
+		entity_type=?, address=?, phone=?, email=?, ein_ssn=?, tax_classification=?, contact_person=?, contact_title=?
 		WHERE id=?
-	`).run(userId ?? existing.user_id, (fullName || "").trim(), (carrierName || "").trim(), status || existing.status, (notes || "").trim(), id);
+	`).run(
+		userId ?? existing.user_id, (fullName || existing.full_name).trim(), (carrierName || existing.carrier_name).trim(),
+		status || existing.status, (notes ?? existing.notes).trim(),
+		(entityType ?? existing.entity_type).trim(), (address ?? existing.address).trim(),
+		(phone ?? existing.phone).trim(), (email ?? existing.email).trim(),
+		(einSsn ?? existing.ein_ssn).trim(), (taxClassification ?? existing.tax_classification).trim(),
+		(contactPerson ?? existing.contact_person).trim(), (contactTitle ?? existing.contact_title).trim(), id
+	);
 	res.json({ success: true });
 });
 
