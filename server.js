@@ -1151,13 +1151,15 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 				return res.json({ success: true, message: "Application accepted (account already exists)" });
 			}
 
-			// Generate username from full_name (e.g., "Lesline Johnson" -> "lesline.johnson")
+			// Generate username from phone: LogisX-{last4digits} (e.g., "LogisX-2609")
 			const fullName = application.full_name.trim();
-			let baseUsername = fullName.toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9.]/g, "");
+			const phoneDigits = (application.phone || "").replace(/\D/g, "");
+			const last4 = phoneDigits.slice(-4) || "0000";
+			let baseUsername = `LogisX-${last4}`;
 			let username = baseUsername;
 			let suffix = 1;
 			while (db.prepare("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(username)) {
-				username = `${baseUsername}${suffix}`;
+				username = `${baseUsername}-${suffix}`;
 				suffix++;
 			}
 
