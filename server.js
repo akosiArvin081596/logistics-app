@@ -4390,7 +4390,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			/^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 		const unassignedStatuses =
-			/^(unassigned|new|open|pending|available|cancell?ed)$/i;
+			/^(unassigned|new|open|pending|available)$/i;
 
 		// Filter jobs — only rows with a Load ID
 		const hasLoadId = (r) => loadIdCol ? !!(r[loadIdCol] || "").trim() : true;
