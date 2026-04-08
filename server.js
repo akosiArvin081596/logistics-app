@@ -1395,11 +1395,15 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		}
 	}
 
-	// EIN/SSN
+	// EIN/SSN — fill both SSN and EIN fields
 	if (einSsn) {
 		const digits = einSsn.replace(/\D/g, "");
 		if (digits.length === 9) {
-			// Fill EIN fields (2 + 7 digits)
+			// SSN fields (3 + 2 + 4 digits)
+			try { form.getTextField("topmostSubform[0].Page1[0].f1_11[0]").setText(digits.slice(0, 3)); } catch {}
+			try { form.getTextField("topmostSubform[0].Page1[0].f1_12[0]").setText(digits.slice(3, 5)); } catch {}
+			try { form.getTextField("topmostSubform[0].Page1[0].f1_13[0]").setText(digits.slice(5)); } catch {}
+			// EIN fields (2 + 7 digits)
 			try { form.getTextField("topmostSubform[0].Page1[0].f1_14[0]").setText(digits.slice(0, 2)); } catch {}
 			try { form.getTextField("topmostSubform[0].Page1[0].f1_15[0]").setText(digits.slice(2)); } catch {}
 		}
@@ -1415,7 +1419,7 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 		const blue = rgb(0.1, 0.34, 0.86);
 		// "Sign Here" line on page 1 — "Signature of U.S. person" field
-		const sigY = 110;
+		const sigY = 140;
 		page1.drawText(signatureText, { x: 120, y: sigY, size: 10, font: fontBold, color: blue });
 		if (effectiveDate) page1.drawText(effectiveDate, { x: 460, y: sigY, size: 9, font, color: blue });
 		if (signatureImage) {
