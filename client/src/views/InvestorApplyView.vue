@@ -28,7 +28,12 @@
             <div class="form-group"><label>Entity Type</label>
               <select v-model="form.entity_type"><option value="">Select...</option><option>LLC</option><option>Corp</option><option>Sole Prop</option><option>Other</option></select>
             </div>
-            <div class="form-group full"><label>Principal Address *</label><input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" /></div>
+            <div class="form-group full"><label>Principal Address *</label>
+              <div class="address-row">
+                <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" />
+                <button type="button" class="map-pick-btn" @click="showMapPicker = true" title="Pick on map">&#128205;</button>
+              </div>
+            </div>
             <div class="form-group"><label>Primary Contact Person</label><input v-model="form.contact_person" /></div>
             <div class="form-group"><label>Title</label><input v-model="form.contact_title" /></div>
             <div class="form-group"><label>Phone *</label><input v-model="form.phone" type="tel" required /></div>
@@ -137,6 +142,13 @@
         @close="showSignModal = false"
         @signed="handleSigned"
       />
+
+      <LocationPickerModal
+        :open="showMapPicker"
+        label="Principal Address"
+        @close="showMapPicker = false"
+        @confirm="onMapConfirm"
+      />
     </div>
   </div>
 </template>
@@ -147,8 +159,10 @@ import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import StepIndicator from '../components/apply/StepIndicator.vue'
 import InvestorSignModal from '../components/invest/InvestorSignModal.vue'
+import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 
 const addressInput = ref(null)
+const showMapPicker = ref(false)
 const api = useApi()
 const { show: toast } = useToast()
 
@@ -197,6 +211,11 @@ function initAddrAutocomplete() {
     const place = ac.getPlace()
     if (place?.formatted_address) form.address = place.formatted_address
   })
+}
+
+function onMapConfirm({ displayName }) {
+  if (displayName) form.address = displayName
+  showMapPicker.value = false
 }
 
 const canProceedStep1 = computed(() => form.legal_name && form.email && form.phone && form.address && form.ein_ssn)
@@ -254,6 +273,15 @@ async function submitBanking() {
 </script>
 
 <style scoped>
+.address-row { display: flex; gap: 0.5rem; }
+.address-row input { flex: 1; }
+.map-pick-btn {
+  flex-shrink: 0; width: 38px; height: 38px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid #ddd; border-radius: 6px; background: #fff;
+  font-size: 1.1rem; cursor: pointer;
+}
+.map-pick-btn:hover { background: #f0f0f0; border-color: #bbb; }
 .invest-page {
   min-height: 100vh;
   background: #f5f6fa;
