@@ -199,7 +199,7 @@ onMounted(async () => {
     if (!key) return
     if (window.google?.maps?.places) { initAddrAutocomplete(); return }
     const script = document.createElement('script')
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places`
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places,marker&v=weekly`
     script.onload = () => initAddrAutocomplete()
     document.head.appendChild(script)
   } catch { /* skip */ }
