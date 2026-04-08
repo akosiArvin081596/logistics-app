@@ -172,10 +172,9 @@
 
           <div class="step-actions">
             <div></div>
-            <button class="btn-primary" :disabled="!canProceedStep1 || submitting" @click="submitApplication">
-              <span v-if="submitting" class="spinner light"></span>
-              {{ submitting ? 'Submitting...' : 'Continue' }}
-              <svg v-if="!submitting" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            <button class="btn-primary" :disabled="!canProceedStep1" @click="step = 1; maxStep = Math.max(maxStep, 1)">
+              Continue
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
           </div>
         </div>
@@ -407,9 +406,8 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
               Back
             </button>
-            <button class="btn-primary" :disabled="!canSubmitBanking || submitting" @click="submitBanking">
-              <span v-if="submitting" class="spinner light"></span>
-              {{ submitting ? 'Submitting...' : 'Complete Onboarding' }}
+            <button class="btn-primary" :disabled="!canSubmitBanking || submitting" @click="showReviewModal = true">
+              {{ 'Review & Complete' }}
             </button>
           </div>
         </div>
@@ -420,6 +418,95 @@
     <div v-if="photoPreviewUrl" class="photo-overlay" @click="photoPreviewUrl = ''">
       <button class="photo-overlay-close">&times;</button>
       <img :src="photoPreviewUrl" class="photo-overlay-img" />
+    </div>
+
+    <!-- Review Modal -->
+    <div v-if="showReviewModal" class="review-overlay" @click.self="showReviewModal = false">
+      <div class="review-modal">
+        <div class="review-header">
+          <h3>Review Your Application</h3>
+          <button class="review-close" @click="showReviewModal = false">&times;</button>
+        </div>
+        <div class="review-body">
+          <!-- Step 1: Application Info -->
+          <div class="review-section">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+              Application Details
+            </div>
+            <div class="review-grid">
+              <div class="review-item"><span class="review-label">Legal Name</span><span class="review-value">{{ form.legal_name }}</span></div>
+              <div v-if="form.dba" class="review-item"><span class="review-label">DBA</span><span class="review-value">{{ form.dba }}</span></div>
+              <div v-if="form.entity_type" class="review-item"><span class="review-label">Entity Type</span><span class="review-value">{{ form.entity_type }}</span></div>
+              <div class="review-item full"><span class="review-label">Address</span><span class="review-value">{{ form.address }}</span></div>
+              <div v-if="form.contact_person" class="review-item"><span class="review-label">Contact Person</span><span class="review-value">{{ form.contact_person }}</span></div>
+              <div v-if="form.contact_title" class="review-item"><span class="review-label">Title</span><span class="review-value">{{ form.contact_title }}</span></div>
+              <div class="review-item"><span class="review-label">Phone</span><span class="review-value">{{ form.phone }}</span></div>
+              <div class="review-item"><span class="review-label">Email</span><span class="review-value">{{ form.email }}</span></div>
+              <div v-if="form.ein_ssn" class="review-item"><span class="review-label">EIN/SSN</span><span class="review-value">{{ form.ein_ssn }}</span></div>
+              <div v-if="form.tax_classification" class="review-item"><span class="review-label">Tax Classification</span><span class="review-value">{{ form.tax_classification }}</span></div>
+            </div>
+          </div>
+
+          <!-- Step 2: Fleet -->
+          <div class="review-section">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+              Fleet ({{ vehicles.length }} vehicle{{ vehicles.length > 1 ? 's' : '' }})
+            </div>
+            <div v-for="(v, i) in vehicles" :key="i" class="review-vehicle">
+              <div class="review-vehicle-label">Vehicle {{ String.fromCharCode(65 + i) }}</div>
+              <div class="review-grid">
+                <div class="review-item"><span class="review-label">Make</span><span class="review-value">{{ v.make }}</span></div>
+                <div class="review-item"><span class="review-label">Model</span><span class="review-value">{{ v.model }}</span></div>
+                <div class="review-item"><span class="review-label">Year</span><span class="review-value">{{ v.year }}</span></div>
+                <div class="review-item"><span class="review-label">VIN</span><span class="review-value">{{ v.vin }}</span></div>
+                <div v-if="v.licensePlate" class="review-item"><span class="review-label">License Plate</span><span class="review-value">{{ v.licensePlate }}</span></div>
+                <div v-if="v.titleState" class="review-item"><span class="review-label">Title State</span><span class="review-value">{{ v.titleState }}</span></div>
+                <div v-if="v.registeredOwner" class="review-item"><span class="review-label">Registered Owner</span><span class="review-value">{{ v.registeredOwner }}</span></div>
+                <div v-if="v.purchasePrice" class="review-item"><span class="review-label">Purchase Price</span><span class="review-value">${{ v.purchasePrice.toLocaleString() }}</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 2: Documents -->
+          <div class="review-section">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              Documents ({{ signedCount }}/{{ totalDocs }} signed)
+            </div>
+            <div class="review-grid">
+              <div v-for="doc in documents" :key="doc.doc_key" class="review-item full">
+                <span class="review-label">{{ doc.doc_name }}</span>
+                <span class="review-value" :class="doc.signed ? 'text-green' : 'text-amber'">{{ doc.signed ? 'Signed' : 'Pending' }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 3: Banking -->
+          <div class="review-section">
+            <div class="review-section-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+              Banking Information
+            </div>
+            <div class="review-grid">
+              <div class="review-item"><span class="review-label">Bank Name</span><span class="review-value">{{ banking.bank_name }}</span></div>
+              <div v-if="banking.account_type" class="review-item"><span class="review-label">Account Type</span><span class="review-value">{{ banking.account_type }}</span></div>
+              <div v-if="banking.account_name" class="review-item"><span class="review-label">Name on Account</span><span class="review-value">{{ banking.account_name }}</span></div>
+              <div class="review-item"><span class="review-label">Routing Number</span><span class="review-value">{{ banking.routing_number }}</span></div>
+              <div class="review-item"><span class="review-label">Account Number</span><span class="review-value">{{ '••••' + banking.account_number.slice(-4) }}</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="review-footer">
+          <button class="btn-ghost" @click="showReviewModal = false">Go Back & Edit</button>
+          <button class="btn-primary" :disabled="submitting" @click="showReviewModal = false; submitBanking()">
+            <span v-if="submitting" class="spinner light"></span>
+            {{ submitting ? 'Submitting...' : 'Confirm & Complete Onboarding' }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Modals -->
@@ -522,6 +609,7 @@ const activeVehicleTab = ref(0)
 const activeModelOptions = computed(() => truckModels[vehicles.value[activeVehicleTab.value]?.make] || [])
 const stateDropOpen = ref(false)
 const photoPreviewUrl = ref('')
+const showReviewModal = ref(false)
 const bankDropOpen = ref(false)
 const usBanks = [
   'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
@@ -1372,6 +1460,65 @@ async function submitBanking() {
   background: #0f2847; color: #fff;
   display: flex; align-items: center; justify-content: center;
   font-size: 0.72rem; font-weight: 800;
+}
+
+/* ─── Review modal ─── */
+.review-overlay {
+  position: fixed; inset: 0; z-index: 999;
+  background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  padding: 1rem;
+}
+.review-modal {
+  background: #fff; border-radius: 14px;
+  width: 100%; max-width: 700px; max-height: 90vh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.review-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 1rem 1.5rem; border-bottom: 1px solid #e9edf3;
+}
+.review-header h3 { font-size: 1.1rem; font-weight: 700; color: #0f172a; margin: 0; }
+.review-close {
+  font-size: 1.5rem; background: none; border: none;
+  cursor: pointer; color: #94a3b8; line-height: 1;
+}
+.review-body {
+  flex: 1; overflow-y: auto; padding: 1.25rem 1.5rem;
+}
+.review-section {
+  margin-bottom: 1.25rem; padding-bottom: 1rem;
+  border-bottom: 1px solid #f1f5f9;
+}
+.review-section:last-child { border-bottom: none; margin-bottom: 0; }
+.review-section-title {
+  display: flex; align-items: center; gap: 0.5rem;
+  font-size: 0.82rem; font-weight: 700; color: #0f172a;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 0.75rem;
+}
+.review-section-title svg { color: #3b82f6; }
+.review-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 0.5rem 1rem;
+}
+.review-item { display: flex; flex-direction: column; gap: 0.1rem; }
+.review-item.full { grid-column: 1 / -1; }
+.review-label { font-size: 0.7rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.04em; }
+.review-value { font-size: 0.85rem; color: #0f172a; font-weight: 500; }
+.text-green { color: #16a34a; }
+.text-amber { color: #d97706; }
+.review-vehicle {
+  margin-bottom: 0.75rem; padding: 0.65rem 0.85rem;
+  background: #fafbfd; border-radius: 8px; border: 1px solid #f1f5f9;
+}
+.review-vehicle-label {
+  font-size: 0.75rem; font-weight: 700; color: #475569;
+  margin-bottom: 0.5rem;
+}
+.review-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 1rem 1.5rem; border-top: 1px solid #e9edf3; gap: 1rem;
 }
 
 /* ═══════════════════════════════════════════
