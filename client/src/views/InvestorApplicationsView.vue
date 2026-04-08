@@ -302,24 +302,11 @@ const outreach = reactive({
   subject: 'LogisX Investor Onboarding Invitation',
   body: `Dear Investor,
 
-You are invited to join LogisX Inc. as a fleet participant.
+You are invited to join LogisX Inc. as a fleet participant. We provide full operational support, real-time revenue tracking, and a dedicated investor dashboard to help you maximize returns on your commercial vehicles.
 
-To begin the onboarding process, please visit the link below and complete the 3-step wizard:
+Our onboarding is fully digital — it only takes a few minutes to complete your application, sign the required documents, and set up your ACH settlement account.
 
-${investUrl}
-
-Step 1: Complete your application
-Step 2: Review and sign the Master Participation Agreement and Vehicle Lease
-Step 3: Submit your W-9 and banking information
-
-If you have questions, contact us at info@logisx.com or call our office.
-
-Best regards,
-Deshorn King, CEO
-LogisX Inc.
-4576 Research Forest Dr, Suite 200
-The Woodlands, TX 77381
-USDOT# 4302683`,
+We look forward to partnering with you.`,
   sending: false,
   result: null,
 })
