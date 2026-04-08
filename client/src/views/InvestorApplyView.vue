@@ -512,10 +512,9 @@
 
     <!-- Modals -->
     <InvestorSignModal
-      :show="showSignModal" :doc="selectedDoc"
+      :show="showSignModal" :doc="selectedDoc" :pdf-url="previewPdfUrl"
       :suggested-names="[form.contact_person, form.legal_name].filter(Boolean)"
-      :applicant-name="form.legal_name" :applicant-entity="form.entity_type"
-      @close="showSignModal = false" @signed="handleSigned"
+      @close="showSignModal = false; revokePreview()" @signed="handleSigned"
     />
     <LocationPickerModal
       :open="showMapPicker" label="Principal Address"
@@ -621,6 +620,7 @@ const activeModelOptions = computed(() => truckModels[vehicles.value[activeVehic
 const stateDropOpen = ref(false)
 const photoPreviewUrl = ref('')
 const showReviewModal = ref(false)
+const previewPdfUrl = ref('')
 const bankDropOpen = ref(false)
 const usBanks = [
   'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
@@ -823,10 +823,30 @@ function submitApplication() {
   maxStep.value = Math.max(maxStep.value, 1)
 }
 
-// Open sign modal — purely local
-function openDoc(doc) {
+// Open sign modal — fetch stateless PDF preview
+async function openDoc(doc) {
   selectedDoc.value = doc
+  previewPdfUrl.value = ''
   showSignModal.value = true
+  try {
+    const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
+    const res = await fetch(`/api/public/investor-preview-pdf/${doc.doc_key}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...form, vehicles: stripped }),
+    })
+    if (res.ok) {
+      const blob = await res.blob()
+      previewPdfUrl.value = URL.createObjectURL(blob)
+    }
+  } catch { /* preview failed, modal still works */ }
+}
+
+function revokePreview() {
+  if (previewPdfUrl.value) {
+    URL.revokeObjectURL(previewPdfUrl.value)
+    previewPdfUrl.value = ''
+  }
 }
 
 // Capture signature locally — no server call

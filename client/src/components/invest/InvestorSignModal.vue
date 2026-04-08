@@ -9,21 +9,10 @@
 
       <!-- Two-panel body -->
       <div class="modal-body">
-        <!-- Left: Document info -->
+        <!-- Left: PDF viewer -->
         <div class="pdf-panel">
-          <div class="doc-info">
-            <div class="doc-info-icon">
-              <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            </div>
-            <h3 class="doc-info-title">{{ doc?.doc_name }}</h3>
-            <p class="doc-info-desc">{{ docDescription }}</p>
-            <div class="doc-info-details">
-              <div class="detail-row"><span class="detail-label">Applicant</span><span class="detail-value">{{ applicantName }}</span></div>
-              <div v-if="applicantEntity" class="detail-row"><span class="detail-label">Entity</span><span class="detail-value">{{ applicantEntity }}</span></div>
-              <div class="detail-row"><span class="detail-label">Date</span><span class="detail-value">{{ effectiveDate }}</span></div>
-            </div>
-            <p class="doc-info-note">By signing below, you acknowledge that you have read and agree to the terms of this document. The final signed PDF will be generated upon submission.</p>
-          </div>
+          <iframe v-if="pdfUrl" :src="pdfUrl" class="pdf-frame"></iframe>
+          <div v-else class="pdf-placeholder">Loading document...</div>
         </div>
 
         <!-- Right: Sign panel -->
@@ -89,9 +78,8 @@ import { ref, computed, watch, nextTick } from 'vue'
 const props = defineProps({
   show: { type: Boolean, default: false },
   doc: { type: Object, default: null },
+  pdfUrl: { type: String, default: '' },
   suggestedNames: { type: Array, default: () => [] },
-  applicantName: { type: String, default: '' },
-  applicantEntity: { type: String, default: '' },
 })
 const emit = defineEmits(['close', 'signed'])
 
@@ -101,16 +89,6 @@ const canvasRef = ref(null)
 const isDrawing = ref(false)
 const hasDrawn = ref(false)
 const nameDropOpen = ref(false)
-
-const effectiveDate = computed(() => new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }))
-
-const docDescription = computed(() => {
-  const key = props.doc?.doc_key
-  if (key === 'master_agreement') return 'This agreement establishes the terms of participation and management responsibilities between you and LogisX Logistics for fleet operations, revenue sharing, and service obligations.'
-  if (key === 'vehicle_lease') return 'This lease agreement covers the commercial vehicles you are registering with LogisX, including maintenance responsibilities, insurance requirements, and usage terms.'
-  if (key === 'w9') return 'IRS Form W-9 is required for tax reporting purposes. Your taxpayer identification number (EIN/SSN) will be used to issue 1099 forms as required by federal law.'
-  return ''
-})
 
 const filteredNames = computed(() => {
   const q = signatureText.value.toLowerCase()
@@ -212,34 +190,15 @@ function handleSign() {
   flex: 1; display: flex; overflow: hidden;
 }
 
-/* ─── Left: Document info ─── */
+/* ─── Left: PDF ─── */
 .pdf-panel {
-  flex: 1; background: #f8fafc; overflow-y: auto;
+  flex: 1; background: #f5f5f5; overflow: hidden;
+}
+.pdf-frame { width: 100%; height: 100%; border: none; }
+.pdf-placeholder {
   display: flex; align-items: center; justify-content: center;
+  height: 100%; color: #6b7085; font-size: 0.9rem;
 }
-.doc-info {
-  max-width: 520px; padding: 2.5rem; text-align: center;
-}
-.doc-info-icon { color: #3b82f6; margin-bottom: 1.25rem; }
-.doc-info-title { font-size: 1.3rem; font-weight: 700; color: #0f172a; margin: 0 0 0.75rem; }
-.doc-info-desc { font-size: 0.9rem; color: #475569; line-height: 1.6; margin: 0 0 1.5rem; }
-.doc-info-details {
-  background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
-  padding: 1rem; margin-bottom: 1.5rem; text-align: left;
-}
-.detail-row {
-  display: flex; justify-content: space-between; padding: 0.4rem 0;
-  border-bottom: 1px solid #f1f5f9;
-}
-.detail-row:last-child { border-bottom: none; }
-.detail-label { font-size: 0.78rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em; }
-.detail-value { font-size: 0.88rem; font-weight: 500; color: #0f172a; }
-.doc-info-note {
-  font-size: 0.8rem; color: #94a3b8; line-height: 1.5;
-  background: #fffbeb; border: 1px solid #fef3c7; border-radius: 8px;
-  padding: 0.75rem; text-align: left;
-}
-
 /* ─── Right: Sign panel ─── */
 .sign-panel {
   width: 340px; flex-shrink: 0;
