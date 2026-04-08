@@ -310,8 +310,17 @@
             </div>
           </details>
 
-          <!-- Accordion 2: Onboarding Documents -->
-          <details class="accordion" open>
+          <!-- Submit gate: application + vehicles submitted together -->
+          <div v-if="!applicationId" class="submit-gate">
+            <button class="btn-primary" :disabled="!allVehiclesValid || submitting" @click="submitApplication">
+              <span v-if="submitting" class="spinner light"></span>
+              {{ submitting ? 'Submitting...' : 'Submit Application & Continue to Documents' }}
+              <svg v-if="!submitting" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </button>
+          </div>
+
+          <!-- Accordion 2: Onboarding Documents (visible after application submitted) -->
+          <details v-if="applicationId" class="accordion" open>
             <summary class="accordion-toggle">
               <div class="accordion-title">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -814,12 +823,11 @@ async function submitApplication() {
   if (submitting.value) return
   submitting.value = true
   try {
-    const result = await api.post('/api/public/investor-apply', { ...form })
+    const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
+    const result = await api.post('/api/public/investor-apply', { ...form, vehicles: stripped })
     applicationId.value = result.applicationId
     accessToken.value = result.accessToken
     await loadOnboarding()
-    step.value = 1
-    maxStep.value = Math.max(maxStep.value, 1)
     toast('Application submitted', 'success')
   } catch (err) {
     toast(err.message || 'Submission failed', 'error')
@@ -836,15 +844,6 @@ async function loadOnboarding() {
 }
 
 async function openDoc(doc) {
-  // Save vehicles to server first (strip photos to keep payload small)
-  if (applicationId.value && vehicles.value.length) {
-    try {
-      const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
-      await api.post(`/api/public/investor-onboarding/${applicationId.value}/vehicles`, {
-        vehicles: stripped, accessToken: accessToken.value,
-      })
-    } catch { /* skip */ }
-  }
   selectedDoc.value = doc
   selectedPdfUrl.value = doc.signed && doc.signed_pdf_url
     ? doc.signed_pdf_url
@@ -1214,6 +1213,11 @@ async function submitBanking() {
   display: flex; justify-content: space-between; align-items: center;
   margin-top: 1.75rem; gap: 1rem;
   padding-top: 1.25rem;
+  border-top: 1px solid #f1f5f9;
+}
+.submit-gate {
+  display: flex; justify-content: center;
+  margin: 1.5rem 0; padding: 1.25rem 0;
   border-top: 1px solid #f1f5f9;
 }
 

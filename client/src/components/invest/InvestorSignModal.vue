@@ -84,7 +84,6 @@ const props = defineProps({
   pdfUrl: { type: String, default: '' },
   applicationId: { type: Number, default: 0 },
   accessToken: { type: String, default: '' },
-  vehicleInfo: { type: Array, default: () => [] },
   suggestedNames: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['close', 'signed'])
@@ -166,7 +165,6 @@ async function handleSign() {
     await api.post(`/api/public/investor-onboarding/${props.applicationId}/sign/${props.doc.doc_key}`, {
       signatureText: signatureText.value.trim(),
       signatureImage,
-      vehicleInfo: (props.vehicleInfo || []).map(({ photo, photoName, ...rest }) => rest),
       accessToken: props.accessToken,
     })
     toast('Document signed', 'success')

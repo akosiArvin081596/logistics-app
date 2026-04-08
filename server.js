@@ -1328,32 +1328,52 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 
 // === INVESTOR ONBOARDING ENDPOINTS (Public) ===
 
-// POST /api/public/investor-apply — Step 1: Submit investor application
+// POST /api/public/investor-apply — Submit investor application + vehicles (atomic)
 app.post("/api/public/investor-apply", (req, res) => {
 	try {
 		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
 			years_in_operation, industry_experience, fleet_size, preferred_communication,
-			tax_classification, ein_ssn, bankruptcy_liens, reporting_preference } = req.body;
+			tax_classification, ein_ssn, bankruptcy_liens, reporting_preference, vehicles } = req.body;
 		if (!legal_name || !email || !phone || !address || !ein_ssn) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
 		const accessToken = crypto.randomUUID();
-		const result = db.prepare(`
-			INSERT INTO investor_applications (legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
-				years_in_operation, industry_experience, fleet_size, preferred_communication,
-				tax_classification, ein_ssn, bankruptcy_liens, reporting_preference, access_token)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`).run(legal_name, dba || "", entity_type || "", address, contact_person || "", contact_title || "",
-			phone, email, years_in_operation || "", industry_experience || "", fleet_size || "",
-			preferred_communication || "", tax_classification || "", ein_ssn, bankruptcy_liens || "", reporting_preference || "", accessToken);
+		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
 
-		const appId = result.lastInsertRowid;
-		// Create onboarding record + seed documents
-		db.prepare("INSERT INTO investor_onboarding (application_id, status) VALUES (?, 'documents_pending')").run(appId);
-		const seedDoc = db.prepare("INSERT OR IGNORE INTO investor_onboarding_documents (application_id, doc_key, doc_name) VALUES (?, ?, ?)");
-		for (const doc of INVESTOR_ONBOARDING_DOCS) {
-			seedDoc.run(appId, doc.key, doc.name);
-		}
+		const applyTx = db.transaction(() => {
+			const result = db.prepare(`
+				INSERT INTO investor_applications (legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
+					years_in_operation, industry_experience, fleet_size, preferred_communication,
+					tax_classification, ein_ssn, bankruptcy_liens, reporting_preference, access_token)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`).run(legal_name, dba || "", entity_type || "", address, contact_person || "", contact_title || "",
+				phone, email, years_in_operation || "", industry_experience || "", fleet_size || "",
+				preferred_communication || "", tax_classification || "", ein_ssn, bankruptcy_liens || "", reporting_preference || "", accessToken);
+
+			const appId = result.lastInsertRowid;
+
+			// Save vehicles if provided
+			if (vehiclesArr.length > 0) {
+				const v = vehiclesArr[0];
+				db.prepare(`UPDATE investor_applications SET
+					vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
+					vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=?,
+					vehicles_json=? WHERE id=?`
+				).run(v.year || "", v.make || "", v.model || "", v.vin || "",
+					v.mileage || "", v.titleState || "", v.liens || "", v.registeredOwner || "",
+					JSON.stringify(vehiclesArr), appId);
+			}
+
+			// Create onboarding record + seed documents
+			db.prepare("INSERT INTO investor_onboarding (application_id, status) VALUES (?, 'documents_pending')").run(appId);
+			const seedDoc = db.prepare("INSERT OR IGNORE INTO investor_onboarding_documents (application_id, doc_key, doc_name) VALUES (?, ?, ?)");
+			for (const doc of INVESTOR_ONBOARDING_DOCS) {
+				seedDoc.run(appId, doc.key, doc.name);
+			}
+			return appId;
+		});
+
+		const appId = applyTx();
 		res.json({ success: true, applicationId: appId, accessToken });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -1483,7 +1503,7 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		const appId = verifyInvestorToken(req, res);
 		if (!appId) return;
 		const { docKey } = req.params;
-		const { signatureText, signatureImage, vehicleInfo } = req.body;
+		const { signatureText, signatureImage } = req.body;
 		if (!signatureText || !signatureText.trim()) return res.status(400).json({ error: "Signature required" });
 
 		const docRow = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(appId, docKey);
@@ -1498,19 +1518,8 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		const signedPath = path.join(signedDir, signedFileName);
 		let signedPdfUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
 
-		// Save vehicle info if provided (for Exhibit A)
-		const vehiclesArr = Array.isArray(vehicleInfo) ? vehicleInfo : (vehicleInfo ? [vehicleInfo] : []);
-		if (vehiclesArr.length > 0) {
-			const v = vehiclesArr[0];
-			db.prepare(`UPDATE investor_applications SET
-				vehicle_year=?, vehicle_make=?, vehicle_model=?, vehicle_vin=?, vehicle_mileage=?,
-				vehicle_title_state=?, vehicle_liens=?, vehicle_registered_owner=?,
-				vehicles_json=? WHERE id=?`
-			).run(v.year || "", v.make || "", v.model || "",
-				v.vin || "", v.mileage || "", v.titleState || "",
-				v.liens || "", v.registeredOwner || "",
-				JSON.stringify(vehiclesArr), appId);
-		}
+		// Read vehicles from DB (already saved via /vehicles endpoint)
+		const vehiclesArr = application?.vehicles_json ? JSON.parse(application.vehicles_json) : [];
 
 		if (docKey === "w9") {
 			const pdfBytes = await fillW9Form({
