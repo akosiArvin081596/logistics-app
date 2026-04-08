@@ -248,7 +248,13 @@
                 <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].vin" placeholder="Vehicle Identification Number" required /></div>
                 <div class="field"><label>License Plate</label><input v-model="vehicles[activeVehicleTab].licensePlate" placeholder="e.g. ABC-1234" /></div>
                 <div class="field"><label>Current Mileage</label><input v-model="vehicles[activeVehicleTab].mileage" placeholder="e.g. 120,000" /></div>
-                <div class="field"><label>Title State</label><input v-model="vehicles[activeVehicleTab].titleState" placeholder="e.g. Texas" /></div>
+                <div class="field">
+                  <label>Title State</label>
+                  <input v-model="vehicles[activeVehicleTab].titleState" list="us-states-list" placeholder="Search state..." />
+                  <datalist id="us-states-list">
+                    <option v-for="st in usStates" :key="st" :value="st" />
+                  </datalist>
+                </div>
                 <div class="field"><label>Existing Liens</label><input v-model="vehicles[activeVehicleTab].liens" placeholder="None or lien holder name" /></div>
                 <div class="field"><label>Registered Owner</label><input v-model="vehicles[activeVehicleTab].registeredOwner" placeholder="Owner on title" /></div>
                 <div class="field full">
@@ -402,6 +408,16 @@ const form = reactive({
   phone: '', email: '', years_in_operation: '', industry_experience: '', fleet_size: '',
   preferred_communication: '', tax_classification: '', ein_ssn: '', bankruptcy_liens: '', reporting_preference: '',
 })
+
+const usStates = [
+  'Alabama','Alaska','Arizona','Arkansas','California','Colorado','Connecticut','Delaware',
+  'Florida','Georgia','Hawaii','Idaho','Illinois','Indiana','Iowa','Kansas','Kentucky',
+  'Louisiana','Maine','Maryland','Massachusetts','Michigan','Minnesota','Mississippi',
+  'Missouri','Montana','Nebraska','Nevada','New Hampshire','New Jersey','New Mexico',
+  'New York','North Carolina','North Dakota','Ohio','Oklahoma','Oregon','Pennsylvania',
+  'Rhode Island','South Carolina','South Dakota','Tennessee','Texas','Utah','Vermont',
+  'Virginia','Washington','West Virginia','Wisconsin','Wyoming',
+]
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
