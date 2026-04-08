@@ -415,37 +415,33 @@ async function submitBanking() {
 /* ─── Page ─── */
 .invest-page {
   min-height: 100vh;
-  background: #f0f2f7;
+  background: #fff;
   padding: 2.5rem 1rem 3rem;
   font-family: 'DM Sans', system-ui, sans-serif;
 }
-.invest-container { max-width: 740px; margin: 0 auto; }
+.invest-container { max-width: 680px; margin: 0 auto; }
 
 /* ─── Header ─── */
-.invest-header { text-align: center; margin-bottom: 1.75rem; }
+.invest-header { text-align: center; margin-bottom: 2.25rem; }
 .logo-glow {
-  display: inline-flex; padding: 12px 20px; border-radius: 16px;
-  background: rgba(255,255,255,0.7); backdrop-filter: blur(8px);
-  box-shadow: 0 2px 12px rgba(56,189,248,0.08); margin-bottom: 1rem;
+  display: inline-flex; padding: 10px 18px; border-radius: 14px;
+  background: #f8fafc; margin-bottom: 1.15rem;
 }
-.invest-logo { height: 44px; display: block; }
+.invest-logo { height: 40px; display: block; }
 .invest-header h1 {
-  font-size: 1.65rem; font-weight: 800; color: #0f172a;
-  letter-spacing: -0.02em; margin-bottom: 0.2rem;
+  font-size: 1.75rem; font-weight: 800; color: #0f172a;
+  letter-spacing: -0.025em; margin-bottom: 0.3rem;
 }
-.subtitle { font-size: 0.92rem; color: #64748b; }
+.subtitle { font-size: 0.92rem; color: #94a3b8; font-weight: 400; }
 .trust-badge {
   display: inline-flex; align-items: center; gap: 0.35rem;
-  margin-top: 0.75rem; padding: 0.3rem 0.85rem;
-  background: rgba(255,255,255,0.65); backdrop-filter: blur(4px);
-  border-radius: 99px; font-size: 0.72rem; font-weight: 600;
-  color: #64748b; border: 1px solid rgba(226,232,240,0.6);
+  margin-top: 0.85rem; padding: 0.3rem 0.85rem;
+  background: #f0fdf4; border-radius: 99px;
+  font-size: 0.72rem; font-weight: 600; color: #15803d;
 }
 
 /* ─── Progress context ─── */
-.progress-context {
-  text-align: center; margin-bottom: 0.5rem;
-}
+.progress-context { text-align: center; margin-bottom: 0.5rem; }
 .progress-label {
   font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.08em; color: #94a3b8;
@@ -453,55 +449,53 @@ async function submitBanking() {
 
 /* ─── Card ─── */
 .main-card {
-  border-radius: 16px !important;
-  border: 1px solid rgba(226,232,240,0.7) !important;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06) !important;
+  border-radius: 20px !important;
+  border: none !important;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.04), 0 4px 24px rgba(0,0,0,0.06) !important;
   overflow: hidden; margin-top: 1.25rem;
-  background: #ffffff !important;
+  background: #fff !important;
   position: relative;
 }
 .main-card::before {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
   background: linear-gradient(90deg, #38bdf8, #818cf8);
 }
-.card-body { padding: 2rem !important; }
+.card-body { padding: 2.25rem 2.25rem 2rem !important; }
 
 /* ─── Step header ─── */
-.step-header { margin-bottom: 1.5rem; }
+.step-header { margin-bottom: 1.75rem; }
 .step-header h2 {
-  font-size: 1.2rem; font-weight: 800; color: #0f172a;
-  letter-spacing: -0.01em; margin-bottom: 0.15rem;
+  font-size: 1.25rem; font-weight: 800; color: #0f172a;
+  letter-spacing: -0.015em; margin-bottom: 0.2rem;
 }
 .step-header p { font-size: 0.85rem; color: #94a3b8; }
 
 /* ─── Section dividers ─── */
 .section-divider {
   display: flex; align-items: center; gap: 0.5rem;
-  margin: 1.75rem 0 0.85rem; padding-bottom: 0.5rem;
-  border-bottom: 1px solid #e8edf2; color: #64748b;
-  font-size: 0.78rem; font-weight: 700; text-transform: uppercase;
+  margin: 2rem 0 1rem; padding-bottom: 0.55rem;
+  border-bottom: 1px solid #f1f5f9; color: #64748b;
+  font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
 /* ─── Form fields ─── */
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-.field { display: flex; flex-direction: column; gap: 0.3rem; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; }
+.field { display: flex; flex-direction: column; gap: 0.35rem; }
 .field.full { grid-column: 1 / -1; }
-.field label {
-  font-size: 0.78rem; font-weight: 600; color: #374151;
-}
+.field label { font-size: 0.78rem; font-weight: 600; color: #475569; }
 .req { color: #ef4444; }
 .opt { font-weight: 400; color: #94a3b8; font-size: 0.72rem; }
 .field input, .field select {
-  padding: 0.6rem 0.8rem; border: 1px solid #e2e8f0; border-radius: 10px;
-  font-size: 0.88rem; color: #0f172a; background: #f8fafc;
-  font-family: inherit; transition: all 0.2s ease;
+  padding: 0.65rem 0.85rem; border: 1.5px solid #e2e8f0; border-radius: 10px;
+  font-size: 0.88rem; color: #0f172a; background: #fff;
+  font-family: inherit; transition: all 0.15s ease;
 }
 .field input::placeholder { color: #cbd5e1; }
+.field input:hover, .field select:hover { border-color: #cbd5e1; }
 .field input:focus, .field select:focus {
   outline: none; border-color: #38bdf8;
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.12);
-  background: #fff;
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.1);
 }
 
 /* ─── Address row ─── */
@@ -519,10 +513,10 @@ async function submitBanking() {
 .map-btn {
   flex-shrink: 0; width: 42px; height: 42px;
   display: flex; align-items: center; justify-content: center;
-  border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc;
-  color: #64748b; cursor: pointer; transition: all 0.2s;
+  border: 1.5px solid #e2e8f0; border-radius: 10px; background: #fff;
+  color: #94a3b8; cursor: pointer; transition: all 0.15s;
 }
-.map-btn:hover { background: #fff; border-color: #38bdf8; color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.1); }
+.map-btn:hover { border-color: #38bdf8; color: #38bdf8; }
 
 /* ─── Spinner ─── */
 .spinner {
@@ -536,99 +530,97 @@ async function submitBanking() {
 /* ─── Buttons ─── */
 .btn-primary {
   display: inline-flex; align-items: center; gap: 0.5rem;
-  padding: 0.7rem 1.6rem; border: none; border-radius: 10px;
-  background: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
-  color: #fff; font-weight: 700; font-size: 0.88rem;
-  cursor: pointer; transition: all 0.2s; font-family: inherit;
-  box-shadow: 0 2px 8px rgba(56,189,248,0.25);
+  padding: 0.72rem 1.6rem; border: none; border-radius: 10px;
+  background: #0f172a; color: #fff; font-weight: 700; font-size: 0.88rem;
+  cursor: pointer; transition: all 0.15s; font-family: inherit;
 }
-.btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(56,189,248,0.35); }
-.btn-primary:active:not(:disabled) { transform: translateY(0); }
-.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.btn-primary:hover:not(:disabled) { background: #1e293b; }
+.btn-primary:active:not(:disabled) { transform: scale(0.98); }
+.btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
 .btn-ghost {
   display: inline-flex; align-items: center; gap: 0.4rem;
-  padding: 0.7rem 1.4rem; border: 1px solid #e2e8f0; border-radius: 10px;
+  padding: 0.72rem 1.4rem; border: 1.5px solid #e2e8f0; border-radius: 10px;
   background: #fff; color: #475569; font-weight: 600; font-size: 0.88rem;
   cursor: pointer; transition: all 0.15s; font-family: inherit;
 }
 .btn-ghost:hover { background: #f8fafc; border-color: #cbd5e1; }
-.step-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 2rem; gap: 1rem; }
+.step-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 2.25rem; gap: 1rem; }
 
 /* ─── Document progress ─── */
-.doc-progress { margin-bottom: 1.5rem; }
+.doc-progress { margin-bottom: 1.75rem; }
 .doc-progress-bar {
-  height: 6px; background: #e2e8f0; border-radius: 99px; overflow: hidden;
+  height: 4px; background: #f1f5f9; border-radius: 99px; overflow: hidden;
 }
 .doc-progress-fill {
   height: 100%; border-radius: 99px;
-  background: linear-gradient(90deg, #38bdf8, #818cf8);
-  transition: width 0.4s ease;
+  background: #0f172a; transition: width 0.4s ease;
 }
 .doc-progress-text {
-  display: block; text-align: right; margin-top: 0.35rem;
+  display: block; text-align: right; margin-top: 0.4rem;
   font-size: 0.72rem; font-weight: 600; color: #94a3b8;
 }
 
 /* ─── Document cards ─── */
-.doc-list { display: flex; flex-direction: column; gap: 0.6rem; }
+.doc-list { display: flex; flex-direction: column; gap: 0.65rem; }
 .doc-card {
   display: flex; align-items: center; gap: 0.85rem;
-  padding: 1rem 1.15rem; border-radius: 12px;
-  border: 1px solid #e8edf2; cursor: pointer;
-  transition: all 0.2s ease; background: #fff;
+  padding: 1rem 1.15rem; border-radius: 14px;
+  border: 1.5px solid #f1f5f9; cursor: pointer;
+  transition: all 0.15s ease; background: #fff;
 }
-.doc-card:hover { border-color: #cbd5e1; box-shadow: 0 2px 8px rgba(0,0,0,0.04); transform: translateY(-1px); }
-.doc-card.signed { border-color: #d1fae5; background: #f0fdf4; }
+.doc-card:hover { border-color: #e2e8f0; background: #fafbfd; }
+.doc-card.signed { border-color: #d1fae5; background: #f7fdf9; }
 .doc-icon-wrap {
-  width: 38px; height: 38px; border-radius: 10px;
+  width: 40px; height: 40px; border-radius: 12px;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
 .doc-icon-wrap.done { background: #dcfce7; color: #16a34a; }
 .doc-icon-wrap.pending { background: #f1f5f9; color: #94a3b8; }
 .doc-info { flex: 1; min-width: 0; }
 .doc-name { font-weight: 600; font-size: 0.88rem; color: #0f172a; }
-.doc-meta { font-size: 0.72rem; color: #94a3b8; margin-top: 0.1rem; }
+.doc-meta { font-size: 0.72rem; color: #94a3b8; margin-top: 0.15rem; }
 .doc-chip {
-  flex-shrink: 0; padding: 0.25rem 0.75rem; border-radius: 99px;
+  flex-shrink: 0; padding: 0.3rem 0.85rem; border-radius: 99px;
   font-size: 0.72rem; font-weight: 700;
 }
-.chip-sign { background: rgba(56,189,248,0.1); color: #0ea5e9; }
+.chip-sign { background: #f1f5f9; color: #475569; }
 .chip-done { background: #dcfce7; color: #16a34a; }
 
 /* ─── Vehicle card ─── */
 .vehicle-card {
-  background: #f8fafc; border: 1px solid #e8edf2; border-radius: 12px; padding: 1.25rem;
+  background: #fafbfd; border: 1.5px solid #f1f5f9; border-radius: 14px; padding: 1.5rem;
 }
 
 /* ─── Banking security ─── */
 .bank-security-note {
   display: flex; align-items: center; gap: 0.5rem;
-  padding: 0.65rem 1rem; margin-bottom: 1.5rem;
+  padding: 0.7rem 1rem; margin-bottom: 1.5rem;
   background: #f0fdf4; border: 1px solid #d1fae5; border-radius: 10px;
   font-size: 0.78rem; color: #15803d; font-weight: 500;
 }
 
 /* ─── Success ─── */
-.success-content { padding: 3rem 2rem !important; text-align: center; }
+.success-content { padding: 3.5rem 2rem !important; text-align: center; }
 .success-check {
-  width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 1.25rem;
+  width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 1.5rem;
   background: #dcfce7; color: #16a34a;
   display: flex; align-items: center; justify-content: center;
   animation: popIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 @keyframes popIn { 0% { transform: scale(0); } 100% { transform: scale(1); } }
-.success-content h2 { font-size: 1.35rem; font-weight: 800; color: #0f172a; margin-bottom: 0.4rem; }
+.success-content h2 { font-size: 1.35rem; font-weight: 800; color: #0f172a; margin-bottom: 0.5rem; }
 .success-content > p { color: #64748b; font-size: 0.9rem; max-width: 420px; margin: 0 auto; line-height: 1.6; }
 .next-steps {
-  margin-top: 2rem; text-align: left; max-width: 400px; margin-inline: auto;
-  background: #f8fafc; border-radius: 12px; padding: 1.25rem 1.5rem;
+  margin-top: 2.25rem; text-align: left; max-width: 400px; margin-inline: auto;
+  background: #fafbfd; border-radius: 14px; padding: 1.5rem 1.75rem;
+  border: 1px solid #f1f5f9;
 }
-.next-steps h4 { font-size: 0.82rem; font-weight: 700; color: #475569; margin-bottom: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; }
-.next-step { display: flex; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.75rem; font-size: 0.85rem; color: #475569; line-height: 1.5; }
+.next-steps h4 { font-size: 0.78rem; font-weight: 700; color: #475569; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.next-step { display: flex; align-items: flex-start; gap: 0.85rem; margin-bottom: 0.85rem; font-size: 0.85rem; color: #475569; line-height: 1.5; }
 .next-step:last-child { margin-bottom: 0; }
 .ns-num {
   flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%;
-  background: linear-gradient(135deg, #38bdf8, #818cf8); color: #fff;
+  background: #0f172a; color: #fff;
   display: flex; align-items: center; justify-content: center;
   font-size: 0.72rem; font-weight: 800;
 }
@@ -643,8 +635,8 @@ async function submitBanking() {
 @media (max-width: 640px) {
   .invest-page { padding: 1.25rem 0.75rem 2rem; }
   .form-grid { grid-template-columns: 1fr; }
-  .card-body { padding: 1.25rem !important; }
-  .invest-header h1 { font-size: 1.35rem; }
-  .step-header h2 { font-size: 1.05rem; }
+  .card-body { padding: 1.5rem 1.25rem 1.25rem !important; }
+  .invest-header h1 { font-size: 1.4rem; }
+  .step-header h2 { font-size: 1.1rem; }
 }
 </style>
