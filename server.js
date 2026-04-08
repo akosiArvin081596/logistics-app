@@ -2024,9 +2024,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 					application.email || "", application.ein_ssn || "", application.tax_classification || "",
 					application.contact_person || "", application.contact_title || "");
 
-			// Create trucks from application vehicles (owner_id = investor record ID, matching /api/trucks query)
-			const investorRecord = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(userId);
-			const ownerId = investorRecord ? investorRecord.id : userId;
+			// Create trucks from application vehicles (owner_id = user ID, consistent with dashboard/reports)
 			let vehicles = [];
 			try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
 			const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
@@ -2038,7 +2036,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, notes)
 						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(unitNum, v.make || "", v.model || "", parseInt(v.year) || 0, v.vin || "", v.licensePlate || "",
-						truckStatus, ownerId, parseFloat(v.purchasePrice) || 0,
+						truckStatus, userId, parseFloat(v.purchasePrice) || 0,
 						v.titleStatus || "Clean", v.titleState ? `Title State: ${v.titleState}` : "");
 				} catch { /* skip duplicate */ }
 			}
@@ -3421,7 +3419,7 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 		status: r.status,
 		notes: r.notes,
 		createdAt: r.created_at,
-		truckCount: db.prepare("SELECT COUNT(*) as n FROM trucks WHERE owner_id = ?").get(r.id).n,
+		truckCount: db.prepare("SELECT COUNT(*) as n FROM trucks WHERE owner_id = ?").get(r.user_id).n,
 	}));
 	res.json({ investors });
 });
@@ -3500,10 +3498,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 	const user = req.session.user;
 	let rows;
 	if (user.role === "Investor") {
-		const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(user.id);
-		rows = inv
-			? db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(inv.id)
-			: [];
+		rows = db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(user.id);
 	} else {
 		rows = db.prepare("SELECT * FROM trucks ORDER BY unit_number ASC").all();
 	}
@@ -3555,11 +3550,10 @@ app.get("/api/truck-assignments", requireAuth, (req, res) => {
 app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	try {
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
-		// Investors auto-set owner_id to their own investor record
+		// Investors auto-set owner_id to their own user ID
 		let finalOwnerId = parseInt(ownerId) || 0;
 		if (req.session.user.role === "Investor") {
-			const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(req.session.user.id);
-			if (inv) finalOwnerId = inv.id;
+			finalOwnerId = req.session.user.id;
 		}
 		if (!unitNumber || !unitNumber.trim()) {
 			return res.status(400).json({ error: "Unit number is required" });
