@@ -53,9 +53,6 @@
               <select v-model="form.tax_classification"><option value="">Select...</option><option>C-Corp</option><option>S-Corp</option><option>Partnership</option><option>Individual/LLC</option></select>
             </div>
             <div class="form-group"><label>EIN or SSN *</label><input v-model="form.ein_ssn" required /></div>
-            <div class="form-group"><label>Bankruptcy or Tax Liens?</label>
-              <select v-model="form.bankruptcy_liens"><option value="">Select...</option><option>No</option><option>Yes</option></select>
-            </div>
             <div class="form-group"><label>Monthly Reporting Delivery</label>
               <select v-model="form.reporting_preference"><option value="">Select...</option><option>Digital Portal</option><option>Email PDF</option></select>
             </div>
