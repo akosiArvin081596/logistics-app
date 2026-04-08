@@ -28,7 +28,7 @@
             <div class="form-group"><label>Entity Type</label>
               <select v-model="form.entity_type"><option value="">Select...</option><option>LLC</option><option>Corp</option><option>Sole Prop</option><option>Other</option></select>
             </div>
-            <div class="form-group full"><label>Principal Address *</label><input ref="addressInput" v-model="form.address" required /></div>
+            <div class="form-group full"><label>Principal Address *</label><input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" /></div>
             <div class="form-group"><label>Primary Contact Person</label><input v-model="form.contact_person" /></div>
             <div class="form-group"><label>Title</label><input v-model="form.contact_title" /></div>
             <div class="form-group"><label>Phone *</label><input v-model="form.phone" type="tel" required /></div>
@@ -181,7 +181,7 @@ const banking = reactive({
 // Google Places autocomplete for address
 onMounted(async () => {
   try {
-    const { key } = await api.get('/api/maps-key')
+    const { key } = await api.get('/api/config/maps-key')
     if (!key) return
     if (window.google?.maps?.places) { initAddrAutocomplete(); return }
     const script = document.createElement('script')
