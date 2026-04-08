@@ -2609,7 +2609,10 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 // Admin: list all users (without password hashes)
 app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
-		.prepare("SELECT id, username, role, driver_name, email, full_name, company_name, created_at, rating FROM users")
+		.prepare(`SELECT u.id, u.username, u.role, u.driver_name, u.email, u.full_name, u.company_name, u.created_at, u.rating,
+			do2.status AS onboarding_status
+			FROM users u
+			LEFT JOIN driver_onboarding do2 ON do2.user_id = u.id`)
 		.all()
 		.map((u) => ({
 			id: u.id,
@@ -2621,6 +2624,7 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			CompanyName: u.company_name,
 			CreatedAt: u.created_at,
 			Rating: u.rating || 0,
+			OnboardingStatus: u.onboarding_status || null,
 		}));
 	res.json({ users });
 });

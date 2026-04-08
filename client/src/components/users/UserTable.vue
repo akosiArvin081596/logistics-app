@@ -29,6 +29,7 @@
           <td class="mono" style="font-size:0.8rem;color:var(--text-dim);">{{ user.Username || '' }}</td>
           <td>
             <span :class="['role-badge', roleClass(user.Role)]">{{ user.Role || '' }}</span>
+            <span v-if="user.OnboardingStatus && user.OnboardingStatus !== 'fully_onboarded'" class="onboarding-badge">Onboarding</span>
           </td>
           <td :style="{ color: user.FullName ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.FullName || '\u2014' }}
@@ -315,6 +316,18 @@ function handleConfirmDelete() {
   color: var(--amber);
 }
 
+.onboarding-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: 12px;
+  font-size: 0.62rem;
+  font-weight: 600;
+  background: #fef3c7;
+  color: #92400e;
+  margin-left: 0.3rem;
+  white-space: nowrap;
+}
 .role-badge {
   display: inline-flex;
   align-items: center;
