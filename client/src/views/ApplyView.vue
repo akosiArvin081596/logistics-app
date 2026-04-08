@@ -59,12 +59,42 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
           </div>
           <h2>Application Submitted</h2>
-          <p>Thank you, <strong>{{ form.first_name }} {{ form.last_name }}</strong>. Your driver application has been submitted successfully.</p>
+          <p>Thanks for getting your paperwork squared away, <strong>{{ form.first_name }}</strong>. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
+
           <div class="next-steps">
-            <h4>What happens next</h4>
-            <div class="next-step"><span class="ns-num">1</span><span>Our team will review your application within 1-2 business days</span></div>
-            <div class="next-step"><span class="ns-num">2</span><span>You'll receive login credentials via email if accepted</span></div>
-            <div class="next-step"><span class="ns-num">3</span><span>Complete onboarding documents to start driving</span></div>
+            <h4>Here is what happens next</h4>
+            <div class="next-step">
+              <span class="ns-num">1</span>
+              <span><strong>Pre-Employment Screening:</strong> A member of our safety team will contact you shortly to schedule your <strong>pre-appointment drug test</strong>. If you've already completed one recently for another carrier, let us know, but expect to be sent for a new one under the LogisX account.</span>
+            </div>
+            <div class="next-step">
+              <span class="ns-num">2</span>
+              <span><strong>FMCSA Clearinghouse:</strong> This is mandatory. If you haven't already, make sure you are enrolled in the <strong>FMCSA Clearinghouse</strong> and have granted LogisX Inc. permission to run your full query. We cannot put you in a truck until this is cleared.</span>
+            </div>
+            <div class="next-step">
+              <span class="ns-num">3</span>
+              <span><strong>Driver Training:</strong> While we finalize your background check, it's time to get in the right mindset. At LogisX, we pride ourselves on professional, elite operation.</span>
+            </div>
+          </div>
+
+          <div class="pro-tip">
+            <div class="pro-tip-header">Pro-Tip: Don't end up on the internet for the wrong reasons.</div>
+            <p>To understand the standard of safety we expect, take a look at what <em>not</em> to do out there. Check out these "professional" moves on <strong>Bonehead Truckers</strong> — study them so you don't repeat them.</p>
+          </div>
+
+          <div class="video-embed">
+            <iframe
+              src="https://www.youtube.com/embed/KpHxeBQ3TSc?list=PL7DBE50EBBC23F024"
+              title="Bonehead Truckers"
+              frameborder="0"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowfullscreen
+            ></iframe>
+          </div>
+
+          <div class="standby-note">
+            <p>Stand by for a call from our safety coordinator.</p>
+            <p class="team-sign">— The LogisX Safety Team</p>
           </div>
         </div>
       </div>
@@ -551,6 +581,26 @@ async function submitForm() {
   margin-bottom: 0.85rem; font-size: 0.85rem; color: #475569; line-height: 1.5;
 }
 .next-step:last-child { margin-bottom: 0; }
+
+.pro-tip {
+  margin-top: 1.75rem; padding: 1.25rem 1.5rem;
+  background: #fffbeb; border: 1px solid #fef3c7; border-left: 4px solid #f59e0b;
+  border-radius: 10px;
+}
+.pro-tip-header { font-size: 0.88rem; font-weight: 700; color: #92400e; margin-bottom: 0.5rem; }
+.pro-tip p { font-size: 0.85rem; color: #78350f; line-height: 1.6; margin: 0; }
+
+.video-embed {
+  margin-top: 1.5rem; border-radius: 12px; overflow: hidden;
+  aspect-ratio: 16 / 9; background: #000;
+}
+.video-embed iframe { width: 100%; height: 100%; }
+
+.standby-note {
+  margin-top: 1.75rem; text-align: center;
+}
+.standby-note p { font-size: 0.9rem; color: #475569; margin: 0 0 0.25rem; }
+.team-sign { font-weight: 700; color: #0f172a; font-size: 0.88rem; margin-top: 0.5rem !important; }
 .ns-num {
   flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%;
   background: #0f2847; color: #fff;
