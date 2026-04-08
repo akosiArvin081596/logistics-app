@@ -148,7 +148,7 @@ async function handleSign() {
     await api.post(`/api/public/investor-onboarding/${props.applicationId}/sign/${props.doc.doc_key}`, {
       signatureText: signatureText.value.trim(),
       signatureImage,
-      vehicleInfo: props.vehicleInfo || undefined,
+      vehicleInfo: (props.vehicleInfo || []).map(({ photo, photoName, ...rest }) => rest),
       accessToken: props.accessToken,
     })
     toast('Document signed', 'success')
