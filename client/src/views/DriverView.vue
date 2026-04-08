@@ -80,7 +80,7 @@
         :show="showSignModal"
         :doc="selectedDoc"
         @close="showSignModal = false"
-        @signed="showSignModal = false"
+        @signed="onDocSigned"
       />
     </template>
 
@@ -402,6 +402,11 @@ const selectedDoc = ref(null)
 function openOnboardingDoc(doc) {
   selectedDoc.value = doc
   showSignModal.value = true
+}
+function onDocSigned(docKey) {
+  // Update selectedDoc to the fresh signed version so modal shows signed state + PDF
+  const fresh = driverStore.onboarding?.documents?.find(d => d.doc_key === docKey)
+  if (fresh) selectedDoc.value = fresh
 }
 const isOnboarding = computed(() => {
   const ob = driverStore.onboarding

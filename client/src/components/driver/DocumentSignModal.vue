@@ -133,8 +133,12 @@ const accountType = ref('')
 
 const isContractorAgreement = computed(() => props.doc?.doc_key === 'contractor_agreement')
 
+const pdfUrlOverride = ref('')
+
 const pdfUrl = computed(() => {
+  if (pdfUrlOverride.value) return pdfUrlOverride.value
   if (!props.doc) return ''
+  if (props.doc.signed && props.doc.signed_pdf_url) return props.doc.signed_pdf_url
   return `/api/onboarding/documents/${props.doc.doc_key}/pdf`
 })
 
@@ -154,6 +158,7 @@ watch(() => props.show, async (v) => {
     signatureText.value = ''
     signing.value = false
     hasDrawn.value = false
+    pdfUrlOverride.value = ''
     paymentMethod.value = ''
     checkName.value = ''
     bankName.value = ''
@@ -214,7 +219,18 @@ async function handleSign() {
   if (!canSign.value) return
   signing.value = true
   try {
-    const signatureImage = canvasRef.value?.toDataURL('image/png') || null
+    // Export canvas with white background (transparent PNGs can be invisible in PDFs)
+    let signatureImage = null
+    const canvas = canvasRef.value
+    if (canvas) {
+      const tmp = document.createElement('canvas')
+      tmp.width = canvas.width; tmp.height = canvas.height
+      const ctx = tmp.getContext('2d')
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, tmp.width, tmp.height)
+      ctx.drawImage(canvas, 0, 0)
+      signatureImage = tmp.toDataURL('image/png')
+    }
     const payInfo = isContractorAgreement.value ? {
       paymentMethod: paymentMethod.value,
       checkName: checkName.value,
@@ -229,7 +245,11 @@ async function handleSign() {
     await driverStore.signDocument(props.doc.doc_key, signatureText.value.trim(), signatureImage, payInfo)
     toast('Document signed successfully', 'success')
     emit('signed', props.doc.doc_key)
-    emit('close')
+    // Refresh PDF panel to show the signed version (don't close modal)
+    const signedDoc = driverStore.onboarding?.documents?.find(d => d.doc_key === props.doc.doc_key)
+    if (signedDoc?.signed_pdf_url) {
+      pdfUrlOverride.value = signedDoc.signed_pdf_url + '?t=' + Date.now()
+    }
   } catch (err) {
     toast(err.message || 'Failed to sign document', 'error')
   } finally {
