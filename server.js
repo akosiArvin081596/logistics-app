@@ -812,6 +812,7 @@ db.exec(`
 		FOREIGN KEY (application_id) REFERENCES investor_applications(id)
 	)
 `);
+try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signature_image TEXT DEFAULT ''"); } catch { /* exists */ }
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_payment_info (
@@ -1497,8 +1498,8 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		}
 
 		const now = new Date().toISOString();
-		db.prepare("UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signed_at=?, signed_pdf_url=? WHERE application_id=? AND doc_key=?")
-			.run(signatureText.trim(), now, signedPdfUrl, appId, docKey);
+		db.prepare("UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signature_image=?, signed_at=?, signed_pdf_url=? WHERE application_id=? AND doc_key=?")
+			.run(signatureText.trim(), signatureImage || "", now, signedPdfUrl, appId, docKey);
 
 		// Check if all docs signed → advance to banking_pending
 		const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
