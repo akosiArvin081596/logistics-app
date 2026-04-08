@@ -778,13 +778,48 @@ db.exec(`
 		vehicle_liens TEXT DEFAULT '',
 		vehicle_registered_owner TEXT DEFAULT '',
 		access_token TEXT DEFAULT '',
-		status TEXT DEFAULT 'New' CHECK(status IN ('New','Reviewed','Accepted','Rejected')),
+		status TEXT DEFAULT 'Draft' CHECK(status IN ('Draft','New','Reviewed','Accepted','Rejected')),
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
 // Migration: add access_token if missing
 try { db.exec("ALTER TABLE investor_applications ADD COLUMN access_token TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE investor_applications ADD COLUMN vehicles_json TEXT DEFAULT '[]'"); } catch { /* exists */ }
+
+// Migration: add 'Draft' to investor_applications status CHECK constraint
+try {
+	db.prepare("INSERT INTO investor_applications (legal_name, ein_ssn, phone, email, address, status) VALUES ('__test__','__t__','__t__','__t__','__t__','Draft')").run();
+	db.prepare("DELETE FROM investor_applications WHERE legal_name='__test__'").run();
+} catch {
+	db.exec(`
+		ALTER TABLE investor_applications RENAME TO investor_applications_old;
+		CREATE TABLE investor_applications (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			legal_name TEXT NOT NULL, dba TEXT DEFAULT '', entity_type TEXT DEFAULT '',
+			address TEXT DEFAULT '', contact_person TEXT DEFAULT '', contact_title TEXT DEFAULT '',
+			phone TEXT DEFAULT '', email TEXT DEFAULT '',
+			years_in_operation TEXT DEFAULT '', industry_experience TEXT DEFAULT '',
+			fleet_size TEXT DEFAULT '', preferred_communication TEXT DEFAULT '',
+			tax_classification TEXT DEFAULT '', ein_ssn TEXT DEFAULT '',
+			bankruptcy_liens TEXT DEFAULT '', reporting_preference TEXT DEFAULT '',
+			vehicle_year TEXT DEFAULT '', vehicle_make TEXT DEFAULT '', vehicle_model TEXT DEFAULT '',
+			vehicle_vin TEXT DEFAULT '', vehicle_mileage TEXT DEFAULT '',
+			vehicle_title_state TEXT DEFAULT '', vehicle_liens TEXT DEFAULT '',
+			vehicle_registered_owner TEXT DEFAULT '', access_token TEXT DEFAULT '',
+			vehicles_json TEXT DEFAULT '[]',
+			status TEXT DEFAULT 'Draft' CHECK(status IN ('Draft','New','Reviewed','Accepted','Rejected')),
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		INSERT INTO investor_applications SELECT id, legal_name, dba, entity_type,
+			address, contact_person, contact_title, phone, email,
+			years_in_operation, industry_experience, fleet_size, preferred_communication,
+			tax_classification, ein_ssn, bankruptcy_liens, reporting_preference,
+			vehicle_year, vehicle_make, vehicle_model, vehicle_vin, vehicle_mileage,
+			vehicle_title_state, vehicle_liens, vehicle_registered_owner, access_token,
+			vehicles_json, status, created_at FROM investor_applications_old;
+		DROP TABLE investor_applications_old;
+	`);
+}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_onboarding (
@@ -1702,6 +1737,9 @@ app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
 		db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=? WHERE application_id=?")
 			.run(new Date().toISOString(), appId);
 
+		// Promote from Draft to New — application is now visible to admins
+		db.prepare("UPDATE investor_applications SET status='New' WHERE id=? AND status='Draft'").run(appId);
+
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -1718,6 +1756,7 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 			(SELECT COUNT(*) FROM investor_onboarding_documents WHERE application_id=ia.id AND signed=1) AS signed_count
 			FROM investor_applications ia
 			LEFT JOIN investor_onboarding io ON io.application_id = ia.id
+			WHERE ia.status != 'Draft'
 			ORDER BY ia.created_at DESC`).all();
 		res.json(apps);
 	} catch (err) {
