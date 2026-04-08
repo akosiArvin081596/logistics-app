@@ -791,6 +791,57 @@ db.exec(`
 	)
 `);
 
+// Drivers directory (replaces Carrier Database Google Sheet)
+db.exec(`
+	CREATE TABLE IF NOT EXISTS drivers_directory (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		driver_name TEXT NOT NULL UNIQUE,
+		carrier_name TEXT DEFAULT '',
+		state TEXT DEFAULT '',
+		city TEXT DEFAULT '',
+		zip TEXT DEFAULT '',
+		address TEXT DEFAULT '',
+		phone TEXT DEFAULT '',
+		cell TEXT DEFAULT '',
+		email TEXT DEFAULT '',
+		dot TEXT DEFAULT '',
+		mc TEXT DEFAULT '',
+		trucks TEXT DEFAULT '',
+		hazmat TEXT DEFAULT '',
+		rating TEXT DEFAULT '',
+		user_id INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+
+// One-time seed: import Carrier Database from Google Sheet into SQLite on first boot
+const driverCount = db.prepare("SELECT COUNT(*) AS cnt FROM drivers_directory").get().cnt;
+if (driverCount === 0) {
+	(async () => {
+		try {
+			const sheets = await getSheets();
+			const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
+			const rows = resp.data.values || [];
+			if (rows.length < 2) return;
+			const h = rows[0];
+			const find = (regex) => h.findIndex(x => regex.test(x));
+			const di = find(/driver/i); const ci = find(/carrier/i); const si = find(/state/i);
+			const cti = find(/city/i); const zi = find(/zip/i); const ai = find(/address/i);
+			const ti = find(/truck/i); const hzi = find(/hazmat/i); const pi = find(/phone/i);
+			const cli = find(/cell/i); const ei = find(/email/i); const doi = find(/dot/i);
+			const mi = find(/mc/i); const ri = find(/rating/i);
+			const ins = db.prepare(`INSERT OR IGNORE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+			for (let i = 1; i < rows.length; i++) {
+				const r = rows[i];
+				const name = (r[di] || "").trim();
+				if (!name) continue;
+				ins.run(name, r[ci]||"", r[si]||"", r[cti]||"", r[zi]||"", r[ai]||"", r[pi]||"", r[cli]||"", r[ei]||"", r[doi]||"", r[mi]||"", r[ti]||"", r[hzi]||"", r[ri]||"");
+			}
+			console.log(`Seeded ${rows.length - 1} drivers from Carrier Database sheet into SQLite`);
+		} catch (err) { console.error("Driver seed error:", err.message); }
+	})();
+}
+
 // Truck ↔ Driver assignment history
 db.exec(`
 	CREATE TABLE IF NOT EXISTS truck_assignments (
@@ -917,69 +968,117 @@ async function getSheetId(sheets, sheetName) {
 // ============================================================
 // Auto-sync Driver users ↔ Carrier Database Google Sheet
 // ============================================================
-async function syncDriverToCarrierSheet(driverName, opts = {}) {
+// Sync driver to SQLite drivers_directory (replaces Google Sheet sync)
+function syncDriverToCarrierSheet(driverName, opts = {}) {
 	const { oldName, email, companyName, action } = opts;
 	try {
-		const sheets = await getSheets();
-		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
-		const rows = resp.data.values || [];
-		if (rows.length === 0) return;
-		const headers = rows[0];
-		const driverIdx = headers.findIndex(h => /driver/i.test(h));
-		const carrierIdx = headers.findIndex(h => /carrier/i.test(h));
-		const emailIdx = headers.findIndex(h => /email/i.test(h));
-		const trucksIdx = headers.findIndex(h => /truck/i.test(h));
-		const di = driverIdx !== -1 ? driverIdx : 0;
-
-		// Find existing row by name
-		const searchName = (oldName || driverName || "").trim().toLowerCase();
-		let foundRow = -1;
-		for (let i = 1; i < rows.length; i++) {
-			if ((rows[i][di] || "").trim().toLowerCase() === searchName) { foundRow = i; break; }
-		}
-
-		// Get assigned truck unit number
 		const truck = driverName ? db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driverName.trim()) : null;
 		const truckUnit = truck ? truck.unit_number : "";
 
 		if (action === "add") {
-			if (foundRow !== -1) return; // already exists
-			const newRow = new Array(headers.length).fill("");
-			if (di !== -1) newRow[di] = driverName;
-			if (carrierIdx !== -1) newRow[carrierIdx] = companyName || "";
-			if (emailIdx !== -1) newRow[emailIdx] = email || "";
-			if (trucksIdx !== -1) newRow[trucksIdx] = truckUnit;
-			await sheets.spreadsheets.values.append({
-				spreadsheetId: SPREADSHEET_ID, range: "Carrier Database",
-				valueInputOption: "USER_ENTERED", requestBody: { values: [newRow] },
-			});
+			db.prepare(`INSERT OR IGNORE INTO drivers_directory (driver_name, carrier_name, email, trucks) VALUES (?, ?, ?, ?)`)
+				.run(driverName.trim(), companyName || "", email || "", truckUnit);
 		} else if (action === "update") {
-			if (foundRow === -1) {
-				// Row doesn't exist yet — add it
+			const existing = db.prepare("SELECT id FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)").get((oldName || driverName || "").trim());
+			if (!existing) {
 				return syncDriverToCarrierSheet(driverName, { ...opts, action: "add" });
 			}
-			const row = rows[foundRow];
-			// Preserve existing values, only update fields we manage
-			if (di !== -1) row[di] = driverName;
-			if (carrierIdx !== -1 && companyName !== undefined) row[carrierIdx] = companyName;
-			if (emailIdx !== -1 && email !== undefined) row[emailIdx] = email;
-			if (trucksIdx !== -1) row[trucksIdx] = truckUnit;
-			await sheets.spreadsheets.values.update({
-				spreadsheetId: SPREADSHEET_ID, range: `Carrier Database!A${foundRow + 1}`,
-				valueInputOption: "USER_ENTERED", requestBody: { values: [row] },
-			});
+			const sets = ["driver_name = ?"];
+			const params = [driverName.trim()];
+			if (companyName !== undefined) { sets.push("carrier_name = ?"); params.push(companyName); }
+			if (email !== undefined) { sets.push("email = ?"); params.push(email); }
+			sets.push("trucks = ?"); params.push(truckUnit);
+			params.push(existing.id);
+			db.prepare(`UPDATE drivers_directory SET ${sets.join(", ")} WHERE id = ?`).run(...params);
 		} else if (action === "delete") {
-			if (foundRow === -1) return; // nothing to delete
-			const sheetId = await getSheetId(sheets, "Carrier Database");
-			await sheets.spreadsheets.batchUpdate({
-				spreadsheetId: SPREADSHEET_ID,
-				requestBody: { requests: [{ deleteDimension: { range: { sheetId, dimension: "ROWS", startIndex: foundRow, endIndex: foundRow + 1 } } }] },
-			});
+			db.prepare("DELETE FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)").run(driverName.trim());
 		}
 	} catch (err) {
-		console.error("syncDriverToCarrierSheet error:", err.message);
+		console.error("syncDriverToDirectory error:", err.message);
 	}
 }
+
+// Helper: get carrier database from SQLite in the same format as parseSheet() for backward compat
+function getCarrierDBFromSQLite() {
+	const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating"];
+	const rows = db.prepare("SELECT * FROM drivers_directory ORDER BY driver_name ASC").all();
+	const data = rows.map((d, i) => {
+		const obj = {};
+		obj["Driver"] = d.driver_name; obj["Carrier Name"] = d.carrier_name;
+		obj["State"] = d.state; obj["City"] = d.city; obj["ZIP"] = d.zip; obj["Address"] = d.address;
+		obj["Trucks"] = d.trucks; obj["Hazmat"] = d.hazmat; obj["PhoneNumber"] = d.phone;
+		obj["CellNumber"] = d.cell; obj["Email"] = d.email; obj["DOT"] = d.dot;
+		obj["MC"] = d.mc; obj["Rating"] = d.rating; obj._rowIndex = d.id;
+		return obj;
+	});
+	return { headers, data };
+}
+
+// === DRIVERS DIRECTORY API (replaces Carrier Database sheet reads) ===
+
+// GET /api/drivers-directory — all drivers from SQLite
+app.get("/api/drivers-directory", requireAuth, (req, res) => {
+	try {
+		const drivers = db.prepare("SELECT * FROM drivers_directory ORDER BY driver_name ASC").all();
+		// Return in a format compatible with the old sheet-based response
+		const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating"];
+		const data = drivers.map(d => ({
+			Driver: d.driver_name, "Carrier Name": d.carrier_name, State: d.state, City: d.city,
+			ZIP: d.zip, Address: d.address, Trucks: d.trucks, Hazmat: d.hazmat,
+			PhoneNumber: d.phone, CellNumber: d.cell, Email: d.email, DOT: d.dot, MC: d.mc, Rating: d.rating,
+			_rowIndex: d.id, _id: d.id,
+		}));
+		res.json({ headers, data, total: data.length });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/drivers-directory — add driver
+app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { values, headers } = req.body;
+		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
+		const obj = {};
+		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
+		db.prepare(`INSERT OR REPLACE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
+				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
+				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "");
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// PUT /api/drivers-directory/:id — update driver
+app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		const { values, headers } = req.body;
+		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
+		const obj = {};
+		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
+		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=? WHERE id=?`)
+			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
+				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
+				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "", id);
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// DELETE /api/drivers-directory/:id — delete driver
+app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(parseInt(req.params.id));
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
 
 // ============================================================
 // AUTH — Session-based authentication with roles (SQLite)

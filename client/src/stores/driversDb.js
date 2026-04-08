@@ -2,7 +2,6 @@ import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
 
 const api = useApi()
-const SHEET = 'Carrier Database'
 
 export const useDriversDbStore = defineStore('driversDb', {
   state: () => ({
@@ -15,7 +14,7 @@ export const useDriversDbStore = defineStore('driversDb', {
     async load() {
       this.isLoading = true
       try {
-        const data = await api.get(`/api/data?sheet=${encodeURIComponent(SHEET)}&page=1&limit=200`)
+        const data = await api.get('/api/drivers-directory')
         this.headers = data.headers || []
         this.drivers = data.data || []
       } finally {
@@ -24,17 +23,17 @@ export const useDriversDbStore = defineStore('driversDb', {
     },
 
     async add(values) {
-      await api.post(`/api/data?sheet=${encodeURIComponent(SHEET)}`, { values })
+      await api.post('/api/drivers-directory', { values, headers: this.headers })
       await this.load()
     },
 
-    async update(rowIndex, values) {
-      await api.put(`/api/data/${rowIndex}?sheet=${encodeURIComponent(SHEET)}`, { values })
+    async update(id, values) {
+      await api.put(`/api/drivers-directory/${id}`, { values, headers: this.headers })
       await this.load()
     },
 
-    async remove(rowIndex) {
-      await api.del(`/api/data/${rowIndex}?sheet=${encodeURIComponent(SHEET)}`)
+    async remove(id) {
+      await api.del(`/api/drivers-directory/${id}`)
       await this.load()
     },
   },

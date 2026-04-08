@@ -33,9 +33,7 @@ export const useSheetsStore = defineStore('sheets', {
 
     async loadDrivers() {
       try {
-        const json = await api.get(
-          `/api/data?sheet=${encodeURIComponent('Carrier Database')}&page=1&limit=200`
-        )
+        const json = await api.get('/api/drivers-directory')
         const headers = json.headers || []
         const driverCol = headers.find((h) => /driver/i.test(h)) || headers[0]
         if (driverCol) {

@@ -297,7 +297,7 @@ async function loadHeaders() {
 
 async function loadDrivers() {
   try {
-    const data = await api.get(`/api/data?sheet=${encodeURIComponent('Carrier Database')}&page=1&limit=200`)
+    const data = await api.get('/api/drivers-directory')
     const driverCol = (data.headers || []).find(h => /driver/i.test(h))
     if (driverCol) {
       const names = (data.data || []).map(r => (r[driverCol] || '').trim()).filter(Boolean)
