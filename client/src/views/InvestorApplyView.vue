@@ -1,162 +1,257 @@
 <template>
   <div class="invest-page">
     <div class="invest-container">
-      <div class="invest-header">
-        <img src="/logo.avif" alt="LogisX" class="invest-logo" />
-        <h1>Investor Onboarding</h1>
-        <p>Complete the steps below to get started with LogisX.</p>
-      </div>
 
-      <!-- Success screen -->
-      <div v-if="completed" class="invest-success">
-        <div class="success-icon">&#9989;</div>
-        <h2>Onboarding Complete</h2>
-        <p>Thank you, {{ form.legal_name }}. Your application has been submitted and all documents are signed. Our team will review and contact you shortly.</p>
-      </div>
+      <!-- Header -->
+      <header class="invest-header">
+        <div class="logo-glow">
+          <img src="/logo.avif" alt="LogisX" class="invest-logo" />
+        </div>
+        <h1>Investor Portal</h1>
+        <p class="subtitle">Begin your journey with LogisX</p>
+        <div class="trust-badge">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span>256-bit encrypted &amp; secure</span>
+        </div>
+      </header>
+
+      <!-- Success Screen -->
+      <Card v-if="completed" class="main-card">
+        <CardContent class="success-content">
+          <div class="success-check">
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </div>
+          <h2>Onboarding Complete</h2>
+          <p>Thank you, <strong>{{ form.legal_name }}</strong>. Your application and all documents have been submitted successfully.</p>
+          <div class="next-steps">
+            <h4>What happens next</h4>
+            <div class="next-step"><span class="ns-num">1</span><span>Our team will review your application within 1-2 business days</span></div>
+            <div class="next-step"><span class="ns-num">2</span><span>You'll receive login credentials via email once approved</span></div>
+            <div class="next-step"><span class="ns-num">3</span><span>Access your investor dashboard to track fleet performance</span></div>
+          </div>
+        </CardContent>
+      </Card>
 
       <template v-else>
+        <!-- Progress -->
+        <div class="progress-context">
+          <span class="progress-label">Step {{ step + 1 }} of 3</span>
+        </div>
         <StepIndicator :steps="['Application', 'Documents', 'W-9 & Banking']" :current="step" />
 
         <!-- STEP 1: Application -->
-        <div v-if="step === 0" class="step-content">
-          <h2 class="step-title">Investor Application</h2>
-
-          <div class="form-section">General Information</div>
-          <div class="form-grid">
-            <div class="form-group full"><label>Legal Name (Individual or Entity) *</label><input v-model="form.legal_name" required /></div>
-            <div class="form-group"><label>DBA (if applicable)</label><input v-model="form.dba" /></div>
-            <div class="form-group"><label>Entity Type</label>
-              <select v-model="form.entity_type"><option value="">Select...</option><option>LLC</option><option>Corp</option><option>Sole Prop</option><option>Other</option></select>
+        <Card v-if="step === 0" class="main-card">
+          <CardContent class="card-body">
+            <div class="step-header">
+              <h2>Investor Application</h2>
+              <p>Tell us about you and your business</p>
             </div>
-            <div class="form-group full"><label>Principal Address *</label>
-              <div class="address-row">
-                <div class="address-input-wrap">
-                  <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" />
-                  <button type="button" class="addr-inline-btn" :disabled="geolocating" @click="useCurrentLocation" title="Use my current location">
-                    <svg v-if="!geolocating" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
-                    <span v-else class="spin-icon">&#8635;</span>
+
+            <div class="section-divider">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+              <span>General Information</span>
+            </div>
+            <div class="form-grid">
+              <div class="field full">
+                <label>Legal Name (Individual or Entity) <span class="req">*</span></label>
+                <input v-model="form.legal_name" placeholder="e.g. John Doe or Doe Enterprises LLC" required />
+              </div>
+              <div class="field">
+                <label>DBA <span class="opt">(if applicable)</span></label>
+                <input v-model="form.dba" placeholder="Doing business as..." />
+              </div>
+              <div class="field">
+                <label>Entity Type</label>
+                <select v-model="form.entity_type">
+                  <option value="">Select type...</option>
+                  <option>LLC</option><option>Corp</option><option>Sole Prop</option><option>Other</option>
+                </select>
+              </div>
+              <div class="field full">
+                <label>Principal Address <span class="req">*</span></label>
+                <div class="address-row">
+                  <div class="address-input-wrap">
+                    <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" />
+                    <button type="button" class="addr-action-btn" :disabled="geolocating" @click="useCurrentLocation" title="Use my current location">
+                      <svg v-if="!geolocating" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+                      <span v-else class="spinner"></span>
+                    </button>
+                  </div>
+                  <button type="button" class="map-btn" @click="showMapPicker = true" title="Pick on map">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
                   </button>
                 </div>
-                <button type="button" class="map-pick-btn" @click="showMapPicker = true" title="Pick on map">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
+              </div>
+              <div class="field"><label>Primary Contact Person</label><input v-model="form.contact_person" placeholder="Full name" /></div>
+              <div class="field"><label>Title</label><input v-model="form.contact_title" placeholder="e.g. Owner, Manager" /></div>
+              <div class="field"><label>Phone <span class="req">*</span></label><input v-model="form.phone" type="tel" placeholder="(555) 123-4567" required /></div>
+              <div class="field"><label>Email <span class="req">*</span></label><input v-model="form.email" type="email" placeholder="you@company.com" required /></div>
+            </div>
+
+            <div class="section-divider">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+              <span>Business Profile</span>
+            </div>
+            <div class="form-grid">
+              <div class="field"><label>Years in Operation</label><input v-model="form.years_in_operation" placeholder="e.g. 5" /></div>
+              <div class="field">
+                <label>Industry Experience</label>
+                <select v-model="form.industry_experience"><option value="">Select...</option><option>Yes</option><option>No</option></select>
+              </div>
+              <div class="field"><label>Total Fleet Size (Currently Owned)</label><input v-model="form.fleet_size" placeholder="e.g. 3" /></div>
+              <div class="field">
+                <label>Preferred Communication</label>
+                <select v-model="form.preferred_communication"><option value="">Select...</option><option>Email</option><option>Text</option><option>Phone</option></select>
+              </div>
+            </div>
+
+            <div class="section-divider">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+              <span>Financial &amp; Tax</span>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label>Tax Classification</label>
+                <select v-model="form.tax_classification"><option value="">Select...</option><option>C-Corp</option><option>S-Corp</option><option>Partnership</option><option>Individual/LLC</option></select>
+              </div>
+              <div class="field"><label>EIN or SSN <span class="req">*</span></label><input v-model="form.ein_ssn" placeholder="XX-XXXXXXX" required /></div>
+              <div class="field">
+                <label>Monthly Reporting Delivery</label>
+                <select v-model="form.reporting_preference"><option value="">Select...</option><option>Digital Portal</option><option>Email PDF</option></select>
+              </div>
+            </div>
+
+            <div class="step-actions">
+              <div></div>
+              <button class="btn-primary" :disabled="!canProceedStep1 || submitting" @click="submitApplication">
+                <span v-if="submitting" class="spinner light"></span>
+                {{ submitting ? 'Submitting...' : 'Continue' }}
+                <svg v-if="!submitting" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <!-- STEP 2: Document Signing -->
+        <Card v-if="step === 1" class="main-card">
+          <CardContent class="card-body">
+            <div class="step-header">
+              <h2>Sign Onboarding Documents</h2>
+              <p>Review and sign each document to proceed</p>
+            </div>
+
+            <div class="doc-progress">
+              <div class="doc-progress-bar">
+                <div class="doc-progress-fill" :style="{ width: (signedCount / totalDocs * 100) + '%' }"></div>
+              </div>
+              <span class="doc-progress-text">{{ signedCount }} of {{ totalDocs }} signed</span>
+            </div>
+
+            <!-- Vehicle info (for Exhibit A) -->
+            <div v-if="!vehicleInfoDone" class="vehicle-card">
+              <div class="section-divider">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+                <span>Vehicle Information (Exhibit A)</span>
+              </div>
+              <div class="form-grid">
+                <div class="field"><label>Year <span class="req">*</span></label><input v-model="vehicle.year" placeholder="e.g. 2022" required /></div>
+                <div class="field"><label>Make <span class="req">*</span></label><input v-model="vehicle.make" placeholder="e.g. Freightliner" required /></div>
+                <div class="field"><label>Model <span class="req">*</span></label><input v-model="vehicle.model" placeholder="e.g. Cascadia" required /></div>
+                <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicle.vin" placeholder="17-character VIN" required /></div>
+                <div class="field"><label>Current Mileage</label><input v-model="vehicle.mileage" placeholder="e.g. 120,000" /></div>
+                <div class="field"><label>Title State</label><input v-model="vehicle.titleState" placeholder="e.g. Texas" /></div>
+                <div class="field"><label>Existing Liens</label><input v-model="vehicle.liens" placeholder="None or lien holder name" /></div>
+                <div class="field"><label>Registered Owner</label><input v-model="vehicle.registeredOwner" placeholder="Owner on title" /></div>
+              </div>
+              <div class="step-actions">
+                <div></div>
+                <button class="btn-primary" :disabled="!vehicle.year || !vehicle.make || !vehicle.model || !vehicle.vin" @click="vehicleInfoDone = true">
+                  Save &amp; Continue
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
                 </button>
               </div>
             </div>
-            <div class="form-group"><label>Primary Contact Person</label><input v-model="form.contact_person" /></div>
-            <div class="form-group"><label>Title</label><input v-model="form.contact_title" /></div>
-            <div class="form-group"><label>Phone *</label><input v-model="form.phone" type="tel" required /></div>
-            <div class="form-group"><label>Email *</label><input v-model="form.email" type="email" required /></div>
-          </div>
 
-          <div class="form-section">Business Profile</div>
-          <div class="form-grid">
-            <div class="form-group"><label>Years in Operation</label><input v-model="form.years_in_operation" /></div>
-            <div class="form-group"><label>Industry Experience</label>
-              <select v-model="form.industry_experience"><option value="">Select...</option><option>Yes</option><option>No</option></select>
-            </div>
-            <div class="form-group"><label>Total Fleet Size (Currently Owned)</label><input v-model="form.fleet_size" /></div>
-            <div class="form-group"><label>Preferred Communication</label>
-              <select v-model="form.preferred_communication"><option value="">Select...</option><option>Email</option><option>Text</option><option>Phone</option></select>
-            </div>
-          </div>
-
-          <div class="form-section">Financial & Tax</div>
-          <div class="form-grid">
-            <div class="form-group"><label>Tax Classification</label>
-              <select v-model="form.tax_classification"><option value="">Select...</option><option>C-Corp</option><option>S-Corp</option><option>Partnership</option><option>Individual/LLC</option></select>
-            </div>
-            <div class="form-group"><label>EIN or SSN *</label><input v-model="form.ein_ssn" required /></div>
-            <div class="form-group"><label>Monthly Reporting Delivery</label>
-              <select v-model="form.reporting_preference"><option value="">Select...</option><option>Digital Portal</option><option>Email PDF</option></select>
-            </div>
-          </div>
-
-          <div class="step-actions">
-            <div></div>
-            <button class="btn-primary" :disabled="!canProceedStep1 || submitting" @click="submitApplication">
-              {{ submitting ? 'Submitting...' : 'Next: Sign Documents' }}
-            </button>
-          </div>
-        </div>
-
-        <!-- STEP 2: Document Signing -->
-        <div v-if="step === 1" class="step-content">
-          <h2 class="step-title">Sign Onboarding Documents</h2>
-          <p class="step-desc">{{ signedCount }}/{{ totalDocs }} documents signed</p>
-
-          <!-- Vehicle info (for Exhibit A) -->
-          <div v-if="!vehicleInfoDone" class="card vehicle-form">
-            <div class="form-section">Vehicle Information (Exhibit A)</div>
-            <div class="form-grid">
-              <div class="form-group"><label>Year *</label><input v-model="vehicle.year" required /></div>
-              <div class="form-group"><label>Make *</label><input v-model="vehicle.make" required /></div>
-              <div class="form-group"><label>Model *</label><input v-model="vehicle.model" required /></div>
-              <div class="form-group"><label>VIN *</label><input v-model="vehicle.vin" required /></div>
-              <div class="form-group"><label>Current Mileage</label><input v-model="vehicle.mileage" /></div>
-              <div class="form-group"><label>Title State</label><input v-model="vehicle.titleState" /></div>
-              <div class="form-group"><label>Existing Liens</label><input v-model="vehicle.liens" /></div>
-              <div class="form-group"><label>Registered Owner</label><input v-model="vehicle.registeredOwner" /></div>
-            </div>
-            <button class="btn-primary" :disabled="!vehicle.year || !vehicle.make || !vehicle.model || !vehicle.vin" @click="vehicleInfoDone = true">Save Vehicle Info</button>
-          </div>
-
-          <!-- Document list -->
-          <div v-else class="doc-list">
-            <div v-for="doc in documents" :key="doc.doc_key" class="card doc-item" @click="openDoc(doc)">
-              <div class="doc-icon" v-html="doc.signed ? '&#9989;' : '&#9723;'"></div>
-              <div class="doc-info">
-                <div class="doc-name">{{ doc.doc_name }}</div>
-                <div class="doc-status" :class="doc.signed ? 'signed' : ''">{{ doc.signed ? 'Signed' : 'Pending' }}</div>
+            <!-- Document list -->
+            <div v-else class="doc-list">
+              <div v-for="doc in documents" :key="doc.doc_key" class="doc-card" :class="{ signed: doc.signed }" @click="openDoc(doc)">
+                <div class="doc-icon-wrap" :class="doc.signed ? 'done' : 'pending'">
+                  <svg v-if="doc.signed" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                  <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                </div>
+                <div class="doc-info">
+                  <div class="doc-name">{{ doc.doc_name }}</div>
+                  <div class="doc-meta">{{ doc.signed ? 'Completed' : 'Awaiting your signature' }}</div>
+                </div>
+                <span class="doc-chip" :class="doc.signed ? 'chip-done' : 'chip-sign'">
+                  {{ doc.signed ? 'View' : 'Sign' }}
+                </span>
               </div>
-              <div class="doc-action">{{ doc.signed ? 'View' : 'Sign' }}</div>
-            </div>
-            <div class="step-actions">
-              <div></div> <!-- no back from Step 2 — application already submitted -->
-              <button class="btn-primary" :disabled="signedCount < totalDocs" @click="step = 2">Next: Banking</button>
-            </div>
-          </div>
-        </div>
 
-        <!-- STEP 3: W-9 & Banking -->
-        <div v-if="step === 2" class="step-content">
-          <h2 class="step-title">Banking Information</h2>
-          <p class="step-desc">Provide your ACH/Direct Deposit details for Net-60 settlements.</p>
-          <div class="form-grid">
-            <div class="form-group full"><label>Bank Name *</label><input v-model="banking.bank_name" required /></div>
-            <div class="form-group"><label>Account Type</label>
-              <select v-model="banking.account_type"><option value="">Select...</option><option>Business Checking</option><option>Personal Checking</option><option>Savings</option></select>
+              <div class="step-actions">
+                <div></div>
+                <button class="btn-primary" :disabled="signedCount < totalDocs" @click="step = 2">
+                  Continue
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                </button>
+              </div>
             </div>
-            <div class="form-group"><label>Name on Account</label><input v-model="banking.account_name" /></div>
-            <div class="form-group"><label>Routing Number (9 digits) *</label><input v-model="banking.routing_number" required /></div>
-            <div class="form-group"><label>Account Number *</label><input v-model="banking.account_number" required /></div>
-          </div>
-          <div class="step-actions">
-            <button class="btn-secondary" @click="step = 1">Back</button>
-            <button class="btn-primary" :disabled="!canSubmitBanking || submitting" @click="submitBanking">
-              {{ submitting ? 'Submitting...' : 'Complete Onboarding' }}
-            </button>
-          </div>
-        </div>
+          </CardContent>
+        </Card>
+
+        <!-- STEP 3: Banking -->
+        <Card v-if="step === 2" class="main-card">
+          <CardContent class="card-body">
+            <div class="step-header">
+              <h2>Banking Information</h2>
+              <p>ACH/Direct Deposit details for Net-60 settlements</p>
+            </div>
+
+            <div class="bank-security-note">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <span>Your banking information is encrypted and stored securely.</span>
+            </div>
+
+            <div class="form-grid">
+              <div class="field full"><label>Bank Name <span class="req">*</span></label><input v-model="banking.bank_name" placeholder="e.g. Chase, Wells Fargo" required /></div>
+              <div class="field">
+                <label>Account Type</label>
+                <select v-model="banking.account_type"><option value="">Select...</option><option>Business Checking</option><option>Personal Checking</option><option>Savings</option></select>
+              </div>
+              <div class="field"><label>Name on Account</label><input v-model="banking.account_name" placeholder="As it appears on the account" /></div>
+              <div class="field"><label>Routing Number <span class="req">*</span></label><input v-model="banking.routing_number" placeholder="9-digit routing number" required /></div>
+              <div class="field"><label>Account Number <span class="req">*</span></label><input v-model="banking.account_number" placeholder="Account number" required /></div>
+            </div>
+
+            <div class="step-actions">
+              <button class="btn-ghost" @click="step = 1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+                Back
+              </button>
+              <button class="btn-primary" :disabled="!canSubmitBanking || submitting" @click="submitBanking">
+                <span v-if="submitting" class="spinner light"></span>
+                {{ submitting ? 'Submitting...' : 'Complete Onboarding' }}
+              </button>
+            </div>
+          </CardContent>
+        </Card>
       </template>
 
-      <!-- Document sign modal -->
+      <!-- Modals -->
       <InvestorSignModal
-        :show="showSignModal"
-        :doc="selectedDoc"
-        :pdf-url="selectedPdfUrl"
-        :application-id="applicationId"
-        :access-token="accessToken"
+        :show="showSignModal" :doc="selectedDoc" :pdf-url="selectedPdfUrl"
+        :application-id="applicationId" :access-token="accessToken"
         :vehicle-info="vehicleInfoDone ? vehicle : null"
-        @close="showSignModal = false"
-        @signed="handleSigned"
+        @close="showSignModal = false" @signed="handleSigned"
+      />
+      <LocationPickerModal
+        :open="showMapPicker" label="Principal Address"
+        @close="showMapPicker = false" @confirm="onMapConfirm"
       />
 
-      <LocationPickerModal
-        :open="showMapPicker"
-        label="Principal Address"
-        @close="showMapPicker = false"
-        @confirm="onMapConfirm"
-      />
+      <footer class="invest-footer">
+        &copy; {{ new Date().getFullYear() }} LogisX Inc. All rights reserved.
+      </footer>
     </div>
   </div>
 </template>
@@ -165,6 +260,7 @@
 import { ref, computed, reactive, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { Card, CardContent } from '@/components/ui/card'
 import StepIndicator from '../components/apply/StepIndicator.vue'
 import InvestorSignModal from '../components/invest/InvestorSignModal.vue'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
@@ -316,94 +412,239 @@ async function submitBanking() {
 </script>
 
 <style scoped>
-.address-row { display: flex; gap: 0.5rem; }
-.address-input-wrap { flex: 1; position: relative; }
-.address-input-wrap input { width: 100%; padding-right: 36px; }
-.addr-inline-btn {
-  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
-  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
-  border: none; border-radius: 4px; background: transparent;
-  color: #888; cursor: pointer;
-}
-.addr-inline-btn:hover { background: #f0f0f0; color: #333; }
-.addr-inline-btn:disabled { cursor: wait; opacity: 0.5; }
-.spin-icon { display: inline-block; animation: spin 0.8s linear infinite; font-size: 1rem; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.map-pick-btn {
-  flex-shrink: 0; width: 38px; height: 38px;
-  display: flex; align-items: center; justify-content: center;
-  border: 1px solid #ddd; border-radius: 6px; background: #fff;
-  color: #555; cursor: pointer;
-}
-.map-pick-btn:hover { background: #f0f0f0; border-color: #bbb; color: #333; }
+/* ─── Page ─── */
 .invest-page {
   min-height: 100vh;
-  background: #f5f6fa;
-  padding: 2rem 1rem;
+  background: linear-gradient(170deg, #f0f2f7 0%, #e4e9f2 100%);
+  padding: 2.5rem 1rem 3rem;
+  font-family: 'DM Sans', system-ui, sans-serif;
 }
-.invest-container {
-  max-width: 720px;
-  margin: 0 auto;
+.invest-container { max-width: 740px; margin: 0 auto; }
+
+/* ─── Header ─── */
+.invest-header { text-align: center; margin-bottom: 1.75rem; }
+.logo-glow {
+  display: inline-flex; padding: 12px 20px; border-radius: 16px;
+  background: rgba(255,255,255,0.7); backdrop-filter: blur(8px);
+  box-shadow: 0 2px 12px rgba(56,189,248,0.08); margin-bottom: 1rem;
 }
-.invest-header {
-  text-align: center;
-  margin-bottom: 2rem;
+.invest-logo { height: 44px; display: block; }
+.invest-header h1 {
+  font-size: 1.65rem; font-weight: 800; color: #0f172a;
+  letter-spacing: -0.02em; margin-bottom: 0.2rem;
 }
-.invest-logo { height: 48px; margin-bottom: 0.75rem; }
-.invest-header h1 { font-size: 1.5rem; font-weight: 800; color: #1a1d27; }
-.invest-header p { font-size: 0.88rem; color: #6b7085; margin-top: 0.25rem; }
-.invest-success {
-  text-align: center; padding: 3rem 1rem;
-  background: white; border-radius: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+.subtitle { font-size: 0.92rem; color: #64748b; }
+.trust-badge {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  margin-top: 0.75rem; padding: 0.3rem 0.85rem;
+  background: rgba(255,255,255,0.65); backdrop-filter: blur(4px);
+  border-radius: 99px; font-size: 0.72rem; font-weight: 600;
+  color: #64748b; border: 1px solid rgba(226,232,240,0.6);
 }
-.success-icon { font-size: 3rem; margin-bottom: 1rem; }
-.invest-success h2 { font-size: 1.3rem; font-weight: 800; }
-.invest-success p { color: #6b7085; margin-top: 0.5rem; max-width: 400px; margin-inline: auto; }
-.step-content {
-  background: white; border-radius: 14px; padding: 1.5rem;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+
+/* ─── Progress context ─── */
+.progress-context {
+  text-align: center; margin-bottom: 0.5rem;
 }
-.step-title { font-size: 1.15rem; font-weight: 800; margin-bottom: 0.25rem; }
-.step-desc { font-size: 0.82rem; color: #6b7085; margin-bottom: 1rem; }
-.form-section {
-  font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
-  color: #6b7085; margin: 1.25rem 0 0.5rem; padding-bottom: 0.3rem; border-bottom: 1px solid #e8edf2;
+.progress-label {
+  font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; color: #94a3b8;
 }
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
-.form-group { display: flex; flex-direction: column; gap: 0.2rem; }
-.form-group.full { grid-column: 1 / -1; }
-.form-group label { font-size: 0.75rem; font-weight: 600; color: #374151; }
-.form-group input, .form-group select {
-  padding: 0.5rem 0.65rem; border: 1px solid #e2e4ea; border-radius: 8px; font-size: 0.88rem;
+
+/* ─── Card ─── */
+.main-card {
+  border-radius: 16px !important;
+  border: 1px solid rgba(226,232,240,0.7) !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06) !important;
+  overflow: hidden; margin-top: 1.25rem;
+  background: #ffffff !important;
+  position: relative;
 }
-.step-actions { display: flex; justify-content: space-between; margin-top: 1.5rem; gap: 1rem; }
+.main-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: linear-gradient(90deg, #38bdf8, #818cf8);
+}
+.card-body { padding: 2rem !important; }
+
+/* ─── Step header ─── */
+.step-header { margin-bottom: 1.5rem; }
+.step-header h2 {
+  font-size: 1.2rem; font-weight: 800; color: #0f172a;
+  letter-spacing: -0.01em; margin-bottom: 0.15rem;
+}
+.step-header p { font-size: 0.85rem; color: #94a3b8; }
+
+/* ─── Section dividers ─── */
+.section-divider {
+  display: flex; align-items: center; gap: 0.5rem;
+  margin: 1.75rem 0 0.85rem; padding-bottom: 0.5rem;
+  border-bottom: 1px solid #e8edf2; color: #64748b;
+  font-size: 0.78rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ─── Form fields ─── */
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.field { display: flex; flex-direction: column; gap: 0.3rem; }
+.field.full { grid-column: 1 / -1; }
+.field label {
+  font-size: 0.78rem; font-weight: 600; color: #374151;
+}
+.req { color: #ef4444; }
+.opt { font-weight: 400; color: #94a3b8; font-size: 0.72rem; }
+.field input, .field select {
+  padding: 0.6rem 0.8rem; border: 1px solid #e2e8f0; border-radius: 10px;
+  font-size: 0.88rem; color: #0f172a; background: #f8fafc;
+  font-family: inherit; transition: all 0.2s ease;
+}
+.field input::placeholder { color: #cbd5e1; }
+.field input:focus, .field select:focus {
+  outline: none; border-color: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.12);
+  background: #fff;
+}
+
+/* ─── Address row ─── */
+.address-row { display: flex; gap: 0.5rem; }
+.address-input-wrap { flex: 1; position: relative; }
+.address-input-wrap input { width: 100%; padding-right: 38px; }
+.addr-action-btn {
+  position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
+  width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 6px; background: transparent;
+  color: #94a3b8; cursor: pointer; transition: all 0.15s;
+}
+.addr-action-btn:hover { background: #f1f5f9; color: #475569; }
+.addr-action-btn:disabled { cursor: wait; opacity: 0.4; }
+.map-btn {
+  flex-shrink: 0; width: 42px; height: 42px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc;
+  color: #64748b; cursor: pointer; transition: all 0.2s;
+}
+.map-btn:hover { background: #fff; border-color: #38bdf8; color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.1); }
+
+/* ─── Spinner ─── */
+.spinner {
+  display: inline-block; width: 14px; height: 14px;
+  border: 2px solid #94a3b8; border-top-color: transparent;
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+.spinner.light { border-color: rgba(255,255,255,0.35); border-top-color: #fff; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── Buttons ─── */
 .btn-primary {
-  padding: 0.65rem 1.5rem; background: #38bdf8; color: white; border: none; border-radius: 10px;
-  font-weight: 700; font-size: 0.88rem; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  padding: 0.7rem 1.6rem; border: none; border-radius: 10px;
+  background: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
+  color: #fff; font-weight: 700; font-size: 0.88rem;
+  cursor: pointer; transition: all 0.2s; font-family: inherit;
+  box-shadow: 0 2px 8px rgba(56,189,248,0.25);
 }
-.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-secondary {
-  padding: 0.65rem 1.5rem; background: white; color: #374151; border: 1px solid #e2e4ea;
-  border-radius: 10px; font-weight: 600; font-size: 0.88rem; cursor: pointer;
+.btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(56,189,248,0.35); }
+.btn-primary:active:not(:disabled) { transform: translateY(0); }
+.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.btn-ghost {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.7rem 1.4rem; border: 1px solid #e2e8f0; border-radius: 10px;
+  background: #fff; color: #475569; font-weight: 600; font-size: 0.88rem;
+  cursor: pointer; transition: all 0.15s; font-family: inherit;
 }
-.doc-list { display: flex; flex-direction: column; gap: 0.5rem; }
-.doc-item {
-  display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem;
-  cursor: pointer; border-radius: 10px; border: 1px solid #e8edf2; transition: background 0.15s;
+.btn-ghost:hover { background: #f8fafc; border-color: #cbd5e1; }
+.step-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 2rem; gap: 1rem; }
+
+/* ─── Document progress ─── */
+.doc-progress { margin-bottom: 1.5rem; }
+.doc-progress-bar {
+  height: 6px; background: #e2e8f0; border-radius: 99px; overflow: hidden;
 }
-.doc-item:hover { background: #f9fafb; }
-.doc-icon { font-size: 1.2rem; flex-shrink: 0; }
-.doc-info { flex: 1; }
-.doc-name { font-weight: 600; font-size: 0.88rem; }
-.doc-status { font-size: 0.72rem; color: #9ca3af; }
-.doc-status.signed { color: #059669; }
-.doc-action {
-  font-size: 0.72rem; font-weight: 700; color: #38bdf8; padding: 0.2rem 0.6rem;
-  border-radius: 99px; background: rgba(56,189,248,0.1);
+.doc-progress-fill {
+  height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, #38bdf8, #818cf8);
+  transition: width 0.4s ease;
 }
-.card { background: white; border-radius: 12px; padding: 1rem; border: 1px solid #e8edf2; }
-.vehicle-form { margin-bottom: 1rem; }
+.doc-progress-text {
+  display: block; text-align: right; margin-top: 0.35rem;
+  font-size: 0.72rem; font-weight: 600; color: #94a3b8;
+}
+
+/* ─── Document cards ─── */
+.doc-list { display: flex; flex-direction: column; gap: 0.6rem; }
+.doc-card {
+  display: flex; align-items: center; gap: 0.85rem;
+  padding: 1rem 1.15rem; border-radius: 12px;
+  border: 1px solid #e8edf2; cursor: pointer;
+  transition: all 0.2s ease; background: #fff;
+}
+.doc-card:hover { border-color: #cbd5e1; box-shadow: 0 2px 8px rgba(0,0,0,0.04); transform: translateY(-1px); }
+.doc-card.signed { border-color: #d1fae5; background: #f0fdf4; }
+.doc-icon-wrap {
+  width: 38px; height: 38px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.doc-icon-wrap.done { background: #dcfce7; color: #16a34a; }
+.doc-icon-wrap.pending { background: #f1f5f9; color: #94a3b8; }
+.doc-info { flex: 1; min-width: 0; }
+.doc-name { font-weight: 600; font-size: 0.88rem; color: #0f172a; }
+.doc-meta { font-size: 0.72rem; color: #94a3b8; margin-top: 0.1rem; }
+.doc-chip {
+  flex-shrink: 0; padding: 0.25rem 0.75rem; border-radius: 99px;
+  font-size: 0.72rem; font-weight: 700;
+}
+.chip-sign { background: rgba(56,189,248,0.1); color: #0ea5e9; }
+.chip-done { background: #dcfce7; color: #16a34a; }
+
+/* ─── Vehicle card ─── */
+.vehicle-card {
+  background: #f8fafc; border: 1px solid #e8edf2; border-radius: 12px; padding: 1.25rem;
+}
+
+/* ─── Banking security ─── */
+.bank-security-note {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.65rem 1rem; margin-bottom: 1.5rem;
+  background: #f0fdf4; border: 1px solid #d1fae5; border-radius: 10px;
+  font-size: 0.78rem; color: #15803d; font-weight: 500;
+}
+
+/* ─── Success ─── */
+.success-content { padding: 3rem 2rem !important; text-align: center; }
+.success-check {
+  width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 1.25rem;
+  background: #dcfce7; color: #16a34a;
+  display: flex; align-items: center; justify-content: center;
+  animation: popIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes popIn { 0% { transform: scale(0); } 100% { transform: scale(1); } }
+.success-content h2 { font-size: 1.35rem; font-weight: 800; color: #0f172a; margin-bottom: 0.4rem; }
+.success-content > p { color: #64748b; font-size: 0.9rem; max-width: 420px; margin: 0 auto; line-height: 1.6; }
+.next-steps {
+  margin-top: 2rem; text-align: left; max-width: 400px; margin-inline: auto;
+  background: #f8fafc; border-radius: 12px; padding: 1.25rem 1.5rem;
+}
+.next-steps h4 { font-size: 0.82rem; font-weight: 700; color: #475569; margin-bottom: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.next-step { display: flex; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.75rem; font-size: 0.85rem; color: #475569; line-height: 1.5; }
+.next-step:last-child { margin-bottom: 0; }
+.ns-num {
+  flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%;
+  background: linear-gradient(135deg, #38bdf8, #818cf8); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.72rem; font-weight: 800;
+}
+
+/* ─── Footer ─── */
+.invest-footer {
+  text-align: center; margin-top: 2.5rem;
+  font-size: 0.72rem; color: #cbd5e1;
+}
+
+/* ─── Responsive ─── */
 @media (max-width: 640px) {
+  .invest-page { padding: 1.25rem 0.75rem 2rem; }
   .form-grid { grid-template-columns: 1fr; }
+  .card-body { padding: 1.25rem !important; }
+  .invest-header h1 { font-size: 1.35rem; }
+  .step-header h2 { font-size: 1.05rem; }
 }
 </style>
