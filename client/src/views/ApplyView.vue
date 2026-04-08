@@ -263,75 +263,91 @@ const defaultForm = () => ({
 
 const form = reactive(defaultForm())
 
-// ── State persistence via IndexedDB (handles large uploads) ──
-const DB_NAME = 'logisx_apply'
-const STORE_NAME = 'state'
-let dbReady = false
-let saveQueued = false
+// ── State persistence: localStorage for text + IndexedDB for photos ──
+const STORAGE_KEY = 'logisx_apply_state'
+const IDB_NAME = 'logisx_apply'
+const IDB_STORE = 'uploads'
 
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1)
-    req.onupgradeneeded = () => { req.result.createObjectStore(STORE_NAME) }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-  })
-}
-
-async function saveState() {
-  if (!dbReady) { saveQueued = true; return }
+// localStorage: all text fields (sync, reliable, same as /invest)
+function saveState() {
   try {
-    const db = await openDB()
-    const tx = db.transaction(STORE_NAME, 'readwrite')
-    tx.objectStore(STORE_NAME).put({
-      step: step.value, maxStep: maxStep.value,
-      form: { ...form },
+    const { cdl_front, cdl_back, medical_card, ...lite } = form
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      step: step.value, maxStep: maxStep.value, form: lite,
       submitted: submitted.value,
-    }, 'data')
-    db.close()
-  } catch { /* skip */ }
+    }))
+  } catch { /* full */ }
 }
 
-async function loadState() {
+function loadState() {
   try {
-    const db = await openDB()
-    const tx = db.transaction(STORE_NAME, 'readonly')
-    const req = tx.objectStore(STORE_NAME).get('data')
-    await new Promise((resolve, reject) => { req.onsuccess = resolve; req.onerror = reject })
-    const s = req.result
-    db.close()
-    if (!s) return
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return
+    const s = JSON.parse(raw)
     if (s.step != null) step.value = s.step
     if (s.maxStep != null) maxStep.value = s.maxStep
     if (s.form) Object.assign(form, s.form)
     if (s.submitted) submitted.value = s.submitted
     maxStep.value = Math.max(maxStep.value, step.value)
-  } catch { /* corrupt or missing */ }
+  } catch { /* corrupt */ }
 }
 
-async function clearState() {
-  try {
-    const db = await openDB()
-    const tx = db.transaction(STORE_NAME, 'readwrite')
-    tx.objectStore(STORE_NAME).delete('data')
-    db.close()
-  } catch { /* skip */ }
+// IndexedDB: photo uploads only (handles large base64)
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1)
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE)
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
 }
 
-// Register watchers immediately (saveState guards with dbReady flag)
+function idbSave(key, value) {
+  idbOpen().then(db => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).put(value, key)
+    tx.oncomplete = () => db.close()
+    tx.onerror = () => db.close()
+  }).catch(() => {})
+}
+
+function idbLoad(key) {
+  return idbOpen().then(db => new Promise((resolve) => {
+    const tx = db.transaction(IDB_STORE, 'readonly')
+    const req = tx.objectStore(IDB_STORE).get(key)
+    req.onsuccess = () => { db.close(); resolve(req.result || '') }
+    req.onerror = () => { db.close(); resolve('') }
+  })).catch(() => '')
+}
+
+function idbClear() {
+  idbOpen().then(db => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).clear()
+    tx.oncomplete = () => db.close()
+  }).catch(() => {})
+}
+
+// Save photos to IndexedDB when they change
+watch(() => form.cdl_front, (v) => { if (v) idbSave('cdl_front', v) })
+watch(() => form.cdl_back, (v) => { if (v) idbSave('cdl_back', v) })
+watch(() => form.medical_card, (v) => { if (v) idbSave('medical_card', v) })
+
+// Auto-save text to localStorage on any change
 watch(step, saveState)
 watch(submitted, saveState)
 watch(form, saveState, { deep: true })
 
-// Load state on mount, then enable saving
+// Load on mount: localStorage (sync) + IndexedDB photos (async)
 onMounted(async () => {
-  await loadState()
-  dbReady = true
-  if (saveQueued) saveState()
+  loadState()
+  const [cdl_front, cdl_back, medical_card] = await Promise.all([
+    idbLoad('cdl_front'), idbLoad('cdl_back'), idbLoad('medical_card'),
+  ])
+  if (cdl_front) form.cdl_front = cdl_front
+  if (cdl_back) form.cdl_back = cdl_back
+  if (medical_card) form.medical_card = medical_card
 })
-
-// Migrate: remove old localStorage entry if exists
-try { localStorage.removeItem('logisx_apply_state') } catch {}
 
 function goToStep(i) {
   if (submitted.value) return
@@ -387,7 +403,8 @@ async function submitForm() {
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || 'Submission failed')
     submitted.value = true
-    clearState()
+    localStorage.removeItem(STORAGE_KEY)
+    idbClear()
     window.scrollTo({ top: 0, behavior: 'smooth' })
   } catch (err) {
     error.value = err.message
