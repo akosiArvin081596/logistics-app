@@ -17,7 +17,9 @@
           :class="{
             active: !completed && step === i,
             done: completed || step > i,
+            clickable: !completed && i <= maxStep && i !== step,
           }"
+          @click="goToStep(i)"
         >
           <div class="step-icon">
             <!-- Completed checkmark -->
@@ -257,7 +259,7 @@
 
             <div class="step-actions">
               <div></div>
-              <button class="btn-primary" :disabled="signedCount < totalDocs" @click="step = 2">
+              <button class="btn-primary" :disabled="signedCount < totalDocs" @click="step = 2; maxStep = Math.max(maxStep, 2)">
                 Continue
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
               </button>
@@ -330,6 +332,7 @@ const sidebarSteps = [
   { title: 'Banking', desc: 'ACH settlement details' },
 ]
 
+const STORAGE_KEY = 'logisx_invest_state'
 const addressInput = ref(null)
 const showMapPicker = ref(false)
 const geolocating = ref(false)
@@ -337,6 +340,7 @@ const api = useApi()
 const { show: toast } = useToast()
 
 const step = ref(0)
+const maxStep = ref(0)
 const submitting = ref(false)
 const completed = ref(false)
 const applicationId = ref(null)
@@ -371,8 +375,53 @@ const banking = reactive({
   bank_name: '', account_type: '', routing_number: '', account_number: '', account_name: '',
 })
 
-// Google Places autocomplete for address
+// ── State persistence ──
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      step: step.value, maxStep: maxStep.value, form: { ...form },
+      vehicles: vehicles.value, banking: { ...banking },
+      vehicleInfoDone: vehicleInfoDone.value, activeVehicleTab: activeVehicleTab.value,
+      applicationId: applicationId.value, accessToken: accessToken.value,
+      completed: completed.value,
+    }))
+  } catch { /* full storage */ }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return
+    const s = JSON.parse(raw)
+    if (s.step != null) step.value = s.step
+    if (s.maxStep != null) maxStep.value = s.maxStep
+    if (s.form) Object.assign(form, s.form)
+    if (s.vehicles?.length) vehicles.value = s.vehicles
+    if (s.banking) Object.assign(banking, s.banking)
+    if (s.vehicleInfoDone != null) vehicleInfoDone.value = s.vehicleInfoDone
+    if (s.activeVehicleTab != null) activeVehicleTab.value = s.activeVehicleTab
+    if (s.applicationId) applicationId.value = s.applicationId
+    if (s.accessToken) accessToken.value = s.accessToken
+    if (s.completed) completed.value = s.completed
+  } catch { /* corrupt data */ }
+}
+
+// Auto-save on any change
+watch([step, completed, vehicleInfoDone, activeVehicleTab, () => ({ ...form }), vehicles, () => ({ ...banking })], saveState, { deep: true })
+
+// Sidebar navigation
+function goToStep(i) {
+  if (completed.value) return
+  if (i <= maxStep.value) step.value = i
+}
+
+// Restore state + Google Places autocomplete
 onMounted(async () => {
+  loadState()
+  // Reload documents if we have an active onboarding session
+  if (applicationId.value && accessToken.value && !completed.value) {
+    loadOnboarding().catch(() => {})
+  }
   try {
     const { key } = await api.get('/api/config/maps-key')
     if (!key) return
@@ -445,6 +494,7 @@ async function submitApplication() {
     accessToken.value = result.accessToken
     await loadOnboarding()
     step.value = 1
+    maxStep.value = Math.max(maxStep.value, 1)
     toast('Application submitted', 'success')
   } catch (err) {
     toast(err.message || 'Submission failed', 'error')
@@ -477,6 +527,7 @@ async function submitBanking() {
   try {
     await api.post(`/api/public/investor-onboarding/${applicationId.value}/banking`, { ...banking, accessToken: accessToken.value })
     completed.value = true
+    localStorage.removeItem(STORAGE_KEY)
     toast('Onboarding complete!', 'success')
   } catch (err) {
     toast(err.message || 'Submission failed', 'error')
@@ -548,6 +599,9 @@ async function submitBanking() {
   transition: all 0.2s ease;
   border-left: 3px solid transparent;
 }
+
+.sidebar-step.clickable { cursor: pointer; }
+.sidebar-step.clickable:hover { background: rgba(255, 255, 255, 0.05); }
 
 .sidebar-step.active {
   background: rgba(255, 255, 255, 0.08);
