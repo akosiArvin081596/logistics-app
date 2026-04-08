@@ -200,8 +200,8 @@
 
     <!-- View Truck Detail Modal -->
     <Teleport to="body">
-    <div v-if="viewTruck" class="confirm-overlay" @click.self="viewTruck = null">
-      <div class="confirm-box" style="max-width:700px;max-height:85vh;overflow-y:auto;">
+    <div v-if="viewTruck" style="position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:9999" @click.self="viewTruck = null">
+      <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:700px;width:90%;max-height:85vh;overflow-y:auto;box-shadow:0 25px 50px rgba(0,0,0,0.2)">
         <h3 style="margin-bottom:1rem;">{{ viewTruck.UnitNumber }} — {{ [viewTruck.Make, viewTruck.Model].filter(Boolean).join(' ') }}</h3>
         <div class="view-grid">
           <div class="view-row"><span class="view-label">Year</span><span>{{ viewTruck.Year || '\u2014' }}</span></div>
