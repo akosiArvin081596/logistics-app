@@ -383,7 +383,21 @@
               <label>Account Type</label>
               <select v-model="banking.account_type"><option value="">Select...</option><option>Business Checking</option><option>Personal Checking</option><option>Savings</option></select>
             </div>
-            <div class="field"><label>Name on Account</label><input v-model="banking.account_name" placeholder="As it appears on the account" /></div>
+            <div class="field acct-name-field">
+              <label>Name on Account</label>
+              <input
+                v-model="banking.account_name" placeholder="As it appears on the account"
+                autocomplete="off"
+                @focus="acctNameDropOpen = true"
+                @blur="setTimeout(() => acctNameDropOpen = false, 200)"
+              />
+              <div v-if="acctNameDropOpen && acctNameOptions.length" class="acct-name-dropdown">
+                <div
+                  v-for="n in acctNameOptions" :key="n" class="acct-name-option"
+                  @mousedown.prevent="banking.account_name = n; acctNameDropOpen = false"
+                >{{ n }}</div>
+              </div>
+            </div>
             <div class="field"><label>Routing Number <span class="req">*</span></label><input v-model="banking.routing_number" placeholder="9-digit routing number" required /></div>
             <div class="field"><label>Account Number <span class="req">*</span></label><input v-model="banking.account_number" placeholder="Account number" required /></div>
           </div>
@@ -412,7 +426,6 @@
     <InvestorSignModal
       :show="showSignModal" :doc="selectedDoc" :pdf-url="selectedPdfUrl"
       :application-id="applicationId" :access-token="accessToken"
-      :vehicle-info="vehicles"
       :suggested-names="[form.contact_person, form.legal_name].filter(Boolean)"
       @close="showSignModal = false" @signed="handleSigned"
     />
@@ -525,6 +538,14 @@ const usBanks = [
   'Texas Capital Bank','Triumph Bank','UMB Bank','United Bank',
   'Washington Federal','Western Alliance Bank',
 ]
+const acctNameDropOpen = ref(false)
+const acctNameOptions = computed(() => {
+  const names = [form.legal_name, form.contact_person].filter(Boolean)
+  const unique = [...new Set(names)]
+  const q = (banking.account_name || '').toLowerCase()
+  if (!q) return unique
+  return unique.filter(n => n.toLowerCase().includes(q))
+})
 const filteredBanks = computed(() => {
   const q = (banking.bank_name || '').toLowerCase()
   if (!q) return usBanks.slice(0, 10)
@@ -1222,6 +1243,20 @@ async function submitBanking() {
   color: #0f172a; transition: background 0.1s;
 }
 .state-option:hover { background: #f1f5f9; }
+
+/* ─── Account name dropdown ─── */
+.acct-name-field { position: relative; }
+.acct-name-dropdown {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 50;
+  background: #fff; border: 1.5px solid #e2e8f0; border-radius: 9px;
+  margin-top: 2px; max-height: 120px; overflow-y: auto;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.1);
+}
+.acct-name-option {
+  padding: 0.5rem 0.8rem; font-size: 0.84rem; cursor: pointer;
+  color: #0f172a; transition: background 0.1s;
+}
+.acct-name-option:hover { background: #f1f5f9; }
 
 /* ─── Bank searchable dropdown ─── */
 .bank-field { position: relative; }
