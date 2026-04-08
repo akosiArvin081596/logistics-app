@@ -1157,31 +1157,46 @@ app.post("/api/public/apply", (req, res) => {
 			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
 				<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
 			</div>
-			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
-				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Application Received</h2>
+			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none">
+				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Onboarding Status: Documents Received!</h2>
 				<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${full_name}</b>,</p>
-				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Thank you for applying to LogisX Inc. We have received your driver application and our team will review it shortly.</p>
-				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
-					<table style="width:100%;border-collapse:collapse;font-size:14px">
-						<tr><td style="padding:4px 0;color:#64748b;width:140px">Name</td><td style="padding:4px 0;font-weight:600">${full_name}</td></tr>
-						<tr><td style="padding:4px 0;color:#64748b">Position</td><td style="padding:4px 0">${position}</td></tr>
-						<tr><td style="padding:4px 0;color:#64748b">Experience</td><td style="padding:4px 0">${experience} years</td></tr>
-						<tr><td style="padding:4px 0;color:#64748b">CDL</td><td style="padding:4px 0">${has_cdl}</td></tr>
+				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
+
+				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 24px">
+					<div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:12px">Here is what happens next:</div>
+					<table style="width:100%;border-collapse:collapse;font-size:13px;color:#334155">
+						<tr>
+							<td style="padding:8px 10px 8px 0;vertical-align:top;width:24px"><div style="width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px">1</div></td>
+							<td style="padding:8px 0;line-height:1.5;border-bottom:1px solid #f1f5f9"><b>Pre-Employment Screening:</b> A member of our safety team will contact you shortly to schedule your <b>pre-appointment drug test</b>. If you've already completed one recently for another carrier, let us know, but expect to be sent for a new one under the LogisX account.</td>
+						</tr>
+						<tr>
+							<td style="padding:8px 10px 8px 0;vertical-align:top"><div style="width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px">2</div></td>
+							<td style="padding:8px 0;line-height:1.5;border-bottom:1px solid #f1f5f9"><b>FMCSA Clearinghouse:</b> This is mandatory. If you haven't already, make sure you are enrolled in the <b>FMCSA Clearinghouse</b> and have granted LogisX Inc. permission to run your full query. We cannot put you in a truck until this is cleared.</td>
+						</tr>
+						<tr>
+							<td style="padding:8px 10px 8px 0;vertical-align:top"><div style="width:22px;height:22px;border-radius:50%;background:#0f2847;color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:22px">3</div></td>
+							<td style="padding:8px 0;line-height:1.5"><b>Driver Training:</b> While we finalize your background check, it's time to get in the right mindset. At LogisX, we pride ourselves on professional, elite operation.</td>
+						</tr>
 					</table>
 				</div>
-				<h3 style="font-size:15px;margin:24px 0 8px;color:#0f172a">What happens next?</h3>
-				<ul style="padding-left:20px;color:#475569;line-height:1.8">
-					<li>Our team will review your application within <b>1-2 business days</b></li>
-					<li>You'll receive login credentials via email if accepted</li>
-					<li>Complete onboarding documents to start driving</li>
-				</ul>
-				<p style="color:#64748b;font-size:13px;margin-top:24px">If you have any questions, contact us at <a href="mailto:info@logisx.com" style="color:#3b82f6;text-decoration:none">info@logisx.com</a>.</p>
+
+				<div style="background:#fffbeb;border:1px solid #fef3c7;border-left:4px solid #f59e0b;border-radius:8px;padding:14px 18px;margin:0 0 24px">
+					<div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:6px">Pro-Tip: Don't end up on the internet for the wrong reasons.</div>
+					<p style="margin:0;font-size:13px;color:#78350f;line-height:1.5">To understand the standard of safety we expect, take a look at what <em>not</em> to do out there. Check out these "professional" moves on <b>Bonehead Truckers</b> &mdash; study them so you don't repeat them.</p>
+				</div>
+
+				<div style="text-align:center;margin:0 0 24px">
+					<a href="https://www.youtube.com/watch?v=KpHxeBQ3TSc&list=PL7DBE50EBBC23F024" style="display:inline-block;background:#dc2626;color:#ffffff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">&#9654; Watch Bonehead Truckers</a>
+				</div>
+
+				<p style="margin:0 0 6px;font-size:14px;color:#334155;text-align:center">Stand by for a call from our safety coordinator.</p>
+				<p style="margin:0;font-size:14px;font-weight:700;color:#0f172a;text-align:center">&mdash; The LogisX Safety Team</p>
 			</div>
-			<div style="padding:16px 32px;text-align:center">
+			<div style="padding:16px 32px;text-align:center;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 				<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
 			</div>
 		</div>`;
-		sendEmail(email, "LogisX - Driver Application Received", applicantDriverHtml);
+		sendEmail(email, "LogisX - Onboarding Status: Documents Received!", applicantDriverHtml);
 
 		// Send admin notification (detailed)
 		const adminDriverHtml = `
