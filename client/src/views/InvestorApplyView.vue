@@ -123,7 +123,15 @@
               </div>
             </div>
             <div class="field"><label>Primary Contact Person</label><input v-model="form.contact_person" placeholder="Full name" /></div>
-            <div class="field"><label>Title</label><input v-model="form.contact_title" placeholder="e.g. Owner, Manager" /></div>
+            <div class="field">
+              <label>Title</label>
+              <select v-model="form.contact_title">
+                <option value="">Select...</option>
+                <option>Owner</option><option>CEO</option><option>President</option>
+                <option>Managing Member</option><option>Partner</option><option>Manager</option>
+                <option>Director</option><option>CFO</option><option>Other</option>
+              </select>
+            </div>
             <div class="field"><label>Phone <span class="req">*</span></label><input v-model="form.phone" type="tel" placeholder="(555) 123-4567" required /></div>
             <div class="field"><label>Email <span class="req">*</span></label><input v-model="form.email" type="email" placeholder="you@company.com" required /></div>
           </div>
@@ -133,12 +141,11 @@
             <span>Business Profile</span>
           </div>
           <div class="form-grid">
-            <div class="field"><label>Years in Operation</label><input v-model="form.years_in_operation" placeholder="e.g. 5" /></div>
+            <div class="field"><label>Years in Operation</label><input v-model="form.years_in_operation" type="number" min="0" max="100" placeholder="0" /></div>
             <div class="field">
               <label>Industry Experience</label>
               <select v-model="form.industry_experience"><option value="">Select...</option><option>Yes</option><option>No</option></select>
             </div>
-            <div class="field"><label>Total Fleet Size (Currently Owned)</label><input v-model="form.fleet_size" placeholder="e.g. 3" /></div>
             <div class="field">
               <label>Preferred Communication</label>
               <select v-model="form.preferred_communication"><option value="">Select...</option><option>Email</option><option>Text</option><option>Phone</option></select>
@@ -201,6 +208,7 @@
               <div class="field"><label>Title State</label><input v-model="vehicle.titleState" placeholder="e.g. Texas" /></div>
               <div class="field"><label>Existing Liens</label><input v-model="vehicle.liens" placeholder="None or lien holder name" /></div>
               <div class="field"><label>Registered Owner</label><input v-model="vehicle.registeredOwner" placeholder="Owner on title" /></div>
+              <div class="field"><label>Total Fleet Size (Currently Owned)</label><input v-model="form.fleet_size" type="number" min="1" placeholder="e.g. 3" /></div>
             </div>
             <div class="step-actions">
               <div></div>
