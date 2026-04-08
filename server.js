@@ -5028,16 +5028,19 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			return !isNaN(d) && d >= monthStart && d <= now;
 		}).length;
 
-		// Fleet utilization
-		const totalTrucks = carrierDB.data.length;
+		// Fleet utilization (Google Sheets + SQLite trucks)
+		const sqliteTruckCount = db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE status IN ('Active','Maintenance')").get().cnt;
+		const totalTrucks = carrierDB.data.length + sqliteTruckCount;
 		const activeDriverNames = new Set(
 			activeJobs
 				.map((r) => (driverCol ? (r[driverCol] || "").trim().toLowerCase() : ""))
 				.filter(Boolean),
 		);
-		const assignedTrucks = carrierDB.data.filter((r) =>
+		const sheetAssigned = carrierDB.data.filter((r) =>
 			activeDriverNames.has((r[carrierDriverCol] || "").trim().toLowerCase()),
 		).length;
+		const sqliteAssigned = db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE assigned_driver != '' AND status = 'Active'").get().cnt;
+		const assignedTrucks = sheetAssigned + sqliteAssigned;
 
 		// Revenue
 		function parseAmount(str) {
