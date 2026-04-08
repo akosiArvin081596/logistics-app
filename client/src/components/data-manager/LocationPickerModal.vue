@@ -43,7 +43,7 @@
 
 <script setup>
 import { ref, watch, nextTick } from 'vue'
-import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
+import { useGoogleMaps } from '../../composables/useGoogleMaps'
 import { useGeocode } from '../../composables/useGeocode'
 
 const props = defineProps({
@@ -70,6 +70,13 @@ function clearMarker() {
   if (marker) { marker.map = null; marker = null }
 }
 
+function createPinEl() {
+  const el = document.createElement('div')
+  el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="42" viewBox="0 0 24 32" fill="#e53935" stroke="#b71c1c" stroke-width="0.5"><path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0zm0 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/><circle cx="12" cy="12" r="3" fill="white"/></svg>`
+  el.style.cssText = 'cursor:pointer;transform:translate(0,-50%);'
+  return el
+}
+
 function placeMarker(pos) {
   if (marker) {
     marker.position = pos
@@ -77,7 +84,7 @@ function placeMarker(pos) {
     marker = new google.maps.marker.AdvancedMarkerElement({
       position: pos,
       map,
-      content: createDotPin('#6366f1', 16),
+      content: createPinEl(),
     })
   }
 }
