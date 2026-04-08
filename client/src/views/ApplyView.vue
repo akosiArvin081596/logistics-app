@@ -369,7 +369,7 @@ function validate(s) {
     if (!form.accident_history) return 'Please answer the accident history question.'
   }
   if (s === 3) {
-    if (form.availability.length === 0 || !form.skills) return 'Please select availability and list your skills.'
+    if (form.availability.length === 0) return 'Please select your availability.'
   }
   if (s === 4) {
     const missingRef = form.references.some(r => !r.name || !r.phone)
