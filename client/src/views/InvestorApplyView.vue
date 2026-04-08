@@ -484,10 +484,19 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               Documents ({{ signedCount }}/{{ totalDocs }} signed)
             </div>
-            <div class="review-grid">
-              <div v-for="doc in documents" :key="doc.doc_key" class="review-item full">
-                <span class="review-label">{{ doc.doc_name }}</span>
-                <span class="review-value" :class="doc.signed ? 'text-green' : 'text-amber'">{{ doc.signed ? 'Signed' : 'Pending' }}</span>
+            <div class="review-docs">
+              <div v-for="doc in documents" :key="doc.doc_key" class="review-doc-row">
+                <a
+                  v-if="doc.signed && doc.signed_pdf_url"
+                  :href="doc.signed_pdf_url" target="_blank"
+                  class="review-doc-link"
+                  @click.prevent="reviewPdfUrl = doc.signed_pdf_url; reviewPdfTitle = doc.doc_name"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  <span>{{ doc.doc_name }}</span>
+                </a>
+                <span v-else class="review-doc-unsigned">{{ doc.doc_name }}</span>
+                <span class="review-doc-status" :class="doc.signed ? 'text-green' : 'text-amber'">{{ doc.signed ? 'Signed' : 'Pending' }}</span>
               </div>
             </div>
           </div>
@@ -515,6 +524,17 @@
             {{ submitting ? 'Submitting...' : 'Confirm & Complete Onboarding' }}
           </button>
         </div>
+      </div>
+    </div>
+
+    <!-- Review PDF Viewer -->
+    <div v-if="reviewPdfUrl" class="review-pdf-overlay" @click.self="reviewPdfUrl = ''">
+      <div class="review-pdf-viewer">
+        <div class="review-pdf-header">
+          <span>{{ reviewPdfTitle }}</span>
+          <button @click="reviewPdfUrl = ''">&times;</button>
+        </div>
+        <iframe :src="reviewPdfUrl" class="review-pdf-frame"></iframe>
       </div>
     </div>
 
@@ -619,6 +639,8 @@ const activeModelOptions = computed(() => truckModels[vehicles.value[activeVehic
 const stateDropOpen = ref(false)
 const photoPreviewUrl = ref('')
 const showReviewModal = ref(false)
+const reviewPdfUrl = ref('')
+const reviewPdfTitle = ref('')
 const bankDropOpen = ref(false)
 const usBanks = [
   'JPMorgan Chase','Bank of America','Wells Fargo','Citibank','U.S. Bank',
@@ -1520,6 +1542,45 @@ async function submitBanking() {
   font-size: 0.75rem; font-weight: 700; color: #475569;
   margin-bottom: 0.5rem;
 }
+.review-docs { display: flex; flex-direction: column; gap: 0.5rem; }
+.review-doc-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.5rem 0.65rem; border-radius: 8px; background: #fafbfd;
+  border: 1px solid #f1f5f9;
+}
+.review-doc-link {
+  display: flex; align-items: center; gap: 0.5rem;
+  font-size: 0.82rem; font-weight: 600; color: #3b82f6;
+  text-decoration: none; cursor: pointer;
+}
+.review-doc-link:hover { text-decoration: underline; }
+.review-doc-link svg { flex-shrink: 0; }
+.review-doc-unsigned {
+  font-size: 0.82rem; font-weight: 500; color: #94a3b8;
+}
+.review-doc-status { font-size: 0.75rem; font-weight: 700; }
+
+.review-pdf-overlay {
+  position: fixed; inset: 0; z-index: 1100;
+  background: rgba(0,0,0,0.7);
+  display: flex; align-items: center; justify-content: center;
+  padding: 1rem;
+}
+.review-pdf-viewer {
+  background: #fff; border-radius: 12px; width: 100%; max-width: 900px;
+  height: 85vh; display: flex; flex-direction: column; overflow: hidden;
+}
+.review-pdf-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.75rem 1.25rem; border-bottom: 1px solid #e9edf3;
+  font-weight: 700; font-size: 0.95rem; color: #0f172a;
+}
+.review-pdf-header button {
+  font-size: 1.5rem; background: none; border: none;
+  cursor: pointer; color: #94a3b8; line-height: 1;
+}
+.review-pdf-frame { flex: 1; border: none; width: 100%; }
+
 .review-footer {
   display: flex; justify-content: space-between; align-items: center;
   padding: 1rem 1.5rem; border-top: 1px solid #e9edf3; gap: 1rem;
