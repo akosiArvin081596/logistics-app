@@ -282,8 +282,12 @@
                   </div>
                   <div class="field full">
                     <label>Truck Photo <span class="opt">(optional)</span></label>
-                    <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
-                    <img v-if="vehicles[activeVehicleTab].photo" :src="vehicles[activeVehicleTab].photo" class="photo-preview" />
+                    <div class="photo-row">
+                      <div class="photo-input-wrap">
+                        <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" style="padding:0.3rem;" />
+                      </div>
+                      <img v-if="vehicles[activeVehicleTab].photo" :src="vehicles[activeVehicleTab].photo" class="photo-preview" />
+                    </div>
                   </div>
                 </div>
 
@@ -1105,15 +1109,19 @@ async function submitBanking() {
   border-color: #3b82f6;
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
+.photo-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+.photo-input-wrap { flex: 1; min-width: 0; }
 .photo-preview {
-  max-width: 100%;
-  max-height: 200px;
-  width: auto;
-  height: auto;
-  object-fit: contain;
+  width: 160px;
+  height: 100px;
+  object-fit: cover;
   border-radius: 8px;
-  margin-top: 0.5rem;
   border: 1px solid #e2e8f0;
+  flex-shrink: 0;
 }
 /* ─── State searchable dropdown ─── */
 .state-field { position: relative; }
