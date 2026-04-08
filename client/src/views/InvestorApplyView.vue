@@ -641,9 +641,10 @@ async function submitBanking() {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin: 1.5rem 0 0.85rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid #f1f5f9;
+  margin: 1.75rem 0 1rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid #e9edf3;
+  border-bottom: 1px solid #e9edf3;
   color: #64748b;
   font-size: 0.72rem;
   font-weight: 700;
