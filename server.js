@@ -1199,7 +1199,7 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 	}
 });
 
-// GET /api/drivers-directory/:id/documents — signed onboarding PDFs + drug test for a driver
+// GET /api/drivers-directory/:id/documents — signed onboarding PDFs + drug test + SSN for a driver
 app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
@@ -1209,13 +1209,22 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 		// Find the matching user by driver_name (case-insensitive)
 		const user = db.prepare("SELECT id, driver_name FROM users WHERE LOWER(driver_name) = LOWER(?)").get((driver.driver_name || "").trim());
 		if (!user) {
-			return res.json({ documents: [], drugTest: null, linked: false });
+			return res.json({ documents: [], drugTest: null, linked: false, ssn: null });
 		}
 
 		const onboarding = db.prepare("SELECT drug_test_result, drug_test_file_url, drug_test_uploaded_at, status FROM driver_onboarding WHERE user_id = ?").get(user.id);
 		const documents = db.prepare(
 			"SELECT doc_key, doc_name, signed, signature_text, signed_at, signed_pdf_url FROM onboarding_documents WHERE user_id = ? ORDER BY id"
 		).all(user.id);
+
+		// SSN is pulled from the original job application. Super Admin only — not exposed to Dispatchers.
+		let ssn = null;
+		if (req.session.user.role === "Super Admin") {
+			const application = db.prepare(
+				"SELECT ssn FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)"
+			).get(user.id);
+			ssn = application?.ssn || null;
+		}
 
 		res.json({
 			documents,
@@ -1226,6 +1235,7 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 			} : null,
 			onboardingStatus: onboarding?.status || null,
 			linked: true,
+			ssn,
 		});
 	} catch (err) {
 		res.status(500).json({ error: err.message });

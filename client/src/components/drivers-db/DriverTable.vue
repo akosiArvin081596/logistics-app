@@ -65,6 +65,16 @@
               <span class="view-label">{{ col }}</span>
               <span>{{ viewDrv[col] || '\u2014' }}</span>
             </div>
+            <div v-if="docsData.ssn" class="view-row">
+              <span class="view-label">SSN</span>
+              <span class="ssn-value">
+                {{ showSsn ? docsData.ssn : maskedSsn }}
+                <button type="button" class="ssn-toggle" @click="showSsn = !showSsn" :title="showSsn ? 'Hide' : 'Show'">
+                  <svg v-if="!showSsn" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg v-else xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                </button>
+              </span>
+            </div>
           </div>
 
           <!-- Signed Onboarding Documents -->
@@ -274,17 +284,26 @@ const emit = defineEmits(['delete', 'update'])
 
 const viewDrv = ref(null)
 const docsLoading = ref(false)
-const docsData = reactive({ documents: [], drugTest: null, linked: true })
+const docsData = reactive({ documents: [], drugTest: null, linked: true, ssn: null })
+const showSsn = ref(false)
 const showConfirm = ref(false)
 const pendingDrv = ref(null)
 const showEdit = ref(false)
 const editRowIndex = ref(null)
 
-// Fetch signed docs + drug test when the detail modal opens
+const maskedSsn = computed(() => {
+  const s = (docsData.ssn || '').replace(/\D/g, '')
+  if (!s) return ''
+  return s.length >= 4 ? `***-**-${s.slice(-4)}` : '***-**-****'
+})
+
+// Fetch signed docs + drug test + SSN when the detail modal opens
 watch(viewDrv, async (d) => {
   docsData.documents = []
   docsData.drugTest = null
   docsData.linked = true
+  docsData.ssn = null
+  showSsn.value = false
   if (!d || !d._rowIndex) return
   docsLoading.value = true
   try {
@@ -292,12 +311,14 @@ watch(viewDrv, async (d) => {
     docsData.documents = res.documents || []
     docsData.drugTest = res.drugTest || null
     docsData.linked = res.linked !== false
+    docsData.ssn = res.ssn || null
   } catch { /* ignore */ }
   finally { docsLoading.value = false }
 })
 
 function closeView() {
   viewDrv.value = null
+  showSsn.value = false
 }
 
 const h = computed(() => {
@@ -503,6 +524,27 @@ function handleConfirmDelete() {
 .view-grid { display: flex; flex-direction: column; gap: 0.4rem; }
 .view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
 .view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.ssn-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.82rem;
+  letter-spacing: 0.03em;
+}
+.ssn-toggle {
+  background: transparent;
+  border: none;
+  padding: 0.2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.12s, color 0.12s;
+}
+.ssn-toggle:hover { background: #f1f5f9; color: #475569; }
 
 .docs-section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #e8edf2; }
 .docs-title { font-size: 0.72rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.6rem; }
