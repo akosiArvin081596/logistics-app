@@ -82,6 +82,7 @@ const props = defineProps({
   truckId: { type: Number, default: null },
   unitNumber: { type: String, default: '' },
   trucks: { type: Array, default: () => [] },
+  investorId: { type: Number, default: null },
 })
 
 const api = useApi()
@@ -112,7 +113,7 @@ const uploadForm = reactive({
 async function load() {
   loading.value = true
   try {
-    const params = props.truckId ? `?truck_id=${props.truckId}` : props.unitNumber ? `?unit_number=${encodeURIComponent(props.unitNumber)}` : ''
+    const params = props.truckId ? `?truck_id=${props.truckId}` : props.unitNumber ? `?unit_number=${encodeURIComponent(props.unitNumber)}` : props.investorId ? `?investor_id=${props.investorId}` : ''
     const res = await api.get(`/api/legal-documents${params}`)
     docs.value = res.documents || []
   } catch {
@@ -133,8 +134,7 @@ function onFileChange(e) {
 
 async function upload() {
   if (!uploadForm.file || !uploadForm.docType) return
-  const activeTruckId = props.truckId || uploadForm.selectedTruckId
-  if (!activeTruckId) return
+  const activeTruckId = props.truckId || uploadForm.selectedTruckId || 0
   const activeTruck = props.trucks.find(t => t.id === activeTruckId)
   const activeUnitNumber = props.unitNumber || activeTruck?.UnitNumber || ''
   uploading.value = true
@@ -148,6 +148,7 @@ async function upload() {
       fileData: uploadForm.fileBase64,
       notes: uploadForm.notes,
       uploadedBy: auth.user?.username || 'admin',
+      investorId: props.investorId || undefined,
     })
     uploadForm.file = null
     uploadForm.fileBase64 = ''

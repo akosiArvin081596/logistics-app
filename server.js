@@ -6061,7 +6061,19 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 		}
 		let docs;
 		if (isSuperAdmin) {
-			if (truckId) {
+			const queryInvId = req.query.investor_id ? parseInt(req.query.investor_id) : null;
+			if (queryInvId) {
+				// Super Admin viewing a specific investor's docs (profile + truck)
+				const invUserId = db.prepare("SELECT user_id FROM investors WHERE id = ?").get(queryInvId);
+				const owned = invUserId ? db.prepare("SELECT id FROM trucks WHERE owner_id = ?").all(invUserId.user_id).map(t => t.id) : [];
+				const conditions = [`ld.investor_id = ?`];
+				const params = [queryInvId];
+				if (owned.length > 0) {
+					conditions.push(`ld.truck_id IN (${owned.map(() => '?').join(',')})`);
+					params.push(...owned);
+				}
+				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE (${conditions.join(' OR ')}) ORDER BY ld.uploaded_at DESC`).all(...params);
+			} else if (truckId) {
 				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE ld.truck_id = ? ORDER BY ld.uploaded_at DESC`).all(truckId);
 			} else {
 				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ORDER BY ld.uploaded_at DESC`).all();

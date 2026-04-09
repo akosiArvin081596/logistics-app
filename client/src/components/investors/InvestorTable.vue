@@ -168,6 +168,11 @@
             <div v-if="!detail.application?.legal_name" style="text-align:center;padding:2rem;color:#94a3b8;font-size:13px">
               No application data linked to this investor.
             </div>
+
+            <!-- Shared Documents -->
+            <div v-if="selectedInvestorId" style="margin-top:1rem;border-top:1px solid #f1f5f9;padding-top:1rem">
+              <LegalDocumentPortal :investor-id="selectedInvestorId" />
+            </div>
           </div>
         </div>
       </div>
@@ -180,6 +185,7 @@ import { ref, reactive } from 'vue'
 import { useApi } from '../../composables/useApi'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 
 const props = defineProps({
   investors: { type: Array, default: () => [] },
@@ -194,10 +200,12 @@ const pendingInv = ref(null)
 const showEdit = ref(false)
 const showDetail = ref(false)
 const showAcctNum = ref(false)
+const selectedInvestorId = ref(0)
 const detailLoading = ref(false)
 const detail = reactive({ application: null, vehicles: [], banking: {}, documents: [] })
 
 async function viewDetail(inv) {
+  selectedInvestorId.value = inv.id
   if (!inv.applicationId) {
     showDetail.value = true
     detailLoading.value = false
