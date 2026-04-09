@@ -801,12 +801,13 @@ function submitApplication() {
   maxStep.value = Math.max(maxStep.value, 1)
 }
 
-// Fetch PDF preview (with optional signature data for signed docs)
+// Fetch PDF preview (with optional signature data for signed docs).
+// Include banking so the master agreement preview renders the investor's bank info.
 async function fetchPreview(docKey, sig) {
   revokePreview()
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
-    const payload = { ...form, vehicles: stripped }
+    const payload = { ...form, vehicles: stripped, banking: { ...banking } }
     if (sig) { payload.signatureText = sig.text; payload.signatureImage = sig.image }
     const res = await fetch(`/api/public/investor-preview-pdf/${docKey}`, {
       method: 'POST',
@@ -846,7 +847,7 @@ async function openReviewPdf(doc) {
     const res = await fetch(`/api/public/investor-preview-pdf/${doc.doc_key}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...form, vehicles: stripped, signatureText: sig.text, signatureImage: sig.image }),
+      body: JSON.stringify({ ...form, vehicles: stripped, banking: { ...banking }, signatureText: sig.text, signatureImage: sig.image }),
     })
     if (res.ok) {
       const blob = await res.blob()
