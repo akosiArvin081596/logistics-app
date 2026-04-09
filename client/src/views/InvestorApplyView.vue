@@ -258,46 +258,7 @@
                       >{{ st }}</div>
                     </div>
                   </div>
-                  <div class="field"><label>Existing Liens</label><input v-model="vehicles[activeVehicleTab].liens" placeholder="None or lien holder name" /></div>
-                  <div class="field">
-                    <label>Registered Owner</label>
-                    <select v-model="vehicles[activeVehicleTab].registeredOwner">
-                      <option value="">-- Select --</option>
-                      <option v-if="form.legal_name" :value="form.legal_name">{{ form.legal_name }}</option>
-                      <option v-if="form.contact_person && form.contact_person !== form.legal_name" :value="form.contact_person">{{ form.contact_person }}</option>
-                    </select>
-                  </div>
-                  <div class="field full">
-                    <label>Notes <span class="opt">(optional)</span></label>
-                    <textarea v-model="vehicles[activeVehicleTab].notes" class="form-textarea" rows="2" placeholder="Any additional notes..."></textarea>
-                  </div>
-                  <div class="field full">
-                    <label>Truck Photo <span class="opt">(optional)</span></label>
-                    <div class="photo-row">
-                      <label class="photo-choose-btn">
-                        Choose File
-                        <input :key="'photo-' + activeVehicleTab" type="file" accept="image/*" @change="onVehiclePhoto" class="photo-file-hidden" />
-                      </label>
-                      <span v-if="vehicles[activeVehicleTab].photoName" class="photo-filename">{{ vehicles[activeVehicleTab].photoName }}</span>
-                      <span v-else class="photo-filename dim">No file chosen</span>
-                      <a v-if="vehicles[activeVehicleTab].photo" href="#" class="photo-view-link" @click.prevent="photoPreviewUrl = vehicles[activeVehicleTab].photo">View</a>
-                    </div>
-                  </div>
                 </div>
-
-                <details class="biz-config" open>
-                  <summary class="biz-config-label">Business Configuration</summary>
-                  <div class="form-grid" style="margin-top: 0.75rem;">
-                    <div class="field"><label>Purchase Price ($)</label><input v-model.number="vehicles[activeVehicleTab].purchasePrice" type="number" min="0" placeholder="58000" /></div>
-                    <div class="field">
-                      <label>Title Status</label>
-                      <select v-model="vehicles[activeVehicleTab].titleStatus">
-                        <option value="Clean">Clean</option>
-                        <option value="Lien">Lien</option>
-                      </select>
-                    </div>
-                  </div>
-                </details>
               </div>
             </div>
           </details>
