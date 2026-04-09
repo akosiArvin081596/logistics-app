@@ -223,15 +223,6 @@
 
                 <div class="form-grid">
                   <div class="field">
-                    <label>Status</label>
-                    <select v-model="vehicles[activeVehicleTab].status">
-                      <option value="Active">Active</option>
-                      <option value="Inactive">Inactive</option>
-                      <option value="Maintenance">Maintenance</option>
-                      <option value="OOS">OOS</option>
-                    </select>
-                  </div>
-                  <div class="field">
                     <label>Make <span class="req">*</span></label>
                     <select v-model="vehicles[activeVehicleTab].make">
                       <option value="">-- Select make --</option>
