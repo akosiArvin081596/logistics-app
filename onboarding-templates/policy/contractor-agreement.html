@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LogisX Inc. Independent Contractor Agreement v1.57</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    @page { size: letter; margin: 1in; }
+
+    :root {
+      --ink: #000;
+      --rule: #d0d0d0;
+      --paper: #ffffff;
+      --bg: #f5f5f5;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+    }
+
+    body {
+      font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .document {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 88px 80px 96px;
+      background: var(--paper);
+      box-shadow: 0 2px 14px rgba(0, 0, 0, 0.08);
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 700;
+      text-align: center;
+      margin: 0 0 22px;
+      letter-spacing: 0.3px;
+      line-height: 1.3;
+    }
+
+    h2 {
+      font-size: 17px;
+      font-weight: 700;
+      margin: 30px 0 14px;
+      line-height: 1.3;
+    }
+
+    h3 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 20px 0 10px;
+    }
+
+    p { margin: 0 0 16px; }
+
+    ol, ul {
+      padding-left: 28px;
+      margin: 0 0 16px;
+    }
+
+    ol.alpha-upper { list-style-type: upper-alpha; }
+    ol.decimal     { list-style-type: decimal; }
+    ol.alpha-lower { list-style-type: lower-alpha; }
+
+    li { margin-bottom: 12px; }
+
+    ol ol, ul ul, ol ul, ul ol {
+      margin-top: 8px;
+      margin-bottom: 4px;
+    }
+
+    ol ol li, ul ul li { margin-bottom: 6px; }
+
+    strong { font-weight: 700; }
+
+    hr {
+      border: 0;
+      border-top: 1px solid var(--rule);
+      margin: 30px 0 22px;
+    }
+
+    /* Bold-body sections (like Section 9 Arbitration) */
+    .section-bold p,
+    .section-bold li {
+      font-weight: 700;
+    }
+
+    /* Fillable blanks — borderless inputs with a bottom rule */
+    .blank {
+      display: inline-block;
+      border: 0;
+      border-bottom: 1px solid var(--ink);
+      background: transparent;
+      font: inherit;
+      color: inherit;
+      outline: none;
+      padding: 0 4px;
+      vertical-align: baseline;
+      border-radius: 0;
+    }
+    .blank:focus {
+      border-bottom-width: 2px;
+      padding-bottom: 0;
+    }
+
+    .blank-xs   { width:  90px; }
+    .blank-sm   { width: 140px; }
+    .blank-md   { width: 220px; }
+    .blank-lg   { width: 320px; }
+    .blank-xl   { width: 420px; }
+    .blank-full { width: 100%; max-width: 520px; }
+
+    /* Block-level blank that fills line */
+    .blank-block {
+      display: block;
+      width: 100%;
+      margin-top: 4px;
+    }
+
+    /* Checkbox group for payment selection */
+    .checkbox-row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    .checkbox-row input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: #000;
+      flex-shrink: 0;
+    }
+    .checkbox-row .label {
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .checkbox-row .blank {
+      flex: 1;
+      min-width: 260px;
+    }
+
+    .field-row {
+      margin-bottom: 14px;
+    }
+    .field-row .label {
+      font-weight: 700;
+    }
+
+    .signatory-block {
+      margin-top: 20px;
+    }
+    .signatory-block .role {
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+    .signatory-block .sig-line {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .signatory-block .sig-line .label {
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .signatory-block .sig-group {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: nowrap;
+    }
+    .signatory-block .sig-group.sig-by   { flex: 1 1 auto; min-width: 0; }
+    .signatory-block .sig-group.sig-date { flex: 0 0 auto; }
+    .signatory-block .sig-group.sig-by .blank   { flex: 1 1 auto; min-width: 180px; width: auto; }
+    .signatory-block .sig-group.sig-date .blank { width: 130px; }
+    .signatory-block .name {
+      font-weight: 700;
+      margin-top: 6px;
+      margin-bottom: 14px;
+    }
+
+    .page-break { page-break-before: always; }
+
+    @media print {
+      html, body { background: #fff; }
+      .document {
+        box-shadow: none;
+        margin: 0;
+        padding: 0;
+        max-width: none;
+      }
+      .blank { border-bottom: 1px solid #000; }
+    }
+  </style>
+</head>
+<body>
+  <main class="document">
+    <h1>INDEPENDENT CONTRACTOR AGREEMENT</h1>
+
+    <p>This <strong>Independent Contractor Service Agreement</strong> (the "<strong>Agreement</strong>") is made and entered into effective as of <input type="text" class="blank blank-sm" aria-label="Effective date"> (the "<strong>Effective Date</strong>"), by and between <strong>LogisX Inc.</strong> (the "<strong>Company</strong>" or "<strong>Recipient</strong>"), a Texas corporation and authorized U.S. Motor Carrier operating under <strong>USDOT# 4302683</strong>, with its principal place of business located at <strong>4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381</strong>, and <input type="text" class="blank blank-md" aria-label="Contractor name"> (the "<strong>Contractor</strong>"), an independent business entity with a primary address located at <input type="text" class="blank blank-lg" aria-label="Contractor address">.</p>
+
+    <h2>1. DESCRIPTION OF SERVICES &amp; SCOPE OF WORK</h2>
+    <p>The Contractor is engaged as an independent professional to provide <strong>Commercial Motor Vehicle (CMV) Operation and Transportation Services</strong>. By executing this Agreement, the Contractor warrants and represents the following:</p>
+    <ol class="alpha-upper">
+      <li><strong>Professional Expertise:</strong> The Contractor possesses the specialized skill, experience, and professional expertise necessary to operate CMVs safely and efficiently under the Company's motor carrier authority (<strong>USDOT# 4302683</strong>).</li>
+      <li><strong>Licensure &amp; Certification:</strong> The Contractor holds a valid <strong>Commercial Driver's License (CDL)</strong> with all necessary endorsements and a current <strong>Medical Examiner's Certificate</strong> (Medical Card) as required by law.</li>
+      <li><strong>Mandatory Disclosure:</strong> The Contractor shall provide copies of all credentials to the Company upon request. The Contractor <strong>must immediately notify the Company</strong>, in writing, of any traffic person citations, license suspensions, revocations, or any medical condition that would disqualify them from operating a CMV under FMCSR.</li>
+      <li><strong>Regulatory Compliance:</strong> The Contractor shall perform all Services in strict accordance with the <strong>Federal Motor Carrier Safety Regulations (FMCSR)</strong>, including but not limited to <strong>FMCSA &sect; 395.3 Hours of Service (HOS)</strong>, pre-and-post trip vehicle inspection requirements (DVIR), and mandatory drug/alcohol testing programs.</li>
+      <li><strong>Operational Result:</strong> While the Contractor maintains the right to determine the specific "means and methods" of driving (e.g., route selection, fuel stops), the Contractor is contractually responsible for achieving the specific performance result: the safe, damage-free, and <strong>on-time</strong> pickup and delivery of cargo within the appointment windows provided by the Company or its customers.</li>
+      <li><strong>Drug &amp; Alcohol Clearinghouse:</strong> The Contractor consents to and shall remain in "Clear" status with the <strong>FMCSA Drug and Alcohol Clearinghouse</strong>. Any "Prohibited" status shall result in the immediate and automatic termination of this Agreement for cause.</li>
+    </ol>
+
+    <h2>2. COMPENSATION, INVOICING, &amp; TAX COMPLIANCE</h2>
+    <p>The Company shall compensate the Contractor for Services rendered under the following strict terms and conditions:</p>
+    <ol class="decimal">
+      <li>
+        <strong>Daily Rate &amp; Cycle Definition:</strong> The Company shall pay the Contractor a flat rate of <strong>$250.00 per day</strong>. For the purposes of this Agreement, a "day" is strictly defined as the completion of one (1) <strong>USDOT 14-hour duty cycle</strong> as governed by <strong>FMCSA &sect; 395.3</strong>. Partial cycles or "on-call" time not resulting in a dispatched movement do not constitute a "day" unless pre-approved in writing by the Company.
+      </li>
+      <li>
+        <strong>Mandatory Invoicing:</strong> All payments are strictly <strong>"Pay-by-Invoice."</strong> The Contractor must submit a professional, itemized invoice to the Company on a weekly basis. Each invoice <strong>must</strong> be accompanied by the documentation and payment election details specified in <strong>Exhibit A</strong>, including:
+        <ol class="alpha-lower">
+          <li>Verified Electronic Logging Device (ELD) records or log-hour verification to ensure strict <strong>HOS compliance</strong>.</li>
+          <li>Signed Bills of Lading (BOLs) or Proof of Delivery (POD) for all loads handled during the invoiced period.</li>
+        </ol>
+      </li>
+      <li>
+        <strong>Payment Terms (Net 7):</strong> The Company shall remit payment to the Contractor via the method selected in <strong>Exhibit A</strong> within <strong>seven (7) calendar days (Net 7)</strong> from the date of receipt of a complete and undisputed invoice, including all required supporting documentation.
+      </li>
+      <li>
+        <strong>Right to Offset:</strong> The Company reserves the right to withhold or "offset" payments from any invoice to cover costs incurred due to the Contractor's negligence, including but not limited to: cargo claims, equipment damage, or fines/penalties resulting from the Contractor's HOS or safety violations.
+      </li>
+      <li>
+        <strong>Independent Contractor (1099) Status:</strong> The Contractor is an independent business entity and <strong>not</strong> an employee of the Company.
+        <ol class="alpha-lower">
+          <li><strong>No Withholdings:</strong> The Company will <strong>not</strong> withhold any federal, state, or local income taxes, FICA, or unemployment taxes.</li>
+          <li><strong>Tax Responsibility:</strong> The Contractor is solely responsible for all self-employment taxes, 1099 filings, and mandatory business insurance.</li>
+          <li><strong>No Benefits:</strong> The Contractor is not eligible for, and hereby waives any claim to, worker's compensation, health insurance, paid time off, or any other employee fringe benefits.</li>
+        </ol>
+      </li>
+      <li>
+        <strong>Business Expenses:</strong> The Contractor shall bear all personal and business-related expenses incurred in the performance of the Services (e.g., cellular data for the LogisX platform, personal equipment, and travel) unless otherwise specified in the payment instructions within <strong>Exhibit A</strong> for a specific dispatch.
+      </li>
+    </ol>
+
+    <h2>3. PERFORMANCE STANDARDS &amp; OPERATIONAL INTEGRITY</h2>
+    <p>While the Contractor maintains the right to determine the specific "means and methods" of professional driving (e.g., fuel stops, rest locations, and specific routing), the Contractor agrees to adhere to the following <strong>Performance Standards</strong> to ensure the operational integrity of <strong>LogisX Inc. (USDOT# 4302683)</strong>:</p>
+    <ol class="decimal">
+      <li><strong>Time-Critical Performance (On-Time Delivery):</strong> The Contractor acknowledges that "time is of the essence." The Contractor shall ensure all pickups and deliveries are completed strictly within the appointment windows provided by the Company or its customers.</li>
+      <li><strong>Operational Result vs. Method:</strong> The Company's interest is solely in the <strong>result</strong> of the services (i.e., a safe, legal, and on-time delivery). The Contractor is responsible for calculating transit times, weather impacts, and HOS requirements to ensure this result is met without direct "time management" supervision from the Company.</li>
+      <li><strong>Material Breach for Delays:</strong> The Contractor acknowledges that consistent delays or failure to meet appointment windows causes irreparable harm to the Company's business reputation and contractual standing with shippers. <strong>Five (5) or more unexcused late arrivals within a thirty (30) day period</strong> may be considered a material breach of this Agreement, providing grounds for immediate termination.</li>
+      <li><strong>Safety &amp; Technology Compliance:</strong> Performance includes strict, non-negotiable adherence to the <strong>LogisX Inc. Mobile Communications Policy</strong> (prohibiting handheld device use while in motion) and all applicable DOT safety standards.</li>
+      <li><strong>Communication Requirement:</strong> While the Company does not manage the Contractor's hour-by-hour schedule, the Contractor agrees to provide "Status Updates" (e.g., Loaded, Unloaded, or Maintenance Delays) via the designated LogisX dispatch platform or electronic logging interface to ensure the Company can fulfill its tracking obligations to customers.</li>
+      <li><strong>Professional Conduct:</strong> The Contractor shall conduct themselves in a professional manner at all shipper and receiver facilities. Any "Banned" status from a customer facility due to the Contractor's conduct shall be deemed a failure to perform the Services under this Agreement.</li>
+    </ol>
+
+    <h2>4. INDEPENDENT CONTRACTOR STATUS &amp; OPERATIONAL RESTRICTIONS</h2>
+    <p>To ensure the protection of <strong>LogisX Inc.</strong> against labor board audits or misclassification claims, this section explicitly defines the "Free Agent" status of the Contractor.</p>
+    <ol class="decimal">
+      <li><strong>Result-Oriented Engagement:</strong> The Company's interest is strictly and solely in the <strong>final result</strong> of the Services: the safe, legal, and on-time delivery of cargo. The Company does <strong>not</strong> exercise "time management," direct supervision, or control over the Contractor's specific driving techniques, gear shifting, braking methods, or personal rest schedules, provided the Contractor remains in compliance with <strong>FMCSR HOS</strong> regulations.</li>
+      <li><strong>Control of Means and Methods:</strong> The Contractor is a "Free Agent" and retains the absolute right to determine the specific "means and methods" of performance. This includes, but is not limited to, the selection of travel routes, fueling locations, and the order of non-appointment-based tasks, provided the <strong>Performance Objective</strong> (the delivery window) is met.</li>
+      <li><strong>Non-Exclusivity:</strong> This is a non-exclusive Agreement. The Contractor remains free to provide services to other motor carriers or entities, provided that such outside services do not create a conflict of interest or result in a violation of the Contractor's available <strong>HOS</strong> under the Company's USDOT authority.</li>
+      <li><strong>No Employment "Tools of the Trade":</strong> The Contractor is responsible for providing their own "tools of the trade," including but not limited to: mobile communication devices compatible with the LogisX platform, personal protective equipment (PPE), and any specialized navigational tools.</li>
+      <li><strong>Professional Conduct &amp; Representation:</strong> While the Contractor is an independent entity, they acknowledge that while operating under the Company's <strong>USDOT# 4302683</strong>, their conduct reflects upon the Company's safety rating. The Contractor is responsible for their own professional conduct and agrees to interact with all third-party shippers, receivers, and law enforcement in a professional, law-abiding manner.</li>
+      <li><strong>No Authority to Bind:</strong> The Contractor has no authority to enter into contracts, incur debt, or make any legal representations on behalf of <strong>LogisX Inc.</strong> The Contractor shall at all times identify themselves to third parties as an Independent Contractor and not as an agent or employee of the Company.</li>
+    </ol>
+
+    <h2>5. TERMINATION &amp; SEPARATION OF PARTIES</h2>
+    <p>To maintain a true <strong>Independent Contractor</strong> relationship under labor standards, the right to terminate must be balanced. While the Company requires "Immediate Termination" for safety and performance to protect its <strong>USDOT# 4302683</strong>, the "At-Will" nature for both parties reinforces that this is a business-to-business arrangement, not an employment contract.</p>
+    <ol class="decimal">
+      <li><strong>Standard Termination:</strong> Either Party may terminate this Agreement at any time, for any reason or no reason, upon <strong>fourteen (14) days' written notice</strong> to the other Party. This notice period allows for the orderly completion of any outstanding dispatches and final invoicing.</li>
+      <li>
+        <strong>Company's Right to Immediate Termination for Cause:</strong> Notwithstanding the standard notice period, the Company reserves the absolute right to terminate this Agreement <strong>immediately and without prior notice</strong> for "Cause." For the purposes of protecting the Company's motor carrier authority and contractual obligations, "Cause" includes, but is not limited to:
+        <ol class="alpha-lower">
+          <li><strong>Performance Failure:</strong> Any unexcused failure to meet delivery windows or "Performance Objectives" as defined in Section 3.</li>
+          <li><strong>Safety &amp; Compliance Violations:</strong> Any violation of the <strong>LogisX Inc. Mobile Communications Policy</strong>, failure of a drug/alcohol test, or any "Prohibited" status in the FMCSA Clearinghouse.</li>
+          <li><strong>Loss of Eligibility:</strong> Suspension, revocation, or expiration of the Contractor's CDL or Medical Examiner's Certificate.</li>
+          <li><strong>Risk to Authority:</strong> Any action or omission by the Contractor that jeopardizes the Company's <strong>DOT Safety Rating</strong>, insurance standing, or primary customer contracts.</li>
+          <li><strong>Criminal Conduct:</strong> Any arrest or conviction for a felony or serious traffic violation (as defined by FMCSR) while performing Services.</li>
+        </ol>
+      </li>
+      <li><strong>Contractor's Right to Terminate:</strong> The Contractor may terminate this Agreement if the Company fails to remit payment within the <strong>Net 7</strong> terms defined in Section 2, provided the Contractor gives written notice of the default and a seven (7) day cure period.</li>
+      <li>
+        <strong>Post-Termination Obligations:</strong> Upon termination, regardless of the reason, the Contractor shall:
+        <ol class="alpha-lower">
+          <li>Immediately return any Company-owned property, access keys, or sensitive shipping documents.</li>
+          <li>Provide all final ELD logs and signed Bills of Lading (BOLs) required for final invoicing.</li>
+          <li>Cease representing themselves as an active provider for <strong>LogisX Inc. (USDOT# 4302683)</strong>.</li>
+        </ol>
+      </li>
+      <li><strong>Final Settlement:</strong> The Company shall process the final invoice within seven (7) days of receiving all required closing documentation and a final verified log-out from the LogisX platform.</li>
+    </ol>
+
+    <h2>6. CONFIDENTIALITY, NON-SOLICITATION, &amp; TRADE SECRET PROTECTION</h2>
+    <p>The Contractor acknowledges that during the course of providing Services, they will have access to "Confidential Information" which is the exclusive property of <strong>LogisX Inc.</strong> This Confidential Information includes, but is not limited to, the internal architecture and functional logic of the <strong>LogisX Platform</strong>, proprietary pricing structures, specific shipper and broker identities, contractual terms with third-party customers, and internal operational strategies. The Contractor agrees to maintain the absolute secrecy of this information and shall not, at any time during or after the termination of this Agreement, disclose, divulge, or make use of such information for personal gain or for the benefit of any third-party competitor.</p>
+    <p>Furthermore, the Contractor acknowledges that the Company has invested significant resources into developing its customer base and specialized logistics network. To protect these legitimate business interests, the Contractor agrees that for a period of <strong>twelve (12) months</strong> following the termination of this Agreement for any reason, they shall not, directly or indirectly, solicit, interfere with, or attempt to divert any customer, shipper, or broker of the Company with whom the Contractor had contact or became aware of through this engagement. Any attempt to "back-door" the Company by providing transportation services directly to these customers or through a competing motor carrier within this restricted period shall be considered a material breach of this Agreement. This provision shall survive the termination of the Agreement and remains enforceable to the maximum extent permitted under <strong>Texas law</strong>.</p>
+
+    <h2>7. INDEMNIFICATION, LIABILITY SHIELD, &amp; DEFENSE OF CLAIMS</h2>
+    <p>The Contractor acknowledges that as an independent business entity, they assume full responsibility for the risks associated with the performance of the Services. To the fullest extent permitted by <strong>Texas law</strong>, the Contractor agrees to <strong>indemnify, defend, and hold harmless LogisX Inc.</strong>, its parent companies, subsidiaries, officers, directors, and employees from and against any and all claims, demands, causes of action, losses, damages, liabilities, judgments, settlements, and expenses&mdash;including, without limitation, reasonable attorney's fees and court costs&mdash;arising out of or resulting from the Contractor's performance under this Agreement.</p>
+    <p>This indemnification obligation specifically covers, but is not limited to, any third-party claims for personal injury, wrongful death, or property damage resulting from vehicle accidents, cargo loss or damage, or the Contractor's failure to strictly comply with <strong>Federal Motor Carrier Safety Regulations (FMCSR)</strong>. The Contractor further agrees to indemnify the Company for any fines, penalties, or assessments levied by the <strong>FMCSA</strong>, <strong>Department of Transportation (DOT)</strong>, or any state regulatory body that result from the Contractor's operational violations or negligence while operating under the Company's motor carrier authority (<strong>USDOT# 4302683</strong>).</p>
+    <p>The Company shall not be liable to the Contractor for any indirect, incidental, special, or consequential damages, including loss of profits or business interruption, arising from the termination of this Agreement or any dispatch delays. This Section 7 shall survive the expiration or termination of this Agreement and shall remain in full force and effect regarding any incident occurring during the term of the Contractor's engagement.</p>
+
+    <h2>8. FORCE MAJEURE &amp; EXCUSABLE DELAY</h2>
+    <p>Neither Party shall be liable for any failure or delay in the performance of its obligations under this Agreement&mdash;specifically regarding the "On-Time Delivery" requirements&mdash;to the extent that such failure or delay is caused by a <strong>Force Majeure Event</strong>. A Force Majeure Event is strictly defined as an occurrence beyond the reasonable control of the affected Party that could not have been avoided by the exercise of due diligence, including but not limited to: acts of God (severe weather, floods, earthquakes), declared war, acts of terrorism, civil unrest, or mandatory government-ordered shutdowns or road closures.</p>
+    <p>To invoke this clause, the Contractor must provide <strong>immediate verbal and written notice</strong> to the Company's dispatch or management as soon as the Force Majeure Event becomes apparent, detailing the nature of the event and the expected duration of the delay. The Contractor is not excused from performance due to "predictable" operational challenges, including but not limited to: routine heavy traffic, preventable mechanical breakdowns of the Contractor's equipment, lack of available HOS due to poor trip planning, or personal illness.</p>
+    <p>The Company reserves the right to reassign any dispatch affected by a Force Majeure Event to another carrier or contractor if the delay exceeds <strong>four (4) hours</strong>, in order to mitigate damages to the Company's customers. In such an event, the Contractor shall only be entitled to pro-rated compensation for the portion of the 14-hour cycle actually completed, provided the cargo remains secure and the Company's interests are protected. Consistent reliance on Force Majeure for standard operational delays shall be scrutinized and may result in the immediate termination of this Agreement under the Performance Guidelines of Section 3.</p>
+
+    <h2>9. MANDATORY ARBITRATION &amp; WAIVER OF CLASS ACTION</h2>
+    <div class="section-bold">
+      <p>In lieu of formal court proceedings, the Parties agree that any and all disputes, claims, or controversies arising out of or relating to this Agreement&mdash;including its formation, breach, termination, or the Independent Contractor status of the Contractor&mdash;shall be resolved exclusively through Binding Arbitration. This Agreement to arbitrate is governed by the Federal Arbitration Act (9 U.S.C. &sect;&sect; 1-16) and shall be conducted by the American Arbitration Association (AAA) or a mutually agreed-upon private ADR (Alternative Dispute Resolution) firm under their respective Commercial Arbitration Rules.</p>
+      <p>The arbitration shall take place in Montgomery County, Texas, and shall be presided over by a single, neutral arbitrator with at least ten (10) years of experience in transportation and logistics law. The arbitrator's decision shall be final and binding, and judgment upon the award rendered by the arbitrator may be entered in any court having jurisdiction thereof. The Parties shall split the administrative costs and arbitrator's fees equally, though each Party shall bear its own attorney's fees and legal costs unless the arbitrator awards such fees to the prevailing Party under a specific statutory right.</p>
+      <p>Class Action Waiver: The Contractor and the Company agree that any arbitration shall be conducted in their individual capacities only and not as a class action or other representative action. The Parties expressly waive their right to file a class action or seek relief on a class basis. Furthermore, the Parties hereby waive their right to a jury trial for any dispute covered by this Agreement.</p>
+      <p>Nothing in this Section 9 shall prevent either Party from seeking a temporary restraining order or preliminary injunction in a court of competent jurisdiction to protect Confidential Information or to enforce the Non-Solicitation provisions of Section 6 pending the appointment of an arbitrator.</p>
+    </div>
+
+    <h2>8. GOVERNING LAW</h2>
+    <p>This Agreement shall be governed by and construed in accordance with the laws of the <strong>State of Texas</strong>. Any legal actions shall be filed in Montgomery County, Texas.</p>
+
+    <hr>
+
+    <h2>SIGNATORIES</h2>
+
+    <div class="signatory-block">
+      <div class="role">RECIPIENT: LogisX Inc.</div>
+      <div class="sig-line">
+        <div class="sig-group sig-by">
+          <span class="label">By:</span>
+          <input type="text" class="blank" aria-label="Recipient signature">
+        </div>
+        <div class="sig-group sig-date">
+          <span class="label">Date:</span>
+          <input type="text" class="blank" aria-label="Recipient date">
+        </div>
+      </div>
+      <div class="name">Deshorn King, CEO</div>
+    </div>
+
+    <div class="signatory-block">
+      <div class="role">CONTRACTOR:</div>
+      <div class="sig-line">
+        <div class="sig-group sig-by">
+          <span class="label">By:</span>
+          <input type="text" class="blank" aria-label="Contractor signature">
+        </div>
+        <div class="sig-group sig-date">
+          <span class="label">Date:</span>
+          <input type="text" class="blank" aria-label="Contractor date">
+        </div>
+      </div>
+      <div class="sig-line">
+        <span class="label">[Print Name]:</span>
+        <input type="text" class="blank blank-lg" aria-label="Contractor printed name">
+      </div>
+    </div>
+
+    <div class="page-break"></div>
+
+    <h2>EXHIBIT A: PAYMENT SELECTION &amp; INVOICE REQUIREMENTS</h2>
+    <p>This <strong>Exhibit A</strong> is incorporated into and made a part of the <strong>Independent Contractor Service Agreement</strong> dated <input type="text" class="blank blank-sm" aria-label="Exhibit A agreement date">, between <strong>LogisX Inc. (USDOT# 4302683)</strong> and the <strong>Contractor</strong>. As referenced in <strong>Section 2 (Compensation, Invoicing, &amp; Tax Compliance)</strong>, the Contractor hereby elects the following method of payment:</p>
+
+    <hr>
+
+    <h3>PAYMENT METHOD SELECTION</h3>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="pay-check" aria-label="Check payment">
+      <label for="pay-check" class="label">Check &nbsp; Name on Account:</label>
+      <input type="text" class="blank" aria-label="Check: Name on account">
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="pay-ach" aria-label="Direct deposit payment">
+      <label for="pay-ach" class="label">Direct Deposit (ACH) &nbsp; Name of Bank:</label>
+      <input type="text" class="blank" aria-label="ACH: Name of bank">
+    </div>
+
+    <div class="field-row">
+      <span class="label">Bank Address:</span>
+      <input type="text" class="blank blank-block" aria-label="Bank address">
+    </div>
+    <div class="field-row">
+      <span class="label">Bank Phone #:</span>
+      <input type="text" class="blank blank-block" aria-label="Bank phone number">
+    </div>
+    <div class="field-row">
+      <span class="label">Bank Routing #:</span>
+      <input type="text" class="blank blank-block" aria-label="Bank routing number">
+    </div>
+    <div class="field-row">
+      <span class="label">Bank Account #:</span>
+      <input type="text" class="blank blank-block" aria-label="Bank account number">
+    </div>
+    <div class="field-row">
+      <span class="label">Name(s) on Acct:</span>
+      <input type="text" class="blank blank-block" aria-label="Names on account">
+    </div>
+    <div class="field-row">
+      <span class="label">Type of Account (Checking/Savings):</span>
+      <input type="text" class="blank blank-block" aria-label="Type of account">
+    </div>
+
+    <hr>
+
+    <p><strong>MANDATORY INVOICE ACKNOWLEDGMENT</strong> By signing below, the Contractor acknowledges and agrees to the following administrative requirements to ensure timely payment processing under the <strong>Net 7</strong> terms:</p>
+    <ol class="decimal">
+      <li><strong>Submission Requirement:</strong> In order to receive any payment from <strong>LogisX Inc.</strong>, all Independent Contractors <strong>MUST</strong> sign and submit a professional work invoice detailing the specific dates of service and the 14-hour cycles completed.</li>
+      <li><strong>Supporting Documentation:</strong> No invoice will be considered "received" or "complete" for payment purposes until it is accompanied by the required <strong>ELD logs</strong> and <strong>signed Proof of Delivery (POD)</strong> documents as stipulated in the main Agreement.</li>
+      <li><strong>Accuracy:</strong> The Contractor is responsible for the accuracy of the banking or mailing information provided above. <strong>LogisX Inc.</strong> is not liable for delays or losses resulting from incorrect account details provided by the Contractor.</li>
+    </ol>
+
+    <div class="sig-line" style="margin-top: 24px;">
+      <span class="label">CONTRACTOR SIGNATURE:</span>
+      <input type="text" class="blank blank-lg" aria-label="Contractor signature">
+    </div>
+    <div class="sig-line">
+      <span class="label">DATE:</span>
+      <input type="text" class="blank blank-sm" aria-label="Date">
+    </div>
+  </main>
+</body>
+</html>

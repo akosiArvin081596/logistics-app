@@ -14,11 +14,7 @@ const compression = require("compression");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
-const { generateContractorAgreement } = require("./lib/generate-contractor-pdf");
-const { generateEquipmentPolicy } = require("./lib/generate-equipment-policy-pdf");
-const { generateMobilePolicy } = require("./lib/generate-mobile-policy-pdf");
-const { generateSubstancePolicy } = require("./lib/generate-substance-policy-pdf");
-const { generateServiceInvoice } = require("./lib/generate-service-invoice-pdf");
+const { renderPolicy } = require("./lib/policy-renderer");
 const { generateMasterAgreement } = require("./lib/generate-master-agreement-pdf");
 const { generateVehicleLease } = require("./lib/generate-vehicle-lease-pdf");
 
@@ -2928,14 +2924,18 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 		const signedPath = path.join(signedDir, signedFileName);
 		let signedPdfUrl = `/uploads/onboarding-signed/${signedFileName}`;
 
-		if (docKey === "contractor_agreement") {
-			// Dynamic PDF generation — full document recreated with driver data
-			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-			const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
-			const now = new Date();
-			const effectiveDate = now.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		// All 4 policy docs now share a single HTML → Puppeteer → PDF pipeline.
+		// W-9 stays on pdf-lib because it's an IRS AcroForm fill, not a generated layout.
+		// service_invoice is intentionally NOT in this branch — it was dead code here
+		// (never in ONBOARDING_DOCS). The real service invoice use is the weekly
+		// invoice flow at POST /api/invoices/generate.
+		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+		const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const resolvedFullName = user?.driver_name || application?.full_name || signatureText.trim();
 
-			// Save payment info if provided
+		if (docKey === "contractor_agreement") {
+			// Contractor agreement has banking info — persist it before rendering
 			if (paymentInfo) {
 				db.prepare(`INSERT OR REPLACE INTO driver_payment_info
 					(user_id, payment_method, check_name, bank_name, bank_address, bank_phone, bank_routing, bank_account, bank_acct_name, account_type)
@@ -2945,11 +2945,11 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 					paymentInfo.bankRouting || "", paymentInfo.bankAccount || "", paymentInfo.bankAcctName || "",
 					paymentInfo.accountType || "");
 			}
-
-			const pdfBuffer = await generateContractorAgreement({
-				fullName: user?.driver_name || application?.full_name || signatureText.trim(),
+			const pdfBuffer = await renderPolicy("contractor_agreement", {
+				fullName: resolvedFullName,
 				address: application?.address || "",
 				effectiveDate,
+				signatureText: signatureText.trim(),
 				signatureImage: signatureImage || null,
 				paymentMethod: paymentInfo?.paymentMethod || "",
 				checkName: paymentInfo?.checkName || "",
@@ -2962,55 +2962,18 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 				accountType: paymentInfo?.accountType || "",
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
-		} else if (docKey === "equipment_policy") {
-			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-			const pdfBuffer = await generateEquipmentPolicy({
-				fullName: user?.driver_name || signatureText.trim(),
+		} else if (docKey === "equipment_policy" || docKey === "mobile_policy" || docKey === "substance_policy") {
+			const pdfBuffer = await renderPolicy(docKey, {
+				fullName: resolvedFullName,
 				effectiveDate,
+				signatureText: signatureText.trim(),
 				signatureImage: signatureImage || null,
-			});
-			fs.writeFileSync(signedPath, pdfBuffer);
-		} else if (docKey === "mobile_policy") {
-			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-			const pdfBuffer = await generateMobilePolicy({
-				fullName: user?.driver_name || signatureText.trim(),
-				effectiveDate,
-				signatureImage: signatureImage || null,
-			});
-			fs.writeFileSync(signedPath, pdfBuffer);
-		} else if (docKey === "substance_policy") {
-			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-			const pdfBuffer = await generateSubstancePolicy({
-				fullName: user?.driver_name || signatureText.trim(),
-				effectiveDate,
-				signatureImage: signatureImage || null,
-			});
-			fs.writeFileSync(signedPath, pdfBuffer);
-		} else if (docKey === "service_invoice") {
-			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-			const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
-			const payInfo = db.prepare("SELECT * FROM driver_payment_info WHERE user_id = ?").get(userId);
-			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-			const pdfBuffer = await generateServiceInvoice({
-				fullName: user?.driver_name || signatureText.trim(),
-				address: application?.address || "",
-				phone: application?.phone || "",
-				effectiveDate,
-				signatureImage: signatureImage || null,
-				bankName: payInfo?.bank_name || "",
-				accountType: payInfo?.account_type || "",
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
 		} else {
 			// W-9: fill form fields (same as investor) + overlay signature and date
-			const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-			const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
-			const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 			const pdfBytes = await fillW9Form({
-				legalName: user?.driver_name || signatureText.trim(),
+				legalName: resolvedFullName,
 				entityType: "Sole Prop",
 				address: application?.address || "",
 				einSsn: application?.ssn || "",
@@ -3077,68 +3040,18 @@ app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async 
 	}
 });
 
-// GET /api/onboarding/documents/:docKey/pdf — serve onboarding PDF (dynamic for contractor agreement)
+// GET /api/onboarding/documents/:docKey/pdf — serve onboarding PDF (HTML template rendered via Puppeteer)
 app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) => {
 	try {
 		const { docKey } = req.params;
 		const docDef = ONBOARDING_DOCS.find(d => d.key === docKey);
 		if (!docDef) return res.status(404).json({ error: "Unknown document" });
 
-		// Dynamic PDF generation for docs we've recreated
 		const userId = req.session.user.id;
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 		const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
 		const driverName = user?.driver_name || application?.full_name || "";
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-
-		if (docKey === "contractor_agreement") {
-			const pdfBuffer = await generateContractorAgreement({
-				fullName: driverName, address: application?.address || "", effectiveDate,
-				signatureImage: null,
-				paymentMethod: "", checkName: "", bankName: "", bankAddress: "",
-				bankPhone: "", bankRouting: "", bankAccount: "", bankAcctName: "", accountType: "",
-			});
-			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Contractor Agreement Preview.pdf"');
-			return res.send(pdfBuffer);
-		}
-
-		if (docKey === "equipment_policy") {
-			const pdfBuffer = await generateEquipmentPolicy({
-				fullName: driverName, effectiveDate, signatureImage: null,
-			});
-			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Equipment Policy Preview.pdf"');
-			return res.send(pdfBuffer);
-		}
-
-		if (docKey === "mobile_policy") {
-			const pdfBuffer = await generateMobilePolicy({
-				fullName: driverName, effectiveDate, signatureImage: null,
-			});
-			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Mobile Policy Preview.pdf"');
-			return res.send(pdfBuffer);
-		}
-
-		if (docKey === "substance_policy") {
-			const pdfBuffer = await generateSubstancePolicy({
-				fullName: driverName, effectiveDate, signatureImage: null,
-			});
-			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Substance Policy Preview.pdf"');
-			return res.send(pdfBuffer);
-		}
-
-		if (docKey === "service_invoice") {
-			const pdfBuffer = await generateServiceInvoice({
-				fullName: driverName, address: application?.address || "", phone: application?.phone || "",
-				effectiveDate, signatureImage: null, bankName: "", accountType: "",
-			});
-			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Service Invoice Preview.pdf"');
-			return res.send(pdfBuffer);
-		}
 
 		if (docKey === "w9") {
 			// W-9: fill form fields (same as investor) — preview without signature
@@ -3155,23 +3068,30 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) =
 			return res.send(Buffer.from(pdfBytes));
 		}
 
-		// All other docs: serve static template
-		const fileMap = {
-			equipment_policy: "Contracted Provider Equipment Policy.pdf",
-			w9: "fw9.pdf",
-			mobile_policy: "LogisX Inc. Mobile Policy.pdf",
-			substance_policy: "LogisX SUBSTANCE POLICY AND PROCEDURE.pdf",
-			service_invoice: "Logistics Service Invoice.pdf",
+		// HTML → Puppeteer → PDF for all policy docs (preview = no signature)
+		const previewData = {
+			fullName: driverName,
+			address: application?.address || "",
+			effectiveDate,
+			signatureText: "",
+			signatureImage: null,
+			// Contractor agreement gets empty banking defaults for preview
+			paymentMethod: "",
+			checkName: "",
+			bankName: "",
+			bankAddress: "",
+			bankPhone: "",
+			bankRouting: "",
+			bankAccount: "",
+			bankAcctName: "",
+			accountType: "",
 		};
-		const fileName = fileMap[docKey];
-		const filePath = path.join(__dirname, "uploads", "onboarding-templates", fileName);
-		if (!fs.existsSync(filePath)) {
-			return res.status(404).json({ error: "PDF file not found. Please upload the template." });
-		}
+		const pdfBuffer = await renderPolicy(docKey, previewData);
 		res.setHeader("Content-Type", "application/pdf");
-		res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
-		fs.createReadStream(filePath).pipe(res);
+		res.setHeader("Content-Disposition", `inline; filename="${docKey}-preview.pdf"`);
+		return res.send(pdfBuffer);
 	} catch (err) {
+		console.error("Policy preview error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -3313,126 +3233,58 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		}
 		const invoiceNumber = generateInvoiceNumber(driverName, weekStart);
 
-		// Generate PDF
+		// Generate PDF via HTML → Puppeteer pipeline (see lib/policy-renderer.js)
 		const uploadsDir = path.join(__dirname, "uploads", "invoices");
 		if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 		const pdfFileName = `${invoiceNumber}.pdf`;
 		const pdfPath = path.join(uploadsDir, pdfFileName);
 
-		await new Promise((resolve, reject) => {
-			const doc = new PDFDocument({ size: "LETTER", margin: 50 });
-			const stream = fs.createWriteStream(pdfPath);
-			doc.pipe(stream);
+		// Bucket loads by day of week (Saturday–Friday to match the HTML template)
+		const DAY_NAMES = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+		const delivDateCol = headers.find(h => /drop.?off.*date|deliv.*date|deliv.*appoint/i.test(h)) || dateCol;
+		const daysMap = {};
+		for (const d of DAY_NAMES) daysMap[d] = { loadBol: "", total: 0, completed: false };
+		for (const load of uniqueLoads) {
+			const rawDate = (delivDateCol ? load[delivDateCol] : "") || "";
+			const parsed = new Date(String(rawDate).replace(/^date:\s*/i, "").trim());
+			if (isNaN(parsed.getTime())) continue;
+			// JS: 0=Sunday..6=Saturday; template order: Saturday..Friday
+			const jsDay = parsed.getDay();
+			const templateDay = DAY_NAMES[(jsDay + 1) % 7];
+			const existing = daysMap[templateDay];
+			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
+			existing.loadBol = existing.loadBol ? `${existing.loadBol}, ${lid}` : lid;
+			existing.total += ratePerLoad;
+			existing.completed = true;
+		}
 
-			// Header
-			doc.rect(0, 0, 612, 80).fill("#0f3460");
-			doc.font("Helvetica-Bold").fontSize(24).fillColor("#ffffff").text("LogisX", 50, 20);
-			doc.fontSize(12).text("Weekly Driver Invoice", 50, 48);
-			doc.fontSize(10).font("Helvetica").text(invoiceNumber, 400, 30, { align: "right", width: 162 });
-			doc.fillColor("#000000");
-			doc.moveDown(2);
-			doc.y = 100;
+		// Lookup driver payment info for bank on file + account type
+		const driverUser = db.prepare("SELECT id FROM users WHERE LOWER(driver_name) = LOWER(?)").get(driverName);
+		const payInfo = driverUser
+			? db.prepare("SELECT * FROM driver_payment_info WHERE user_id = ?").get(driverUser.id)
+			: null;
 
-			// Invoice details
-			doc.font("Helvetica-Bold").fontSize(11).text("Driver: ", 50, doc.y, { continued: true });
-			doc.font("Helvetica").text(driverName);
-			doc.font("Helvetica-Bold").text("Week: ", 50, doc.y, { continued: true });
-			doc.font("Helvetica").text(`${weekStart}  to  ${computedWeekEnd}`);
-			doc.font("Helvetica-Bold").text("Generated: ", 50, doc.y, { continued: true });
-			doc.font("Helvetica").text(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
-			doc.moveDown(1);
-
-			// Loads table
-			doc.font("Helvetica-Bold").fontSize(13).text("Completed Loads", 50, doc.y);
-			doc.moveDown(0.5);
-			const tableTop = doc.y;
-			const col = { num: 50, loadId: 80, pickup: 200, delivery: 340, rate: 480 };
-			doc.fontSize(9).font("Helvetica-Bold");
-			doc.rect(50, tableTop - 2, 512, 16).fill("#e8edf3");
-			doc.fillColor("#000000");
-			doc.text("#", col.num, tableTop, { width: 25 });
-			doc.text("Load ID", col.loadId, tableTop, { width: 110 });
-			doc.text("Pickup Date", col.pickup, tableTop, { width: 130 });
-			doc.text("Delivery Date", col.delivery, tableTop, { width: 130 });
-			doc.text("Rate", col.rate, tableTop, { width: 80, align: "right" });
-			doc.font("Helvetica").fontSize(9);
-			let rowY = tableTop + 18;
-			const pickupDateCol = headers.find(h => /pickup.*date|pickup.*appoint/i.test(h));
-			const delivDateCol = headers.find(h => /drop.?off.*date|deliv.*date|deliv.*appoint/i.test(h)) || dateCol;
-			uniqueLoads.forEach((load, i) => {
-				if (rowY > 700) { doc.addPage(); rowY = 50; }
-				if (i % 2 === 1) doc.rect(50, rowY - 2, 512, 15).fill("#f7f8fa").fillColor("#000000");
-				doc.fillColor("#000000");
-				doc.text(String(i + 1), col.num, rowY, { width: 25 });
-				doc.text(loadIdCol ? load[loadIdCol] || "-" : "-", col.loadId, rowY, { width: 110 });
-				doc.text(pickupDateCol ? load[pickupDateCol] || "-" : "-", col.pickup, rowY, { width: 130 });
-				doc.text(delivDateCol ? load[delivDateCol] || "-" : "-", col.delivery, rowY, { width: 130 });
-				doc.text(`$${ratePerLoad.toFixed(2)}`, col.rate, rowY, { width: 80, align: "right" });
-				rowY += 16;
-			});
-			// Subtotal
-			doc.moveTo(50, rowY).lineTo(562, rowY).strokeColor("#cccccc").stroke();
-			rowY += 6;
-			doc.font("Helvetica-Bold").fontSize(10);
-			doc.text(`Total: ${loadsCount} load${loadsCount !== 1 ? "s" : ""} x $${ratePerLoad.toFixed(2)}`, 50, rowY, { width: 430 });
-			doc.text(`$${totalEarnings.toFixed(2)}`, col.rate, rowY, { width: 80, align: "right" });
-			rowY += 24;
-
-			// Expenses table
-			if (expenses.length > 0) {
-				if (rowY > 650) { doc.addPage(); rowY = 50; }
-				doc.font("Helvetica-Bold").fontSize(13).fillColor("#000000");
-				doc.text("Expenses This Week", 50, rowY);
-				rowY += 20;
-				const eCol = { date: 50, type: 130, loadId: 230, amount: 350, desc: 420 };
-				doc.fontSize(9).font("Helvetica-Bold");
-				doc.rect(50, rowY - 2, 512, 16).fill("#e8edf3").fillColor("#000000");
-				doc.text("Date", eCol.date, rowY, { width: 70 });
-				doc.text("Type", eCol.type, rowY, { width: 90 });
-				doc.text("Load ID", eCol.loadId, rowY, { width: 110 });
-				doc.text("Amount", eCol.amount, rowY, { width: 60, align: "right" });
-				doc.text("Description", eCol.desc, rowY, { width: 142 });
-				doc.font("Helvetica").fontSize(9);
-				rowY += 18;
-				expenses.forEach((exp, i) => {
-					if (rowY > 700) { doc.addPage(); rowY = 50; }
-					if (i % 2 === 1) doc.rect(50, rowY - 2, 512, 15).fill("#f7f8fa").fillColor("#000000");
-					doc.fillColor("#000000");
-					doc.text(exp.date || "-", eCol.date, rowY, { width: 70 });
-					doc.text(exp.type || "-", eCol.type, rowY, { width: 90 });
-					doc.text(exp.load_id || "-", eCol.loadId, rowY, { width: 110 });
-					doc.text(`$${(exp.amount || 0).toFixed(2)}`, eCol.amount, rowY, { width: 60, align: "right" });
-					doc.text((exp.description || "").slice(0, 30), eCol.desc, rowY, { width: 142 });
-					rowY += 16;
-				});
-				doc.moveTo(50, rowY).lineTo(562, rowY).strokeColor("#cccccc").stroke();
-				rowY += 6;
-				doc.font("Helvetica-Bold").fontSize(10);
-				doc.text("Total Expenses:", 50, rowY, { width: 300 });
-				doc.text(`$${expensesTotal.toFixed(2)}`, eCol.amount, rowY, { width: 60, align: "right" });
-				doc.fontSize(8).font("Helvetica").fillColor("#888888");
-				rowY += 16;
-				doc.text("Expenses listed for reference. Reimbursement handled separately.", 50, rowY);
-				rowY += 20;
-			}
-
-			// Grand total
-			if (rowY > 700) { doc.addPage(); rowY = 50; }
-			doc.fillColor("#000000");
-			doc.rect(50, rowY, 512, 30).fill("#0f3460");
-			doc.font("Helvetica-Bold").fontSize(14).fillColor("#ffffff");
-			doc.text("Total Earnings:", 60, rowY + 8, { width: 300 });
-			doc.text(`$${totalEarnings.toFixed(2)}`, 400, rowY + 8, { width: 152, align: "right" });
-
-			// Footer
-			doc.fillColor("#888888").font("Helvetica").fontSize(8);
-			doc.text("Generated by LogisX Dispatch System", 50, 740, { align: "center", width: 512 });
-			doc.text("Invoice must be submitted by Friday 6:00 PM CST", 50, 750, { align: "center", width: 512 });
-
-			doc.end();
-			stream.on("finish", resolve);
-			stream.on("error", reject);
+		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+		const pdfBuffer = await renderPolicy("service_invoice", {
+			driverName,
+			businessName: driverName,
+			providerAddress: "",
+			providerPhone: "",
+			invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
+			submissionDate: nowStr,
+			signatureDate: nowStr,
+			totalDue: totalEarnings,
+			bankOnFile: payInfo?.bank_name || "",
+			accountType: (payInfo?.account_type || "").toLowerCase(),
+			days: daysMap,
+			// Default compliance checkboxes to checked — the driver is certifying they've
+			// uploaded these documents via the app. Unchecking is a manual override.
+			hasEldData: true,
+			hasBol: true,
+			hasDvir: true,
+			hasFuelReceipts: true,
 		});
+		fs.writeFileSync(pdfPath, pdfBuffer);
 
 		// Insert into DB
 		const result = db.prepare(
@@ -8963,3 +8815,14 @@ server.listen(PORT, async () => {
 		process.exit(1);
 	}
 });
+
+// Clean up the shared Puppeteer browser process on shutdown so pm2 restarts
+// don't leak Chromium instances.
+const { shutdownBrowser } = require("./lib/pdf-browser");
+async function gracefulShutdown(signal) {
+	console.log(`${signal} received — shutting down Puppeteer browser`);
+	try { await shutdownBrowser(); } catch { /* ignore */ }
+	process.exit(0);
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

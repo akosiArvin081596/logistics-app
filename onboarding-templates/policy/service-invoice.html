@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LogisX Inc. — Weekly Service Invoice</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <style>
+    @page { size: letter; margin: 1in; }
+
+    :root {
+      --ink: #000;
+      --rule: #d0d0d0;
+      --table-border: #c4c4c4;
+      --paper: #ffffff;
+      --bg: #f5f5f5;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+    }
+
+    body {
+      font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .document {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 76px 80px 96px;
+      background: var(--paper);
+      box-shadow: 0 2px 14px rgba(0, 0, 0, 0.08);
+    }
+
+    h1 {
+      font-size: 42px;
+      font-weight: 700;
+      text-align: left;
+      margin: 0 0 26px;
+      letter-spacing: 0.2px;
+      line-height: 1.1;
+    }
+
+    h2 {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 28px 0 12px;
+      line-height: 1.3;
+    }
+
+    h3 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 18px 0 10px;
+    }
+
+    p { margin: 0 0 14px; }
+
+    .italic-note {
+      font-style: italic;
+      margin: 0 0 12px;
+    }
+
+    strong { font-weight: 700; }
+
+    ol, ul {
+      padding-left: 26px;
+      margin: 0 0 16px;
+    }
+    li { margin-bottom: 10px; }
+
+    hr {
+      border: 0;
+      border-top: 1px solid var(--rule);
+      margin: 26px 0 20px;
+    }
+
+    /* From / Bill To blocks */
+    .block-label {
+      font-weight: 700;
+      margin: 0 0 8px;
+    }
+
+    .field-row {
+      margin-bottom: 12px;
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .field-row .label {
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .field-group {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: nowrap;
+    }
+    .field-group.grow { flex: 1 1 auto; min-width: 0; }
+    .field-group.grow .blank { flex: 1 1 auto; width: auto; min-width: 140px; }
+
+    /* Uniform FROM block — all four fields same visual width */
+    .from-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    .from-cell {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+    .from-cell .label {
+      font-weight: 700;
+      white-space: nowrap;
+      min-width: 130px;
+    }
+    .from-cell .blank {
+      flex: 1 1 auto;
+      width: auto;
+      max-width: 340px;
+    }
+
+    /* Fillable blanks */
+    .blank {
+      display: inline-block;
+      border: 0;
+      border-bottom: 1px solid var(--ink);
+      background: transparent;
+      font: inherit;
+      color: inherit;
+      outline: none;
+      padding: 0 4px;
+      vertical-align: baseline;
+      border-radius: 0;
+    }
+    .blank:focus {
+      border-bottom-width: 2px;
+      padding-bottom: 0;
+    }
+    .blank-xs  { width:  90px; }
+    .blank-sm  { width: 180px; }
+    .blank-md  { width: 240px; }
+    .blank-lg  { width: 320px; }
+
+    /* Bill To address */
+    .bill-to .addr-line {
+      margin: 2px 0;
+    }
+
+    /* Invoice meta table (Invoice #, Submission Date, Time) */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 18px;
+      font-size: 14px;
+    }
+    table th, table td {
+      border: 1px solid var(--table-border);
+      padding: 14px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    table th {
+      font-weight: 700;
+      background: transparent;
+    }
+    table td .blank {
+      border-bottom-color: var(--ink);
+    }
+
+    .meta-table td {
+      height: 70px;
+    }
+    .meta-table .prefix {
+      display: inline-block;
+    }
+
+    /* Service summary table */
+    .service-table th, .service-table td {
+      padding: 18px 12px;
+    }
+    .service-table .day-cell {
+      font-weight: 400;
+    }
+    .service-table .rate-cell {
+      white-space: nowrap;
+    }
+    .service-table .total-cell .blank {
+      width: 100%;
+      min-width: 70px;
+    }
+    .service-table .total-cell .dollar {
+      display: inline-block;
+      margin-right: 2px;
+    }
+    .service-table .load-cell .blank {
+      width: 100%;
+      min-width: 90px;
+    }
+    .service-table .status-cell {
+      white-space: nowrap;
+    }
+    .service-table .status-cell label {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-right: 4px;
+    }
+    .service-table .total-row td {
+      font-weight: 700;
+    }
+    .service-table input[type="checkbox"] {
+      width: 13px;
+      height: 13px;
+      accent-color: #000;
+      margin: 0;
+    }
+
+    /* Attachment checklist */
+    .checklist {
+      list-style: none;
+      padding-left: 0;
+      margin: 0 0 16px;
+      counter-reset: item;
+    }
+    .checklist li {
+      counter-increment: item;
+      margin-bottom: 14px;
+      padding-left: 44px;
+      position: relative;
+    }
+    .checklist li::before {
+      content: counter(item) ".";
+      position: absolute;
+      left: 0;
+      top: 0;
+      font-weight: 400;
+    }
+    .checklist input[type="checkbox"] {
+      position: absolute;
+      left: 22px;
+      top: 5px;
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: #000;
+    }
+
+    /* Payment instructions bullets */
+    .payment-list {
+      list-style: disc;
+      padding-left: 26px;
+    }
+    .payment-list li {
+      margin-bottom: 10px;
+    }
+    .payment-list .acct-choice {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-right: 10px;
+    }
+    .payment-list input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      accent-color: #000;
+      margin: 0;
+    }
+
+    .page-break { page-break-before: always; }
+
+    @media print {
+      html, body { background: #fff; }
+      .document {
+        box-shadow: none;
+        margin: 0;
+        padding: 0;
+        max-width: none;
+      }
+      .blank { border-bottom: 1px solid #000; }
+    }
+  </style>
+</head>
+<body>
+  <main class="document">
+    <h1>WEEKLY SERVICE INVOICE</h1>
+
+    <p class="block-label">FROM (Contracted Service Provider):</p>
+    <div class="from-grid">
+      <label class="from-cell">
+        <span class="label">Name:</span>
+        <input type="text" class="blank" aria-label="Provider name">
+      </label>
+      <label class="from-cell">
+        <span class="label">Business Name:</span>
+        <input type="text" class="blank" aria-label="Business name">
+      </label>
+      <label class="from-cell">
+        <span class="label">Address:</span>
+        <input type="text" class="blank" aria-label="Provider address">
+      </label>
+      <label class="from-cell">
+        <span class="label">Phone:</span>
+        <input type="text" class="blank" aria-label="Provider phone">
+      </label>
+    </div>
+
+    <p class="block-label" style="margin-top: 22px;">BILL TO:</p>
+    <div class="bill-to">
+      <div class="addr-line"><strong>LogisX Inc.</strong></div>
+      <div class="addr-line">4576 Research Forest Dr, Suite 200</div>
+      <div class="addr-line">The Woodlands, TX 77381</div>
+    </div>
+
+    <p style="margin-top: 18px;"><strong>USDOT# 4302683</strong></p>
+
+    <hr>
+
+    <table class="meta-table">
+      <thead>
+        <tr>
+          <th>Invoice Number</th>
+          <th>Submission Date</th>
+          <th>Submission Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <span class="prefix">INV-2026-</span><input type="text" class="blank" style="width: 70px;" aria-label="Invoice number suffix">
+          </td>
+          <td>
+            <strong>Friday,</strong> <input type="text" class="blank" style="width: 110px;" aria-label="Submission date">
+          </td>
+          <td>
+            <strong>MUST BE BEFORE 6:00 PM</strong>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>LOGISTICS SERVICE SUMMARY</h2>
+    <p class="italic-note">Billing Period: [Saturday Date] to [Current Friday Date]</p>
+
+    <table class="service-table">
+      <thead>
+        <tr>
+          <th style="width: 16%;">Date of Service</th>
+          <th style="width: 20%;">Load / BOL #</th>
+          <th style="width: 28%;">14-Hour Duty Cycle Status</th>
+          <th style="width: 15%;">Daily Rate</th>
+          <th style="width: 21%;">Total</th>
+        </tr>
+      </thead>
+      <tbody id="invoice-rows">
+        <!-- 7 day rows generated below -->
+      </tbody>
+    </table>
+
+    <h2>MANDATORY ATTACHMENTS FOR PAYMENT VERIFICATION</h2>
+    <p class="italic-note">Per Section 5.02 of the Service Agreement, this invoice will NOT be processed if any items are missing:</p>
+    <ol class="checklist">
+      <li><input type="checkbox" aria-label="Verified ELD Data"><strong>Verified ELD Data:</strong> Full logs for every 14-hour cycle claimed above.</li>
+      <li><input type="checkbox" aria-label="Signed Bills of Lading"><strong>Signed Bills of Lading (BOL):</strong> Proof of delivery for every load listed.</li>
+      <li><input type="checkbox" aria-label="Daily Vehicle Inspection Reports"><strong>Daily Vehicle Inspection Reports (DVIR):</strong> Post-trip inspections for the week.</li>
+      <li><input type="checkbox" aria-label="Fuel Receipts"><strong>Fuel Receipts:</strong> All original receipts for the billing period.</li>
+    </ol>
+
+    <hr>
+
+    <h2>PAYMENT INSTRUCTIONS</h2>
+    <p class="italic-note">Payment will be remitted within <strong>7 calendar days</strong> of Monday verification via the method on file.</p>
+    <ul class="payment-list">
+      <li><strong>Bank on File:</strong> <input type="text" class="blank blank-md" aria-label="Bank on file"></li>
+      <li>
+        <strong>Account Type:</strong>
+        <label class="acct-choice"><input type="checkbox" aria-label="Checking"> Checking</label>
+        /
+        <label class="acct-choice"><input type="checkbox" aria-label="Savings"> Savings</label>
+      </li>
+    </ul>
+
+    <p><strong>PROVIDER CERTIFICATION:</strong> I certify that the services listed above were performed personally or by my authorized agents in full compliance with <strong>USDOT HOS</strong> regulations and <strong>LogisX Inc.</strong> safety policies. I acknowledge that any equipment damage or fines incurred during this period may be offset against this settlement.</p>
+
+    <div class="field-row" style="margin-top: 18px;">
+      <span class="label">Signature:</span>
+      <input type="text" class="blank blank-md" aria-label="Provider signature">
+      <span class="label">Date:</span>
+      <input type="text" class="blank blank-xs" aria-label="Signature date">
+    </div>
+  </main>
+
+  <script>
+    // Generate the 7 day rows and wire up auto-calc for Total Due
+    (function () {
+      const days = ['Saturday','Sunday','Monday','Tuesday','Wednesday','Thursday','Friday'];
+      const tbody = document.getElementById('invoice-rows');
+      const DAILY_RATE = 250;
+
+      days.forEach((day, i) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="day-cell">${day}</td>
+          <td class="load-cell"><input type="text" class="blank" aria-label="${day} Load/BOL number"></td>
+          <td class="status-cell">
+            <label><input type="checkbox" class="completed" data-row="${i}"> Completed</label>
+            /
+            <label><input type="checkbox" class="na" data-row="${i}"> N/A</label>
+          </td>
+          <td class="rate-cell">$250.00</td>
+          <td class="total-cell"><span class="dollar">$</span><input type="text" class="blank row-total" data-row="${i}" aria-label="${day} total"></td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      // TOTAL DUE row
+      const totalRow = document.createElement('tr');
+      totalRow.className = 'total-row';
+      totalRow.innerHTML = `
+        <td><strong>TOTAL DUE</strong></td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="total-cell"><span class="dollar">$</span><input type="text" class="blank" id="grand-total" aria-label="Total due"></td>
+      `;
+      tbody.appendChild(totalRow);
+
+      // Auto-calc: when Completed ticked, fill row total with 250; untick clears it.
+      // Completed and N/A are mutually exclusive.
+      const rows = Array.from(tbody.querySelectorAll('tr:not(.total-row)'));
+      const grandTotalInput = document.getElementById('grand-total');
+
+      function recalcGrand() {
+        let total = 0;
+        rows.forEach(row => {
+          const val = parseFloat(row.querySelector('.row-total').value) || 0;
+          total += val;
+        });
+        grandTotalInput.value = total ? total.toFixed(2) : '';
+      }
+
+      rows.forEach(row => {
+        const completed = row.querySelector('.completed');
+        const na        = row.querySelector('.na');
+        const rowTotal  = row.querySelector('.row-total');
+
+        completed.addEventListener('change', () => {
+          if (completed.checked) {
+            na.checked = false;
+            rowTotal.value = DAILY_RATE.toFixed(2);
+          } else {
+            rowTotal.value = '';
+          }
+          recalcGrand();
+        });
+        na.addEventListener('change', () => {
+          if (na.checked) {
+            completed.checked = false;
+            rowTotal.value = '';
+          }
+          recalcGrand();
+        });
+        rowTotal.addEventListener('input', recalcGrand);
+      });
+    })();
+  </script>
+</body>
+</html>
