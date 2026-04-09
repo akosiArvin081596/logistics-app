@@ -3327,18 +3327,26 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 			existing.completed = true;
 		}
 
-		// Lookup driver payment info for bank on file + account type
+		// Lookup driver's contact info + payment info for the invoice header
 		const driverUser = db.prepare("SELECT id FROM users WHERE LOWER(driver_name) = LOWER(?)").get(driverName);
 		const payInfo = driverUser
 			? db.prepare("SELECT * FROM driver_payment_info WHERE user_id = ?").get(driverUser.id)
 			: null;
+		// Pull provider address + phone from drivers_directory (populated during onboarding)
+		const driverRow = db.prepare(
+			"SELECT address, city, state, zip, phone, cell FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)"
+		).get(driverName);
+		const providerAddress = driverRow
+			? [driverRow.address, driverRow.city, driverRow.state, driverRow.zip].filter(Boolean).join(", ")
+			: "";
+		const providerPhone = driverRow ? (driverRow.phone || driverRow.cell || "") : "";
 
 		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 		const pdfBuffer = await renderPolicy("service_invoice", {
 			driverName,
 			businessName: driverName,
-			providerAddress: "",
-			providerPhone: "",
+			providerAddress,
+			providerPhone,
 			invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
 			submissionDate: nowStr,
 			signatureDate: nowStr,
