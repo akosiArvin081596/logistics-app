@@ -1193,6 +1193,39 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 	}
 });
 
+// GET /api/drivers-directory/:id/documents — signed onboarding PDFs + drug test for a driver
+app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		const driver = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
+		if (!driver) return res.status(404).json({ error: "Driver not found" });
+
+		// Find the matching user by driver_name (case-insensitive)
+		const user = db.prepare("SELECT id, driver_name FROM users WHERE LOWER(driver_name) = LOWER(?)").get((driver.driver_name || "").trim());
+		if (!user) {
+			return res.json({ documents: [], drugTest: null, linked: false });
+		}
+
+		const onboarding = db.prepare("SELECT drug_test_result, drug_test_file_url, drug_test_uploaded_at, status FROM driver_onboarding WHERE user_id = ?").get(user.id);
+		const documents = db.prepare(
+			"SELECT doc_key, doc_name, signed, signature_text, signed_at, signed_pdf_url FROM onboarding_documents WHERE user_id = ? ORDER BY id"
+		).all(user.id);
+
+		res.json({
+			documents,
+			drugTest: onboarding && onboarding.drug_test_result ? {
+				result: onboarding.drug_test_result,
+				file_url: onboarding.drug_test_file_url,
+				uploaded_at: onboarding.drug_test_uploaded_at,
+			} : null,
+			onboardingStatus: onboarding?.status || null,
+			linked: true,
+		});
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // DELETE /api/drivers-directory/:id — delete driver
 app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) => {
 	try {

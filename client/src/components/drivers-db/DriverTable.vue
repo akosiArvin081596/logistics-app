@@ -57,8 +57,8 @@
 
     <!-- View Detail -->
     <Teleport to="body">
-      <div v-if="viewDrv" class="confirm-overlay" @click.self="viewDrv = null">
-        <div class="confirm-box" style="max-width:600px;max-height:85vh;overflow-y:auto;">
+      <div v-if="viewDrv" class="confirm-overlay" @click.self="closeView">
+        <div class="confirm-box" style="max-width:640px;max-height:85vh;overflow-y:auto;">
           <h3 style="margin-bottom:1rem;">{{ viewDrv[h.driver] }}</h3>
           <div class="view-grid">
             <div v-for="col in viewHeaders" :key="col" class="view-row">
@@ -66,8 +66,54 @@
               <span>{{ viewDrv[col] || '\u2014' }}</span>
             </div>
           </div>
+
+          <!-- Signed Onboarding Documents -->
+          <div class="docs-section">
+            <div class="docs-title">Signed Onboarding Documents</div>
+            <div v-if="docsLoading" class="docs-empty">Loading...</div>
+            <template v-else-if="docsData.linked === false">
+              <div class="docs-empty">No onboarding record linked to this driver.</div>
+            </template>
+            <template v-else-if="docsData.documents && docsData.documents.length">
+              <div v-for="doc in docsData.documents" :key="doc.doc_key" class="doc-row">
+                <div class="doc-info">
+                  <div class="doc-name">{{ doc.doc_name }}</div>
+                  <div v-if="doc.signed" class="doc-meta">
+                    Signed by <b>{{ doc.signature_text }}</b>
+                    <span v-if="doc.signed_at"> · {{ new Date(doc.signed_at).toLocaleDateString() }}</span>
+                  </div>
+                  <div v-else class="doc-meta doc-pending">Not signed</div>
+                </div>
+                <a v-if="doc.signed && doc.signed_pdf_url" :href="doc.signed_pdf_url" target="_blank" class="doc-link">View PDF</a>
+                <span v-else class="doc-pending-badge">Pending</span>
+              </div>
+            </template>
+            <div v-else class="docs-empty">No signed documents.</div>
+          </div>
+
+          <!-- Drug Test -->
+          <div class="docs-section">
+            <div class="docs-title">Pre-Employment Drug Test</div>
+            <div v-if="docsLoading" class="docs-empty">Loading...</div>
+            <template v-else-if="docsData.drugTest">
+              <div class="doc-row">
+                <div class="doc-info">
+                  <div class="doc-name">Drug Test Result</div>
+                  <div class="doc-meta">
+                    <span :class="docsData.drugTest.result === 'pass' ? 'dt-pass' : 'dt-fail'">
+                      {{ docsData.drugTest.result.toUpperCase() }}
+                    </span>
+                    <span v-if="docsData.drugTest.uploaded_at"> · {{ new Date(docsData.drugTest.uploaded_at).toLocaleDateString() }}</span>
+                  </div>
+                </div>
+                <a v-if="docsData.drugTest.file_url" :href="docsData.drugTest.file_url" target="_blank" class="doc-link">View File</a>
+              </div>
+            </template>
+            <div v-else-if="docsData.linked !== false" class="docs-empty">No drug test uploaded yet.</div>
+          </div>
+
           <div style="margin-top:1rem;text-align:right;">
-            <button class="btn btn-secondary" @click="viewDrv = null">Close</button>
+            <button class="btn btn-secondary" @click="closeView">Close</button>
           </div>
         </div>
       </div>
@@ -195,10 +241,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
+import { useApi } from '../../composables/useApi'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import StarRating from '../shared/StarRating.vue'
+
+const api = useApi()
 
 const props = defineProps({
   drivers: { type: Array, default: () => [] },
@@ -220,10 +269,32 @@ function getAssignedTruck(driver) {
 const emit = defineEmits(['delete', 'update'])
 
 const viewDrv = ref(null)
+const docsLoading = ref(false)
+const docsData = reactive({ documents: [], drugTest: null, linked: true })
 const showConfirm = ref(false)
 const pendingDrv = ref(null)
 const showEdit = ref(false)
 const editRowIndex = ref(null)
+
+// Fetch signed docs + drug test when the detail modal opens
+watch(viewDrv, async (d) => {
+  docsData.documents = []
+  docsData.drugTest = null
+  docsData.linked = true
+  if (!d || !d._rowIndex) return
+  docsLoading.value = true
+  try {
+    const res = await api.get(`/api/drivers-directory/${d._rowIndex}/documents`)
+    docsData.documents = res.documents || []
+    docsData.drugTest = res.drugTest || null
+    docsData.linked = res.linked !== false
+  } catch { /* ignore */ }
+  finally { docsLoading.value = false }
+})
+
+function closeView() {
+  viewDrv.value = null
+}
 
 const h = computed(() => {
   const hd = props.headers
@@ -428,4 +499,29 @@ function handleConfirmDelete() {
 .view-grid { display: flex; flex-direction: column; gap: 0.4rem; }
 .view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
 .view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+
+.docs-section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #e8edf2; }
+.docs-title { font-size: 0.72rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.6rem; }
+.docs-empty { font-size: 0.78rem; color: #9ca3af; padding: 0.5rem 0; }
+.doc-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.55rem 0.75rem; background: #fafbfd; border: 1px solid #f1f5f9;
+  border-radius: 8px; margin-bottom: 0.35rem;
+}
+.doc-info { flex: 1; min-width: 0; }
+.doc-name { font-size: 0.82rem; font-weight: 600; color: #0f172a; }
+.doc-meta { font-size: 0.72rem; color: #64748b; margin-top: 0.15rem; }
+.doc-meta.doc-pending { color: #d97706; }
+.doc-link {
+  font-size: 0.72rem; font-weight: 600; color: #0ea5e9; text-decoration: none;
+  padding: 0.35rem 0.7rem; border: 1px solid #bae6fd; border-radius: 6px;
+  background: #f0f9ff; flex-shrink: 0;
+}
+.doc-link:hover { background: #e0f2fe; }
+.doc-pending-badge {
+  font-size: 0.68rem; font-weight: 700; color: #92400e; background: #fef3c7;
+  padding: 0.25rem 0.6rem; border-radius: 999px; text-transform: uppercase;
+}
+.dt-pass { color: #16a34a; font-weight: 700; }
+.dt-fail { color: #dc2626; font-weight: 700; }
 </style>
