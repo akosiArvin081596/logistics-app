@@ -80,6 +80,7 @@ const navConfig = {
     { to: '/tracking', icon: '&#128205;', label: 'Tracking' },
     { to: '/notifications', icon: '&#128276;', label: 'Notifications' },
     { to: '/expenses', icon: '&#128176;', label: 'Expenses' },
+    { to: '/invoices', icon: '&#128178;', label: 'Invoices' },
     { to: '/messages', icon: '&#128172;', label: 'Messages' },
     { divider: true, label: 'Administration' },
     { to: '/users', icon: '&#9881;', label: 'User Management' },

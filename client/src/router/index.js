@@ -47,6 +47,12 @@ const routes = [
     meta: { roles: ['Super Admin', 'Dispatcher'] },
   },
   {
+    path: '/invoices',
+    name: 'invoices',
+    component: () => import('../views/InvoicesView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/messages',
     name: 'messages',
     component: () => import('../views/MessagesView.vue'),
