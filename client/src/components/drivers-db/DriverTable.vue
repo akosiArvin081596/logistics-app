@@ -112,6 +112,9 @@
             <div v-else-if="docsData.linked !== false" class="docs-empty">No drug test uploaded yet.</div>
           </div>
 
+          <!-- Shared Documents — Super Admin uploads files the driver sees in their Kit tab -->
+          <LegalDocumentPortal v-if="viewDrv._rowIndex" :driver-id="viewDrv._rowIndex" />
+
           <div style="margin-top:1rem;text-align:right;">
             <button class="btn btn-secondary" @click="closeView">Close</button>
           </div>
@@ -246,6 +249,7 @@ import { useApi } from '../../composables/useApi'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import StarRating from '../shared/StarRating.vue'
+import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 
 const api = useApi()
 

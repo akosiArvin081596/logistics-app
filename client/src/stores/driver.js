@@ -17,6 +17,7 @@ export const useDriverStore = defineStore('driver', {
     acceptedLoadIds: new Set(),
     onboarding: null,
     invoices: [],
+    sharedDocuments: [],
     currentTab: 'loads',
     selectedStatusLoad: null,
     isLoading: true,
@@ -208,6 +209,7 @@ export const useDriverStore = defineStore('driver', {
         this.headers = data.headers || { jobTracking: [], carrierDB: [] }
         this.onboarding = data.onboarding || null
         this.invoices = data.invoices || []
+        this.sharedDocuments = data.sharedDocuments || []
 
         // Keep selected status load in sync
         if (this.selectedStatusLoad) {

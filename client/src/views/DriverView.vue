@@ -272,6 +272,7 @@
           v-else
           :driver-info="driverStore.driverInfo"
           :headers="driverStore.headers.carrierDB"
+          :shared-documents="driverStore.sharedDocuments"
         />
       </section>
 

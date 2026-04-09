@@ -593,6 +593,11 @@ db.exec(`
 // Migration: add investor_id to legal_documents for profile-level docs
 try { db.exec("ALTER TABLE legal_documents ADD COLUMN investor_id INTEGER DEFAULT 0"); } catch {}
 
+// Migration: add driver_id to legal_documents for Super-Admin-shared driver documents
+// (insurance card, driver's license, photos, etc. that the driver sees read-only in their Kit tab)
+try { db.exec("ALTER TABLE legal_documents ADD COLUMN driver_id INTEGER DEFAULT 0"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_legal_docs_driver ON legal_documents(driver_id)"); } catch {}
+
 // Migration: messages attachment columns
 try { db.prepare("SELECT attachment_url FROM messages LIMIT 1").get(); }
 catch {
@@ -1227,11 +1232,23 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 	}
 });
 
-// DELETE /api/drivers-directory/:id — delete driver
+// DELETE /api/drivers-directory/:id — delete driver (cascades shared documents on disk + in DB)
 app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) => {
 	try {
-		db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(parseInt(req.params.id));
-		res.json({ success: true });
+		const id = parseInt(req.params.id);
+		if (!id || id <= 0) return res.status(400).json({ error: "Invalid driver id" });
+		// Cascade: remove any shared documents uploaded to this driver (files + rows)
+		const orphanedDocs = db.prepare("SELECT file_url FROM legal_documents WHERE driver_id = ?").all(id);
+		for (const doc of orphanedDocs) {
+			if (!doc.file_url) continue;
+			try {
+				const filePath = path.join(__dirname, doc.file_url);
+				if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+			} catch (err) { console.error("Failed to unlink driver doc on cascade:", err.message); }
+		}
+		db.prepare("DELETE FROM legal_documents WHERE driver_id = ?").run(id);
+		db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
+		res.json({ success: true, cascadedDocs: orphanedDocs.length });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -5758,6 +5775,18 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			 FROM invoices WHERE LOWER(driver) = ? ORDER BY created_at DESC LIMIT 20`
 		).all(nameLower);
 
+		// Shared documents — files Super Admin uploaded to this driver via /drivers detail modal.
+		// Lookup keyed on drivers_directory.id (resolved by driver_name). Guard against id=0 sentinel
+		// collision so drivers without a directory row return [] instead of every truck/investor doc.
+		let sharedDocuments = [];
+		const directoryRow = db.prepare("SELECT id FROM drivers_directory WHERE LOWER(driver_name) = ?").get(nameLower);
+		if (directoryRow && directoryRow.id > 0) {
+			sharedDocuments = db.prepare(
+				`SELECT id, doc_type, file_name, notes, uploaded_by, uploaded_at
+				 FROM legal_documents WHERE driver_id = ? ORDER BY uploaded_at DESC`
+			).all(directoryRow.id);
+		}
+
 		res.json({
 			loads: filteredLoads,
 			driverInfo: driverInfo || null,
@@ -5776,10 +5805,45 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 				totalDocs: ONBOARDING_DOCS.length,
 			} : null,
 			invoices: driverInvoices,
+			sharedDocuments,
 		});
 	} catch (error) {
 		console.error("Error fetching driver data:", error.message);
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/driver/shared-documents/:id/download — Proxy download for driver shared docs
+// Ownership check: the requesting user must be the driver the document was uploaded to (or Super Admin).
+// Matches the invoice/investor signed-PDF proxy pattern. This is the only path drivers use to access
+// their files — the raw /uploads/legal/* route is protected by requireAuth but not by ownership,
+// so we deliberately don't expose the raw file_url to the driver's frontend.
+app.get("/api/driver/shared-documents/:id/download", requireAuth, (req, res) => {
+	try {
+		const docId = parseInt(req.params.id);
+		if (!docId || docId <= 0) return res.status(400).json({ error: "Invalid document id" });
+		const doc = db.prepare("SELECT * FROM legal_documents WHERE id = ?").get(docId);
+		if (!doc) return res.status(404).json({ error: "Document not found" });
+		if (!doc.driver_id || doc.driver_id <= 0) {
+			return res.status(404).json({ error: "Not a driver shared document" });
+		}
+		const sessionUser = req.session.user;
+		if (sessionUser.role !== "Super Admin") {
+			// Ownership check: session user must be the driver this doc was uploaded to
+			const driverRow = db.prepare("SELECT driver_name FROM drivers_directory WHERE id = ?").get(doc.driver_id);
+			if (!driverRow) return res.status(403).json({ error: "Forbidden" });
+			const sessionDriver = (sessionUser.driver_name || sessionUser.driverName || "").trim().toLowerCase();
+			if (!sessionDriver || sessionDriver !== (driverRow.driver_name || "").trim().toLowerCase()) {
+				return res.status(403).json({ error: "Forbidden" });
+			}
+		}
+		if (!doc.file_url) return res.status(404).json({ error: "File missing" });
+		const filePath = path.join(__dirname, doc.file_url);
+		if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File missing" });
+		res.sendFile(filePath);
+	} catch (err) {
+		console.error("Shared doc download error:", err.message);
+		res.status(500).json({ error: err.message });
 	}
 });
 
@@ -6185,7 +6249,7 @@ app.get("/api/documents/:loadId", requireAuth, (req, res) => {
 	}
 });
 
-// GET /api/legal-documents — Legal docs for investor's trucks
+// GET /api/legal-documents — Legal docs for investor's trucks or driver shared docs
 app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, res) => {
 	try {
 		const user = req.session.user;
@@ -6194,6 +6258,14 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 		if (!truckId && req.query.unit_number) {
 			const t = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?)").get(req.query.unit_number.trim());
 			if (t) truckId = t.id;
+		}
+		// Super Admin viewing a specific driver's shared docs — guard against driver_id=0 sentinel collision
+		const queryDriverId = req.query.driver_id ? parseInt(req.query.driver_id) : null;
+		if (isSuperAdmin && queryDriverId && queryDriverId > 0) {
+			const driverDocs = db.prepare(
+				`SELECT ld.* FROM legal_documents ld WHERE ld.driver_id = ? ORDER BY ld.uploaded_at DESC`
+			).all(queryDriverId);
+			return res.json({ documents: driverDocs });
 		}
 		let docs;
 		if (isSuperAdmin) {
@@ -6243,17 +6315,20 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 // POST /api/legal-documents/upload — Super Admin or Investor uploads a legal doc
 app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
-		const { truckId, unitNumber, docType, fileData, fileName, notes, investorId } = req.body;
+		const { truckId, unitNumber, docType, fileData, fileName, notes, investorId, driverId } = req.body;
 		if (!fileData || !fileName) {
 			return res.status(400).json({ error: "fileData and fileName are required" });
 		}
 		if (fileData.length > 13_500_000) {
 			return res.status(400).json({ error: "File too large (max 10MB)" });
 		}
-		const validTypes = ['Title','Vehicle Title','Registration','Insurance Certificate','Insurance COI','Lease Agreement','Bill of Sale','Inspection Report','IFTA License','Maintenance Records','Photo','Contract','Tax Document','Compliance','Other'];
+		const validTypes = ['Title','Vehicle Title','Registration','Insurance Certificate','Insurance COI','Lease Agreement','Bill of Sale','Inspection Report','IFTA License','Maintenance Records','Photo','Contract','Tax Document','Compliance','Driver\'s License','Medical Card','ID Card','Other'];
 		const safeType = validTypes.includes(docType) ? docType : 'Other';
 		const ext = require("path").extname(fileName) || '.pdf';
-		const safeName = `${(unitNumber||'truck').replace(/[^a-zA-Z0-9]/g,'_')}_${safeType.replace(/\s+/g,'_')}_${Date.now()}${ext}`;
+		// Prefix filename with driver- or truck identifier depending on mode (for easier forensics in the uploads dir)
+		const drvId = parseInt(driverId) || 0;
+		const prefix = drvId > 0 ? `driver${drvId}` : (unitNumber || 'truck').replace(/[^a-zA-Z0-9]/g, '_');
+		const safeName = `${prefix}_${safeType.replace(/[\s']/g, '_')}_${Date.now()}${ext}`;
 		const legalDir = require("path").join(__dirname, "uploads", "legal");
 		if (!require("fs").existsSync(legalDir)) require("fs").mkdirSync(legalDir, { recursive: true });
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
@@ -6265,9 +6340,13 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), 
 			const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(req.session.user.id);
 			if (inv) invId = inv.id;
 		}
+		// Driver-mode uploads MUST NOT also be tagged with truck/investor IDs
+		const finalTruckId = drvId > 0 ? 0 : (parseInt(truckId) || 0);
+		const finalInvId = drvId > 0 ? 0 : invId;
+		const finalUnit = drvId > 0 ? '' : (unitNumber || '');
 		const result = db.prepare(
-			`INSERT INTO legal_documents (truck_id, unit_number, doc_type, file_name, file_url, notes, uploaded_by, investor_id) VALUES (?,?,?,?,?,?,?,?)`
-		).run(parseInt(truckId) || 0, unitNumber || '', safeType, fileName, fileUrl, notes || '', req.session.user.username, invId);
+			`INSERT INTO legal_documents (truck_id, unit_number, doc_type, file_name, file_url, notes, uploaded_by, investor_id, driver_id) VALUES (?,?,?,?,?,?,?,?,?)`
+		).run(finalTruckId, finalUnit, safeType, fileName, fileUrl, notes || '', req.session.user.username, finalInvId, drvId);
 		res.json({ success: true, id: result.lastInsertRowid, fileUrl });
 	} catch (err) {
 		console.error("Legal doc upload error:", err.message);

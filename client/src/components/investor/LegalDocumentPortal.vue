@@ -2,13 +2,13 @@
   <div class="section">
     <div class="section-title">
       <div class="section-icon" style="background: var(--blue-dim, rgba(59,130,246,0.15)); color: var(--blue, #3b82f6);">&#128196;</div>
-      Legal Documents
+      {{ isDriverMode ? 'Shared Documents' : 'Legal Documents' }}
       <span class="doc-count" v-if="docs.length > 0">{{ docs.length }}</span>
     </div>
 
-    <!-- Upload (Super Admin + Investor) -->
-    <div class="upload-row">
-      <select v-if="isSuperAdmin && !truckId && trucks.length > 0" v-model="uploadForm.selectedTruckId" class="doc-select">
+    <!-- Upload (Super Admin + Investor) — hidden in read-only mode -->
+    <div v-if="!readOnly" class="upload-row">
+      <select v-if="isSuperAdmin && !truckId && !isDriverMode && trucks.length > 0" v-model="uploadForm.selectedTruckId" class="doc-select">
         <option :value="null">-- Profile Level --</option>
         <option v-for="t in trucks" :key="t.id" :value="t.id">{{ t.UnitNumber }}</option>
       </select>
@@ -63,7 +63,7 @@
           <td class="by-col">{{ doc.uploaded_by }}</td>
           <td>
             <a :href="doc.file_url" target="_blank" rel="noopener" class="btn-view">View</a>
-            <button v-if="isSuperAdmin || doc.uploaded_by === auth.user?.username" class="btn-del" @click="remove(doc)">&#x2715;</button>
+            <button v-if="!readOnly && (isSuperAdmin || doc.uploaded_by === auth.user?.username)" class="btn-del" @click="remove(doc)">&#x2715;</button>
           </td>
         </tr>
       </tbody>
@@ -83,17 +83,23 @@ const props = defineProps({
   unitNumber: { type: String, default: '' },
   trucks: { type: Array, default: () => [] },
   investorId: { type: Number, default: null },
+  driverId: { type: Number, default: null },
+  readOnly: { type: Boolean, default: false },
 })
 
 const api = useApi()
 const auth = useAuthStore()
 
 const isSuperAdmin = computed(() => auth.user?.role === 'Super Admin')
+const isDriverMode = computed(() => !!props.driverId)
 
+// Master doc-type list — kept in sync with server.js validTypes array
 const docTypes = [
   'Title', 'Registration', 'Insurance Certificate', 'Lease Agreement',
   'Bill of Sale', 'Inspection Report', 'IFTA License', 'Maintenance Records',
-  'Photo', 'Contract', 'Tax Document', 'Compliance', 'Other',
+  'Photo', 'Contract', 'Tax Document', 'Compliance',
+  "Driver's License", 'Medical Card', 'ID Card',
+  'Other',
 ]
 
 const docs = ref([])
@@ -113,7 +119,11 @@ const uploadForm = reactive({
 async function load() {
   loading.value = true
   try {
-    const params = props.truckId ? `?truck_id=${props.truckId}` : props.unitNumber ? `?unit_number=${encodeURIComponent(props.unitNumber)}` : props.investorId ? `?investor_id=${props.investorId}` : ''
+    let params = ''
+    if (props.driverId) params = `?driver_id=${props.driverId}`
+    else if (props.truckId) params = `?truck_id=${props.truckId}`
+    else if (props.unitNumber) params = `?unit_number=${encodeURIComponent(props.unitNumber)}`
+    else if (props.investorId) params = `?investor_id=${props.investorId}`
     const res = await api.get(`/api/legal-documents${params}`)
     docs.value = res.documents || []
   } catch {
@@ -134,9 +144,10 @@ function onFileChange(e) {
 
 async function upload() {
   if (!uploadForm.file || !uploadForm.docType) return
-  const activeTruckId = props.truckId || uploadForm.selectedTruckId || 0
-  const activeTruck = props.trucks.find(t => t.id === activeTruckId)
-  const activeUnitNumber = props.unitNumber || activeTruck?.UnitNumber || ''
+  // Driver-mode uploads never attach truck/investor context — the row is tagged only with driver_id server-side
+  const activeTruckId = props.driverId ? 0 : (props.truckId || uploadForm.selectedTruckId || 0)
+  const activeTruck = props.driverId ? null : props.trucks.find(t => t.id === activeTruckId)
+  const activeUnitNumber = props.driverId ? '' : (props.unitNumber || activeTruck?.UnitNumber || '')
   uploading.value = true
   errorMsg.value = ''
   try {
@@ -148,7 +159,8 @@ async function upload() {
       fileData: uploadForm.fileBase64,
       notes: uploadForm.notes,
       uploadedBy: auth.user?.username || 'admin',
-      investorId: props.investorId || undefined,
+      investorId: props.driverId ? undefined : (props.investorId || undefined),
+      driverId: props.driverId || undefined,
     })
     uploadForm.file = null
     uploadForm.fileBase64 = ''
@@ -188,8 +200,8 @@ async function loadOnboardingDocs() {
 
 onMounted(() => {
   load()
-  // Only show onboarding docs on investor profile view, not truck-specific modals
-  if (!props.truckId && !props.unitNumber) loadOnboardingDocs()
+  // Only show onboarding docs on investor profile view (not truck-specific modals, not driver modals)
+  if (!props.truckId && !props.unitNumber && !props.driverId) loadOnboardingDocs()
 })
 </script>
 
