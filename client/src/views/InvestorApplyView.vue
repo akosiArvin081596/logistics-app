@@ -873,6 +873,7 @@ async function submitOnboarding() {
     completed.value = true
     localStorage.removeItem(STORAGE_KEY)
     toast('Onboarding complete!', 'success')
+    setTimeout(() => { window.location.href = 'https://logisx.com/' }, 5000)
   } catch (err) {
     toast(err.message || 'Submission failed', 'error')
   } finally {
