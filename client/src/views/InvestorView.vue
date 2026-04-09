@@ -3,9 +3,23 @@
     <!-- Hero Header -->
     <div class="hero-header">
       <div class="hero-top">
-        <div>
-          <h2 class="hero-title">{{ dashboardTitle }}</h2>
-          <p class="hero-sub">Performance overview &middot; {{ todayFormatted }}</p>
+        <div class="hero-identity">
+          <label v-if="canEditPicture" class="hero-avatar-wrap" :class="{ 'hero-avatar-uploading': picUploading }" title="Click to change profile picture">
+            <img v-if="investorPicture" :src="investorPicture" class="hero-avatar-img" alt="Profile picture" />
+            <div v-else class="hero-avatar-initials">{{ investorInitials }}</div>
+            <div class="hero-avatar-overlay">
+              <svg v-if="!picUploading" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+              <div v-else class="hero-spinner"></div>
+            </div>
+            <input type="file" accept="image/*" class="hero-avatar-input" @change="onPicChange" />
+          </label>
+          <div v-else-if="investorPicture" class="hero-avatar-wrap hero-avatar-readonly">
+            <img :src="investorPicture" class="hero-avatar-img" alt="Profile picture" />
+          </div>
+          <div>
+            <h2 class="hero-title">{{ dashboardTitle }}</h2>
+            <p class="hero-sub">Performance overview &middot; {{ todayFormatted }}</p>
+          </div>
         </div>
         <div class="header-actions">
           <a href="mailto:info@logisx.com" class="btn-email">Contact Operations</a>
@@ -110,6 +124,63 @@ const trucks = ref([])
 const reportLoading = ref(false)
 const reportStart = ref('')
 const reportEnd = ref('')
+const picUploading = ref(false)
+
+const investorRecord = computed(() => store.data?.investor || null)
+const investorPicture = computed(() => investorRecord.value?.profilePictureUrl || '')
+const canEditPicture = computed(() => authStore.user?.role === 'Investor' && !!investorRecord.value?.id)
+const investorInitials = computed(() => {
+  const name = authStore.user?.companyName || authStore.user?.fullName || authStore.user?.username || '?'
+  return name
+    .split(/\s+/)
+    .map(w => w[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2)
+})
+
+async function onPicChange(event) {
+  const file = event.target.files?.[0]
+  if (!file || !investorRecord.value?.id) return
+  picUploading.value = true
+  try {
+    const base64 = await resizeImageToBase64(file, 512)
+    await api.post(`/api/investors/${investorRecord.value.id}/profile-picture`, {
+      fileData: base64,
+      fileName: file.name,
+    })
+    await store.load()
+    toast('Profile picture updated')
+  } catch (err) {
+    toast('Upload failed', 'error')
+  } finally {
+    picUploading.value = false
+    event.target.value = ''
+  }
+}
+
+function resizeImageToBase64(file, maxDim) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      let { width, height } = img
+      if (width > maxDim || height > maxDim) {
+        if (width > height) { height = Math.round(height * maxDim / width); width = maxDim }
+        else { width = Math.round(width * maxDim / height); height = maxDim }
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, width, height)
+      ctx.drawImage(img, 0, 0, width, height)
+      resolve(canvas.toDataURL('image/jpeg', 0.9))
+    }
+    img.onerror = reject
+    img.src = URL.createObjectURL(file)
+  })
+}
 
 function titleCase(s) {
   return s.replace(/\b\w/g, c => c.toUpperCase())
@@ -208,6 +279,74 @@ onMounted(() => {
   justify-content: space-between;
   margin-bottom: 1.25rem;
 }
+
+.hero-identity {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.hero-avatar-wrap {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+  cursor: pointer;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+}
+.hero-avatar-wrap.hero-avatar-readonly {
+  cursor: default;
+}
+.hero-avatar-wrap .hero-avatar-overlay { opacity: 0; }
+.hero-avatar-wrap:hover:not(.hero-avatar-readonly) .hero-avatar-overlay,
+.hero-avatar-wrap.hero-avatar-uploading .hero-avatar-overlay { opacity: 1; }
+.hero-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.hero-avatar-initials {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+.hero-avatar-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.15s;
+  border-radius: 50%;
+}
+.hero-avatar-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+.hero-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: hero-spin 0.7s linear infinite;
+}
+@keyframes hero-spin { to { transform: rotate(360deg); } }
 
 .hero-title {
   font-size: 1.35rem;

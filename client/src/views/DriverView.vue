@@ -273,6 +273,8 @@
           :driver-info="driverStore.driverInfo"
           :headers="driverStore.headers.carrierDB"
           :shared-documents="driverStore.sharedDocuments"
+          :profile-picture-url="driverStore.profilePictureUrl"
+          :driver-id="driverStore.driverDirectoryId"
         />
       </section>
 

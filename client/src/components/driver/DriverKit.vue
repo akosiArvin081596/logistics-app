@@ -6,7 +6,15 @@
   <div v-else>
     <div v-if="driverInfo" class="card">
       <div class="kit-header">
-        <div class="kit-avatar">{{ initials(displayName) }}</div>
+        <label class="kit-avatar-wrap" :class="{ 'kit-avatar-uploading': uploading }" :title="canUpload ? 'Click to change profile picture' : ''">
+          <img v-if="profilePictureUrl" :src="profilePictureUrl" class="kit-avatar-img" alt="Profile picture" />
+          <div v-else class="kit-avatar">{{ initials(displayName) }}</div>
+          <div v-if="canUpload" class="kit-avatar-overlay">
+            <svg v-if="!uploading" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            <div v-else class="kit-spinner"></div>
+          </div>
+          <input v-if="canUpload" type="file" accept="image/*" class="kit-avatar-input" @change="onPicChange" />
+        </label>
         <div>
           <div class="kit-name">{{ displayName }}</div>
           <div class="kit-role">Driver</div>
@@ -64,13 +72,73 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { useApi } from '../../composables/useApi'
+import { useDriverStore } from '../../stores/driver'
+import { useToast } from '../../composables/useToast'
+
+const api = useApi()
+const driverStore = useDriverStore()
+const toast = useToast()
 
 const props = defineProps({
   driverInfo: { type: Object, default: null },
   headers: { type: Array, default: () => [] },
   sharedDocuments: { type: Array, default: () => [] },
+  profilePictureUrl: { type: String, default: '' },
+  driverId: { type: Number, default: 0 },
+  canUpload: { type: Boolean, default: true },
 })
+
+const uploading = ref(false)
+
+async function onPicChange(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  if (!props.driverId) {
+    toast.show?.('Cannot upload — driver record not linked', 'error')
+    return
+  }
+  uploading.value = true
+  try {
+    const base64 = await resizeImageToBase64(file, 512)
+    await api.post(`/api/drivers-directory/${props.driverId}/profile-picture`, {
+      fileData: base64,
+      fileName: file.name,
+    })
+    await driverStore.loadData()
+    toast.show?.('Profile picture updated', 'success')
+  } catch (err) {
+    toast.show?.('Upload failed', 'error')
+  } finally {
+    uploading.value = false
+    event.target.value = ''
+  }
+}
+
+// Resize an image file to a max dimension and return a JPEG data URL
+function resizeImageToBase64(file, maxDim) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      let { width, height } = img
+      if (width > maxDim || height > maxDim) {
+        if (width > height) { height = Math.round(height * maxDim / width); width = maxDim }
+        else { width = Math.round(width * maxDim / height); height = maxDim }
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, width, height)
+      ctx.drawImage(img, 0, 0, width, height)
+      resolve(canvas.toDataURL('image/jpeg', 0.9))
+    }
+    img.onerror = reject
+    img.src = URL.createObjectURL(file)
+  })
+}
 
 function findCol(headers, regex) {
   return (headers || []).find((h) => regex.test(h)) || null
@@ -119,6 +187,22 @@ function formatDate(ts) {
   margin-bottom: 1rem;
 }
 
+.kit-avatar-wrap {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+  cursor: pointer;
+  border-radius: 50%;
+  overflow: hidden;
+  isolation: isolate;
+}
+.kit-avatar-wrap:not(.kit-avatar-uploading) .kit-avatar-overlay {
+  opacity: 0;
+}
+.kit-avatar-wrap:hover .kit-avatar-overlay {
+  opacity: 1;
+}
 .kit-avatar {
   width: 56px;
   height: 56px;
@@ -130,8 +214,42 @@ function formatDate(ts) {
   justify-content: center;
   font-weight: 700;
   font-size: 1.2rem;
-  flex-shrink: 0;
 }
+.kit-avatar-img {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+.kit-avatar-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.15s;
+  border-radius: 50%;
+}
+.kit-avatar-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+.kit-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: kit-spin 0.7s linear infinite;
+}
+@keyframes kit-spin { to { transform: rotate(360deg); } }
 
 .kit-name {
   font-size: 1.1rem;

@@ -59,7 +59,18 @@
     <Teleport to="body">
       <div v-if="viewDrv" class="confirm-overlay" @click.self="closeView">
         <div class="confirm-box" style="max-width:640px;max-height:85vh;overflow-y:auto;">
-          <h3 style="margin-bottom:1rem;">{{ viewDrv[h.driver] }}</h3>
+          <div class="view-header">
+            <label class="view-avatar-wrap" :class="{ 'view-avatar-uploading': picUploading }" title="Click to change profile picture">
+              <img v-if="viewDrv.ProfilePictureUrl" :src="viewDrv.ProfilePictureUrl" class="view-avatar-img" alt="Profile picture" />
+              <div v-else class="view-avatar-initials">{{ initialsFor(viewDrv[h.driver]) }}</div>
+              <div class="view-avatar-overlay">
+                <svg v-if="!picUploading" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                <div v-else class="view-spinner"></div>
+              </div>
+              <input type="file" accept="image/*" class="view-avatar-input" @change="onPicChange" />
+            </label>
+            <h3 style="margin:0;">{{ viewDrv[h.driver] }}</h3>
+          </div>
           <div class="view-grid">
             <div v-for="col in viewHeaders" :key="col" class="view-row">
               <span class="view-label">{{ col }}</span>
@@ -280,7 +291,7 @@ function getAssignedTruck(driver) {
   return `${assignment.unit_number} (${assignment.year || ''} ${assignment.make || ''} ${assignment.model || ''})`.trim()
 }
 
-const emit = defineEmits(['delete', 'update'])
+const emit = defineEmits(['delete', 'update', 'picture-updated'])
 
 const viewDrv = ref(null)
 const docsLoading = ref(false)
@@ -290,6 +301,61 @@ const showConfirm = ref(false)
 const pendingDrv = ref(null)
 const showEdit = ref(false)
 const editRowIndex = ref(null)
+const picUploading = ref(false)
+
+function initialsFor(name) {
+  return (name || '?')
+    .split(/\s+/)
+    .map(w => w[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2)
+}
+
+async function onPicChange(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  if (!viewDrv.value?._rowIndex) return
+  picUploading.value = true
+  try {
+    const base64 = await resizeImageToBase64(file, 512)
+    const res = await api.post(`/api/drivers-directory/${viewDrv.value._rowIndex}/profile-picture`, {
+      fileData: base64,
+      fileName: file.name,
+    })
+    // Update the current view and the row in props.drivers so both refresh
+    viewDrv.value.ProfilePictureUrl = res.url
+    emit('picture-updated')
+  } catch (err) {
+    // silent fail (toast not available here)
+  } finally {
+    picUploading.value = false
+    event.target.value = ''
+  }
+}
+
+function resizeImageToBase64(file, maxDim) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      let { width, height } = img
+      if (width > maxDim || height > maxDim) {
+        if (width > height) { height = Math.round(height * maxDim / width); width = maxDim }
+        else { width = Math.round(width * maxDim / height); height = maxDim }
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, width, height)
+      ctx.drawImage(img, 0, 0, width, height)
+      resolve(canvas.toDataURL('image/jpeg', 0.9))
+    }
+    img.onerror = reject
+    img.src = URL.createObjectURL(file)
+  })
+}
 
 const maskedSsn = computed(() => {
   const s = (docsData.ssn || '').replace(/\D/g, '')
@@ -521,6 +587,71 @@ function handleConfirmDelete() {
 
 .clickable-row { cursor: pointer; }
 .clickable-row:hover td { background: var(--accent-dim, #f0f9ff); }
+.view-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.view-avatar-wrap {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  cursor: pointer;
+  border-radius: 50%;
+  overflow: hidden;
+}
+.view-avatar-wrap .view-avatar-overlay { opacity: 0; }
+.view-avatar-wrap:hover .view-avatar-overlay,
+.view-avatar-wrap.view-avatar-uploading .view-avatar-overlay { opacity: 1; }
+.view-avatar-img {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+.view-avatar-initials {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--accent-dim, #e0f2fe);
+  color: var(--accent, #0ea5e9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.3rem;
+}
+.view-avatar-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.15s;
+  border-radius: 50%;
+}
+.view-avatar-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+.view-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: view-spin 0.7s linear infinite;
+}
+@keyframes view-spin { to { transform: rotate(360deg); } }
 .view-grid { display: flex; flex-direction: column; gap: 0.4rem; }
 .view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
 .view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }

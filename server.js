@@ -484,6 +484,10 @@ try {
 	db.prepare("UPDATE drivers_directory SET status = 'active' WHERE status IS NULL OR status = ''").run();
 } catch {}
 
+// Migration: add profile_picture_url to drivers_directory and investors for uploadable avatars
+try { db.exec("ALTER TABLE drivers_directory ADD COLUMN profile_picture_url TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investors ADD COLUMN profile_picture_url TEXT DEFAULT ''"); } catch {}
+
 // One-time seed: import Carrier Database from Google Sheet into SQLite on first boot
 const driverCount = db.prepare("SELECT COUNT(*) AS cnt FROM drivers_directory").get().cnt;
 if (driverCount === 0) {
@@ -1150,6 +1154,7 @@ app.get("/api/drivers-directory", requireAuth, (req, res) => {
 			ZIP: d.zip, Address: d.address, Trucks: d.trucks, Hazmat: d.hazmat,
 			PhoneNumber: d.phone, CellNumber: d.cell, Email: d.email, DOT: d.dot, MC: d.mc, Rating: d.rating,
 			Status: d.status || 'active',
+			ProfilePictureUrl: d.profile_picture_url || '',
 			_rowIndex: d.id, _id: d.id,
 		}));
 		res.json({ headers, data, total: data.length });
@@ -1242,7 +1247,7 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 	}
 });
 
-// DELETE /api/drivers-directory/:id — delete driver (cascades shared documents on disk + in DB)
+// DELETE /api/drivers-directory/:id — delete driver (cascades shared documents + profile picture on disk + in DB)
 app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
@@ -1256,10 +1261,109 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) 
 				if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 			} catch (err) { console.error("Failed to unlink driver doc on cascade:", err.message); }
 		}
+		// Cascade: remove profile picture if any
+		const existingDriver = db.prepare("SELECT profile_picture_url FROM drivers_directory WHERE id = ?").get(id);
+		if (existingDriver?.profile_picture_url) {
+			try {
+				const picPath = path.join(__dirname, existingDriver.profile_picture_url);
+				if (fs.existsSync(picPath)) fs.unlinkSync(picPath);
+			} catch (err) { console.error("Failed to unlink driver profile pic on cascade:", err.message); }
+		}
 		db.prepare("DELETE FROM legal_documents WHERE driver_id = ?").run(id);
 		db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
 		res.json({ success: true, cascadedDocs: orphanedDocs.length });
 	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// ============================================================
+// PROFILE PICTURES — shared helper + per-entity upload endpoints
+// ============================================================
+
+// Helper: persist a base64-encoded image to uploads/profile-pictures/ and return its public URL.
+// Frontend pre-resizes and exports JPEG via canvas, so we always save with .jpg extension.
+function saveProfilePicture(entityType, entityId, fileData) {
+	const dir = path.join(__dirname, "uploads", "profile-pictures");
+	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+	const safeName = `${entityType}-${entityId}-${Date.now()}.jpg`;
+	const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
+	fs.writeFileSync(path.join(dir, safeName), Buffer.from(base64, "base64"));
+	return `/uploads/profile-pictures/${safeName}`;
+}
+
+// POST /api/drivers-directory/:id/profile-picture — Super Admin or the driver themselves
+app.post("/api/drivers-directory/:id/profile-picture", requireAuth, (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		if (!id || id <= 0) return res.status(400).json({ error: "Invalid driver id" });
+		const driver = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
+		if (!driver) return res.status(404).json({ error: "Driver not found" });
+
+		// Ownership check: Super Admin OR Driver role with matching driver_name
+		const sessionUser = req.session.user;
+		if (sessionUser.role !== "Super Admin") {
+			if (sessionUser.role !== "Driver") return res.status(403).json({ error: "Forbidden" });
+			const sessionDriver = (sessionUser.driver_name || sessionUser.driverName || "").trim().toLowerCase();
+			if (!sessionDriver || sessionDriver !== (driver.driver_name || "").trim().toLowerCase()) {
+				return res.status(403).json({ error: "Forbidden" });
+			}
+		}
+
+		const { fileData } = req.body;
+		if (!fileData) return res.status(400).json({ error: "fileData required" });
+		if (fileData.length > 7_000_000) return res.status(400).json({ error: "File too large (max 5MB)" });
+
+		// Unlink the old picture if the driver already had one
+		if (driver.profile_picture_url) {
+			try {
+				const oldPath = path.join(__dirname, driver.profile_picture_url);
+				if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+			} catch (err) { console.error("Failed to unlink old driver profile pic:", err.message); }
+		}
+
+		const fileUrl = saveProfilePicture("driver", id, fileData);
+		db.prepare("UPDATE drivers_directory SET profile_picture_url = ? WHERE id = ?").run(fileUrl, id);
+		res.json({ success: true, url: fileUrl });
+	} catch (err) {
+		console.error("Driver profile picture upload error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/investors/:id/profile-picture — Super Admin or the investor themselves
+app.post("/api/investors/:id/profile-picture", requireAuth, (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		if (!id || id <= 0) return res.status(400).json({ error: "Invalid investor id" });
+		const investor = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
+		if (!investor) return res.status(404).json({ error: "Investor not found" });
+
+		// Ownership check: Super Admin OR Investor role whose users.id matches investors.user_id
+		const sessionUser = req.session.user;
+		if (sessionUser.role !== "Super Admin") {
+			if (sessionUser.role !== "Investor" || investor.user_id !== sessionUser.id) {
+				return res.status(403).json({ error: "Forbidden" });
+			}
+		}
+
+		const { fileData } = req.body;
+		if (!fileData) return res.status(400).json({ error: "fileData required" });
+		if (fileData.length > 7_000_000) return res.status(400).json({ error: "File too large (max 5MB)" });
+
+		// Unlink the old picture if the investor already had one
+		if (investor.profile_picture_url) {
+			try {
+				const oldPath = path.join(__dirname, investor.profile_picture_url);
+				if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+			} catch (err) { console.error("Failed to unlink old investor profile pic:", err.message); }
+		}
+
+		const fileUrl = saveProfilePicture("investor", id, fileData);
+		db.prepare("UPDATE investors SET profile_picture_url = ? WHERE id = ?").run(fileUrl, id);
+		res.json({ success: true, url: fileUrl });
+	} catch (err) {
+		console.error("Investor profile picture upload error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -3819,6 +3923,7 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 		notes: r.notes,
 		createdAt: r.created_at,
 		applicationId: r.application_id || 0,
+		profilePictureUrl: r.profile_picture_url || "",
 		truckCount: db.prepare("SELECT COUNT(*) as n FROM trucks WHERE owner_id = ?").get(r.user_id).n,
 	}));
 	res.json({ investors });
@@ -3860,6 +3965,13 @@ app.delete("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 	const { id } = req.params;
 	const existing = db.prepare("SELECT * FROM investors WHERE id = ?").get(id);
 	if (!existing) return res.status(404).json({ error: "Investor not found" });
+	// Cascade: unlink the profile picture from disk
+	if (existing.profile_picture_url) {
+		try {
+			const picPath = path.join(__dirname, existing.profile_picture_url);
+			if (fs.existsSync(picPath)) fs.unlinkSync(picPath);
+		} catch (err) { console.error("Failed to unlink investor profile pic on cascade:", err.message); }
+	}
 	db.prepare("DELETE FROM investors WHERE id = ?").run(id);
 	res.json({ success: true });
 });
@@ -5789,8 +5901,12 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		// Lookup keyed on drivers_directory.id (resolved by driver_name). Guard against id=0 sentinel
 		// collision so drivers without a directory row return [] instead of every truck/investor doc.
 		let sharedDocuments = [];
-		const directoryRow = db.prepare("SELECT id FROM drivers_directory WHERE LOWER(driver_name) = ?").get(nameLower);
+		let profilePictureUrl = "";
+		let driverDirectoryId = 0;
+		const directoryRow = db.prepare("SELECT id, profile_picture_url FROM drivers_directory WHERE LOWER(driver_name) = ?").get(nameLower);
 		if (directoryRow && directoryRow.id > 0) {
+			driverDirectoryId = directoryRow.id;
+			profilePictureUrl = directoryRow.profile_picture_url || "";
 			sharedDocuments = db.prepare(
 				`SELECT id, doc_type, file_name, notes, uploaded_by, uploaded_at
 				 FROM legal_documents WHERE driver_id = ? ORDER BY uploaded_at DESC`
@@ -5816,6 +5932,8 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			} : null,
 			invoices: driverInvoices,
 			sharedDocuments,
+			profilePictureUrl,
+			driverDirectoryId,
 		});
 	} catch (error) {
 		console.error("Error fetching driver data:", error.message);
@@ -8241,6 +8359,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const revenuePerMile = fleetTotalMiles > 0 ? Math.round((totalRevenue / fleetTotalMiles) * 100) / 100 : 0;
 		const costPerMile = fleetTotalMiles > 0 ? Math.round((totalExpenses / fleetTotalMiles) * 100) / 100 : 0;
 
+		// Resolve the investor's own record so the dashboard can display (and upload) their profile picture
+		let investorProfile = null;
+		if (!isSuperAdmin) {
+			investorProfile = db.prepare("SELECT id, profile_picture_url FROM investors WHERE user_id = ?").get(user.id);
+		}
+
 		res.json({
 			production: {
 				totalRevenue: Math.round(totalRevenue),
@@ -8280,6 +8404,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				completedJobs: completedJobCount,
 			},
 			config,
+			investor: investorProfile ? {
+				id: investorProfile.id,
+				profilePictureUrl: investorProfile.profile_picture_url || "",
+			} : null,
 		});
 	} catch (error) {
 		console.error("Error building investor data:", error.message);

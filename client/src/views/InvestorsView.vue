@@ -21,6 +21,7 @@
         :carrier-names="store.carrierNames"
         @delete="handleDelete"
         @update="handleUpdate"
+        @picture-updated="store.load()"
       />
     </template>
   </div>

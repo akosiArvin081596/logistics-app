@@ -18,6 +18,8 @@ export const useDriverStore = defineStore('driver', {
     onboarding: null,
     invoices: [],
     sharedDocuments: [],
+    profilePictureUrl: '',
+    driverDirectoryId: 0,
     currentTab: 'loads',
     selectedStatusLoad: null,
     isLoading: true,
@@ -210,6 +212,8 @@ export const useDriverStore = defineStore('driver', {
         this.onboarding = data.onboarding || null
         this.invoices = data.invoices || []
         this.sharedDocuments = data.sharedDocuments || []
+        this.profilePictureUrl = data.profilePictureUrl || ''
+        this.driverDirectoryId = data.driverDirectoryId || 0
 
         // Keep selected status load in sync
         if (this.selectedStatusLoad) {

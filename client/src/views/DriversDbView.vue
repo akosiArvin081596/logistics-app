@@ -24,6 +24,7 @@
         :truck-assignments="truckAssignments"
         @delete="handleDelete"
         @update="handleUpdate"
+        @picture-updated="store.load()"
       />
     </template>
   </div>
