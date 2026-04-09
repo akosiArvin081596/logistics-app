@@ -925,6 +925,66 @@ app.use(
 		cookie: { maxAge: 24 * 60 * 60 * 1000 },
 	}),
 );
+// ============================================================
+// n8n Webhook: Upsert job into sheet_job_tracking (replaces Google Sheets write)
+// ============================================================
+app.post("/api/n8n/job", (req, res) => {
+	try {
+		const {
+			load_id, details, driver, pickup_info, pickup_appointment, pickup_address,
+			dropoff_info, dropoff_appointment, dropoff_address, payment, broker_contact_name,
+			phone_number, email, assigned_date, documents, contract_id, trailer_number,
+			job_status, truck,
+		} = req.body;
+		if (!load_id) return res.status(400).json({ error: "load_id is required" });
+
+		// Upsert: update if load_id exists, insert if not
+		const existing = db.prepare("SELECT id FROM sheet_job_tracking WHERE load_id = ?").get(load_id);
+		if (existing) {
+			const sets = [];
+			const params = [];
+			const maybeSet = (col, val) => { if (val !== undefined && val !== null) { sets.push(`${col} = ?`); params.push(val); } };
+			maybeSet("details", details);
+			maybeSet("driver", driver);
+			maybeSet("pickup_info", pickup_info);
+			maybeSet("pickup_appointment", pickup_appointment);
+			maybeSet("pickup_address", pickup_address);
+			maybeSet("dropoff_info", dropoff_info);
+			maybeSet("dropoff_appointment", dropoff_appointment);
+			maybeSet("dropoff_address", dropoff_address);
+			maybeSet("_payment_", payment);
+			maybeSet("broker_contact_name", broker_contact_name);
+			maybeSet("phone_number", phone_number);
+			maybeSet("email", email);
+			maybeSet("assigned_date", assigned_date);
+			maybeSet("documents", documents);
+			maybeSet("contract_id", contract_id);
+			maybeSet("trailer_number", trailer_number);
+			maybeSet("job_status", job_status);
+			maybeSet("truck", truck);
+			if (sets.length > 0) {
+				params.push(existing.id);
+				db.prepare(`UPDATE sheet_job_tracking SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+			}
+			res.json({ success: true, action: "updated", id: existing.id });
+		} else {
+			const result = db.prepare(`INSERT INTO sheet_job_tracking
+				(load_id, details, driver, pickup_info, pickup_appointment, pickup_address,
+				dropoff_info, dropoff_appointment, dropoff_address, _payment_, broker_contact_name,
+				phone_number, email, assigned_date, documents, contract_id, trailer_number, job_status, truck)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			.run(load_id, details || "", driver || "", pickup_info || "", pickup_appointment || "",
+				pickup_address || "", dropoff_info || "", dropoff_appointment || "", dropoff_address || "",
+				payment || "", broker_contact_name || "", phone_number || "", email || "",
+				assigned_date || "", documents || "", contract_id || "", trailer_number || "",
+				job_status || "Dispatched", truck || "");
+			res.json({ success: true, action: "inserted", id: result.lastInsertRowid });
+		}
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // Shared email helper
 async function sendEmail(to, subject, htmlBody, attachments = []) {
 	const gmailUser = process.env.GMAIL_USER;
