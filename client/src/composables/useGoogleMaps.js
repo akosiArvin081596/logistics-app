@@ -22,7 +22,7 @@ export function useGoogleMaps() {
           const cbName = '_gmReady' + Date.now()
           window[cbName] = () => { delete window[cbName]; resolve() }
           const script = document.createElement('script')
-          script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=marker&v=weekly&loading=async&callback=${cbName}`
+          script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=marker,places&v=weekly&loading=async&callback=${cbName}`
           script.async = true
           script.onerror = reject
           document.head.appendChild(script)
@@ -50,7 +50,29 @@ export function useGoogleMaps() {
     })
   }
 
-  return { load, createMap }
+  // Attach a Google Places Autocomplete to an <input> element.
+  // onSelect receives { formatted, place } — formatted is the full address string,
+  // place is the raw google.maps.places.PlaceResult (with address_components etc).
+  // Used for bank address, personal address, and any other address field that
+  // needs to be verified against real places so payments / deliveries don't fail.
+  async function attachAutocomplete(inputEl, onSelect, options = {}) {
+    if (!inputEl) return null
+    const maps = await load()
+    const autocomplete = new maps.places.Autocomplete(inputEl, {
+      types: options.types || ['address'],
+      componentRestrictions: options.componentRestrictions || { country: 'us' },
+      fields: options.fields || ['address_components', 'formatted_address', 'geometry'],
+    })
+    autocomplete.addListener('place_changed', () => {
+      const place = autocomplete.getPlace()
+      if (place && place.formatted_address && typeof onSelect === 'function') {
+        onSelect({ formatted: place.formatted_address, place })
+      }
+    })
+    return autocomplete
+  }
+
+  return { load, createMap, attachAutocomplete }
 }
 
 // Helper: create a colored dot element for AdvancedMarkerElement content

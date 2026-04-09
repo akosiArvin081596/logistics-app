@@ -665,3 +665,14 @@ body {
 /* Utility */
 .hidden { display: none !important; }
 .section-divider { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
+
+/* Google Places Autocomplete dropdown — always on top of modals/dialogs */
+.pac-container {
+  z-index: 10001 !important;
+  border-radius: 8px;
+  border: 1px solid #e2e4ea;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  font-family: inherit;
+}
+.pac-item { padding: 0.5rem 0.75rem; font-size: 0.82rem; cursor: pointer; }
+.pac-item:hover { background: #f0f9ff; }

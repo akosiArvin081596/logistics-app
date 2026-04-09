@@ -49,7 +49,18 @@
               </div>
               <template v-if="paymentMethod === 'ach'">
                 <div class="sign-field"><label class="sign-field-label">Bank Name</label><input v-model="bankName" class="pay-input" placeholder="Name of Bank" :disabled="!agreed" /></div>
-                <div class="sign-field"><label class="sign-field-label">Bank Address</label><input v-model="bankAddress" class="pay-input" placeholder="Bank Address" :disabled="!agreed" /></div>
+                <div class="sign-field">
+                  <label class="sign-field-label">Bank Address</label>
+                  <input
+                    ref="bankAddressInput"
+                    v-model="bankAddress"
+                    class="pay-input"
+                    placeholder="Start typing your bank's address..."
+                    :disabled="!agreed"
+                    autocomplete="off"
+                  />
+                  <div class="sign-field-hint">Pick from the dropdown to ensure the exact branch address is on file — wrong addresses can delay ACH deposits.</div>
+                </div>
                 <div class="sign-field"><label class="sign-field-label">Bank Phone</label><input v-model="bankPhone" class="pay-input" placeholder="Bank Phone #" :disabled="!agreed" /></div>
                 <div class="pay-row">
                   <div class="sign-field"><label class="sign-field-label">Routing #</label><input v-model="bankRouting" class="pay-input" placeholder="Routing #" :disabled="!agreed" /></div>
@@ -103,6 +114,7 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
+import { useGoogleMaps } from '../../composables/useGoogleMaps'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -113,6 +125,7 @@ const emit = defineEmits(['close', 'signed'])
 
 const driverStore = useDriverStore()
 const { show: toast } = useToast()
+const { attachAutocomplete } = useGoogleMaps()
 
 const agreed = ref(false)
 const signatureText = ref('')
@@ -131,6 +144,8 @@ const bankRouting = ref('')
 const bankAccount = ref('')
 const bankAcctName = ref('')
 const accountType = ref('')
+const bankAddressInput = ref(null)
+let bankAutocompleteAttached = false
 
 const isContractorAgreement = computed(() => props.doc?.doc_key === 'contractor_agreement')
 
@@ -169,8 +184,30 @@ watch(() => props.show, async (v) => {
     bankAccount.value = ''
     bankAcctName.value = ''
     accountType.value = ''
+    bankAutocompleteAttached = false
     await nextTick()
     initCanvas()
+  }
+})
+
+// Attach Google Places Autocomplete to the bank address field the moment the ACH form
+// is rendered. Only attaches once per modal open to avoid duplicate listeners.
+// Wrong bank addresses can cause ACH deposits to bounce or delay — this forces the
+// driver to pick a real, verified address instead of typing one freely.
+watch([() => paymentMethod.value, bankAddressInput], async ([method, el]) => {
+  if (method === 'ach' && el && !bankAutocompleteAttached) {
+    bankAutocompleteAttached = true
+    try {
+      await attachAutocomplete(el, ({ formatted }) => {
+        bankAddress.value = formatted
+      }, {
+        types: ['address'],
+        componentRestrictions: { country: 'us' },
+      })
+    } catch (err) {
+      // Silently skip if Maps API unavailable — free-text entry still works
+      bankAutocompleteAttached = false
+    }
   }
 })
 
@@ -338,6 +375,13 @@ function formatDate(d) {
   font-size: 0.82rem; background: #fff; font-family: inherit;
 }
 .pay-input:disabled { opacity: 0.4; }
+.sign-field-hint {
+  font-size: 0.68rem;
+  color: #64748b;
+  line-height: 1.4;
+  margin-top: 0.15rem;
+  font-style: italic;
+}
 .pay-row { display: flex; gap: 0.5rem; }
 .pay-row .sign-field { flex: 1; }
 
