@@ -7693,11 +7693,61 @@ app.get("/api/geocode/search", async (req, res) => {
 	}
 });
 
-// GET /api/geocode/load/:loadId — get coordinates for a load (instant SQLite lookup)
-app.get("/api/geocode/load/:loadId", requireAuth, (req, res) => {
+// GET /api/geocode/load/:loadId — get coordinates for a load (SQLite lookup, geocodes on-demand if missing)
+app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 	try {
 		const loadId = decodeURIComponent(req.params.loadId).trim().toLowerCase().replace(/^#/, "");
-		const row = db.prepare("SELECT * FROM load_coordinates WHERE load_id = ?").get(loadId);
+		let row = db.prepare("SELECT * FROM load_coordinates WHERE load_id = ?").get(loadId);
+
+		// On miss (or partial coverage): find addresses in the sheet, geocode, and cache
+		const needsGeocode = !row || !row.origin_lat || !row.dest_lat;
+		if (needsGeocode) {
+			try {
+				const sheets = await getSheets();
+				const headerResp = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: "Job Tracking!1:1",
+				});
+				const headers = (headerResp.data.values || [[]])[0];
+				const dataResp = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: "Job Tracking",
+				});
+				const rows = dataResp.data.values || [];
+				const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+				const pickupAddrCol = headers.find((h) => /pickup.*address|origin.*address|shipper.*address/i.test(h));
+				const dropoffAddrCol = headers.find((h) => /drop.?off.*address|dest.*address|receiver.*address|delivery.*address/i.test(h));
+				if (loadIdCol) {
+					for (let i = 1; i < rows.length; i++) {
+						const obj = {};
+						headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
+						if ((obj[loadIdCol] || "").trim().toLowerCase() === loadId) {
+							const pickupAddr = pickupAddrCol ? (obj[pickupAddrCol] || "").trim() : "";
+							const dropoffAddr = dropoffAddrCol ? (obj[dropoffAddrCol] || "").trim() : "";
+							const [origin, dest] = await Promise.all([
+								pickupAddr ? geocodeAddress(pickupAddr) : Promise.resolve(null),
+								dropoffAddr ? geocodeAddress(dropoffAddr) : Promise.resolve(null),
+							]);
+							db.prepare(`INSERT OR REPLACE INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+								.run(
+									loadId,
+									origin ? origin.lat : (row && row.origin_lat) || null,
+									origin ? origin.lng : (row && row.origin_lng) || null,
+									dest ? dest.lat : (row && row.dest_lat) || null,
+									dest ? dest.lng : (row && row.dest_lng) || null,
+									pickupAddr || (row && row.pickup_address) || "",
+									dropoffAddr || (row && row.dropoff_address) || "",
+								);
+							row = db.prepare("SELECT * FROM load_coordinates WHERE load_id = ?").get(loadId);
+							break;
+						}
+					}
+				}
+			} catch (err) {
+				console.error("Lazy geocode failed for load", loadId, err.message);
+			}
+		}
+
 		if (!row) return res.json({});
 		const result = {};
 		if (row.origin_lat) { result.originLat = row.origin_lat; result.originLng = row.origin_lng; }
