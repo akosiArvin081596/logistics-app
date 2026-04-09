@@ -4,6 +4,20 @@
       <h2>Driver Database</h2>
     </div>
 
+    <!-- KPI Summary -->
+    <div class="kpi-grid" style="margin-bottom:1.25rem;">
+      <Card v-for="card in kpiCards" :key="card.label" class="kpi-card" :class="card.theme">
+        <CardContent class="flex items-center gap-4" style="padding:1rem 1.25rem;">
+          <div :class="['kpi-icon', card.iconTheme]" v-html="card.icon"></div>
+          <div class="kpi-info">
+            <div class="kpi-label">{{ card.label }}</div>
+            <div class="kpi-value">{{ card.value }}</div>
+            <div class="kpi-sub">{{ card.sub }}</div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+
     <details class="form-accordion">
       <summary class="form-toggle">+ Add Driver <span class="form-toggle-note">(Case-by-case basis only — should go through the proper application process)</span></summary>
       <AddDriverForm
@@ -38,6 +52,7 @@ import { useToast } from '../composables/useToast'
 import AddDriverForm from '../components/drivers-db/AddDriverForm.vue'
 import DriverTable from '../components/drivers-db/DriverTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
+import { Card, CardContent } from '@/components/ui/card'
 
 const store = useDriversDbStore()
 const api = useApi()
@@ -50,6 +65,19 @@ const carrierNames = computed(() => {
   if (!col) return []
   const names = store.drivers.map(r => (r[col] || '').trim()).filter(Boolean)
   return [...new Set(names)].sort()
+})
+
+const kpiCards = computed(() => {
+  const drv = store.drivers
+  const active = drv.filter(d => (d.Status || '').toLowerCase() === 'active').length
+  const pending = drv.filter(d => (d.Status || '').toLowerCase() === 'pending').length
+  const withTruck = drv.filter(d => (d.Trucks || '').trim() !== '').length
+  return [
+    { label: 'Total Drivers', value: drv.length, sub: 'In directory',                icon: '&#128100;', theme: 'kpi-blue',    iconTheme: 'kpi-icon-blue' },
+    { label: 'Active',        value: active,     sub: 'Ready to dispatch',           icon: '&#10003;',  theme: 'kpi-emerald', iconTheme: 'kpi-icon-emerald' },
+    { label: 'Pending',       value: pending,    sub: 'Awaiting drug test',          icon: '&#9203;',   theme: 'kpi-amber',   iconTheme: 'kpi-icon-amber' },
+    { label: 'Assigned',      value: `${withTruck}/${drv.length}`, sub: 'Linked to a truck', icon: '&#128279;', theme: 'kpi-violet',  iconTheme: 'kpi-icon-violet' },
+  ]
 })
 
 async function handleAdd(values) {
