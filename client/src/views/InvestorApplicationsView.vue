@@ -6,9 +6,23 @@
         <p class="text-[13px] text-gray-400 mt-0.5">Review and manage investor onboarding applications</p>
       </div>
       <div class="flex items-center gap-3">
-        <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ applications.length }} total</span>
+        <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ filteredApplications.length }} {{ activeFilter || 'total' }}</span>
         <button class="px-4 py-2 text-sm font-semibold bg-white text-gray-700 border border-gray-200 rounded-lg hover:border-gray-300 hover:shadow-sm transition-all" @click="load">&#8635; Refresh</button>
       </div>
+    </div>
+
+    <!-- KPI Summary -->
+    <div class="kpi-grid" style="margin-bottom:1.25rem;">
+      <Card v-for="card in kpiCards" :key="card.label" class="kpi-card" :class="[card.theme, { 'kpi-active': activeFilter === card.filter }]" style="cursor:pointer;" @click="handleKpiClick(card.filter)">
+        <CardContent class="flex items-center gap-4" style="padding:1rem 1.25rem;">
+          <div :class="['kpi-icon', card.iconTheme]" v-html="card.icon"></div>
+          <div class="kpi-info">
+            <div class="kpi-label">{{ card.label }}</div>
+            <div class="kpi-value">{{ card.value }}</div>
+            <div class="kpi-sub">{{ card.sub }}</div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
 
     <!-- Outreach Email Section -->
@@ -74,7 +88,7 @@
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow v-for="app in applications" :key="app.id" class="hover:bg-blue-50/30 transition-colors cursor-pointer" @click="viewDetail(app)">
+            <TableRow v-for="app in filteredApplications" :key="app.id" class="hover:bg-blue-50/30 transition-colors cursor-pointer" @click="viewDetail(app)">
               <TableCell class="font-semibold text-[13px] text-gray-900">{{ app.legal_name }}</TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.entity_type || '-' }}</TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.email }}</TableCell>
@@ -224,7 +238,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { Card, CardContent } from '@/components/ui/card'
@@ -237,6 +251,29 @@ const api = useApi()
 const { show: toast } = useToast()
 const applications = ref([])
 const loading = ref(false)
+const activeFilter = ref(null)
+
+const filteredApplications = computed(() => {
+  if (!activeFilter.value) return applications.value
+  if (activeFilter.value === 'fully_onboarded') {
+    return applications.value.filter(a => a.onboarding_status === 'fully_onboarded')
+  }
+  return applications.value.filter(a => a.status === activeFilter.value)
+})
+
+const kpiCards = computed(() => {
+  const a = applications.value
+  return [
+    { label: 'Total',         value: a.length,                                                                  sub: 'All applications',    icon: '&#128188;', theme: 'kpi-blue',    iconTheme: 'kpi-icon-blue',    filter: null },
+    { label: 'New',           value: a.filter(x => x.status === 'New').length,                                  sub: 'Pending review',      icon: '&#10071;',  theme: 'kpi-amber',   iconTheme: 'kpi-icon-amber',   filter: 'New' },
+    { label: 'Accepted',      value: a.filter(x => x.status === 'Accepted').length,                             sub: 'Approved by admin',   icon: '&#10003;',  theme: 'kpi-emerald', iconTheme: 'kpi-icon-emerald', filter: 'Accepted' },
+    { label: 'Fully Onboarded', value: a.filter(x => x.onboarding_status === 'fully_onboarded').length,         sub: 'Docs + banking done', icon: '&#127881;', theme: 'kpi-violet',  iconTheme: 'kpi-icon-violet',  filter: 'fully_onboarded' },
+  ]
+})
+
+function handleKpiClick(filter) {
+  activeFilter.value = activeFilter.value === filter ? null : filter
+}
 const showCredentials = ref(false)
 const credentials = ref(null)
 const showDetail = ref(false)
