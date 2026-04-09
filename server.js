@@ -39,7 +39,8 @@ const server = http.createServer(app);
 const io = new Server(server);
 app.use(compression());
 app.use(express.json({ limit: "20mb" }));
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+// NOTE: /uploads static mount is deferred to after requireAuth is defined (see below),
+// so every file under uploads/ requires an authenticated session.
 
 // ============================================================
 // SQLite — Local database for app data (messages, users, expenses)
@@ -1257,6 +1258,12 @@ function requireRole(...roles) {
 	};
 }
 
+// Authenticated static serving for uploads (drug tests, signed PDFs, invoices, legal docs, etc.)
+// Every subdirectory under uploads/ contains sensitive documents (PII, signatures, banking info, SSN on W-9),
+// so the entire tree requires a session. Public onboarding flows serve PDFs via dedicated /api/... routes
+// instead of direct static URLs, so locking this down does not break any public page.
+app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads")));
+
 // ============================================================
 // PUBLIC: Job Application
 // ============================================================
@@ -2208,8 +2215,7 @@ app.post("/api/public/investor-preview-pdf/:docKey", async (req, res) => {
 	}
 });
 
-// Serve signed investor PDFs
-app.use("/uploads/investor-onboarding-signed", express.static(path.join(__dirname, "uploads", "investor-onboarding-signed")));
+// Signed investor PDFs are served by the authenticated /uploads mount (see top of file).
 
 // Admin: list investor applications
 app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => {
@@ -2901,8 +2907,7 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 	}
 });
 
-// Serve signed PDFs
-app.use("/uploads/onboarding-signed", requireAuth, express.static(path.join(__dirname, "uploads", "onboarding-signed")));
+// Signed onboarding PDFs are served by the authenticated /uploads mount (see top of file).
 
 // POST /api/onboarding/:userId/drug-test — Super Admin uploads drug test result
 app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async (req, res) => {
@@ -3040,8 +3045,7 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) =
 	}
 });
 
-// Serve uploaded onboarding files (drug test results)
-app.use("/uploads/onboarding", express.static(path.join(__dirname, "uploads", "onboarding")));
+// Drug test files under uploads/onboarding are served by the authenticated /uploads mount (see top of file).
 
 // === INVOICE ENDPOINTS ===
 
@@ -3410,8 +3414,7 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), (req, res) => {
 	}
 });
 
-// Serve invoice PDFs
-app.use("/uploads/invoices", express.static(path.join(__dirname, "uploads", "invoices")));
+// Invoice PDFs are served by the authenticated /uploads mount (see top of file).
 
 // Check if any users exist (for first-time setup)
 app.get("/api/auth/setup-check", (req, res) => {
