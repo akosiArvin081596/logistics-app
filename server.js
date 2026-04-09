@@ -1728,11 +1728,36 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 		field("Date", app.signature_date);
 		doc.moveDown(0.5);
 
-		// Embed CDL/Medical images if present
+		// Embed CDL/Medical images if present.
+		// Renders each image at its NATIVE resolution (no upscaling / stretching).
+		// Small images are shown small so the reviewer can see they are low quality
+		// instead of being silently blown up into a pixelated mess.
+		const getJpegDimensions = (buf) => {
+			// Walk JPEG markers looking for SOF0/SOF2 to read native width/height.
+			// Returns { width, height } or null if unreadable.
+			if (!buf || buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+			let i = 2;
+			while (i < buf.length) {
+				if (buf[i] !== 0xff) return null;
+				const marker = buf[i + 1];
+				if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+					return { height: (buf[i + 5] << 8) | buf[i + 6], width: (buf[i + 7] << 8) | buf[i + 8] };
+				}
+				i += 2 + ((buf[i + 2] << 8) | buf[i + 3]);
+			}
+			return null;
+		};
+		const getPngDimensions = (buf) => {
+			if (!buf || buf.length < 24) return null;
+			if (buf[0] !== 0x89 || buf[1] !== 0x50 || buf[2] !== 0x4e || buf[3] !== 0x47) return null;
+			return {
+				width: (buf[16] << 24) | (buf[17] << 16) | (buf[18] << 8) | buf[19],
+				height: (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23],
+			};
+		};
 		const embedImage = (label, base64) => {
 			if (!base64) return;
 			try {
-				let buf;
 				if (base64.startsWith("data:application/pdf")) {
 					// PDF uploads: skip embedding (can't embed PDF inside PDF with pdfkit)
 					doc.addPage();
@@ -1742,11 +1767,38 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 					return;
 				}
 				const data = base64.replace(/^data:image\/\w+;base64,/, "");
-				buf = Buffer.from(data, "base64");
+				const buf = Buffer.from(data, "base64");
+				const dims = getJpegDimensions(buf) || getPngDimensions(buf);
 				doc.addPage();
 				doc.fontSize(14).font("Helvetica-Bold").fillColor("#0ea5e9").text(label, { align: "center" });
 				doc.moveDown(0.5);
-				doc.image(buf, 56, doc.y, { fit: [500, 600], align: "center", valign: "center" });
+				// Letter page usable box: 612 wide × ~720 tall below the heading.
+				const BOX_W = 500;
+				const BOX_H = 600;
+				const LEFT_MARGIN = 56;
+				if (dims && dims.width > 0 && dims.height > 0) {
+					// Scale DOWN to fit the box, never UP past the native size.
+					// scale === 1 means render at actual resolution.
+					const scale = Math.min(BOX_W / dims.width, BOX_H / dims.height, 1);
+					const renderW = Math.round(dims.width * scale);
+					const renderH = Math.round(dims.height * scale);
+					const x = LEFT_MARGIN + Math.round((BOX_W - renderW) / 2);
+					const y = doc.y;
+					doc.image(buf, x, y, { width: renderW, height: renderH });
+					// Always report the native size so the reviewer can flag low-quality photos.
+					doc.y = y + renderH + 10;
+					doc.fontSize(9).font("Helvetica-Oblique")
+						.fillColor(dims.width < 800 || dims.height < 500 ? "#dc2626" : "#6b7280")
+						.text(`Actual image resolution: ${dims.width}\u00D7${dims.height}px`, LEFT_MARGIN, doc.y, { width: BOX_W, align: "center" });
+					if (dims.width < 800 || dims.height < 500) {
+						doc.moveDown(0.25);
+						doc.fontSize(9).font("Helvetica-Oblique").fillColor("#dc2626")
+							.text("Low-resolution upload — request a clearer photo from the applicant.", LEFT_MARGIN, doc.y, { width: BOX_W, align: "center" });
+					}
+				} else {
+					// Unknown format — fall back to fit (may scale up slightly).
+					doc.image(buf, LEFT_MARGIN, doc.y, { fit: [BOX_W, BOX_H], align: "center", valign: "center" });
+				}
 			} catch { /* skip if image is invalid */ }
 		};
 		embedImage("CDL - Front", app.cdl_front);

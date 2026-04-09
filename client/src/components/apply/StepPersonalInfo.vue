@@ -155,6 +155,14 @@ async function useCurrentLocation() {
   )
 }
 
+// Minimum accepted resolution for CDL / Medical Card photos.
+// Below this the document is unreadable when rendered at full size in the PDF.
+const MIN_W = 800
+const MIN_H = 500
+// Cap final image at this dimension to keep the base64 payload reasonable
+// (we still keep the native aspect ratio — no stretching).
+const MAX_DIMENSION = 2400
+
 function handleFile(event, field) {
   const file = event.target.files[0]
   if (!file) return
@@ -163,22 +171,34 @@ function handleFile(event, field) {
     const reader = new FileReader()
     reader.onload = (e) => { props.form[field] = e.target.result }
     reader.readAsDataURL(file)
-  } else {
-    const img = new Image()
-    img.onload = () => {
-      const MAX = 2400
-      let { width, height } = img
-      if (width > MAX || height > MAX) {
-        if (width > height) { height = Math.round(height * MAX / width); width = MAX }
-        else { width = Math.round(width * MAX / height); height = MAX }
-      }
-      const canvas = document.createElement('canvas')
-      canvas.width = width; canvas.height = height
-      canvas.getContext('2d').drawImage(img, 0, 0, width, height)
-      props.form[field] = canvas.toDataURL('image/jpeg', 0.92)
-    }
-    img.src = URL.createObjectURL(file)
+    return
   }
+  const img = new Image()
+  img.onload = () => {
+    const nativeW = img.naturalWidth
+    const nativeH = img.naturalHeight
+    // Reject images that are too small — upscaling produces pixelated PDFs.
+    if (nativeW < MIN_W || nativeH < MIN_H) {
+      alert(`Image is too small — the file you uploaded is ${nativeW}\u00D7${nativeH}px.\nPlease upload a clearer photo at least ${MIN_W}\u00D7${MIN_H}px so it stays readable.`)
+      event.target.value = ''
+      return
+    }
+    // Only scale DOWN for large files — never up. Preserves aspect ratio.
+    let width = nativeW
+    let height = nativeH
+    if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+      const scale = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height)
+      width = Math.round(width * scale)
+      height = Math.round(height * scale)
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    canvas.getContext('2d').drawImage(img, 0, 0, width, height)
+    props.form[field] = canvas.toDataURL('image/jpeg', 0.92)
+  }
+  img.onerror = () => { alert('Could not read that image. Please try a different file.') }
+  img.src = URL.createObjectURL(file)
 }
 
 onMounted(async () => {
