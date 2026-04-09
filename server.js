@@ -475,6 +475,14 @@ db.exec(`
 	)
 `);
 
+// Migration: add status column to drivers_directory (pending/active/inactive)
+// Existing rows get 'active' so current drivers stay in the dispatch dropdown.
+// New auto-created rows from onboarding default to 'pending' until drug test passes.
+try {
+	db.exec("ALTER TABLE drivers_directory ADD COLUMN status TEXT DEFAULT 'active'");
+	db.prepare("UPDATE drivers_directory SET status = 'active' WHERE status IS NULL OR status = ''").run();
+} catch {}
+
 // One-time seed: import Carrier Database from Google Sheet into SQLite on first boot
 const driverCount = db.prepare("SELECT COUNT(*) AS cnt FROM drivers_directory").get().cnt;
 if (driverCount === 0) {
@@ -1083,7 +1091,8 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 		const truckUnit = truck ? truck.unit_number : "";
 
 		if (action === "add") {
-			db.prepare(`INSERT OR IGNORE INTO drivers_directory (driver_name, carrier_name, email, trucks) VALUES (?, ?, ?, ?)`)
+			// New drivers created via onboarding start as 'pending' — they become 'active' when drug test passes
+			db.prepare(`INSERT OR IGNORE INTO drivers_directory (driver_name, carrier_name, email, trucks, status) VALUES (?, ?, ?, ?, 'pending')`)
 				.run(driverName.trim(), companyName || "", email || "", truckUnit);
 		} else if (action === "update") {
 			const existing = db.prepare("SELECT id FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)").get((oldName || driverName || "").trim());
@@ -1107,7 +1116,7 @@ function syncDriverToCarrierSheet(driverName, opts = {}) {
 
 // Helper: get carrier database from SQLite in the same format as parseSheet() for backward compat
 function getCarrierDBFromSQLite() {
-	const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating"];
+	const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating", "Status"];
 	const rows = db.prepare("SELECT * FROM drivers_directory ORDER BY driver_name ASC").all();
 	const data = rows.map((d, i) => {
 		const obj = {};
@@ -1115,7 +1124,8 @@ function getCarrierDBFromSQLite() {
 		obj["State"] = d.state; obj["City"] = d.city; obj["ZIP"] = d.zip; obj["Address"] = d.address;
 		obj["Trucks"] = d.trucks; obj["Hazmat"] = d.hazmat; obj["PhoneNumber"] = d.phone;
 		obj["CellNumber"] = d.cell; obj["Email"] = d.email; obj["DOT"] = d.dot;
-		obj["MC"] = d.mc; obj["Rating"] = d.rating; obj._rowIndex = d.id;
+		obj["MC"] = d.mc; obj["Rating"] = d.rating; obj["Status"] = d.status || 'active';
+		obj._rowIndex = d.id;
 		return obj;
 	});
 	return { headers, data };
@@ -1128,11 +1138,12 @@ app.get("/api/drivers-directory", requireAuth, (req, res) => {
 	try {
 		const drivers = db.prepare("SELECT * FROM drivers_directory ORDER BY driver_name ASC").all();
 		// Return in a format compatible with the old sheet-based response
-		const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating"];
+		const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating", "Status"];
 		const data = drivers.map(d => ({
 			Driver: d.driver_name, "Carrier Name": d.carrier_name, State: d.state, City: d.city,
 			ZIP: d.zip, Address: d.address, Trucks: d.trucks, Hazmat: d.hazmat,
 			PhoneNumber: d.phone, CellNumber: d.cell, Email: d.email, DOT: d.dot, MC: d.mc, Rating: d.rating,
+			Status: d.status || 'active',
 			_rowIndex: d.id, _id: d.id,
 		}));
 		res.json({ headers, data, total: data.length });
@@ -1141,18 +1152,19 @@ app.get("/api/drivers-directory", requireAuth, (req, res) => {
 	}
 });
 
-// POST /api/drivers-directory — add driver
+// POST /api/drivers-directory — add driver (manual adds default to active)
 app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { values, headers } = req.body;
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
-		db.prepare(`INSERT OR REPLACE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		db.prepare(`INSERT OR REPLACE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
-				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "");
+				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
+				obj.Status || "active");
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -1167,10 +1179,14 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
-		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=? WHERE id=?`)
+		// Keep existing status if the client didn't send one
+		const current = db.prepare("SELECT status FROM drivers_directory WHERE id = ?").get(id);
+		const nextStatus = obj.Status || current?.status || "active";
+		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=?, status=? WHERE id=?`)
 			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
-				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "", id);
+				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
+				nextStatus, id);
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -2637,10 +2653,45 @@ async function checkAndCompleteOnboarding(userId) {
 	if (allSigned && ob.drug_test_result === "pass") {
 		const now = new Date().toISOString();
 		db.prepare("UPDATE driver_onboarding SET status = 'fully_onboarded', onboarded_at = ? WHERE user_id = ?").run(now, userId);
-		// Sync driver to Carrier Database sheet
+		// Sync driver to drivers_directory + activate
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+		const pathTwoApplication = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(ob.application_id);
 		if (user) {
 			syncDriverToCarrierSheet(user.driver_name, { email: user.email, companyName: user.company_name, action: "add" });
+
+			// Backfill application details (idempotent — only fills blank fields so manual edits win)
+			if (pathTwoApplication) {
+				try {
+					db.prepare(`UPDATE drivers_directory SET
+						phone = CASE WHEN ? != '' THEN ? ELSE phone END,
+						cell = CASE WHEN ? != '' THEN ? ELSE cell END,
+						address = CASE WHEN ? != '' THEN ? ELSE address END,
+						city = CASE WHEN ? != '' THEN ? ELSE city END,
+						state = CASE WHEN ? != '' THEN ? ELSE state END,
+						zip = CASE WHEN ? != '' THEN ? ELSE zip END,
+						dot = CASE WHEN ? != '' THEN ? ELSE dot END,
+						mc = CASE WHEN ? != '' THEN ? ELSE mc END,
+						hazmat = CASE WHEN ? != '' THEN ? ELSE hazmat END
+						WHERE LOWER(driver_name) = LOWER(?)`).run(
+						pathTwoApplication.phone || '', pathTwoApplication.phone || '',
+						pathTwoApplication.cell || '', pathTwoApplication.cell || '',
+						pathTwoApplication.address || '', pathTwoApplication.address || '',
+						pathTwoApplication.city || '', pathTwoApplication.city || '',
+						pathTwoApplication.state || '', pathTwoApplication.state || '',
+						pathTwoApplication.zip || '', pathTwoApplication.zip || '',
+						pathTwoApplication.dot || '', pathTwoApplication.dot || '',
+						pathTwoApplication.mc || '', pathTwoApplication.mc || '',
+						pathTwoApplication.hazmat || '', pathTwoApplication.hazmat || '',
+						(user.driver_name || '').trim()
+					);
+				} catch (err) { console.error("drivers_directory path2 backfill error:", err.message); }
+			}
+
+			// Auto-activate the driver now that drug test passed
+			try {
+				db.prepare("UPDATE drivers_directory SET status = 'active' WHERE LOWER(driver_name) = LOWER(?)").run((user.driver_name || '').trim());
+			} catch (err) { console.error("drivers_directory activation error:", err.message); }
+
 			insertNotification.run(
 				user.driver_name.trim().toLowerCase(), "onboarding_complete",
 				"Onboarding Complete", "You are now fully onboarded. Welcome to LogisX!",
@@ -5347,11 +5398,12 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			else revPending += amt;
 		});
 
-		// Driver list (case-insensitive dedup to prevent misspelling duplicates)
+		// Driver list for dispatch dropdown — only active drivers (pending = awaiting drug test, inactive = disabled)
 		const driverMap = new Map();
 		carrierDB.data.forEach((r) => {
 			const name = (r[carrierDriverCol] || "").trim();
-			if (name && !driverMap.has(name.toLowerCase())) driverMap.set(name.toLowerCase(), name);
+			const status = (r["Status"] || "active").toLowerCase();
+			if (name && status === "active" && !driverMap.has(name.toLowerCase())) driverMap.set(name.toLowerCase(), name);
 		});
 		const driverList = [...driverMap.values()].sort();
 

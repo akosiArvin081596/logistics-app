@@ -11,6 +11,7 @@
       <thead>
         <tr>
           <th>Driver</th>
+          <th>Status</th>
           <th>Carrier</th>
           <th>Location</th>
           <th>Phone</th>
@@ -26,6 +27,9 @@
       <tbody>
         <tr v-for="d in drivers" :key="d._rowIndex" class="clickable-row" @click="viewDrv = d">
           <td class="name-cell">{{ d[h.driver] || '\u2014' }}</td>
+          <td>
+            <span class="status-badge" :class="statusClass(d)">{{ (d.Status || 'active').toUpperCase() }}</span>
+          </td>
           <td>{{ d[h.carrier] || '\u2014' }}</td>
           <td>{{ locStr(d) }}</td>
           <td>{{ d[h.phone] || '\u2014' }}</td>
@@ -160,6 +164,16 @@
             </div>
           </div>
 
+          <div class="edit-field">
+            <label>Status</label>
+            <select v-model="editForm.status">
+              <option value="pending">Pending (awaiting drug test)</option>
+              <option value="active">Active (can be dispatched)</option>
+              <option value="inactive">Inactive (hidden from dispatch)</option>
+            </select>
+            <p class="status-help">Drivers become Active automatically after passing their drug test. Use this toggle to override.</p>
+          </div>
+
           <div class="confirm-actions">
             <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
             <button class="btn btn-primary" @click="handleSaveEdit">Save</button>
@@ -237,8 +251,15 @@ const viewHeaders = computed(() => props.headers.filter(c => !/carrier/i.test(c)
 const editForm = reactive({
   driver: '', carrierName: '', state: '', city: '', zip: '', address: '',
   trucks: '', hazmat: 'NO', phone: '', cell: '', email: '',
-  dot: '', mc: '', rating: 'Not Rated',
+  dot: '', mc: '', rating: 'Not Rated', status: 'active',
 })
+
+function statusClass(d) {
+  const s = (d.Status || 'active').toLowerCase()
+  if (s === 'active') return 'status-active'
+  if (s === 'pending') return 'status-pending'
+  return 'status-inactive'
+}
 
 function getDriverAvg(d) {
   const name = (d[h.value.driver] || '').trim().toLowerCase()
@@ -268,6 +289,7 @@ function openEdit(d) {
   editForm.dot = d[h.value.dot] || ''
   editForm.mc = d[h.value.mc] || ''
   editForm.rating = d[h.value.rating] || 'Not Rated'
+  editForm.status = d.Status || 'active'
   showEdit.value = true
 }
 
@@ -278,7 +300,7 @@ function handleSaveEdit() {
       editForm.driver, editForm.carrierName, editForm.state, editForm.city,
       editForm.zip, editForm.address, editForm.trucks, editForm.hazmat,
       editForm.phone, editForm.cell, editForm.email,
-      editForm.dot, editForm.mc, editForm.rating,
+      editForm.dot, editForm.mc, editForm.rating, editForm.status,
     ],
   })
   showEdit.value = false
@@ -328,6 +350,26 @@ function handleConfirmDelete() {
 
 .name-cell { font-weight: 600; }
 .mono { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; }
+
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.status-badge.status-active { background: #dcfce7; color: #166534; }
+.status-badge.status-pending { background: #fef3c7; color: #92400e; }
+.status-badge.status-inactive { background: #f1f5f9; color: #64748b; }
+
+.status-help {
+  font-size: 0.68rem;
+  color: #9ca3af;
+  margin: 0.3rem 0 0;
+  line-height: 1.4;
+}
 
 .action-btns { display: flex; gap: 0.35rem; justify-content: flex-end; }
 .btn-edit, .btn-remove {
