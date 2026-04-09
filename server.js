@@ -6114,7 +6114,7 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), 
 		if (fileData.length > 13_500_000) {
 			return res.status(400).json({ error: "File too large (max 10MB)" });
 		}
-		const validTypes = ['Title','Vehicle Title','Registration','Insurance Certificate','Insurance COI','Lease Agreement','Bill of Sale','Inspection Report','IFTA License','Maintenance Records','Other'];
+		const validTypes = ['Title','Vehicle Title','Registration','Insurance Certificate','Insurance COI','Lease Agreement','Bill of Sale','Inspection Report','IFTA License','Maintenance Records','Photo','Contract','Tax Document','Compliance','Other'];
 		const safeType = validTypes.includes(docType) ? docType : 'Other';
 		const ext = require("path").extname(fileName) || '.pdf';
 		const safeName = `${(unitNumber||'truck').replace(/[^a-zA-Z0-9]/g,'_')}_${safeType.replace(/\s+/g,'_')}_${Date.now()}${ext}`;
