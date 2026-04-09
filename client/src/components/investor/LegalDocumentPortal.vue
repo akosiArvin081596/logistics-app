@@ -186,7 +186,11 @@ async function loadOnboardingDocs() {
   } catch { /* skip */ }
 }
 
-onMounted(() => { load(); loadOnboardingDocs() })
+onMounted(() => {
+  load()
+  // Only show onboarding docs on investor profile view, not truck-specific modals
+  if (!props.truckId && !props.unitNumber) loadOnboardingDocs()
+})
 </script>
 
 <style scoped>
