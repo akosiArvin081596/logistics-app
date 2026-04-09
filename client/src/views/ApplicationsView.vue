@@ -120,10 +120,15 @@
               <h4>Personal Information</h4>
               <div class="detail-row"><span>Email:</span><span>{{ selectedApp.email }}</span></div>
               <div class="detail-row"><span>Phone:</span><span>{{ selectedApp.phone }}</span></div>
+              <div v-if="selectedApp.cell" class="detail-row"><span>Cell:</span><span>{{ selectedApp.cell }}</span></div>
               <div class="detail-row"><span>DOB:</span><span>{{ selectedApp.dob }}</span></div>
               <div class="detail-row"><span>Address:</span><span>{{ selectedApp.address }}</span></div>
+              <div v-if="selectedApp.city || selectedApp.state || selectedApp.zip" class="detail-row"><span>City/State/ZIP:</span><span>{{ [selectedApp.city, selectedApp.state].filter(Boolean).join(', ') }}{{ selectedApp.zip ? ' ' + selectedApp.zip : '' }}</span></div>
               <div class="detail-row"><span>SSN:</span><span>{{ maskSSN(selectedApp.ssn) }}</span></div>
               <div class="detail-row"><span>License:</span><span>{{ selectedApp.drivers_license }}</span></div>
+              <div v-if="selectedApp.dot" class="detail-row"><span>DOT #:</span><span>{{ selectedApp.dot }}</span></div>
+              <div v-if="selectedApp.mc" class="detail-row"><span>MC #:</span><span>{{ selectedApp.mc }}</span></div>
+              <div class="detail-row"><span>Hazmat:</span><span>{{ selectedApp.hazmat || 'No' }}</span></div>
             </div>
             <div class="detail-section">
               <h4>Experience &amp; Qualifications</h4>

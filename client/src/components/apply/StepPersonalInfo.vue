@@ -12,9 +12,12 @@
       <div class="field"><label class="field-label">Email Address <span class="req">*</span></label><div class="input-wrap"><input v-model="form.email" type="email" placeholder="you@email.com" required /></div></div>
       <div class="field"><label class="field-label">Phone Number <span class="req">*</span></label><div class="input-wrap"><input v-model="form.phone" type="tel" placeholder="(555) 555-5555" required /></div></div>
     </div>
-    <div class="field"><label class="field-label">Date of Birth <span class="req">*</span></label><div class="input-wrap"><input v-model="form.dob" type="date" required /></div></div>
+    <div class="grid grid-cols-2 gap-4">
+      <div class="field"><label class="field-label">Cell Number</label><div class="input-wrap"><input v-model="form.cell" type="tel" placeholder="(555) 555-5555" /></div></div>
+      <div class="field"><label class="field-label">Date of Birth <span class="req">*</span></label><div class="input-wrap"><input v-model="form.dob" type="date" required /></div></div>
+    </div>
     <div class="field">
-      <label class="field-label">Current Address and Zip Code <span class="req">*</span></label>
+      <label class="field-label">Current Address <span class="req">*</span></label>
       <div class="address-row">
         <div class="address-input-wrap">
           <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" />
@@ -27,10 +30,26 @@
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
         </button>
       </div>
+      <p class="field-hint">Pick from autocomplete to auto-fill City, State and ZIP below.</p>
+    </div>
+    <div class="grid grid-cols-3 gap-4">
+      <div class="field"><label class="field-label">City <span class="req">*</span></label><div class="input-wrap"><input v-model="form.city" placeholder="City" required /></div></div>
+      <div class="field"><label class="field-label">State <span class="req">*</span></label><div class="input-wrap"><input v-model="form.state" placeholder="ST" maxlength="2" style="text-transform:uppercase" required /></div></div>
+      <div class="field"><label class="field-label">ZIP <span class="req">*</span></label><div class="input-wrap"><input v-model="form.zip" placeholder="12345" required /></div></div>
     </div>
     <div class="grid grid-cols-2 gap-4">
       <div class="field"><label class="field-label">Social Security Number (SSN) <span class="req">*</span></label><div class="input-wrap"><input v-model="form.ssn" placeholder="XXX-XX-XXXX" required /></div></div>
       <div class="field"><label class="field-label">Drivers License Number <span class="req">*</span></label><div class="input-wrap"><input v-model="form.drivers_license" placeholder="License number" required /></div></div>
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div class="field"><label class="field-label">DOT # <span class="opt">(optional)</span></label><div class="input-wrap"><input v-model="form.dot" placeholder="Only if Owner Operator" /></div></div>
+      <div class="field"><label class="field-label">MC # <span class="opt">(optional)</span></label><div class="input-wrap"><input v-model="form.mc" placeholder="Only if Owner Operator" /></div></div>
+    </div>
+    <div class="field">
+      <label class="field-label">Hazmat Endorsement <span class="req">*</span></label>
+      <div class="radio-group">
+        <label class="radio-item" v-for="opt in hazmatOpts" :key="opt"><input type="radio" v-model="form.hazmat" :value="opt" /><span>{{ opt }}</span></label>
+      </div>
     </div>
 
     <!-- CDL + Medical Card Uploads -->
@@ -92,9 +111,23 @@ import { ref, reactive, onMounted } from 'vue'
 const props = defineProps({ form: { type: Object, required: true } })
 const emit = defineEmits(['open-map'])
 const positions = ['Company Driver', 'Owner Operator', 'Other']
+const hazmatOpts = ['Yes', 'No']
 const addressInput = ref(null)
 const geolocating = ref(false)
 const fileTypes = reactive({ cdl_front: false, cdl_back: false, medical_card: false })
+
+function parseAddressComponents(components) {
+  const out = { city: '', state: '', zip: '' }
+  if (!Array.isArray(components)) return out
+  for (const comp of components) {
+    const types = comp.types || []
+    if (!out.city && types.includes('locality')) out.city = comp.long_name || ''
+    else if (!out.city && types.includes('sublocality')) out.city = comp.long_name || ''
+    if (!out.state && types.includes('administrative_area_level_1')) out.state = comp.short_name || ''
+    if (!out.zip && types.includes('postal_code')) out.zip = comp.long_name || ''
+  }
+  return out
+}
 
 async function useCurrentLocation() {
   if (!navigator.geolocation) return
@@ -105,7 +138,14 @@ async function useCurrentLocation() {
         const res = await fetch(`/api/geocode?lat=${pos.coords.latitude}&lng=${pos.coords.longitude}`)
         if (res.ok) {
           const data = await res.json()
-          if (data.results?.[0]?.formatted_address) props.form.address = data.results[0].formatted_address
+          const r = data.results?.[0]
+          if (r?.formatted_address) props.form.address = r.formatted_address
+          if (r?.address_components) {
+            const c = parseAddressComponents(r.address_components)
+            if (c.city) props.form.city = c.city
+            if (c.state) props.form.state = c.state
+            if (c.zip) props.form.zip = c.zip
+          }
         }
       } catch { /* skip */ }
       geolocating.value = false
@@ -170,17 +210,25 @@ function initAutocomplete() {
   const autocomplete = new window.google.maps.places.Autocomplete(addressInput.value, {
     types: ['address'],
     componentRestrictions: { country: 'us' },
+    fields: ['address_components', 'formatted_address', 'geometry'],
   })
   autocomplete.addListener('place_changed', () => {
     const place = autocomplete.getPlace()
     if (place && place.formatted_address) {
       props.form.address = place.formatted_address
+      const c = parseAddressComponents(place.address_components)
+      if (c.city) props.form.city = c.city
+      if (c.state) props.form.state = c.state
+      if (c.zip) props.form.zip = c.zip
     }
   })
 }
 </script>
 
 <style scoped>
+.grid-cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+.field-hint { font-size: 0.72rem; color: #9ca3af; margin: 0.35rem 0 0; }
+.opt { font-weight: 400; color: #9ca3af; font-size: 0.72rem; margin-left: 0.25rem; }
 .upload-section { margin-bottom: 1.1rem; }
 .upload-hint { font-size: 0.78rem; color: #9ca3af; margin: 0.25rem 0 0.75rem; }
 .upload-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; }
@@ -246,5 +294,6 @@ function initAutocomplete() {
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 640px) {
   .upload-grid { grid-template-columns: 1fr; }
+  .grid-cols-3 { grid-template-columns: 1fr; }
 }
 </style>

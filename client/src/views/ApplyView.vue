@@ -152,10 +152,17 @@
               <div class="review-item"><span class="review-label">Full Name</span><span class="review-value">{{ form.first_name }} {{ form.last_name }}</span></div>
               <div class="review-item"><span class="review-label">Email</span><span class="review-value">{{ form.email }}</span></div>
               <div class="review-item"><span class="review-label">Phone</span><span class="review-value">{{ form.phone }}</span></div>
+              <div v-if="form.cell" class="review-item"><span class="review-label">Cell</span><span class="review-value">{{ form.cell }}</span></div>
               <div class="review-item"><span class="review-label">Date of Birth</span><span class="review-value">{{ form.dob }}</span></div>
               <div class="review-item full"><span class="review-label">Address</span><span class="review-value">{{ form.address }}</span></div>
+              <div class="review-item"><span class="review-label">City</span><span class="review-value">{{ form.city }}</span></div>
+              <div class="review-item"><span class="review-label">State</span><span class="review-value">{{ form.state }}</span></div>
+              <div class="review-item"><span class="review-label">ZIP</span><span class="review-value">{{ form.zip }}</span></div>
               <div class="review-item"><span class="review-label">Driver's License</span><span class="review-value">{{ form.drivers_license }}</span></div>
               <div class="review-item"><span class="review-label">Position</span><span class="review-value">{{ form.position }}</span></div>
+              <div class="review-item"><span class="review-label">Hazmat</span><span class="review-value">{{ form.hazmat }}</span></div>
+              <div v-if="form.dot" class="review-item"><span class="review-label">DOT #</span><span class="review-value">{{ form.dot }}</span></div>
+              <div v-if="form.mc" class="review-item"><span class="review-label">MC #</span><span class="review-value">{{ form.mc }}</span></div>
               <div class="review-item"><span class="review-label">CDL Front</span><span class="review-value" :class="form.cdl_front ? 'text-green' : 'text-amber'">{{ form.cdl_front ? 'Uploaded' : 'Missing' }}</span></div>
               <div class="review-item"><span class="review-label">CDL Back</span><span class="review-value" :class="form.cdl_back ? 'text-green' : 'text-amber'">{{ form.cdl_back ? 'Uploaded' : 'Missing' }}</span></div>
               <div class="review-item"><span class="review-label">Medical Card</span><span class="review-value" :class="form.medical_card ? 'text-green' : 'text-amber'">{{ form.medical_card ? 'Uploaded' : 'Missing' }}</span></div>
@@ -279,7 +286,10 @@ function onMapConfirm({ displayName }) {
 }
 
 const defaultForm = () => ({
-  first_name: '', last_name: '', email: '', phone: '', dob: '', address: '', ssn: '', drivers_license: '', position: '',
+  first_name: '', last_name: '', email: '', phone: '', cell: '', dob: '',
+  address: '', city: '', state: '', zip: '',
+  ssn: '', drivers_license: '', position: '',
+  dot: '', mc: '', hazmat: '',
   cdl_front: '', cdl_back: '', medical_card: '',
   experience: '', has_cdl: '', work_authorized: '', felony_convicted: '', felony_explanation: '',
   accident_history: '', accident_description: '', traffic_citations: '',
@@ -390,7 +400,7 @@ function goToStep(i) {
 
 function validate(s) {
   if (s === 0) {
-    if (!form.first_name || !form.last_name || !form.email || !form.phone || !form.dob || !form.address || !form.ssn || !form.drivers_license || !form.position) return 'Please fill in all required fields in this section.'
+    if (!form.first_name || !form.last_name || !form.email || !form.phone || !form.dob || !form.address || !form.city || !form.state || !form.zip || !form.ssn || !form.drivers_license || !form.position || !form.hazmat) return 'Please fill in all required fields in this section.'
     if (!form.cdl_front || !form.cdl_back || !form.medical_card) return 'Please upload CDL (front and back) and medical card images.'
   }
   if (s === 1) {

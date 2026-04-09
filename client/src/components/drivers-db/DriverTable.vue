@@ -57,7 +57,7 @@
         <div class="confirm-box" style="max-width:600px;max-height:85vh;overflow-y:auto;">
           <h3 style="margin-bottom:1rem;">{{ viewDrv[h.driver] }}</h3>
           <div class="view-grid">
-            <div v-for="col in headers" :key="col" class="view-row">
+            <div v-for="col in viewHeaders" :key="col" class="view-row">
               <span class="view-label">{{ col }}</span>
               <span>{{ viewDrv[col] || '\u2014' }}</span>
             </div>
@@ -231,6 +231,8 @@ const h = computed(() => {
     rating: find(/rating/i),
   }
 })
+
+const viewHeaders = computed(() => props.headers.filter(c => !/carrier/i.test(c)))
 
 const editForm = reactive({
   driver: '', carrierName: '', state: '', city: '', zip: '', address: '',

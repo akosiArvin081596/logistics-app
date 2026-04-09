@@ -335,6 +335,15 @@ try { db.exec("ALTER TABLE job_applications ADD COLUMN cdl_front TEXT DEFAULT ''
 try { db.exec("ALTER TABLE job_applications ADD COLUMN cdl_back TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE job_applications ADD COLUMN medical_card TEXT DEFAULT ''"); } catch {}
 
+// Migration: add driver directory fields to job_applications (so acceptance flows into drivers_directory)
+try { db.exec("ALTER TABLE job_applications ADD COLUMN city TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE job_applications ADD COLUMN state TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE job_applications ADD COLUMN zip TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE job_applications ADD COLUMN cell TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE job_applications ADD COLUMN dot TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE job_applications ADD COLUMN mc TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE job_applications ADD COLUMN hazmat TEXT DEFAULT ''"); } catch {}
+
 // Migration: add asset_ref to messages (for "Share Asset" in chat)
 try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } catch {}
 
@@ -1204,14 +1213,14 @@ function requireRole(...roles) {
 // ============================================================
 app.post("/api/public/apply", (req, res) => {
 	try {
-		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card } = req.body;
+		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card, city, state, zip, cell, dot, mc, hazmat } = req.body;
 		if (!full_name || !email || !phone || !dob || !address || !ssn || !drivers_license || !position || !experience || !has_cdl || !work_authorized || !felony_convicted || !accident_history || !signature) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
 		const result = db.prepare(`
-			INSERT INTO job_applications (full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`).run(full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation || '', accident_history, accident_description || '', traffic_citations || '', certifications || '', JSON.stringify(availability || []), skills, typeof reference_info === 'string' ? reference_info : JSON.stringify(reference_info || ''), additional_info || '', signature, signature_date || new Date().toLocaleDateString('en-US'), cdl_front || '', cdl_back || '', medical_card || '');
+			INSERT INTO job_applications (full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card, city, state, zip, cell, dot, mc, hazmat)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation || '', accident_history, accident_description || '', traffic_citations || '', certifications || '', JSON.stringify(availability || []), skills, typeof reference_info === 'string' ? reference_info : JSON.stringify(reference_info || ''), additional_info || '', signature, signature_date || new Date().toLocaleDateString('en-US'), cdl_front || '', cdl_back || '', medical_card || '', city || '', state || '', zip || '', cell || '', dot || '', mc || '', hazmat || '');
 		res.json({ success: true, id: result.lastInsertRowid });
 
 		// Send confirmation email to applicant (branded HTML)
@@ -1275,12 +1284,17 @@ app.post("/api/public/apply", (req, res) => {
 						<tr><td style="padding:5px 0;color:#64748b;width:140px">Name</td><td style="padding:5px 0;font-weight:600">${full_name}</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${email}">${email}</a></td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${phone}</td></tr>
+						${cell ? `<tr><td style="padding:5px 0;color:#64748b">Cell</td><td style="padding:5px 0">${cell}</td></tr>` : ''}
 						<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${position}</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Experience</td><td style="padding:5px 0">${experience} years</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">CDL</td><td style="padding:5px 0">${has_cdl}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Hazmat</td><td style="padding:5px 0">${hazmat || 'No'}</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Work Authorized</td><td style="padding:5px 0">${work_authorized}</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Felony</td><td style="padding:5px 0">${felony_convicted}</td></tr>
 						<tr><td style="padding:5px 0;color:#64748b">Address</td><td style="padding:5px 0">${address}</td></tr>
+						${(city || state || zip) ? `<tr><td style="padding:5px 0;color:#64748b">City / State / ZIP</td><td style="padding:5px 0">${[city, state].filter(Boolean).join(', ')}${zip ? ' ' + zip : ''}</td></tr>` : ''}
+						${dot ? `<tr><td style="padding:5px 0;color:#64748b">DOT #</td><td style="padding:5px 0">${dot}</td></tr>` : ''}
+						${mc ? `<tr><td style="padding:5px 0;color:#64748b">MC #</td><td style="padding:5px 0">${mc}</td></tr>` : ''}
 					</table>
 				</div>
 				<div style="text-align:center;margin:24px 0">
@@ -1481,11 +1495,18 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 		field("Full Name", app.full_name);
 		field("Email", app.email);
 		field("Phone", app.phone);
+		if (app.cell) field("Cell", app.cell);
 		field("Date of Birth", app.dob);
 		field("Address", app.address);
+		if (app.city || app.state || app.zip) {
+			field("City / State / ZIP", `${[app.city, app.state].filter(Boolean).join(", ")}${app.zip ? " " + app.zip : ""}`);
+		}
 		field("SSN", app.ssn ? "***-**-" + app.ssn.slice(-4) : "N/A");
 		field("Drivers License", app.drivers_license);
 		field("Position", app.position);
+		if (app.dot) field("DOT #", app.dot);
+		if (app.mc) field("MC #", app.mc);
+		field("Hazmat Endorsement", app.hazmat || "No");
 		doc.moveDown(0.5);
 
 		section("Experience & Qualifications");
@@ -2486,6 +2507,33 @@ async function checkAndCompleteOnboarding(userId) {
 		// Add driver to drivers_directory immediately
 		if (driverName) {
 			syncDriverToCarrierSheet(driverName, { email: driverEmail, companyName: user?.company_name || "", action: "add" });
+			// Backfill directory with application details (city/state/zip/cell/dot/mc/hazmat/address/phone)
+			if (application) {
+				try {
+					db.prepare(`UPDATE drivers_directory SET
+						phone = CASE WHEN ? != '' THEN ? ELSE phone END,
+						cell = CASE WHEN ? != '' THEN ? ELSE cell END,
+						address = CASE WHEN ? != '' THEN ? ELSE address END,
+						city = CASE WHEN ? != '' THEN ? ELSE city END,
+						state = CASE WHEN ? != '' THEN ? ELSE state END,
+						zip = CASE WHEN ? != '' THEN ? ELSE zip END,
+						dot = CASE WHEN ? != '' THEN ? ELSE dot END,
+						mc = CASE WHEN ? != '' THEN ? ELSE mc END,
+						hazmat = CASE WHEN ? != '' THEN ? ELSE hazmat END
+						WHERE LOWER(driver_name) = LOWER(?)`).run(
+						application.phone || '', application.phone || '',
+						application.cell || '', application.cell || '',
+						application.address || '', application.address || '',
+						application.city || '', application.city || '',
+						application.state || '', application.state || '',
+						application.zip || '', application.zip || '',
+						application.dot || '', application.dot || '',
+						application.mc || '', application.mc || '',
+						application.hazmat || '', application.hazmat || '',
+						driverName.trim()
+					);
+				} catch (err) { console.error("drivers_directory backfill error:", err.message); }
+			}
 		}
 
 		// Notify driver
@@ -7607,7 +7655,9 @@ app.get("/api/geocode", async (req, res) => {
 				formatted_address: r.formatted_address,
 				address_components: [
 					{ long_name: (comp.find(c => c.types.includes("locality")) || {}).long_name || "", types: ["locality"] },
+					{ long_name: (comp.find(c => c.types.includes("sublocality")) || {}).long_name || "", types: ["sublocality"] },
 					{ short_name: (comp.find(c => c.types.includes("administrative_area_level_1")) || {}).short_name || "", types: ["administrative_area_level_1"] },
+					{ long_name: (comp.find(c => c.types.includes("postal_code")) || {}).long_name || "", types: ["postal_code"] },
 				],
 			}],
 		});
