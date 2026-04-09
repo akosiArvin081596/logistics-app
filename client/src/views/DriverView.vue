@@ -87,6 +87,23 @@
 
     <!-- NORMAL DRIVER UI — shown when fully onboarded (or no onboarding record) -->
     <template v-else>
+    <!-- Welcome / Activation Modal — shown once when a driver first lands here after becoming fully onboarded -->
+    <div v-if="showWelcomeModal" class="welcome-overlay" @click.self="dismissWelcome">
+      <div class="welcome-card">
+        <div class="welcome-icon">&#127881;</div>
+        <h2 class="welcome-title">Welcome to the Team!</h2>
+        <p class="welcome-sub">Hey <b>{{ driverName }}</b> — you're now an official LogisX driver.</p>
+        <div class="welcome-checklist">
+          <div class="welcome-check"><span class="wc-icon">&#9989;</span> Onboarding documents signed</div>
+          <div class="welcome-check"><span class="wc-icon">&#9989;</span> Pre-employment drug test passed</div>
+          <div class="welcome-check"><span class="wc-icon">&#9989;</span> Added to the active fleet</div>
+        </div>
+        <p class="welcome-msg">Your account is active. You can now receive load assignments from dispatch, report your status on the road, and get paid. Drive safe out there.</p>
+        <p class="welcome-signoff">&mdash; The LogisX Team</p>
+        <button class="welcome-btn" @click="dismissWelcome">Let's Get Started</button>
+      </div>
+    </div>
+
     <!-- Load Assigned Notification -->
     <LoadAssignedBanner
       :notification="assignedNotification"
@@ -430,7 +447,37 @@ const chatLoadId = ref('')
 const showFilters = ref(false)
 const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
+const showWelcomeModal = ref(false)
 let isMounted = false
+
+// Welcome / activation modal — shows once per driver, first login after fully_onboarded
+function welcomeStorageKey() {
+  const uid = auth.user?.id || driverStore.onboarding?.user_id || 'anon'
+  return `logisx_welcome_seen_${uid}`
+}
+function maybeShowWelcome() {
+  const ob = driverStore.onboarding
+  if (!ob || ob.status !== 'fully_onboarded') return
+  if (!ob.onboarded_at) return
+  // Only celebrate if onboarding happened recently (guards against existing drivers seeing this on every new deploy)
+  const onboardedMs = new Date(ob.onboarded_at).getTime()
+  if (isNaN(onboardedMs)) return
+  const daysSince = (Date.now() - onboardedMs) / (1000 * 60 * 60 * 24)
+  if (daysSince > 14) return
+  try {
+    if (localStorage.getItem(welcomeStorageKey())) return
+  } catch { /* private mode */ }
+  showWelcomeModal.value = true
+}
+function dismissWelcome() {
+  showWelcomeModal.value = false
+  try { localStorage.setItem(welcomeStorageKey(), new Date().toISOString()) } catch { /* ignore */ }
+}
+// If a driver is on the onboarding lock screen when the admin uploads their drug test,
+// the store refreshes, isOnboarding flips to false — surface the celebration at that moment too.
+watch(isOnboarding, (v, old) => {
+  if (old === true && v === false) maybeShowWelcome()
+})
 
 const subTabs = [
   { label: 'Active', value: 'active' },
@@ -896,6 +943,7 @@ onMounted(async () => {
   driverStore.driverName = driverName.value
   try {
     await driverStore.loadData()
+    maybeShowWelcome()
   } catch {
     toast.show('Failed to load data', 'error')
   }
@@ -984,6 +1032,110 @@ onUnmounted(() => {
 .ob-next-steps ul { margin: 0.5rem 0; padding-left: 1.2rem; }
 .ob-next-steps li { margin-bottom: 0.4rem; }
 .ob-next-steps p { margin-bottom: 0.4rem; }
+
+/* Welcome / Activation Modal */
+.welcome-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.78);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+  padding: 1rem;
+  animation: welcome-fade 0.3s ease-out;
+}
+@keyframes welcome-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.welcome-card {
+  background: linear-gradient(160deg, #ffffff 0%, #f0fdf4 100%);
+  border-radius: 20px;
+  padding: 2rem 1.75rem 1.75rem;
+  max-width: 380px;
+  width: 100%;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(16, 185, 129, 0.2);
+  text-align: center;
+  animation: welcome-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes welcome-pop {
+  from { transform: scale(0.85); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+.welcome-icon {
+  font-size: 3.5rem;
+  line-height: 1;
+  margin-bottom: 0.6rem;
+}
+.welcome-title {
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: #064e3b;
+  margin: 0 0 0.5rem;
+  letter-spacing: -0.01em;
+}
+.welcome-sub {
+  font-size: 0.95rem;
+  color: #374151;
+  margin: 0 0 1.25rem;
+}
+.welcome-sub b { color: #065f46; }
+.welcome-checklist {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1rem;
+  text-align: left;
+}
+.welcome-check {
+  font-size: 0.85rem;
+  color: #065f46;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.22rem 0;
+  font-weight: 600;
+}
+.wc-icon {
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+.welcome-msg {
+  font-size: 0.85rem;
+  color: #4b5563;
+  line-height: 1.55;
+  margin: 0 0 0.4rem;
+}
+.welcome-signoff {
+  font-size: 0.8rem;
+  color: #6b7280;
+  font-style: italic;
+  margin: 0 0 1.3rem;
+}
+.welcome-btn {
+  display: block;
+  width: 100%;
+  background: linear-gradient(135deg, #059669, #10b981);
+  color: #ffffff;
+  border: none;
+  border-radius: 10px;
+  padding: 0.9rem 1.25rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.12s;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
+  font-family: inherit;
+}
+.welcome-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(16, 185, 129, 0.5);
+}
+.welcome-btn:active { transform: translateY(0); }
 
 /* Distance Warning Banner */
 .distance-warning {
