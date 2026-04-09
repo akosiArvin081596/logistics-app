@@ -152,7 +152,16 @@
                 <div class="detail-item"><span class="detail-label">Bank Name</span><span class="detail-value">{{ detail.banking.bank_name }}</span></div>
                 <div v-if="detail.banking.account_type" class="detail-item"><span class="detail-label">Account Type</span><span class="detail-value">{{ detail.banking.account_type }}</span></div>
                 <div class="detail-item"><span class="detail-label">Routing Number</span><span class="detail-value">{{ detail.banking.routing_number }}</span></div>
-                <div class="detail-item"><span class="detail-label">Account Number</span><span class="detail-value">{{ '••••' + (detail.banking.account_number || '').slice(-4) }}</span></div>
+                <div class="detail-item">
+                  <span class="detail-label">Account Number</span>
+                  <span class="detail-value" style="display:inline-flex;align-items:center;gap:0.4rem">
+                    {{ showAcctNum ? detail.banking.account_number : '••••' + (detail.banking.account_number || '').slice(-4) }}
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="cursor:pointer;color:#94a3b8;flex-shrink:0" @click="showAcctNum = !showAcctNum">
+                      <path v-if="!showAcctNum" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle v-if="!showAcctNum" cx="12" cy="12" r="3"/>
+                      <path v-if="showAcctNum" d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line v-if="showAcctNum" x1="1" y1="1" x2="23" y2="23"/>
+                    </svg>
+                  </span>
+                </div>
               </div>
             </div>
             <!-- No application linked -->
@@ -184,6 +193,7 @@ const showConfirm = ref(false)
 const pendingInv = ref(null)
 const showEdit = ref(false)
 const showDetail = ref(false)
+const showAcctNum = ref(false)
 const detailLoading = ref(false)
 const detail = reactive({ application: null, vehicles: [], banking: {}, documents: [] })
 
