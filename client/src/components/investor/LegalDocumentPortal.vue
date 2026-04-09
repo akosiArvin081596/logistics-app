@@ -6,10 +6,10 @@
       <span class="doc-count" v-if="docs.length > 0">{{ docs.length }}</span>
     </div>
 
-    <!-- Upload (Super Admin only) -->
-    <div v-if="isSuperAdmin" class="upload-row">
-      <select v-if="!truckId && trucks.length > 0" v-model="uploadForm.selectedTruckId" class="doc-select">
-        <option :value="null">-- Select Truck --</option>
+    <!-- Upload (Super Admin + Investor) -->
+    <div class="upload-row">
+      <select v-if="isSuperAdmin && !truckId && trucks.length > 0" v-model="uploadForm.selectedTruckId" class="doc-select">
+        <option :value="null">-- Profile Level --</option>
         <option v-for="t in trucks" :key="t.id" :value="t.id">{{ t.UnitNumber }}</option>
       </select>
       <select v-model="uploadForm.docType" class="doc-select">
@@ -21,10 +21,9 @@
         {{ uploadForm.file ? uploadForm.file.name : 'Choose File' }}
         <input type="file" style="display:none" @change="onFileChange" />
       </label>
-      <button class="btn-upload" :disabled="!uploadForm.file || !uploadForm.docType || uploading || (!truckId && !uploadForm.selectedTruckId)" @click="upload" :title="!uploadForm.docType ? 'Please select a doc type first' : !uploadForm.file ? 'Please choose a file first' : ''">
+      <button class="btn-upload" :disabled="!uploadForm.file || !uploadForm.docType || uploading" @click="upload">
         {{ uploading ? 'Uploading...' : 'Upload' }}
       </button>
-      <span v-if="uploadForm.file && !uploadForm.docType" class="upload-hint">Select a doc type to upload</span>
     </div>
 
     <!-- Signed Onboarding Documents -->
@@ -64,7 +63,7 @@
           <td class="by-col">{{ doc.uploaded_by }}</td>
           <td>
             <a :href="doc.file_url" target="_blank" rel="noopener" class="btn-view">View</a>
-            <button v-if="isSuperAdmin" class="btn-del" @click="remove(doc)">&#x2715;</button>
+            <button v-if="isSuperAdmin || doc.uploaded_by === auth.user?.username" class="btn-del" @click="remove(doc)">&#x2715;</button>
           </td>
         </tr>
       </tbody>
@@ -92,7 +91,8 @@ const isSuperAdmin = computed(() => auth.user?.role === 'Super Admin')
 
 const docTypes = [
   'Title', 'Registration', 'Insurance Certificate', 'Lease Agreement',
-  'Bill of Sale', 'Inspection Report', 'IFTA License', 'Maintenance Records', 'Other',
+  'Bill of Sale', 'Inspection Report', 'IFTA License', 'Maintenance Records',
+  'Photo', 'Contract', 'Tax Document', 'Compliance', 'Other',
 ]
 
 const docs = ref([])

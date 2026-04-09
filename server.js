@@ -572,6 +572,9 @@ db.exec(`
 	)
 `);
 
+// Migration: add investor_id to legal_documents for profile-level docs
+try { db.exec("ALTER TABLE legal_documents ADD COLUMN investor_id INTEGER DEFAULT 0"); } catch {}
+
 // Migration: messages attachment columns
 try { db.prepare("SELECT attachment_url FROM messages LIMIT 1").get(); }
 catch {
@@ -6064,13 +6067,23 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ORDER BY ld.uploaded_at DESC`).all();
 			}
 		} else {
+			const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(user.id);
+			const invId = inv ? inv.id : 0;
 			const owned = db.prepare("SELECT id FROM trucks WHERE owner_id = ?").all(user.id).map(t => t.id);
-			if (owned.length === 0) return res.json({ documents: [] });
-			const ph = owned.map(() => '?').join(',');
-			const baseQ = `SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE ld.truck_id IN (${ph})`;
-			docs = truckId && owned.includes(truckId)
-				? db.prepare(baseQ + ' AND ld.truck_id = ? ORDER BY ld.uploaded_at DESC').all(...owned, truckId)
-				: db.prepare(baseQ + ' ORDER BY ld.uploaded_at DESC').all(...owned);
+			if (owned.length === 0 && !invId) return res.json({ documents: [] });
+			// Get truck docs + investor-profile docs
+			const conditions = [];
+			const params = [];
+			if (owned.length > 0) {
+				conditions.push(`ld.truck_id IN (${owned.map(() => '?').join(',')})`);
+				params.push(...owned);
+			}
+			if (invId) {
+				conditions.push(`ld.investor_id = ?`);
+				params.push(invId);
+			}
+			const where = conditions.length > 0 ? `WHERE (${conditions.join(' OR ')})` : '';
+			docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ${where} ORDER BY ld.uploaded_at DESC`).all(...params);
 		}
 		res.json({ documents: docs });
 	} catch (err) {
@@ -6079,12 +6092,12 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 	}
 });
 
-// POST /api/legal-documents/upload — Super Admin uploads a legal doc per truck
-app.post("/api/legal-documents/upload", requireRole("Super Admin"), async (req, res) => {
+// POST /api/legal-documents/upload — Super Admin or Investor uploads a legal doc
+app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
-		const { truckId, unitNumber, docType, fileData, fileName, notes } = req.body;
-		if (!truckId || !fileData || !fileName) {
-			return res.status(400).json({ error: "truckId, fileData, and fileName are required" });
+		const { truckId, unitNumber, docType, fileData, fileName, notes, investorId } = req.body;
+		if (!fileData || !fileName) {
+			return res.status(400).json({ error: "fileData and fileName are required" });
 		}
 		if (fileData.length > 13_500_000) {
 			return res.status(400).json({ error: "File too large (max 10MB)" });
@@ -6098,9 +6111,15 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin"), async (req, 
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
 		require("fs").writeFileSync(require("path").join(legalDir, safeName), Buffer.from(base64, "base64"));
 		const fileUrl = `/uploads/legal/${safeName}`;
+		// Determine investor_id: from request body or from session (if Investor role)
+		let invId = parseInt(investorId) || 0;
+		if (req.session.user.role === "Investor" && !invId) {
+			const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(req.session.user.id);
+			if (inv) invId = inv.id;
+		}
 		const result = db.prepare(
-			`INSERT INTO legal_documents (truck_id, unit_number, doc_type, file_name, file_url, notes, uploaded_by) VALUES (?,?,?,?,?,?,?)`
-		).run(parseInt(truckId), unitNumber || '', safeType, fileName, fileUrl, notes || '', req.session.user.username);
+			`INSERT INTO legal_documents (truck_id, unit_number, doc_type, file_name, file_url, notes, uploaded_by, investor_id) VALUES (?,?,?,?,?,?,?,?)`
+		).run(parseInt(truckId) || 0, unitNumber || '', safeType, fileName, fileUrl, notes || '', req.session.user.username, invId);
 		res.json({ success: true, id: result.lastInsertRowid, fileUrl });
 	} catch (err) {
 		console.error("Legal doc upload error:", err.message);
@@ -6108,8 +6127,8 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin"), async (req, 
 	}
 });
 
-// DELETE /api/legal-documents/:id — Super Admin removes a legal doc
-app.delete("/api/legal-documents/:id", requireRole("Super Admin"), (req, res) => {
+// DELETE /api/legal-documents/:id — Super Admin or owner removes a legal doc
+app.delete("/api/legal-documents/:id", requireRole("Super Admin", "Investor"), (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
 		const doc = db.prepare("SELECT * FROM legal_documents WHERE id = ?").get(id);
