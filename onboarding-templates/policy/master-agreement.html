@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Master Participation &amp; Management Agreement — LogisX Inc.</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,600;0,700;1,400;1,700&display=swap" rel="stylesheet">
+  <style>
+    @page { size: letter; margin: 1in; }
+
+    :root { --ink:#000; --rule:#ccc; --paper:#fff; --bg:#f5f5f5; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin:0; padding:0; background:var(--bg); }
+
+    body {
+      font-family: 'Open Sans', Arial, sans-serif;
+      color: var(--ink);
+      font-size: 14.5px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .document {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 80px 76px 96px;
+      background: var(--paper);
+      box-shadow: 0 2px 14px rgba(0,0,0,.08);
+    }
+
+    /* Title — uppercase, regular weight, centered */
+    .doc-title {
+      font-size: 15px;
+      font-weight: 400;
+      text-align: center;
+      letter-spacing: 0.3px;
+      margin: 0 0 22px;
+    }
+
+    h2 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 28px 0 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.1px;
+    }
+
+    /* Article header — bold, uppercase like PDF */
+    .article-header {
+      font-size: 15px;
+      font-weight: 700;
+      text-transform: uppercase;
+      margin: 32px 0 14px;
+    }
+
+    /* Numbered section (2.1, 3.2, etc.) */
+    .section-title {
+      font-weight: 700;
+      display: inline;
+    }
+
+    p { margin: 0 0 14px; }
+
+    ul {
+      padding-left: 26px;
+      margin: 0 0 14px;
+    }
+    li { margin-bottom: 10px; }
+    strong { font-weight: 700; }
+
+    hr {
+      border: 0;
+      border-top: 1px solid var(--rule);
+      margin: 28px 0 22px;
+    }
+
+    /* DEFINITIONS — bold quoted term + body */
+    .def-block { margin-bottom: 14px; }
+    .def-block .def-term { font-weight: 700; }
+    .def-subs { margin: 8px 0 0 24px; }
+    .def-sub { margin-bottom: 8px; }
+    .def-sub .sub-term { font-weight: 700; display: inline; }
+
+    /* Fillable blanks */
+    .blank {
+      display: inline-block;
+      border: 0;
+      border-bottom: 1px solid var(--ink);
+      background: transparent;
+      font: inherit;
+      color: inherit;
+      outline: none;
+      padding: 0 4px;
+      vertical-align: baseline;
+      border-radius: 0;
+    }
+    .blank:focus { border-bottom-width: 2px; }
+    .blank-xs  { width:  90px; }
+    .blank-sm  { width: 160px; }
+    .blank-md  { width: 240px; }
+    .blank-lg  { width: 340px; }
+    .blank-xl  { width: 420px; }
+
+    /* Signature execution box */
+    .sig-box {
+      border: 1px solid var(--ink);
+      padding: 22px 26px;
+      margin: 28px 0;
+    }
+    .sig-box h3 {
+      font-size: 14px;
+      font-weight: 700;
+      margin: 0 0 18px;
+      text-transform: uppercase;
+    }
+    .sig-party { margin-bottom: 26px; }
+    .sig-party:last-child { margin-bottom: 0; }
+    .sig-party .party-name { font-weight: 700; margin-bottom: 12px; }
+    .sig-row {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .sig-group {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: nowrap;
+    }
+    .sig-group.grow { flex: 1 1 0; min-width: 0; }
+    .sig-group.grow .blank { flex: 1 1 0; width: auto; min-width: 0; }
+    .sig-group.fixed { flex: 0 0 auto; }
+    .sig-group .label { font-weight: 700; white-space: nowrap; }
+
+    /* Exhibit/Schedule section table */
+    .vehicle-id-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 14px;
+    }
+    .vehicle-id-table th, .vehicle-id-table td {
+      border: 1px solid var(--ink);
+      padding: 10px 12px;
+      text-align: left;
+    }
+    .vehicle-id-table th { font-weight: 700; }
+    .vehicle-id-table td input[type="text"] { width: 100%; }
+
+    /* Checkbox items in exhibits */
+    .check-item {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .check-item input[type="checkbox"] {
+      width: 13px;
+      height: 13px;
+      margin: 0;
+      flex-shrink: 0;
+      accent-color: #000;
+    }
+
+    /* DEV NOTE styled box */
+    .dev-note {
+      border-left: 3px solid #888;
+      padding: 10px 14px;
+      background: #f9f9f9;
+      margin-top: 20px;
+    }
+    .dev-note h3 { font-size: 14px; font-weight: 700; margin: 0 0 8px; }
+
+    .page-break { page-break-before: always; }
+
+    @media print {
+      html,body { background:#fff; }
+      .document { box-shadow:none; margin:0; padding:0; max-width:none; }
+      .blank { border-bottom: 1px solid #000; }
+      .dev-note { display: none; }
+    }
+  </style>
+</head>
+<body>
+<main class="document">
+
+  <p class="doc-title">MASTER PARTICIPATION &amp; MANAGEMENT AGREEMENT</p>
+
+  <p>THIS MASTER PARTICIPATION &amp; MANAGEMENT AGREEMENT (the "Agreement") is entered into and made effective as of the date of the final signature below (the "Effective Date"), by and between LogisX Inc., a Texas corporation, having its principal place of business at 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 (the "Manager"), and the individual or entity identified on the signature page of this Agreement (the "Participant").</p>
+
+  <h2>RECITALS</h2>
+  <ul>
+    <li><strong>Managerial Authority and Regulatory Status:</strong> The Manager is a professional logistics and motor carrier entity, maintaining all requisite federal and state regulatory authorizations, including USDOT# 4302683, and possesses the operational infrastructure and administrative capacity to manage commercial freight operations in strict accordance with Federal Motor Carrier Safety Regulations (FMCSR) and applicable Texas statutes.</li>
+    <li><strong>Operational and Technical Oversight:</strong> The Manager provides comprehensive fleet management services, including the utilization of third-party electronic logging devices (ELD), real-time telemetry, and data-driven route optimization software to oversee the operational lifecycle and safety compliance of the Asset.</li>
+    <li><strong>Asset Contribution for Managed Services:</strong> The Participant is the legal and beneficial owner of the heavy-duty commercial transportation equipment (the "Asset"), as specifically described by Vehicle Identification Number (VIN) and specification in Exhibit A, and desires to entrust the exclusive operational management and deployment of said Asset to the Manager.</li>
+    <li><strong>Variable-Yield Production Model:</strong> The Parties expressly acknowledge and agree that this Agreement is predicated on a Variable-Yield Production Model, wherein the Participant's financial return is derived solely from the active and successful revenue generation produced by the Asset.</li>
+    <li><strong>Absence of Guaranteed Yield or Debt Service:</strong> The Manager assumes no obligation for fixed monthly disbursements, guaranteed minimum returns, or debt service payments; no yield shall accrue, nor shall any payment be owed, during periods in which the Asset is non-operational due to mechanical failure, required maintenance, market volatility, or the unavailability of qualified labor.</li>
+    <li><strong>Governing Law and Commercial Bailment:</strong> This Agreement is intended to be governed by the laws of the State of Texas, specifically regarding the principles of commercial bailment, management services, and independent contractor relationships.</li>
+    <li><strong>Sophisticated Party Intent:</strong> The Parties enter into this Agreement as sophisticated business entities seeking a mutually beneficial management arrangement based strictly on the professional utilization and performance of the Asset.</li>
+  </ul>
+
+  <p class="article-header">ARTICLE 1: DEFINITIONS</p>
+  <p>The following terms, when used in this Agreement, shall have the meanings set forth below:</p>
+
+  <div class="def-block">
+    <span class="def-term">"The Asset"</span>: Refers to the specific heavy-duty commercial transportation equipment, including any tractor(s) or power unit(s), owned by the Participant and identified by Vehicle Identification Number (VIN) and technical specifications in <strong>Exhibit A</strong>.
+  </div>
+
+  <div class="def-block">
+    <span class="def-term">"Gross Revenue"</span>: The total monetary compensation received by the Manager from shippers, brokers, or third-party logistics providers for the transportation of freight specifically attributed to the operation of the Asset.
+  </div>
+
+  <div class="def-block">
+    <span class="def-term">"Priority Expenses"</span>: The direct operational costs associated with the Asset's production which must be satisfied prior to any profit distribution. These include:
+    <div class="def-subs">
+      <div class="def-sub"><span class="sub-term">Contracted Labor</span>: A flat-rate daily driver compensation fee of <strong>$250.00</strong> per completed 14-hour duty cycle.</div>
+      <div class="def-sub"><span class="sub-term">Operating Supplies</span>: All variable fuel and diesel exhaust fluid (DEF) costs incurred during dispatched miles.</div>
+      <div class="def-sub"><span class="sub-term">Fixed Insurance Overhead</span>: Pro-rated monthly premiums for Commercial Auto Liability, Cargo, and Physical Damage insurance.</div>
+      <div class="def-sub"><span class="sub-term">Regulatory and Compliance Fees</span>: Monthly subscription costs for Electronic Logging Devices (ELD), telemetry services, and pro-rated Federal Heavy Vehicle Use Tax (Form 2290).</div>
+    </div>
+  </div>
+
+  <div class="def-block">
+    <span class="def-term">"Net Operating Income (NOI)"</span>: The residual funds remaining after all Priority Expenses and Maintenance Reserve deductions have been subtracted from the Gross Revenue.
+  </div>
+
+  <div class="def-block">
+    <span class="def-term">"Maintenance Reserve"</span>: A recurring monthly capital allocation, as specified in the Fee Schedule, held by the Manager to fund the ongoing operational readiness of the Asset. This reserve is utilized for preventative maintenance, tires, glass, and minor mechanical repairs required to keep the Asset in a "Fit for Service" status.
+  </div>
+
+  <div class="def-block">
+    <span class="def-term">"Settlement Period"</span>: The defined accounting and disbursement window, adhering to a <strong>"Net-60"</strong> cycle. Under this schedule, Gross Revenue generated in a specific calendar month is reconciled and settled on the last Friday of the following calendar month to account for standard industry accounts receivable aging.
+  </div>
+
+  <div class="def-block">
+    <span class="def-term">"Variable-Yield Participation"</span>: The performance-based compensation model wherein the Participant and Manager split the NOI in accordance with the percentages defined in Article 3.
+  </div>
+
+  <div class="def-block">
+    <span class="def-term">"Operational Downtime"</span>: Any period during which the Asset is not actively generating revenue due to mechanical failure, driver unavailability, required inspections, or lack of freight volume.
+  </div>
+
+  <p class="article-header">ARTICLE 2: SCOPE OF RELATIONSHIP</p>
+
+  <p><span class="section-title">2.1 Nature of the Relationship.</span> This Agreement establishes a business-to-business (B2B) management services relationship between the Manager and the Participant. The Participant enters this Agreement as an independent asset owner and not as an employee, partner, or joint venturer of the Manager. The Participant shall remain solely responsible for all federal, state, and local tax liabilities arising from their share of the Net Operating Income (NOI), for which the Manager will issue an Internal Revenue Service (IRS) Form 1099 annually.</p>
+
+  <p><span class="section-title">2.2 Asset Ownership and Bailment.</span> Legal title and beneficial ownership of the Asset shall remain exclusively with the Participant at all times. This Agreement constitutes an asset-only contribution for the exclusive operational use of the Manager's fleet. Possession of the Asset by the Manager is for the limited purpose of commercial freight management under the principles of a commercial bailment for mutual benefit.</p>
+
+  <p><span class="section-title">2.3 Grant of Exclusive Operational Control.</span> The Participant hereby grants the Manager absolute and irrevocable authority to manage, dispatch, and operate the Asset for the duration of the Term. This grant of authority includes, but is not limited to:</p>
+  <ul>
+    <li><strong>Driver Management:</strong> The Manager maintains the sole and exclusive right to recruit, screen, qualify, and assign drivers to the Asset under the Manager's <strong>USDOT# 4302683</strong>.</li>
+    <li><strong>Freight and Lane Optimization:</strong> The Manager shall have full autonomy in the selection of all freight, shipping lanes, and customers, utilizing the Manager's proprietary route optimization software and technology stack to maximize Asset utilization.</li>
+    <li><strong>Regulatory Compliance Oversight:</strong> The Manager shall oversee all safety and compliance requirements in accordance with the Federal Motor Carrier Safety Administration (FMCSA).</li>
+  </ul>
+
+  <p><span class="section-title">2.4 Limited Power of Attorney.</span> To facilitate the seamless integration of the Asset into the Manager's commercial fleet, the Participant hereby appoints the Manager as its <strong>Attorney-in-Fact</strong>. This limited power of attorney specifically empowers the Manager to perform the following acts on behalf of the Participant:</p>
+  <ul>
+    <li><strong>Registration and Licensing:</strong> Apply for and obtain International Registration Plan (IRP) apportioned plates and cab cards.</li>
+    <li><strong>Tax Filings:</strong> Execute and file International Fuel Tax Agreement (IFTA) returns and IRS Form 2290 (Heavy Highway Vehicle Use Tax).</li>
+    <li><strong>Permitting:</strong> Secure all necessary state and federal permits required for the legal operation of the Asset in interstate commerce.</li>
+  </ul>
+
+  <p><span class="section-title">2.5 Launch Capital and Regulatory Costs.</span> The Manager is expressly authorized to pre-fund and subsequently deduct all initial costs associated with the procurement of base plates, apportioned registration, regulatory permits, and mandatory inspections from the Asset's Gross Revenue. These costs shall be categorized as "Fixed Overhead" or "Launch Capital" and shall be reconciled during the initial Settlement Periods.</p>
+
+  <p class="article-header" style="text-transform:none; font-size:15px;">2.6: LIMITED LICENSE TO TECHNOLOGY STACK</p>
+
+  <p><span class="section-title">2.6.1 Grant of Non-Exclusive License.</span> For the duration of the Term, the Manager hereby grants to the Participant a limited, non-exclusive, non-transferable, and <strong>royalty-free license</strong> to utilize the Manager's proprietary technology stack. This includes access to real-time telemetry, electronic logging device (ELD) interfaces, and data-driven route optimization reports solely for the purpose of monitoring the performance and production of the Asset.</p>
+
+  <p><span class="section-title">2.6.2 Intellectual Property Ownership.</span> The Participant expressly acknowledges and agrees that the Manager (or its third-party providers) retains all right, title, and interest in and to the technology stack, including all software, algorithms, data structures, and proprietary "LogisX" interfaces. This Agreement does not constitute a sale of software or a transfer of any intellectual property rights to the Participant.</p>
+
+  <p><span class="section-title">2.6.3 Prohibited Use.</span> The Participant shall not, and shall not permit any third party to:</p>
+  <ul>
+    <li>Reverse engineer, decompile, or attempt to derive the source code of the Manager's technology;</li>
+    <li>Utilize the Manager's route optimization data for any equipment not covered under this Agreement;</li>
+    <li>Sublicense or "white-label" the technology for use in external logistics operations.</li>
+  </ul>
+
+  <p><span class="section-title">2.6.4 Termination of Access.</span> Upon the termination of this Agreement for any reason, the Participant's license to the technology stack shall immediately cease. The Participant shall immediately return or delete any proprietary software or access credentials provided by the Manager.</p>
+
+  <p class="article-header">ARTICLE 3: SETTLEMENT AND DISBURSEMENTS</p>
+
+  <p><span class="section-title">3.1 Performance-Based Contingency.</span> The Participant expressly acknowledges and agrees that all disbursements under this Agreement are strictly contingent upon the active operational status and revenue-generating performance of the Asset. No "debt service," guaranteed yield, or interest shall accrue or be owed to the Participant during periods of <strong>Operational Downtime</strong>, including but not limited to mechanical failure, scheduled or unscheduled maintenance, driver unavailability, or adverse market conditions.</p>
+
+  <p><span class="section-title">3.2 Priority of Payments (The "Waterfall").</span> To determine the Net Operating Income (NOI) available for distribution, the Manager shall apply a strict priority of payments to the Gross Revenue. The following <strong>Priority Expenses</strong> shall be deducted in full before any profit participation is calculated:</p>
+  <ul>
+    <li><strong>Direct Operational Labor:</strong> A fixed daily driver compensation rate of <strong>$250.00</strong> per 14-hour duty cycle.</li>
+    <li><strong>Variable Operating Supplies:</strong> All actual costs for fuel and diesel exhaust fluid (DEF) utilized during dispatched operations.</li>
+    <li><strong>Fixed Operational Overhead:</strong> Pro-rated monthly allocations for commercial insurance (Liability, Cargo, and Physical Damage), ELD compliance subscriptions, and proprietary software licensing.</li>
+    <li><strong>Mandatory Reserves:</strong> A non-refundable monthly <strong>Maintenance Reserve of $800.00</strong> to ensure the Asset's ongoing "Fit for Service" status, and a <strong>$300.00 Contingency Buffer</strong> to protect against unexpected operational liabilities.</li>
+    <li><strong>Regulatory Compliance:</strong> Pro-rated assessments for Federal Highway Use Tax (<strong>IRS Form 2290</strong>), IRP apportioned registration, and required state permitting.</li>
+  </ul>
+
+  <p><span class="section-title">3.3 Revenue Participation and Method of Payment.</span> Upon the final determination of the monthly NOI, the remaining funds shall be distributed according to a <strong>50/50 split</strong>:</p>
+  <ul>
+    <li><strong>Participant Distribution (50%):</strong> Remitted to the Participant as a professional return on the contributed Asset.</li>
+    <li><strong>Managerial Distribution (50%):</strong> Retained by the Manager as compensation for comprehensive fleet administration, scaling, and logistics management.</li>
+    <li><strong>Payment Execution (Schedule A):</strong> All disbursements shall be issued to the Participant via the electronic payment method and banking instructions designated in the attached <strong>Schedule A (Payment &amp; Banking Election Form)</strong>. The Participant is responsible for maintaining the accuracy of the information in <strong>Schedule A</strong> to avoid processing delays.</li>
+  </ul>
+
+  <p><span class="section-title">3.4 Settlement Cycle (Net-60).</span> Reconciliation and disbursements shall adhere to a <strong>"Net-60"</strong> accounting window to accommodate standard industry receivable aging and the verification of all operational debits. Revenue generated within a specific calendar month shall be settled and paid on the <strong>last Friday of the subsequent calendar month</strong> (e.g., January production is settled and paid on the last Friday of February).</p>
+
+  <p><span class="section-title">3.5 Transparency and Reporting ("Birth-to-Death" Log).</span> To provide the Participant with full operational visibility, each disbursement shall be accompanied by an itemized <strong>Monthly Settlement Statement</strong>. This statement shall provide a comprehensive "birth-to-death" financial log, including:</p>
+  <ul>
+    <li>Total Gross Revenue per individual load.</li>
+    <li>An itemized breakdown of all Priority Expenses and Reserve allocations.</li>
+    <li>Verification of active duty cycles and ELD-supported production data.</li>
+  </ul>
+
+  <p><span class="section-title">3.6 Finality of Settlement.</span> The Participant shall have <strong>forty-five (45) days</strong> from the date of the Settlement Statement to notify the Manager in writing of any discrepancies. Failure to provide written notice within this window shall constitute an absolute waiver of any claims regarding the accuracy of that specific Settlement Period.</p>
+
+  <p class="article-header">ARTICLE 4: TERM, RENEWAL, AND EXIT STRATEGY</p>
+
+  <p><span class="section-title">4.01 Initial Term and Commencement.</span> This Agreement shall commence on the Effective Date and shall remain in full force and effect for an initial period of <strong>one (1) year</strong> (the "Initial Term").</p>
+
+  <p><span class="section-title">4.02 Automatic Successive Renewal.</span> Upon the expiration of the Initial Term, this Agreement shall automatically renew for successive <strong>one (1) year</strong> periods (each a "Renewal Term") unless either Party provides formal written notice of non-renewal to the other Party at least <strong>thirty (30) days</strong> prior to the expiration of the then-current term.</p>
+
+  <p><span class="section-title">4.03 Termination for Convenience.</span> Either Party may terminate this Agreement without cause or penalty by providing <strong>thirty (30) days'</strong> prior written notice to the other Party. In the event of such termination:</p>
+  <ul>
+    <li>The Participant remains entitled to their designated share of Net Operating Income (NOI) generated up to the physical date the Asset is officially decommissioned from the Manager's fleet.</li>
+    <li>All final disbursements remain subject to the <strong>Net-60</strong> settlement cycle to ensure all trailing operational expenses, tolling, and regulatory chargebacks are reconciled.</li>
+    <li>The Participant shall cooperate fully with the Manager to ensure the timely removal of all Company-provided placards, ELD hardware, and regulatory decals.</li>
+  </ul>
+
+  <p><span class="section-title">4.04 Termination for Material Breach or Safety Deficit.</span> The Manager reserves the right to terminate this Agreement immediately upon written notice under the following conditions:</p>
+  <ul>
+    <li><strong>Mechanical Instability:</strong> The Asset is deemed mechanically unsound, unsafe, or fails to meet <strong>Texas Department of Public Safety (DPS)</strong> or <strong>FMCSR</strong> roadworthiness standards.</li>
+    <li><strong>Regulatory/Insurance Failure:</strong> The Asset becomes uninsurable at standard market rates or loses its apportioned registration status.</li>
+    <li><strong>Operational Interference:</strong> The Participant, or its agents, interferes with the <strong>Exclusive Operational Control</strong> of the Manager, including unauthorized communication with assigned drivers or attempts to influence dispatch and routing.</li>
+    <li><strong>Abandonment:</strong> Any attempt by the Participant to physically reclaim the Asset while under an active freight dispatch.</li>
+  </ul>
+
+  <p><span class="section-title">4.05 Post-Termination Obligations.</span> Termination of this Agreement shall not release either Party from any liability which at the time of termination has already accrued, or which thereafter may accrue in respect to any act or omission prior to termination.</p>
+
+  <p class="article-header">ARTICLE 5: LIABILITY, INSURANCE, AND RISK OF LOSS</p>
+
+  <p><span class="section-title">5.01 Primary Operational Insurance.</span> During the term of active dispatch, the Manager shall procure and maintain, as a Priority Expense, Commercial Automobile Liability and Cargo Insurance in such amounts as are required by the Federal Motor Carrier Safety Administration (FMCSA) and the Texas Department of Transportation (TxDOT). The Manager's obligation to provide such coverage is strictly limited to periods when the Asset is being operated in the furtherance of the Manager's business under USDOT# 4302683.</p>
+
+  <p><span class="section-title">5.02 Participant's Insurance Obligations.</span> The Participant shall, at its sole cost and expense, maintain Physical Damage Insurance (Comprehensive and Collision) covering the Asset for its full insurable value.</p>
+  <ul>
+    <li><strong>Non-Trucking Liability:</strong> The Participant is further responsible for maintaining Non-Trucking Liability (Bobtail) insurance for all periods during which the Asset is not under active dispatch by the Manager.</li>
+    <li><strong>Proof of Coverage:</strong> The Participant shall provide the Manager with Certificates of Insurance naming LogisX Inc. as an Additional Insured and Loss Payee, as applicable, providing at least thirty (30) days' notice of cancellation.</li>
+  </ul>
+
+  <p><span class="section-title">5.03 Limitation of Managerial Liability.</span> The Participant expressly acknowledges and agrees that the Manager shall not be liable, financially or otherwise, for:</p>
+  <ul>
+    <li><strong>Asset Depreciation:</strong> Any reduction in the market value of the Asset resulting from high-mileage utilization or market fluctuations.</li>
+    <li><strong>Mechanical Wear and Tear:</strong> Component failures, engine degradation, or repairs resulting from standard operational use.</li>
+    <li><strong>Uncovered Losses:</strong> Any loss or damage to the Asset that is not expressly covered by the Manager's primary liability policy, including but not limited to acts of God or mechanical "breakdown".</li>
+  </ul>
+
+  <p><span class="section-title">5.04 Indemnification by Participant.</span> The Participant agrees to indemnify, defend, and hold harmless LogisX Inc., its officers, and directors from and against any and all claims, damages, or legal expenses arising from:</p>
+  <ul>
+    <li><strong>Title and Liens:</strong> The Participant's failure to maintain clear legal title or satisfy any underlying debt service or liens associated with the Asset.</li>
+    <li><strong>Pre-existing Defects:</strong> Latent or patent mechanical defects existing at the time of the Asset's contribution to the fleet.</li>
+    <li><strong>Participant Negligence:</strong> Any acts or omissions by the Participant or its agents that jeopardize the Manager's regulatory standing or safety rating.</li>
+  </ul>
+
+  <p><span class="section-title">5.05 Deductible Responsibility.</span> In the event of a covered loss under the Manager's insurance policies, the Participant shall be responsible for the payment of any applicable deductibles, which shall be treated as a Priority Expense and deducted from the Net Operating Income (NOI) or the Maintenance Reserve.</p>
+
+  <p class="article-header">ARTICLE 6: FORCE MAJEURE AND OPERATIONAL DISRUPTION</p>
+
+  <p><span class="section-title">6.01 Definition of Force Majeure.</span> Neither Party shall be liable for any delay or failure to perform its obligations under this Agreement (excluding the Participant's obligation to maintain Physical Damage Insurance or the Manager's obligation to remit settled NOI) if such delay or failure is caused by a Force Majeure Event. A Force Majeure Event refers to any cause beyond the reasonable control of the affected Party, including, but not limited to:</p>
+  <ul>
+    <li>Acts of God, flood, fire, earthquake, or explosion;</li>
+    <li>War, invasion, hostilities (whether war is declared or not), terrorist threats, or acts;</li>
+    <li>Government-mandated lockdowns, national or regional emergencies, or pandemics;</li>
+    <li>Strikes, labor stoppages, or slowdowns; and</li>
+    <li>Material disruptions to national fuel supplies or the interstate highway system.</li>
+  </ul>
+
+  <p><span class="section-title">6.02 Notice of Delay.</span> The Party whose performance is affected by a Force Majeure Event shall give written notice to the other Party within five (5) business days of the commencement of the event, stating the period of time the occurrence is expected to continue and the specific obligations affected.</p>
+
+  <p><span class="section-title">6.03 Market-Driven Suspension.</span> In addition to the above, the Parties acknowledge that the commercial transportation industry is subject to extreme volatility in fuel prices and freight market spot rates. The Manager reserves the right to temporarily suspend operations (Grounding) of the Asset if current market conditions render the continued operation of the Asset mathematically non-profitable for the fleet. During such a suspension, no Priority Expenses (excluding Fixed Overhead) shall accrue, and no "debt service" or participation yield shall be owed to the Participant.</p>
+
+  <p><span class="section-title">6.04 Termination During Force Majeure.</span> If a Force Majeure Event or Market-Driven Suspension continues for a period of more than sixty (60) consecutive days, either Party may terminate this Agreement upon written notice, subject to the final reconciliation and settlement of any outstanding NOI.</p>
+
+  <p class="article-header">ARTICLE 7: GOVERNING LAW, DISPUTE RESOLUTION, AND MISCELLANEOUS PROVISIONS</p>
+
+  <p><span class="section-title">7.01 Governing Law.</span> This Agreement, and all claims or causes of action (whether in contract, tort, or statute) that may be based upon, arise out of, or relate to this Agreement, shall be governed by, and enforced in accordance with, the internal laws of the <strong>State of Texas</strong>, including its statutes of limitations, without regard to any borrowing statute or conflict of laws principles that would result in the application of the laws of a different jurisdiction.</p>
+
+  <p><span class="section-title">7.02 Mandatory Binding Arbitration.</span> Any dispute, controversy, or claim arising out of or relating to this Agreement, or the breach, termination, or invalidity thereof, shall be settled by <strong>final and binding arbitration</strong> administered by the American Arbitration Association (AAA) in accordance with its Commercial Arbitration Rules.</p>
+  <ul>
+    <li><strong>Venue:</strong> The place of arbitration shall be <strong>Montgomery County, Texas</strong>.</li>
+    <li><strong>Authority:</strong> The arbitrator shall have the power to rule on his or her own jurisdiction, including any objections with respect to the existence, scope, or validity of the arbitration agreement or to the arbitrability of any claim or counterclaim.</li>
+    <li><strong>Judgment:</strong> The award rendered by the arbitrator shall be final, and judgment may be entered upon it in any court having jurisdiction thereof.</li>
+  </ul>
+
+  <p><span class="section-title">7.03 Waiver of Jury Trial and Class Actions.</span> <strong>THE PARTIES HEREBY IRREVOCABLY WAIVE, TO THE FULLEST EXTENT PERMITTED BY APPLICABLE LAW, ANY RIGHT THEY MAY HAVE TO A TRIAL BY JURY IN ANY LEGAL PROCEEDING DIRECTLY OR INDIRECTLY ARISING OUT OF OR RELATING TO THIS AGREEMENT.</strong> Furthermore, the Parties agree that any arbitration shall be conducted in their individual capacities only and not as a class action or other representative action, and the Parties expressly waive their right to file a class action or seek relief on a class basis.</p>
+
+  <p><span class="section-title">7.04 Prevailing Party Attorney's Fees.</span> In the event that any Party institutes any legal suit, action, or proceeding (including arbitration) against the other Party arising out of or relating to this Agreement, the prevailing Party in the suit, action, or proceeding shall be entitled to receive, in addition to all other damages to which it may be entitled, the costs incurred by such Party in conducting the suit, action, or proceeding, including reasonable attorneys' fees and expenses and court costs.</p>
+
+  <p><span class="section-title">7.05 Severability.</span> If any term or provision of this Agreement is found by a court of competent jurisdiction to be invalid, illegal, or unenforceable, such invalidity, illegality, or unenforceability shall not affect any other term or provision of this Agreement or invalidate or render unenforceable such term or provision in any other jurisdiction.</p>
+
+  <p><span class="section-title">7.06 Entire Agreement.</span> This Agreement, including <strong>Exhibit A</strong> and <strong>Schedule A</strong>, constitutes the sole and entire agreement of the Parties with respect to the subject matter contained herein, and supersedes all prior and contemporaneous understandings, agreements, representations, and warranties, both written and oral, with respect to such subject matter. No amendment to or modification of this Agreement is effective unless it is in writing and signed by an authorized representative of each Party.</p>
+
+  <!-- Signature Box -->
+  <div class="sig-box">
+    <h3>Signature Execution</h3>
+    <div class="sig-party">
+      <div class="party-name">MANAGER: LogisX Inc.</div>
+      <div class="sig-row">
+        <div class="sig-group grow"><span class="label">By:</span><input type="text" class="blank" aria-label="Manager signature"></div>
+        <div class="sig-group fixed"><span class="label">Date:</span><input type="text" class="blank blank-sm" aria-label="Manager date"></div>
+      </div>
+      <div class="sig-row">
+        <div class="sig-group grow"><span class="label">Name:</span><input type="text" class="blank" aria-label="Manager name"></div>
+        <div class="sig-group fixed"><span class="label">Title:</span><input type="text" class="blank blank-sm" aria-label="Manager title"></div>
+      </div>
+    </div>
+    <div class="sig-party">
+      <div class="party-name">PARTICIPANT:</div>
+      <div class="sig-row">
+        <div class="sig-group grow"><span class="label">By:</span><input type="text" class="blank" aria-label="Participant signature"></div>
+        <div class="sig-group fixed"><span class="label">Date:</span><input type="text" class="blank blank-sm" aria-label="Participant date"></div>
+      </div>
+      <div class="sig-row">
+        <div class="sig-group grow"><span class="label">Name:</span><input type="text" class="blank" aria-label="Participant name"></div>
+        <div class="sig-group fixed"><span class="label">Title:</span><input type="text" class="blank blank-sm" aria-label="Participant title"></div>
+      </div>
+      <div class="sig-row">
+        <div class="sig-group grow"><span class="label">Address:</span><input type="text" class="blank" aria-label="Participant address"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EXHIBIT A -->
+  <div class="page-break"></div>
+  <p class="article-header">EXHIBIT A: ASSET SPECIFICATION &amp; CONDITION REPORT</p>
+  <p><em>This Exhibit is incorporated into and made part of the Master Participation &amp; Management Agreement.</em></p>
+
+  <h2>I. VEHICLE IDENTIFICATION</h2>
+  <table class="vehicle-id-table">
+    <thead>
+      <tr>
+        <th>Year</th>
+        <th>Make</th>
+        <th>Model</th>
+        <th>VIN (Vehicle Identification Number)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><input type="text" class="blank blank-xs" aria-label="Year"></td>
+        <td><input type="text" class="blank blank-sm" aria-label="Make"></td>
+        <td><input type="text" class="blank blank-sm" aria-label="Model"></td>
+        <td><input type="text" class="blank blank-lg" aria-label="VIN"></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>II. REGULATORY &amp; COMPLIANCE DATA</h2>
+  <ul>
+    <li><strong>Current Mileage:</strong> <input type="text" class="blank blank-md" aria-label="Current mileage"></li>
+    <li><strong>Title State:</strong> <input type="text" class="blank blank-md" aria-label="Title state"></li>
+    <li><strong>Existing Liens (if any):</strong> <input type="text" class="blank blank-md" aria-label="Existing liens"></li>
+    <li><strong>Registered Owner:</strong> <input type="text" class="blank blank-md" aria-label="Registered owner"></li>
+  </ul>
+
+  <h2>III. ANCILLARY EQUIPMENT INCLUDED</h2>
+  <ul style="list-style:none; padding-left:0;">
+    <li class="check-item"><input type="checkbox" aria-label="ELD Hardware"> <strong>ELD Hardware installed?</strong> (Make/Model): <input type="text" class="blank blank-sm" aria-label="ELD make model"></li>
+    <li class="check-item"><input type="checkbox" aria-label="Telematics/GPS"> <strong>Telematics/GPS installed?</strong> <input type="text" class="blank blank-md" aria-label="Telematics details"></li>
+    <li class="check-item"><input type="checkbox" aria-label="Dashcam"> <strong>Dashcam System?</strong> <input type="text" class="blank blank-md" aria-label="Dashcam details"></li>
+    <li class="check-item"><input type="checkbox" aria-label="Sleeper Berthing"> <strong>Sleeper Berthing/Inverter?</strong> <input type="text" class="blank blank-md" aria-label="Sleeper details"></li>
+    <li class="check-item"><input type="checkbox" aria-label="APU"> <strong>Auxiliary Power Unit?</strong> <input type="text" class="blank blank-md" aria-label="APU details"></li>
+  </ul>
+
+  <p><strong>IV. OWNER ACKNOWLEDGMENT OF CONDITION</strong> The Participant hereby certifies that the Asset is in "Good and Safe" operating condition, free of known major mechanical defects, and meets all <strong>FMCSA</strong> and <strong>Texas DPS</strong> roadworthiness standards as of the date of delivery to the Manager.</p>
+  <div class="sig-row" style="margin-top:14px;">
+    <div class="sig-group fixed"><span class="label">Participant signature:</span><input type="text" class="blank blank-sm" aria-label="Participant signature"></div>
+    <div class="sig-group fixed"><span class="label">Date:</span><input type="text" class="blank blank-xs" aria-label="Date"></div>
+  </div>
+
+  <!-- SCHEDULE A -->
+  <div class="page-break"></div>
+  <p class="article-header">SCHEDULE A: DISBURSEMENT &amp; BANKING ELECTION FORM</p>
+  <p><em>This Schedule defines the method and destination for all NOI Payouts.</em></p>
+
+  <h2>I. REVENUE RECIPIENT INFORMATION</h2>
+  <ul>
+    <li><strong>Legal Name (as it appears on W-9):</strong> <input type="text" class="blank blank-lg" aria-label="Legal name"></li>
+    <li><strong>Tax ID / SSN:</strong> <input type="text" class="blank blank-lg" aria-label="Tax ID SSN"></li>
+    <li><strong>Email for Settlement Statements:</strong> <input type="text" class="blank blank-lg" aria-label="Email"></li>
+  </ul>
+
+  <h2>II. BANKING INSTRUCTIONS (ACH/DIRECT DEPOSIT)</h2>
+  <ul>
+    <li>
+      <strong>Bank Name:</strong> <input type="text" class="blank blank-lg" aria-label="Bank name">
+    </li>
+    <li>
+      <strong>Account Type:</strong>
+      <label style="margin-left:6px;"><input type="checkbox" aria-label="Business Checking"> Business Checking</label>
+      <label style="margin-left:10px;"><input type="checkbox" aria-label="Personal Checking"> Personal Checking</label>
+      <label style="margin-left:10px;"><input type="checkbox" aria-label="Savings"> Savings</label>
+    </li>
+    <li><strong>Routing Number (9 Digits):</strong> <input type="text" class="blank blank-md" aria-label="Routing number"></li>
+    <li><strong>Account Number:</strong> <input type="text" class="blank blank-lg" aria-label="Account number"></li>
+  </ul>
+
+  <p><strong>III. SETTLEMENT ACKNOWLEDGMENT</strong> The Participant acknowledges that all disbursements follow the <strong>Net-60 Settlement Cycle</strong> (e.g., revenue from the 1st through the 31st of Month A is disbursed on the last Friday of Month B). The Participant is responsible for notifying the Manager of any changes to banking information at least <strong>ten (10) business days</strong> prior to a scheduled settlement.</p>
+
+  <div class="sig-row" style="margin-top:18px;">
+    <div class="sig-group grow"><span class="label">Participant Signature:</span><input type="text" class="blank" aria-label="Participant signature"></div>
+    <div class="sig-group fixed"><span class="label">Date:</span><input type="text" class="blank blank-xs" aria-label="Date"></div>
+  </div>
+
+  <hr>
+
+  <div class="dev-note">
+    <h3>DEV NOTE ONLY — Pro-Tips for Your Logistics Operation:</h3>
+    <ul>
+      <li><strong>The W-9 Requirement:</strong> You should always require a signed <strong>W-9</strong> to be attached to <strong>Schedule A</strong> before you issue the first payment. This protects you during tax season when you issue those <strong>1099s</strong>.</li>
+      <li><strong>The "Photos" Clause:</strong> In a digital workflow, I recommend having the investor upload 4 clear photos of the truck (Front, Back, Left, Right) to be kept on file with <strong>Exhibit A</strong>. This prevents disputes over cosmetic damage later.</li>
+    </ul>
+  </div>
+
+</main>
+</body>
+</html>

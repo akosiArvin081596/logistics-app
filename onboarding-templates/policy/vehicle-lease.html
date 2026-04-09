@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Commercial Vehicle Lease Agreement — LogisX Inc.</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,600;0,700;1,400;1,700&display=swap" rel="stylesheet">
+  <style>
+    @page { size: letter; margin: 1in; }
+
+    :root { --ink:#000; --rule:#ccc; --paper:#fff; --bg:#f5f5f5; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin:0; padding:0; background:var(--bg); }
+
+    body {
+      font-family: 'Open Sans', Arial, sans-serif;
+      color: var(--ink);
+      font-size: 14.5px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .document {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 80px 76px 96px;
+      background: var(--paper);
+      box-shadow: 0 2px 14px rgba(0,0,0,.08);
+    }
+
+    /* Title — bold, left-aligned */
+    h1 {
+      font-size: 16px;
+      font-weight: 700;
+      margin: 0 0 22px;
+      letter-spacing: 0.2px;
+    }
+
+    /* Article header */
+    .article-header {
+      font-size: 15px;
+      font-weight: 700;
+      text-transform: uppercase;
+      margin: 30px 0 14px;
+    }
+
+    h2 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 22px 0 10px;
+    }
+
+    h3 {
+      font-size: 14.5px;
+      font-weight: 700;
+      margin: 18px 0 8px;
+    }
+
+    .section-title { font-weight: 700; display: inline; }
+
+    p { margin: 0 0 14px; }
+
+    ul { padding-left: 26px; margin: 0 0 14px; }
+    li { margin-bottom: 10px; }
+    strong { font-weight: 700; }
+
+    hr {
+      border: 0;
+      border-top: 1px solid var(--rule);
+      margin: 28px 0 22px;
+    }
+
+    /* Fillable blanks */
+    .blank {
+      display: inline-block;
+      border: 0;
+      border-bottom: 1px solid var(--ink);
+      background: transparent;
+      font: inherit;
+      color: inherit;
+      outline: none;
+      padding: 0 4px;
+      vertical-align: baseline;
+      border-radius: 0;
+    }
+    .blank:focus { border-bottom-width: 2px; }
+    .blank-xs  { width:  90px; }
+    .blank-sm  { width: 160px; }
+    .blank-md  { width: 240px; }
+    .blank-lg  { width: 340px; }
+
+    /* Signature rows */
+    .sig-row {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .sig-group {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: nowrap;
+    }
+    .sig-group.grow { flex: 1 1 0; min-width: 0; }
+    .sig-group.grow .blank { flex: 1 1 0; width: auto; min-width: 0; }
+    .sig-group.fixed { flex: 0 0 auto; }
+    .sig-group .label { font-weight: 700; white-space: nowrap; }
+
+    /* Signature execution block */
+    .sig-block { margin: 28px 0; }
+    .sig-block .party { margin-bottom: 30px; }
+    .sig-block .party-name { font-weight: 700; margin-bottom: 12px; }
+    .sig-block .party-addr { font-size: 14px; margin-bottom: 12px; }
+    .sig-block .party-attn { font-weight: 700; margin-bottom: 12px; }
+    .sig-block .name-title-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; font-size: 14px; }
+
+    /* Condition receipt checkboxes */
+    .check-item {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .check-item input[type="checkbox"] {
+      width: 13px; height: 13px; margin: 0;
+      flex-shrink: 0; accent-color: #000;
+    }
+
+    /* Onboarding numbered sections */
+    .onboard-section h3 { font-size: 15px; margin: 18px 0 8px; }
+
+    /* Welcome tagline */
+    .welcome { font-size: 20px; font-weight: 700; margin: 20px 0 10px; }
+
+    /* Checklist phase headers */
+    .phase-header { font-weight: 700; margin: 18px 0 8px; }
+
+    /* Vehicle ID table */
+    .vehicle-id-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 14px;
+    }
+    .vehicle-id-table th, .vehicle-id-table td {
+      border: 1px solid var(--ink);
+      padding: 10px 12px;
+      text-align: left;
+    }
+    .vehicle-id-table th { font-weight: 700; }
+
+    /* Condition checklist 2-column grid */
+    .condition-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px 40px;
+      margin: 10px 0 18px;
+    }
+    .cond-cell { display: block; }
+    .cond-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 400;
+    }
+    .cond-top input[type="checkbox"] {
+      width: 13px; height: 13px; margin: 0;
+      flex-shrink: 0; accent-color: #000;
+    }
+    .cond-radios {
+      display: flex;
+      gap: 18px;
+      padding-left: 22px;
+      margin-top: 4px;
+    }
+    .cond-radios label {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      cursor: pointer;
+    }
+    .cond-radios label input[type="radio"] {
+      width: 14px; height: 14px; margin: 0;
+      accent-color: #000;
+    }
+    .cond-radios label span {
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .condition-grid input[type="checkbox"] {
+      width: 13px; height: 13px; margin: 0;
+      flex-shrink: 0; accent-color: #000;
+    }
+
+    .page-break { page-break-before: always; }
+
+    @media print {
+      html,body { background:#fff; }
+      .document { box-shadow:none; margin:0; padding:0; max-width:none; }
+      .blank { border-bottom: 1px solid #000; }
+    }
+  </style>
+</head>
+<body>
+<main class="document">
+
+  <h1>COMMERCIAL VEHICLE LEASE AGREEMENT</h1>
+
+  <p><span class="section-title">THIS COMMERCIAL VEHICLE LEASE AGREEMENT</span> (the "Lease") is entered into and made effective as of the date of the final signature below (the "Effective Date"), by and between the individual or entity identified on the signature page of this Agreement (the "<strong>Lessor</strong>"), and <strong>LogisX Inc.</strong>, a Texas corporation, having its principal place of business at <strong>4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381</strong> (the "<strong>Lessee</strong>").</p>
+
+  <p class="article-header">ARTICLE 1: PROPERTY DESCRIPTION, TERM, AND TITLE</p>
+
+  <p><span class="section-title">1.01 Lease of Equipment.</span> The Lessor hereby leases to the Lessee, and the Lessee hereby leases from the Lessor, the commercial motor vehicle(s) (the "<strong>Vehicle</strong>" or "<strong>Equipment</strong>") specifically described by VIN and technical specification in <strong>Exhibit A</strong>, which is attached hereto and incorporated by reference.</p>
+
+  <p><span class="section-title">1.02 Term of Lease.</span> The term of this Lease shall commence upon the physical delivery of the Vehicle to the Lessee (the "<strong>Commencement Date</strong>") and shall continue for an initial term of <strong>one (1) year</strong>. Upon the expiration of the initial term, this Lease shall automatically convert to a <strong>month-to-month</strong> arrangement unless either Party provides at least <strong>thirty (30) days'</strong> prior written notice of intent to terminate.</p>
+
+  <p><span class="section-title">1.03 Warranty of Condition.</span> The Lessor warrants and represents that, at the time of delivery, the Vehicle is in good working order, is mechanically sound, and meets all <strong>Federal Motor Carrier Safety Administration (FMCSA)</strong> and <strong>Texas Department of Public Safety (DPS)</strong> roadworthiness standards. EXCEPT AS SPECIFICALLY PROVIDED HEREIN, THE LESSOR MAKES NO OTHER WARRANTIES, EXPRESS OR IMPLIED, INCLUDING ANY WARRANTY OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.</p>
+
+  <p><span class="section-title">1.04 Retention of Title and Ownership.</span> This Agreement constitutes a contract of <strong>leasing only</strong>. The Lessee acquires no right, title, or interest in or to the Vehicle except for the right of possession and use as a lessee under the terms of this Agreement. Legal and beneficial title to the Vehicle shall remain exclusively with the Lessor at all times unless transferred via a separate Bill of Sale.</p>
+
+  <p><span class="section-title">1.05 Protection of Title.</span> The Lessee shall not permit any lien, levy, or legal process to be asserted against the Vehicle. In the event the Lessee receives notice of any claim or lien against the Vehicle, the Lessee shall notify the Lessor in writing within <strong>twenty-four (24) hours</strong>.</p>
+
+  <p class="article-header">ARTICLE 2: LESSEE COVENANTS AND OPERATIONAL OBLIGATIONS</p>
+
+  <p><span class="section-title">2.01 Lease Payments and Remittance Structure.</span> The Lessee agrees to pay the Lessor "Rent" as a derivative of the <strong>Net Operating Income (NOI)</strong> generated by the Vehicle, as defined and governed by the <strong>Master Participation &amp; Management Agreement</strong>.</p>
+  <ul>
+    <li><strong>Variable-Yield Settlement:</strong> Disbursements shall be calculated based on the <strong>50/50 profit participation model</strong> after all <strong>Priority Expenses</strong> (Labor, Fuel, Insurance, and Reserves) have been satisfied.</li>
+    <li><strong>Settlement Cycle (Net-60):</strong> In alignment with industry receivable aging, all lease payments shall be settled and remitted on the <strong>last Friday of the calendar month following the month of production</strong>.</li>
+    <li><strong>Method of Payment:</strong> Remittance shall be executed via <strong>ACH Direct Deposit</strong> using the banking coordinates provided by the Lessor in <strong>Schedule A</strong> (Payment &amp; Banking Election Form).</li>
+  </ul>
+
+  <p><span class="section-title">2.02 Maintenance and Operational Care.</span> The Lessee, at its own expense, shall provide for the preventative maintenance and routine repairs required to keep the Vehicle in professional operating condition.</p>
+  <ul>
+    <li><strong>Routine Services:</strong> This includes, but is not limited to, oil and filter changes, lubrication, required safety inspections, and interior/exterior cleaning.</li>
+    <li><strong>Tire and Brake Maintenance:</strong> The Lessee is responsible for the maintenance and, when operationally necessary, the replacement of tires and brake components. Any replacement parts or tires shall immediately become the property of the Lessor upon installation.</li>
+    <li><strong>Redelivery Standards:</strong> Upon termination, the Lessee shall return the Vehicle with tires having no less than <strong>30% remaining tread</strong> and brakes having no less than <strong>30% remaining lining</strong>.</li>
+  </ul>
+
+  <p><span class="section-title">2.03 Alterations and Major Repairs.</span></p>
+  <ul>
+    <li><strong>Consent for Modifications:</strong> The Lessee shall not make any substantial structural changes or mechanical modifications to the Vehicle without the express prior written consent of the Lessor.</li>
+    <li><strong>Major Repair Protocol:</strong> The Lessee shall promptly notify the Lessor of any required major repairs. For repairs exceeding the scope of the <strong>Maintenance Reserve</strong>, the Lessor shall provide specific instructions and shall be responsible for the associated costs, provided the damage did not result from the Lessee's gross negligence or unauthorized use.</li>
+  </ul>
+
+  <p><span class="section-title">2.04 Responsibility for Asset Damage.</span> The Lessee shall be responsible for all damage to the Vehicle while in the Lessee's possession and control, excluding standard wear and tear. Any costs for repairs resulting from driver negligence or inappropriate use shall be assessed against the <strong>Net Operating Income (NOI)</strong> or the <strong>Maintenance Reserve</strong> as a Priority Expense.</p>
+
+  <p class="article-header">ARTICLE 3: INSURANCE AND INDEMNIFICATION</p>
+
+  <p><span class="section-title">3.01 Primary Operational Insurance.</span> During the term of this Lease, the Lessee shall, as a <strong>Priority Expense</strong>, procure and maintain Commercial Automobile Liability and Property Damage insurance ("<strong>Liability Insurance</strong>") covering the Vehicle(s) while under active dispatch.</p>
+  <ul>
+    <li><strong>Coverage Limits:</strong> Such insurance shall provide a Combined Single Limit (CSL) for Bodily Injury and Property Damage of no less than <strong>$1,000,000.00</strong> per occurrence, or as required by <strong>FMCSA</strong> and <strong>Texas DOT</strong> regulations.</li>
+    <li><strong>Policy Requirements:</strong> The policy shall name the Lessor as an <strong>Additional Insured</strong>. The Lessee shall ensure the policy provides for at least <strong>thirty (30) days'</strong> prior written notice to the Lessor before any material alteration or cancellation.</li>
+    <li><strong>Evidence of Coverage:</strong> The Lessee shall furnish Certificates of Insurance (COI) to the Lessor prior to the Commencement Date and at least ten (10) days prior to any policy expiration.</li>
+  </ul>
+
+  <p><span class="section-title">3.02 Failure to Maintain.</span> If the Lessee fails to maintain the required Liability Insurance, the Lessor is authorized (but not obligated) to procure such coverage. All costs incurred by the Lessor for such procurement shall be deducted from the <strong>Net Operating Income (NOI)</strong> or the <strong>Maintenance Reserve</strong> as an emergency Priority Expense.</p>
+
+  <p><span class="section-title">3.03 Mutual Indemnification.</span></p>
+  <ul>
+    <li><strong>Operational Indemnity:</strong> To the extent not covered by insurance, the Lessee shall release, indemnify, and hold the Lessor harmless from and against any claims, causes of action, or liabilities arising out of the maintenance, use, or operation of the Vehicle while in the Lessee's possession.</li>
+    <li><strong>Personnel Indemnity:</strong> The Lessee shall indemnify and hold the Lessor harmless from all claims for death, injury, or property damage sustained by the Lessee's employees, contracted drivers, or agents arising from the operation of the Vehicle.</li>
+    <li><strong>Disclaimer of Control:</strong> The Lessor, by being named an additional insured, does not assume any dominion, control, or liability over the daily operation or dispatch of the Vehicle.</li>
+  </ul>
+
+  <p class="article-header">ARTICLE 4: PHYSICAL DAMAGE AND RISK OF LOSS</p>
+
+  <p><span class="section-title">4.01 Responsibility for Physical Loss.</span> The Lessee shall be responsible for all loss or damage to the Vehicle while this Lease is in effect, subject to the following:</p>
+  <ul>
+    <li><strong>Covered Perils:</strong> This includes, but is not limited to, damage from collision, upset, fire, theft, windstorm, or earthquake.</li>
+    <li><strong>Total Loss Valuation:</strong> In the event of a total loss or unrecovered theft, the Lessee shall pay the Lessor the <strong>Stated Value</strong> or depreciated value of the Vehicle as defined in <strong>Exhibit A</strong>.</li>
+  </ul>
+
+  <p><span class="section-title">4.02 Physical Damage Coverage.</span> The Lessee shall maintain a policy of <strong>Physical Damage Insurance</strong> (Comprehensive and Collision) acceptable to the Lessor.</p>
+  <ul>
+    <li><strong>Loss Payee Status:</strong> The policy shall name the Lessor as the <strong>Sole Loss Payee</strong>.</li>
+    <li><strong>Deductibles:</strong> The deductible shall not exceed the amount specified in <strong>Exhibit A</strong>. Any deductible owed following a claim shall be treated as a <strong>Priority Expense</strong> deducted from the <strong>Maintenance Reserve</strong> or NOI.</li>
+  </ul>
+
+  <p class="article-header">ARTICLE 5: ACCIDENT REPORTING AND CARGO LIABILITY</p>
+
+  <p><span class="section-title">5.01 Immediate Notification Protocol.</span> The Lessee shall notify the Lessor immediately upon the occurrence of any accident, theft, or incident resulting in damage to the Vehicle or involving its use.</p>
+  <ul>
+    <li><strong>Method of Communication:</strong> Notification must be made via the fastest available means (e.g., telephone or emergency digital dispatch).</li>
+    <li><strong>Driver Obligations:</strong> The Lessee shall ensure the driver provides a detailed written report within <strong>twenty-four (24) hours</strong> and renders all necessary assistance to the Lessor and the insurer in the investigation, defense, or prosecution of any subsequent claims or legal actions.</li>
+  </ul>
+
+  <p><span class="section-title">6.01 Cargo Liability and Indemnification.</span> The Lessee hereby releases, and covenants to <strong>indemnify, defend, and hold harmless</strong> the Lessor from any and all liability for loss, damage, or theft of goods, cargo, or other property in the Lessee's custody or control, regardless of where such loss occurs.</p>
+
+  <p><span class="section-title">6.02 Cargo Insurance Requirements.</span> The Lessee shall, at its sole expense, maintain <strong>Cargo Insurance</strong> in an amount consistent with industry standards and <strong>FMCSA</strong> requirements (typically <strong>$100,000.00</strong> minimum).</p>
+  <ul>
+    <li><strong>Named Insured:</strong> The Lessee shall include the Lessor as a <strong>Named Insured</strong> or <strong>Loss Payee</strong> on all cargo or transportation floater policies.</li>
+    <li><strong>Evidence of Coverage:</strong> A valid Certificate of Insurance showing these endorsements must be maintained on file with the Lessor at all times.</li>
+  </ul>
+
+  <p><span class="section-title">6.03 Waiver of Subrogation.</span> The Lessee expressly waives any legal right of recovery or subrogation against the Lessor for any loss or damage to cargo or property carried on or within the Vehicle.</p>
+
+  <p class="article-header">ARTICLE 7: TAXES, LICENSES, AND REGULATORY COMPLIANCE</p>
+
+  <p><span class="section-title">7.01 Responsibility for Taxes.</span> The Lessee shall be responsible for the timely filing and payment of all taxes, fees, and assessments arising from the operation of the Vehicle, which shall be treated as <strong>Priority Expenses</strong>. This includes:</p>
+  <ul>
+    <li><strong>Federal Heavy Vehicle Use Tax (IRS Form 2290)</strong>.</li>
+    <li><strong>International Fuel Tax Agreement (IFTA)</strong> reporting and payments.</li>
+    <li><strong>International Registration Plan (IRP)</strong> apportioned registration and plating fees.</li>
+  </ul>
+
+  <p><span class="section-title">7.02 Regulatory Permits.</span> The Lessee shall secure and maintain all necessary state and federal permits required for the legal operation of the Vehicle in interstate commerce.</p>
+
+  <p><span class="section-title">7.03 Fines and Penalties.</span> The Lessee shall be solely responsible for all fines, citations, and penalties incurred due to equipment violations (e.g., overweight, lighting) or driver conduct. Any such costs paid by the Lessor on the Lessee's behalf shall be deducted from the <strong>Net Operating Income (NOI)</strong>.</p>
+
+  <p class="article-header">ARTICLE 8: MUTUAL COVENANTS AND REGULATORY FILINGS</p>
+
+  <p><span class="section-title">8.01 Responsibility for Taxes and Licensing.</span> Except as otherwise designated in <strong>Exhibit A</strong>, the Lessee shall be responsible for the timely application, filing, and payment of all federal, state, and local taxes, licenses, and permits required for the operation of the Vehicle. Any regulatory assessments not specifically allocated to the Lessor shall be the sole responsibility of the Lessee and treated as a <strong>Priority Expense</strong>.</p>
+
+  <p><span class="section-title">8.02 Motor Fuel Tax (IFTA) Compliance.</span> The Lessee shall prepare and file all <strong>International Fuel Tax Agreement (IFTA)</strong> returns and related motor fuel tax reports from its own records.</p>
+  <ul>
+    <li><strong>Record Keeping:</strong> The Lessee shall maintain and, upon request, provide the Lessor with all trip records, fuel receipts, and mileage logs necessary to audit fuel tax compliance.</li>
+    <li><strong>Accuracy:</strong> The Lessee assumes full liability for the accuracy of these filings and any subsequent audits by taxing authorities.</li>
+  </ul>
+
+  <p><span class="section-title">8.03 Governmental Charges and Penalties.</span> The Lessee agrees to pay when due all governmental charges, including but not limited to:</p>
+  <ul>
+    <li><strong>Fines and Tolls:</strong> All traffic citations, overweight fines, and electronic tolling assessments (e.g., TxTag).</li>
+    <li><strong>Property and Excise Taxes:</strong> Any ad valorem or use taxes assessed against the Vehicle during the Term.</li>
+    <li><strong>Default on Taxes:</strong> Should the Lessor be required to pay any such charges on the Lessee's behalf, the Lessor shall deduct the full amount plus a <strong>15% administrative fee</strong> from the <strong>Net Operating Income (NOI)</strong>.</li>
+  </ul>
+
+  <p><span class="section-title">8.04 Force Majeure.</span> The Lessor shall incur no liability for a failure to supply the Vehicle or any contracted service if prevented by acts of God, war, terrorism, pandemic, labor disputes, or other causes beyond its reasonable control.</p>
+
+  <p><span class="section-title">8.05 Operational Limits and Weight Compliance.</span> The Lessee shall ensure that the Vehicle is never operated in excess of the manufacturer's recommended maximum <strong>Gross Vehicle Weight (GVW)</strong> or <strong>Gross Combination Weight (GCW)</strong> as specified in <strong>Exhibit A</strong>.</p>
+
+  <p><span class="section-title">8.06 Vehicle Specifications and Mandatory Retrofits.</span></p>
+  <ul>
+    <li><strong>Acceptance:</strong> The acceptance of the Vehicle into service constitutes an acknowledgment by the Lessee that the Vehicle meets all operational specifications.</li>
+    <li><strong>Mandatory Safety Upgrades:</strong> If any federal, state, or local regulation requires the subsequent installation of additional safety or anti-pollution devices (e.g., ELD hardware or emissions sensors), the Manager shall arrange for installation, and the cost shall be treated as a <strong>Priority Expense</strong>.</li>
+  </ul>
+
+  <p><span class="section-title">8.07 Assignment and Sub-Leasing.</span></p>
+  <ul>
+    <li><strong>Prohibition on Sub-Leasing:</strong> The Lessee shall not sub-lease the Vehicle or permit its use by any third party without the prior written consent of the Lessor.</li>
+    <li><strong>Successors:</strong> This Lease is binding upon the parties and their respective successors and legal representatives.</li>
+    <li><strong>Material Change:</strong> The Lessee shall notify the Lessor in writing of any material change in ownership or disposition of business assets.</li>
+  </ul>
+
+  <p><span class="section-title">8.08 Entire Agreement and Amendments.</span> This Lease, together with the <strong>Master Participation &amp; Management Agreement</strong>, constitutes the entire understanding between the Parties. No verbal agreements or informal writings shall alter these terms. All amendments must be executed in writing by authorized representatives of both <strong>LogisX Inc.</strong> and the Lessor.</p>
+
+  <p><span class="section-title">8.09 Formal Notice.</span> Any notice required under this Lease shall be delivered personally, via guaranteed overnight courier, or by certified mail to the addresses specified in the preamble of this Agreement.</p>
+
+  <p class="article-header">ARTICLE 9: CANCELLATION, TERMINATION, AND DEFAULT</p>
+
+  <p><span class="section-title">9.01 Termination for Convenience.</span> Either the Lessor or the Lessee may terminate this Lease, in whole or with respect to specific Vehicles, at any time by providing <strong>thirty (30) days' prior written notice</strong> to the other Party.</p>
+  <ul>
+    <li><strong>Partial Termination:</strong> This Lease may be canceled in part by specifying certain Vehicles for removal under the same notice terms, while the Lease remains in full effect for all other Vehicles.</li>
+    <li><strong>Redelivery:</strong> Upon termination, the Lessee shall promptly return the Vehicle(s) to a location designated by the Lessor. The Vehicle(s) must be returned in roadworthy condition, complete, and in good order, reasonable wear and tear excepted.</li>
+  </ul>
+
+  <p><span class="section-title">9.02 Automatic Termination and Event of Default.</span> This Agreement shall terminate automatically at the election of the Lessor, and without prior notice to the Lessee, upon the occurrence of any of the following "Events of Default":</p>
+  <ul>
+    <li>The Lessee becomes insolvent or is adjudicated bankrupt;</li>
+    <li>The Lessee files a voluntary petition in bankruptcy or makes an assignment for the benefit of creditors;</li>
+    <li>A receiver is appointed for the Lessee's business or assets;</li>
+    <li>The Lessee undergoes a material liquidation of business assets;</li>
+    <li>Any of the Lessee's property is subjected to levy, seizure, or sale by any creditor or government agency.</li>
+  </ul>
+
+  <p><span class="section-title">9.03 Governing Law and Jurisdiction.</span> This Lease shall be construed in accordance with the laws of the <strong>State of Texas</strong>. The Parties hereby irrevocably submit to the exclusive jurisdiction of the state or federal courts located in <strong>Montgomery County, Texas</strong>, for the resolution of any disputes arising from or relating to this Lease.</p>
+
+  <!-- SIGNATURE EXECUTION -->
+  <hr>
+  <h2>SIGNATURE EXECUTION</h2>
+  <p><strong>IN WITNESS WHEREOF</strong>, the Parties have executed this Commercial Vehicle Lease Agreement as of the Effective Date.</p>
+
+  <div class="sig-block">
+    <div class="party">
+      <div class="party-name">LESSEE: LogisX Inc. &nbsp; Address: 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381</div>
+      <div class="party-attn">ATTENTION: Deshorn King / Lesline Johnson</div>
+      <div class="sig-row">
+        <div class="sig-group grow"><span class="label">By:</span><input type="text" class="blank" aria-label="Lessee signature"></div>
+      </div>
+      <div class="name-title-row">
+        Name: <strong>Lesline Johnson</strong> &nbsp;&nbsp; Title: <strong>Manager / Authorized Signatory</strong>
+      </div>
+    </div>
+
+    <hr>
+
+    <div class="party">
+      <div class="party-name">LESSOR: <input type="text" class="blank blank-lg" aria-label="Lessor name"> &nbsp; Address: <input type="text" class="blank blank-lg" aria-label="Lessor address"></div>
+      <hr style="margin:12px 0;">
+      <div class="party-attn">ATTENTION: <input type="text" class="blank blank-md" aria-label="Lessor contact"></div>
+      <div class="sig-row">
+        <div class="sig-group grow"><span class="label">By:</span><input type="text" class="blank" aria-label="Lessor signature"></div>
+      </div>
+      <div class="sig-row" style="margin-top:4px;">
+        <div class="sig-group grow"><span class="label">Name:</span><input type="text" class="blank" aria-label="Lessor printed name"></div>
+      </div>
+      <div class="sig-row" style="margin-top:4px;">
+        <div class="sig-group grow"><span class="label">Title:</span><input type="text" class="blank" aria-label="Lessor title"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VEHICLE DELIVERY & CONDITION RECEIPT -->
+  <div class="page-break"></div>
+  <h2>VEHICLE DELIVERY &amp; CONDITION RECEIPT</h2>
+  <p><em>This document serves as the formal "handover" record. It protects LogisX Inc. from pre-existing damage claims and confirms the "Commencement Date" for the Net-60 cycle.</em></p>
+
+  <h3>I. ASSET IDENTIFICATION</h3>
+
+  <!-- Row 1: Unit #  |  VIN (Last 6)  |  Current Mileage -->
+  <div style="display:flex; gap:28px; align-items:baseline; flex-wrap:wrap; margin-bottom:14px;">
+    <div style="display:inline-flex; align-items:baseline; gap:8px; flex:1 1 0; min-width:0;">
+      <strong style="white-space:nowrap;">Unit #:</strong>
+      <input type="text" class="blank" style="flex:1 1 0; min-width:60px;" aria-label="Unit number">
+    </div>
+    <div style="display:inline-flex; align-items:baseline; gap:8px; flex:1 1 0; min-width:0;">
+      <strong style="white-space:nowrap;">VIN (Last 6):</strong>
+      <input type="text" class="blank" style="flex:1 1 0; min-width:60px;" aria-label="VIN last 6">
+    </div>
+    <div style="display:inline-flex; align-items:baseline; gap:8px; flex:1 1 0; min-width:0;">
+      <strong style="white-space:nowrap;">Current Mileage:</strong>
+      <input type="text" class="blank" style="flex:1 1 0; min-width:60px;" aria-label="Current mileage">
+    </div>
+  </div>
+
+  <!-- Row 2: Location of Delivery  |  Date/Time -->
+  <div style="display:flex; gap:28px; align-items:baseline; flex-wrap:wrap; margin-bottom:22px;">
+    <div style="display:inline-flex; align-items:baseline; gap:8px; flex:2 1 0; min-width:0;">
+      <strong style="white-space:nowrap;">Location of Delivery:</strong>
+      <input type="text" class="blank" style="flex:1 1 0; min-width:80px;" aria-label="Location of delivery">
+    </div>
+    <div style="display:inline-flex; align-items:baseline; gap:8px; flex:1 1 0; min-width:0;">
+      <strong style="white-space:nowrap;">Date/Time:</strong>
+      <input type="text" class="blank" style="flex:1 1 0; min-width:80px;" aria-label="Date and time">
+    </div>
+  </div>
+
+  <h3>II. EXTERIOR CONDITION CHECKLIST <span style="font-weight:400;">(Circle one: G = Good, S = Scratched, D = Dented)</span></h3>
+
+  <!-- 2-column condition grid -->
+  <div class="condition-grid">
+
+    <!-- Row 1 -->
+    <div class="cond-cell">
+      <div class="cond-top">
+        <input type="checkbox" aria-label="Front Bumper/Grille">
+        <span>Front Bumper/Grille:</span>
+      </div>
+      <div class="cond-radios">
+        <label><input type="radio" name="front-bumper" value="G"><span>G</span></label>
+        <label><input type="radio" name="front-bumper" value="S"><span>S</span></label>
+        <label><input type="radio" name="front-bumper" value="D"><span>D</span></label>
+      </div>
+    </div>
+    <div class="cond-cell">
+      <div class="cond-top">
+        <input type="checkbox" aria-label="Windshield/Glass">
+        <span>Windshield/Glass:</span>
+      </div>
+      <div class="cond-radios">
+        <label><input type="radio" name="windshield" value="G"><span>G</span></label>
+        <label><input type="radio" name="windshield" value="S"><span>S</span></label>
+        <label><input type="radio" name="windshield" value="D"><span>D</span></label>
+      </div>
+    </div>
+
+    <!-- Row 2 -->
+    <div class="cond-cell">
+      <div class="cond-top">
+        <input type="checkbox" aria-label="Left/Driver Side">
+        <span>Left/Driver Side:</span>
+      </div>
+      <div class="cond-radios">
+        <label><input type="radio" name="left-side" value="G"><span>G</span></label>
+        <label><input type="radio" name="left-side" value="S"><span>S</span></label>
+        <label><input type="radio" name="left-side" value="D"><span>D</span></label>
+      </div>
+    </div>
+    <div class="cond-cell">
+      <div class="cond-top">
+        <input type="checkbox" aria-label="Right/Passenger Side">
+        <span>Right/Passenger Side:</span>
+      </div>
+      <div class="cond-radios">
+        <label><input type="radio" name="right-side" value="G"><span>G</span></label>
+        <label><input type="radio" name="right-side" value="S"><span>S</span></label>
+        <label><input type="radio" name="right-side" value="D"><span>D</span></label>
+      </div>
+    </div>
+
+    <!-- Row 3 -->
+    <div class="cond-cell">
+      <div class="cond-top">
+        <input type="checkbox" aria-label="Tires">
+        <span>Tires (Estimated Tread %):</span>
+      </div>
+      <div style="padding-left:20px; margin-top:4px;">
+        <input type="text" class="blank" style="width:120px;" aria-label="Tread percentage">
+      </div>
+    </div>
+    <div class="cond-cell">
+      <div class="cond-top">
+        <input type="checkbox" aria-label="Lights/Signals">
+        <span>Lights/Signals Functional?</span>
+      </div>
+      <div class="cond-radios">
+        <label><input type="radio" name="lights" value="yes"><span>Yes</span></label>
+        <label><input type="radio" name="lights" value="no"><span>No</span></label>
+      </div>
+    </div>
+
+  </div><!-- end condition-grid -->
+
+  <h3>III. INTERIOR &amp; EQUIPMENT</h3>
+  <div class="condition-grid" style="gap:12px 40px;">
+    <div class="cond-cell" style="display:flex; align-items:center; gap:8px; padding:6px 0;">
+      <input type="checkbox" aria-label="ELD Hardware"> ELD Hardware Installed &amp; Functional
+    </div>
+    <div class="cond-cell" style="display:flex; align-items:center; gap:8px; padding:6px 0;">
+      <input type="checkbox" aria-label="Registration Cab Card"> Registration/Insurance Cab Card Present
+    </div>
+    <div class="cond-cell" style="display:flex; align-items:center; gap:8px; padding:6px 0;">
+      <input type="checkbox" aria-label="Fire Extinguisher"> Fire Extinguisher/Triangles Present
+    </div>
+    <div class="cond-cell" style="display:flex; align-items:center; gap:8px; padding:6px 0;">
+      <input type="checkbox" aria-label="Cabin Cleanliness"> Cabin Cleanliness (Standard)
+    </div>
+  </div>
+
+  <p><strong>IV. ACCEPTANCE</strong> The Lessee hereby accepts the Vehicle in the condition noted above. The <strong>Initial Term</strong> and <strong>Insurance Coverage</strong> begin as of the date and time of this signature.</p>
+  <div class="sig-row" style="margin-top:14px;">
+    <div class="sig-group grow"><span class="label">LESSEE Signature:</span><input type="text" class="blank" aria-label="Lessee signature"></div>
+    <div class="sig-group grow"><span class="label">LESSOR Signature:</span><input type="text" class="blank" aria-label="Lessor signature"></div>
+  </div>
+
+  <!-- Welcome / Onboarding Info -->
+  <div class="page-break"></div>
+  <p class="welcome">Welcome to the LogisX Fleet!</p>
+  <p>We don't just move freight; we optimize assets. Here is what to expect as we launch your unit.</p>
+
+  <div class="onboard-section">
+    <h3>1. The Onboarding Phase (Days 1&ndash;7)</h3>
+    <ul>
+      <li><strong>Tech Integration:</strong> We install our ELD and telemetry hardware.</li>
+      <li><strong>Regulatory Suite:</strong> We file your <strong>Form 2290</strong>, secure your <strong>IRP Plates</strong>, and add the unit to our primary <strong>$1M Liability Policy</strong>.</li>
+      <li><strong>Driver Matching:</strong> Our safety team vets and assigns a professional driver to your unit.</li>
+    </ul>
+
+    <h3>2. The "Net-60" Rhythm</h3>
+    <p>To maintain a healthy cash flow and account for industry receivable aging:</p>
+    <ul>
+      <li><strong>Month 1:</strong> Your truck is out earning.</li>
+      <li><strong>Month 2:</strong> We reconcile the loads, audits, and expenses.</li>
+      <li><strong>Last Friday of Month 2:</strong> Your 50% share is deposited via ACH.</li>
+    </ul>
+
+    <h3>3. Maintenance: The Reserve Strategy</h3>
+    <p>We deduct a <strong>$800 Maintenance Reserve</strong> and a <strong>$300 Contingency Buffer</strong> monthly.</p>
+    <ul>
+      <li><strong>Why?</strong> This ensures that when a tire blows or a sensor fails, the truck stays on the road. We handle the mechanics; you receive the reports.</li>
+    </ul>
+
+    <h3>4. Your Portal &amp; Communication</h3>
+    <p>You will receive a monthly <strong>"Birth-to-Death" Log</strong>. This is your itemized truth. It shows every dollar earned and every cent spent. For urgent asset inquiries, our management team is available via the owner-direct line.</p>
+
+    <p><strong>LogisX Inc.</strong> <em>Efficiency. Transparency. Scale.</em></p>
+  </div>
+
+  <!-- INVESTOR ONBOARDING CHECKLIST -->
+  <div class="page-break"></div>
+  <h2>LOGISX INVESTOR ONBOARDING CHECKLIST</h2>
+  <p><em>Use this internal checklist to ensure every "Asset Unit" is legally and operationally cleared before the first dispatch.</em></p>
+
+  <hr>
+
+  <p class="phase-header">Phase 1: Compliance &amp; Legal (The "Ironclad" Paperwork)</p>
+  <ul style="list-style:none; padding-left:0;">
+    <li class="check-item"><input type="checkbox"> <strong>Master Participation &amp; Management Agreement:</strong> Signed by both parties.</li>
+    <li class="check-item"><input type="checkbox"> <strong>Commercial Vehicle Lease Agreement:</strong> Signed by both parties.</li>
+    <li class="check-item"><input type="checkbox"> <strong>W-9 Form (Request for Taxpayer ID):</strong> Completed and signed by the Investor/Entity (Required for 1099 issuance).</li>
+    <li class="check-item"><input type="checkbox"> <strong>Investor/Participant Application:</strong> Completed and vetted (See template below).</li>
+    <li class="check-item"><input type="checkbox"> <strong>Certificate of Insurance (COI):</strong> Investor must provide proof of <strong>Physical Damage (Comp/Collision)</strong> and <strong>Bobtail/Non-Trucking Liability</strong> naming <strong>LogisX Inc.</strong> as Additional Insured/Loss Payee.</li>
+  </ul>
+
+  <p class="phase-header">Phase 2: Asset Verification (The "Hardware" Check)</p>
+  <ul style="list-style:none; padding-left:0;">
+    <li class="check-item"><input type="checkbox"> <strong>Vehicle Title/Registration:</strong> Copy of front and back (Verify no undisclosed liens).</li>
+    <li class="check-item"><input type="checkbox"> <strong>Current IRS Form 2290 (HVUT):</strong> Proof of payment for the current tax year.</li>
+    <li class="check-item"><input type="checkbox"> <strong>Vehicle Delivery &amp; Condition Receipt:</strong> Signed at the time of physical handover.</li>
+    <li class="check-item"><input type="checkbox"> <strong>Photos of Asset:</strong> 4 clear photos (Front, Back, Left, Right) stored in the unit's digital folder.</li>
+    <li class="check-item"><input type="checkbox"> <strong>Maintenance Records:</strong> Last 90 days of service history (Oil, Brakes, Tires).</li>
+  </ul>
+
+  <p class="phase-header">Phase 3: Operational Integration (The "LogisX" Launch)</p>
+  <ul style="list-style:none; padding-left:0;">
+    <li class="check-item"><input type="checkbox"> <strong>Schedule A (Banking/ACH):</strong> Verified routing and account numbers for the Net-60 cycle.</li>
+    <li class="check-item"><input type="checkbox"> <strong>ELD Hardware Installation:</strong> Unit paired with the LogisX fleet portal.</li>
+    <li class="check-item"><input type="checkbox"> <strong>Decals/Placards:</strong> LogisX USDOT# and Company Branding applied to the cab.</li>
+    <li class="check-item"><input type="checkbox"> <strong>Driver Assignment:</strong> Qualified driver assigned and briefed on the specific unit.</li>
+  </ul>
+
+  <!-- INVESTOR/PARTICIPANT APPLICATION -->
+  <div class="page-break"></div>
+  <h2>INVESTOR/PARTICIPANT APPLICATION</h2>
+  <p><em>This helps you "know your partner" and ensures they have the business structure to handle a 50/50 logistics venture.</em></p>
+
+  <h3>I. APPLICANT GENERAL INFORMATION</h3>
+  <ul style="list-style:none; padding-left:0;">
+    <li style="margin-bottom:10px;"><strong>Legal Name (Individual or Entity):</strong> <input type="text" class="blank blank-xl" aria-label="Legal name"></li>
+    <li style="margin-bottom:10px;"><strong>DBA (if applicable):</strong> <input type="text" class="blank blank-xl" aria-label="DBA"></li>
+    <li style="margin-bottom:10px;">
+      <strong>Entity Type:</strong>
+      <label style="margin-left:6px;"><input type="checkbox"> LLC</label>
+      <label style="margin-left:8px;"><input type="checkbox"> Corp</label>
+      <label style="margin-left:8px;"><input type="checkbox"> Sole Prop</label>
+      <label style="margin-left:8px;"><input type="checkbox"> Other:</label>
+      <input type="text" class="blank blank-sm" aria-label="Other entity type">
+    </li>
+    <li style="margin-bottom:10px;"><strong>Principal Address:</strong> <input type="text" class="blank blank-xl" aria-label="Principal address"></li>
+    <li style="margin-bottom:10px;">
+      <strong>Primary Contact Person:</strong> <input type="text" class="blank blank-md" aria-label="Contact person">
+      &nbsp; <strong>Title:</strong> <input type="text" class="blank blank-sm" aria-label="Contact title">
+    </li>
+    <li style="margin-bottom:10px;">
+      <strong>Phone:</strong> <input type="text" class="blank blank-md" aria-label="Phone">
+      &nbsp; <strong>Email:</strong> <input type="text" class="blank blank-md" aria-label="Email">
+    </li>
+  </ul>
+
+  <h3>II. BUSINESS PROFILE</h3>
+  <ul style="list-style:none; padding-left:0;">
+    <li style="margin-bottom:10px;">
+      <strong>Years in Operation:</strong> <input type="text" class="blank blank-xs" aria-label="Years in operation">
+      &nbsp; <strong>Industry Experience:</strong>
+      <label style="margin-left:6px;"><input type="checkbox"> Yes</label>
+      <label style="margin-left:8px;"><input type="checkbox"> No</label>
+    </li>
+    <li style="margin-bottom:10px;"><strong>Total Fleet Size (Currently Owned):</strong> <input type="text" class="blank blank-xs" aria-label="Fleet size"></li>
+    <li style="margin-bottom:10px;">
+      <strong>Preferred Method of Communication:</strong>
+      <label style="margin-left:6px;"><input type="checkbox"> Email</label>
+      <label style="margin-left:8px;"><input type="checkbox"> Text</label>
+      <label style="margin-left:8px;"><input type="checkbox"> Phone</label>
+    </li>
+  </ul>
+
+  <h3>III. FINANCIAL &amp; TAX ELECTION</h3>
+  <ul style="list-style:none; padding-left:0;">
+    <li style="margin-bottom:10px;">
+      <strong>Tax Classification:</strong>
+      <label style="margin-left:6px;"><input type="checkbox"> C-Corp</label>
+      <label style="margin-left:8px;"><input type="checkbox"> S-Corp</label>
+      <label style="margin-left:8px;"><input type="checkbox"> Partnership</label>
+      <label style="margin-left:8px;"><input type="checkbox"> Individual/LLC</label>
+    </li>
+    <li style="margin-bottom:10px;"><strong>EIN/Social Security Number:</strong> <input type="text" class="blank blank-xl" aria-label="EIN SSN"></li>
+    <li style="margin-bottom:10px;">
+      <strong>Are you currently under any bankruptcy or tax liens?</strong>
+      <label style="margin-left:6px;"><input type="checkbox"> Yes</label>
+      <label style="margin-left:8px;"><input type="checkbox"> No</label>
+    </li>
+    <li style="margin-bottom:10px;">
+      <strong>Desired Monthly Reporting Delivery:</strong>
+      <label style="margin-left:6px;"><input type="checkbox"> Digital Portal</label>
+      <label style="margin-left:8px;"><input type="checkbox"> Email PDF</label>
+    </li>
+  </ul>
+
+  <h3>IV. ATTACHMENTS REQUIRED</h3>
+  <ul style="list-style:none; padding-left:0;">
+    <li class="check-item"><input type="checkbox"> Signed W-9 Form</li>
+    <li class="check-item"><input type="checkbox"> Copy of Articles of Incorporation/Organization (if Entity)</li>
+    <li class="check-item"><input type="checkbox"> Valid State ID or Passport of Principal Signatory</li>
+  </ul>
+
+  <hr>
+  <h2>W-9 REMINDER &mdash; W-9 form attached</h2>
+
+</main>
+</body>
+</html>

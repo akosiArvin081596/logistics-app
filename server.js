@@ -15,8 +15,6 @@ const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { renderPolicy } = require("./lib/policy-renderer");
-const { generateMasterAgreement } = require("./lib/generate-master-agreement-pdf");
-const { generateVehicleLease } = require("./lib/generate-vehicle-lease-pdf");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -1845,7 +1843,29 @@ app.post("/api/public/investor-apply", async (req, res) => {
 		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 
-		const appData = { legalName: legal_name, dba: dba || "", entityType: entity_type || "", address, contactPerson: contact_person || "", contactTitle: contact_title || "", phone, email, einSsn: ein_ssn, effectiveDate };
+		// appData feeds both fillW9Form (W-9) and renderPolicy (master_agreement, vehicle_lease).
+		// The HTML templates need the extra fields (years_in_operation, fleet_size, vehicle_*,
+		// banking) that aren't in the old minimal appData shape.
+		const appData = {
+			legalName: legal_name,
+			dba: dba || "",
+			entityType: entity_type || "",
+			address,
+			contactPerson: contact_person || "",
+			contactTitle: contact_title || "",
+			phone,
+			email,
+			einSsn: ein_ssn,
+			effectiveDate,
+			// Extended fields for HTML templates
+			yearsInOperation: years_in_operation || "",
+			fleetSize: fleet_size || "",
+			vehicles: vehiclesArr,
+			bankName: banking?.bank_name || "",
+			bankRouting: banking?.routing_number || "",
+			bankAccount: banking?.account_number || "",
+			accountType: banking?.account_type || "",
+		};
 
 		for (const doc of INVESTOR_ONBOARDING_DOCS) {
 			const sig = signatures[doc.key];
@@ -1856,10 +1876,20 @@ app.post("/api/public/investor-apply", async (req, res) => {
 					const pdfBytes = await fillW9Form({ ...appData, signatureText: sig.text.trim(), signatureImage: sig.image });
 					if (pdfBytes) fs.writeFileSync(signedPath, pdfBytes);
 				} else if (doc.key === "master_agreement") {
-					const pdfBuffer = await generateMasterAgreement({ ...appData, signatureText: sig.text.trim(), signatureImage: sig.image, signedAt });
+					const pdfBuffer = await renderPolicy("master_agreement", {
+						...appData,
+						signatureText: sig.text.trim(),
+						signatureImage: sig.image,
+						signedAt,
+					});
 					fs.writeFileSync(signedPath, pdfBuffer);
 				} else if (doc.key === "vehicle_lease") {
-					const pdfBuffer = await generateVehicleLease({ ...appData, signatureText: sig.text.trim(), signatureImage: sig.image, signedAt, vehicles: vehiclesArr });
+					const pdfBuffer = await renderPolicy("vehicle_lease", {
+						...appData,
+						signatureText: sig.text.trim(),
+						signatureImage: sig.image,
+						signedAt,
+					});
 					fs.writeFileSync(signedPath, pdfBuffer);
 				}
 			} catch (pdfErr) {
@@ -2147,25 +2177,43 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 			} else {
 				signedPdfUrl = "";
 			}
-		} else if (docKey === "master_agreement") {
+		} else if (docKey === "master_agreement" || docKey === "vehicle_lease") {
 			const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
-			const pdfBuffer = await generateMasterAgreement({
-				legalName: application?.legal_name || "", dba: application?.dba || "",
-				entityType: application?.entity_type || "", address: application?.address || "",
-				contactPerson: application?.contact_person || "", contactTitle: application?.contact_title || "",
-				phone: application?.phone || "", email: application?.email || "",
-				einSsn: application?.ein_ssn || "", effectiveDate,
-				signatureText: signatureText.trim(), signatureImage, signedAt,
-			});
-			fs.writeFileSync(signedPath, pdfBuffer);
-		} else if (docKey === "vehicle_lease") {
-			const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
-			const pdfBuffer = await generateVehicleLease({
-				legalName: application?.legal_name || "", dba: application?.dba || "",
-				entityType: application?.entity_type || "", address: application?.address || "",
-				contactPerson: application?.contact_person || "", phone: application?.phone || "",
-				email: application?.email || "", effectiveDate,
-				signatureText: signatureText.trim(), signatureImage, signedAt, vehicles: vehiclesArr,
+			// Load any stored vehicles (from vehicles_json or the vehicle_* fallback columns)
+			let storedVehicles = vehiclesArr;
+			if (!storedVehicles.length) {
+				try { storedVehicles = JSON.parse(application?.vehicles_json || "[]"); } catch { storedVehicles = []; }
+				if (!storedVehicles.length && application?.vehicle_year) {
+					storedVehicles = [{
+						year: application.vehicle_year, make: application.vehicle_make, model: application.vehicle_model,
+						vin: application.vehicle_vin, mileage: application.vehicle_mileage,
+						titleState: application.vehicle_title_state, liens: application.vehicle_liens,
+						registeredOwner: application.vehicle_registered_owner,
+					}];
+				}
+			}
+			const payInfo = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
+			const pdfBuffer = await renderPolicy(docKey, {
+				legalName: application?.legal_name || "",
+				dba: application?.dba || "",
+				entityType: application?.entity_type || "",
+				address: application?.address || "",
+				contactPerson: application?.contact_person || "",
+				contactTitle: application?.contact_title || "",
+				phone: application?.phone || "",
+				email: application?.email || "",
+				einSsn: application?.ein_ssn || "",
+				yearsInOperation: application?.years_in_operation || "",
+				fleetSize: application?.fleet_size || "",
+				vehicles: storedVehicles,
+				bankName: payInfo?.bank_name || "",
+				bankRouting: payInfo?.routing_number || "",
+				bankAccount: payInfo?.account_number || "",
+				accountType: payInfo?.account_type || "",
+				effectiveDate,
+				signatureText: signatureText.trim(),
+				signatureImage,
+				signedAt,
 			});
 			fs.writeFileSync(signedPath, pdfBuffer);
 		}
@@ -2202,37 +2250,42 @@ app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", async (req,
 		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
-		if (docKey === "master_agreement") {
-			const pdfBuffer = await generateMasterAgreement({
-				legalName: application?.legal_name || "", dba: application?.dba || "",
-				entityType: application?.entity_type || "", address: application?.address || "",
-				contactPerson: application?.contact_person || "", contactTitle: application?.contact_title || "",
-				phone: application?.phone || "", email: application?.email || "",
-				einSsn: application?.ein_ssn || "", effectiveDate,
-			});
-			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Master Agreement Preview.pdf"');
-			return res.send(pdfBuffer);
-		}
-
-		if (docKey === "vehicle_lease") {
+		if (docKey === "master_agreement" || docKey === "vehicle_lease") {
 			let vehicles = [];
 			try { vehicles = JSON.parse(application?.vehicles_json || "[]"); } catch { /* skip */ }
 			if (!vehicles.length && (application?.vehicle_year || application?.vehicle_make)) {
 				vehicles.push({
 					year: application.vehicle_year || "", make: application.vehicle_make || "",
 					model: application.vehicle_model || "", vin: application.vehicle_vin || "",
-					licensePlate: "", titleState: application.vehicle_title_state || "",
+					mileage: application.vehicle_mileage || "",
+					titleState: application.vehicle_title_state || "",
+					liens: application.vehicle_liens || "",
+					registeredOwner: application.vehicle_registered_owner || "",
 				});
 			}
-			const pdfBuffer = await generateVehicleLease({
-				legalName: application?.legal_name || "", dba: application?.dba || "",
-				entityType: application?.entity_type || "", address: application?.address || "",
-				contactPerson: application?.contact_person || "", phone: application?.phone || "",
-				email: application?.email || "", effectiveDate, vehicles,
+			const payInfo = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
+			const pdfBuffer = await renderPolicy(docKey, {
+				legalName: application?.legal_name || "",
+				dba: application?.dba || "",
+				entityType: application?.entity_type || "",
+				address: application?.address || "",
+				contactPerson: application?.contact_person || "",
+				contactTitle: application?.contact_title || "",
+				phone: application?.phone || "",
+				email: application?.email || "",
+				einSsn: application?.ein_ssn || "",
+				yearsInOperation: application?.years_in_operation || "",
+				fleetSize: application?.fleet_size || "",
+				vehicles,
+				bankName: payInfo?.bank_name || "",
+				bankRouting: payInfo?.routing_number || "",
+				bankAccount: payInfo?.account_number || "",
+				accountType: payInfo?.account_type || "",
+				effectiveDate,
 			});
 			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Vehicle Lease Preview.pdf"');
+			const filename = docKey === "master_agreement" ? "Master Agreement Preview.pdf" : "Vehicle Lease Preview.pdf";
+			res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
 			return res.send(pdfBuffer);
 		}
 
@@ -2311,22 +2364,38 @@ app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
 app.post("/api/public/investor-preview-pdf/:docKey", async (req, res) => {
 	try {
 		const { docKey } = req.params;
-		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email, ein_ssn, vehicles, signatureText, signatureImage } = req.body;
+		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email, ein_ssn, years_in_operation, fleet_size, vehicles, banking, signatureText, signatureImage } = req.body;
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 		const signedAt = signatureText ? new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" }) : undefined;
-		const appData = { legalName: legal_name || "", dba: dba || "", entityType: entity_type || "", address: address || "", contactPerson: contact_person || "", contactTitle: contact_title || "", phone: phone || "", email: email || "", einSsn: ein_ssn || "", effectiveDate, signatureText: signatureText || undefined, signatureImage: signatureImage || undefined, signedAt };
+		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
+		const appData = {
+			legalName: legal_name || "",
+			dba: dba || "",
+			entityType: entity_type || "",
+			address: address || "",
+			contactPerson: contact_person || "",
+			contactTitle: contact_title || "",
+			phone: phone || "",
+			email: email || "",
+			einSsn: ein_ssn || "",
+			yearsInOperation: years_in_operation || "",
+			fleetSize: fleet_size || "",
+			vehicles: vehiclesArr,
+			bankName: banking?.bank_name || "",
+			bankRouting: banking?.routing_number || "",
+			bankAccount: banking?.account_number || "",
+			accountType: banking?.account_type || "",
+			effectiveDate,
+			signatureText: signatureText || undefined,
+			signatureImage: signatureImage || undefined,
+			signedAt,
+		};
 
-		if (docKey === "master_agreement") {
-			const pdfBuffer = await generateMasterAgreement(appData);
+		if (docKey === "master_agreement" || docKey === "vehicle_lease") {
+			const pdfBuffer = await renderPolicy(docKey, appData);
 			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Master Agreement.pdf"');
-			return res.send(pdfBuffer);
-		}
-		if (docKey === "vehicle_lease") {
-			const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
-			const pdfBuffer = await generateVehicleLease({ ...appData, vehicles: vehiclesArr });
-			res.setHeader("Content-Type", "application/pdf");
-			res.setHeader("Content-Disposition", 'inline; filename="Vehicle Lease.pdf"');
+			const filename = docKey === "master_agreement" ? "Master Agreement.pdf" : "Vehicle Lease.pdf";
+			res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
 			return res.send(pdfBuffer);
 		}
 		if (docKey === "w9") {
