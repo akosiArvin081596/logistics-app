@@ -180,7 +180,8 @@ function fmtDate(ts) {
 
 async function loadOnboardingDocs() {
   try {
-    const res = await api.get('/api/investor/onboarding-documents')
+    const params = props.investorId ? `?investor_id=${props.investorId}` : ''
+    const res = await api.get(`/api/investor/onboarding-documents${params}`)
     onboardingDocs.value = (res.documents || []).filter(d => d.signed && d.signed_pdf_url)
   } catch { /* skip */ }
 }

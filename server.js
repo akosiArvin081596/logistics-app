@@ -6180,7 +6180,12 @@ app.post("/api/chat/attachment", requireAuth, async (req, res) => {
 app.get("/api/investor/onboarding-documents", requireRole("Super Admin", "Investor"), (req, res) => {
 	try {
 		const user = req.session.user;
-		const investor = db.prepare("SELECT application_id FROM investors WHERE user_id = ?").get(user.id);
+		let investor;
+		if (user.role === "Super Admin" && req.query.investor_id) {
+			investor = db.prepare("SELECT application_id FROM investors WHERE id = ?").get(parseInt(req.query.investor_id));
+		} else {
+			investor = db.prepare("SELECT application_id FROM investors WHERE user_id = ?").get(user.id);
+		}
 		if (!investor || !investor.application_id) return res.json({ documents: [] });
 		const docs = db.prepare("SELECT doc_key, doc_name, signed, signature_text, signed_at, signed_pdf_url FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id").all(investor.application_id);
 		res.json({ documents: docs });
