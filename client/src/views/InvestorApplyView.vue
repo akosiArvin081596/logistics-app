@@ -1020,7 +1020,6 @@ async function submitOnboarding() {
   border: 1.5px solid #e9edf3;
   border-radius: 12px;
   margin-bottom: 1rem;
-  overflow: hidden;
   background: #fff;
 }
 .accordion-toggle {
