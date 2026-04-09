@@ -27,9 +27,23 @@
       <span v-if="uploadForm.file && !uploadForm.docType" class="upload-hint">Select a doc type to upload</span>
     </div>
 
+    <!-- Signed Onboarding Documents -->
+    <div v-if="onboardingDocs.length > 0" class="onboarding-docs">
+      <div class="ob-docs-label">Signed Onboarding Documents</div>
+      <div class="ob-docs-grid">
+        <a v-for="doc in onboardingDocs" :key="doc.doc_key" :href="doc.signed_pdf_url" target="_blank" rel="noopener" class="ob-doc-card">
+          <div class="ob-doc-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/></svg>
+          </div>
+          <div class="ob-doc-name">{{ doc.doc_name }}</div>
+          <div class="ob-doc-meta">Signed {{ fmtDate(doc.signed_at) }}</div>
+        </a>
+      </div>
+    </div>
+
     <!-- Doc list -->
     <div v-if="loading" class="doc-empty">Loading...</div>
-    <div v-else-if="docs.length === 0" class="doc-empty">No legal documents on file.</div>
+    <div v-else-if="docs.length === 0 && onboardingDocs.length === 0" class="doc-empty">No legal documents on file.</div>
     <table v-else class="doc-table">
       <thead>
         <tr>
@@ -82,6 +96,7 @@ const docTypes = [
 ]
 
 const docs = ref([])
+const onboardingDocs = ref([])
 const loading = ref(false)
 const uploading = ref(false)
 const errorMsg = ref('')
@@ -162,7 +177,14 @@ function fmtDate(ts) {
   return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-onMounted(load)
+async function loadOnboardingDocs() {
+  try {
+    const res = await api.get('/api/investor/onboarding-documents')
+    onboardingDocs.value = (res.documents || []).filter(d => d.signed && d.signed_pdf_url)
+  } catch { /* skip */ }
+}
+
+onMounted(() => { load(); loadOnboardingDocs() })
 </script>
 
 <style scoped>
@@ -251,4 +273,21 @@ onMounted(load)
 .btn-del:hover { opacity: 0.75; }
 
 .error-msg { color: var(--danger); font-size: 0.78rem; margin-top: 0.5rem; }
+
+.onboarding-docs { margin-bottom: 1rem; }
+.ob-docs-label {
+  font-size: 0.72rem; font-weight: 700; color: #64748b;
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.6rem;
+}
+.ob-docs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.65rem; }
+.ob-doc-card {
+  display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
+  padding: 1rem 0.75rem; border: 1.5px solid #d1fae5; border-radius: 10px;
+  background: #f7fdf9; text-decoration: none; color: inherit;
+  transition: all 0.15s; cursor: pointer; text-align: center;
+}
+.ob-doc-card:hover { border-color: #16a34a; background: #ecfdf5; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.ob-doc-icon { color: #16a34a; }
+.ob-doc-name { font-size: 0.78rem; font-weight: 600; color: #0f172a; line-height: 1.3; }
+.ob-doc-meta { font-size: 0.65rem; color: #94a3b8; }
 </style>

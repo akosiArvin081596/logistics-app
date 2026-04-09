@@ -6145,6 +6145,19 @@ app.post("/api/chat/attachment", requireAuth, async (req, res) => {
 	}
 });
 
+// GET /api/investor/onboarding-documents — Investor's signed onboarding docs (Master Agreement, Vehicle Lease, W-9)
+app.get("/api/investor/onboarding-documents", requireRole("Super Admin", "Investor"), (req, res) => {
+	try {
+		const user = req.session.user;
+		const investor = db.prepare("SELECT application_id FROM investors WHERE user_id = ?").get(user.id);
+		if (!investor || !investor.application_id) return res.json({ documents: [] });
+		const docs = db.prepare("SELECT doc_key, doc_name, signed, signature_text, signed_at, signed_pdf_url FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id").all(investor.application_id);
+		res.json({ documents: docs });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // GET /api/investor/documents — All documents for the investor's drivers
 app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
