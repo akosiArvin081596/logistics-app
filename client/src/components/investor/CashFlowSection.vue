@@ -14,7 +14,7 @@
       <div class="kpi-card blue">
         <div class="kpi-label">Owner Earnings (Est.)</div>
         <div class="kpi-value">{{ fmt(investorPayout) }}</div>
-        <div class="kpi-sub">at 50% owner take</div>
+        <div class="kpi-sub">at {{ splitPct }}% owner take</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Break-Even</div>
@@ -66,8 +66,9 @@ const totalInvestment = computed(() => totalPurchasePrice.value + totalStartupEx
 // Net Cash Flow = revenue - actual expenses from server
 const netCashFlow = computed(() => totalRevenue.value - totalExpenses.value)
 
-// Owner Earnings = fixed 50%
-const investorPayout = computed(() => netCashFlow.value * 0.5)
+// Owner Earnings = from config split %
+const splitPct = computed(() => props.production?.investorSplitPct || 50)
+const investorPayout = computed(() => netCashFlow.value * (splitPct.value / 100))
 
 // Payoff progress = net revenue recovered / total investment
 const recoveryPct = computed(() => {

@@ -6577,7 +6577,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 			const investorCfg = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(user.id);
 			investorCfg.forEach(r => (config[r.key] = r.value));
 		}
-		const purchasePrice = parseFloat(config.purchase_price) || 58000;
+		const purchasePrice = parseFloat(config.truck_purchase_price || config.purchase_price) || 58000;
 		const totalTrucks = isSuperAdmin
 			? db.prepare("SELECT COUNT(*) AS cnt FROM trucks").get().cnt
 			: db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE owner_id = ?").get(user.id).cnt;
@@ -8251,21 +8251,33 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 		const avgMonthlyOwnerEarnings = Math.round(paidRevenue / monthsOfOperation);
 
-		// ---- Add truck fixed costs & maintenance fund to totalExpenses ----
+		// ---- Add truck fixed costs — per-truck months of ownership ----
 		{
 			const truckQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly FROM trucks WHERE owner_id = ?"
-				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly FROM trucks";
+				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly, created_at FROM trucks WHERE owner_id = ?"
+				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly, created_at FROM trucks";
 			const truckArgs = investorDriverSet ? [user.id] : [];
 			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
-			let fixedMonthlyTotal = 0;
 			for (const t of fleetTrucks) {
-				fixedMonthlyTotal += (t.insurance_monthly || 0) + (t.eld_monthly || 0)
+				const fixedPerMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
 					+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12)
 					+ ((t.driver_pay_daily || 0) * 30)
 					+ (t.maintenance_fund_monthly || 0);
+				// Use truck's own created_at to determine how long it has existed,
+				// capped to monthsOfOperation so we never exceed the operating window.
+				let truckMonths = monthsOfOperation;
+				if (t.created_at) {
+					const truckDate = new Date(t.created_at);
+					if (!isNaN(truckDate)) {
+						truckMonths = Math.max(1,
+							(now.getFullYear() - truckDate.getFullYear()) * 12
+							+ (now.getMonth() - truckDate.getMonth()) + 1
+						);
+						truckMonths = Math.min(truckMonths, monthsOfOperation);
+					}
+				}
+				totalExpenses += fixedPerMonth * truckMonths;
 			}
-			totalExpenses += fixedMonthlyTotal * monthsOfOperation;
 		}
 
 		// Monthly revenue sorted
@@ -8279,10 +8291,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			: db.prepare("SELECT id, unit_number, assigned_driver, purchase_price, title_status FROM trucks").all();
 		const totalTrucks = allOwnedTrucks.length || 1;
 		const totalPurchasePrice = allOwnedTrucks.reduce((sum, t) => sum + (t.purchase_price || 0), 0);
-		const totalCurrentValue = Math.round(totalPurchasePrice * 0.80); // 20% flat depreciation
+		const depreciationYears = Math.max(1, parseFloat(config.depreciation_years) || 5);
+		const depreciationRate = Math.min(1, monthsOfOperation / (depreciationYears * 12));
+		const totalCurrentValue = Math.round(totalPurchasePrice * (1 - depreciationRate));
 		// Use first truck's values as representative for single-truck display; fleet view uses totals
 		const purchasePrice = allOwnedTrucks.length === 1 ? (allOwnedTrucks[0].purchase_price || 0) : totalPurchasePrice;
-		const currentValue = allOwnedTrucks.length === 1 ? Math.round((allOwnedTrucks[0].purchase_price || 0) * 0.80) : totalCurrentValue;
+		const currentValue = allOwnedTrucks.length === 1 ? Math.round((allOwnedTrucks[0].purchase_price || 0) * (1 - depreciationRate)) : totalCurrentValue;
 		const titleStatus = allOwnedTrucks.length === 1 ? (allOwnedTrucks[0].title_status || "Clean") : "Mixed";
 
 		// Fleet totals (S9)
@@ -8294,38 +8308,39 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate); // S7
 
 		// ---- Per-Truck Revenue Data (S8) ----
-		const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 		const perTruckData = {};
 		if (investorDriverSet) {
-			const ownedTrucks = db.prepare("SELECT unit_number, assigned_driver FROM trucks WHERE owner_id = ?").all(user.id);
+			const ownedTrucks = db.prepare("SELECT unit_number, assigned_driver, created_at FROM trucks WHERE owner_id = ?").all(user.id);
 			ownedTrucks.forEach((truck) => {
 				const driverName = (truck.assigned_driver || "").trim().toLowerCase();
-				let unitMonthlyGross = 0;
+				// All-time revenue for this truck's driver
+				let unitTotalGross = 0;
 				if (driverName && jtRateCol) {
-					// Use Job Tracking data for per-truck monthly revenue (more reliable driver+date data)
 					filteredJobData.forEach((r) => {
 						const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
 						if (driver !== driverName) return;
-						const dateVal = jtDateCol ? r[jtDateCol] : null;
-						if (dateVal) {
-							const d = new Date(dateVal);
-							if (!isNaN(d)) {
-								const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-								if (key === currentMonthKey) {
-									unitMonthlyGross += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
-								}
-							}
-						}
+						unitTotalGross += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
 					});
 				}
-				// Per-truck monthly expenses (RFD-13)
-				const expRow = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE LOWER(driver) = ? AND strftime('%Y-%m', date) = ?`).get(driverName, currentMonthKey);
-				const maintRow = db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf WHERE LOWER(mf.truck) = ? AND strftime('%Y-%m', mf.date) = ?`).get(truck.unit_number.toLowerCase(), currentMonthKey);
-				const compRow = db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf WHERE LOWER(cf.truck) = ? AND strftime('%Y-%m', cf.due_date) = ? AND cf.status = 'Paid'`).get(truck.unit_number.toLowerCase(), currentMonthKey);
-				// Fixed costs from truck record (pro-rated monthly)
+				// All-time variable expenses for this truck's driver
+				const expRow = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE LOWER(driver) = ?`).get(driverName);
+				const maintRow = db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf WHERE LOWER(mf.truck) = ? AND mf.type = 'service'`).get(truck.unit_number.toLowerCase());
+				const compRow = db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf WHERE LOWER(cf.truck) = ? AND cf.status = 'Paid'`).get(truck.unit_number.toLowerCase());
+				// Fixed costs × truck's own months of existence
 				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly FROM trucks WHERE unit_number = ?").get(truck.unit_number);
-				const fixedMonthly = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12) + ((truckRow?.driver_pay_daily || 0) * 30) + (truckRow?.maintenance_fund_monthly || 0);
-				const unitMonthlyExpenses = (expRow?.t || 0) + (maintRow?.t || 0) + (compRow?.t || 0) + fixedMonthly;
+				const fixedPerMonth = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12) + ((truckRow?.driver_pay_daily || 0) * 30) + (truckRow?.maintenance_fund_monthly || 0);
+				let truckMonths = monthsOfOperation;
+				if (truck.created_at) {
+					const td = new Date(truck.created_at);
+					if (!isNaN(td)) {
+						truckMonths = Math.max(1, (now.getFullYear() - td.getFullYear()) * 12 + (now.getMonth() - td.getMonth()) + 1);
+						truckMonths = Math.min(truckMonths, monthsOfOperation);
+					}
+				}
+				const unitTotalExpenses = (expRow?.t || 0) + (maintRow?.t || 0) + (compRow?.t || 0) + (fixedPerMonth * truckMonths);
+				// Average monthly = all-time totals / months this truck has existed
+				const avgMonthlyGross = Math.round(unitTotalGross / truckMonths);
+				const avgMonthlyExpenses = Math.round(unitTotalExpenses / truckMonths);
 				// Mileage from odometer readings (max - min)
 				const odometerRange = db.prepare(
 					`SELECT MIN(odometer) AS minOdo, MAX(odometer) AS maxOdo FROM expenses WHERE LOWER(driver) = ? AND odometer > 0`
@@ -8333,9 +8348,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const totalMiles = (odometerRange?.maxOdo && odometerRange?.minOdo) ? Math.round(odometerRange.maxOdo - odometerRange.minOdo) : 0;
 
 				perTruckData[truck.unit_number] = {
-					unitMonthlyGross: Math.round(unitMonthlyGross),
-					unitMonthlyExpenses: Math.round(unitMonthlyExpenses),
-					estAnnualRevenue: Math.round((unitMonthlyGross - unitMonthlyExpenses) * 12),
+					unitMonthlyGross: avgMonthlyGross,
+					unitMonthlyExpenses: avgMonthlyExpenses,
+					estAnnualRevenue: Math.round((avgMonthlyGross - avgMonthlyExpenses) * 12),
 					totalMiles,
 				};
 			});
@@ -8368,7 +8383,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				monthlyData,
 				avgMonthlyOwnerEarnings,
 				monthsOfOperation,
-				investorSplitPct: 50,
+				investorSplitPct: parseFloat(config.investor_split_pct) || 50,
 				totalJobs,
 				completedJobs: completedJobCount,
 				totalExpenses: Math.round(totalExpenses),
@@ -8381,8 +8396,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				purchasePrice,
 				currentValue,
 				titleStatus,
-				depreciationYears: 1,
-				annualDepreciation: purchasePrice,
+				depreciationYears,
+				annualDepreciation: Math.round(totalPurchasePrice / depreciationYears),
 				totalTrucks,
 				totalMiles: fleetTotalMiles,
 				revenuePerMile,
