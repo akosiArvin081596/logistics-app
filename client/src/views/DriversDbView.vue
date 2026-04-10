@@ -49,6 +49,7 @@ import { onMounted, computed, ref } from 'vue'
 import { useDriversDbStore } from '../stores/driversDb'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddDriverForm from '../components/drivers-db/AddDriverForm.vue'
 import DriverTable from '../components/drivers-db/DriverTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
@@ -57,6 +58,7 @@ import { Card, CardContent } from '@/components/ui/card'
 const store = useDriversDbStore()
 const api = useApi()
 const { show: toast } = useToast()
+useSocketRefresh('drivers:changed', () => store.load())
 const driverRatings = ref({})
 const truckAssignments = ref([])
 

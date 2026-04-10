@@ -179,6 +179,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -188,6 +189,7 @@ import DrugTestUpload from '../components/users/DrugTestUpload.vue'
 
 const api = useApi()
 const { show: toast } = useToast()
+useSocketRefresh('applications:changed', () => load())
 const applications = ref([])
 const loading = ref(false)
 const showDrugTest = ref(false)

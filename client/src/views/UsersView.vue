@@ -37,6 +37,7 @@ import { onMounted, computed } from 'vue'
 import { useUsersStore } from '../stores/users'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddUserForm from '../components/users/AddUserForm.vue'
 import UserTable from '../components/users/UserTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
@@ -45,6 +46,7 @@ import { Card, CardContent } from '@/components/ui/card'
 const store = useUsersStore()
 const authStore = useAuthStore()
 const { show: toast } = useToast()
+useSocketRefresh('users:changed', () => store.loadUsers())
 
 const kpiCards = computed(() => {
   const users = store.users

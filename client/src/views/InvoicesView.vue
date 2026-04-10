@@ -164,6 +164,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useInvoicesStore } from '../stores/invoices'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -172,6 +173,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 
 const store = useInvoicesStore()
 const { show: toast } = useToast()
+useSocketRefresh('invoices:changed', () => store.load())
 
 const showDetail = ref(false)
 const selectedInvoice = ref(null)

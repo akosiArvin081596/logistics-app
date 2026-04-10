@@ -241,6 +241,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -249,6 +250,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 
 const api = useApi()
 const { show: toast } = useToast()
+useSocketRefresh('investor-applications:changed', () => load())
 const applications = ref([])
 const loading = ref(false)
 const activeFilter = ref(null)

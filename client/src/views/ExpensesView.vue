@@ -4,13 +4,18 @@
       <h2>Expenses</h2>
     </div>
     <div class="expenses-fill">
-      <ExpensesTab />
+      <ExpensesTab :key="refreshKey" />
     </div>
   </div>
 </template>
 
 <script setup>
+import { ref } from 'vue'
 import ExpensesTab from '../components/dashboard/ExpensesTab.vue'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
+
+const refreshKey = ref(0)
+useSocketRefresh('expenses:changed', () => { refreshKey.value++ })
 </script>
 
 <style scoped>

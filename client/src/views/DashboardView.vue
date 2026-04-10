@@ -56,6 +56,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useDashboardStore } from '../stores/dashboard'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
@@ -72,7 +73,7 @@ const auth = useAuthStore()
 const { show: toast } = useToast()
 const socket = useSocket()
 const activeTab = ref('jobBoard')
-let refreshInterval = null
+useSocketRefresh('dashboard:changed', () => refresh())
 
 const tabs = computed(() => [
   { key: 'jobBoard', label: 'Job Board', count: store.unassignedJobs.length },
@@ -96,6 +97,6 @@ function onStatusUpdated(p) { toast(`${p.driverName}: ${p.newStatus}`, 'info'); 
 function onPodUploaded(p) { toast(`POD uploaded: ${p.loadId}`, 'success'); refresh() }
 function onNewLoad() { toast('New load received', 'info'); refresh() }
 
-onMounted(() => { refresh(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); socket.on('new-load', onNewLoad); refreshInterval = setInterval(refresh, 60000) })
-onUnmounted(() => { clearInterval(refreshInterval); socket.off('status-updated', onStatusUpdated); socket.off('pod-uploaded', onPodUploaded); socket.off('new-load', onNewLoad) })
+onMounted(() => { refresh(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); socket.on('new-load', onNewLoad) })
+onUnmounted(() => { socket.off('status-updated', onStatusUpdated); socket.off('pod-uploaded', onPodUploaded); socket.off('new-load', onNewLoad) })
 </script>

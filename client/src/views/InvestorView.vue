@@ -107,6 +107,7 @@ import { useInvestorStore } from '../stores/investor'
 import { useAuthStore } from '../stores/auth'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import ProductionSection from '../components/investor/ProductionSection.vue'
 import TrendSection from '../components/investor/TrendSection.vue'
 import AssetSection from '../components/investor/AssetSection.vue'
@@ -124,6 +125,7 @@ const store = useInvestorStore()
 const authStore = useAuthStore()
 const api = useApi()
 const { show: toast } = useToast()
+useSocketRefresh('investor:changed', () => loadData())
 
 const trucks = ref([])
 const reportLoading = ref(false)

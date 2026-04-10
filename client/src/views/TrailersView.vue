@@ -170,6 +170,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useTrailersStore } from '../stores/trailers'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
@@ -180,6 +181,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 
 const store = useTrailersStore()
 const { show: toast } = useToast()
+useSocketRefresh('trailers:changed', () => store.load())
 
 const showForm = ref(false)
 const editing = ref(null)

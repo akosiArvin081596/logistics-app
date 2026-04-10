@@ -45,6 +45,7 @@
 import { onMounted, computed } from 'vue'
 import { useInvestorsStore } from '../stores/investors'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddInvestorForm from '../components/investors/AddInvestorForm.vue'
 import InvestorTable from '../components/investors/InvestorTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
@@ -52,6 +53,7 @@ import { Card, CardContent } from '@/components/ui/card'
 
 const store = useInvestorsStore()
 const { show: toast } = useToast()
+useSocketRefresh('investors:changed', () => store.load())
 
 const kpiCards = computed(() => {
   const inv = store.investors

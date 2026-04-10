@@ -31,6 +31,9 @@ const app = express();
 app.disable('etag');
 const server = http.createServer(app);
 const io = new Server(server);
+// Emit a domain invalidation event so connected clients auto-refresh.
+// Called after successful mutations (POST/PUT/DELETE) — no payload needed.
+function notifyChange(domain) { io.to("dispatch").emit(`${domain}:changed`); }
 app.use(compression());
 app.use(express.json({ limit: "20mb" }));
 // NOTE: /uploads static mount is deferred to after requireAuth is defined (see below),
@@ -1175,6 +1178,7 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				obj.Status || "active");
+		notifyChange("drivers");
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -1197,6 +1201,7 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				nextStatus, id);
+		notifyChange("drivers");
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -1270,6 +1275,7 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) 
 		}
 		db.prepare("DELETE FROM legal_documents WHERE driver_id = ?").run(id);
 		db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
+		notifyChange("drivers");
 		res.json({ success: true, cascadedDocs: orphanedDocs.length });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -1526,6 +1532,7 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			// Check if already onboarded for this application
 			const existingOnboarding = db.prepare("SELECT id FROM driver_onboarding WHERE application_id = ?").get(appId);
 			if (existingOnboarding) {
+				notifyChange("applications");
 				return res.json({ success: true, message: "Application accepted (account already exists)" });
 			}
 
@@ -1565,6 +1572,7 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			}
 
 			logAudit(req, "accept_application", "application", appId, `Accepted driver "${fullName}", created account "${username}"`);
+			notifyChange("applications"); notifyChange("users"); notifyChange("drivers");
 
 			res.json({
 				success: true,
@@ -2565,6 +2573,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			}
 
 			logAudit(req, "accept_investor", "investor_application", appId, `Accepted investor "${fullName}", created account "${username}", ${vehicles.length} vehicle(s)`);
+			notifyChange("investor-applications"); notifyChange("investors"); notifyChange("users"); notifyChange("trucks");
 			res.json({ success: true, accountCreated: true, credentials: { username, tempPassword, userId, investorName: fullName } });
 
 			// Send welcome email to investor (async, non-blocking)
@@ -3498,6 +3507,7 @@ app.put("/api/invoices/:id/submit", requireAuth, (req, res) => {
 		}
 		const now = new Date().toISOString();
 		db.prepare("UPDATE invoices SET status = 'Submitted', submitted_at = ? WHERE id = ?").run(now, invoice.id);
+		notifyChange("invoices");
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -3525,6 +3535,7 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), (req, res) => {
 			db.prepare("UPDATE invoices SET status = 'Paid', approved_at = ?, approved_by = ? WHERE id = ?")
 				.run(now, adminName, invoice.id);
 		}
+		notifyChange("invoices");
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -3667,6 +3678,7 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		logAudit(req, 'create_user', 'user', username, `Created user "${username}" with role ${role}`);
+		notifyChange("users");
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error creating user:", error.message);
@@ -3765,6 +3777,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			syncDriverToCarrierSheet(user.driver_name, { email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
 		}
 
+		notifyChange("users");
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error updating user:", error.message);
@@ -3878,6 +3891,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		syncDriverToCarrierSheet(user.driver_name, { action: "delete" });
 	}
 	db.prepare("DELETE FROM users WHERE id = ?").run(id);
+	notifyChange("users");
 	res.json({ success: true });
 });
 
@@ -3924,6 +3938,7 @@ app.post("/api/investors", requireRole("Super Admin"), (req, res) => {
 	`).run(userId || null, fullName.trim(), (carrierName || "").trim(), status || "Active", (notes || "").trim(),
 		(entityType || "").trim(), (address || "").trim(), (phone || "").trim(), (email || "").trim(),
 		(einSsn || "").trim(), (taxClassification || "").trim(), (contactPerson || "").trim(), (contactTitle || "").trim());
+	notifyChange("investors");
 	res.json({ success: true, id: result.lastInsertRowid });
 });
 
@@ -3944,6 +3959,7 @@ app.put("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 		(einSsn ?? existing.ein_ssn).trim(), (taxClassification ?? existing.tax_classification).trim(),
 		(contactPerson ?? existing.contact_person).trim(), (contactTitle ?? existing.contact_title).trim(), id
 	);
+	notifyChange("investors");
 	res.json({ success: true });
 });
 
@@ -3959,6 +3975,7 @@ app.delete("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 		} catch (err) { console.error("Failed to unlink investor profile pic on cascade:", err.message); }
 	}
 	db.prepare("DELETE FROM investors WHERE id = ?").run(id);
+	notifyChange("investors");
 	res.json({ success: true });
 });
 
@@ -4074,6 +4091,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		if (assignedDriver && assignedDriver.trim()) {
 			assignDriverToTruck(result.lastInsertRowid, assignedDriver.trim());
 		}
+		notifyChange("trucks");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error creating truck:", error.message);
@@ -4145,6 +4163,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 				syncDriverToCarrierSheet(oldDriver.trim(), { action: "update" });
 			}
 		}
+		notifyChange("trucks");
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error updating truck:", error.message);
@@ -4164,6 +4183,7 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		db.prepare("DELETE FROM compliance_fees WHERE LOWER(truck) = ?").run(unit);
 	}
 	db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
+	notifyChange("trucks");
 	res.json({ success: true });
 });
 
@@ -4199,6 +4219,7 @@ app.post("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) =
 			INSERT INTO trailers (trailer_number, type, length, year, vin, license_plate, status, truck_id, notes)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(trailer_number, type || 'Dry Van', length || '53', year || 0, vin || '', license_plate || '', status || 'Available', truck_id || null, notes || '');
+		notifyChange("trailers");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -4231,6 +4252,7 @@ app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res
 			notes ?? trailer.notes,
 			id
 		);
+		notifyChange("trailers");
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -4243,6 +4265,7 @@ app.delete("/api/trailers/:id", requireRole("Super Admin"), (req, res) => {
 		const trailer = db.prepare("SELECT * FROM trailers WHERE id = ?").get(id);
 		if (!trailer) return res.status(404).json({ error: "Trailer not found" });
 		db.prepare("DELETE FROM trailers WHERE id = ?").run(id);
+		notifyChange("trailers");
 		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -5138,6 +5161,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 
 		logAudit(req, 'dispatch_load', 'load', loadId, `Assigned driver ${driver} to load ${loadId}`);
+		notifyChange("dashboard");
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error dispatching load:", error.message);
@@ -5210,7 +5234,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			db.prepare("DELETE FROM load_responses WHERE load_id = ? AND driver_name = ?")
 				.run(loadId, newDriver.trim().toLowerCase());
 		}
-
+		notifyChange("dashboard");
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error reassigning load:", error.message);
@@ -5281,7 +5305,7 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin", "Dispatcher"), async
 			title: `Cancelled Load ${loadId || 'N/A'}`,
 			body: `Was assigned to ${driver || 'unknown'}`,
 		});
-
+		notifyChange("dashboard");
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error cancelling load:", error.message);
@@ -6314,7 +6338,7 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 			)
 			.run(timestamp, driver, loadId || "", type, amount, description || "", date, photoData || "",
 				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit);
-
+		notifyChange("expenses");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error logging expense:", error.message);
@@ -8495,6 +8519,7 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 		const expense = db.prepare("SELECT id FROM expenses WHERE id = ?").get(id);
 		if (!expense) return res.status(404).json({ error: "Expense not found" });
 		db.prepare("UPDATE expenses SET status = ? WHERE id = ?").run(status, id);
+		notifyChange("expenses");
 		res.json({ success: true });
 	} catch (err) {
 		console.error("Error updating expense status:", err.message);

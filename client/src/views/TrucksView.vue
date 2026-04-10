@@ -50,6 +50,7 @@ import { onMounted, computed } from 'vue'
 import { useTrucksStore } from '../stores/trucks'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddTruckForm from '../components/trucks/AddTruckForm.vue'
 import TruckTable from '../components/trucks/TruckTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
@@ -58,6 +59,7 @@ import { Card, CardContent } from '@/components/ui/card'
 const store = useTrucksStore()
 const authStore = useAuthStore()
 const { show: toast } = useToast()
+useSocketRefresh('trucks:changed', () => { store.loadTrucks(); store.loadDriverNames(); store.loadInvestorUsers() })
 
 const kpiCards = computed(() => {
   const trucks = store.trucks
