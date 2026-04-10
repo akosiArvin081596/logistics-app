@@ -554,7 +554,12 @@ function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColNa
 	const usr = db.prepare("SELECT company_name FROM users WHERE id = ?").get(userId);
 	const carrierName = usr ? (usr.company_name || "").trim() : "";
 	const set = new Set();
-	// From live Carrier Database sheet
+	// 1. From trucks assigned to this investor (most authoritative — direct owner_id link)
+	const truckDrivers = db.prepare(
+		"SELECT DISTINCT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver IS NOT NULL AND assigned_driver != ''"
+	).all(userId);
+	truckDrivers.forEach(t => set.add(t.assigned_driver.trim().toLowerCase()));
+	// 2. From live Carrier Database (drivers_directory) matching carrier name
 	if (carrierName && carrierDBData && driverColName && carrierColName) {
 		const carrierLower = carrierName.toLowerCase();
 		carrierDBData.forEach(row => {
@@ -563,7 +568,7 @@ function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColNa
 			if (rowCarrier === carrierLower && rowDriver) set.add(rowDriver);
 		});
 	}
-	// From carrier_driver_history (historical pairings)
+	// 3. From carrier_driver_history (historical pairings)
 	if (carrierName) {
 		const historical = db.prepare(
 			"SELECT DISTINCT driver_name FROM carrier_driver_history WHERE LOWER(carrier_name) = ?"
