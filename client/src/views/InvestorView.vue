@@ -557,9 +557,14 @@ onMounted(() => {
   padding: 1rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   overflow: hidden;
   min-width: 0;
+  gap: 0.3rem;
 }
 .combined-kpi-grid .kpi-card.accent { border-color: var(--accent); }
 .combined-kpi-grid .kpi-card.accent .kpi-value { color: var(--accent); }
