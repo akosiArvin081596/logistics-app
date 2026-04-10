@@ -94,7 +94,8 @@ async function handleCancel({ rowIndex, job }) { try { await store.cancelLoad(ro
 async function handleStatusUpdate({ rowIndex, newStatus, job }) { try { const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); const dc = store.headers.find(h => /driver/i.test(h)); await store.updateStatus(rowIndex, dc ? job[dc] || '' : '', lc ? job[lc] || '' : '', newStatus, job); toast(`Status: ${newStatus}`, 'success'); refresh() } catch { toast('Failed to update', 'error') } }
 function onStatusUpdated(p) { toast(`${p.driverName}: ${p.newStatus}`, 'info'); refresh() }
 function onPodUploaded(p) { toast(`POD uploaded: ${p.loadId}`, 'success'); refresh() }
+function onNewLoad() { toast('New load received', 'info'); refresh() }
 
-onMounted(() => { refresh(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); refreshInterval = setInterval(refresh, 60000) })
-onUnmounted(() => { clearInterval(refreshInterval); socket.off('status-updated', onStatusUpdated); socket.off('pod-uploaded', onPodUploaded) })
+onMounted(() => { refresh(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); socket.on('new-load', onNewLoad); refreshInterval = setInterval(refresh, 60000) })
+onUnmounted(() => { clearInterval(refreshInterval); socket.off('status-updated', onStatusUpdated); socket.off('pod-uploaded', onPodUploaded); socket.off('new-load', onNewLoad) })
 </script>

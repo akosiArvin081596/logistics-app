@@ -5039,6 +5039,14 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 	}
 });
 
+// POST /api/webhook/new-load — Called by n8n after writing a load to Google Sheets.
+// Emits a socket event so connected dashboards refresh instantly instead of waiting for the 60s poll.
+// No auth required — the endpoint only emits a notification, no data mutation.
+app.post("/api/webhook/new-load", (req, res) => {
+	io.to("dispatch").emit("new-load", { timestamp: Date.now() });
+	res.json({ ok: true });
+});
+
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
