@@ -45,6 +45,11 @@
         </div>
         <div class="stat-divider"></div>
         <div class="stat-item">
+          <span class="stat-value" style="color:#f59e0b">{{ fmtK(store.production?.totalExpenses) }}</span>
+          <span class="stat-label">Expenses</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat-item">
           <span class="stat-value">{{ store.production?.completedJobs || 0 }}</span>
           <span class="stat-label">Completed Loads</span>
         </div>

@@ -8170,35 +8170,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			})
 			: carrierDB.data;
 
-		// ---- Expense Data (S1) ----
-		let totalExpenses = 0;
-		if (investorOwnerId) {
-			// Primary: expenses tagged with owner_id (new). Fallback: expenses by driver name (old)
-			const driverList = [...investorDriverSet];
-			const placeholders = driverList.map(() => '?').join(',');
-			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE owner_id = ? OR LOWER(driver) IN (${placeholders})`).get(investorOwnerId, ...driverList);
-			totalExpenses += expSum.total;
-			// Maintenance fund services for investor's trucks
-			const maintSum = db.prepare(`SELECT COALESCE(SUM(mf.amount), 0) AS total FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type = 'service'`).get(user.id);
-			totalExpenses += maintSum.total;
-			// Compliance fees paid for investor's trucks
-			const compSum = db.prepare(`SELECT COALESCE(SUM(cf.amount), 0) AS total FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status = 'Paid'`).get(user.id);
-			totalExpenses += compSum.total;
-		} else if (isSuperAdmin) {
-			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses`).get();
-			totalExpenses += expSum.total;
-			const maintSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM maintenance_fund WHERE type = 'service'`).get();
-			totalExpenses += maintSum.total;
-			const compSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid'`).get();
-			totalExpenses += compSum.total;
-		}
-
 		// ---- Production Performance (from Job Tracking) ----
 		const jtRateCol = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
 		const jtDateCol = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i)
 			|| findCol(jobTracking.headers, /date/i);
 		const jtDriverCol = findCol(jobTracking.headers, /^driver$/i);
 		const statusCol = findCol(jobTracking.headers, /status/i);
+		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
 		// Revenue = completed loads × flat rate per load (configurable, default $250)
@@ -8208,6 +8186,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		let paidRevenue = 0;
 		let last30DaysRevenue = 0;
 		const monthlyRevenue = {};
+		const completedLoadIds = new Set();
 		const now = new Date();
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -8215,6 +8194,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		filteredJobData.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
 			if (!completedStatuses.test(st)) return;
+			// Track this load's ID for expense filtering
+			const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
+			if (lid) completedLoadIds.add(lid);
 			// Each completed load = ratePerLoad in revenue
 			totalRevenue += ratePerLoad;
 			paidRevenue += ratePerLoad;
@@ -8230,6 +8212,34 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		// Avg daily revenue = 30-day average (S2)
 		const avgDailyRevenue = last30DaysRevenue / 30;
+
+		// ---- Expense Data (S1) — only from completed loads ----
+		let totalExpenses = 0;
+		if (completedLoadIds.size > 0) {
+			const lidList = [...completedLoadIds];
+			const lidPh = lidList.map(() => '?').join(',');
+			if (investorOwnerId) {
+				const driverList = [...investorDriverSet];
+				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
+				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh}) AND (owner_id = ? OR LOWER(driver) IN (${driverPh}))`).get(...lidList, investorOwnerId, ...driverList);
+				totalExpenses += expSum.total;
+			} else if (isSuperAdmin) {
+				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh})`).get(...lidList);
+				totalExpenses += expSum.total;
+			}
+		}
+		// Truck-level costs (maintenance fund, compliance fees) — not load-specific
+		if (investorOwnerId) {
+			const maintSum = db.prepare(`SELECT COALESCE(SUM(mf.amount), 0) AS total FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type = 'service'`).get(user.id);
+			totalExpenses += maintSum.total;
+			const compSum = db.prepare(`SELECT COALESCE(SUM(cf.amount), 0) AS total FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status = 'Paid'`).get(user.id);
+			totalExpenses += compSum.total;
+		} else if (isSuperAdmin) {
+			const maintSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM maintenance_fund WHERE type = 'service'`).get();
+			totalExpenses += maintSum.total;
+			const compSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid'`).get();
+			totalExpenses += compSum.total;
+		}
 
 		// Operating period (earliest to latest from Job Tracking)
 		let earliestDate = null;
