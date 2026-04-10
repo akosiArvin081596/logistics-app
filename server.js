@@ -8201,6 +8201,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const statusCol = findCol(jobTracking.headers, /status/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
+		// Revenue = completed loads × flat rate per load (configurable, default $250)
+		const ratePerLoad = parseFloat(config.rate_per_load) || 250;
+
 		let totalRevenue = 0;
 		let paidRevenue = 0;
 		let last30DaysRevenue = 0;
@@ -8210,17 +8213,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
 		filteredJobData.forEach((r) => {
-			const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
-			if (!amt) return;
-			totalRevenue += amt;
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
-			if (completedStatuses.test(st)) paidRevenue += amt;
+			if (!completedStatuses.test(st)) return;
+			// Each completed load = ratePerLoad in revenue
+			totalRevenue += ratePerLoad;
+			paidRevenue += ratePerLoad;
 			if (jtDateCol && r[jtDateCol]) {
 				const d = new Date(r[jtDateCol]);
 				if (!isNaN(d)) {
-					if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
+					if (d >= thirtyDaysAgo) last30DaysRevenue += ratePerLoad;
 					const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-					monthlyRevenue[key] = (monthlyRevenue[key] || 0) + amt;
+					monthlyRevenue[key] = (monthlyRevenue[key] || 0) + ratePerLoad;
 				}
 			}
 		});
@@ -8313,13 +8316,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const ownedTrucks = db.prepare("SELECT unit_number, assigned_driver, created_at FROM trucks WHERE owner_id = ?").all(user.id);
 			ownedTrucks.forEach((truck) => {
 				const driverName = (truck.assigned_driver || "").trim().toLowerCase();
-				// All-time revenue for this truck's driver
+				// All-time revenue for this truck's driver (completed loads × flat rate)
 				let unitTotalGross = 0;
-				if (driverName && jtRateCol) {
+				if (driverName) {
 					filteredJobData.forEach((r) => {
 						const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
 						if (driver !== driverName) return;
-						unitTotalGross += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
+						const st = statusCol ? (r[statusCol] || "").trim() : "";
+						if (completedStatuses.test(st)) unitTotalGross += ratePerLoad;
 					});
 				}
 				// All-time variable expenses for this truck's driver
