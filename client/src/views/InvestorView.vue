@@ -75,57 +75,9 @@
 
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
-      <!-- Unified KPI Grid (3 columns, 3 rows) -->
-      <div class="section" style="margin-bottom:1.25rem;">
-        <div class="combined-kpi-grid">
-          <!-- Production cards -->
-          <div class="kpi-card accent">
-            <div class="kpi-label">Avg Daily Revenue</div>
-            <div class="kpi-value">{{ fmtFull(store.production?.avgDailyRevenue) }}</div>
-            <div class="kpi-sub">avg last 30 days</div>
-          </div>
-          <div class="kpi-card accent">
-            <div class="kpi-label">Monthly Owner Earnings</div>
-            <div class="kpi-value">{{ fmtFull(store.production?.avgMonthlyOwnerEarnings) }}</div>
-            <div class="kpi-sub">avg over {{ store.production?.monthsOfOperation || 0 }} months</div>
-          </div>
-          <!-- Trend cards -->
-          <div class="kpi-card" :class="momGrowth >= 0 ? 'accent' : 'danger'">
-            <div class="kpi-label">Month-over-Month</div>
-            <div class="kpi-value">{{ momGrowth >= 0 ? '+' : '' }}{{ momGrowth.toFixed(1) }}%</div>
-            <div class="kpi-sub">{{ momGrowth >= 0 ? 'Growth' : 'Decline' }} vs prior month</div>
-          </div>
-          <div class="kpi-card blue">
-            <div class="kpi-label">Best Month</div>
-            <div class="kpi-value">{{ fmtFull(bestMonth.amount) }}</div>
-            <div class="kpi-sub">{{ bestMonth.label }}</div>
-          </div>
-          <div class="kpi-card blue">
-            <div class="kpi-label">Total Revenue</div>
-            <div class="kpi-value">{{ fmtFull(store.production?.totalRevenue) }}</div>
-            <div class="kpi-sub">{{ fmtFull(store.production?.paidRevenue) }} collected</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Completed Loads</div>
-            <div class="kpi-value">{{ store.production?.completedJobs }}</div>
-            <div class="kpi-sub">of {{ store.production?.totalJobs }} total</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Avg Monthly Revenue</div>
-            <div class="kpi-value">{{ fmtFull(avgMonthly) }}</div>
-            <div class="kpi-sub">across {{ monthlyData.length }} months</div>
-          </div>
-          <div class="kpi-card" :class="projectedAnnual > 0 ? 'accent' : ''">
-            <div class="kpi-label">Projected Annual</div>
-            <div class="kpi-value">{{ fmtFull(projectedAnnual) }}</div>
-            <div class="kpi-sub">based on {{ monthlyData.length > 3 ? 'last 3 months' : 'current avg' }}</div>
-          </div>
-        </div>
-        <!-- Charts side by side -->
-        <div class="charts-row">
-          <ProductionSection :production="store.production" :config="store.config" :chart-only="true" />
-          <TrendSection :production="store.production" :chart-only="true" />
-        </div>
+      <div class="sections-grid">
+        <ProductionSection :production="store.production" :config="store.config" />
+        <TrendSection :production="store.production" />
       </div>
       <AssetSection :asset="store.asset" :config="store.config" />
       <MyTrucks :trucks="trucks" @reload="loadData" />
@@ -254,33 +206,6 @@ const taxShieldData = computed(() => {
   const asset = store.asset || {}
   return { ...ts, purchasePrice: asset.purchasePrice }
 })
-
-// Trend computations (moved from TrendSection for unified KPI grid)
-const monthlyData = computed(() => store.production?.monthlyData || [])
-const momGrowth = computed(() => {
-  if (monthlyData.value.length < 2) return 0
-  const curr = monthlyData.value[monthlyData.value.length - 1].amount
-  const prev = monthlyData.value[monthlyData.value.length - 2].amount
-  if (!prev) return 0
-  return ((curr - prev) / prev) * 100
-})
-const bestMonth = computed(() => {
-  if (monthlyData.value.length === 0) return { amount: 0, label: 'N/A' }
-  const names = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  const best = monthlyData.value.reduce((a, b) => a.amount > b.amount ? a : b)
-  const parts = (best.month || '').split('-')
-  return { amount: best.amount, label: names[parseInt(parts[1])] || best.month }
-})
-const avgMonthly = computed(() => {
-  if (monthlyData.value.length === 0) return 0
-  return monthlyData.value.reduce((s, m) => s + m.amount, 0) / monthlyData.value.length
-})
-const projectedAnnual = computed(() => {
-  const recent = monthlyData.value.slice(-3)
-  if (recent.length === 0) return 0
-  return (recent.reduce((s, m) => s + m.amount, 0) / recent.length) * 12
-})
-function fmtFull(n) { return '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 }) }
 
 function fmtK(n) {
   const v = Number(n || 0)
@@ -546,59 +471,7 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.1);
 }
 
-/* Unified KPI grid — 3 columns, flows into 3 rows */
-.combined-kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
-  margin-bottom: 1.25rem;
-}
-.combined-kpi-grid .kpi-card {
-  padding: 1rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  overflow: hidden;
-  min-width: 0;
-  gap: 0.3rem;
-}
-.combined-kpi-grid .kpi-card.accent { border-color: var(--accent); }
-.combined-kpi-grid .kpi-card.accent .kpi-value { color: var(--accent); }
-.combined-kpi-grid .kpi-card.blue { border-color: var(--blue); }
-.combined-kpi-grid .kpi-card.blue .kpi-value { color: var(--blue); }
-.combined-kpi-grid .kpi-card.danger { border-color: var(--danger); }
-.combined-kpi-grid .kpi-card.danger .kpi-value { color: var(--danger); }
-.combined-kpi-grid .kpi-label {
-  font-size: 0.72rem; font-weight: 600; color: var(--text-dim);
-  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.4rem;
-}
-.combined-kpi-grid .kpi-value {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: clamp(1rem, 2.5vw, 1.5rem); font-weight: 700;
-  overflow-wrap: break-word;
-}
-.combined-kpi-grid .kpi-sub {
-  font-size: 0.72rem; color: var(--text-dim); margin-top: 0.2rem;
-  overflow-wrap: break-word;
-}
-/* Charts row — side by side below KPI grid */
-.charts-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1.25rem;
-}
-.section {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.25rem;
-}
-
-/* Legacy — kept for backward compat if sections-grid is used elsewhere */
+/* Sections grid for side-by-side */
 .sections-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -611,8 +484,6 @@ onMounted(() => {
 }
 
 @media (max-width: 900px) {
-  .combined-kpi-grid { grid-template-columns: repeat(2, 1fr); }
-  .charts-row { grid-template-columns: 1fr; }
   .sections-grid {
     grid-template-columns: 1fr;
   }
@@ -627,7 +498,6 @@ onMounted(() => {
 }
 
 @media (max-width: 600px) {
-  .combined-kpi-grid { grid-template-columns: 1fr; }
   .inv-header { padding: 1rem; }
   .inv-header h1 { font-size: 1.1rem; }
   .header-actions { flex-wrap: wrap; gap: 0.4rem; }

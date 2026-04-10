@@ -1,34 +1,32 @@
 <template>
-  <div :class="chartOnly ? '' : 'section'">
-    <template v-if="!chartOnly">
-      <div class="section-title">
-        <div class="section-icon" style="background: var(--blue-dim); color: var(--blue);">&#128200;</div>
-        Revenue Trends
-      </div>
+  <div class="section">
+    <div class="section-title">
+      <div class="section-icon" style="background: var(--blue-dim); color: var(--blue);">&#128200;</div>
+      Revenue Trends
+    </div>
 
-      <div class="kpi-grid">
-        <div class="kpi-card" :class="momGrowth >= 0 ? 'accent' : 'danger'">
-          <div class="kpi-label">Month-over-Month</div>
-          <div class="kpi-value">{{ momGrowth >= 0 ? '+' : '' }}{{ momGrowth.toFixed(1) }}%</div>
-          <div class="kpi-sub">{{ momGrowth >= 0 ? 'Growth' : 'Decline' }} vs prior month</div>
-        </div>
-        <div class="kpi-card blue">
-          <div class="kpi-label">Best Month</div>
-          <div class="kpi-value">{{ fmt(bestMonth.amount) }}</div>
-          <div class="kpi-sub">{{ bestMonth.label }}</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Avg Monthly Revenue</div>
-          <div class="kpi-value">{{ fmt(avgMonthly) }}</div>
-          <div class="kpi-sub">across {{ months.length }} months</div>
-        </div>
-        <div class="kpi-card" :class="projectedAnnual > 0 ? 'accent' : ''">
-          <div class="kpi-label">Projected Annual</div>
-          <div class="kpi-value">{{ fmt(projectedAnnual) }}</div>
-          <div class="kpi-sub">based on {{ months.length > 3 ? 'last 3 months' : 'current avg' }}</div>
-        </div>
+    <div class="kpi-grid">
+      <div class="kpi-card" :class="momGrowth >= 0 ? 'accent' : 'danger'">
+        <div class="kpi-label">Month-over-Month</div>
+        <div class="kpi-value">{{ momGrowth >= 0 ? '+' : '' }}{{ momGrowth.toFixed(1) }}%</div>
+        <div class="kpi-sub">{{ momGrowth >= 0 ? 'Growth' : 'Decline' }} vs prior month</div>
       </div>
-    </template>
+      <div class="kpi-card blue">
+        <div class="kpi-label">Best Month</div>
+        <div class="kpi-value">{{ fmt(bestMonth.amount) }}</div>
+        <div class="kpi-sub">{{ bestMonth.label }}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Monthly Revenue</div>
+        <div class="kpi-value">{{ fmt(avgMonthly) }}</div>
+        <div class="kpi-sub">across {{ months.length }} months</div>
+      </div>
+      <div class="kpi-card" :class="projectedAnnual > 0 ? 'accent' : ''">
+        <div class="kpi-label">Projected Annual</div>
+        <div class="kpi-value">{{ fmt(projectedAnnual) }}</div>
+        <div class="kpi-sub">based on {{ months.length > 3 ? 'last 3 months' : 'current avg' }}</div>
+      </div>
+    </div>
 
     <!-- Trend line chart -->
     <div class="trend-chart">
@@ -57,7 +55,6 @@ import { computed } from 'vue'
 
 const props = defineProps({
   production: { type: Object, required: true },
-  chartOnly: { type: Boolean, default: false },
 })
 
 const months = computed(() => props.production?.monthlyData || [])
@@ -133,8 +130,10 @@ function shortMonth(month) {
 @media (max-width: 600px) { .kpi-grid { grid-template-columns: 1fr; } }
 .kpi-card {
   padding: 1rem; border: 1px solid var(--border);
-  border-radius: var(--radius); text-align: center;
-  overflow: hidden; min-width: 0;
+  border-radius: var(--radius);
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; text-align: center;
+  overflow: hidden; min-width: 0; gap: 0.3rem;
 }
 .kpi-card.accent { border-color: var(--accent); }
 .kpi-card.accent .kpi-value { color: var(--accent); }

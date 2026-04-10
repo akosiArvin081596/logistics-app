@@ -1,34 +1,32 @@
 <template>
-  <div :class="chartOnly ? '' : 'section'">
-    <template v-if="!chartOnly">
-      <div class="section-title">
-        <div class="section-icon" style="background: var(--accent-dim); color: var(--accent);">&#9650;</div>
-        Production Performance
-      </div>
+  <div class="section">
+    <div class="section-title">
+      <div class="section-icon" style="background: var(--accent-dim); color: var(--accent);">&#9650;</div>
+      Production Performance
+    </div>
 
-      <div class="kpi-grid">
-        <div class="kpi-card accent">
-          <div class="kpi-label">Avg Daily Revenue</div>
-          <div class="kpi-value">{{ fmt(production.avgDailyRevenue) }}</div>
-          <div class="kpi-sub">avg last 30 days</div>
-        </div>
-        <div class="kpi-card accent">
-          <div class="kpi-label">Monthly Owner Earnings</div>
-          <div class="kpi-value">{{ fmt(production.avgMonthlyOwnerEarnings) }}</div>
-          <div class="kpi-sub">avg over {{ production.monthsOfOperation || 0 }} months</div>
-        </div>
-        <div class="kpi-card blue">
-          <div class="kpi-label">Total Revenue</div>
-          <div class="kpi-value">{{ fmt(production.totalRevenue) }}</div>
-          <div class="kpi-sub">{{ fmt(production.paidRevenue) }} collected</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Completed Loads</div>
-          <div class="kpi-value">{{ production.completedJobs }}</div>
-          <div class="kpi-sub">of {{ production.totalJobs }} total</div>
-        </div>
+    <div class="kpi-grid">
+      <div class="kpi-card accent">
+        <div class="kpi-label">Avg Daily Revenue</div>
+        <div class="kpi-value">{{ fmt(production.avgDailyRevenue) }}</div>
+        <div class="kpi-sub">avg last 30 days</div>
       </div>
-    </template>
+      <div class="kpi-card accent">
+        <div class="kpi-label">Monthly Owner Earnings</div>
+        <div class="kpi-value">{{ fmt(production.avgMonthlyOwnerEarnings) }}</div>
+        <div class="kpi-sub">avg over {{ production.monthsOfOperation || 0 }} months</div>
+      </div>
+      <div class="kpi-card blue">
+        <div class="kpi-label">Total Revenue</div>
+        <div class="kpi-value">{{ fmt(production.totalRevenue) }}</div>
+        <div class="kpi-sub">{{ fmt(production.paidRevenue) }} collected</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Completed Loads</div>
+        <div class="kpi-value">{{ production.completedJobs }}</div>
+        <div class="kpi-sub">of {{ production.totalJobs }} total</div>
+      </div>
+    </div>
 
     <!-- Monthly Revenue Chart -->
     <div class="chart-bars">
@@ -51,7 +49,6 @@ import { computed } from 'vue'
 const props = defineProps({
   production: { type: Object, required: true },
   config: { type: Object, default: null },
-  chartOnly: { type: Boolean, default: false },
 })
 
 const months = computed(() => props.production.monthlyData || [])
@@ -113,9 +110,14 @@ function monthLabel(month) {
   padding: 1rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   overflow: hidden;
   min-width: 0;
+  gap: 0.3rem;
 }
 
 .kpi-card.accent {
