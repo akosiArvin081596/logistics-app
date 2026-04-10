@@ -5,12 +5,7 @@
         <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Operations Dashboard</h2>
         <p class="text-[13px] text-gray-400 mt-0.5">Real-time logistics overview</p>
       </div>
-      <div class="flex items-center gap-3">
-        <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ lastUpdated }}</span>
-        <button class="px-4 py-2 text-sm font-semibold bg-white text-gray-700 border border-gray-200 rounded-lg hover:border-gray-300 hover:shadow-sm active:scale-[0.97] transition-all duration-150" @click="refresh">
-          &#8635; Refresh
-        </button>
-      </div>
+      <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ lastUpdated }}</span>
     </div>
 
     <template v-if="store.kpis">
