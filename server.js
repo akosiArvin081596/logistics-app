@@ -4756,7 +4756,7 @@ app.post("/api/admin/fix-stale-locations", requireRole("Super Admin"), async (re
 });
 
 // Debug: check what the driver endpoint returns (first 2 loads)
-app.get("/api/debug/driver-view/:driverName", async (req, res) => {
+app.get("/api/debug/driver-view/:driverName", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const sheets = await getSheets();
@@ -4788,7 +4788,7 @@ app.get("/api/debug/driver-view/:driverName", async (req, res) => {
 });
 
 // Debug: analyze empty rows for a driver
-app.get("/api/debug/driver-empty/:driverName", async (req, res) => {
+app.get("/api/debug/driver-empty/:driverName", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const sheets = await getSheets();
@@ -4843,7 +4843,7 @@ app.get("/api/debug/driver-empty/:driverName", async (req, res) => {
 });
 
 // Debug: sample row data to inspect column formats
-app.get("/api/debug/sample-row", async (req, res) => {
+app.get("/api/debug/sample-row", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const sheets = await getSheets();
 		const response = await sheets.spreadsheets.values.get({
@@ -4865,7 +4865,7 @@ app.get("/api/debug/sample-row", async (req, res) => {
 });
 
 // Debug: check driver load matching
-app.get("/api/debug/driver-loads/:driverName", async (req, res) => {
+app.get("/api/debug/driver-loads/:driverName", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const sheets = await getSheets();
@@ -4899,7 +4899,7 @@ app.get("/api/debug/driver-loads/:driverName", async (req, res) => {
 });
 
 // Debug: check a user's role/driverName without auth (read-only, no sensitive data)
-app.get("/api/debug/user/:username", (req, res) => {
+app.get("/api/debug/user/:username", requireRole("Super Admin"), (req, res) => {
 	const username = decodeURIComponent(req.params.username).trim();
 	const user = db
 		.prepare("SELECT id, username, role, driver_name, email, created_at FROM users WHERE LOWER(username) = ?")
