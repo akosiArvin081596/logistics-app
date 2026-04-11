@@ -44,6 +44,11 @@
         <span>{{ fmt(totalPurchasePrice / 2) }}</span>
         <span>{{ fmt(totalPurchasePrice) }}</span>
       </div>
+      <div class="timeline-note">
+        Shows how much of your truck's purchase price ({{ fmt(totalPurchasePrice) }}) has been recovered through net revenue ({{ fmt(netRevenueToDate) }}).
+        At {{ recoveryPct.toFixed(0) }}%, you've earned back {{ fmt(netRevenueToDate) }} of {{ fmt(totalPurchasePrice) }}.
+        {{ recoveryPct >= 100 ? 'Your truck has paid for itself!' : 'When the bar reaches 100%, your truck has paid for itself.' }}
+      </div>
     </div>
   </div>
 </template>
@@ -167,5 +172,9 @@ const breakEvenDate = computed(() => {
 .timeline-markers {
   display: flex; justify-content: space-between; margin-top: 0.3rem;
   font-size: 0.6rem; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;
+}
+.timeline-note {
+  font-size: 0.72rem; color: var(--text-dim); font-style: italic;
+  margin-top: 0.75rem; line-height: 1.5;
 }
 </style>
