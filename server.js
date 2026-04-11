@@ -8326,6 +8326,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const e = end ? new Date(end) : new Date(start);
 			e.setHours(12, 0, 0, 0);
 			if (e < s) return [fmtDate(s)];
+			// Cap at 31 days to prevent runaway loops on bad data (no trucking load spans >31 days)
+			const MAX_SPAN = 31 * 24 * 3600 * 1000;
+			if (e - s > MAX_SPAN) e.setTime(s.getTime() + MAX_SPAN);
 			const cur = new Date(s);
 			while (cur <= e) {
 				dates.push(fmtDate(cur));
