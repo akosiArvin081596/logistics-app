@@ -8201,6 +8201,37 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			|| findCol(jobTracking.headers, /date/i);
 		const jtDriverCol = findCol(jobTracking.headers, /^driver$/i);
 		const statusCol = findCol(jobTracking.headers, /status/i);
+		const pickupDateCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
+		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
+
+		// Helper: parse a messy date cell like "5/16/25 9:00" or "5/16/25 06:00-18:00 Appt." into a Date
+		function parseSheetDate(val) {
+			if (!val) return null;
+			const m = String(val).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+			if (!m) return null;
+			let yr = parseInt(m[3]);
+			if (yr < 100) yr += 2000;
+			const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
+			return isNaN(d) ? null : d;
+		}
+		// Helper: format a Date as "YYYY-MM-DD" using LOCAL time (avoids UTC shift)
+		function fmtDate(d) {
+			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+		}
+		// Helper: expand two dates into an array of "YYYY-MM-DD" strings (inclusive)
+		function expandDateRange(start, end) {
+			const dates = [];
+			const s = new Date(start); s.setHours(12, 0, 0, 0);
+			const e = end ? new Date(end) : new Date(start);
+			e.setHours(12, 0, 0, 0);
+			if (e < s) return [fmtDate(s)];
+			const cur = new Date(s);
+			while (cur <= e) {
+				dates.push(fmtDate(cur));
+				cur.setDate(cur.getDate() + 1);
+			}
+			return dates;
+		}
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
@@ -8289,20 +8320,66 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 		const avgMonthlyOwnerEarnings = Math.round(paidRevenue / monthsOfOperation);
 
-		// ---- Add truck fixed costs — per-truck months of ownership ----
+		// ---- Driver Pay: active-day algorithm (F1) ----
+		// For each driver, expand every load's pickup→dropoff into individual calendar
+		// dates, deduplicate, count unique days, multiply by daily rate.
+		const driverPayDetails = {};
+		let totalDriverPay = 0;
+		{
+			// Build per-driver active-day sets from ALL loads (not just completed — the driver
+			// works regardless of whether the load is marked complete yet).
+			const driverDaySets = {};
+			const activeWorkStatuses = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
+			filteredJobData.forEach((r) => {
+				const st = statusCol ? (r[statusCol] || "").trim() : "";
+				if (!activeWorkStatuses.test(st)) return;
+				const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
+				if (!driver) return;
+				const pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
+				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
+				if (!pickup) return;
+				if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
+				const days = expandDateRange(pickup, dropoff || pickup);
+				days.forEach(d => driverDaySets[driver].add(d));
+			});
+
+			// Compute pay per driver and add to expenses
+			const trucksByDriver = {};
+			const truckQuery = investorDriverSet
+				? "SELECT assigned_driver, driver_pay_daily FROM trucks WHERE owner_id = ?"
+				: "SELECT assigned_driver, driver_pay_daily FROM trucks";
+			const truckArgs = investorDriverSet ? [user.id] : [];
+			db.prepare(truckQuery).all(...truckArgs).forEach(t => {
+				const d = (t.assigned_driver || "").trim().toLowerCase();
+				if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
+			});
+
+			for (const [driver, daySet] of Object.entries(driverDaySets)) {
+				const rate = trucksByDriver[driver] || 250;
+				const activeDays = daySet.size;
+				const pay = activeDays * rate;
+				totalDriverPay += pay;
+				driverPayDetails[driver] = {
+					activeDays,
+					dailyRate: rate,
+					totalPay: pay,
+					dates: [...daySet].sort(),
+				};
+			}
+			totalExpenses += totalDriverPay;
+		}
+
+		// ---- Add truck fixed costs (excluding driver pay — now computed above) ----
 		{
 			const truckQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly, created_at FROM trucks WHERE owner_id = ?"
-				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly, created_at FROM trucks";
+				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly, created_at FROM trucks WHERE owner_id = ?"
+				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly, created_at FROM trucks";
 			const truckArgs = investorDriverSet ? [user.id] : [];
 			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
 			for (const t of fleetTrucks) {
 				const fixedPerMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
 					+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12)
-					+ ((t.driver_pay_daily || 0) * 30)
 					+ (t.maintenance_fund_monthly || 0);
-				// Use truck's own created_at to determine how long it has existed,
-				// capped to monthsOfOperation so we never exceed the operating window.
 				let truckMonths = monthsOfOperation;
 				if (t.created_at) {
 					const truckDate = new Date(t.created_at);
@@ -8365,9 +8442,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const expRow = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE LOWER(driver) = ?`).get(driverName);
 				const maintRow = db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf WHERE LOWER(mf.truck) = ? AND mf.type = 'service'`).get(truck.unit_number.toLowerCase());
 				const compRow = db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf WHERE LOWER(cf.truck) = ? AND cf.status = 'Paid'`).get(truck.unit_number.toLowerCase());
-				// Fixed costs × truck's own months of existence
-				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, driver_pay_daily, maintenance_fund_monthly FROM trucks WHERE unit_number = ?").get(truck.unit_number);
-				const fixedPerMonth = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12) + ((truckRow?.driver_pay_daily || 0) * 30) + (truckRow?.maintenance_fund_monthly || 0);
+				// Fixed costs (no driver_pay — computed via active days above) × truck months
+				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly FROM trucks WHERE unit_number = ?").get(truck.unit_number);
+				const fixedPerMonth = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12) + (truckRow?.maintenance_fund_monthly || 0);
 				let truckMonths = monthsOfOperation;
 				if (truck.created_at) {
 					const td = new Date(truck.created_at);
@@ -8376,7 +8453,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						truckMonths = Math.min(truckMonths, monthsOfOperation);
 					}
 				}
-				const unitTotalExpenses = (expRow?.t || 0) + (maintRow?.t || 0) + (compRow?.t || 0) + (fixedPerMonth * truckMonths);
+				// Per-truck driver pay from active-day computation
+				const driverPay = driverPayDetails[driverName]?.totalPay || 0;
+				const unitTotalExpenses = (expRow?.t || 0) + (maintRow?.t || 0) + (compRow?.t || 0) + (fixedPerMonth * truckMonths) + driverPay;
 				// Average monthly = all-time totals / months this truck has existed
 				const avgMonthlyGross = Math.round(unitTotalGross / truckMonths);
 				const avgMonthlyExpenses = Math.round(unitTotalExpenses / truckMonths);
@@ -8427,6 +8506,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalJobs,
 				completedJobs: completedJobCount,
 				totalExpenses: Math.round(totalExpenses),
+				totalDriverPay: Math.round(totalDriverPay),
+				driverPayDetails,
 				netRevenueToDate,
 				totalPurchasePrice,
 				totalStartupExpenses,
