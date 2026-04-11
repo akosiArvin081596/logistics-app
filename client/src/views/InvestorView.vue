@@ -100,7 +100,7 @@ const store = useInvestorStore()
 const authStore = useAuthStore()
 const api = useApi()
 const { show: toast } = useToast()
-useSocketRefresh('investor:changed', () => loadData())
+useSocketRefresh('investor:changed', () => loadData(), 'investor')
 
 const trucks = ref([])
 const reportLoading = ref(false)

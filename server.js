@@ -34,7 +34,13 @@ const server = http.createServer(app);
 const io = new Server(server);
 // Emit a domain invalidation event so connected clients auto-refresh.
 // Called after successful mutations (POST/PUT/DELETE) — no payload needed.
-function notifyChange(domain) { io.to("dispatch").emit(`${domain}:changed`); }
+function notifyChange(domain) {
+	io.to("dispatch").emit(`${domain}:changed`);
+	// Also notify investor room for domains that affect investor dashboards
+	if (["trucks", "expenses", "invoices", "investor"].includes(domain)) {
+		io.to("investor").emit(`${domain}:changed`);
+	}
+}
 app.set("trust proxy", 1); // Behind nginx — use real client IP for rate limiting
 const ALLOWED_FILE_EXTS = new Set([".pdf",".jpg",".jpeg",".png",".gif",".webp",".doc",".docx",".xls",".xlsx",".csv",".txt"]);
 function validateFileExt(fileName) { return ALLOWED_FILE_EXTS.has(path.extname(fileName || "").toLowerCase()); }

@@ -7,8 +7,9 @@ import { useSocket } from './useSocket'
  *
  * @param {string} event  Socket event name, e.g. 'trucks:changed'
  * @param {Function} reload  Function to call when the event fires
+ * @param {string} room  Socket room to join — 'dispatch' for admin pages, 'investor' for investor pages
  */
-export function useSocketRefresh(event, reload) {
+export function useSocketRefresh(event, reload, room = 'dispatch') {
   const socket = useSocket()
   let timer = null
 
@@ -19,7 +20,7 @@ export function useSocketRefresh(event, reload) {
 
   onMounted(() => {
     socket.connect()
-    socket.register('dispatch')
+    socket.register(room)
     socket.on(event, handler)
   })
 
