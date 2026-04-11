@@ -7,26 +7,6 @@
 
     <div class="asset-grid">
       <div class="asset-item">
-        <div class="asset-label">Purchase Price</div>
-        <div class="asset-value">{{ fmt(asset.purchasePrice) }}</div>
-        <div class="asset-formula">= SUM(trucks.purchase_price)</div>
-      </div>
-      <div class="asset-item">
-        <div class="asset-label">Current Market Value</div>
-        <div class="asset-value" style="color: var(--accent);">{{ fmt(asset.currentValue) }}</div>
-        <div class="asset-formula">= price * (1 - months / (depYrs * 12))</div>
-      </div>
-      <div class="asset-item">
-        <div class="asset-label">Title Status</div>
-        <div class="asset-value title-status">{{ asset.titleStatus }}</div>
-        <div class="asset-formula">= truck.title_status</div>
-      </div>
-      <div class="asset-item">
-        <div class="asset-label">Fleet Size</div>
-        <div class="asset-value">{{ asset.totalTrucks }}</div>
-        <div class="asset-formula">= COUNT(trucks WHERE owner_id)</div>
-      </div>
-      <div class="asset-item">
         <div class="asset-label">Total Miles</div>
         <div class="asset-value">{{ (asset.totalMiles || 0).toLocaleString() }}</div>
         <div class="asset-formula">= MAX(odometer) - MIN(odometer)</div>

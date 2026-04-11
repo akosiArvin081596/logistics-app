@@ -5,33 +5,6 @@
       Production Performance
     </div>
 
-    <div class="kpi-grid">
-      <div class="kpi-card accent">
-        <div class="kpi-label">Avg Daily Revenue</div>
-        <div class="kpi-value">{{ fmt(production.avgDailyRevenue) }}</div>
-        <div class="kpi-sub">avg last 30 days</div>
-        <div class="kpi-formula">= last30DaysRevenue / 30</div>
-      </div>
-      <div class="kpi-card accent">
-        <div class="kpi-label">Monthly Earnings</div>
-        <div class="kpi-value">{{ fmt(production.last30DaysRevenue) }}</div>
-        <div class="kpi-sub">trailing 30 days</div>
-        <div class="kpi-formula">= SUM(Payment col, completed loads, last 30 days)</div>
-      </div>
-      <div class="kpi-card blue">
-        <div class="kpi-label">Total Revenue</div>
-        <div class="kpi-value">{{ fmt(production.totalRevenue) }}</div>
-        <div class="kpi-sub">{{ fmt(production.paidRevenue) }} collected</div>
-        <div class="kpi-formula">= SUM(Payment col, all completed loads)</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Completed Loads</div>
-        <div class="kpi-value">{{ production.completedJobs }}</div>
-        <div class="kpi-sub">of {{ production.totalJobs }} total</div>
-        <div class="kpi-formula">= COUNT(status: Delivered|Completed|POD Received)</div>
-      </div>
-    </div>
-
     <!-- Monthly Revenue Chart -->
     <div class="chart-bars">
       <template v-if="months.length > 0">
