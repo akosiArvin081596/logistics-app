@@ -24,7 +24,7 @@
       <div class="kpi-card" :class="projectedAnnual > 0 ? 'accent' : ''">
         <div class="kpi-label">Projected Annual</div>
         <div class="kpi-value">{{ fmt(projectedAnnual) }}</div>
-        <div class="kpi-sub">based on {{ months.length > 3 ? 'last 3 months' : 'current avg' }}</div>
+        <div class="kpi-sub">avg daily x 20 days x 12 months</div>
       </div>
     </div>
 
@@ -78,11 +78,10 @@ const avgMonthly = computed(() => {
   return months.value.reduce((s, m) => s + m.amount, 0) / months.value.length
 })
 
+// Projected Annual = avg daily earnings × 20 working days/month × 12 months
 const projectedAnnual = computed(() => {
-  const recent = months.value.slice(-3)
-  if (recent.length === 0) return 0
-  const avg = recent.reduce((s, m) => s + m.amount, 0) / recent.length
-  return avg * 12
+  const avgDaily = props.production?.avgDailyRevenue || 0
+  return avgDaily * 20 * 12
 })
 
 const trendPoints = computed(() => {

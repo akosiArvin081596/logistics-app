@@ -37,8 +37,8 @@
       </div>
       <div class="timeline-markers">
         <span>$0</span>
-        <span>{{ fmt(totalInvestment / 2) }}</span>
-        <span>{{ fmt(totalInvestment) }}</span>
+        <span>{{ fmt(totalPurchasePrice / 2) }}</span>
+        <span>{{ fmt(totalPurchasePrice) }}</span>
       </div>
     </div>
   </div>
@@ -70,10 +70,10 @@ const netCashFlow = computed(() => totalRevenue.value - totalExpenses.value)
 const splitPct = computed(() => props.production?.investorSplitPct || 50)
 const investorPayout = computed(() => netCashFlow.value * (splitPct.value / 100))
 
-// Payoff progress = net revenue recovered / total investment
+// Payoff progress = net revenue recovered / purchase price
 const recoveryPct = computed(() => {
-  if (totalInvestment.value <= 0) return 0
-  return (netRevenueToDate.value / totalInvestment.value) * 100
+  if (totalPurchasePrice.value <= 0) return 0
+  return (netRevenueToDate.value / totalPurchasePrice.value) * 100
 })
 
 // Business ROI = net / gross * 100
@@ -82,11 +82,14 @@ const roiPct = computed(() => {
   return (netRevenueToDate.value / totalRevenue.value) * 100
 })
 
-// Break-even = total investment / avg monthly owner earnings
+// Break-even = purchase price / monthly net cash flow
+const monthlyNetCashFlow = computed(() => {
+  const months = props.production?.monthsOfOperation || 1
+  return netCashFlow.value / months
+})
 const breakEvenMonths = computed(() => {
-  if (avgMonthlyOwnerEarnings.value <= 0) return 'N/A'
-  const months = Math.ceil(totalInvestment.value / avgMonthlyOwnerEarnings.value)
-  return months
+  if (monthlyNetCashFlow.value <= 0) return 'N/A'
+  return Math.ceil(totalPurchasePrice.value / monthlyNetCashFlow.value)
 })
 
 const breakEvenDate = computed(() => {

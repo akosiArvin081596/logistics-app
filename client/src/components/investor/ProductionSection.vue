@@ -12,9 +12,9 @@
         <div class="kpi-sub">avg last 30 days</div>
       </div>
       <div class="kpi-card accent">
-        <div class="kpi-label">Monthly Owner Earnings</div>
-        <div class="kpi-value">{{ fmt(production.avgMonthlyOwnerEarnings) }}</div>
-        <div class="kpi-sub">avg over {{ production.monthsOfOperation || 0 }} months</div>
+        <div class="kpi-label">Monthly Earnings</div>
+        <div class="kpi-value">{{ fmt(production.last30DaysRevenue) }}</div>
+        <div class="kpi-sub">trailing 30 days</div>
       </div>
       <div class="kpi-card blue">
         <div class="kpi-label">Total Revenue</div>

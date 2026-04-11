@@ -5505,6 +5505,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const activeStatuses =
 			/^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
+		const canceledStatuses = /^(cancel|canceled|cancelled)$/i;
 		const unassignedStatuses =
 			/^(unassigned|new|open|pending|available)$/i;
 
@@ -5516,7 +5517,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const unassignedJobs = jobTracking.data.filter((r) => {
 			if (!hasLoadId(r)) return false;
 			const status = statusCol ? (r[statusCol] || "").trim() : "";
-			if (activeStatuses.test(status) || completedStatuses.test(status)) return false;
+			if (activeStatuses.test(status) || completedStatuses.test(status) || canceledStatuses.test(status)) return false;
 			return unassignedStatuses.test(status) || !status;
 		});
 		const completedJobs = jobTracking.data.filter(
@@ -8418,6 +8419,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				paidRevenue: Math.round(paidRevenue),
 				pendingRevenue: Math.round(totalRevenue - paidRevenue),
 				avgDailyRevenue: Math.round(avgDailyRevenue),
+				last30DaysRevenue: Math.round(last30DaysRevenue),
 				monthlyData,
 				avgMonthlyOwnerEarnings,
 				monthsOfOperation,
