@@ -140,9 +140,9 @@ function monthLabel(month) {
 .chart-bars {
   display: flex;
   align-items: flex-end;
-  gap: 4px;
-  height: 120px;
-  padding-top: 0.5rem;
+  gap: 8px;
+  height: 260px;
+  padding-top: 1rem;
   border-bottom: 1px solid var(--border);
 }
 
@@ -153,30 +153,35 @@ function monthLabel(month) {
   align-items: center;
   height: 100%;
   justify-content: flex-end;
+  min-width: 40px;
 }
 
 .chart-bar {
   width: 100%;
-  max-width: 32px;
-  background: var(--accent);
-  border-radius: 4px 4px 0 0;
-  min-height: 2px;
+  max-width: 56px;
+  background: linear-gradient(180deg, var(--accent), #0ea5e9);
+  border-radius: 6px 6px 0 0;
+  min-height: 4px;
   transition: height 0.3s;
+}
+.chart-bar:hover {
+  opacity: 0.85;
 }
 
 .chart-label {
-  font-size: 0.55rem;
+  font-size: 0.7rem;
   color: var(--text-dim);
-  margin-top: 0.3rem;
+  margin-top: 0.4rem;
   font-family: 'JetBrains Mono', monospace;
+  font-weight: 500;
 }
 
 .chart-amount {
-  font-size: 0.55rem;
+  font-size: 0.72rem;
   color: var(--text);
-  font-weight: 600;
+  font-weight: 700;
   font-family: 'JetBrains Mono', monospace;
-  margin-bottom: 0.2rem;
+  margin-bottom: 0.3rem;
 }
 
 .chart-empty {
@@ -188,8 +193,9 @@ function monthLabel(month) {
 
 .chart-caption {
   text-align: center;
-  margin-top: 0.3rem;
-  font-size: 0.65rem;
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
   color: var(--text-dim);
+  font-weight: 500;
 }
 </style>
