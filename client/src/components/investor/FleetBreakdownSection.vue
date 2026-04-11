@@ -107,6 +107,7 @@
 
 <script setup>
 import { ref, computed } from 'vue'
+import { formatCurrency as fmt } from '../../utils/format'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -174,10 +175,6 @@ const fleetROI = computed(() => {
   if (totalPrice === 0) return 0
   return (totalEstRevenue.value / totalPrice) * 100
 })
-
-function fmt(n) {
-  return '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })
-}
 
 function statusClass(status) {
   if (status === 'Active') return 'status-active'

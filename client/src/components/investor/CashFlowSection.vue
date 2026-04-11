@@ -50,6 +50,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { formatCurrency as fmt } from '../../utils/format'
 
 const props = defineProps({
   production: { type: Object, default: () => ({}) },
@@ -105,9 +106,6 @@ const breakEvenDate = computed(() => {
   return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
 })
 
-function fmt(n) {
-  return '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })
-}
 </script>
 
 <style scoped>

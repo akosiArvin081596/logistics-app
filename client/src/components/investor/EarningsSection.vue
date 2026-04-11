@@ -96,6 +96,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { formatCurrency as fmt } from '../../utils/format'
 
 const props = defineProps({
   production: { type: Object, default: () => ({}) },
@@ -116,12 +117,6 @@ function monthLabel(mk) {
   if (!mk) return ''
   const [y, m] = mk.split('-')
   return `${MONTH_NAMES[parseInt(m)]} ${y}`
-}
-
-function fmt(n) {
-  const v = Number(n || 0)
-  const prefix = v < 0 ? '-$' : '$'
-  return prefix + Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 })
 }
 </script>
 
