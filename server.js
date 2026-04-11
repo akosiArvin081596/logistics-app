@@ -11,6 +11,7 @@ const SqliteStore = require("better-sqlite3-session-store")(session);
 const geolib = require("geolib");
 const PDFDocument = require("pdfkit");
 const compression = require("compression");
+const rateLimit = require("express-rate-limit");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
@@ -34,6 +35,7 @@ const io = new Server(server);
 // Emit a domain invalidation event so connected clients auto-refresh.
 // Called after successful mutations (POST/PUT/DELETE) — no payload needed.
 function notifyChange(domain) { io.to("dispatch").emit(`${domain}:changed`); }
+app.set("trust proxy", 1); // Behind nginx — use real client IP for rate limiting
 app.use(compression());
 app.use(express.json({ limit: "20mb" }));
 // NOTE: /uploads static mount is deferred to after requireAuth is defined (see below),
@@ -1416,7 +1418,8 @@ app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads"))
 // ============================================================
 // PUBLIC: Job Application
 // ============================================================
-app.post("/api/public/apply", (req, res) => {
+const publicFormLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: "Too many submissions. Try again later." }, standardHeaders: true });
+app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 	try {
 		const { full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card, city, state, zip, cell, dot, mc, hazmat } = req.body;
 		if (!full_name || !email || !phone || !dob || !address || !ssn || !drivers_license || !position || !experience || !has_cdl || !work_authorized || !felony_convicted || !accident_history || !signature) {
@@ -1840,7 +1843,7 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 // === INVESTOR ONBOARDING ENDPOINTS (Public) ===
 
 // POST /api/public/investor-apply — Single atomic submission: form + vehicles + banking + signatures
-app.post("/api/public/investor-apply", async (req, res) => {
+app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 	try {
 		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email,
 			years_in_operation, industry_experience, fleet_size, preferred_communication,
@@ -3646,8 +3649,9 @@ app.post("/api/auth/setup", async (req, res) => {
 	}
 });
 
-// Login
-app.post("/api/auth/login", async (req, res) => {
+// Login — rate limited to prevent brute-force
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: "Too many login attempts. Try again in 15 minutes." }, standardHeaders: true });
+app.post("/api/auth/login", loginLimiter, async (req, res) => {
 	try {
 		const { username, password } = req.body;
 		if (!username || !password) {
