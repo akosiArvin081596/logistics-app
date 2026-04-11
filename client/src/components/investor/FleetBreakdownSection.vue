@@ -21,27 +21,74 @@
         </tr>
       </thead>
       <tbody>
-        <tr v-for="t in trucksWithROI" :key="t.id">
-          <td class="photo-cell">
-            <img v-if="t.Photo" :src="t.Photo" class="truck-thumb" :alt="t.UnitNumber" />
-            <div v-else class="truck-thumb-placeholder">&#128665;</div>
-          </td>
-          <td class="unit-num">{{ t.UnitNumber }}</td>
-          <td>{{ [t.Make, t.Model].filter(Boolean).join(' ') || '\u2014' }}</td>
-          <td>
-            <span :class="['status-badge', statusClass(t.Status)]">{{ t.Status }}</span>
-          </td>
-          <td :style="{ color: t.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ t.AssignedDriver || '\u2014' }}
-          </td>
-          <td class="mono">{{ (t.totalMiles || 0).toLocaleString() }}</td>
-          <td class="mono">{{ fmt(t.estRevenue) }}</td>
-          <td>
-            <span :class="['roi-badge', t.roi >= 0 ? 'positive' : 'negative']">
-              {{ t.roi >= 0 ? '+' : '' }}{{ t.roi.toFixed(1) }}%
-            </span>
-          </td>
-        </tr>
+        <template v-for="t in trucksWithROI" :key="t.id">
+          <tr class="clickable-row" @click="toggleDetail(t.UnitNumber || t.unit_number)">
+            <td class="photo-cell">
+              <img v-if="t.Photo" :src="t.Photo" class="truck-thumb" :alt="t.UnitNumber" />
+              <div v-else class="truck-thumb-placeholder">&#128665;</div>
+            </td>
+            <td class="unit-num">{{ t.UnitNumber }}</td>
+            <td>{{ [t.Make, t.Model].filter(Boolean).join(' ') || '\u2014' }}</td>
+            <td>
+              <span :class="['status-badge', statusClass(t.Status)]">{{ t.Status }}</span>
+            </td>
+            <td :style="{ color: t.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
+              {{ t.AssignedDriver || '\u2014' }}
+            </td>
+            <td class="mono">{{ (t.totalMiles || 0).toLocaleString() }}</td>
+            <td class="mono">{{ fmt(t.estRevenue) }}</td>
+            <td>
+              <span :class="['roi-badge', t.roi >= 0 ? 'positive' : 'negative']">
+                {{ t.roi >= 0 ? '+' : '' }}{{ t.roi.toFixed(1) }}%
+              </span>
+            </td>
+          </tr>
+          <!-- Expandable P&L breakdown -->
+          <tr v-if="expandedUnit === (t.UnitNumber || t.unit_number)" class="detail-row">
+            <td colspan="8">
+              <div class="truck-detail">
+                <div class="detail-header">{{ t.UnitNumber }} &middot; {{ [t.Make, t.Model].filter(Boolean).join(' ') }} &middot; {{ t.AssignedDriver || 'Unassigned' }}</div>
+                <div class="detail-sub">Monthly Avg (based on {{ truckMonths(t) }} month{{ truckMonths(t) !== 1 ? 's' : '' }})</div>
+                <div class="detail-breakdown">
+                  <div class="bd-row">
+                    <span>Revenue ({{ t.AssignedDriver || 'driver' }} loads)</span>
+                    <span class="bd-val" style="color:var(--accent)">{{ fmt(perUnit(t)?.unitMonthlyGross) }}</span>
+                  </div>
+                  <div class="bd-row deduct">
+                    <span>- Driver Pay</span>
+                    <span class="bd-val">{{ fmt(-(driverPay(t))) }}<span class="bd-hint"> ({{ driverDays(t) }} days x ${{ driverRate(t) }})</span></span>
+                  </div>
+                  <div class="bd-row deduct">
+                    <span>- Fixed Costs</span>
+                    <span class="bd-val">{{ fmt(-(fixedCosts(t))) }}</span>
+                  </div>
+                  <div class="bd-row deduct">
+                    <span>- Trip Expenses</span>
+                    <span class="bd-val">{{ fmt(-(tripExp(t))) }}</span>
+                  </div>
+                  <div class="bd-divider"></div>
+                  <div class="bd-row total">
+                    <span>Monthly Net</span>
+                    <span class="bd-val" :style="{color: monthlyNet(t) >= 0 ? 'var(--accent)' : 'var(--danger)'}">{{ fmt(monthlyNet(t)) }}</span>
+                  </div>
+                  <div class="bd-row">
+                    <span>&times; 12 months</span>
+                    <span class="bd-val"></span>
+                  </div>
+                  <div class="bd-row total">
+                    <span>Est. Annual Revenue</span>
+                    <span class="bd-val" style="color:var(--blue)">{{ fmt(t.estRevenue) }}</span>
+                  </div>
+                  <div class="bd-divider"></div>
+                  <div class="bd-row">
+                    <span>ROI ({{ fmt(t.estRevenue) }} / {{ fmt(truckPrice(t)) }})</span>
+                    <span class="bd-val" :style="{color: t.roi >= 0 ? 'var(--accent)' : 'var(--danger)'}">{{ t.roi >= 0 ? '+' : '' }}{{ t.roi.toFixed(1) }}%</span>
+                  </div>
+                </div>
+              </div>
+            </td>
+          </tr>
+        </template>
       </tbody>
       <tfoot>
         <tr>
@@ -59,7 +106,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -67,10 +114,46 @@ const props = defineProps({
   production: { type: Object, default: () => ({}) },
 })
 
+const expandedUnit = ref(null)
+function toggleDetail(unit) { expandedUnit.value = expandedUnit.value === unit ? null : unit }
+
+function perUnit(t) {
+  const key = t.UnitNumber || t.unit_number || ''
+  return (props.production?.perTruckData || {})[key] || {}
+}
+function truckPrice(t) { return t.PurchasePrice || t.purchase_price || props.asset?.purchasePrice || 0 }
+function truckMonths(t) { return props.production?.monthsOfOperation || 1 }
+function driverPay(t) {
+  const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
+  return (props.production?.driverPayDetails || {})[driver]?.totalPay || 0
+}
+function driverDays(t) {
+  const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
+  return (props.production?.driverPayDetails || {})[driver]?.activeDays || 0
+}
+function driverRate(t) {
+  const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
+  return (props.production?.driverPayDetails || {})[driver]?.dailyRate || 250
+}
+function fixedCosts(t) {
+  const pu = perUnit(t)
+  return (pu.unitMonthlyExpenses || 0) - (driverPay(t) / (truckMonths(t) || 1)) - tripExp(t)
+}
+function tripExp(t) {
+  // tripExp = unitMonthlyExpenses - fixedCosts - driverPay/months
+  // We don't have tripExp separately, so derive: total expenses - driverPay - (monthlyGross - monthlyNet - driverPay)
+  // Simpler: just show unitMonthlyExpenses breakdown note
+  return 0 // TODO: backend doesn't send per-truck trip expenses separately yet
+}
+function monthlyNet(t) {
+  const pu = perUnit(t)
+  return (pu.unitMonthlyGross || 0) - (pu.unitMonthlyExpenses || 0)
+}
+
 const trucksWithROI = computed(() => {
   const perTruckData = props.production?.perTruckData || {}
   const grossRevenue = props.production?.totalRevenue || 0
-  const purchasePrice = props.asset?.purchasePrice || 58000
+  const purchasePrice = props.asset?.purchasePrice || 0
 
   return props.trucks.map(t => {
     const unitKey = t.UnitNumber || t.unit_number || ''
