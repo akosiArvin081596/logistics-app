@@ -948,13 +948,22 @@ const INVESTOR_ONBOARDING_DOCS = [
 ];
 
 // Session store in SQLite (persists across server restarts)
+const SESSION_SECRET = process.env.SESSION_SECRET || "dispatch-logistics-2024";
+if (!process.env.SESSION_SECRET) {
+	console.warn("WARNING: SESSION_SECRET not set in environment — using fallback. Set it in .env for production.");
+}
 app.use(
 	session({
 		store: new SqliteStore({ client: db, expired: { clear: true, intervalMs: 3600000 } }),
-		secret: "dispatch-logistics-2024",
+		secret: SESSION_SECRET,
 		resave: false,
 		saveUninitialized: false,
-		cookie: { maxAge: 24 * 60 * 60 * 1000 },
+		cookie: {
+			maxAge: 24 * 60 * 60 * 1000,
+			httpOnly: true,
+			secure: process.env.NODE_ENV === "production",
+			sameSite: "strict",
+		},
 	}),
 );
 // ============================================================

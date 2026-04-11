@@ -38,7 +38,7 @@ PORT=3000  # optional, defaults to 3000
 
 Hardcoded values in `server.js` (change if forking):
 - Spreadsheet ID: `"1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"`
-- Session secret: `"dispatch-logistics-2024"` (24-hour cookie max age)
+- Session secret: Set via `SESSION_SECRET` env var (required for production; falls back to default for dev)
 
 ## Architecture
 
