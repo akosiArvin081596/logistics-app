@@ -2144,7 +2144,7 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 
 	// Line 3a: Entity type checkboxes
 	const entityCheckMap = {
-		"Sole Prop": 0, "C-Corp": 1, "S-Corp": 2, "Partnership": 3, "Trust": 4, "LLC": 5, "Other": 6,
+		"Sole Prop": 0, "C-Corp": 1, "S-Corp": 2, "Corp": 1, "Partnership": 3, "Trust": 4, "Trust/Estate": 4, "LLC": 5, "Other": 6,
 	};
 	const cbIdx = entityCheckMap[entityType];
 	if (cbIdx !== undefined) {
@@ -2155,26 +2155,29 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		setField("topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].f1_03[0]", "P");
 	}
 
-	// Line 5-6: Address
+	// Line 5: Street address, Line 6: City/State/ZIP
 	if (address) {
 		const parts = address.split(",").map(s => s.trim());
+		// Line 5 — street address
 		setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_07[0]", parts[0] || address);
+		// Line 6 — city, state, ZIP (f1_08 is Line 6; f1_09 is "Requester's name" — wrong box)
 		if (parts.length > 1) {
-			setField("topmostSubform[0].Page1[0].f1_09[0]", parts.slice(1).join(", "));
+			setField("topmostSubform[0].Page1[0].Address_ReadOrder[0].f1_08[0]", parts.slice(1).join(", "));
 		}
 	}
 
-	// EIN/SSN — fill available digits into both SSN and EIN fields
+	// EIN/SSN — fill the appropriate section based on entity type
 	if (einSsn) {
 		const digits = einSsn.replace(/\D/g, "");
-		// SSN fields (3 + 2 + 4) — only if exactly 9 digits
-		if (digits.length === 9) {
+		const looksLikeEin = /^\d{2}-\d{7}$/.test(einSsn.trim());
+		const isIndividual = (!entityType || entityType === "Sole Prop") && !looksLikeEin;
+		if (isIndividual && digits.length === 9) {
+			// SSN fields (3 + 2 + 4) — for individuals/sole props only
 			setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3));
 			setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5));
 			setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5));
-		}
-		// EIN fields (2 + remaining) — fill if at least 2 digits
-		if (digits.length >= 2) {
+		} else if (digits.length >= 2) {
+			// EIN fields (2 + remaining) — for LLCs, corps, partnerships, trusts
 			setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2));
 			if (digits.length > 2) setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2));
 		}
