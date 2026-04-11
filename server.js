@@ -8372,10 +8372,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					totalRevenue += amt;
 					if (driver) grossByDriver[driver] = (grossByDriver[driver] || 0) + amt;
 					if (jtDateCol && r[jtDateCol]) {
-						const d = new Date(r[jtDateCol]);
-						if (!isNaN(d)) {
+						// Use parseSheetDate first (consistent local-time parsing), fall back to new Date()
+						const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+						if (d && !isNaN(d)) {
 							if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
-							const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+							const key = fmtDate(d).slice(0, 7); // "YYYY-MM" using local time
 							monthlyRevenue[key] = (monthlyRevenue[key] || 0) + amt;
 						}
 					}
@@ -8394,8 +8395,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 			// Operating period (track earliest/latest dates)
 			if (jtDateCol && r[jtDateCol]) {
-				const d = new Date(r[jtDateCol]);
-				if (!isNaN(d)) {
+				const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				if (d && !isNaN(d)) {
 					if (!earliestDate || d < earliestDate) earliestDate = d;
 					if (!latestDate || d > latestDate) latestDate = d;
 				}
