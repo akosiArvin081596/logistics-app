@@ -8339,30 +8339,59 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
-		// Revenue = actual Payment/Rate column from Job Tracking (varies per load)
+		// ---- Single-pass: revenue + driver pay + operating period + per-driver gross ----
+		const activeWorkStatuses = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
 		let totalRevenue = 0;
 		let last30DaysRevenue = 0;
+		let earliestDate = null;
+		let latestDate = null;
 		const monthlyRevenue = {};
 		const completedLoadIds = new Set();
+		const grossByDriver = {};       // per-driver completed revenue (replaces Pass 3 inner loop)
+		const driverDaySets = {};        // per-driver active day Sets (was Pass 2)
 		const now = new Date();
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
 		filteredJobData.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
-			if (!completedStatuses.test(st)) return;
-			const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
-			if (!amt) return;
-			// Track this load's ID for expense filtering
-			const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
-			if (lid) completedLoadIds.add(lid);
-			totalRevenue += amt;
+			const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
+
+			// Revenue (completed loads only)
+			if (completedStatuses.test(st)) {
+				const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
+				if (amt) {
+					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
+					if (lid) completedLoadIds.add(lid);
+					totalRevenue += amt;
+					if (driver) grossByDriver[driver] = (grossByDriver[driver] || 0) + amt;
+					if (jtDateCol && r[jtDateCol]) {
+						const d = new Date(r[jtDateCol]);
+						if (!isNaN(d)) {
+							if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
+							const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+							monthlyRevenue[key] = (monthlyRevenue[key] || 0) + amt;
+						}
+					}
+				}
+			}
+
+			// Driver active days (all work statuses, not just completed)
+			if (activeWorkStatuses.test(st) && driver) {
+				const pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
+				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
+				if (pickup) {
+					if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
+					expandDateRange(pickup, dropoff || pickup).forEach(d => driverDaySets[driver].add(d));
+				}
+			}
+
+			// Operating period (track earliest/latest dates)
 			if (jtDateCol && r[jtDateCol]) {
 				const d = new Date(r[jtDateCol]);
 				if (!isNaN(d)) {
-					if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
-					const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-					monthlyRevenue[key] = (monthlyRevenue[key] || 0) + amt;
+					if (!earliestDate || d < earliestDate) earliestDate = d;
+					if (!latestDate || d > latestDate) latestDate = d;
 				}
 			}
 		});
@@ -8370,7 +8399,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// Avg daily revenue = 30-day average (S2)
 		const avgDailyRevenue = last30DaysRevenue / 30;
 
-		// ---- Expense Data (S1) — only from completed loads ----
+		// Months of operation and avg monthly owner earnings (S3)
+		let monthsOfOperation = 1;
+		if (earliestDate && latestDate) {
+			monthsOfOperation = Math.max(1,
+				(latestDate.getFullYear() - earliestDate.getFullYear()) * 12
+				+ (latestDate.getMonth() - earliestDate.getMonth()) + 1
+			);
+		}
+		const avgMonthlyOwnerEarnings = Math.round(totalRevenue / monthsOfOperation);
+
+		// ---- Expense Data — load-specific + truck-level ----
 		let totalExpenses = 0;
 		if (completedLoadIds.size > 0) {
 			const lidList = [...completedLoadIds];
@@ -8385,93 +8424,37 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalExpenses += expSum.total;
 			}
 		}
-		// Truck-level costs (maintenance fund DISBURSEMENTS, compliance fees) — not load-specific
-		// NOTE: maintenance_fund table = actual service payments (e.g., oil change $200).
-		// This is SEPARATE from trucks.maintenance_fund_monthly (a monthly reserve/budget).
-		// Both are intentionally included: the reserve is a recurring fixed cost, the
-		// disbursements are actual variable spend. If the client considers the reserve
-		// as money set aside (not an expense), remove maintenance_fund_monthly from
-		// the fixed costs block below (~line 8443).
+		// Truck-level costs (maintenance fund DISBURSEMENTS, compliance fees)
+		// NOTE: maintenance_fund table = actual service payments. SEPARATE from trucks.maintenance_fund_monthly (budget).
 		if (investorOwnerId) {
 			const maintSum = db.prepare(`SELECT COALESCE(SUM(mf.amount), 0) AS total FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type = 'service'`).get(user.id);
 			totalExpenses += maintSum.total;
 			const compSum = db.prepare(`SELECT COALESCE(SUM(cf.amount), 0) AS total FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status = 'Paid'`).get(user.id);
 			totalExpenses += compSum.total;
 		} else if (isSuperAdmin) {
-			const maintSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM maintenance_fund WHERE type = 'service'`).get();
-			totalExpenses += maintSum.total;
-			const compSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid'`).get();
-			totalExpenses += compSum.total;
+			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM maintenance_fund WHERE type = 'service'`).get().total;
+			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid'`).get().total;
 		}
 
-		// Operating period (earliest to latest from Job Tracking)
-		let earliestDate = null;
-		let latestDate = null;
-		filteredJobData.forEach((r) => {
-			if (jtDateCol && r[jtDateCol]) {
-				const d = new Date(r[jtDateCol]);
-				if (!isNaN(d)) {
-					if (!earliestDate || d < earliestDate) earliestDate = d;
-					if (!latestDate || d > latestDate) latestDate = d;
-				}
-			}
-		});
-
-		// Months of operation and avg monthly owner earnings (S3)
-		let monthsOfOperation = 1;
-		if (earliestDate && latestDate) {
-			monthsOfOperation = Math.max(1,
-				(latestDate.getFullYear() - earliestDate.getFullYear()) * 12
-				+ (latestDate.getMonth() - earliestDate.getMonth()) + 1
-			);
-		}
-		const avgMonthlyOwnerEarnings = Math.round(totalRevenue / monthsOfOperation);
-
-		// ---- Driver Pay: active-day algorithm (F1) ----
-		// For each driver, expand every load's pickup→dropoff into individual calendar
-		// dates, deduplicate, count unique days, multiply by daily rate.
+		// ---- Driver Pay from active-day sets (computed in single pass above) ----
 		const driverPayDetails = {};
 		let totalDriverPay = 0;
 		{
-			// Build per-driver active-day sets from ALL loads (not just completed — the driver
-			// works regardless of whether the load is marked complete yet).
-			const driverDaySets = {};
-			const activeWorkStatuses = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
-			filteredJobData.forEach((r) => {
-				const st = statusCol ? (r[statusCol] || "").trim() : "";
-				if (!activeWorkStatuses.test(st)) return;
-				const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
-				if (!driver) return;
-				const pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
-				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
-				if (!pickup) return;
-				if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
-				const days = expandDateRange(pickup, dropoff || pickup);
-				days.forEach(d => driverDaySets[driver].add(d));
-			});
-
-			// Compute pay per driver and add to expenses
+			// Get daily rates from trucks (one query, not per-truck)
 			const trucksByDriver = {};
 			const truckQuery = investorDriverSet
 				? "SELECT assigned_driver, driver_pay_daily FROM trucks WHERE owner_id = ?"
 				: "SELECT assigned_driver, driver_pay_daily FROM trucks";
-			const truckArgs = investorDriverSet ? [user.id] : [];
-			db.prepare(truckQuery).all(...truckArgs).forEach(t => {
+			db.prepare(truckQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => {
 				const d = (t.assigned_driver || "").trim().toLowerCase();
 				if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
 			});
-
 			for (const [driver, daySet] of Object.entries(driverDaySets)) {
 				const rate = trucksByDriver[driver] || 250;
 				const activeDays = daySet.size;
 				const pay = activeDays * rate;
 				totalDriverPay += pay;
-				driverPayDetails[driver] = {
-					activeDays,
-					dailyRate: rate,
-					totalPay: pay,
-					dates: [...daySet].sort(),
-				};
+				driverPayDetails[driver] = { activeDays, dailyRate: rate, totalPay: pay, dates: [...daySet].sort() };
 			}
 			totalExpenses += totalDriverPay;
 		}
@@ -8596,9 +8579,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 
 		// ---- Asset Security (S4, S5) — now per-truck ----
+		// Single truck query with all columns needed by asset section + per-truck loop
 		const allOwnedTrucks = investorDriverSet
-			? db.prepare("SELECT id, unit_number, assigned_driver, purchase_price, title_status FROM trucks WHERE owner_id = ?").all(user.id)
-			: db.prepare("SELECT id, unit_number, assigned_driver, purchase_price, title_status FROM trucks").all();
+			? db.prepare("SELECT * FROM trucks WHERE owner_id = ?").all(user.id)
+			: db.prepare("SELECT * FROM trucks").all();
 		const totalTrucks = allOwnedTrucks.length || 1;
 		const totalPurchasePrice = allOwnedTrucks.reduce((sum, t) => sum + (t.purchase_price || 0), 0);
 		const depreciationYears = Math.max(1, parseFloat(config.depreciation_years) || 5);
@@ -8617,31 +8601,36 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const section179 = totalPurchasePrice; // S6: 100% deductibility per truck
 		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate); // S7
 
-		// ---- Per-Truck Revenue Data (S8) ----
+		// ---- Per-Truck Revenue Data (S8) — batched queries, no inner loops ----
 		const perTruckData = {};
 		if (investorDriverSet) {
-			const ownedTrucks = db.prepare("SELECT unit_number, assigned_driver, created_at FROM trucks WHERE owner_id = ?").all(user.id);
-			ownedTrucks.forEach((truck) => {
+			// Batch queries BEFORE the loop (4 queries total instead of 5N)
+			const expByDriver = Object.fromEntries(
+				db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? GROUP BY LOWER(driver)`).all(user.id).map(r => [r.d, r.t])
+			);
+			const maintByTruck = Object.fromEntries(
+				db.prepare(`SELECT LOWER(mf.truck) AS u, COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type='service' GROUP BY LOWER(mf.truck)`).all(user.id).map(r => [r.u, r.t])
+			);
+			const compByTruck = Object.fromEntries(
+				db.prepare(`SELECT LOWER(cf.truck) AS u, COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status='Paid' GROUP BY LOWER(cf.truck)`).all(user.id).map(r => [r.u, r.t])
+			);
+			const odoByDriver = Object.fromEntries(
+				db.prepare(`SELECT LOWER(driver) AS d, MIN(odometer) AS minOdo, MAX(odometer) AS maxOdo FROM expenses WHERE owner_id = ? AND odometer > 0 GROUP BY LOWER(driver)`).all(user.id).map(r => [r.d, r])
+			);
+
+			// Use allOwnedTrucks (already fetched for asset section) — no extra query
+			allOwnedTrucks.forEach((truck) => {
 				const driverName = (truck.assigned_driver || "").trim().toLowerCase();
-				// All-time revenue for this truck's driver (actual Payment column)
-				let unitTotalGross = 0;
-				if (driverName && jtRateCol) {
-					filteredJobData.forEach((r) => {
-						const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
-						if (driver !== driverName) return;
-						const st = statusCol ? (r[statusCol] || "").trim() : "";
-						if (completedStatuses.test(st)) {
-							unitTotalGross += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
-						}
-					});
-				}
-				// All-time variable expenses for this truck's driver
-				const expRow = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE LOWER(driver) = ?`).get(driverName);
-				const maintRow = db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf WHERE LOWER(mf.truck) = ? AND mf.type = 'service'`).get(truck.unit_number.toLowerCase());
-				const compRow = db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf WHERE LOWER(cf.truck) = ? AND cf.status = 'Paid'`).get(truck.unit_number.toLowerCase());
-				// Fixed costs (no driver_pay — computed via active days above) × truck months
-				const truckRow = db.prepare("SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly FROM trucks WHERE unit_number = ?").get(truck.unit_number);
-				const fixedPerMonth = (truckRow?.insurance_monthly || 0) + (truckRow?.eld_monthly || 0) + ((truckRow?.hvut_annual || 0) / 12) + ((truckRow?.irp_annual || 0) / 12) + (truckRow?.maintenance_fund_monthly || 0);
+				const unitLower = truck.unit_number.toLowerCase();
+				// Revenue from grossByDriver map (computed in single pass above)
+				const unitTotalGross = grossByDriver[driverName] || 0;
+				// Expenses from batch maps (zero queries in this loop)
+				const varExp = expByDriver[driverName] || 0;
+				const maintExp = maintByTruck[unitLower] || 0;
+				const compExp = compByTruck[unitLower] || 0;
+				const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0)
+					+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12)
+					+ (truck.maintenance_fund_monthly || 0);
 				let truckMonths = monthsOfOperation;
 				if (truck.created_at) {
 					const td = new Date(truck.created_at);
@@ -8650,17 +8639,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						truckMonths = Math.min(truckMonths, monthsOfOperation);
 					}
 				}
-				// Per-truck driver pay from active-day computation
 				const driverPay = driverPayDetails[driverName]?.totalPay || 0;
-				const unitTotalExpenses = (expRow?.t || 0) + (maintRow?.t || 0) + (compRow?.t || 0) + (fixedPerMonth * truckMonths) + driverPay;
-				// Average monthly = all-time totals / months this truck has existed
+				const unitTotalExpenses = varExp + maintExp + compExp + (fixedPerMonth * truckMonths) + driverPay;
 				const avgMonthlyGross = Math.round(unitTotalGross / truckMonths);
 				const avgMonthlyExpenses = Math.round(unitTotalExpenses / truckMonths);
-				// Mileage from odometer readings (max - min)
-				const odometerRange = db.prepare(
-					`SELECT MIN(odometer) AS minOdo, MAX(odometer) AS maxOdo FROM expenses WHERE LOWER(driver) = ? AND odometer > 0`
-				).get(driverName);
-				const totalMiles = (odometerRange?.maxOdo && odometerRange?.minOdo) ? Math.round(odometerRange.maxOdo - odometerRange.minOdo) : 0;
+				const odo = odoByDriver[driverName];
+				const totalMiles = (odo?.maxOdo && odo?.minOdo) ? Math.round(odo.maxOdo - odo.minOdo) : 0;
 
 				perTruckData[truck.unit_number] = {
 					unitMonthlyGross: avgMonthlyGross,
