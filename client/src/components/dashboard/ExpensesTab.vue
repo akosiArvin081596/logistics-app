@@ -430,6 +430,10 @@ async function submitExpense() {
   if (!addForm.driver || !addForm.type || !addForm.amount || !addForm.date) {
     toast('Fill in Driver, Type, Amount, and Date', 'error'); return
   }
+  const parsedAmt = parseFloat(addForm.amount)
+  if (isNaN(parsedAmt) || parsedAmt <= 0) {
+    toast('Amount must be greater than zero', 'error'); return
+  }
   addLoading.value = true
   try {
     await api.post('/api/expenses', {
@@ -444,7 +448,7 @@ async function submitExpense() {
       odometer: 0,
     })
     toast('Expense logged')
-    addForm.amount = ''; addForm.loadId = ''; addForm.description = ''
+    addForm.driver = ''; addForm.amount = ''; addForm.loadId = ''; addForm.description = ''
     await loadAll()
   } catch (err) {
     toast(err.message || 'Failed to log expense', 'error')
@@ -463,10 +467,17 @@ async function loadAll() {
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await api.get(`/api/expenses/all${qs}`)
     allExpenses.value = data.expenses || []
-    // Build driver list from unfiltered data (only on first load)
+    // Build driver list from drivers directory (not from expenses — new drivers with no expenses would be missing)
     if (allDrivers.value.length === 0) {
-      const names = new Set(allExpenses.value.map(e => e.driver).filter(Boolean))
-      allDrivers.value = [...names].sort()
+      try {
+        const dd = await api.get('/api/drivers-directory')
+        const names = (dd.data || []).map(d => d.Driver || d.driver_name).filter(Boolean)
+        allDrivers.value = [...new Set(names)].sort()
+      } catch {
+        // Fallback: derive from existing expenses
+        const names = new Set(allExpenses.value.map(e => e.driver).filter(Boolean))
+        allDrivers.value = [...names].sort()
+      }
     }
   } catch { /* empty */ }
   allLoading.value = false
