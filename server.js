@@ -1195,6 +1195,10 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				obj.Status || "active");
+		// Sync carrier-driver history on write (not on read)
+		if (obj.Driver && obj["Carrier Name"]) {
+			syncCarrierDriverHistory([obj], "Driver", "Carrier Name");
+		}
 		notifyChange("drivers");
 		res.json({ success: true });
 	} catch (err) {
@@ -1218,6 +1222,10 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				nextStatus, id);
+		// Sync carrier-driver history on write (not on read)
+		if (obj.Driver && obj["Carrier Name"]) {
+			syncCarrierDriverHistory([obj], "Driver", "Carrier Name");
+		}
 		notifyChange("drivers");
 		res.json({ success: true });
 	} catch (err) {
@@ -8241,10 +8249,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const user = req.session.user;
 		const isSuperAdmin = user.role === "Super Admin";
 
-		// Resolve carrier DB columns and sync history
+		// Resolve carrier DB columns (history sync moved to POST/PUT /api/drivers-directory)
 		const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
 		const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
-		if (carrierCarrierCol) syncCarrierDriverHistory(carrierDB.data, carrierDriverCol, carrierCarrierCol);
 
 		// Get investor's driver names (current + historical) for data filtering
 		let investorDriverSet = null; // null = no filter (Super Admin)
