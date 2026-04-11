@@ -21,20 +21,20 @@
             <p class="hero-sub">Performance overview &middot; {{ todayFormatted }}</p>
           </div>
         </div>
-        <div class="header-actions">
-          <a href="mailto:info@logisx.com" class="btn-email">Contact Operations</a>
-          <a href="mailto:dev@logisx.com" class="btn-email">Contact Tech Support</a>
-          <div class="report-group">
-            <input v-model="reportStart" type="date" class="date-input" title="Report start date" />
-            <input v-model="reportEnd" type="date" class="date-input" title="Report end date" />
-            <button class="btn-report" :disabled="reportLoading" @click="downloadReport">
-              {{ reportLoading ? 'Generating...' : 'Download Report' }}
-            </button>
-          </div>
-          <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
-            {{ store.isLoading ? 'Loading...' : 'Refresh' }}
+      </div>
+      <div class="header-actions-row">
+        <a href="mailto:info@logisx.com" class="btn-email">Contact Operations</a>
+        <a href="mailto:dev@logisx.com" class="btn-email">Contact Tech Support</a>
+        <div class="report-group">
+          <input v-model="reportStart" type="date" class="date-input" title="Report start date" />
+          <input v-model="reportEnd" type="date" class="date-input" title="Report end date" />
+          <button class="btn-report" :disabled="reportLoading" @click="downloadReport">
+            {{ reportLoading ? 'Generating...' : 'Download Report' }}
           </button>
         </div>
+        <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
+          {{ store.isLoading ? 'Loading...' : 'Refresh' }}
+        </button>
       </div>
 
       <!-- Quick Stats Strip -->
@@ -369,10 +369,12 @@ onMounted(() => {
   margin-top: 0.25rem;
 }
 
-.header-actions {
+.header-actions-row {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .btn-email {
@@ -495,7 +497,7 @@ onMounted(() => {
   }
   .stat-divider { display: none; }
   .stat-item { min-width: 40%; }
-  .header-actions { flex-wrap: wrap; }
+  .header-actions-row { flex-wrap: wrap; }
   .report-group { flex-wrap: wrap; }
 }
 
