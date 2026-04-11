@@ -684,7 +684,7 @@ if (configCount === 0) {
 		["section_179_deduction", "30000"],
 		["investor_payout_min", "2100"],
 		["investor_payout_max", "3100"],
-		["investor_split_pct", "35"],
+		["investor_split_pct", "50"],
 		["blue_chip_brokers", "Pepsi,Coca-Cola,PepsiCo,Frito-Lay,Nestle,Procter & Gamble,Unilever,Walmart,Amazon,Target"],
 		["maintenance_fund_monthly", "800"],
 		["fuel_savings_target_pct", "15"],
