@@ -80,6 +80,7 @@
 
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
+      <EarningsSection :production="store.production" />
       <div class="sections-grid">
         <ProductionSection :production="store.production" :config="store.config" />
         <TrendSection :production="store.production" />
@@ -113,6 +114,7 @@ import { useAuthStore } from '../stores/auth'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
+import EarningsSection from '../components/investor/EarningsSection.vue'
 import ProductionSection from '../components/investor/ProductionSection.vue'
 import TrendSection from '../components/investor/TrendSection.vue'
 import AssetSection from '../components/investor/AssetSection.vue'

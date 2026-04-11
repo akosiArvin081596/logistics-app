@@ -8446,6 +8446,92 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([month, amount]) => ({ month, amount: Math.round(amount) }));
 
+		// ---- Monthly Earnings Breakdown (exact calendar month) ----
+		const monthlyEarnings = [];
+		{
+			const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+			// 1. Monthly driver pay — bucket active days by YYYY-MM
+			const monthlyDriverPay = {};
+			for (const [driver, detail] of Object.entries(driverPayDetails)) {
+				const rate = detail.dailyRate || 250;
+				// Group dates by month, deduplicate within each month
+				const monthDays = {};
+				for (const d of detail.dates) {
+					const mk = d.slice(0, 7); // "YYYY-MM"
+					if (!monthDays[mk]) monthDays[mk] = new Set();
+					monthDays[mk].add(d);
+				}
+				for (const [mk, days] of Object.entries(monthDays)) {
+					monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + (days.size * rate);
+				}
+			}
+
+			// 2. Monthly trip expenses — from DB grouped by month
+			const monthlyTripExp = {};
+			if (investorOwnerId) {
+				const driverList = [...investorDriverSet];
+				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
+				const rows = db.prepare(
+					`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) GROUP BY m`
+				).all(investorOwnerId, ...driverList);
+				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+			} else if (isSuperAdmin) {
+				const rows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses GROUP BY m`).all();
+				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+			}
+
+			// 3. Monthly fixed costs — constant per month per truck (only months truck existed)
+			const truckFixedQuery = investorDriverSet
+				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly, created_at FROM trucks WHERE owner_id = ?"
+				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly, created_at FROM trucks";
+			const truckFixedArgs = investorDriverSet ? [user.id] : [];
+			const fixedTrucks = db.prepare(truckFixedQuery).all(...truckFixedArgs);
+			function getMonthlyFixedCosts(monthKey) {
+				let total = 0;
+				for (const t of fixedTrucks) {
+					const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
+						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12)
+						+ (t.maintenance_fund_monthly || 0);
+					// Only count if truck existed in this month
+					if (t.created_at) {
+						const td = new Date(t.created_at);
+						const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
+						if (monthKey < truckKey) continue; // truck didn't exist yet
+					}
+					total += perMonth;
+				}
+				return Math.round(total);
+			}
+
+			// 4. Build the array for every month from earliest to current
+			const startMonth = earliestDate
+				? `${earliestDate.getFullYear()}-${String(earliestDate.getMonth() + 1).padStart(2, "0")}`
+				: currentMonthKey;
+			let cursor = new Date(parseInt(startMonth.slice(0, 4)), parseInt(startMonth.slice(5, 7)) - 1, 1);
+			const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
+			while (cursor <= endDate) {
+				const mk = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`;
+				const revenue = monthlyRevenue[mk] || 0;
+				const driverPay = monthlyDriverPay[mk] || 0;
+				const fixedCosts = getMonthlyFixedCosts(mk);
+				const tripExpenses = monthlyTripExp[mk] || 0;
+				const netProfit = revenue - driverPay - fixedCosts - tripExpenses;
+				monthlyEarnings.push({
+					month: mk,
+					revenue: Math.round(revenue),
+					driverPay: Math.round(driverPay),
+					fixedCosts,
+					tripExpenses: Math.round(tripExpenses),
+					netProfit: Math.round(netProfit),
+					investorEarnings: Math.round(netProfit / 2),
+					companyEarnings: Math.round(netProfit / 2),
+					isCurrentMonth: mk === currentMonthKey,
+				});
+				cursor.setMonth(cursor.getMonth() + 1);
+			}
+		}
+
 		// ---- Asset Security (S4, S5) — now per-truck ----
 		const allOwnedTrucks = investorDriverSet
 			? db.prepare("SELECT id, unit_number, assigned_driver, purchase_price, title_status FROM trucks WHERE owner_id = ?").all(user.id)
@@ -8561,6 +8647,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalPurchasePrice,
 				totalStartupExpenses,
 				perTruckData,
+				monthlyEarnings,
 			},
 			asset: {
 				purchasePrice,
