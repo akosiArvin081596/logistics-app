@@ -74,18 +74,22 @@
           <div class="alltime-item">
             <span class="alltime-label">Revenue</span>
             <span class="alltime-value">{{ fmt(production.totalRevenue) }}</span>
+            <span class="alltime-formula">= SUM(Payment, all completed loads)</span>
           </div>
           <div class="alltime-item">
             <span class="alltime-label">Expenses</span>
             <span class="alltime-value" style="color: var(--danger)">{{ fmt(production.totalExpenses) }}</span>
+            <span class="alltime-formula">= driverPay + fixedCosts + tripExp</span>
           </div>
           <div class="alltime-item">
             <span class="alltime-label">Net</span>
             <span class="alltime-value" :style="{ color: production.netRevenueToDate >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(production.netRevenueToDate) }}</span>
+            <span class="alltime-formula">= revenue - expenses</span>
           </div>
           <div class="alltime-item">
             <span class="alltime-label">Your Earnings</span>
             <span class="alltime-value" :style="{ color: production.investorEarnings >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(production.investorEarnings) }}</span>
+            <span class="alltime-formula">= net / 2 (50/50 split)</span>
           </div>
         </div>
       </div>
@@ -226,6 +230,11 @@ function monthLabel(mk) {
 .alltime-value {
   font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; font-weight: 700;
   display: block; margin-top: 0.15rem;
+}
+.alltime-formula {
+  font-size: 0.55rem; font-family: 'JetBrains Mono', monospace;
+  color: var(--text-dim); opacity: 0.5; font-style: italic;
+  display: block; margin-top: 0.1rem;
 }
 
 .empty { text-align: center; color: var(--text-dim); padding: 2rem; font-size: 0.85rem; }

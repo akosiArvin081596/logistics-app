@@ -102,6 +102,9 @@
         </tr>
       </tfoot>
     </table>
+    <div class="fleet-note">
+      Est. Revenue = (avg monthly gross - avg monthly expenses) x 12. ROI = Est. Revenue / Purchase Price x 100. Based on {{ monthsLabel }} of data — projections become more accurate over time.
+    </div>
   </div>
 </template>
 
@@ -176,6 +179,11 @@ const fleetROI = computed(() => {
   return (totalEstRevenue.value / totalPrice) * 100
 })
 
+const monthsLabel = computed(() => {
+  const m = props.production?.monthsOfOperation || 1
+  return m + ' month' + (m !== 1 ? 's' : '')
+})
+
 function statusClass(status) {
   if (status === 'Active') return 'status-active'
   if (status === 'Inactive') return 'status-inactive'
@@ -245,4 +253,9 @@ function statusClass(status) {
 }
 .roi-badge.positive { background: var(--accent-dim); color: var(--accent); }
 .roi-badge.negative { background: var(--danger-dim); color: var(--danger); }
+.fleet-note {
+  font-size: 0.68rem; color: var(--text-dim); font-style: italic;
+  margin-top: 0.75rem; padding: 0.5rem 0; border-top: 1px solid var(--bg);
+  line-height: 1.5;
+}
 </style>

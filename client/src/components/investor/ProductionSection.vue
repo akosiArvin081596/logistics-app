@@ -5,18 +5,15 @@
       Production Performance
     </div>
 
-    <!-- Monthly Revenue Chart -->
-    <template v-if="months.length > 0">
-      <div class="chart-bars">
-        <div v-for="m in months" :key="m.month" class="chart-bar-wrap">
-          <div class="chart-amount">{{ fmt(m.amount) }}</div>
-          <div class="chart-bar" :style="{ height: barHeight(m.amount) }"></div>
-          <div class="chart-label">{{ monthLabel(m.month) }}</div>
-        </div>
+    <!-- Monthly Revenue Chart — always shows 12 months -->
+    <div class="chart-bars">
+      <div v-for="m in chartMonths" :key="m.key" class="chart-bar-wrap">
+        <div class="chart-amount">{{ m.amount > 0 ? fmt(m.amount) : '' }}</div>
+        <div class="chart-bar" :class="{ empty: m.amount === 0 }" :style="{ height: m.amount > 0 ? barHeight(m.amount) : '2px' }"></div>
+        <div class="chart-label">{{ m.label }}</div>
       </div>
-      <div class="chart-caption">Monthly Revenue</div>
-    </template>
-    <div v-else class="chart-empty">No monthly revenue data yet</div>
+    </div>
+    <div class="chart-caption">Monthly Revenue</div>
   </div>
 </template>
 
@@ -28,10 +25,26 @@ const props = defineProps({
   config: { type: Object, default: null },
 })
 
+const MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
 const months = computed(() => props.production.monthlyData || [])
 
+// Build 12-month trailing view — current month + 11 prior, always 12 bars
+const chartMonths = computed(() => {
+  const now = new Date()
+  const dataMap = {}
+  months.value.forEach(m => { dataMap[m.month] = m.amount })
+  const result = []
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    const key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+    result.push({ key, label: MONTH_SHORT[d.getMonth()], amount: dataMap[key] || 0 })
+  }
+  return result
+})
+
 const maxAmount = computed(() =>
-  Math.max(...months.value.map((m) => m.amount), 1)
+  Math.max(...chartMonths.value.map(m => m.amount), 1)
 )
 
 function fmt(n) {
@@ -40,10 +53,6 @@ function fmt(n) {
 
 function barHeight(amount) {
   return (amount / maxAmount.value) * 100 + '%'
-}
-
-function monthLabel(month) {
-  return (month || '').split('-')[1] || month
 }
 </script>
 
@@ -54,7 +63,10 @@ function monthLabel(month) {
   border-radius: var(--radius);
   padding: 1.25rem;
   margin-bottom: 1.25rem;
+  display: flex;
+  flex-direction: column;
 }
+.chart-bars { flex: 1; }
 
 .section-title {
   font-size: 0.95rem;
@@ -164,9 +176,8 @@ function monthLabel(month) {
   min-height: 4px;
   transition: height 0.3s;
 }
-.chart-bar:hover {
-  opacity: 0.85;
-}
+.chart-bar:hover { opacity: 0.85; }
+.chart-bar.empty { background: var(--bg); }
 
 .chart-label {
   font-size: 0.7rem;
