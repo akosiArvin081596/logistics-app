@@ -8007,10 +8007,7 @@ app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async 
 });
 
 // GET /api/config/maps-key — expose Google Maps API key for client-side map rendering
-// Public: needed by /apply and /invest forms (unauthenticated) for address autocomplete.
-// Security: restrict this key by HTTP referrer in Google Cloud Console (API & Services > Credentials).
 app.get("/api/config/maps-key", (req, res) => {
-	if (!GOOGLE_MAPS_API_KEY) return res.json({ key: "" });
 	res.json({ key: GOOGLE_MAPS_API_KEY });
 });
 
