@@ -112,11 +112,11 @@ watch(months, (v) => {
 
 const selected = computed(() => months.value[selectedIdx.value] || null)
 
-const MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 function monthLabel(mk) {
   if (!mk) return ''
   const [y, m] = mk.split('-')
-  return `${MONTH_NAMES[parseInt(m)]} ${y}`
+  return `${MONTH_NAMES[parseInt(m) - 1] || m} ${y}`
 }
 </script>
 
