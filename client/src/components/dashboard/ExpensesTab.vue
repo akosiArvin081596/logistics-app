@@ -12,6 +12,27 @@
 
     <!-- ALL EXPENSES -->
     <div v-show="activeSubTab === 'all'" class="sub-panel">
+      <!-- Add Expense form — Super Admin / Dispatcher only -->
+      <div v-if="canAddExpense" class="add-expense-card">
+        <div class="add-expense-title">Log Expense</div>
+        <div class="add-expense-row">
+          <select v-model="addForm.driver" class="add-input">
+            <option value="">Select Driver *</option>
+            <option v-for="d in allDrivers" :key="d" :value="d">{{ d }}</option>
+          </select>
+          <select v-model="addForm.type" class="add-input">
+            <option v-for="t in expenseTypes" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <input v-model="addForm.amount" type="number" step="0.01" min="0" placeholder="Amount *" class="add-input" style="max-width:120px" />
+          <input v-model="addForm.date" type="date" class="add-input" style="max-width:150px" />
+          <button class="btn btn-primary add-btn" :disabled="addLoading" @click="submitExpense">{{ addLoading ? '...' : 'Add' }}</button>
+        </div>
+        <div class="add-expense-row">
+          <input v-model="addForm.loadId" type="text" placeholder="Load ID (optional)" class="add-input" style="max-width:180px" />
+          <input v-model="addForm.description" type="text" placeholder="Description (e.g., Tire repair paid via phone)" class="add-input" style="flex:1" />
+        </div>
+      </div>
+
       <template v-if="allLoading">
         <div class="skeleton skeleton-card"></div>
       </template>
@@ -397,8 +418,40 @@ const allExpenses = ref([])
 const allLoading = ref(true)
 const allDrivers = ref([])
 const previewImg = ref(null)
-const expenseTypes = ['Fuel', 'Toll', 'Repair', 'Food', 'Other']
+const expenseTypes = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
 const allFilter = reactive({ driver: '', type: '', status: '' })
+
+// Add Expense form (Super Admin / Dispatcher only)
+const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
+const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toISOString().slice(0, 10), loadId: '', description: '' })
+const addLoading = ref(false)
+
+async function submitExpense() {
+  if (!addForm.driver || !addForm.type || !addForm.amount || !addForm.date) {
+    toast('Fill in Driver, Type, Amount, and Date', 'error'); return
+  }
+  addLoading.value = true
+  try {
+    await api.post('/api/expenses', {
+      driver: addForm.driver,
+      type: addForm.type,
+      amount: parseFloat(addForm.amount),
+      date: addForm.date,
+      loadId: addForm.loadId || '',
+      description: addForm.description || '',
+      photoData: '',
+      gallons: 0,
+      odometer: 0,
+    })
+    toast('Expense logged')
+    addForm.amount = ''; addForm.loadId = ''; addForm.description = ''
+    await loadAll()
+  } catch (err) {
+    toast(err.message || 'Failed to log expense', 'error')
+  } finally {
+    addLoading.value = false
+  }
+}
 
 async function loadAll() {
   allLoading.value = true
@@ -892,4 +945,30 @@ tr:hover td { background: var(--surface-hover); }
   z-index: 300; cursor: pointer;
 }
 .preview-img { max-width: 90vw; max-height: 85vh; border-radius: 8px; }
+
+/* Add Expense form */
+.add-expense-card {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 1rem; margin-bottom: 1rem;
+}
+.add-expense-title {
+  font-size: 0.72rem; font-weight: 700; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.6rem;
+}
+.add-expense-row {
+  display: flex; gap: 0.5rem; margin-bottom: 0.5rem; flex-wrap: wrap; align-items: center;
+}
+.add-expense-row:last-child { margin-bottom: 0; }
+.add-input {
+  padding: 0.4rem 0.6rem; border: 1px solid var(--border); border-radius: 6px;
+  font-family: inherit; font-size: 0.8rem; background: var(--surface); color: var(--text);
+  min-width: 120px;
+}
+.add-input:focus { outline: none; border-color: var(--blue); }
+.add-btn {
+  padding: 0.4rem 1rem; font-size: 0.8rem; font-weight: 600; border-radius: 6px;
+  border: none; background: var(--blue); color: #fff; cursor: pointer;
+}
+.add-btn:hover { opacity: 0.9; }
+.add-btn:disabled { opacity: 0.5; cursor: default; }
 </style>
