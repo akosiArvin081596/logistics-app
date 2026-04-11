@@ -8347,7 +8347,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalExpenses += expSum.total;
 			}
 		}
-		// Truck-level costs (maintenance fund, compliance fees) — not load-specific
+		// Truck-level costs (maintenance fund DISBURSEMENTS, compliance fees) — not load-specific
+		// NOTE: maintenance_fund table = actual service payments (e.g., oil change $200).
+		// This is SEPARATE from trucks.maintenance_fund_monthly (a monthly reserve/budget).
+		// Both are intentionally included: the reserve is a recurring fixed cost, the
+		// disbursements are actual variable spend. If the client considers the reserve
+		// as money set aside (not an expense), remove maintenance_fund_monthly from
+		// the fixed costs block below (~line 8443).
 		if (investorOwnerId) {
 			const maintSum = db.prepare(`SELECT COALESCE(SUM(mf.amount), 0) AS total FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type = 'service'`).get(user.id);
 			totalExpenses += maintSum.total;
@@ -8433,6 +8439,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 
 		// ---- Add truck fixed costs (excluding driver pay — now computed above) ----
+		// NOTE: maintenance_fund_monthly here is the monthly RESERVE budget from the
+		// trucks table. See comment above for distinction from maintenance_fund table.
 		{
 			const truckQuery = investorDriverSet
 				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly, created_at FROM trucks WHERE owner_id = ?"
