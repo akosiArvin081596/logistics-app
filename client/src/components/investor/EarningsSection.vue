@@ -273,9 +273,9 @@
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Total Expenses</span>
-              <span class="val danger">{{ fmt(production.totalExpenses) }}</span>
+              <span class="val danger">{{ fmt(allTimeDriverPay + allTimeFixedCosts + allTimeTripExpenses) }}</span>
             </div>
-            <div class="modal-formula">{{ fmt(allTimeDriverPay) }} + {{ fmt(allTimeFixedCosts) }} + {{ fmt(allTimeTripExpenses) }} = {{ fmt(production.totalExpenses) }}</div>
+            <div class="modal-formula">{{ fmt(allTimeDriverPay) }} + {{ fmt(allTimeFixedCosts) }} + {{ fmt(allTimeTripExpenses) }} = {{ fmt(allTimeDriverPay + allTimeFixedCosts + allTimeTripExpenses) }}</div>
           </div>
         </template>
 
@@ -343,9 +343,10 @@ const props = defineProps({
 const months = computed(() => props.production?.monthlyEarnings || [])
 const selectedIdx = ref(0)
 
-// Default to current month (last item) when data loads
+// Default to current month (last item) when data loads; clamp if months shrinks
 watch(months, (v) => {
-  if (v.length) selectedIdx.value = v.length - 1
+  if (v.length) selectedIdx.value = Math.min(selectedIdx.value, v.length - 1) || v.length - 1
+  else selectedIdx.value = 0
 }, { immediate: true })
 
 const selected = computed(() => months.value[selectedIdx.value] || null)
