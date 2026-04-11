@@ -83,7 +83,7 @@
       <MyTrucks :trucks="trucks" @reload="loadData" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
-      <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" />
+      <!-- <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" /> -->
       <InvestorChat :trucks="trucks" />
       <LegalDocumentPortal :trucks="trucks" />
       <!-- Business Configuration hidden from investor view; admin manages via Admin Tools -->
