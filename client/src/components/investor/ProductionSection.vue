@@ -7,10 +7,10 @@
 
     <!-- Monthly Revenue Chart — always shows 12 months -->
     <div class="chart-bars">
-      <div v-for="m in chartMonths" :key="m.key" class="chart-bar-wrap">
+      <div v-for="m in chartMonths" :key="m.key" class="chart-bar-wrap" :class="{ current: m.isCurrent }">
         <div class="chart-amount">{{ m.amount > 0 ? fmt(m.amount) : '' }}</div>
-        <div class="chart-bar" :class="{ empty: m.amount === 0 }" :style="{ height: m.amount > 0 ? barHeight(m.amount) : '2px' }"></div>
-        <div class="chart-label">{{ m.label }}</div>
+        <div class="chart-bar" :class="{ empty: m.amount === 0, 'bar-current': m.isCurrent }" :style="{ height: m.amount > 0 ? barHeight(m.amount) : '2px' }"></div>
+        <div class="chart-label" :class="{ 'label-current': m.isCurrent }">{{ m.label }}</div>
       </div>
     </div>
     <div class="chart-caption">Monthly Revenue</div>
@@ -29,16 +29,17 @@ const MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct'
 
 const months = computed(() => props.production.monthlyData || [])
 
-// Build 12-month trailing view — current month + 11 prior, always 12 bars
+// Build 12-month view — current month centered (6 before + current + 5 after)
 const chartMonths = computed(() => {
   const now = new Date()
   const dataMap = {}
   months.value.forEach(m => { dataMap[m.month] = m.amount })
   const result = []
-  for (let i = 11; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+  for (let i = -6; i <= 5; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
     const key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
-    result.push({ key, label: MONTH_SHORT[d.getMonth()], amount: dataMap[key] || 0 })
+    const isCurrent = i === 0
+    result.push({ key, label: MONTH_SHORT[d.getMonth()], amount: dataMap[key] || 0, isCurrent })
   }
   return result
 })
@@ -178,6 +179,9 @@ function barHeight(amount) {
 }
 .chart-bar:hover { opacity: 0.85; }
 .chart-bar.empty { background: var(--bg); }
+.chart-bar.bar-current { background: linear-gradient(180deg, #10b981, #059669); }
+.chart-bar-wrap.current { position: relative; }
+.label-current { font-weight: 700; color: var(--accent); }
 
 .chart-label {
   font-size: 0.7rem;
