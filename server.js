@@ -176,6 +176,10 @@ db.exec(`
 	)
 `);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_driver ON expenses(driver)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner ON expenses(owner_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_trucks_owner ON trucks(owner_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_maintenance_truck ON maintenance_fund(truck)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_compliance_truck ON compliance_fees(truck)`);
 
 // Migrate: add gallons + odometer columns to expenses table (fuel tracking)
 try {
