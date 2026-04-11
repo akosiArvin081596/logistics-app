@@ -970,6 +970,10 @@ app.use(
 // n8n Webhook: Upsert job into sheet_job_tracking (replaces Google Sheets write)
 // ============================================================
 app.post("/api/n8n/job", (req, res) => {
+	const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
+	if (webhookSecret && req.headers["x-webhook-secret"] !== webhookSecret) {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
 	try {
 		const {
 			load_id, details, driver, pickup_info, pickup_appointment, pickup_address,
@@ -5120,8 +5124,11 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 
 // POST /api/webhook/new-load — Called by n8n after writing a load to Google Sheets.
 // Emits a socket event so connected dashboards refresh instantly instead of waiting for the 60s poll.
-// No auth required — the endpoint only emits a notification, no data mutation.
 app.post("/api/webhook/new-load", (req, res) => {
+	const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
+	if (webhookSecret && req.headers["x-webhook-secret"] !== webhookSecret) {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
 	io.to("dispatch").emit("new-load", { timestamp: Date.now() });
 	res.json({ ok: true });
 });
