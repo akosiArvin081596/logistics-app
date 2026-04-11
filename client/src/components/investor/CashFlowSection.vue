@@ -45,9 +45,9 @@
         <span>{{ fmt(totalPurchasePrice) }}</span>
       </div>
       <div class="timeline-note">
-        Shows how much of your truck's purchase price ({{ fmt(totalPurchasePrice) }}) has been recovered through net revenue ({{ fmt(netRevenueToDate) }}).
+        Shows how much of your {{ truckWord }} total purchase price ({{ fmt(totalPurchasePrice) }}) has been recovered through net revenue ({{ fmt(netRevenueToDate) }}).
         At {{ recoveryPct.toFixed(0) }}%, you've earned back {{ fmt(netRevenueToDate) }} of {{ fmt(totalPurchasePrice) }}.
-        {{ recoveryPct >= 100 ? 'Your truck has paid for itself!' : 'When the bar reaches 100%, your truck has paid for itself.' }}
+        {{ recoveryPct >= 100 ? 'Your fleet has paid for itself!' : 'When the bar reaches 100%, your fleet has paid for itself.' }}
       </div>
     </div>
   </div>
@@ -93,6 +93,11 @@ const roiPct = computed(() => {
 })
 
 // Break-even = purchase price / monthly net cash flow
+const truckWord = computed(() => {
+  const count = props.production?.totalJobs !== undefined ? (props.asset?.totalTrucks || 1) : 1
+  return count === 1 ? "truck's" : `fleet's (${count} trucks)`
+})
+
 const monthlyNetCashFlow = computed(() => {
   const months = props.production?.monthsOfOperation || 1
   return netCashFlow.value / months
