@@ -440,6 +440,7 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.06);
   border-radius: 10px;
   padding: 0.75rem 0;
+  margin-top: 1rem;
 }
 
 .stat-item {
