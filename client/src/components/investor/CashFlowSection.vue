@@ -128,6 +128,8 @@ function fmt(n) {
 .kpi-card {
   padding: 1rem; border: 1px solid var(--border);
   border-radius: var(--radius); text-align: center;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 0.3rem;
 }
 .kpi-card.accent { border-color: var(--accent); }
 .kpi-card.accent .kpi-value { color: var(--accent); }
