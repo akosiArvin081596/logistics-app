@@ -6790,6 +6790,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		});
 
 		const jtRateCol2 = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
+		const jtDateCol2 = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(jobTracking.headers, /date/i);
 		const rptStatusCol = findCol(jobTracking.headers, /status/i);
 		const rptCompletedStatuses = /^(delivered|completed|pod received)$/i;
 
