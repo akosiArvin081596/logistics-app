@@ -6,17 +6,17 @@
     </div>
 
     <!-- Monthly Revenue Chart -->
-    <div class="chart-bars">
-      <template v-if="months.length > 0">
+    <template v-if="months.length > 0">
+      <div class="chart-bars">
         <div v-for="m in months" :key="m.month" class="chart-bar-wrap">
           <div class="chart-amount">{{ fmt(m.amount) }}</div>
           <div class="chart-bar" :style="{ height: barHeight(m.amount) }"></div>
           <div class="chart-label">{{ monthLabel(m.month) }}</div>
         </div>
-      </template>
-      <div v-else class="chart-empty">No monthly data yet</div>
-    </div>
-    <div class="chart-caption">Monthly Revenue</div>
+      </div>
+      <div class="chart-caption">Monthly Revenue</div>
+    </template>
+    <div v-else class="chart-empty">No monthly revenue data yet</div>
   </div>
 </template>
 
@@ -180,11 +180,10 @@ function monthLabel(month) {
 }
 
 .chart-empty {
-  width: 100%;
   text-align: center;
   color: var(--text-dim);
   font-size: 0.82rem;
-  align-self: center;
+  padding: 1.5rem 0;
 }
 
 .chart-caption {
