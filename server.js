@@ -3355,11 +3355,60 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		).all(nameLower, weekStart, computedWeekEnd);
 
 		const loadsCount = uniqueLoads.length;
-		const ratePerLoad = 250;
-		const totalEarnings = loadsCount * ratePerLoad;
+		const dailyRate = 250;
 		const expensesTotal = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
 		const loadIds = uniqueLoads.map(l => loadIdCol ? l[loadIdCol] : "").filter(Boolean);
 		const expenseIds = expenses.map(e => e.id);
+
+		// --- Active-day algorithm for driver pay ---
+		// Parse date from messy sheet values like "5/16/25 9:00" or "5/16/25 06:00-18:00 Appt."
+		function parseInvoiceDate(val) {
+			if (!val) return null;
+			const cleaned = String(val).replace(/^date:\s*/i, "").trim();
+			// Try M/D/YY or M/D/YYYY format first
+			const m = cleaned.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+			if (m) {
+				let yr = parseInt(m[3]); if (yr < 100) yr += 2000;
+				const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
+				return isNaN(d) ? null : d;
+			}
+			// Fallback: try native Date parse
+			const d = new Date(cleaned);
+			return isNaN(d) ? null : d;
+		}
+		function fmtLocalDate(d) {
+			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+		}
+
+		const pickupCol = headers.find(h => /pickup.*appo|pickup.*date/i.test(h));
+		const dropoffCol = headers.find(h => /drop.?off.*appo|drop.?off.*date|deliv.*appoint/i.test(h));
+		const activeDaySet = new Set();
+		const dayLoadMap = {}; // date string → [load IDs]
+
+		for (const load of uniqueLoads) {
+			const pickup = parseInvoiceDate(pickupCol ? load[pickupCol] : null);
+			const dropoff = parseInvoiceDate(dropoffCol ? load[dropoffCol] : null);
+			if (!pickup) continue;
+			const start = new Date(pickup); start.setHours(12, 0, 0, 0);
+			const end = dropoff ? new Date(dropoff) : new Date(pickup);
+			end.setHours(12, 0, 0, 0);
+			if (end < start) { end.setTime(start.getTime()); }
+			const cur = new Date(start);
+			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
+			while (cur <= end) {
+				const ds = fmtLocalDate(cur);
+				// Only count days within the invoice week
+				if (ds >= weekStart && ds <= computedWeekEnd) {
+					activeDaySet.add(ds);
+					if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
+					if (lid && !dayLoadMap[ds].includes(lid)) dayLoadMap[ds].push(lid);
+				}
+				cur.setDate(cur.getDate() + 1);
+			}
+		}
+
+		const activeDays = activeDaySet.size;
+		const totalEarnings = activeDays * dailyRate;
 
 		// Generate invoice number
 		// Delete existing draft if any
@@ -3374,23 +3423,21 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		const pdfFileName = `${invoiceNumber}.pdf`;
 		const pdfPath = path.join(uploadsDir, pdfFileName);
 
-		// Bucket loads by day of week (Saturday–Friday to match the HTML template)
+		// Bucket active days into the Sat–Fri template grid
 		const DAY_NAMES = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
-		const delivDateCol = headers.find(h => /drop.?off.*date|deliv.*date|deliv.*appoint/i.test(h)) || dateCol;
 		const daysMap = {};
 		for (const d of DAY_NAMES) daysMap[d] = { loadBol: "", total: 0, completed: false };
-		for (const load of uniqueLoads) {
-			const rawDate = (delivDateCol ? load[delivDateCol] : "") || "";
-			const parsed = new Date(String(rawDate).replace(/^date:\s*/i, "").trim());
-			if (isNaN(parsed.getTime())) continue;
-			// JS: 0=Sunday..6=Saturday; template order: Saturday..Friday
-			const jsDay = parsed.getDay();
-			const templateDay = DAY_NAMES[(jsDay + 1) % 7];
-			const existing = daysMap[templateDay];
-			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
-			existing.loadBol = existing.loadBol ? `${existing.loadBol}, ${lid}` : lid;
-			existing.total += ratePerLoad;
-			existing.completed = true;
+		for (const ds of activeDaySet) {
+			const dt = new Date(ds + "T12:00:00");
+			const jsDay = dt.getDay(); // 0=Sun..6=Sat
+			const templateDay = DAY_NAMES[(jsDay + 1) % 7]; // shift so 6(Sat)→0, 0(Sun)→1, ...
+			const entry = daysMap[templateDay];
+			entry.total += dailyRate;
+			entry.completed = true;
+			const bols = dayLoadMap[ds] || [];
+			entry.loadBol = entry.loadBol
+				? `${entry.loadBol}, ${bols.join(", ")}`.replace(/, $/, "")
+				: bols.join(", ");
 		}
 
 		// Lookup driver's contact info + payment info for the invoice header
@@ -3429,13 +3476,13 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		});
 		fs.writeFileSync(pdfPath, pdfBuffer);
 
-		// Insert into DB
+		// Insert into DB (rate_per_load stores daily rate; loads_count stores active days for this invoice)
 		const result = db.prepare(
 			`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, ?, ?)`
 		).run(
 			invoiceNumber, driverName.toLowerCase(), weekStart, computedWeekEnd,
-			loadsCount, ratePerLoad, totalEarnings, expensesTotal,
+			activeDays, dailyRate, totalEarnings, expensesTotal,
 			pdfFileName, JSON.stringify(loadIds), JSON.stringify(expenseIds)
 		);
 
