@@ -8542,6 +8542,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 			// 2. Monthly trip expenses — from DB grouped by month
 			const monthlyTripExp = {};
+			const tripExpByCategory = {};  // { "YYYY-MM": { fuel: X, maintenance: X, ... } }
 			if (investorOwnerId) {
 				const driverList = [...investorDriverSet];
 				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
@@ -8549,9 +8550,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) GROUP BY m`
 				).all(investorOwnerId, ...driverList);
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+				const catRows = db.prepare(
+					`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) GROUP BY m, LOWER(type)`
+				).all(investorOwnerId, ...driverList);
+				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			} else if (isSuperAdmin) {
 				const rows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses GROUP BY m`).all();
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+				const catRows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses GROUP BY m, LOWER(type)`).all();
+				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			}
 
 			// 3. Monthly fixed costs — constant per month per truck (only months truck existed)
@@ -8596,6 +8603,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					driverPay: Math.round(driverPay),
 					fixedCosts,
 					tripExpenses: Math.round(tripExpenses),
+					tripExpCategories: tripExpByCategory[mk] || {},
 					netProfit: Math.round(netProfit),
 					investorEarnings: Math.round(netProfit / 2),
 					companyEarnings: Math.round(netProfit / 2),

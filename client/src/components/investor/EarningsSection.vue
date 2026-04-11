@@ -105,35 +105,51 @@
           <DialogDescription>{{ modalSubtitle }}</DialogDescription>
         </DialogHeader>
 
-        <!-- MONTHLY: Full P&L Breakdown -->
+        <!-- ======================== -->
+        <!-- MONTHLY: Full P&L        -->
+        <!-- ======================== -->
         <template v-if="detailType === 'earnings' && selected">
           <div class="modal-breakdown">
+            <div class="modal-explain">
+              Here is exactly how your earnings for <strong>{{ monthLabel(selected.month) }}</strong> are calculated, step by step.
+            </div>
+
+            <div class="step-label">Step 1: Start with Revenue</div>
+            <div class="modal-explain-sm">The total amount your trucks earned from completed loads this month.</div>
             <div class="modal-row highlight">
               <span>Revenue</span>
               <span class="val accent">{{ fmt(selected.revenue) }}</span>
             </div>
-            <div class="modal-formula">SUM of Payment column from all completed loads this month</div>
+
+            <div class="step-label">Step 2: Subtract Operating Costs</div>
+            <div class="modal-explain-sm">These are the costs of running your truck(s) this month.</div>
             <div class="modal-row deduct">
-              <span>- Driver Pay</span>
-              <span class="val danger">{{ fmt(-selected.driverPay) }}</span>
+              <span>Driver Pay</span>
+              <span class="val danger">-{{ fmt(selected.driverPay) }}</span>
             </div>
-            <div class="modal-formula">$250/day x active driving days (pickup-to-dropoff, deduplicated)</div>
+            <div class="modal-hint">Your driver earns $250 for each day they are actively hauling a load.</div>
             <div class="modal-row deduct">
-              <span>- Fixed Costs</span>
-              <span class="val danger">{{ fmt(-selected.fixedCosts) }}</span>
+              <span>Fixed Costs</span>
+              <span class="val danger">-{{ fmt(selected.fixedCosts) }}</span>
             </div>
-            <div class="modal-formula">Insurance + ELD + IRP/12 + HVUT/12 + Maintenance Reserve</div>
+            <div class="modal-hint">Monthly insurance, ELD tracking, registration (IRP), road tax (HVUT), and maintenance reserve.</div>
             <div class="modal-row deduct">
-              <span>- Trip Expenses</span>
-              <span class="val danger">{{ fmt(-selected.tripExpenses) }}</span>
+              <span>Trip Expenses</span>
+              <span class="val danger">-{{ fmt(selected.tripExpenses) }}</span>
             </div>
-            <div class="modal-formula">Fuel + tolls + repairs from expenses table</div>
+            <div class="modal-hint">Fuel, tolls, repairs, and other costs incurred on the road this month.</div>
+
+            <div class="step-label">Step 3: Calculate Net Profit</div>
+            <div class="modal-explain-sm">Revenue minus all costs above = the profit before splitting.</div>
             <div class="modal-divider"></div>
             <div class="modal-row bold">
               <span>Net Profit</span>
               <span class="val" :class="selected.netProfit >= 0 ? 'accent' : 'danger'">{{ fmt(selected.netProfit) }}</span>
             </div>
-            <div class="modal-formula">{{ fmt(selected.revenue) }} - {{ fmt(selected.driverPay) }} - {{ fmt(selected.fixedCosts) }} - {{ fmt(selected.tripExpenses) }} = {{ fmt(selected.netProfit) }}</div>
+            <div class="modal-math">{{ fmt(selected.revenue) }} - {{ fmt(selected.driverPay) }} - {{ fmt(selected.fixedCosts) }} - {{ fmt(selected.tripExpenses) }} = {{ fmt(selected.netProfit) }}</div>
+
+            <div class="step-label">Step 4: Apply the 50/50 Split</div>
+            <div class="modal-explain-sm">Per your agreement, net profit is split equally between you and LogisX.</div>
             <div class="modal-row split-row">
               <span>&#247; 2 (50/50 split)</span>
               <span></span>
@@ -142,126 +158,190 @@
               <span>Your Earnings</span>
               <span class="val" :class="selected.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(selected.investorEarnings) }}</span>
             </div>
-            <div class="modal-formula">{{ fmt(selected.netProfit) }} / 2 = {{ fmt(selected.investorEarnings) }}</div>
+            <div class="modal-math">{{ fmt(selected.netProfit) }} / 2 = {{ fmt(selected.investorEarnings) }}</div>
           </div>
         </template>
 
-        <!-- MONTHLY: Revenue detail -->
+        <!-- ======================== -->
+        <!-- MONTHLY: Revenue          -->
+        <!-- ======================== -->
         <template v-if="detailType === 'revenue' && selected">
           <div class="modal-breakdown">
-            <div class="modal-explain">Total payment received from all completed loads in {{ monthLabel(selected.month) }}.</div>
+            <div class="modal-explain">
+              This is the total payment earned from all loads your trucks completed in <strong>{{ monthLabel(selected.month) }}</strong>.
+            </div>
+            <div class="modal-explain-sm">
+              Each time one of your trucks delivers a load, the shipper/broker pays a rate for that trip. This figure is the sum of all those payments for the selected month.
+            </div>
+            <div class="modal-explain-sm">
+              <strong>Where it comes from:</strong> The "Payment" column in our Job Tracking system, filtered to loads completed by your assigned driver(s) this month.
+            </div>
+            <div class="modal-divider"></div>
             <div class="modal-row bold result">
-              <span>Revenue</span>
+              <span>Monthly Revenue</span>
               <span class="val accent">{{ fmt(selected.revenue) }}</span>
             </div>
-            <div class="modal-formula">= SUM(Payment column, completed loads for {{ monthLabel(selected.month) }})</div>
           </div>
         </template>
 
-        <!-- MONTHLY: Driver Pay detail -->
+        <!-- ======================== -->
+        <!-- MONTHLY: Driver Pay       -->
+        <!-- ======================== -->
         <template v-if="detailType === 'driverPay' && selected">
           <div class="modal-breakdown">
-            <div class="modal-explain">Each driver is paid $250 per active day. Active days are calendar days between pickup and dropoff dates, deduplicated across overlapping loads.</div>
+            <div class="modal-explain">
+              Your driver is compensated at a flat rate of <strong>$250 per active day</strong>. An "active day" is any calendar day where the driver is working on a load &mdash; from the pickup date through the delivery date.
+            </div>
+            <div class="modal-explain-sm">
+              If a driver has overlapping loads (e.g., picked up a new load the same day they delivered the last one), those days are only counted once to avoid double-charging.
+            </div>
+
             <template v-if="Object.keys(driverDetails).length">
-              <div class="modal-row" v-for="(d, name) in driverDetails" :key="name">
-                <span>{{ name }}</span>
-                <span class="val danger">{{ fmt(d.totalPay) }}</span>
-              </div>
-              <div class="modal-formula" v-for="(d, name) in driverDetails" :key="name + '-f'" style="padding-bottom:0.35rem;">
-                {{ name }}: {{ d.activeDays }} days x ${{ d.dailyRate || 250 }}/day
+              <div class="step-label">Driver Breakdown</div>
+              <div v-for="(d, name) in driverDetails" :key="name">
+                <div class="modal-row">
+                  <span>{{ name }}</span>
+                  <span class="val danger">{{ fmt(d.totalPay) }}</span>
+                </div>
+                <div class="modal-hint">{{ d.activeDays }} active days x ${{ d.dailyRate || 250 }}/day</div>
               </div>
             </template>
+
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Total Driver Pay</span>
               <span class="val danger">{{ fmt(selected.driverPay) }}</span>
             </div>
-            <div class="modal-formula">= $250 x active days in {{ monthLabel(selected.month) }}</div>
           </div>
         </template>
 
-        <!-- MONTHLY: Fixed Costs detail -->
+        <!-- ======================== -->
+        <!-- MONTHLY: Fixed Costs      -->
+        <!-- ======================== -->
         <template v-if="detailType === 'fixedCosts' && selected">
           <div class="modal-breakdown">
-            <div class="modal-explain">Monthly fixed costs across {{ fcb.truckCount || 1 }} truck{{ (fcb.truckCount || 1) > 1 ? 's' : '' }}, prorated from annual fees where applicable.</div>
+            <div class="modal-explain">
+              These are the recurring monthly costs to keep your {{ fcb.truckCount > 1 ? fcb.truckCount + ' trucks' : 'truck' }} legally compliant and road-ready. They are charged every month regardless of how many loads are completed.
+            </div>
+
+            <div class="step-label">Cost Breakdown (Monthly Total)</div>
             <div class="modal-row">
-              <span>Insurance (monthly)</span>
+              <span>Insurance</span>
               <span class="val danger">{{ fmt(fcb.insurance) }}</span>
             </div>
+            <div class="modal-hint">Commercial liability insurance required to operate.</div>
             <div class="modal-row">
-              <span>ELD (monthly)</span>
+              <span>ELD Device</span>
               <span class="val danger">{{ fmt(fcb.eld) }}</span>
             </div>
+            <div class="modal-hint">Electronic Logging Device &mdash; federally required to track driver hours.</div>
             <div class="modal-row">
-              <span>IRP (annual / 12)</span>
+              <span>IRP Registration</span>
               <span class="val danger">{{ fmt(fcb.irp) }}</span>
             </div>
+            <div class="modal-hint">International Registration Plan &mdash; annual fee divided by 12 months.</div>
             <div class="modal-row">
-              <span>HVUT (annual / 12)</span>
+              <span>HVUT Road Tax</span>
               <span class="val danger">{{ fmt(fcb.hvut) }}</span>
             </div>
+            <div class="modal-hint">Heavy Vehicle Use Tax (Form 2290) &mdash; annual fee divided by 12 months.</div>
             <div class="modal-row">
               <span>Maintenance Reserve</span>
               <span class="val danger">{{ fmt(fcb.maintReserve) }}</span>
             </div>
+            <div class="modal-hint">Monthly reserve set aside for preventive maintenance, tire replacements, and unexpected repairs.</div>
+
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Total Fixed Costs</span>
               <span class="val danger">{{ fmt(selected.fixedCosts) }}</span>
             </div>
-            <div class="modal-formula">{{ fmt(fcb.insurance) }} + {{ fmt(fcb.eld) }} + {{ fmt(fcb.irp) }} + {{ fmt(fcb.hvut) }} + {{ fmt(fcb.maintReserve) }} = {{ fmt(selected.fixedCosts) }}/mo</div>
+            <div class="modal-math">{{ fmt(fcb.insurance) }} + {{ fmt(fcb.eld) }} + {{ fmt(fcb.irp) }} + {{ fmt(fcb.hvut) }} + {{ fmt(fcb.maintReserve) }} = {{ fmt(selected.fixedCosts) }}/mo</div>
           </div>
         </template>
 
-        <!-- MONTHLY: Trip Expenses detail -->
+        <!-- ======================== -->
+        <!-- MONTHLY: Trip Expenses    -->
+        <!-- ======================== -->
         <template v-if="detailType === 'tripExpenses' && selected">
           <div class="modal-breakdown">
-            <div class="modal-explain">Variable expenses logged against loads this month, sourced from the expenses table.</div>
-            <div class="modal-row"><span>Fuel</span><span class="val">from expenses</span></div>
-            <div class="modal-row"><span>Tolls</span><span class="val">from expenses</span></div>
-            <div class="modal-row"><span>Repairs</span><span class="val">from expenses</span></div>
-            <div class="modal-row"><span>Other</span><span class="val">from expenses</span></div>
+            <div class="modal-explain">
+              These are variable costs that only occur when your truck is on the road. Unlike fixed costs, trip expenses change from month to month based on how many loads were hauled and the routes taken.
+            </div>
+
+            <template v-if="Object.keys(selected.tripExpCategories || {}).length">
+              <div class="step-label">Expense Categories</div>
+              <div v-for="(amt, cat) in selected.tripExpCategories" :key="cat">
+                <div class="modal-row">
+                  <span>{{ catLabel(cat) }}</span>
+                  <span class="val danger">{{ fmt(amt) }}</span>
+                </div>
+              </div>
+            </template>
+            <div v-else class="modal-explain-sm" style="font-style:italic;">
+              No trip expenses were logged for this month.
+            </div>
+
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Total Trip Expenses</span>
               <span class="val danger">{{ fmt(selected.tripExpenses) }}</span>
             </div>
-            <div class="modal-formula">= SUM of all expenses for {{ monthLabel(selected.month) }}</div>
+            <div class="modal-explain-sm" style="margin-top:0.5rem;">
+              <strong>Where it comes from:</strong> Receipts and expense reports submitted by your driver and logged in the system.
+            </div>
           </div>
         </template>
 
-        <!-- MONTHLY: Net Profit detail -->
+        <!-- ======================== -->
+        <!-- MONTHLY: Net Profit       -->
+        <!-- ======================== -->
         <template v-if="detailType === 'netProfit' && selected">
           <div class="modal-breakdown">
+            <div class="modal-explain">
+              Net profit is what remains after all operating costs are subtracted from your truck's revenue. This is the number that gets split 50/50 between you and LogisX.
+            </div>
+
+            <div class="step-label">The Calculation</div>
             <div class="modal-row highlight">
-              <span>Revenue</span>
+              <span>Revenue (loads completed)</span>
               <span class="val accent">{{ fmt(selected.revenue) }}</span>
             </div>
             <div class="modal-row deduct">
               <span>- Driver Pay</span>
-              <span class="val danger">{{ fmt(-selected.driverPay) }}</span>
+              <span class="val danger">-{{ fmt(selected.driverPay) }}</span>
             </div>
             <div class="modal-row deduct">
               <span>- Fixed Costs</span>
-              <span class="val danger">{{ fmt(-selected.fixedCosts) }}</span>
+              <span class="val danger">-{{ fmt(selected.fixedCosts) }}</span>
             </div>
             <div class="modal-row deduct">
               <span>- Trip Expenses</span>
-              <span class="val danger">{{ fmt(-selected.tripExpenses) }}</span>
+              <span class="val danger">-{{ fmt(selected.tripExpenses) }}</span>
             </div>
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Net Profit</span>
               <span class="val" :class="selected.netProfit >= 0 ? 'accent' : 'danger'">{{ fmt(selected.netProfit) }}</span>
             </div>
-            <div class="modal-formula">{{ fmt(selected.revenue) }} - {{ fmt(selected.driverPay) }} - {{ fmt(selected.fixedCosts) }} - {{ fmt(selected.tripExpenses) }} = {{ fmt(selected.netProfit) }}</div>
+            <div class="modal-math">{{ fmt(selected.revenue) }} - {{ fmt(selected.driverPay) }} - {{ fmt(selected.fixedCosts) }} - {{ fmt(selected.tripExpenses) }} = {{ fmt(selected.netProfit) }}</div>
+
+            <div v-if="selected.netProfit < 0" class="modal-callout warning">
+              A negative net profit means operating costs exceeded revenue this month. This can happen during the first month, slow freight periods, or when major maintenance occurs.
+            </div>
           </div>
         </template>
 
-        <!-- ALL-TIME: Revenue -->
+        <!-- ======================== -->
+        <!-- ALL-TIME: Revenue         -->
+        <!-- ======================== -->
         <template v-if="detailType === 'allRevenue'">
           <div class="modal-breakdown">
-            <div class="modal-explain">Total payment from all completed loads across all months.</div>
+            <div class="modal-explain">
+              This is the total revenue your fleet has generated since your first load. It represents every dollar earned from completed deliveries across all months.
+            </div>
+
+            <div class="step-label">Monthly Revenue History</div>
             <div class="modal-monthly-list" v-if="months.length">
               <div class="modal-row" v-for="m in months" :key="m.month">
                 <span>{{ monthLabel(m.month) }}{{ m.isCurrentMonth ? ' *' : '' }}</span>
@@ -276,73 +356,102 @@
           </div>
         </template>
 
-        <!-- ALL-TIME: Expenses -->
+        <!-- ======================== -->
+        <!-- ALL-TIME: Expenses        -->
+        <!-- ======================== -->
         <template v-if="detailType === 'allExpenses'">
           <div class="modal-breakdown">
-            <div class="modal-explain">Total of all cost categories across all months.</div>
+            <div class="modal-explain">
+              This is the total cost of operating your fleet since day one. Expenses fall into three categories:
+            </div>
+
+            <div class="step-label">1. Driver Pay</div>
+            <div class="modal-explain-sm">Total compensation paid to your driver(s) at $250/active day.</div>
             <div class="modal-row">
               <span>Driver Pay</span>
               <span class="val danger">{{ fmt(allTimeDriverPay) }}</span>
             </div>
-            <div class="modal-formula">$250/day x all active driving days</div>
+
+            <div class="step-label">2. Fixed Costs</div>
+            <div class="modal-explain-sm">Recurring monthly costs: insurance, ELD, registration (IRP), road tax (HVUT), and maintenance reserve.</div>
             <div class="modal-row">
               <span>Fixed Costs</span>
               <span class="val danger">{{ fmt(allTimeFixedCosts) }}</span>
             </div>
-            <div class="modal-formula">Insurance + ELD + IRP/12 + HVUT/12 + Maint Reserve (monthly per truck)</div>
+
+            <div class="step-label">3. Trip Expenses</div>
+            <div class="modal-explain-sm">Variable costs from actual trips: fuel, tolls, repairs, and other on-the-road expenses.</div>
             <div class="modal-row">
               <span>Trip Expenses</span>
               <span class="val danger">{{ fmt(allTimeTripExpenses) }}</span>
             </div>
-            <div class="modal-formula">Fuel + tolls + repairs from expenses table</div>
+
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Total Expenses</span>
               <span class="val danger">{{ fmt(allTimeDriverPay + allTimeFixedCosts + allTimeTripExpenses) }}</span>
             </div>
-            <div class="modal-formula">{{ fmt(allTimeDriverPay) }} + {{ fmt(allTimeFixedCosts) }} + {{ fmt(allTimeTripExpenses) }} = {{ fmt(allTimeDriverPay + allTimeFixedCosts + allTimeTripExpenses) }}</div>
+            <div class="modal-math">{{ fmt(allTimeDriverPay) }} + {{ fmt(allTimeFixedCosts) }} + {{ fmt(allTimeTripExpenses) }} = {{ fmt(allTimeDriverPay + allTimeFixedCosts + allTimeTripExpenses) }}</div>
           </div>
         </template>
 
-        <!-- ALL-TIME: Net -->
+        <!-- ======================== -->
+        <!-- ALL-TIME: Net             -->
+        <!-- ======================== -->
         <template v-if="detailType === 'allNet'">
           <div class="modal-breakdown">
+            <div class="modal-explain">
+              This is the total profit your fleet has generated after all operating costs. It represents the bottom line across your entire investment period.
+            </div>
+
+            <div class="step-label">The Calculation</div>
             <div class="modal-row highlight">
-              <span>Revenue</span>
+              <span>All-Time Revenue</span>
               <span class="val accent">{{ fmt(production.totalRevenue) }}</span>
             </div>
+            <div class="modal-explain-sm">Every dollar earned from completed loads.</div>
             <div class="modal-row deduct">
-              <span>- Total Expenses</span>
-              <span class="val danger">{{ fmt(-production.totalExpenses) }}</span>
+              <span>- All-Time Expenses</span>
+              <span class="val danger">-{{ fmt(production.totalExpenses) }}</span>
             </div>
+            <div class="modal-explain-sm">Driver pay + fixed costs + trip expenses combined.</div>
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Net Profit</span>
               <span class="val" :class="production.netRevenueToDate >= 0 ? 'accent' : 'danger'">{{ fmt(production.netRevenueToDate) }}</span>
             </div>
-            <div class="modal-formula">{{ fmt(production.totalRevenue) }} - {{ fmt(production.totalExpenses) }} = {{ fmt(production.netRevenueToDate) }}</div>
+            <div class="modal-math">{{ fmt(production.totalRevenue) }} - {{ fmt(production.totalExpenses) }} = {{ fmt(production.netRevenueToDate) }}</div>
           </div>
         </template>
 
-        <!-- ALL-TIME: Your Earnings -->
+        <!-- ======================== -->
+        <!-- ALL-TIME: Your Earnings   -->
+        <!-- ======================== -->
         <template v-if="detailType === 'allEarnings'">
           <div class="modal-breakdown">
+            <div class="modal-explain">
+              This is your cumulative 50% share of all profits since your first load. Per your agreement with LogisX, net profit is split equally &mdash; half goes to you, half goes to the company.
+            </div>
+
+            <div class="step-label">The Calculation</div>
             <div class="modal-row highlight">
-              <span>Net Profit</span>
+              <span>All-Time Net Profit</span>
               <span class="val" :class="production.netRevenueToDate >= 0 ? 'accent' : 'danger'">{{ fmt(production.netRevenueToDate) }}</span>
             </div>
+            <div class="modal-explain-sm">Revenue ({{ fmt(production.totalRevenue) }}) minus all expenses ({{ fmt(production.totalExpenses) }}).</div>
             <div class="modal-row split-row">
-              <span>&#247; 2 (50/50 split)</span>
+              <span>&#247; 2 (your 50% share)</span>
               <span></span>
             </div>
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
-              <span>Your Earnings</span>
+              <span>Your All-Time Earnings</span>
               <span class="val" :class="production.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(production.investorEarnings) }}</span>
             </div>
-            <div class="modal-formula">{{ fmt(production.netRevenueToDate) }} / 2 = {{ fmt(production.investorEarnings) }}</div>
-            <div class="modal-monthly-list" v-if="months.length" style="margin-top:0.75rem;">
-              <div class="modal-explain">Monthly breakdown:</div>
+            <div class="modal-math">{{ fmt(production.netRevenueToDate) }} / 2 = {{ fmt(production.investorEarnings) }}</div>
+
+            <div class="step-label" style="margin-top:1rem;">Month-by-Month History</div>
+            <div class="modal-monthly-list" v-if="months.length">
               <div class="modal-row" v-for="m in months" :key="m.month">
                 <span>{{ monthLabel(m.month) }}{{ m.isCurrentMonth ? ' *' : '' }}</span>
                 <span class="val" :class="m.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(m.investorEarnings) }}</span>
@@ -392,31 +501,42 @@ function openDetail(type) {
   detailType.value = type
 }
 
+// Expense category label (backend stores lowercase type strings)
+const CAT_LABELS = { fuel: 'Fuel', maintenance: 'Maintenance / Repairs', tolls: 'Tolls', parking: 'Parking', other: 'Other', repair: 'Repairs', tires: 'Tires', def: 'DEF Fluid' }
+function catLabel(cat) {
+  return CAT_LABELS[cat] || (cat ? cat.charAt(0).toUpperCase() + cat.slice(1) : 'Other')
+}
+
 // All-time expense sub-totals derived from monthly data
 const allTimeDriverPay = computed(() => months.value.reduce((s, m) => s + (m.driverPay || 0), 0))
 const allTimeFixedCosts = computed(() => months.value.reduce((s, m) => s + (m.fixedCosts || 0), 0))
 const allTimeTripExpenses = computed(() => months.value.reduce((s, m) => s + (m.tripExpenses || 0), 0))
 
 const MODAL_CONFIG = {
-  earnings:     { title: 'Monthly Earnings Breakdown', subtitle: 'How your earnings are calculated for this month' },
-  revenue:      { title: 'Revenue', subtitle: 'Total payment from completed loads' },
-  driverPay:    { title: 'Driver Pay', subtitle: 'Cost of driver compensation' },
-  fixedCosts:   { title: 'Fixed Costs', subtitle: 'Monthly truck operating costs' },
-  tripExpenses: { title: 'Trip Expenses', subtitle: 'Variable per-trip costs' },
-  netProfit:    { title: 'Net Profit', subtitle: 'Revenue minus all costs' },
-  allRevenue:   { title: 'All-Time Revenue', subtitle: 'Revenue across all months' },
-  allExpenses:  { title: 'All-Time Expenses', subtitle: 'Expense breakdown across all months' },
-  allNet:       { title: 'All-Time Net Profit', subtitle: 'Total revenue minus total expenses' },
-  allEarnings:  { title: 'All-Time Your Earnings', subtitle: 'Your 50% share of net profit' },
+  earnings:     { title: 'How Your Earnings Are Calculated', subtitle: 'Step-by-step breakdown of your monthly earnings' },
+  revenue:      { title: 'Revenue Explained', subtitle: 'Total income from completed loads' },
+  driverPay:    { title: 'Driver Pay Explained', subtitle: 'How driver compensation is calculated' },
+  fixedCosts:   { title: 'Fixed Costs Explained', subtitle: 'Monthly costs to keep your truck(s) running' },
+  tripExpenses: { title: 'Trip Expenses Explained', subtitle: 'Variable costs from hauling loads' },
+  netProfit:    { title: 'Net Profit Explained', subtitle: 'Revenue minus all operating costs' },
+  allRevenue:   { title: 'All-Time Revenue', subtitle: 'Cumulative income since your first load' },
+  allExpenses:  { title: 'All-Time Expenses', subtitle: 'Total operating costs across all months' },
+  allNet:       { title: 'All-Time Net Profit', subtitle: 'Your fleet\'s total profit to date' },
+  allEarnings:  { title: 'All-Time Your Earnings', subtitle: 'Your cumulative 50% share of profits' },
 }
 
 const modalTitle = computed(() => {
   const cfg = MODAL_CONFIG[detailType.value]
   if (!cfg) return ''
   const isMonthly = !detailType.value.startsWith('all') && selected.value
-  return isMonthly ? `${cfg.title} — ${monthLabel(selected.value.month)}` : cfg.title
+  return isMonthly ? `${cfg.title}` : cfg.title
 })
-const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle || '')
+const modalSubtitle = computed(() => {
+  const cfg = MODAL_CONFIG[detailType.value]
+  if (!cfg) return ''
+  const isMonthly = !detailType.value.startsWith('all') && selected.value
+  return isMonthly ? `${monthLabel(selected.value.month)} — ${cfg.subtitle}` : cfg.subtitle
+})
 </script>
 
 <style scoped>
@@ -465,7 +585,6 @@ const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle ||
 }
 .earn-card.positive { border-color: var(--accent); background: rgba(16, 185, 129, 0.04); }
 .earn-card.negative { border-color: var(--danger); background: rgba(239, 68, 68, 0.04); }
-.earn-card.company { border-color: var(--blue); background: rgba(59, 130, 246, 0.04); }
 .earn-label {
   font-size: 0.72rem; font-weight: 600; color: var(--text-dim);
   text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.4rem;
@@ -565,15 +684,46 @@ const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle ||
 .modal-row.result { background: var(--bg); border-radius: 6px; font-size: 0.92rem; }
 .modal-row.split-row { color: var(--text-dim); font-size: 0.78rem; }
 .modal-divider { border-top: 1px dashed var(--border); margin: 0.4rem 0.75rem; }
-.modal-formula {
-  font-size: 0.62rem; font-family: 'JetBrains Mono', monospace;
-  color: var(--text-dim); opacity: 0.6; font-style: italic;
-  padding: 0 0.75rem 0.25rem;
+
+/* Step labels */
+.step-label {
+  font-size: 0.72rem; font-weight: 700; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.03em;
+  padding: 0.6rem 0.75rem 0.2rem; margin-top: 0.25rem;
 }
+
+/* Explanatory text */
 .modal-explain {
-  font-size: 0.78rem; color: var(--text-dim); padding: 0.25rem 0.75rem 0.5rem;
+  font-size: 0.82rem; color: var(--text); padding: 0.25rem 0.75rem 0.5rem;
+  line-height: 1.5;
+}
+.modal-explain-sm {
+  font-size: 0.75rem; color: var(--text-dim); padding: 0 0.75rem 0.4rem;
   line-height: 1.4;
 }
+.modal-hint {
+  font-size: 0.68rem; color: var(--text-dim); padding: 0 0.75rem 0.3rem;
+  line-height: 1.3; font-style: italic;
+}
+
+/* Math formula */
+.modal-math {
+  font-size: 0.68rem; font-family: 'JetBrains Mono', monospace;
+  color: var(--text-dim); opacity: 0.7;
+  padding: 0.15rem 0.75rem 0.25rem; text-align: center;
+}
+
+/* Callout box */
+.modal-callout {
+  font-size: 0.75rem; padding: 0.6rem 0.75rem; border-radius: 6px;
+  margin: 0.5rem 0.75rem 0; line-height: 1.4;
+}
+.modal-callout.warning {
+  background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.25);
+  color: var(--text);
+}
+
+/* Monthly list */
 .modal-monthly-list { max-height: 300px; overflow-y: auto; }
 .modal-monthly-list .modal-row { font-size: 0.8rem; padding: 0.35rem 0.75rem; }
 .modal-monthly-list .modal-row:nth-child(even) { background: var(--bg); border-radius: 4px; }
