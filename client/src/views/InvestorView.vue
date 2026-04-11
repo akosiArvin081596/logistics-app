@@ -49,8 +49,10 @@
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
       <EarningsSection :production="store.production" />
-      <ProductionSection :production="store.production" :config="store.config" />
-      <TrendSection :production="store.production" />
+      <div class="sections-row">
+        <ProductionSection :production="store.production" :config="store.config" />
+        <TrendSection :production="store.production" />
+      </div>
       <AssetSection :asset="store.asset" :config="store.config" />
       <MyTrucks :trucks="trucks" @reload="loadData" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
@@ -461,13 +463,22 @@ onMounted(() => {
   gap: 1.25rem;
   margin-bottom: 1.25rem;
 }
-
 .sections-grid > :deep(.section) {
+  margin-bottom: 0;
+}
+.sections-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  margin-bottom: 1.25rem;
+  align-items: stretch;
+}
+.sections-row > :deep(.section) {
   margin-bottom: 0;
 }
 
 @media (max-width: 900px) {
-  .sections-grid {
+  .sections-grid, .sections-row {
     grid-template-columns: 1fr;
   }
   .quick-stats {

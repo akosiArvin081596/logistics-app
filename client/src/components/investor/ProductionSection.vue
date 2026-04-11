@@ -141,7 +141,7 @@ function monthLabel(month) {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  height: 260px;
+  height: 180px;
   padding-top: 1rem;
   border-bottom: 1px solid var(--border);
 }
