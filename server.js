@@ -6830,13 +6830,16 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 
 		let totalExpenses = 0;
 		let fuelExpenses = 0, maintenanceExpenses = 0, complianceExpenses = 0, otherExpenses = 0;
-		const dateWhereExp = filterStart ? ` AND date >= '${filterStart.toISOString().slice(0,10)}'` : '';
-		const dateWhereExpEnd = filterEnd ? ` AND date <= '${filterEnd.toISOString().slice(0,10)}'` : '';
+		// Parameterized date filters (avoid string interpolation in SQL)
+		let dateWhere = '';
+		const dateParams = [];
+		if (filterStart) { dateWhere += ' AND date >= ?'; dateParams.push(filterStart.toISOString().slice(0, 10)); }
+		if (filterEnd) { dateWhere += ' AND date <= ?'; dateParams.push(filterEnd.toISOString().slice(0, 10)); }
 		if (investorDriverSet && investorDriverSet.size > 0) {
 			const driverList = [...investorDriverSet];
 			const ph = driverList.map(() => '?').join(',');
 			// Itemized expenses by type
-			const expRows = db.prepare(`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE LOWER(driver) IN (${ph})${dateWhereExp}${dateWhereExpEnd} GROUP BY LOWER(type)`).all(...driverList);
+			const expRows = db.prepare(`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE LOWER(driver) IN (${ph})${dateWhere} GROUP BY LOWER(type)`).all(...driverList, ...dateParams);
 			expRows.forEach(r => {
 				if (/fuel/i.test(r.t)) fuelExpenses += r.total;
 				else if (/maint|repair|tire|oil/i.test(r.t)) maintenanceExpenses += r.total;
