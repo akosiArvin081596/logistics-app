@@ -8583,7 +8583,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const allOwnedTrucks = investorDriverSet
 			? db.prepare("SELECT * FROM trucks WHERE owner_id = ?").all(user.id)
 			: db.prepare("SELECT * FROM trucks").all();
-		const totalTrucks = allOwnedTrucks.length || 1;
+		const totalTrucks = allOwnedTrucks.length;
 		const totalPurchasePrice = allOwnedTrucks.reduce((sum, t) => sum + (t.purchase_price || 0), 0);
 		const depreciationYears = Math.max(1, parseFloat(config.depreciation_years) || 5);
 		const depreciationRate = Math.min(1, monthsOfOperation / (depreciationYears * 12));
