@@ -8700,7 +8700,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalExpenses: Math.round(totalExpenses),
 				investorEarnings: Math.round((totalRevenue - totalExpenses) / 2),
 				totalDriverPay: Math.round(totalDriverPay),
-				driverPayDetails,
+				driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(([k, v]) => [k, { activeDays: v.activeDays, dailyRate: v.dailyRate, totalPay: v.totalPay }])),
 				netRevenueToDate,
 				totalPurchasePrice,
 				totalStartupExpenses,
