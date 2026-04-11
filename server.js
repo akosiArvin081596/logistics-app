@@ -5136,6 +5136,7 @@ app.post("/api/webhook/new-load", (req, res) => {
 	if (webhookSecret && req.headers["x-webhook-secret"] !== webhookSecret) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
+	jtCacheInvalidate();
 	io.to("dispatch").emit("new-load", { timestamp: Date.now() });
 	res.json({ ok: true });
 });
@@ -5231,7 +5232,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 
 		logAudit(req, 'dispatch_load', 'load', loadId, `Assigned driver ${driver} to load ${loadId}`);
-		notifyChange("dashboard");
+		notifyChange("dashboard"); jtCacheInvalidate();
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error dispatching load:", error.message);
@@ -5304,7 +5305,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			db.prepare("DELETE FROM load_responses WHERE load_id = ? AND driver_name = ?")
 				.run(loadId, newDriver.trim().toLowerCase());
 		}
-		notifyChange("dashboard");
+		notifyChange("dashboard"); jtCacheInvalidate();
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error reassigning load:", error.message);
@@ -5375,7 +5376,7 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin", "Dispatcher"), async
 			title: `Cancelled Load ${loadId || 'N/A'}`,
 			body: `Was assigned to ${driver || 'unknown'}`,
 		});
-		notifyChange("dashboard");
+		notifyChange("dashboard"); jtCacheInvalidate();
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error cancelling load:", error.message);
@@ -6174,6 +6175,7 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 		});
 
 		// Notify dispatch in real-time
+		jtCacheInvalidate();
 		io.to("dispatch").emit("status-updated", { loadId, driverName, newStatus });
 		insertDispatchNotification.run(
 			'status-updated',
@@ -8215,18 +8217,25 @@ app.get("/api/weather", requireAuth, async (req, res) => {
 // INVESTOR — Financial & Investor View (Read-Only)
 // ============================================================
 
+// Job Tracking sheet cache — avoids hitting Google Sheets API on every investor request (2-5s).
+// TTL 60s. Invalidated by mutation endpoints (dispatch, status update, load edit) via jtCacheInvalidate().
+let _jtCache = null;
+const JT_CACHE_TTL = 60_000;
+async function getJobTrackingCached() {
+	if (_jtCache && (Date.now() - _jtCache.at) < JT_CACHE_TTL) return _jtCache.data;
+	const sheets = await getSheets();
+	const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+	const parsed = parseSheet(response.data);
+	parsed.data = deduplicateLoads(parsed.data, parsed.headers);
+	_jtCache = { data: parsed, at: Date.now() };
+	return parsed;
+}
+function jtCacheInvalidate() { _jtCache = null; }
+
 // GET /api/investor — Aggregated financial data for investor view
 app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
-		const sheets = await getSheets();
-
-		const response = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking",
-		});
-
-		const jobTracking = parseSheet(response.data);
-		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
+		const jobTracking = await getJobTrackingCached();
 		const carrierDB = getCarrierDBFromSQLite();
 
 		const user = req.session.user;
