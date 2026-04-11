@@ -98,8 +98,10 @@ const breakEvenMonths = computed(() => {
 
 const breakEvenDate = computed(() => {
   if (typeof breakEvenMonths.value !== 'number') return ''
+  const monthsOperated = props.production?.monthsOfOperation || 0
+  const monthsRemaining = Math.max(0, breakEvenMonths.value - monthsOperated)
   const d = new Date()
-  d.setMonth(d.getMonth() + breakEvenMonths.value)
+  d.setMonth(d.getMonth() + monthsRemaining)
   return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
 })
 
