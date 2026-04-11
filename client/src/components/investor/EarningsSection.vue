@@ -162,8 +162,18 @@
         <template v-if="detailType === 'driverPay' && selected">
           <div class="modal-breakdown">
             <div class="modal-explain">Each driver is paid $250 per active day. Active days are calendar days between pickup and dropoff dates, deduplicated across overlapping loads.</div>
+            <template v-if="Object.keys(driverDetails).length">
+              <div class="modal-row" v-for="(d, name) in driverDetails" :key="name">
+                <span>{{ name }}</span>
+                <span class="val danger">{{ fmt(d.totalPay) }}</span>
+              </div>
+              <div class="modal-formula" v-for="(d, name) in driverDetails" :key="name + '-f'" style="padding-bottom:0.35rem;">
+                {{ name }}: {{ d.activeDays }} days x ${{ d.dailyRate || 250 }}/day
+              </div>
+            </template>
+            <div class="modal-divider"></div>
             <div class="modal-row bold result">
-              <span>Driver Pay</span>
+              <span>Total Driver Pay</span>
               <span class="val danger">{{ fmt(selected.driverPay) }}</span>
             </div>
             <div class="modal-formula">= $250 x active days in {{ monthLabel(selected.month) }}</div>
@@ -173,18 +183,33 @@
         <!-- MONTHLY: Fixed Costs detail -->
         <template v-if="detailType === 'fixedCosts' && selected">
           <div class="modal-breakdown">
-            <div class="modal-explain">Monthly fixed costs per truck, prorated from annual fees where applicable.</div>
-            <div class="modal-row"><span>Insurance (monthly)</span><span class="val">per truck</span></div>
-            <div class="modal-row"><span>ELD (monthly)</span><span class="val">per truck</span></div>
-            <div class="modal-row"><span>IRP (annual / 12)</span><span class="val">per truck</span></div>
-            <div class="modal-row"><span>HVUT (annual / 12)</span><span class="val">per truck</span></div>
-            <div class="modal-row"><span>Maintenance Reserve</span><span class="val">per truck</span></div>
+            <div class="modal-explain">Monthly fixed costs across {{ fcb.truckCount || 1 }} truck{{ (fcb.truckCount || 1) > 1 ? 's' : '' }}, prorated from annual fees where applicable.</div>
+            <div class="modal-row">
+              <span>Insurance (monthly)</span>
+              <span class="val danger">{{ fmt(fcb.insurance) }}</span>
+            </div>
+            <div class="modal-row">
+              <span>ELD (monthly)</span>
+              <span class="val danger">{{ fmt(fcb.eld) }}</span>
+            </div>
+            <div class="modal-row">
+              <span>IRP (annual / 12)</span>
+              <span class="val danger">{{ fmt(fcb.irp) }}</span>
+            </div>
+            <div class="modal-row">
+              <span>HVUT (annual / 12)</span>
+              <span class="val danger">{{ fmt(fcb.hvut) }}</span>
+            </div>
+            <div class="modal-row">
+              <span>Maintenance Reserve</span>
+              <span class="val danger">{{ fmt(fcb.maintReserve) }}</span>
+            </div>
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Total Fixed Costs</span>
               <span class="val danger">{{ fmt(selected.fixedCosts) }}</span>
             </div>
-            <div class="modal-formula">= SUM of all truck fixed costs for {{ monthLabel(selected.month) }}</div>
+            <div class="modal-formula">{{ fmt(fcb.insurance) }} + {{ fmt(fcb.eld) }} + {{ fmt(fcb.irp) }} + {{ fmt(fcb.hvut) }} + {{ fmt(fcb.maintReserve) }} = {{ fmt(selected.fixedCosts) }}/mo</div>
           </div>
         </template>
 
@@ -360,6 +385,8 @@ function monthLabel(mk) {
 
 // --- Detail modal ---
 const detailType = ref('')
+const fcb = computed(() => props.production?.fixedCostBreakdown || { insurance: 0, eld: 0, irp: 0, hvut: 0, maintReserve: 0, truckCount: 1 })
+const driverDetails = computed(() => props.production?.driverPayDetails || {})
 
 function openDetail(type) {
   detailType.value = type

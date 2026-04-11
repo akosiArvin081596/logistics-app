@@ -8624,6 +8624,16 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const totalStartupExpenses = 5000 * totalTrucks;
 		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
 
+		// Fixed cost breakdown (per-category sums across fleet, monthly)
+		const fixedCostBreakdown = {
+			insurance: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.insurance_monthly || 0), 0)),
+			eld: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.eld_monthly || 0), 0)),
+			irp: Math.round(allOwnedTrucks.reduce((s, t) => s + ((t.irp_annual || 0) / 12), 0)),
+			hvut: Math.round(allOwnedTrucks.reduce((s, t) => s + ((t.hvut_annual || 0) / 12), 0)),
+			maintReserve: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.maintenance_fund_monthly || 0), 0)),
+			truckCount: totalTrucks,
+		};
+
 		// ---- Tax Shield (S6, S7, S10) ----
 		const section179 = totalPurchasePrice; // S6: 100% deductibility per truck
 		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate); // S7
@@ -8720,6 +8730,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalStartupExpenses,
 				perTruckData,
 				monthlyEarnings,
+				fixedCostBreakdown,
 			},
 			asset: {
 				purchasePrice,
