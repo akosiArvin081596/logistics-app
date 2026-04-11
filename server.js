@@ -36,6 +36,8 @@ const io = new Server(server);
 // Called after successful mutations (POST/PUT/DELETE) — no payload needed.
 function notifyChange(domain) { io.to("dispatch").emit(`${domain}:changed`); }
 app.set("trust proxy", 1); // Behind nginx — use real client IP for rate limiting
+const ALLOWED_FILE_EXTS = new Set([".pdf",".jpg",".jpeg",".png",".gif",".webp",".doc",".docx",".xls",".xlsx",".csv",".txt"]);
+function validateFileExt(fileName) { return ALLOWED_FILE_EXTS.has(path.extname(fileName || "").toLowerCase()); }
 app.use(compression());
 app.use(express.json({ limit: "20mb" }));
 // NOTE: /uploads static mount is deferred to after requireAuth is defined (see below),
@@ -3167,6 +3169,7 @@ app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async 
 
 		let fileUrl = "";
 		if (fileData && fileName) {
+			if (!validateFileExt(fileName)) return res.status(400).json({ error: "File type not allowed" });
 			// Save file to uploads/onboarding/
 			const uploadsDir = path.join(__dirname, "uploads", "onboarding");
 			if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
@@ -6536,9 +6539,10 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), 
 		if (fileData.length > 13_500_000) {
 			return res.status(400).json({ error: "File too large (max 10MB)" });
 		}
+		if (!validateFileExt(fileName)) return res.status(400).json({ error: "File type not allowed" });
 		const validTypes = ['Title','Vehicle Title','Registration','Insurance Certificate','Insurance COI','Lease Agreement','Bill of Sale','Inspection Report','IFTA License','Maintenance Records','Photo','Contract','Tax Document','Compliance','Driver\'s License','Medical Card','ID Card','Other'];
 		const safeType = validTypes.includes(docType) ? docType : 'Other';
-		const ext = require("path").extname(fileName) || '.pdf';
+		const ext = path.extname(fileName) || '.pdf';
 		// Prefix filename with driver- or truck identifier depending on mode (for easier forensics in the uploads dir)
 		const drvId = parseInt(driverId) || 0;
 		const prefix = drvId > 0 ? `driver${drvId}` : (unitNumber || 'truck').replace(/[^a-zA-Z0-9]/g, '_');
@@ -6591,8 +6595,9 @@ app.post("/api/chat/attachment", requireAuth, async (req, res) => {
 		const { fileData, fileName, mimeType } = req.body;
 		if (!fileData || !fileName) return res.status(400).json({ error: "fileData and fileName required" });
 		if (fileData.length > 13_500_000) return res.status(400).json({ error: "File too large (max 10MB)" });
+		if (!validateFileExt(fileName)) return res.status(400).json({ error: "File type not allowed" });
 		const attachmentType = (mimeType || '').startsWith('image/') ? 'image' : (mimeType === 'application/pdf' ? 'pdf' : 'other');
-		const ext = require("path").extname(fileName) || (attachmentType === 'image' ? '.jpg' : '.bin');
+		const ext = path.extname(fileName) || (attachmentType === 'image' ? '.jpg' : '.bin');
 		const safeName = `chat_${Date.now()}_${Math.random().toString(36).slice(2,7)}${ext}`;
 		const chatDir = require("path").join(__dirname, "uploads", "chat");
 		if (!require("fs").existsSync(chatDir)) require("fs").mkdirSync(chatDir, { recursive: true });
@@ -7047,6 +7052,7 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 
 		if (fileType === 'document') {
 			// Direct document upload (PDF, Word, etc.) — no image conversion
+			if (clientFileName && !validateFileExt(clientFileName)) return res.status(400).json({ error: "File type not allowed" });
 			const base64 = (typeof photoData === 'string' ? photoData : '').replace(/^data:[^;]+;base64,/, "");
 			fileBuffer = Buffer.from(base64, "base64");
 			const ext = clientFileName ? path.extname(clientFileName) : '.pdf';
