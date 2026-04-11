@@ -49,10 +49,8 @@
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
       <EarningsSection :production="store.production" />
-      <div class="sections-grid">
-        <ProductionSection :production="store.production" :config="store.config" />
-        <TrendSection :production="store.production" />
-      </div>
+      <ProductionSection :production="store.production" :config="store.config" />
+      <TrendSection :production="store.production" />
       <AssetSection :asset="store.asset" :config="store.config" />
       <MyTrucks :trucks="trucks" @reload="loadData" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
