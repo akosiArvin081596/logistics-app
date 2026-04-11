@@ -6392,6 +6392,15 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 		if (!driver || !type || !amount || !date) {
 			return res.status(400).json({ error: "Missing required fields" });
 		}
+		// Ownership: Drivers can only submit their own expenses; Investors cannot submit at all
+		const userRole = req.session.user.role;
+		if (userRole === "Driver") {
+			if (driver.trim().toLowerCase() !== (req.session.user.driverName || "").trim().toLowerCase()) {
+				return res.status(403).json({ error: "Drivers can only submit their own expenses" });
+			}
+		} else if (userRole === "Investor") {
+			return res.status(403).json({ error: "Investors cannot submit expenses" });
+		}
 		const VALID_EXPENSE_TYPES = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other'];
 		if (!VALID_EXPENSE_TYPES.includes(type)) {
 			return res.status(400).json({ error: "Invalid expense type" });
