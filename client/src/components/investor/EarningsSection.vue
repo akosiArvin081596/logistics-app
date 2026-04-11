@@ -17,20 +17,12 @@
     </div>
 
     <template v-if="selected">
-      <!-- Earnings Cards -->
-      <div class="earnings-cards">
-        <div class="earn-card" :class="selected.investorEarnings >= 0 ? 'positive' : 'negative'">
-          <div class="earn-label">Your Earnings</div>
-          <div class="earn-value">{{ fmt(selected.investorEarnings) }}</div>
-          <div class="earn-sub">50% of net profit</div>
-          <div class="earn-formula">= netProfit / 2</div>
-        </div>
-        <div class="earn-card company">
-          <div class="earn-label">Company Earnings</div>
-          <div class="earn-value">{{ fmt(selected.companyEarnings) }}</div>
-          <div class="earn-sub">50% of net profit</div>
-          <div class="earn-formula">= netProfit / 2</div>
-        </div>
+      <!-- Earnings Card -->
+      <div class="earn-card" :class="selected.investorEarnings >= 0 ? 'positive' : 'negative'" style="margin-bottom:1.25rem;">
+        <div class="earn-label">Your Earnings</div>
+        <div class="earn-value">{{ fmt(selected.investorEarnings) }}</div>
+        <div class="earn-sub">50% of net profit ({{ fmt(selected.netProfit) }})</div>
+        <div class="earn-formula">= (revenue - driverPay - fixedCosts - tripExpenses) / 2</div>
       </div>
 
       <!-- Breakdown Table -->
@@ -172,10 +164,7 @@ function fmt(n) {
 }
 .month-select:focus { outline: none; border-color: var(--accent); }
 
-/* Earnings Cards */
-.earnings-cards {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.25rem;
-}
+/* Earnings Card */
 .earn-card {
   padding: 1.25rem; border-radius: var(--radius); text-align: center;
   border: 1px solid var(--border);
@@ -192,7 +181,6 @@ function fmt(n) {
 }
 .earn-card.positive .earn-value { color: var(--accent); }
 .earn-card.negative .earn-value { color: var(--danger); }
-.earn-card.company .earn-value { color: var(--blue); }
 .earn-sub { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.2rem; }
 .earn-formula {
   font-size: 0.58rem; font-family: 'JetBrains Mono', monospace;
@@ -248,7 +236,6 @@ function fmt(n) {
 .empty { text-align: center; color: var(--text-dim); padding: 2rem; font-size: 0.85rem; }
 
 @media (max-width: 600px) {
-  .earnings-cards { grid-template-columns: 1fr; }
   .alltime-grid { grid-template-columns: repeat(2, 1fr); }
   .breakdown-row { grid-template-columns: 1fr auto; }
   .breakdown-formula { display: none; }
