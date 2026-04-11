@@ -8303,7 +8303,6 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		// Revenue = actual Payment/Rate column from Job Tracking (varies per load)
 		let totalRevenue = 0;
-		let paidRevenue = 0;
 		let last30DaysRevenue = 0;
 		const monthlyRevenue = {};
 		const completedLoadIds = new Set();
@@ -8320,7 +8319,6 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
 			if (lid) completedLoadIds.add(lid);
 			totalRevenue += amt;
-			paidRevenue += amt;
 			if (jtDateCol && r[jtDateCol]) {
 				const d = new Date(r[jtDateCol]);
 				if (!isNaN(d)) {
@@ -8383,7 +8381,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				+ (latestDate.getMonth() - earliestDate.getMonth()) + 1
 			);
 		}
-		const avgMonthlyOwnerEarnings = Math.round(paidRevenue / monthsOfOperation);
+		const avgMonthlyOwnerEarnings = Math.round(totalRevenue / monthsOfOperation);
 
 		// ---- Driver Pay: active-day algorithm (F1) ----
 		// For each driver, expand every load's pickup→dropoff into individual calendar
@@ -8648,8 +8646,6 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		res.json({
 			production: {
 				totalRevenue: Math.round(totalRevenue),
-				paidRevenue: Math.round(paidRevenue),
-				pendingRevenue: Math.round(totalRevenue - paidRevenue),
 				avgDailyRevenue: Math.round(avgDailyRevenue),
 				last30DaysRevenue: Math.round(last30DaysRevenue),
 				monthlyData,
