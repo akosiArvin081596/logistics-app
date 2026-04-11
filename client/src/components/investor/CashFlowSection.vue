@@ -28,7 +28,7 @@
         <div class="kpi-label">Business ROI</div>
         <div class="kpi-value">{{ roiPct.toFixed(1) }}%</div>
         <div class="kpi-sub">total to date</div>
-        <div class="kpi-formula">= netRevenueToDate / totalRevenue * 100</div>
+        <div class="kpi-formula">= netRevenueToDate / purchasePrice * 100</div>
       </div>
     </div>
 
@@ -80,10 +80,10 @@ const recoveryPct = computed(() => {
   return (netRevenueToDate.value / totalPurchasePrice.value) * 100
 })
 
-// Business ROI = net / gross * 100
+// Business ROI = net profit / investment cost * 100
 const roiPct = computed(() => {
-  if (totalRevenue.value <= 0) return 0
-  return (netRevenueToDate.value / totalRevenue.value) * 100
+  if (totalPurchasePrice.value <= 0) return 0
+  return (netRevenueToDate.value / totalPurchasePrice.value) * 100
 })
 
 // Break-even = purchase price / monthly net cash flow
