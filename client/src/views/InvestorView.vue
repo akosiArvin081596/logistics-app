@@ -42,26 +42,31 @@
         <div class="stat-item">
           <span class="stat-value">{{ fmtK(store.production?.totalRevenue) }}</span>
           <span class="stat-label">Total Revenue</span>
+          <span class="stat-formula">= SUM(Payment col, completed loads)</span>
         </div>
         <div class="stat-divider"></div>
         <div class="stat-item">
           <span class="stat-value" style="color:#f59e0b">{{ fmtK(store.production?.totalExpenses) }}</span>
           <span class="stat-label">Expenses</span>
+          <span class="stat-formula">= driverPay + fixedCosts + tripExp</span>
         </div>
         <div class="stat-divider"></div>
         <div class="stat-item">
           <span class="stat-value">{{ store.production?.completedJobs || 0 }}</span>
           <span class="stat-label">Completed Loads</span>
+          <span class="stat-formula">= COUNT(completed status)</span>
         </div>
         <div class="stat-divider"></div>
         <div class="stat-item">
           <span class="stat-value">{{ store.asset?.totalTrucks || trucks.length || 0 }}</span>
           <span class="stat-label">Fleet Size</span>
+          <span class="stat-formula">= COUNT(trucks)</span>
         </div>
         <div class="stat-divider"></div>
         <div class="stat-item">
           <span class="stat-value accent">{{ fmtK(store.production?.avgDailyRevenue) }}</span>
           <span class="stat-label">Avg / Day</span>
+          <span class="stat-formula">= last30DaysRevenue / 30</span>
         </div>
       </div>
     </div>
@@ -468,6 +473,11 @@ onMounted(() => {
   color: rgba(255, 255, 255, 0.45);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+.stat-formula {
+  font-size: 0.5rem; font-family: 'JetBrains Mono', monospace;
+  color: rgba(255, 255, 255, 0.25); font-style: italic; margin-top: 0.1rem;
+  display: block;
 }
 
 .stat-divider {

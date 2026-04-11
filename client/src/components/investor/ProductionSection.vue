@@ -10,21 +10,25 @@
         <div class="kpi-label">Avg Daily Revenue</div>
         <div class="kpi-value">{{ fmt(production.avgDailyRevenue) }}</div>
         <div class="kpi-sub">avg last 30 days</div>
+        <div class="kpi-formula">= last30DaysRevenue / 30</div>
       </div>
       <div class="kpi-card accent">
         <div class="kpi-label">Monthly Earnings</div>
         <div class="kpi-value">{{ fmt(production.last30DaysRevenue) }}</div>
         <div class="kpi-sub">trailing 30 days</div>
+        <div class="kpi-formula">= SUM(Payment col, completed loads, last 30 days)</div>
       </div>
       <div class="kpi-card blue">
         <div class="kpi-label">Total Revenue</div>
         <div class="kpi-value">{{ fmt(production.totalRevenue) }}</div>
         <div class="kpi-sub">{{ fmt(production.paidRevenue) }} collected</div>
+        <div class="kpi-formula">= SUM(Payment col, all completed loads)</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Completed Loads</div>
         <div class="kpi-value">{{ production.completedJobs }}</div>
         <div class="kpi-sub">of {{ production.totalJobs }} total</div>
+        <div class="kpi-formula">= COUNT(status: Delivered|Completed|POD Received)</div>
       </div>
     </div>
 
@@ -154,6 +158,10 @@ function monthLabel(month) {
   color: var(--text-dim);
   margin-top: 0.2rem;
   overflow-wrap: break-word;
+}
+.kpi-formula {
+  font-size: 0.58rem; font-family: 'JetBrains Mono', monospace;
+  color: var(--text-dim); opacity: 0.5; font-style: italic; margin-top: 0.15rem;
 }
 
 .chart-bars {

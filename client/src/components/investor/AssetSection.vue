@@ -9,30 +9,37 @@
       <div class="asset-item">
         <div class="asset-label">Purchase Price</div>
         <div class="asset-value">{{ fmt(asset.purchasePrice) }}</div>
+        <div class="asset-formula">= SUM(trucks.purchase_price)</div>
       </div>
       <div class="asset-item">
         <div class="asset-label">Current Market Value</div>
         <div class="asset-value" style="color: var(--accent);">{{ fmt(asset.currentValue) }}</div>
+        <div class="asset-formula">= price * (1 - months / (depYrs * 12))</div>
       </div>
       <div class="asset-item">
         <div class="asset-label">Title Status</div>
         <div class="asset-value title-status">{{ asset.titleStatus }}</div>
+        <div class="asset-formula">= truck.title_status</div>
       </div>
       <div class="asset-item">
         <div class="asset-label">Fleet Size</div>
         <div class="asset-value">{{ asset.totalTrucks }}</div>
+        <div class="asset-formula">= COUNT(trucks WHERE owner_id)</div>
       </div>
       <div class="asset-item">
         <div class="asset-label">Total Miles</div>
         <div class="asset-value">{{ (asset.totalMiles || 0).toLocaleString() }}</div>
+        <div class="asset-formula">= MAX(odometer) - MIN(odometer)</div>
       </div>
       <div class="asset-item">
         <div class="asset-label">Revenue / Mile</div>
         <div class="asset-value" style="color: var(--accent);">{{ asset.revenuePerMile ? '$' + asset.revenuePerMile.toFixed(2) : '\u2014' }}</div>
+        <div class="asset-formula">= totalRevenue / totalMiles</div>
       </div>
       <div class="asset-item">
         <div class="asset-label">Cost / Mile</div>
         <div class="asset-value" style="color: var(--danger);">{{ asset.costPerMile ? '$' + asset.costPerMile.toFixed(2) : '\u2014' }}</div>
+        <div class="asset-formula">= totalExpenses / totalMiles</div>
       </div>
     </div>
 
@@ -141,5 +148,9 @@ function fmt(n) {
   height: 100%;
   border-radius: 5px;
   transition: width 0.5s;
+}
+.asset-formula {
+  font-size: 0.58rem; font-family: 'JetBrains Mono', monospace;
+  color: var(--text-dim); opacity: 0.5; font-style: italic; margin-top: 0.15rem;
 }
 </style>

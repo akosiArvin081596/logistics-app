@@ -10,21 +10,25 @@
         <div class="kpi-label">Month-over-Month</div>
         <div class="kpi-value">{{ momGrowth >= 0 ? '+' : '' }}{{ momGrowth.toFixed(1) }}%</div>
         <div class="kpi-sub">{{ momGrowth >= 0 ? 'Growth' : 'Decline' }} vs prior month</div>
+        <div class="kpi-formula">= (curMonth - prevMonth) / prevMonth * 100</div>
       </div>
       <div class="kpi-card blue">
         <div class="kpi-label">Best Month</div>
         <div class="kpi-value">{{ fmt(bestMonth.amount) }}</div>
         <div class="kpi-sub">{{ bestMonth.label }}</div>
+        <div class="kpi-formula">= MAX(monthlyData[].amount)</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Avg Monthly Revenue</div>
         <div class="kpi-value">{{ fmt(avgMonthly) }}</div>
         <div class="kpi-sub">across {{ months.length }} months</div>
+        <div class="kpi-formula">= SUM(monthlyData) / months.length</div>
       </div>
       <div class="kpi-card" :class="projectedAnnual > 0 ? 'accent' : ''">
         <div class="kpi-label">Projected Annual</div>
         <div class="kpi-value">{{ fmt(projectedAnnual) }}</div>
         <div class="kpi-sub">avg daily x 20 days x 12 months</div>
+        <div class="kpi-formula">= avgDailyRevenue * 20 * 12</div>
       </div>
     </div>
 
@@ -146,6 +150,7 @@ function shortMonth(month) {
 }
 .kpi-value { font-family: 'JetBrains Mono', monospace; font-size: clamp(1rem, 2.5vw, 1.5rem); font-weight: 700; overflow-wrap: break-word; }
 .kpi-sub { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.2rem; overflow-wrap: break-word; }
+.kpi-formula { font-size: 0.58rem; font-family: 'JetBrains Mono', monospace; color: var(--text-dim); opacity: 0.5; font-style: italic; margin-top: 0.15rem; }
 
 .trend-chart { margin-top: 0.5rem; }
 .trend-line { height: 100px; border-bottom: 1px solid var(--border); }

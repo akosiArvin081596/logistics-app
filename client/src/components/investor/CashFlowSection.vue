@@ -10,21 +10,25 @@
         <div class="kpi-label">Net Cash Flow</div>
         <div class="kpi-value">{{ fmt(netCashFlow) }}</div>
         <div class="kpi-sub">revenue minus expenses</div>
+        <div class="kpi-formula">= totalRevenue - totalExpenses</div>
       </div>
       <div class="kpi-card blue">
         <div class="kpi-label">Owner Earnings (Est.)</div>
         <div class="kpi-value">{{ fmt(investorPayout) }}</div>
         <div class="kpi-sub">at {{ splitPct }}% owner take</div>
+        <div class="kpi-formula">= netCashFlow * {{ splitPct }} / 100</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Break-Even</div>
         <div class="kpi-value">{{ breakEvenMonths }} mo</div>
         <div class="kpi-sub">est. {{ breakEvenDate }}</div>
+        <div class="kpi-formula">= purchasePrice / monthlyNetCashFlow</div>
       </div>
       <div class="kpi-card" :class="roiPct >= 0 ? 'accent' : 'danger'">
         <div class="kpi-label">Business ROI</div>
         <div class="kpi-value">{{ roiPct.toFixed(1) }}%</div>
         <div class="kpi-sub">total to date</div>
+        <div class="kpi-formula">= netRevenueToDate / totalRevenue * 100</div>
       </div>
     </div>
 
@@ -137,6 +141,7 @@ function fmt(n) {
 }
 .kpi-value { font-family: 'JetBrains Mono', monospace; font-size: 1.5rem; font-weight: 700; }
 .kpi-sub { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.2rem; }
+.kpi-formula { font-size: 0.58rem; font-family: 'JetBrains Mono', monospace; color: var(--text-dim); opacity: 0.5; font-style: italic; margin-top: 0.15rem; }
 
 .timeline { margin-top: 0.5rem; }
 .timeline-title {
