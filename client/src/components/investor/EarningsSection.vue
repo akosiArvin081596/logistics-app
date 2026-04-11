@@ -74,22 +74,22 @@
         <div class="alltime-grid">
           <div class="alltime-item clickable" @click="openDetail('allRevenue')">
             <span class="alltime-label">Revenue</span>
-            <span class="alltime-value">{{ fmt(production.totalRevenue) }}</span>
+            <span class="alltime-value">{{ fmt(allTimeRevenue) }}</span>
             <span class="alltime-formula">= SUM(Payment, all completed loads)</span>
           </div>
           <div class="alltime-item clickable" @click="openDetail('allExpenses')">
             <span class="alltime-label">Expenses</span>
-            <span class="alltime-value" style="color: var(--danger)">{{ fmt(production.totalExpenses) }}</span>
+            <span class="alltime-value" style="color: var(--danger)">{{ fmt(allTimeExpenses) }}</span>
             <span class="alltime-formula">= driverPay + fixedCosts + tripExp</span>
           </div>
           <div class="alltime-item clickable" @click="openDetail('allNet')">
             <span class="alltime-label">Net</span>
-            <span class="alltime-value" :style="{ color: production.netRevenueToDate >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(production.netRevenueToDate) }}</span>
+            <span class="alltime-value" :style="{ color: allTimeNet >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(allTimeNet) }}</span>
             <span class="alltime-formula">= revenue - expenses</span>
           </div>
           <div class="alltime-item clickable" @click="openDetail('allEarnings')">
             <span class="alltime-label">Your Earnings</span>
-            <span class="alltime-value" :style="{ color: production.investorEarnings >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(production.investorEarnings) }}</span>
+            <span class="alltime-value" :style="{ color: allTimeEarnings >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(allTimeEarnings) }}</span>
             <span class="alltime-formula">= net / 2 (50/50 split)</span>
           </div>
         </div>
@@ -351,7 +351,7 @@
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>All-Time Revenue</span>
-              <span class="val accent">{{ fmt(production.totalRevenue) }}</span>
+              <span class="val accent">{{ fmt(allTimeRevenue) }}</span>
             </div>
           </div>
         </template>
@@ -407,20 +407,20 @@
             <div class="step-label">The Calculation</div>
             <div class="modal-row highlight">
               <span>All-Time Revenue</span>
-              <span class="val accent">{{ fmt(production.totalRevenue) }}</span>
+              <span class="val accent">{{ fmt(allTimeRevenue) }}</span>
             </div>
             <div class="modal-explain-sm">Every dollar earned from completed loads.</div>
             <div class="modal-row deduct">
               <span>- All-Time Expenses</span>
-              <span class="val danger">-{{ fmt(production.totalExpenses) }}</span>
+              <span class="val danger">-{{ fmt(allTimeExpenses) }}</span>
             </div>
             <div class="modal-explain-sm">Driver pay + fixed costs + trip expenses combined.</div>
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Net Profit</span>
-              <span class="val" :class="production.netRevenueToDate >= 0 ? 'accent' : 'danger'">{{ fmt(production.netRevenueToDate) }}</span>
+              <span class="val" :class="allTimeNet >= 0 ? 'accent' : 'danger'">{{ fmt(allTimeNet) }}</span>
             </div>
-            <div class="modal-math">{{ fmt(production.totalRevenue) }} - {{ fmt(production.totalExpenses) }} = {{ fmt(production.netRevenueToDate) }}</div>
+            <div class="modal-math">{{ fmt(allTimeRevenue) }} - {{ fmt(allTimeExpenses) }} = {{ fmt(allTimeNet) }}</div>
           </div>
         </template>
 
@@ -436,9 +436,9 @@
             <div class="step-label">The Calculation</div>
             <div class="modal-row highlight">
               <span>All-Time Net Profit</span>
-              <span class="val" :class="production.netRevenueToDate >= 0 ? 'accent' : 'danger'">{{ fmt(production.netRevenueToDate) }}</span>
+              <span class="val" :class="allTimeNet >= 0 ? 'accent' : 'danger'">{{ fmt(allTimeNet) }}</span>
             </div>
-            <div class="modal-explain-sm">Revenue ({{ fmt(production.totalRevenue) }}) minus all expenses ({{ fmt(production.totalExpenses) }}).</div>
+            <div class="modal-explain-sm">Revenue ({{ fmt(allTimeRevenue) }}) minus all expenses ({{ fmt(allTimeExpenses) }}).</div>
             <div class="modal-row split-row">
               <span>&#247; 2 (your 50% share)</span>
               <span></span>
@@ -446,9 +446,9 @@
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
               <span>Your All-Time Earnings</span>
-              <span class="val" :class="production.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(production.investorEarnings) }}</span>
+              <span class="val" :class="allTimeEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(allTimeEarnings) }}</span>
             </div>
-            <div class="modal-math">{{ fmt(production.netRevenueToDate) }} / 2 = {{ fmt(production.investorEarnings) }}</div>
+            <div class="modal-math">{{ fmt(allTimeNet) }} / 2 = {{ fmt(allTimeEarnings) }}</div>
 
             <div class="step-label" style="margin-top:1rem;">Month-by-Month History</div>
             <div class="modal-monthly-list" v-if="months.length">
@@ -507,10 +507,14 @@ function catLabel(cat) {
   return CAT_LABELS[cat] || (cat ? cat.charAt(0).toUpperCase() + cat.slice(1) : 'Other')
 }
 
-// All-time expense sub-totals derived from monthly data
+// All-time totals derived from monthly data (ensures consistency: all-time = SUM of months)
+const allTimeRevenue = computed(() => months.value.reduce((s, m) => s + (m.revenue || 0), 0))
 const allTimeDriverPay = computed(() => months.value.reduce((s, m) => s + (m.driverPay || 0), 0))
 const allTimeFixedCosts = computed(() => months.value.reduce((s, m) => s + (m.fixedCosts || 0), 0))
 const allTimeTripExpenses = computed(() => months.value.reduce((s, m) => s + (m.tripExpenses || 0), 0))
+const allTimeExpenses = computed(() => allTimeDriverPay.value + allTimeFixedCosts.value + allTimeTripExpenses.value)
+const allTimeNet = computed(() => allTimeRevenue.value - allTimeExpenses.value)
+const allTimeEarnings = computed(() => Math.round(allTimeNet.value / 2))
 
 const MODAL_CONFIG = {
   earnings:     { title: 'How Your Earnings Are Calculated', subtitle: 'Step-by-step breakdown of your monthly earnings' },
