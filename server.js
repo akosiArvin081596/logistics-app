@@ -5155,7 +5155,16 @@ app.post("/api/webhook/new-load", (req, res) => {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	jtCacheInvalidate();
+	const loadId = req.body?.load_id || req.body?.loadId || "";
+	const driver = req.body?.driver || "";
+	insertDispatchNotification.run(
+		"new-load",
+		`New Load${loadId ? " " + loadId : ""}`,
+		driver ? `Assigned to ${driver}` : "New load added from dispatch workflow",
+		JSON.stringify({ loadId, driver, source: "n8n" })
+	);
 	io.to("dispatch").emit("new-load", { timestamp: Date.now() });
+	io.to("dispatch").emit("dispatch-notification", { type: "new-load", title: `New Load${loadId ? " " + loadId : ""}`, body: driver ? `Assigned to ${driver}` : "New load added" });
 	res.json({ ok: true });
 });
 
