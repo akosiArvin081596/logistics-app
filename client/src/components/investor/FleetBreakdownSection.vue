@@ -76,20 +76,20 @@ const trucksWithROI = computed(() => {
     const unitKey = t.UnitNumber || t.unit_number || ''
     const perUnit = perTruckData[unitKey]
     const estRevenue = perUnit?.estAnnualRevenue ?? 0
-    const roi = purchasePrice > 0 && grossRevenue > 0
-      ? (estRevenue / grossRevenue) * 100
-      : 0
+    const truckPrice = t.PurchasePrice || t.purchase_price || purchasePrice
+    // ROI = annual net profit / truck investment cost
+    const roi = truckPrice > 0 ? (estRevenue / truckPrice) * 100 : 0
     const totalMiles = perUnit?.totalMiles ?? 0
     return { ...t, estRevenue, roi, totalMiles }
   })
 })
 
 const totalEstRevenue = computed(() => trucksWithROI.value.reduce((s, t) => s + t.estRevenue, 0))
-// RFD-14: Fleet Total ROI = sum(estAnnualRevenue) / totalGrossRevenue
+// Fleet ROI = total est annual net / total fleet purchase price
 const fleetROI = computed(() => {
-  const grossRevenue = props.production?.totalRevenue || 0
-  if (grossRevenue === 0) return 0
-  return (totalEstRevenue.value / grossRevenue) * 100
+  const totalPrice = props.production?.totalPurchasePrice || props.asset?.purchasePrice || 0
+  if (totalPrice === 0) return 0
+  return (totalEstRevenue.value / totalPrice) * 100
 })
 
 function fmt(n) {
