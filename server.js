@@ -6434,6 +6434,14 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 		if (!VALID_EXPENSE_TYPES.includes(type)) {
 			return res.status(400).json({ error: "Invalid expense type" });
 		}
+		// Validate amount: must be positive number under 1M
+		const parsedAmount = parseFloat(amount);
+		if (isNaN(parsedAmount) || parsedAmount <= 0 || parsedAmount > 1_000_000) {
+			return res.status(400).json({ error: "Amount must be a positive number under 1,000,000" });
+		}
+		// Sanitize free-text fields
+		const safeDescription = (description || "").toString().slice(0, 500);
+		const safeLoadId = (loadId || "").toString().slice(0, 100);
 
 		const timestamp = new Date().toISOString();
 		// Look up truck/owner for this driver to stamp on expense
@@ -6445,13 +6453,13 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
-			.run(timestamp, driver, loadId || "", type, amount, description || "", date, photoData || "",
+			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoData || "",
 				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit);
 		notifyChange("expenses");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error logging expense:", error.message);
-		res.status(500).json({ error: error.message });
+		res.status(500).json({ error: "Failed to log expense" });
 	}
 });
 
