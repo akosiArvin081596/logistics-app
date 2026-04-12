@@ -4,6 +4,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const { google } = require("googleapis");
 const path = require("path");
+const fs = require("fs");
 const bcrypt = require("bcryptjs");
 const session = require("express-session");
 const Database = require("better-sqlite3");
@@ -16,6 +17,7 @@ const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { renderPolicy } = require("./lib/policy-renderer");
+const { getStateFromCoords } = require("./lib/ifta-states");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -54,6 +56,7 @@ app.use(express.json({ limit: "20mb" }));
 // ============================================================
 const db = new Database(path.join(__dirname, "app.db"));
 db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS messages (
@@ -183,6 +186,9 @@ db.exec(`
 `);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_driver ON expenses(driver)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner ON expenses(owner_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses(status)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner_date ON expenses(owner_id, date)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_trucks_owner ON trucks(owner_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_maintenance_truck ON maintenance_fund(truck)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_compliance_truck ON compliance_fees(truck)`);
@@ -661,6 +667,21 @@ db.exec(`
 db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver ON driver_locations(driver)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_ts ON driver_locations(timestamp)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_load_id ON driver_locations(load_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver_ts ON driver_locations(driver, timestamp DESC)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver_load ON driver_locations(driver, load_id)`);
+
+// driver_locations grows unbounded (every active driver pings every 30s).
+// Purge rows older than 90 days on a weekly schedule + once at boot to seed.
+function purgeOldDriverLocations() {
+	try {
+		const result = db.prepare("DELETE FROM driver_locations WHERE timestamp < datetime('now', '-90 days')").run();
+		if (result.changes > 0) console.log(`[cleanup] Purged ${result.changes} old driver_locations rows`);
+	} catch (err) {
+		console.error("[cleanup] driver_locations purge failed:", err.message);
+	}
+}
+purgeOldDriverLocations();
+setInterval(purgeOldDriverLocations, 7 * 24 * 60 * 60 * 1000); // weekly
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_config (
@@ -962,10 +983,13 @@ const INVESTOR_ONBOARDING_DOCS = [
 ];
 
 // Session store in SQLite (persists across server restarts)
-const SESSION_SECRET = process.env.SESSION_SECRET || "dispatch-logistics-2024";
 if (!process.env.SESSION_SECRET) {
-	console.warn("WARNING: SESSION_SECRET not set in environment — using fallback. Set it in .env for production.");
+	if (process.env.NODE_ENV === "production") {
+		throw new Error("SESSION_SECRET must be set in production");
+	}
+	console.warn("WARNING: SESSION_SECRET not set in environment — using dev fallback. Set it in .env for production.");
 }
+const SESSION_SECRET = process.env.SESSION_SECRET || "dev-only-fallback-do-not-use-in-production";
 app.use(
 	session({
 		store: new SqliteStore({ client: db, expired: { clear: true, intervalMs: 3600000 } }),
@@ -985,7 +1009,7 @@ app.use(
 // ============================================================
 app.post("/api/n8n/job", (req, res) => {
 	const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
-	if (webhookSecret && req.headers["x-webhook-secret"] !== webhookSecret) {
+	if (!webhookSecret || req.headers["x-webhook-secret"] !== webhookSecret) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	try {
@@ -1058,7 +1082,6 @@ async function sendEmail(to, subject, htmlBody, attachments = []) {
 }
 
 // Serve Vue SPA build (client/dist) if it exists, otherwise fall back to public/
-const fs = require("fs");
 const clientDistPath = path.join(__dirname, "client", "dist");
 const publicPath = path.join(__dirname, "public");
 if (fs.existsSync(clientDistPath)) {
@@ -1087,7 +1110,6 @@ const auth = new google.auth.GoogleAuth({
 });
 
 let sheetsClient = null;
-let driveClient = null;
 const sheetIdCache = new Map();
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
@@ -1098,14 +1120,6 @@ async function getSheets() {
 		sheetsClient = google.sheets({ version: "v4", auth: authClient });
 	}
 	return sheetsClient;
-}
-
-async function getDrive() {
-	if (!driveClient) {
-		const authClient = await auth.getClient();
-		driveClient = google.drive({ version: "v3", auth: authClient });
-	}
-	return driveClient;
 }
 
 async function getSheetId(sheets, sheetName) {
@@ -3876,7 +3890,6 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 // Download SQLite database file (Super Admin only)
 app.get("/api/db/download", requireRole("Super Admin"), (req, res) => {
 	// Backup to a temp file to capture WAL contents
-	const fs = require("fs");
 	const tmpPath = path.join(__dirname, "app_backup.db");
 	db.backup(tmpPath).then(() => {
 		res.download(tmpPath, "app.db", () => {
@@ -4092,7 +4105,11 @@ async function checkDriverActiveLoad(driverName) {
 		return null;
 	} catch (err) {
 		console.error("checkDriverActiveLoad error:", err.message);
-		return null; // Allow assignment if check fails
+		// Fail closed: if we cannot verify the driver is free, do NOT allow the
+		// assignment. Throwing here propagates to the caller's outer catch which
+		// returns HTTP 500, blocking the dispatch instead of silently permitting
+		// double-dispatch on a Sheets API blip.
+		throw new Error("Unable to verify driver availability — try again");
 	}
 }
 
@@ -5154,7 +5171,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 // Emits a socket event so connected dashboards refresh instantly instead of waiting for the 60s poll.
 app.post("/api/webhook/new-load", (req, res) => {
 	const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
-	if (webhookSecret && req.headers["x-webhook-secret"] !== webhookSecret) {
+	if (!webhookSecret || req.headers["x-webhook-secret"] !== webhookSecret) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	jtCacheInvalidate();
@@ -5560,33 +5577,9 @@ app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) =
 // ============================================================
 app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const sheets = await getSheets();
-
-		const response = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking",
-		});
-
-		function parseSheet(valueRange) {
-			const rows = (valueRange && valueRange.values) || [];
-			if (rows.length === 0) return { headers: [], data: [] };
-			const headers = rows[0];
-			const data = rows.slice(1).map((row, idx) => {
-				const obj = { _rowIndex: idx + 2 };
-				headers.forEach((h, i) => {
-					obj[h] = row[i] || "";
-				});
-				return obj;
-			});
-			return { headers, data };
-		}
-
-		function findCol(headers, regex) {
-			return headers.find((h) => regex.test(h)) || null;
-		}
-
-		const jobTracking = parseSheet(response.data);
-		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
+		// Use shared 60s Job Tracking cache (invalidated by mutations) instead of
+		// hitting Sheets on every dashboard load.
+		const jobTracking = await getJobTrackingCached();
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Identify key columns
@@ -6416,6 +6409,29 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 	}
 });
 
+// Receipt photo storage helpers — write base64 data URIs to disk and return
+// the URL path. Old base64-in-DB rows still work because the frontend img tag
+// accepts both data URIs and URL paths.
+const RECEIPTS_DIR = path.join(__dirname, "uploads", "expense-receipts");
+try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
+function saveReceiptToDisk(photoData) {
+	if (!photoData || typeof photoData !== "string") return "";
+	if (!photoData.startsWith("data:")) return photoData; // already a URL/path
+	const m = photoData.match(/^data:image\/(\w+);base64,(.+)$/);
+	if (!m) return ""; // unrecognized format — drop silently
+	const ext = (m[1] || "png").toLowerCase().replace("jpeg", "jpg");
+	const buf = Buffer.from(m[2], "base64");
+	const fname = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
+	const fpath = path.join(RECEIPTS_DIR, fname);
+	try {
+		fs.writeFileSync(fpath, buf);
+		return `/uploads/expense-receipts/${fname}`;
+	} catch (err) {
+		console.error("Receipt save failed:", err.message);
+		return ""; // fall back to no photo rather than blob in DB
+	}
+}
+
 // POST /api/expenses — Log a new expense (SQLite)
 app.post("/api/expenses", requireAuth, (req, res) => {
 	try {
@@ -6451,12 +6467,14 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 		const driverTruck = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
+		// Receipt photo: write base64 to disk, store URL path in column instead of blob
+		const photoUrlOrPath = saveReceiptToDisk(photoData);
 		const result = db
 			.prepare(
 				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
-			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoData || "",
+			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoUrlOrPath,
 				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit);
 		notifyChange("expenses");
 		res.json({ success: true, id: result.lastInsertRowid });
@@ -6596,10 +6614,10 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), 
 		const drvId = parseInt(driverId) || 0;
 		const prefix = drvId > 0 ? `driver${drvId}` : (unitNumber || 'truck').replace(/[^a-zA-Z0-9]/g, '_');
 		const safeName = `${prefix}_${safeType.replace(/[\s']/g, '_')}_${Date.now()}${ext}`;
-		const legalDir = require("path").join(__dirname, "uploads", "legal");
-		if (!require("fs").existsSync(legalDir)) require("fs").mkdirSync(legalDir, { recursive: true });
+		const legalDir = path.join(__dirname, "uploads", "legal");
+		if (!fs.existsSync(legalDir)) fs.mkdirSync(legalDir, { recursive: true });
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
-		require("fs").writeFileSync(require("path").join(legalDir, safeName), Buffer.from(base64, "base64"));
+		fs.writeFileSync(path.join(legalDir, safeName), Buffer.from(base64, "base64"));
 		const fileUrl = `/uploads/legal/${safeName}`;
 		// Determine investor_id: from request body or from session (if Investor role)
 		let invId = parseInt(investorId) || 0;
@@ -6628,8 +6646,8 @@ app.delete("/api/legal-documents/:id", requireRole("Super Admin", "Investor"), (
 		const doc = db.prepare("SELECT * FROM legal_documents WHERE id = ?").get(id);
 		if (!doc) return res.status(404).json({ error: "Document not found" });
 		if (doc.file_url) {
-			const filePath = require("path").join(__dirname, doc.file_url);
-			try { require("fs").unlinkSync(filePath); } catch { /* file may already be gone */ }
+			const filePath = path.join(__dirname, doc.file_url);
+			try { fs.unlinkSync(filePath); } catch { /* file may already be gone */ }
 		}
 		db.prepare("DELETE FROM legal_documents WHERE id = ?").run(id);
 		res.json({ success: true });
@@ -6648,10 +6666,10 @@ app.post("/api/chat/attachment", requireAuth, async (req, res) => {
 		const attachmentType = (mimeType || '').startsWith('image/') ? 'image' : (mimeType === 'application/pdf' ? 'pdf' : 'other');
 		const ext = path.extname(fileName) || (attachmentType === 'image' ? '.jpg' : '.bin');
 		const safeName = `chat_${Date.now()}_${Math.random().toString(36).slice(2,7)}${ext}`;
-		const chatDir = require("path").join(__dirname, "uploads", "chat");
-		if (!require("fs").existsSync(chatDir)) require("fs").mkdirSync(chatDir, { recursive: true });
+		const chatDir = path.join(__dirname, "uploads", "chat");
+		if (!fs.existsSync(chatDir)) fs.mkdirSync(chatDir, { recursive: true });
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
-		require("fs").writeFileSync(require("path").join(chatDir, safeName), Buffer.from(base64, "base64"));
+		fs.writeFileSync(path.join(chatDir, safeName), Buffer.from(base64, "base64"));
 		res.json({ success: true, fileUrl: `/uploads/chat/${safeName}`, attachmentType });
 	} catch (err) {
 		console.error("Chat attachment error:", err.message);
@@ -6732,7 +6750,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 		const section179 = purchasePrice;
 		const annualDepreciation = purchasePrice;
 
-		// Net revenue
+		// Net revenue — must succeed; we refuse to fabricate financial figures
 		let netRevenueToDate = 0;
 		try {
 			const sheets = await getSheets();
@@ -6771,7 +6789,13 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? OR LOWER(driver) IN (${ph})`).get(user.id, ...drivers).t;
 				})();
 			netRevenueToDate = Math.round(totalRevenue - expClause);
-		} catch { /* if sheets fail, use 0 */ }
+		} catch (sheetsErr) {
+			// Refuse to generate a financial document with fabricated zeros.
+			console.error("Tax CSV: sheets fetch failed:", sheetsErr.message);
+			return res.status(503).json({
+				error: "Unable to generate tax document — financial data source unavailable. Please try again shortly.",
+			});
+		}
 
 		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate);
 		const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
@@ -7860,38 +7884,6 @@ async function getRoute(from, to, retries = 2) {
 		}
 	}
 	return null;
-}
-
-// Snap GPS points to roads using Google Roads API
-async function snapToRoads(points) {
-	if (!points || points.length < 2) return null;
-	try {
-		const BATCH_SIZE = 100;
-		let allSnapped = [];
-		for (let i = 0; i < points.length; i += BATCH_SIZE - 1) {
-			const batch = points.slice(i, i + BATCH_SIZE);
-			if (batch.length < 2) break;
-			const path = batch.map(p => `${p.latitude},${p.longitude}`).join("|");
-			const url = `https://roads.googleapis.com/v1/snapToRoads?path=${encodeURIComponent(path)}&interpolate=true&key=${GOOGLE_MAPS_API_KEY}`;
-			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), 8000);
-			const resp = await fetch(url, { signal: controller.signal });
-			clearTimeout(timeout);
-			if (!resp.ok) {
-				console.error(`Roads API error: ${resp.status}`);
-				return null;
-			}
-			const data = await resp.json();
-			if (!data.snappedPoints || data.snappedPoints.length === 0) return null;
-			for (const pt of data.snappedPoints) {
-				allSnapped.push({ latitude: pt.location.latitude, longitude: pt.location.longitude });
-			}
-		}
-		return allSnapped.length >= 2 ? allSnapped : null;
-	} catch (err) {
-		console.error("Roads API snap error:", err.message);
-		return null;
-	}
 }
 
 // GET /api/locations/trail — GPS trail for a specific driver/load
@@ -9131,70 +9123,6 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 	}
 });
 
-// Simple lat/lng to US state lookup using bounding boxes
-function getStateFromCoords(lat, lng) {
-	// Simplified state boundaries (approximate bounding boxes, checked in order of likely usage)
-	const states = [
-		{ name: "TX", minLat: 25.84, maxLat: 36.5, minLng: -106.65, maxLng: -93.51 },
-		{ name: "OK", minLat: 33.62, maxLat: 37.0, minLng: -103.0, maxLng: -94.43 },
-		{ name: "LA", minLat: 28.93, maxLat: 33.02, minLng: -94.04, maxLng: -88.82 },
-		{ name: "AR", minLat: 33.0, maxLat: 36.5, minLng: -94.62, maxLng: -89.64 },
-		{ name: "NM", minLat: 31.33, maxLat: 37.0, minLng: -109.05, maxLng: -103.0 },
-		{ name: "MS", minLat: 30.17, maxLat: 35.0, minLng: -91.66, maxLng: -88.1 },
-		{ name: "AL", minLat: 30.22, maxLat: 35.01, minLng: -88.47, maxLng: -84.89 },
-		{ name: "TN", minLat: 34.98, maxLat: 36.68, minLng: -90.31, maxLng: -81.65 },
-		{ name: "GA", minLat: 30.36, maxLat: 35.0, minLng: -85.61, maxLng: -80.84 },
-		{ name: "FL", minLat: 24.52, maxLat: 31.0, minLng: -87.63, maxLng: -80.03 },
-		{ name: "MO", minLat: 35.99, maxLat: 40.61, minLng: -95.77, maxLng: -89.1 },
-		{ name: "KS", minLat: 36.99, maxLat: 40.0, minLng: -102.05, maxLng: -94.59 },
-		{ name: "CO", minLat: 36.99, maxLat: 41.0, minLng: -109.05, maxLng: -102.04 },
-		{ name: "AZ", minLat: 31.33, maxLat: 37.0, minLng: -114.82, maxLng: -109.04 },
-		{ name: "CA", minLat: 32.53, maxLat: 42.01, minLng: -124.41, maxLng: -114.13 },
-		{ name: "NV", minLat: 35.0, maxLat: 42.0, minLng: -120.01, maxLng: -114.04 },
-		{ name: "IL", minLat: 36.97, maxLat: 42.51, minLng: -91.51, maxLng: -87.02 },
-		{ name: "IN", minLat: 37.77, maxLat: 41.76, minLng: -88.1, maxLng: -84.78 },
-		{ name: "OH", minLat: 38.4, maxLat: 42.33, minLng: -84.82, maxLng: -80.52 },
-		{ name: "PA", minLat: 39.72, maxLat: 42.27, minLng: -80.52, maxLng: -74.69 },
-		{ name: "NY", minLat: 40.5, maxLat: 45.01, minLng: -79.76, maxLng: -71.86 },
-		{ name: "NC", minLat: 33.84, maxLat: 36.59, minLng: -84.32, maxLng: -75.46 },
-		{ name: "SC", minLat: 32.03, maxLat: 35.22, minLng: -83.35, maxLng: -78.54 },
-		{ name: "VA", minLat: 36.54, maxLat: 39.47, minLng: -83.68, maxLng: -75.24 },
-		{ name: "WA", minLat: 45.54, maxLat: 49.0, minLng: -124.85, maxLng: -116.92 },
-		{ name: "OR", minLat: 41.99, maxLat: 46.29, minLng: -124.57, maxLng: -116.46 },
-		{ name: "ID", minLat: 41.99, maxLat: 49.0, minLng: -117.24, maxLng: -111.04 },
-		{ name: "MT", minLat: 44.36, maxLat: 49.0, minLng: -116.05, maxLng: -104.04 },
-		{ name: "WY", minLat: 40.99, maxLat: 45.01, minLng: -111.06, maxLng: -104.05 },
-		{ name: "UT", minLat: 36.99, maxLat: 42.0, minLng: -114.05, maxLng: -109.04 },
-		{ name: "ND", minLat: 45.94, maxLat: 49.0, minLng: -104.05, maxLng: -96.55 },
-		{ name: "SD", minLat: 42.48, maxLat: 45.95, minLng: -104.06, maxLng: -96.44 },
-		{ name: "NE", minLat: 39.99, maxLat: 43.0, minLng: -104.05, maxLng: -95.31 },
-		{ name: "IA", minLat: 40.37, maxLat: 43.5, minLng: -96.64, maxLng: -90.14 },
-		{ name: "MN", minLat: 43.5, maxLat: 49.38, minLng: -97.24, maxLng: -89.49 },
-		{ name: "WI", minLat: 42.49, maxLat: 47.08, minLng: -92.89, maxLng: -86.25 },
-		{ name: "MI", minLat: 41.7, maxLat: 48.31, minLng: -90.42, maxLng: -82.12 },
-		{ name: "KY", minLat: 36.5, maxLat: 39.15, minLng: -89.57, maxLng: -81.96 },
-		{ name: "WV", minLat: 37.2, maxLat: 40.64, minLng: -82.64, maxLng: -77.72 },
-		{ name: "MD", minLat: 37.91, maxLat: 39.72, minLng: -79.49, maxLng: -75.05 },
-		{ name: "DE", minLat: 38.45, maxLat: 39.84, minLng: -75.79, maxLng: -75.05 },
-		{ name: "NJ", minLat: 38.93, maxLat: 41.36, minLng: -75.56, maxLng: -73.89 },
-		{ name: "CT", minLat: 40.98, maxLat: 42.05, minLng: -73.73, maxLng: -71.79 },
-		{ name: "RI", minLat: 41.15, maxLat: 42.02, minLng: -71.86, maxLng: -71.12 },
-		{ name: "MA", minLat: 41.24, maxLat: 42.89, minLng: -73.51, maxLng: -69.93 },
-		{ name: "VT", minLat: 42.73, maxLat: 45.02, minLng: -73.44, maxLng: -71.47 },
-		{ name: "NH", minLat: 42.7, maxLat: 45.31, minLng: -72.56, maxLng: -70.7 },
-		{ name: "ME", minLat: 43.06, maxLat: 47.46, minLng: -71.08, maxLng: -66.95 },
-		{ name: "HI", minLat: 18.91, maxLat: 22.24, minLng: -160.25, maxLng: -154.81 },
-		{ name: "AK", minLat: 51.21, maxLat: 71.39, minLng: -179.15, maxLng: -129.98 },
-		{ name: "DC", minLat: 38.79, maxLat: 38.99, minLng: -77.12, maxLng: -76.91 },
-	];
-	for (const s of states) {
-		if (lat >= s.minLat && lat <= s.maxLat && lng >= s.minLng && lng <= s.maxLng) {
-			return s.name;
-		}
-	}
-	return "Other";
-}
-
 // ============================================================
 // SPA Catch-All — Serve Vue app for all non-API routes
 // ============================================================
@@ -9228,6 +9156,17 @@ app.use((err, req, res, next) => {
 		return res.status(400).json({ error: "Invalid request. Please try again." });
 	}
 	next(err);
+});
+
+// Final error handler — catches anything that propagates via next(err) or
+// uncaught throws inside async route handlers. Logs the full error server-side
+// and returns a generic 500 to the client (never leaks err.message details).
+// Per-route try/catch blocks still own their own error responses; this is the
+// safety net that prevents stack traces from reaching API consumers.
+app.use((err, req, res, next) => {
+	if (res.headersSent) return next(err);
+	console.error(`[unhandled] ${req.method} ${req.originalUrl}:`, err);
+	res.status(500).json({ error: "Internal server error" });
 });
 
 // ============================================================
