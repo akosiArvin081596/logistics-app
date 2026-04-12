@@ -5577,15 +5577,9 @@ app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) =
 // ============================================================
 app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const sheets = await getSheets();
-
-		const response = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking",
-		});
-
-		const jobTracking = parseSheet(response.data);
-		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
+		// Use shared 60s Job Tracking cache (invalidated by mutations) instead of
+		// hitting Sheets on every dashboard load.
+		const jobTracking = await getJobTrackingCached();
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Identify key columns
