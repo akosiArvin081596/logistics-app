@@ -4,6 +4,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const { google } = require("googleapis");
 const path = require("path");
+const fs = require("fs");
 const bcrypt = require("bcryptjs");
 const session = require("express-session");
 const Database = require("better-sqlite3");
@@ -1080,7 +1081,6 @@ async function sendEmail(to, subject, htmlBody, attachments = []) {
 }
 
 // Serve Vue SPA build (client/dist) if it exists, otherwise fall back to public/
-const fs = require("fs");
 const clientDistPath = path.join(__dirname, "client", "dist");
 const publicPath = path.join(__dirname, "public");
 if (fs.existsSync(clientDistPath)) {
@@ -1109,7 +1109,6 @@ const auth = new google.auth.GoogleAuth({
 });
 
 let sheetsClient = null;
-let driveClient = null;
 const sheetIdCache = new Map();
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
@@ -1120,14 +1119,6 @@ async function getSheets() {
 		sheetsClient = google.sheets({ version: "v4", auth: authClient });
 	}
 	return sheetsClient;
-}
-
-async function getDrive() {
-	if (!driveClient) {
-		const authClient = await auth.getClient();
-		driveClient = google.drive({ version: "v3", auth: authClient });
-	}
-	return driveClient;
 }
 
 async function getSheetId(sheets, sheetName) {
@@ -3898,7 +3889,6 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 // Download SQLite database file (Super Admin only)
 app.get("/api/db/download", requireRole("Super Admin"), (req, res) => {
 	// Backup to a temp file to capture WAL contents
-	const fs = require("fs");
 	const tmpPath = path.join(__dirname, "app_backup.db");
 	db.backup(tmpPath).then(() => {
 		res.download(tmpPath, "app.db", () => {
@@ -6446,7 +6436,7 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 // the URL path. Old base64-in-DB rows still work because the frontend img tag
 // accepts both data URIs and URL paths.
 const RECEIPTS_DIR = path.join(__dirname, "uploads", "expense-receipts");
-try { require("fs").mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
+try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
 function saveReceiptToDisk(photoData) {
 	if (!photoData || typeof photoData !== "string") return "";
 	if (!photoData.startsWith("data:")) return photoData; // already a URL/path
@@ -6457,7 +6447,7 @@ function saveReceiptToDisk(photoData) {
 	const fname = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
 	const fpath = path.join(RECEIPTS_DIR, fname);
 	try {
-		require("fs").writeFileSync(fpath, buf);
+		fs.writeFileSync(fpath, buf);
 		return `/uploads/expense-receipts/${fname}`;
 	} catch (err) {
 		console.error("Receipt save failed:", err.message);
@@ -6647,10 +6637,10 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), 
 		const drvId = parseInt(driverId) || 0;
 		const prefix = drvId > 0 ? `driver${drvId}` : (unitNumber || 'truck').replace(/[^a-zA-Z0-9]/g, '_');
 		const safeName = `${prefix}_${safeType.replace(/[\s']/g, '_')}_${Date.now()}${ext}`;
-		const legalDir = require("path").join(__dirname, "uploads", "legal");
-		if (!require("fs").existsSync(legalDir)) require("fs").mkdirSync(legalDir, { recursive: true });
+		const legalDir = path.join(__dirname, "uploads", "legal");
+		if (!fs.existsSync(legalDir)) fs.mkdirSync(legalDir, { recursive: true });
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
-		require("fs").writeFileSync(require("path").join(legalDir, safeName), Buffer.from(base64, "base64"));
+		fs.writeFileSync(path.join(legalDir, safeName), Buffer.from(base64, "base64"));
 		const fileUrl = `/uploads/legal/${safeName}`;
 		// Determine investor_id: from request body or from session (if Investor role)
 		let invId = parseInt(investorId) || 0;
@@ -6679,8 +6669,8 @@ app.delete("/api/legal-documents/:id", requireRole("Super Admin", "Investor"), (
 		const doc = db.prepare("SELECT * FROM legal_documents WHERE id = ?").get(id);
 		if (!doc) return res.status(404).json({ error: "Document not found" });
 		if (doc.file_url) {
-			const filePath = require("path").join(__dirname, doc.file_url);
-			try { require("fs").unlinkSync(filePath); } catch { /* file may already be gone */ }
+			const filePath = path.join(__dirname, doc.file_url);
+			try { fs.unlinkSync(filePath); } catch { /* file may already be gone */ }
 		}
 		db.prepare("DELETE FROM legal_documents WHERE id = ?").run(id);
 		res.json({ success: true });
@@ -6699,10 +6689,10 @@ app.post("/api/chat/attachment", requireAuth, async (req, res) => {
 		const attachmentType = (mimeType || '').startsWith('image/') ? 'image' : (mimeType === 'application/pdf' ? 'pdf' : 'other');
 		const ext = path.extname(fileName) || (attachmentType === 'image' ? '.jpg' : '.bin');
 		const safeName = `chat_${Date.now()}_${Math.random().toString(36).slice(2,7)}${ext}`;
-		const chatDir = require("path").join(__dirname, "uploads", "chat");
-		if (!require("fs").existsSync(chatDir)) require("fs").mkdirSync(chatDir, { recursive: true });
+		const chatDir = path.join(__dirname, "uploads", "chat");
+		if (!fs.existsSync(chatDir)) fs.mkdirSync(chatDir, { recursive: true });
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
-		require("fs").writeFileSync(require("path").join(chatDir, safeName), Buffer.from(base64, "base64"));
+		fs.writeFileSync(path.join(chatDir, safeName), Buffer.from(base64, "base64"));
 		res.json({ success: true, fileUrl: `/uploads/chat/${safeName}`, attachmentType });
 	} catch (err) {
 		console.error("Chat attachment error:", err.message);
@@ -7917,38 +7907,6 @@ async function getRoute(from, to, retries = 2) {
 		}
 	}
 	return null;
-}
-
-// Snap GPS points to roads using Google Roads API
-async function snapToRoads(points) {
-	if (!points || points.length < 2) return null;
-	try {
-		const BATCH_SIZE = 100;
-		let allSnapped = [];
-		for (let i = 0; i < points.length; i += BATCH_SIZE - 1) {
-			const batch = points.slice(i, i + BATCH_SIZE);
-			if (batch.length < 2) break;
-			const path = batch.map(p => `${p.latitude},${p.longitude}`).join("|");
-			const url = `https://roads.googleapis.com/v1/snapToRoads?path=${encodeURIComponent(path)}&interpolate=true&key=${GOOGLE_MAPS_API_KEY}`;
-			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), 8000);
-			const resp = await fetch(url, { signal: controller.signal });
-			clearTimeout(timeout);
-			if (!resp.ok) {
-				console.error(`Roads API error: ${resp.status}`);
-				return null;
-			}
-			const data = await resp.json();
-			if (!data.snappedPoints || data.snappedPoints.length === 0) return null;
-			for (const pt of data.snappedPoints) {
-				allSnapped.push({ latitude: pt.location.latitude, longitude: pt.location.longitude });
-			}
-		}
-		return allSnapped.length >= 2 ? allSnapped : null;
-	} catch (err) {
-		console.error("Roads API snap error:", err.message);
-		return null;
-	}
 }
 
 // GET /api/locations/trail — GPS trail for a specific driver/load
