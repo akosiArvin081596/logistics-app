@@ -146,6 +146,7 @@ Executed a 4-sprint hardening plan targeting the most critical findings from the
 ## Commits
 
 ```
+345b2b2 docs: write final AUDIT_CHANGELOG with all sprint outcomes
 2b06031 chore: Sprint 4 — gitignore PII files
 f7d83db perf: Sprint 3 — dashboard cache + Vite manualChunks
 cb45952 refactor: remove duplicated parseSheet/findCol shadow
@@ -154,5 +155,45 @@ cb45952 refactor: remove duplicated parseSheet/findCol shadow
 dd4c247 fix: Sprint 1 — error handler middleware + receipt photos to disk
 40ec272 fix: Sprint 1 hardening — webhooks, session, dispatch, indexes, FK pragma
 ```
+
+---
+
+## Deployment + Smoke Test Results
+
+**Merged:** `audit-hardening` → `main` (no-ff merge `a23b3c5`)
+**Pushed:** `origin/main` updated successfully (from `3dd67ba` → `a23b3c5`)
+**Deployed:** SSH to `root@76.13.22.110`, `git pull`, `npm run build`, `pm2 restart logistics-app`
+**Build result:** Vite ✓ built in 9.56s — vendor chunks split as expected
+**Server status:** PM2 online, 161MB RAM, restart count incremented
+
+### Smoke Tests (all PASS)
+
+| Test | Endpoint | Expected | Got | Result |
+|---|---|---|---|---|
+| 1 | `GET /api/auth/setup-check` | 200 | 200 | ✅ |
+| 2 | `GET /api/auth/session` (unauth) | 200 | 200 | ✅ |
+| 3 | `GET /api/trucks` (unauth) | 401 | 401 | ✅ RBAC |
+| 4 | `POST /api/webhook/new-load` (no secret) | 401 | 401 | ✅ S1.1 fix verified |
+| 5 | `GET /` (SPA index) | 200 | 200 | ✅ |
+
+### Database State Verification
+
+```
+Sprint 1 indexes confirmed live in production:
+  idx_expenses_date         ← NEW
+  idx_expenses_status       ← NEW
+  idx_expenses_owner_date   ← NEW (composite)
+  idx_locations_driver_ts   ← NEW (composite)
+  idx_locations_driver_load ← NEW (composite)
+  idx_expenses_driver       (existing)
+  idx_expenses_owner        (existing)
+  idx_locations_driver      (existing)
+  idx_locations_load_id     (existing)
+  idx_locations_ts          (existing)
+
+PRAGMA foreign_keys = 1   ← Sprint 1 fix verified
+```
+
+**No rollback needed.** Production stable, all hardening changes verified live.
 
 ---
