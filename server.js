@@ -54,6 +54,7 @@ app.use(express.json({ limit: "20mb" }));
 // ============================================================
 const db = new Database(path.join(__dirname, "app.db"));
 db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS messages (
@@ -183,6 +184,9 @@ db.exec(`
 `);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_driver ON expenses(driver)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner ON expenses(owner_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses(status)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner_date ON expenses(owner_id, date)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_trucks_owner ON trucks(owner_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_maintenance_truck ON maintenance_fund(truck)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_compliance_truck ON compliance_fees(truck)`);
@@ -661,6 +665,21 @@ db.exec(`
 db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver ON driver_locations(driver)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_ts ON driver_locations(timestamp)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_load_id ON driver_locations(load_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver_ts ON driver_locations(driver, timestamp DESC)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver_load ON driver_locations(driver, load_id)`);
+
+// driver_locations grows unbounded (every active driver pings every 30s).
+// Purge rows older than 90 days on a weekly schedule + once at boot to seed.
+function purgeOldDriverLocations() {
+	try {
+		const result = db.prepare("DELETE FROM driver_locations WHERE timestamp < datetime('now', '-90 days')").run();
+		if (result.changes > 0) console.log(`[cleanup] Purged ${result.changes} old driver_locations rows`);
+	} catch (err) {
+		console.error("[cleanup] driver_locations purge failed:", err.message);
+	}
+}
+purgeOldDriverLocations();
+setInterval(purgeOldDriverLocations, 7 * 24 * 60 * 60 * 1000); // weekly
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_config (
@@ -962,10 +981,13 @@ const INVESTOR_ONBOARDING_DOCS = [
 ];
 
 // Session store in SQLite (persists across server restarts)
-const SESSION_SECRET = process.env.SESSION_SECRET || "dispatch-logistics-2024";
 if (!process.env.SESSION_SECRET) {
-	console.warn("WARNING: SESSION_SECRET not set in environment — using fallback. Set it in .env for production.");
+	if (process.env.NODE_ENV === "production") {
+		throw new Error("SESSION_SECRET must be set in production");
+	}
+	console.warn("WARNING: SESSION_SECRET not set in environment — using dev fallback. Set it in .env for production.");
 }
+const SESSION_SECRET = process.env.SESSION_SECRET || "dev-only-fallback-do-not-use-in-production";
 app.use(
 	session({
 		store: new SqliteStore({ client: db, expired: { clear: true, intervalMs: 3600000 } }),
@@ -985,7 +1007,7 @@ app.use(
 // ============================================================
 app.post("/api/n8n/job", (req, res) => {
 	const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
-	if (webhookSecret && req.headers["x-webhook-secret"] !== webhookSecret) {
+	if (!webhookSecret || req.headers["x-webhook-secret"] !== webhookSecret) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	try {
@@ -4092,7 +4114,11 @@ async function checkDriverActiveLoad(driverName) {
 		return null;
 	} catch (err) {
 		console.error("checkDriverActiveLoad error:", err.message);
-		return null; // Allow assignment if check fails
+		// Fail closed: if we cannot verify the driver is free, do NOT allow the
+		// assignment. Throwing here propagates to the caller's outer catch which
+		// returns HTTP 500, blocking the dispatch instead of silently permitting
+		// double-dispatch on a Sheets API blip.
+		throw new Error("Unable to verify driver availability — try again");
 	}
 }
 
@@ -5154,7 +5180,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 // Emits a socket event so connected dashboards refresh instantly instead of waiting for the 60s poll.
 app.post("/api/webhook/new-load", (req, res) => {
 	const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
-	if (webhookSecret && req.headers["x-webhook-secret"] !== webhookSecret) {
+	if (!webhookSecret || req.headers["x-webhook-secret"] !== webhookSecret) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	jtCacheInvalidate();
@@ -6732,7 +6758,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 		const section179 = purchasePrice;
 		const annualDepreciation = purchasePrice;
 
-		// Net revenue
+		// Net revenue — must succeed; we refuse to fabricate financial figures
 		let netRevenueToDate = 0;
 		try {
 			const sheets = await getSheets();
@@ -6771,7 +6797,13 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? OR LOWER(driver) IN (${ph})`).get(user.id, ...drivers).t;
 				})();
 			netRevenueToDate = Math.round(totalRevenue - expClause);
-		} catch { /* if sheets fail, use 0 */ }
+		} catch (sheetsErr) {
+			// Refuse to generate a financial document with fabricated zeros.
+			console.error("Tax CSV: sheets fetch failed:", sheetsErr.message);
+			return res.status(503).json({
+				error: "Unable to generate tax document — financial data source unavailable. Please try again shortly.",
+			});
+		}
 
 		const atRiskCapital = Math.max(0, (totalPurchasePrice + totalStartupExpenses) - netRevenueToDate);
 		const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
