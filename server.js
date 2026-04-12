@@ -6442,6 +6442,29 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 	}
 });
 
+// Receipt photo storage helpers — write base64 data URIs to disk and return
+// the URL path. Old base64-in-DB rows still work because the frontend img tag
+// accepts both data URIs and URL paths.
+const RECEIPTS_DIR = path.join(__dirname, "uploads", "expense-receipts");
+try { require("fs").mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
+function saveReceiptToDisk(photoData) {
+	if (!photoData || typeof photoData !== "string") return "";
+	if (!photoData.startsWith("data:")) return photoData; // already a URL/path
+	const m = photoData.match(/^data:image\/(\w+);base64,(.+)$/);
+	if (!m) return ""; // unrecognized format — drop silently
+	const ext = (m[1] || "png").toLowerCase().replace("jpeg", "jpg");
+	const buf = Buffer.from(m[2], "base64");
+	const fname = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
+	const fpath = path.join(RECEIPTS_DIR, fname);
+	try {
+		require("fs").writeFileSync(fpath, buf);
+		return `/uploads/expense-receipts/${fname}`;
+	} catch (err) {
+		console.error("Receipt save failed:", err.message);
+		return ""; // fall back to no photo rather than blob in DB
+	}
+}
+
 // POST /api/expenses — Log a new expense (SQLite)
 app.post("/api/expenses", requireAuth, (req, res) => {
 	try {
@@ -6477,12 +6500,14 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 		const driverTruck = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
+		// Receipt photo: write base64 to disk, store URL path in column instead of blob
+		const photoUrlOrPath = saveReceiptToDisk(photoData);
 		const result = db
 			.prepare(
 				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
-			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoData || "",
+			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoUrlOrPath,
 				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit);
 		notifyChange("expenses");
 		res.json({ success: true, id: result.lastInsertRowid });
@@ -9260,6 +9285,17 @@ app.use((err, req, res, next) => {
 		return res.status(400).json({ error: "Invalid request. Please try again." });
 	}
 	next(err);
+});
+
+// Final error handler — catches anything that propagates via next(err) or
+// uncaught throws inside async route handlers. Logs the full error server-side
+// and returns a generic 500 to the client (never leaks err.message details).
+// Per-route try/catch blocks still own their own error responses; this is the
+// safety net that prevents stack traces from reaching API consumers.
+app.use((err, req, res, next) => {
+	if (res.headersSent) return next(err);
+	console.error(`[unhandled] ${req.method} ${req.originalUrl}:`, err);
+	res.status(500).json({ error: "Internal server error" });
 });
 
 // ============================================================
