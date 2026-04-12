@@ -5584,24 +5584,6 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			range: "Job Tracking",
 		});
 
-		function parseSheet(valueRange) {
-			const rows = (valueRange && valueRange.values) || [];
-			if (rows.length === 0) return { headers: [], data: [] };
-			const headers = rows[0];
-			const data = rows.slice(1).map((row, idx) => {
-				const obj = { _rowIndex: idx + 2 };
-				headers.forEach((h, i) => {
-					obj[h] = row[i] || "";
-				});
-				return obj;
-			});
-			return { headers, data };
-		}
-
-		function findCol(headers, regex) {
-			return headers.find((h) => regex.test(h)) || null;
-		}
-
 		const jobTracking = parseSheet(response.data);
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = getCarrierDBFromSQLite();
