@@ -8516,8 +8516,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		{
 			const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 
-			// 1. Monthly driver pay — bucket active days by YYYY-MM
+			// 1. Monthly driver pay — bucket active days by YYYY-MM.
+			// Builds both the monthly total and a per-driver-per-month breakdown
+			// so the frontend can show "tom smith: 8 days × $250 = $2000" for
+			// the selected month (not all-time).
 			const monthlyDriverPay = {};
+			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay } } }
 			for (const [driver, detail] of Object.entries(driverPayDetails)) {
 				const rate = detail.dailyRate || 250;
 				// Group dates by month, deduplicate within each month
@@ -8528,7 +8532,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					monthDays[mk].add(d);
 				}
 				for (const [mk, days] of Object.entries(monthDays)) {
-					monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + (days.size * rate);
+					const pay = days.size * rate;
+					monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + pay;
+					if (!monthlyDriverDetails[mk]) monthlyDriverDetails[mk] = {};
+					monthlyDriverDetails[mk][driver] = { activeDays: days.size, dailyRate: rate, totalPay: pay };
 				}
 			}
 
@@ -8593,6 +8600,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					month: mk,
 					revenue: Math.round(revenue),
 					driverPay: Math.round(driverPay),
+					driverDetails: monthlyDriverDetails[mk] || {},
 					fixedCosts,
 					tripExpenses: Math.round(tripExpenses),
 					tripExpCategories: tripExpByCategory[mk] || {},

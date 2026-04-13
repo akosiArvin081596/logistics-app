@@ -196,20 +196,23 @@
               If a driver has overlapping loads (e.g., picked up a new load the same day they delivered the last one), those days are only counted once to avoid double-charging.
             </div>
 
-            <template v-if="Object.keys(driverDetails).length">
-              <div class="step-label">Driver Breakdown</div>
-              <div v-for="(d, name) in driverDetails" :key="name">
+            <template v-if="selected.driverDetails && Object.keys(selected.driverDetails).length">
+              <div class="step-label">Driver Breakdown — {{ monthLabel(selected.month) }}</div>
+              <div v-for="(d, name) in selected.driverDetails" :key="name">
                 <div class="modal-row">
                   <span>{{ name }}</span>
                   <span class="val danger">{{ fmt(d.totalPay) }}</span>
                 </div>
-                <div class="modal-hint">{{ d.activeDays }} active days x ${{ d.dailyRate || 250 }}/day</div>
+                <div class="modal-hint">{{ d.activeDays }} active day{{ d.activeDays !== 1 ? 's' : '' }} x ${{ d.dailyRate || 250 }}/day</div>
               </div>
             </template>
+            <div v-else class="modal-explain-sm" style="font-style:italic;">
+              No active driver days in {{ monthLabel(selected.month) }}.
+            </div>
 
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
-              <span>Total Driver Pay</span>
+              <span>Total Driver Pay ({{ monthLabel(selected.month) }})</span>
               <span class="val danger">{{ fmt(selected.driverPay) }}</span>
             </div>
           </div>
@@ -495,7 +498,6 @@ function monthLabel(mk) {
 // --- Detail modal ---
 const detailType = ref('')
 const fcb = computed(() => props.production?.fixedCostBreakdown || { insurance: 0, eld: 0, irp: 0, hvut: 0, maintReserve: 0, truckCount: 1 })
-const driverDetails = computed(() => props.production?.driverPayDetails || {})
 
 function openDetail(type) {
   detailType.value = type
