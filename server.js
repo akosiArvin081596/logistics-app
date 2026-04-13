@@ -9348,7 +9348,8 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		let totalRevenue = 0;
 		let earliestDate = null;
 		let latestDate = null;
-		const completedLoadIds = new Set();
+		let completedRowCount = 0;       // row-level count — matches /api/investor.completedJobs
+		const completedLoadIds = new Set();  // unique load IDs — used for expense matching
 		const grossByDriver = {};
 		const loadsByDriver = {};
 		const loadsByTruck = {};
@@ -9373,6 +9374,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 
 			// Revenue + completed-load list
 			if (completedStatuses.test(st)) {
+				completedRowCount++;
 				if (driverLc) loadsByDriver[driverLc] = (loadsByDriver[driverLc] || 0) + 1;
 				if (truckUnit) loadsByTruck[truckUnit] = (loadsByTruck[truckUnit] || 0) + 1;
 				const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
@@ -9580,7 +9582,9 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				avgRatePerMile,
 				totalMiles: fleetTotalMiles,
 				monthsOfOperation,
-				completedLoadCount: completedLoadIds.size,
+				// Row count (not unique load IDs) — consistent with totalRevenue
+				// which also sums per-row, and matches /api/investor.completedJobs.
+				completedLoadCount: completedRowCount,
 			},
 			expensesByCategory: Object.fromEntries(
 				Object.entries(expByCategory).map(([k, v]) => [k, Math.round(v)])
