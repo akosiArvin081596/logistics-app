@@ -11,6 +11,7 @@
     "postinstall": "cd client && npm install"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.8.0",
     "better-sqlite3-session-store": "^0.1.0",

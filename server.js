@@ -9374,6 +9374,11 @@ app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res
 		res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
 		const archive = archiver("zip", { zlib: { level: 9 } });
+		// Error handler has to be installed BEFORE pipe() so early failures
+		// surface as a JSON response. Once pipe() has flushed any bytes to
+		// the client the headers are already sent, so a mid-stream failure
+		// can only produce a truncated zip — we log it, but the client has
+		// no clean way to know. Acceptable for a Super-Admin-only export.
 		archive.on("error", (err) => {
 			console.error("Receipt zip error:", err.message);
 			if (!res.headersSent) res.status(500).json({ error: "Failed to build receipt archive" });
@@ -9400,15 +9405,22 @@ app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res
 					attachedCount++;
 				}
 			}
-			// CSV row: always include, so rows without a receipt file are still accounted for
-			const csvCell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+			// CSV row: always include, so rows without a receipt file are still accounted for.
+			// Prepend a single quote to any cell starting with =+-@\t to neutralize
+			// Excel/Calc formula-injection (OWASP CSV injection).
+			const csvCell = (v) => {
+				let s = String(v ?? "");
+				if (/^[=+\-@\t]/.test(s)) s = "'" + s;
+				return `"${s.replace(/"/g, '""')}"`;
+			};
 			csvRows.push([
 				exp.date, exp.id, exp.driver, exp.load_id, exp.type,
 				Number(exp.amount || 0).toFixed(2),
 				exp.description, fileName || "(no file)"
 			].map(csvCell).join(","));
 		}
-		archive.append(csvRows.join("\n"), { name: "manifest.csv" });
+		// RFC 4180 uses CRLF between rows so Excel on Windows parses it correctly.
+		archive.append(csvRows.join("\r\n"), { name: "manifest.csv" });
 		archive.finalize();
 		console.log(`Receipt zip: ${truck} ${from}..${to} — ${expenses.length} rows, ${attachedCount} files`);
 	} catch (err) {

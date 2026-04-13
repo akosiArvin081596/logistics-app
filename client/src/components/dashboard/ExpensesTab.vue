@@ -12,6 +12,28 @@
 
     <!-- ALL EXPENSES -->
     <div v-show="activeSubTab === 'all'" class="sub-panel">
+      <!-- Download Receipts — Super Admin only.
+           Streams a ZIP of every receipt file for a specific truck in a
+           date range, plus a manifest.csv for accounting review. -->
+      <div v-if="auth.isSuperAdmin" class="download-receipts-card">
+        <div class="download-receipts-title">
+          <span>Download Receipts (ZIP)</span>
+          <span class="download-receipts-hint">Bundle all receipts for a truck &amp; date range</span>
+        </div>
+        <div class="download-receipts-row">
+          <select v-model="downloadForm.truck" class="add-input" style="max-width:180px" aria-label="Truck unit">
+            <option value="">Select Truck *</option>
+            <option v-for="t in truckList" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <input v-model="downloadForm.from" type="date" class="add-input" style="max-width:160px" :max="downloadForm.to || todayIso" aria-label="From date" />
+          <input v-model="downloadForm.to" type="date" class="add-input" style="max-width:160px" :min="downloadForm.from" :max="todayIso" aria-label="To date" />
+          <button class="btn btn-primary" :disabled="!canDownload || downloadLoading" @click="downloadReceipts">
+            {{ downloadLoading ? 'Preparing...' : 'Download ZIP' }}
+          </button>
+        </div>
+        <div v-if="downloadError" class="download-receipts-error">{{ downloadError }}</div>
+      </div>
+
       <!-- Add Expense form — Super Admin / Dispatcher only -->
       <div v-if="canAddExpense" class="add-expense-card">
         <div class="add-expense-title">Log Expense</div>
@@ -426,6 +448,70 @@ const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'D
 const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toISOString().slice(0, 10), loadId: '', description: '' })
 const addLoading = ref(false)
 
+// Download Receipts (Super Admin only) — ZIP bundle endpoint
+const truckList = ref([])
+// Computed so a long-lived tab that crosses midnight still clamps correctly.
+const todayIso = computed(() => new Date().toISOString().slice(0, 10))
+const downloadForm = reactive({ truck: '', from: '', to: '' })
+const downloadLoading = ref(false)
+const downloadError = ref('')
+const canDownload = computed(() =>
+  downloadForm.truck && downloadForm.from && downloadForm.to && downloadForm.to >= downloadForm.from
+)
+
+async function loadTruckList() {
+  if (!auth.isSuperAdmin) return
+  try {
+    const res = await api.get('/api/trucks')
+    const rows = res.data || res.trucks || res || []
+    const units = rows.map(t => t.UnitNumber || t.unit_number || t.unit).filter(Boolean)
+    truckList.value = [...new Set(units)].sort()
+  } catch (err) {
+    console.error('loadTruckList failed:', err)
+    downloadError.value = 'Could not load truck list. Refresh to retry.'
+  }
+}
+
+async function downloadReceipts() {
+  downloadError.value = ''
+  if (!canDownload.value) {
+    downloadError.value = 'Pick a truck and a valid date range first.'
+    return
+  }
+  downloadLoading.value = true
+  try {
+    // HEAD-style probe via fetch so we can surface JSON errors (404/400)
+    // to the user instead of a broken file download.
+    const qs = new URLSearchParams({
+      truck: downloadForm.truck,
+      from: downloadForm.from,
+      to: downloadForm.to,
+    }).toString()
+    const url = `/api/expenses/receipts-download?${qs}`
+    const res = await fetch(url, { credentials: 'include' })
+    if (!res.ok) {
+      let msg = `Download failed (${res.status})`
+      try { const j = await res.json(); if (j?.error) msg = j.error } catch { /* not JSON */ }
+      downloadError.value = msg
+      return
+    }
+    const blob = await res.blob()
+    const filename = `${downloadForm.truck}-receipts-${downloadForm.from}-to-${downloadForm.to}.zip`
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(link.href)
+    toast('Receipt bundle downloaded', 'success')
+  } catch (err) {
+    downloadError.value = err?.message || 'Failed to download receipts'
+  } finally {
+    downloadLoading.value = false
+  }
+}
+
 async function submitExpense() {
   if (!addForm.driver || !addForm.type || !addForm.amount || !addForm.date) {
     toast('Fill in Driver, Type, Amount, and Date', 'error'); return
@@ -614,6 +700,7 @@ onMounted(() => {
   if (auth.isSuperAdmin) {
     loadMaintenance()
     loadIfta()
+    loadTruckList()
   }
 })
 </script>
@@ -982,4 +1069,34 @@ tr:hover td { background: var(--surface-hover); }
 }
 .add-btn:hover { opacity: 0.9; }
 .add-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* Download Receipts (Super Admin) */
+.download-receipts-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+.download-receipts-title {
+  display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap;
+  font-size: 0.72rem; font-weight: 700; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.6rem;
+}
+.download-receipts-hint {
+  font-size: 0.68rem; font-weight: 500; text-transform: none;
+  color: var(--text-dim); opacity: 0.7; letter-spacing: 0;
+}
+.download-receipts-row {
+  display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;
+}
+.download-receipts-error {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+}
 </style>
