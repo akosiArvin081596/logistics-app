@@ -9349,6 +9349,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		let earliestDate = null;
 		let latestDate = null;
 		let completedRowCount = 0;       // row-level count — matches /api/investor.completedJobs
+		// Unassigned revenue: completed loads where the Driver column is blank.
+		// Tracked separately so the leaderboard sum reconciles with totalRevenue
+		// AND so Deshorn can see a data-quality signal (loads that never got
+		// attributed to a real driver).
+		let unassignedGross = 0;
+		let unassignedLoadCount = 0;
 		const completedLoadIds = new Set();  // unique load IDs — used for expense matching
 		const grossByDriver = {};
 		const loadsByDriver = {};
@@ -9382,7 +9388,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
 					if (lid) completedLoadIds.add(lid);
 					totalRevenue += amt;
-					if (driverLc) grossByDriver[driverLc] = (grossByDriver[driverLc] || 0) + amt;
+					if (driverLc) {
+						grossByDriver[driverLc] = (grossByDriver[driverLc] || 0) + amt;
+					} else {
+						unassignedGross += amt;
+						unassignedLoadCount += 1;
+					}
 					// Capture for highest/lowest. Use display name for driver (not lowercase).
 					const dateStr = jtDateCol && r[jtDateCol] ? String(r[jtDateCol]) : "";
 					completedLoads.push({
@@ -9568,6 +9579,22 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				avgRatePerMile: totalMiles > 0 ? Math.round((gross / totalMiles) * 100) / 100 : 0,
 			};
 		}).sort((a, b) => b.grossRevenue - a.grossRevenue);
+		// Reconcile the leaderboard with totalRevenue: any completed revenue
+		// from rows with a blank Driver column is surfaced as a single
+		// "(Unassigned)" row at the bottom. Without this, sum(drivers) is
+		// quietly less than totalRevenue whenever the sheet has data-quality
+		// gaps — and the investor reading the dashboard has no way to tell.
+		if (unassignedGross > 0) {
+			drivers.push({
+				name: "(Unassigned)",
+				totalEarnings: 0,
+				grossRevenue: Math.round(unassignedGross),
+				loadCount: unassignedLoadCount,
+				totalMiles: 0,
+				avgRatePerMile: 0,
+				isUnassigned: true, // flag for frontend styling
+			});
+		}
 
 		// Fleet-wide avg rate/mile
 		const fleetTotalMiles = Object.values(odoByDriver).reduce((s, o) => s + Math.max(0, (o.maxOdo || 0) - (o.minOdo || 0)), 0);
@@ -9585,6 +9612,11 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				// Row count (not unique load IDs) — consistent with totalRevenue
 				// which also sums per-row, and matches /api/investor.completedJobs.
 				completedLoadCount: completedRowCount,
+				// Data-quality signal: completed revenue from rows with no
+				// assigned driver. Non-zero means the sheet has attribution
+				// gaps the investor should know about.
+				unassignedRevenue: Math.round(unassignedGross),
+				unassignedLoadCount,
 			},
 			expensesByCategory: Object.fromEntries(
 				Object.entries(expByCategory).map(([k, v]) => [k, Math.round(v)])

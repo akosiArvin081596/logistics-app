@@ -16,6 +16,18 @@
     </div>
 
     <template v-else-if="store.summary">
+      <!-- Data-quality warning: loads with no driver attribution -->
+      <div v-if="store.summary.unassignedRevenue > 0" class="data-warning">
+        <div class="data-warning-title">&#9888; Unassigned Revenue Detected</div>
+        <div class="data-warning-msg">
+          <strong>{{ fmt(store.summary.unassignedRevenue) }}</strong> across
+          <strong>{{ store.summary.unassignedLoadCount }}</strong> completed load{{ store.summary.unassignedLoadCount !== 1 ? 's' : '' }}
+          have no driver assigned in the Job Tracking sheet. These loads are
+          counted in Total Revenue but cannot be attributed on the leaderboard.
+          Review the sheet and fill in the Driver column to fix.
+        </div>
+      </div>
+
       <!-- 1. Summary KPI row -->
       <section class="section">
         <div class="section-title">
@@ -186,16 +198,17 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(d, i) in store.drivers" :key="d.name">
+            <tr v-for="(d, i) in store.drivers" :key="d.name" :class="{ 'row-unassigned': d.isUnassigned }">
               <td class="num">
-                <span class="rank-badge" :class="'rank-' + Math.min(i + 1, 4)">{{ i + 1 }}</span>
+                <span v-if="!d.isUnassigned" class="rank-badge" :class="'rank-' + Math.min(i + 1, 4)">{{ i + 1 }}</span>
+                <span v-else class="unassigned-mark">&#9888;</span>
               </td>
               <td>{{ d.name }}</td>
               <td class="num pos">{{ fmt(d.grossRevenue) }}</td>
-              <td class="num dim">{{ fmt(d.totalEarnings) }}</td>
+              <td class="num dim">{{ d.isUnassigned ? '—' : fmt(d.totalEarnings) }}</td>
               <td class="num">{{ d.loadCount }}</td>
-              <td class="num">{{ (d.totalMiles || 0).toLocaleString() }}</td>
-              <td class="num">${{ (d.avgRatePerMile || 0).toFixed(2) }}</td>
+              <td class="num">{{ d.isUnassigned ? '—' : (d.totalMiles || 0).toLocaleString() }}</td>
+              <td class="num">{{ d.isUnassigned ? '—' : '$' + (d.avgRatePerMile || 0).toFixed(2) }}</td>
             </tr>
           </tbody>
         </table>
@@ -453,5 +466,36 @@ useSocketRefresh('invoices:changed', () => store.load())
   color: var(--text-dim);
   font-size: 0.85rem;
   padding: 1.5rem 0;
+}
+
+.data-warning {
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-left: 4px solid #f59e0b;
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  color: #78350f;
+}
+.data-warning-title {
+  font-weight: 700;
+  font-size: 0.85rem;
+  margin-bottom: 0.35rem;
+}
+.data-warning-msg {
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+.row-unassigned {
+  background: rgba(251, 191, 36, 0.08);
+  font-style: italic;
+}
+.row-unassigned:hover { background: rgba(251, 191, 36, 0.14); }
+.unassigned-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px; height: 24px;
+  font-size: 0.95rem;
+  color: #f59e0b;
 }
 </style>
