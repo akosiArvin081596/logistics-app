@@ -290,12 +290,12 @@ useSocketRefresh('invoices:changed', () => store.load())
 </script>
 
 <style scoped>
+/* .admin-page (from shared.css) already provides flex column layout,
+   and .main applies the horizontal + vertical padding shared by every
+   routed page. Only own-specific spacing belongs here. */
 .financials-page {
-  padding: 1rem 1.25rem 2rem;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
   gap: 1rem;
+  padding-bottom: 2rem;
 }
 .page-header h2 { font-size: 1.4rem; margin: 0; }
 .page-sub { font-size: 0.82rem; color: var(--text-dim); margin-top: 0.2rem; }
