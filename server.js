@@ -9405,6 +9405,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// attributed to a real driver).
 		let unassignedGross = 0;
 		let unassignedLoadCount = 0;
+		let unassignedMiles = 0;
 		const completedLoadIds = new Set();  // unique load IDs — used for expense matching
 		const grossByDriver = {};
 		const milesByDriver = {};        // sum of haversine miles per driver
@@ -9455,7 +9456,11 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					if (loadMiles > 0) {
 						loadsWithCoords++;
 						fleetTotalMiles += loadMiles;
-						if (driverLc) milesByDriver[driverLc] = (milesByDriver[driverLc] || 0) + loadMiles;
+						if (driverLc) {
+							milesByDriver[driverLc] = (milesByDriver[driverLc] || 0) + loadMiles;
+						} else {
+							unassignedMiles += loadMiles;
+						}
 						if (truckUnit) milesByTruck[truckUnit] = (milesByTruck[truckUnit] || 0) + loadMiles;
 					}
 					// Capture for highest/lowest. Use display name for driver (not lowercase).
@@ -9646,13 +9651,14 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// quietly less than totalRevenue whenever the sheet has data-quality
 		// gaps — and the investor reading the dashboard has no way to tell.
 		if (unassignedGross > 0) {
+			const uMiles = Math.round(unassignedMiles);
 			drivers.push({
 				name: "(Unassigned)",
 				totalEarnings: 0,
 				grossRevenue: Math.round(unassignedGross),
 				loadCount: unassignedLoadCount,
-				totalMiles: 0,
-				avgRatePerMile: 0,
+				totalMiles: uMiles,
+				avgRatePerMile: uMiles > 0 ? Math.round((unassignedGross / uMiles) * 100) / 100 : 0,
 				isUnassigned: true, // flag for frontend styling
 			});
 		}
