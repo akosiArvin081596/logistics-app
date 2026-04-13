@@ -92,6 +92,7 @@ const navConfig = {
     { to: '/applications', icon: '&#128221;', label: 'Driver Applications' },
     { to: '/investor-applications', icon: '&#128188;', label: 'Investor Applications' },
     { divider: true, label: 'System' },
+    { to: '/admin/financials', icon: '&#128200;', label: 'Financials' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
   ],
