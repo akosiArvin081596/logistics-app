@@ -8791,6 +8791,24 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
+		// ---- Miles source: load_coordinates table (haversine) ----
+		// Same approach as /api/financials: origin→destination straight-line
+		// distance. Replaces the old odometer-based computation which always
+		// returned 0 because drivers rarely filled in the odometer field.
+		const milesByLoadId = {};
+		{
+			const coordRows = db.prepare(
+				"SELECT load_id, origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL"
+			).all();
+			for (const c of coordRows) {
+				const meters = geolib.getDistance(
+					{ latitude: c.origin_lat, longitude: c.origin_lng },
+					{ latitude: c.dest_lat, longitude: c.dest_lng }
+				);
+				milesByLoadId[(c.load_id || "").toLowerCase()] = meters / 1609.344;
+			}
+		}
+
 		// ---- Single-pass: revenue + driver pay + operating period + per-driver gross ----
 		const activeWorkStatuses = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
 		let totalRevenue = 0;
@@ -8800,6 +8818,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const monthlyRevenue = {};
 		const completedLoadIds = new Set();
 		const grossByDriver = {};       // per-driver completed revenue (replaces Pass 3 inner loop)
+		const milesByDriver = {};       // per-driver haversine miles (replaces odoByDriver)
+		const milesByTruck = {};        // per-truck haversine miles
 		const loadsByDriver = {};       // per-driver completed load count (fallback when no truck column)
 		const loadsByTruck = {};        // per-truck completed load count (preferred when truck column exists)
 		const driverDaySets = {};        // per-driver active day Sets (all-time, used for totals)
@@ -8835,6 +8855,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					if (lid) completedLoadIds.add(lid);
 					totalRevenue += amt;
 					if (driver) grossByDriver[driver] = (grossByDriver[driver] || 0) + amt;
+					// Haversine miles per load (straight-line, load_coordinates)
+					const loadMiles = milesByLoadId[lid.toLowerCase()] || 0;
+					if (loadMiles > 0) {
+						if (driver) milesByDriver[driver] = (milesByDriver[driver] || 0) + loadMiles;
+						if (truckUnit) milesByTruck[truckUnit] = (milesByTruck[truckUnit] || 0) + loadMiles;
+					}
 					if (assignedMonthKey) {
 						const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
 						if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
@@ -9114,10 +9140,6 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const compByTruck = Object.fromEntries(
 				db.prepare(`SELECT LOWER(cf.truck) AS u, COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status='Paid' GROUP BY LOWER(cf.truck)`).all(user.id).map(r => [r.u, r.t])
 			);
-			const odoByDriver = Object.fromEntries(
-				db.prepare(`SELECT LOWER(driver) AS d, MIN(odometer) AS minOdo, MAX(odometer) AS maxOdo FROM expenses WHERE owner_id = ? AND odometer > 0 GROUP BY LOWER(driver)`).all(user.id).map(r => [r.d, r])
-			);
-
 			// Use allOwnedTrucks (already fetched for asset section) — no extra query
 			allOwnedTrucks.forEach((truck) => {
 				const driverName = (truck.assigned_driver || "").trim().toLowerCase();
@@ -9143,8 +9165,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const unitTotalExpenses = varExp + maintExp + compExp + (fixedPerMonth * truckMonths) + driverPay;
 				const avgMonthlyGross = Math.round(unitTotalGross / truckMonths);
 				const avgMonthlyExpenses = Math.round(unitTotalExpenses / truckMonths);
-				const odo = odoByDriver[driverName];
-				const totalMiles = (odo?.maxOdo && odo?.minOdo) ? Math.round(odo.maxOdo - odo.minOdo) : 0;
+				// Miles from the haversine accumulators computed in the single-pass
+				// loop above. Prefer truck-column attribution over driver-based
+				// (same fallback pattern as loadCount below).
+				const truckMilesRaw = milesByTruck[unitLower];
+				const totalMiles = Math.round(
+					truckMilesRaw !== undefined ? truckMilesRaw : (milesByDriver[driverName] || 0)
+				);
 
 				// Prefer direct truck-column attribution (loads tagged with this unit
 				// number) over driver-based attribution, which is stale if a driver
@@ -9344,6 +9371,29 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			return dates;
 		}
 
+		// ---- Miles source: load_coordinates table ----
+		// Historical odometer-based miles (max-min from expense rows) was
+		// always $0 because drivers rarely fill in the odometer field. We
+		// use origin→destination haversine from load_coordinates instead.
+		// This is straight-line "as the crow flies" distance, which under-
+		// estimates actual road miles by ~15-25%. Acceptable for a rough
+		// fleet analytics view; a future enhancement could switch to the
+		// Google Maps Distance Matrix API with a cached distance_miles
+		// column on load_coordinates for exact road miles.
+		const milesByLoadId = {};
+		{
+			const coordRows = db.prepare(
+				"SELECT load_id, origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL"
+			).all();
+			for (const c of coordRows) {
+				const meters = geolib.getDistance(
+					{ latitude: c.origin_lat, longitude: c.origin_lng },
+					{ latitude: c.dest_lat, longitude: c.dest_lng }
+				);
+				milesByLoadId[(c.load_id || "").toLowerCase()] = meters / 1609.344;
+			}
+		}
+
 		// ---- Single-pass aggregation across all loads ----
 		let totalRevenue = 0;
 		let earliestDate = null;
@@ -9357,6 +9407,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		let unassignedLoadCount = 0;
 		const completedLoadIds = new Set();  // unique load IDs — used for expense matching
 		const grossByDriver = {};
+		const milesByDriver = {};        // sum of haversine miles per driver
+		const milesByTruck = {};         // sum of haversine miles per truck
+		let fleetTotalMiles = 0;
+		let loadsWithCoords = 0;         // data-quality signal
 		const loadsByDriver = {};
 		const loadsByTruck = {};
 		const driverDaySets = {};
@@ -9393,6 +9447,16 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					} else {
 						unassignedGross += amt;
 						unassignedLoadCount += 1;
+					}
+					// Miles for this load (straight-line from load_coordinates).
+					// Loads without coordinates contribute 0 — counted separately
+					// as loadsWithCoords so the frontend can show coverage %.
+					const loadMiles = milesByLoadId[lid.toLowerCase()] || 0;
+					if (loadMiles > 0) {
+						loadsWithCoords++;
+						fleetTotalMiles += loadMiles;
+						if (driverLc) milesByDriver[driverLc] = (milesByDriver[driverLc] || 0) + loadMiles;
+						if (truckUnit) milesByTruck[truckUnit] = (milesByTruck[truckUnit] || 0) + loadMiles;
 					}
 					// Capture for highest/lowest. Use display name for driver (not lowercase).
 					const dateStr = jtDateCol && r[jtDateCol] ? String(r[jtDateCol]) : "";
@@ -9493,11 +9557,6 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			if (amt > biggest.amount) biggest = { name: catLabels[cat] || cat, amount: Math.round(amt) };
 		}
 
-		// ---- Odometer mileage per driver ----
-		const odoByDriver = Object.fromEntries(
-			db.prepare(`SELECT LOWER(driver) AS d, MIN(odometer) AS minOdo, MAX(odometer) AS maxOdo FROM expenses WHERE odometer > 0 GROUP BY LOWER(driver)`).all().map(r => [r.d, r])
-		);
-
 		// ---- Per-Truck Performance ----
 		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses GROUP BY LOWER(driver)`).all();
 		const expByDriver = Object.fromEntries(expByDriverRows.map(r => [r.d, r.t]));
@@ -9530,8 +9589,13 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			const fixedTotal = fixedPerMonth * truckMonths;
 			const expenses = varExp + maintExp + compExp + fixedTotal + driverPay;
 			const net = gross - expenses;
-			const odo = odoByDriver[driverName];
-			const totalMiles = (odo?.maxOdo && odo?.minOdo) ? Math.round(odo.maxOdo - odo.minOdo) : 0;
+			// Per-truck miles from haversine: prefer truck-column attribution,
+			// fall back to driver attribution for loads that have no truck
+			// column (same pattern as loadCount below).
+			const truckMiles = milesByTruck[unitLower];
+			const totalMiles = Math.round(
+				truckMiles !== undefined ? truckMiles : (milesByDriver[driverName] || 0)
+			);
 			const ratePerMile = totalMiles > 0 ? Math.round((gross / totalMiles) * 100) / 100 : 0;
 			const truckLoadCount = loadsByTruck[unitLower];
 			const loadCount = (truckLoadCount !== undefined) ? truckLoadCount : (loadsByDriver[driverName] || 0);
@@ -9565,10 +9629,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			if (d && !driverDisplayNames[d.toLowerCase()]) driverDisplayNames[d.toLowerCase()] = d;
 		});
 		const drivers = Object.entries(grossByDriver).map(([lcName, gross]) => {
-			const totalMiles = (() => {
-				const odo = odoByDriver[lcName];
-				return (odo?.maxOdo && odo?.minOdo) ? Math.round(odo.maxOdo - odo.minOdo) : 0;
-			})();
+			const totalMiles = Math.round(milesByDriver[lcName] || 0);
 			const pay = driverPayDetails[lcName]?.totalPay || 0;
 			return {
 				name: driverDisplayNames[lcName] || lcName,
@@ -9596,9 +9657,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			});
 		}
 
-		// Fleet-wide avg rate/mile
-		const fleetTotalMiles = Object.values(odoByDriver).reduce((s, o) => s + Math.max(0, (o.maxOdo || 0) - (o.minOdo || 0)), 0);
-		const avgRatePerMile = fleetTotalMiles > 0 ? Math.round((totalRevenue / fleetTotalMiles) * 100) / 100 : 0;
+		// Fleet-wide avg rate/mile — uses the haversine miles accumulated
+		// in the single-pass loop, rounded to whole miles for the summary.
+		const fleetTotalMilesRounded = Math.round(fleetTotalMiles);
+		const avgRatePerMile = fleetTotalMilesRounded > 0
+			? Math.round((totalRevenue / fleetTotalMilesRounded) * 100) / 100
+			: 0;
 
 		res.json({
 			summary: {
@@ -9607,11 +9671,16 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				netProfit: Math.round(netProfit),
 				biggestExpenseCategory: biggest,
 				avgRatePerMile,
-				totalMiles: fleetTotalMiles,
+				totalMiles: fleetTotalMilesRounded,
 				monthsOfOperation,
 				// Row count (not unique load IDs) — consistent with totalRevenue
 				// which also sums per-row, and matches /api/investor.completedJobs.
 				completedLoadCount: completedRowCount,
+				// Miles source: straight-line haversine from load_coordinates.
+				// loadsWithCoords / completedRowCount = coverage — non-100%
+				// means some completed loads have no geocoded pickup/dropoff.
+				milesSource: "haversine",
+				loadsWithCoords,
 				// Data-quality signal: completed revenue from rows with no
 				// assigned driver. Non-zero means the sheet has attribution
 				// gaps the investor should know about.
