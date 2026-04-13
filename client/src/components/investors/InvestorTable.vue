@@ -115,18 +115,33 @@
             <span style="font-size:13px;color:#94a3b8">Loading...</span>
           </div>
           <div v-else-if="detail.application" style="padding:1.25rem 1.5rem;overflow-y:auto;max-height:68vh">
-            <!-- Application Info -->
+            <!-- Company & Business -->
             <div class="detail-section">
-              <div class="detail-section-title"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg> Application Details</div>
+              <div class="detail-section-title"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg> Company &amp; Business</div>
               <div class="detail-grid">
                 <div class="detail-item"><span class="detail-label">Legal Name</span><span class="detail-value">{{ detail.application.legal_name }}</span></div>
                 <div v-if="detail.application.dba" class="detail-item"><span class="detail-label">DBA</span><span class="detail-value">{{ detail.application.dba }}</span></div>
                 <div v-if="detail.application.entity_type" class="detail-item"><span class="detail-label">Entity Type</span><span class="detail-value">{{ detail.application.entity_type }}</span></div>
-                <div class="detail-item full"><span class="detail-label">Address</span><span class="detail-value">{{ detail.application.address }}</span></div>
-                <div v-if="detail.application.contact_person" class="detail-item"><span class="detail-label">Contact Person</span><span class="detail-value">{{ detail.application.contact_person }}</span></div>
-                <div class="detail-item"><span class="detail-label">Phone</span><span class="detail-value">{{ detail.application.phone }}</span></div>
-                <div class="detail-item"><span class="detail-label">Email</span><span class="detail-value">{{ detail.application.email }}</span></div>
+                <div v-if="detail.application.tax_classification" class="detail-item"><span class="detail-label">Tax Classification</span><span class="detail-value">{{ detail.application.tax_classification }}</span></div>
                 <div v-if="detail.application.ein_ssn" class="detail-item"><span class="detail-label">EIN/SSN</span><span class="detail-value">{{ detail.application.ein_ssn }}</span></div>
+                <div v-if="detail.application.years_in_operation" class="detail-item"><span class="detail-label">Years in Operation</span><span class="detail-value">{{ detail.application.years_in_operation }}</span></div>
+                <div v-if="detail.application.industry_experience" class="detail-item"><span class="detail-label">Industry Experience</span><span class="detail-value">{{ detail.application.industry_experience }}</span></div>
+                <div v-if="detail.application.fleet_size" class="detail-item"><span class="detail-label">Fleet Size</span><span class="detail-value">{{ detail.application.fleet_size }}</span></div>
+                <div class="detail-item full"><span class="detail-label">Address</span><span class="detail-value">{{ detail.application.address }}</span></div>
+                <div v-if="detail.application.bankruptcy_liens" class="detail-item full"><span class="detail-label">Bankruptcy / Liens</span><span class="detail-value">{{ detail.application.bankruptcy_liens }}</span></div>
+              </div>
+            </div>
+
+            <!-- Key Contact Person -->
+            <div class="detail-section">
+              <div class="detail-section-title"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> Key Contact</div>
+              <div class="detail-grid">
+                <div v-if="detail.application.contact_person" class="detail-item"><span class="detail-label">Contact Person</span><span class="detail-value">{{ detail.application.contact_person }}</span></div>
+                <div v-if="detail.application.contact_title" class="detail-item"><span class="detail-label">Title</span><span class="detail-value">{{ detail.application.contact_title }}</span></div>
+                <div v-if="detail.application.phone" class="detail-item"><span class="detail-label">Phone</span><span class="detail-value">{{ detail.application.phone }}</span></div>
+                <div v-if="detail.application.email" class="detail-item"><span class="detail-label">Email</span><span class="detail-value">{{ detail.application.email }}</span></div>
+                <div v-if="detail.application.preferred_communication" class="detail-item"><span class="detail-label">Preferred Contact Method</span><span class="detail-value">{{ detail.application.preferred_communication }}</span></div>
+                <div v-if="detail.application.reporting_preference" class="detail-item"><span class="detail-label">Monthly Statement Delivery</span><span class="detail-value">{{ detail.application.reporting_preference }}</span></div>
               </div>
             </div>
             <!-- Fleet -->
