@@ -469,6 +469,11 @@ db.exec(`
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
+// Persistent cache for actual road-distance miles from Google Routes API.
+// Populated via POST /api/admin/backfill-road-distances (one-time per load).
+// Financials / investor endpoints read this column; fall back to haversine
+// on rows where it's still NULL.
+try { db.exec("ALTER TABLE load_coordinates ADD COLUMN distance_miles REAL"); } catch {}
 
 // Drivers directory (replaces Carrier Database Google Sheet)
 db.exec(`
@@ -5218,6 +5223,59 @@ app.post("/api/admin/fix-stale-locations", requireRole("Super Admin"), async (re
 	}
 });
 
+// POST /api/admin/backfill-road-distances — Populate distance_miles on
+// load_coordinates via Google Routes API. Idempotent: skips rows that
+// already have a non-null distance_miles value. Returns a progress report.
+// Safe to call multiple times; re-running only hits the API for rows where
+// backfill has not yet succeeded (so adding new loads later only costs the
+// new rows). Rate-limited to ~5 QPS to stay well under Routes API quotas.
+app.post("/api/admin/backfill-road-distances", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const force = req.query.force === "1" || req.body?.force === true;
+		const limit = Math.min(1000, parseInt(req.query.limit || req.body?.limit) || 500);
+		const sql = force
+			? "SELECT load_id, origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL LIMIT ?"
+			: "SELECT load_id, origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL AND (distance_miles IS NULL OR distance_miles <= 0) LIMIT ?";
+		const rows = db.prepare(sql).all(limit);
+		if (rows.length === 0) {
+			return res.json({ message: "Nothing to backfill — all coordinated loads already have road distance.", updated: 0, skipped: 0, failed: 0 });
+		}
+		const updateStmt = db.prepare("UPDATE load_coordinates SET distance_miles = ? WHERE load_id = ?");
+		let updated = 0;
+		let failed = 0;
+		const errors = [];
+		// Sequential with 200ms delay to stay under Google Routes quota.
+		// 500 rows at 5/s = 100s max — acceptable for a one-time admin op.
+		for (const r of rows) {
+			const from = { latitude: r.origin_lat, longitude: r.origin_lng };
+			const to = { latitude: r.dest_lat, longitude: r.dest_lng };
+			try {
+				const route = await getRoute(from, to);
+				if (route && route.distanceMiles > 0) {
+					updateStmt.run(route.distanceMiles, r.load_id);
+					updated++;
+				} else {
+					failed++;
+					errors.push({ load_id: r.load_id, reason: "no route found" });
+				}
+			} catch (err) {
+				failed++;
+				errors.push({ load_id: r.load_id, reason: err.message });
+			}
+			await new Promise(rs => setTimeout(rs, 200));
+		}
+		res.json({
+			message: `Backfilled ${updated}/${rows.length} load_coordinates rows with road distance.`,
+			updated,
+			failed,
+			errors: errors.slice(0, 20), // cap to keep response small
+		});
+	} catch (error) {
+		console.error("Error in backfill-road-distances:", error.message);
+		res.status(500).json({ error: "Failed to backfill road distances" });
+	}
+});
+
 // Debug: check what the driver endpoint returns (first 2 loads)
 app.get("/api/debug/driver-view/:driverName", requireRole("Super Admin"), async (req, res) => {
 	try {
@@ -8791,21 +8849,25 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
-		// ---- Miles source: load_coordinates table (haversine) ----
-		// Same approach as /api/financials: origin→destination straight-line
-		// distance. Replaces the old odometer-based computation which always
-		// returned 0 because drivers rarely filled in the odometer field.
+		// ---- Miles source: load_coordinates table ----
+		// Prefer cached road distance (Google Routes API, distance_miles
+		// column). Fall back to haversine straight-line when the backfill
+		// hasn't run yet. Same pattern as /api/financials.
 		const milesByLoadId = {};
 		{
 			const coordRows = db.prepare(
-				"SELECT load_id, origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL"
+				"SELECT load_id, origin_lat, origin_lng, dest_lat, dest_lng, distance_miles FROM load_coordinates WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL"
 			).all();
 			for (const c of coordRows) {
-				const meters = geolib.getDistance(
-					{ latitude: c.origin_lat, longitude: c.origin_lng },
-					{ latitude: c.dest_lat, longitude: c.dest_lng }
-				);
-				milesByLoadId[(c.load_id || "").toLowerCase()] = meters / 1609.344;
+				if (c.distance_miles != null && c.distance_miles > 0) {
+					milesByLoadId[(c.load_id || "").toLowerCase()] = c.distance_miles;
+				} else {
+					const meters = geolib.getDistance(
+						{ latitude: c.origin_lat, longitude: c.origin_lng },
+						{ latitude: c.dest_lat, longitude: c.dest_lng }
+					);
+					milesByLoadId[(c.load_id || "").toLowerCase()] = meters / 1609.344;
+				}
 			}
 		}
 
@@ -9372,25 +9434,30 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		// ---- Miles source: load_coordinates table ----
-		// Historical odometer-based miles (max-min from expense rows) was
-		// always $0 because drivers rarely fill in the odometer field. We
-		// use origin→destination haversine from load_coordinates instead.
-		// This is straight-line "as the crow flies" distance, which under-
-		// estimates actual road miles by ~15-25%. Acceptable for a rough
-		// fleet analytics view; a future enhancement could switch to the
-		// Google Maps Distance Matrix API with a cached distance_miles
-		// column on load_coordinates for exact road miles.
+		// Prefer real road distance from Google Routes API (cached in
+		// distance_miles column, populated via /api/admin/backfill-road-
+		// distances). Fall back to haversine straight-line for any row
+		// where the backfill hasn't run yet. Old odometer-based miles
+		// were always $0 because drivers rarely filled the odometer field.
 		const milesByLoadId = {};
+		let roadMilesCount = 0;
+		let haversineMilesCount = 0;
 		{
 			const coordRows = db.prepare(
-				"SELECT load_id, origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL"
+				"SELECT load_id, origin_lat, origin_lng, dest_lat, dest_lng, distance_miles FROM load_coordinates WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL"
 			).all();
 			for (const c of coordRows) {
-				const meters = geolib.getDistance(
-					{ latitude: c.origin_lat, longitude: c.origin_lng },
-					{ latitude: c.dest_lat, longitude: c.dest_lng }
-				);
-				milesByLoadId[(c.load_id || "").toLowerCase()] = meters / 1609.344;
+				if (c.distance_miles != null && c.distance_miles > 0) {
+					milesByLoadId[(c.load_id || "").toLowerCase()] = c.distance_miles;
+					roadMilesCount++;
+				} else {
+					const meters = geolib.getDistance(
+						{ latitude: c.origin_lat, longitude: c.origin_lng },
+						{ latitude: c.dest_lat, longitude: c.dest_lng }
+					);
+					milesByLoadId[(c.load_id || "").toLowerCase()] = meters / 1609.344;
+					haversineMilesCount++;
+				}
 			}
 		}
 
@@ -9682,10 +9749,16 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				// Row count (not unique load IDs) — consistent with totalRevenue
 				// which also sums per-row, and matches /api/investor.completedJobs.
 				completedLoadCount: completedRowCount,
-				// Miles source: straight-line haversine from load_coordinates.
-				// loadsWithCoords / completedRowCount = coverage — non-100%
-				// means some completed loads have no geocoded pickup/dropoff.
-				milesSource: "haversine",
+				// Miles source breakdown: "road" if every coord row has a
+				// cached Google Routes distance, "haversine" if none do,
+				// "mixed" if some do. loadsWithCoords / completedRowCount =
+				// coverage — non-100% means some completed loads have no
+				// geocoded pickup/dropoff yet.
+				milesSource: roadMilesCount > 0 && haversineMilesCount === 0
+					? "road"
+					: roadMilesCount === 0 ? "haversine" : "mixed",
+				roadMilesLoadCount: roadMilesCount,
+				haversineLoadCount: haversineMilesCount,
 				loadsWithCoords,
 				// Data-quality signal: completed revenue from rows with no
 				// assigned driver. Non-zero means the sheet has attribution
