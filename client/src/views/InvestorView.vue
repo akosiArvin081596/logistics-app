@@ -6,7 +6,7 @@
         <div class="hero-identity">
           <label v-if="canEditPicture" class="hero-avatar-wrap" :class="{ 'hero-avatar-uploading': picUploading }" title="Click to change profile picture">
             <img v-if="investorPicture" :src="investorPicture" class="hero-avatar-img" alt="Profile picture" />
-            <div v-else class="hero-avatar-initials">{{ investorInitials }}</div>
+            <div v-else class="hero-avatar-initials"><AvatarPlaceholder /></div>
             <div class="hero-avatar-overlay">
               <svg v-if="!picUploading" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
               <div v-else class="hero-spinner"></div>
@@ -95,6 +95,7 @@ import LegalDocumentPortal from '../components/investor/LegalDocumentPortal.vue'
 import MyTrucks from '../components/investor/MyTrucks.vue'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
+import AvatarPlaceholder from '../components/shared/AvatarPlaceholder.vue'
 
 const store = useInvestorStore()
 const authStore = useAuthStore()
@@ -111,15 +112,6 @@ const picUploading = ref(false)
 const investorRecord = computed(() => store.data?.investor || null)
 const investorPicture = computed(() => investorRecord.value?.profilePictureUrl || '')
 const canEditPicture = computed(() => authStore.user?.role === 'Investor' && !!investorRecord.value?.id)
-const investorInitials = computed(() => {
-  const name = authStore.user?.companyName || authStore.user?.fullName || authStore.user?.username || '?'
-  return name
-    .split(/\s+/)
-    .map(w => w[0])
-    .join('')
-    .toUpperCase()
-    .slice(0, 2)
-})
 
 async function onPicChange(event) {
   const file = event.target.files?.[0]

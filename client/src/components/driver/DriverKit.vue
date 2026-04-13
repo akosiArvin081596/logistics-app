@@ -8,7 +8,7 @@
       <div class="kit-header">
         <label class="kit-avatar-wrap" :class="{ 'kit-avatar-uploading': uploading }" :title="canUpload ? 'Click to change profile picture' : ''">
           <img v-if="profilePictureUrl" :src="profilePictureUrl" class="kit-avatar-img" alt="Profile picture" />
-          <div v-else class="kit-avatar">{{ initials(displayName) }}</div>
+          <div v-else class="kit-avatar"><AvatarPlaceholder /></div>
           <div v-if="canUpload" class="kit-avatar-overlay">
             <svg v-if="!uploading" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
             <div v-else class="kit-spinner"></div>
@@ -117,6 +117,7 @@ import { computed, ref } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
+import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 
 const api = useApi()
 const driverStore = useDriverStore()
@@ -239,14 +240,6 @@ const visibleRows = computed(() => {
     .map((h) => ({ key: h, value: props.driverInfo[h] }))
 })
 
-function initials(name) {
-  return (name || '?')
-    .split(/\s+/)
-    .map((w) => w[0])
-    .join('')
-    .toUpperCase()
-    .slice(0, 2)
-}
 
 function isUrl(val) {
   return /^https?:\/\//i.test(val || '')

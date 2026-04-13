@@ -97,7 +97,7 @@
             <div style="display:flex;align-items:center;gap:1rem;flex:1;min-width:0">
               <label class="inv-avatar-wrap" :class="{ 'inv-avatar-uploading': picUploading }" title="Click to change profile picture">
                 <img v-if="detail.profilePictureUrl" :src="detail.profilePictureUrl" class="inv-avatar-img" alt="Profile picture" />
-                <div v-else class="inv-avatar-initials">{{ modalInitials }}</div>
+                <div v-else class="inv-avatar-initials"><AvatarPlaceholder /></div>
                 <div class="inv-avatar-overlay">
                   <svg v-if="!picUploading" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                   <div v-else class="inv-spinner"></div>
@@ -207,10 +207,11 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive } from 'vue'
 import { useApi } from '../../composables/useApi'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 
 const props = defineProps({
@@ -230,16 +231,6 @@ const selectedInvestorId = ref(0)
 const detailLoading = ref(false)
 const detail = reactive({ application: null, vehicles: [], banking: {}, documents: [], profilePictureUrl: '', fullName: '' })
 const picUploading = ref(false)
-
-const modalInitials = computed(() => {
-  const name = detail.application?.legal_name || detail.fullName || '?'
-  return name
-    .split(/\s+/)
-    .map(w => w[0])
-    .join('')
-    .toUpperCase()
-    .slice(0, 2)
-})
 
 async function viewDetail(inv) {
   selectedInvestorId.value = inv.id
