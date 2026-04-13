@@ -14,7 +14,7 @@
           <th>Unit</th>
           <th>Make / Model</th>
           <th>Status</th>
-          <th>Driver</th>
+          <th>Current Driver</th>
           <th>Loads</th>
           <th>Miles</th>
           <th>Est. Your Revenue</th>

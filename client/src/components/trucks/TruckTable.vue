@@ -16,7 +16,7 @@
           <th>VIN</th>
           <th>Plate</th>
           <th>Status</th>
-          <th>Driver</th>
+          <th>Current Driver</th>
           <th>Loads</th>
           <th v-if="showOwner">Owner</th>
           <th v-if="canEdit"></th>
@@ -210,7 +210,7 @@
           <div class="view-row"><span class="view-label">VIN</span><span>{{ viewTruck.VIN || '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">License Plate</span><span>{{ viewTruck.LicensePlate || '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Status</span><span :class="['status-badge', statusClass(viewTruck.Status)]">{{ viewTruck.Status }}</span></div>
-          <div class="view-row"><span class="view-label">Assigned Driver</span><span>{{ viewTruck.AssignedDriver || '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Current Driver</span><span>{{ viewTruck.AssignedDriver || '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Completed Loads</span><span>{{ viewTruck.LoadCount ?? 0 }}</span></div>
           <div v-if="showOwner" class="view-row"><span class="view-label">Owner</span><span>{{ ownerName(viewTruck.OwnerId) }}</span></div>
           <div class="view-row"><span class="view-label">Purchase Price</span><span>{{ viewTruck.PurchasePrice ? '$' + Number(viewTruck.PurchasePrice).toLocaleString() : '\u2014' }}</span></div>

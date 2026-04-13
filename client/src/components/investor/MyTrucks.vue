@@ -35,7 +35,7 @@
           <th>Model</th>
           <th>VIN</th>
           <th>Status</th>
-          <th>Driver</th>
+          <th>Current Driver</th>
           <th>Loads</th>
         </tr>
       </thead>
