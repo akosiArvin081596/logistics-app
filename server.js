@@ -9290,6 +9290,312 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 	}
 });
 
+// GET /api/financials — Super Admin financials dashboard (P1-1 from 2026-04-12 meeting)
+// Deshorn asked for a financial overview tab showing expense categories, highest/lowest
+// loads, per-truck macro view, rate-per-mile, and a driver earnings leaderboard. Reuses
+// the job-tracking cache + the same aggregation primitives as /api/investor but without
+// the investor-owner filter (Super Admin sees the whole fleet).
+app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const jobTracking = await getJobTrackingCached();
+
+		// Column resolution (same regex as investor endpoint)
+		const jtRateCol = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
+		const jtDateCol = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i)
+			|| findCol(jobTracking.headers, /date/i);
+		const jtDriverCol = findCol(jobTracking.headers, /^driver$/i);
+		const jtTruckCol = findCol(jobTracking.headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
+		// Intentionally stricter than /api/investor's /status/i so we never
+		// accidentally match "Status Update Date". Production sheet uses
+		// "Job Status" as the actual header, which is handled here. Same
+		// fix pattern as the P0-8 invoice endpoint regex.
+		const statusCol = findCol(jobTracking.headers, /^(job[\s._-]?)?status$/i);
+		const pickupDateCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
+		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
+		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
+		const completedStatuses = /^(delivered|completed|pod received)$/i;
+		const activeWorkStatuses = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
+
+		function parseSheetDate(val) {
+			if (!val) return null;
+			const m = String(val).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+			if (!m) return null;
+			let yr = parseInt(m[3]);
+			if (yr < 100) yr += 2000;
+			const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
+			return isNaN(d) ? null : d;
+		}
+		function fmtDate(d) {
+			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+		}
+		function expandDateRange(start, end) {
+			const dates = [];
+			const s = new Date(start); s.setHours(12, 0, 0, 0);
+			const e = end ? new Date(end) : new Date(start);
+			e.setHours(12, 0, 0, 0);
+			if (e < s) return [fmtDate(s)];
+			const MAX_SPAN = 31 * 24 * 3600 * 1000;
+			if (e - s > MAX_SPAN) e.setTime(s.getTime() + MAX_SPAN);
+			const cur = new Date(s);
+			while (cur <= e) {
+				dates.push(fmtDate(cur));
+				cur.setDate(cur.getDate() + 1);
+			}
+			return dates;
+		}
+
+		// ---- Single-pass aggregation across all loads ----
+		let totalRevenue = 0;
+		let earliestDate = null;
+		let latestDate = null;
+		const completedLoadIds = new Set();
+		const grossByDriver = {};
+		const loadsByDriver = {};
+		const loadsByTruck = {};
+		const driverDaySets = {};
+		const completedLoads = []; // for highest/lowest — store minimal fields
+		const now = new Date();
+
+		jobTracking.data.forEach((r) => {
+			const st = statusCol ? (r[statusCol] || "").trim() : "";
+			const driver = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
+			const driverLc = driver.toLowerCase();
+			const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
+
+			// Operating period
+			if (jtDateCol && r[jtDateCol]) {
+				const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				if (d && !isNaN(d)) {
+					if (!earliestDate || d < earliestDate) earliestDate = d;
+					if (!latestDate || d > latestDate) latestDate = d;
+				}
+			}
+
+			// Revenue + completed-load list
+			if (completedStatuses.test(st)) {
+				if (driverLc) loadsByDriver[driverLc] = (loadsByDriver[driverLc] || 0) + 1;
+				if (truckUnit) loadsByTruck[truckUnit] = (loadsByTruck[truckUnit] || 0) + 1;
+				const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
+				if (amt) {
+					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
+					if (lid) completedLoadIds.add(lid);
+					totalRevenue += amt;
+					if (driverLc) grossByDriver[driverLc] = (grossByDriver[driverLc] || 0) + amt;
+					// Capture for highest/lowest. Use display name for driver (not lowercase).
+					const dateStr = jtDateCol && r[jtDateCol] ? String(r[jtDateCol]) : "";
+					completedLoads.push({
+						loadId: lid || `#${completedLoads.length + 1}`,
+						driver: driver || "(unknown)",
+						amount: amt,
+						date: dateStr,
+					});
+				}
+			}
+
+			// Active-day sets for driver pay
+			if (activeWorkStatuses.test(st) && driverLc) {
+				const pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
+				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
+				if (pickup) {
+					const days = expandDateRange(pickup, dropoff || pickup);
+					if (!driverDaySets[driverLc]) driverDaySets[driverLc] = new Set();
+					days.forEach(d => driverDaySets[driverLc].add(d));
+				}
+			}
+		});
+
+		let monthsOfOperation = 1;
+		if (earliestDate && latestDate) {
+			monthsOfOperation = Math.max(1,
+				(latestDate.getFullYear() - earliestDate.getFullYear()) * 12
+				+ (latestDate.getMonth() - earliestDate.getMonth()) + 1
+			);
+		}
+
+		// ---- Expense totals (entire fleet, no filter) ----
+		const expByCategory = Object.fromEntries(
+			db.prepare(`SELECT LOWER(type) AS cat, COALESCE(SUM(amount),0) AS t FROM expenses GROUP BY LOWER(type)`).all().map(r => [r.cat || "other", r.t])
+		);
+		const totalTripExpenses = Object.values(expByCategory).reduce((s, v) => s + v, 0);
+
+		// Monthly expenses by category
+		const monthlyCategoryRows = db.prepare(
+			`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount),0) AS t
+			 FROM expenses WHERE date IS NOT NULL AND date != '' GROUP BY m, LOWER(type) ORDER BY m ASC`
+		).all();
+		const expensesByMonthMap = {};
+		monthlyCategoryRows.forEach(r => {
+			if (!r.m) return;
+			if (!expensesByMonthMap[r.m]) expensesByMonthMap[r.m] = { month: r.m, fuel: 0, maintenance: 0, repair: 0, toll: 0, food: 0, other: 0 };
+			const key = (r.cat in expensesByMonthMap[r.m]) ? r.cat : "other";
+			expensesByMonthMap[r.m][key] += r.t;
+		});
+		const expensesByMonth = Object.values(expensesByMonthMap);
+
+		// Maintenance fund + compliance fees (truck-level) roll into totalExpenses
+		const maintSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service'`).get().t;
+		const compSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid'`).get().t;
+
+		// ---- Driver pay from active-day sets ----
+		const trucksByDriver = {};
+		db.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {
+			const d = (t.assigned_driver || "").trim().toLowerCase();
+			if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
+		});
+		const driverPayDetails = {};
+		let totalDriverPay = 0;
+		for (const [driver, daySet] of Object.entries(driverDaySets)) {
+			const rate = trucksByDriver[driver] || 250;
+			const activeDays = daySet.size;
+			const pay = activeDays * rate;
+			totalDriverPay += pay;
+			driverPayDetails[driver] = { activeDays, dailyRate: rate, totalPay: pay };
+		}
+
+		// ---- Truck fixed costs ----
+		const allTrucks = db.prepare("SELECT * FROM trucks").all();
+		let totalFixedCosts = 0;
+		for (const t of allTrucks) {
+			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
+				+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12)
+				+ (t.maintenance_fund_monthly || 0);
+			let truckMonths = monthsOfOperation;
+			if (t.created_at) {
+				const td = new Date(t.created_at);
+				if (!isNaN(td)) {
+					truckMonths = Math.max(1, (now.getFullYear() - td.getFullYear()) * 12 + (now.getMonth() - td.getMonth()) + 1);
+					truckMonths = Math.min(truckMonths, monthsOfOperation);
+				}
+			}
+			totalFixedCosts += perMonth * truckMonths;
+		}
+
+		const totalExpenses = totalTripExpenses + maintSum + compSum + totalDriverPay + totalFixedCosts;
+		const netProfit = totalRevenue - totalExpenses;
+
+		// ---- Biggest expense category (compared across fuel/maint/repair/tolls/other) ----
+		const catLabels = { fuel: "Fuel", maintenance: "Maintenance", repair: "Repair", toll: "Tolls", food: "Food", other: "Other" };
+		let biggest = { name: "—", amount: 0 };
+		for (const [cat, amt] of Object.entries(expByCategory)) {
+			if (amt > biggest.amount) biggest = { name: catLabels[cat] || cat, amount: Math.round(amt) };
+		}
+
+		// ---- Odometer mileage per driver ----
+		const odoByDriver = Object.fromEntries(
+			db.prepare(`SELECT LOWER(driver) AS d, MIN(odometer) AS minOdo, MAX(odometer) AS maxOdo FROM expenses WHERE odometer > 0 GROUP BY LOWER(driver)`).all().map(r => [r.d, r])
+		);
+
+		// ---- Per-Truck Performance ----
+		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses GROUP BY LOWER(driver)`).all();
+		const expByDriver = Object.fromEntries(expByDriverRows.map(r => [r.d, r.t]));
+		const maintByTruck = Object.fromEntries(
+			db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' GROUP BY LOWER(truck)`).all().map(r => [r.u, r.t])
+		);
+		const compByTruck = Object.fromEntries(
+			db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' GROUP BY LOWER(truck)`).all().map(r => [r.u, r.t])
+		);
+
+		const perTruck = allTrucks.map((truck) => {
+			const driverName = (truck.assigned_driver || "").trim().toLowerCase();
+			const unitLower = (truck.unit_number || "").toLowerCase();
+			const gross = grossByDriver[driverName] || 0;
+			const varExp = expByDriver[driverName] || 0;
+			const maintExp = maintByTruck[unitLower] || 0;
+			const compExp = compByTruck[unitLower] || 0;
+			const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0)
+				+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12)
+				+ (truck.maintenance_fund_monthly || 0);
+			let truckMonths = monthsOfOperation;
+			if (truck.created_at) {
+				const td = new Date(truck.created_at);
+				if (!isNaN(td)) {
+					truckMonths = Math.max(1, (now.getFullYear() - td.getFullYear()) * 12 + (now.getMonth() - td.getMonth()) + 1);
+					truckMonths = Math.min(truckMonths, monthsOfOperation);
+				}
+			}
+			const driverPay = driverPayDetails[driverName]?.totalPay || 0;
+			const fixedTotal = fixedPerMonth * truckMonths;
+			const expenses = varExp + maintExp + compExp + fixedTotal + driverPay;
+			const net = gross - expenses;
+			const odo = odoByDriver[driverName];
+			const totalMiles = (odo?.maxOdo && odo?.minOdo) ? Math.round(odo.maxOdo - odo.minOdo) : 0;
+			const ratePerMile = totalMiles > 0 ? Math.round((gross / totalMiles) * 100) / 100 : 0;
+			const truckLoadCount = loadsByTruck[unitLower];
+			const loadCount = (truckLoadCount !== undefined) ? truckLoadCount : (loadsByDriver[driverName] || 0);
+			return {
+				unitNumber: truck.unit_number,
+				assignedDriver: truck.assigned_driver || "—",
+				loadCount,
+				gross: Math.round(gross),
+				expenses: Math.round(expenses),
+				net: Math.round(net),
+				totalMiles,
+				ratePerMile,
+				monthlyCost: Math.round(fixedPerMonth),
+			};
+		});
+
+		// ---- Highest + lowest paying loads ----
+		// Guard against fewer than 10 completed loads: sliceStart below ensures
+		// the "lowest" window never overlaps the "highest" window so a single
+		// load never appears in both lists when the fleet is young.
+		const sortedLoads = [...completedLoads].sort((a, b) => b.amount - a.amount);
+		const highest = sortedLoads.slice(0, 5).map(l => ({ loadId: l.loadId, driver: l.driver, amount: Math.round(l.amount), date: l.date }));
+		const lowestStart = Math.max(5, sortedLoads.length - 5);
+		const lowest = sortedLoads.slice(lowestStart).reverse().map(l => ({ loadId: l.loadId, driver: l.driver, amount: Math.round(l.amount), date: l.date }));
+
+		// ---- Driver earnings leaderboard ----
+		// Use the driver's display name from the first row they appear in rather than lowercase
+		const driverDisplayNames = {};
+		jobTracking.data.forEach(r => {
+			const d = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
+			if (d && !driverDisplayNames[d.toLowerCase()]) driverDisplayNames[d.toLowerCase()] = d;
+		});
+		const drivers = Object.entries(grossByDriver).map(([lcName, gross]) => {
+			const totalMiles = (() => {
+				const odo = odoByDriver[lcName];
+				return (odo?.maxOdo && odo?.minOdo) ? Math.round(odo.maxOdo - odo.minOdo) : 0;
+			})();
+			const pay = driverPayDetails[lcName]?.totalPay || 0;
+			return {
+				name: driverDisplayNames[lcName] || lcName,
+				totalEarnings: Math.round(pay), // what the driver earned (their take)
+				grossRevenue: Math.round(gross), // revenue the driver generated
+				loadCount: loadsByDriver[lcName] || 0,
+				totalMiles,
+				avgRatePerMile: totalMiles > 0 ? Math.round((gross / totalMiles) * 100) / 100 : 0,
+			};
+		}).sort((a, b) => b.grossRevenue - a.grossRevenue);
+
+		// Fleet-wide avg rate/mile
+		const fleetTotalMiles = Object.values(odoByDriver).reduce((s, o) => s + Math.max(0, (o.maxOdo || 0) - (o.minOdo || 0)), 0);
+		const avgRatePerMile = fleetTotalMiles > 0 ? Math.round((totalRevenue / fleetTotalMiles) * 100) / 100 : 0;
+
+		res.json({
+			summary: {
+				totalRevenue: Math.round(totalRevenue),
+				totalExpenses: Math.round(totalExpenses),
+				netProfit: Math.round(netProfit),
+				biggestExpenseCategory: biggest,
+				avgRatePerMile,
+				totalMiles: fleetTotalMiles,
+				monthsOfOperation,
+				completedLoadCount: completedLoadIds.size,
+			},
+			expensesByCategory: Object.fromEntries(
+				Object.entries(expByCategory).map(([k, v]) => [k, Math.round(v)])
+			),
+			expensesByMonth,
+			perTruck,
+			loads: { highest, lowest },
+			drivers,
+		});
+	} catch (error) {
+		console.error("GET /api/financials error:", error.message);
+		res.status(500).json({ error: "Failed to load financials" });
+	}
+});
+
 // PUT /api/investor/config — Admin: update investor config
 app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, res) => {
 	try {
