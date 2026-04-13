@@ -78,13 +78,17 @@
                     <span class="bd-val"></span>
                   </div>
                   <div class="bd-row total">
-                    <span>Est. Annual Revenue</span>
+                    <span>Est. Your Annual Take-Home</span>
                     <span class="bd-val" style="color:var(--blue)">{{ fmt(t.estRevenue) }}</span>
                   </div>
                   <div class="bd-divider"></div>
                   <div class="bd-row">
                     <span>ROI ({{ fmt(t.estRevenue) }} / {{ fmt(truckPrice(t)) }})</span>
                     <span class="bd-val" :style="{color: t.roi >= 0 ? 'var(--accent)' : 'var(--danger)'}">{{ t.roi >= 0 ? '+' : '' }}{{ t.roi.toFixed(1) }}%</span>
+                  </div>
+                  <div v-if="t.breakEvenMonths" class="bd-row">
+                    <span>Break-even</span>
+                    <span class="bd-val">{{ t.breakEvenMonths }} months</span>
                   </div>
                 </div>
               </div>

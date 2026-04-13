@@ -26,6 +26,18 @@
       {{ generating ? 'Generating...' : 'Generate Weekly Invoice' }}
     </button>
 
+    <!-- Visible error banner so failures don't get silently swallowed by a
+         disappearing toast. Shows the exact message from the server. -->
+    <div v-if="generateError" class="generate-error">
+      <div class="generate-error-title">
+        <span class="warning-dot">&#9888;</span> Couldn't generate invoice
+      </div>
+      <div class="generate-error-msg">{{ generateError }}</div>
+      <div class="generate-error-hint">
+        Tip: try a different week using the arrows above if this week has no completed loads yet.
+      </div>
+    </div>
+
     <!-- Invoice history -->
     <div class="section-header" style="margin-top: 1rem;">
       Invoice History
@@ -78,6 +90,7 @@ const driverStore = useDriverStore()
 const { show: toast } = useToast()
 
 const generating = ref(false)
+const generateError = ref('')
 const submitting = ref(false)
 const showActions = ref(false)
 const selectedInvoice = ref(null)
@@ -122,6 +135,7 @@ function formatWeekDate(dateStr) {
 
 async function handleGenerate() {
   generating.value = true
+  generateError.value = ''
   try {
     const result = await driverStore.generateInvoice(weekEnd.value)
     if (result.isLate) {
@@ -130,7 +144,11 @@ async function handleGenerate() {
       toast('Invoice generated successfully', 'success')
     }
   } catch (err) {
-    const msg = err?.response?.error || err.message || 'Failed to generate invoice'
+    // useApi wraps server errors into an Error with .message set to
+    // the server's { error: ... } string. Surface it verbatim in the
+    // inline banner so the driver can see why generation failed.
+    const msg = err?.message || err?.response?.error || 'Failed to generate invoice'
+    generateError.value = msg
     toast(msg, 'error')
   } finally {
     generating.value = false
@@ -216,6 +234,34 @@ async function handleSubmit() {
   cursor: pointer;
 }
 .generate-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.generate-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  margin-top: 0.75rem;
+  color: #b91c1c;
+}
+.generate-error-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+.warning-dot { font-size: 1rem; }
+.generate-error-msg {
+  font-size: 0.8rem;
+  line-height: 1.4;
+  margin-bottom: 0.35rem;
+}
+.generate-error-hint {
+  font-size: 0.72rem;
+  color: #991b1b;
+  opacity: 0.85;
+  font-style: italic;
+}
 .invoice-list {
   display: flex;
   flex-direction: column;

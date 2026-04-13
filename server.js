@@ -3419,7 +3419,11 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		});
 
 		const driverCol = headers.find(h => /driver/i.test(h));
-		const statusCol = headers.find(h => /^status$/i.test(h));
+		// Match "Job Status" as well as plain "Status" — the production sheet
+		// uses "Job Status" while the anchored /^status$/i from before did
+		// not match it, causing statusCol to be undefined and the whole
+		// week filter to reject every row with "No completed loads".
+		const statusCol = headers.find(h => /^(job[\s._-]?)?status$/i.test(h));
 		const loadIdCol = headers.find(h => /load.?id|job.?id/i.test(h));
 		const dateCol = headers.find(h => /status.*update.*date|completion.*date|drop.?off.*date|deliv.*date/i.test(h))
 			|| headers.find(h => /date/i.test(h));

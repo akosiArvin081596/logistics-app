@@ -20,8 +20,9 @@
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Break-Even</div>
-        <div class="kpi-value">{{ breakEvenMonths }} mo</div>
-        <div class="kpi-sub">est. {{ breakEvenDate }}</div>
+        <div class="kpi-value">{{ typeof breakEvenMonths === 'number' ? `${breakEvenMonths} mo` : 'N/A' }}</div>
+        <div v-if="breakEvenDate" class="kpi-sub">est. {{ breakEvenDate }}</div>
+        <div v-else class="kpi-sub">need more data</div>
         <div class="kpi-formula">= purchasePrice / avg monthly take-home</div>
       </div>
       <div class="kpi-card" :class="roiPct >= 0 ? 'accent' : 'danger'">
@@ -65,12 +66,9 @@ const props = defineProps({
 
 const totalRevenue = computed(() => props.production?.totalRevenue || 0)
 const totalExpenses = computed(() => props.production?.totalExpenses || 0)
-const netRevenueToDate = computed(() => props.production?.netRevenueToDate || 0)
 const totalPurchasePrice = computed(() => props.production?.totalPurchasePrice || 0)
-const totalStartupExpenses = computed(() => props.production?.totalStartupExpenses || 0)
 // Investor-take-home fields from the new backend aggregates.
 const investorNetToDate = computed(() => props.production?.investorNetToDate || 0)
-const avgMonthlyInvestorEarnings = computed(() => props.production?.avgMonthlyInvestorEarnings || 0)
 const trailing3MonthInvestor = computed(() => props.production?.trailing3MonthInvestor || 0)
 
 // Net Cash Flow = revenue - actual expenses from server (fleet-level, not yet split)
