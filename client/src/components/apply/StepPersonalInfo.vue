@@ -56,6 +56,7 @@
     <div class="upload-section">
       <label class="field-label">CDL &amp; Medical Card Uploads <span class="req">*</span></label>
       <p class="upload-hint">Upload clear photos or PDFs of your CDL (front and back) and medical card</p>
+      <p class="upload-tip">Tip: for the clearest result, use a photo at least 800&times;500 pixels. Smaller images still work but may look blurry in the printed PDF.</p>
       <div class="upload-grid">
         <div class="upload-card" @click="$refs.cdlFrontInput.click()">
           <input ref="cdlFrontInput" type="file" accept="image/*,.pdf" hidden @change="handleFile($event, 'cdl_front')" />
@@ -94,6 +95,11 @@
           </template>
         </div>
       </div>
+      <template v-for="(msg, field) in lowResWarnings" :key="field">
+        <div v-if="msg" class="upload-warning">
+          <span class="warning-dot">&#9888;</span> {{ uploadLabel(field) }}: {{ msg }}
+        </div>
+      </template>
     </div>
 
     <div class="field">
@@ -115,6 +121,11 @@ const hazmatOpts = ['Yes', 'No']
 const addressInput = ref(null)
 const geolocating = ref(false)
 const fileTypes = reactive({ cdl_front: false, cdl_back: false, medical_card: false })
+// Inline, non-blocking warnings for low-resolution uploads.
+// Populated by handleFile() and rendered under the upload grid.
+const lowResWarnings = reactive({ cdl_front: '', cdl_back: '', medical_card: '' })
+const UPLOAD_LABELS = { cdl_front: 'CDL Front', cdl_back: 'CDL Back', medical_card: 'Medical Card' }
+function uploadLabel(field) { return UPLOAD_LABELS[field] || field }
 
 function parseAddressComponents(components) {
   const out = { city: '', state: '', zip: '' }
@@ -167,6 +178,7 @@ function handleFile(event, field) {
   const file = event.target.files[0]
   if (!file) return
   fileTypes[field] = file.type === 'application/pdf'
+  lowResWarnings[field] = '' // clear any previous warning
   if (file.type === 'application/pdf') {
     const reader = new FileReader()
     reader.onload = (e) => { props.form[field] = e.target.result }
@@ -177,11 +189,9 @@ function handleFile(event, field) {
   img.onload = () => {
     const nativeW = img.naturalWidth
     const nativeH = img.naturalHeight
-    // Reject images that are too small — upscaling produces pixelated PDFs.
+    // Low-res images are accepted but flagged inline (no blocking alert).
     if (nativeW < MIN_W || nativeH < MIN_H) {
-      alert(`Image is too small — the file you uploaded is ${nativeW}\u00D7${nativeH}px.\nPlease upload a clearer photo at least ${MIN_W}\u00D7${MIN_H}px so it stays readable.`)
-      event.target.value = ''
-      return
+      lowResWarnings[field] = `This image is ${nativeW}\u00D7${nativeH}px. For best readability in the printed PDF, try a photo at least ${MIN_W}\u00D7${MIN_H}px if you have one.`
     }
     // Only scale DOWN for large files — never up. Preserves aspect ratio.
     let width = nativeW
@@ -197,7 +207,10 @@ function handleFile(event, field) {
     canvas.getContext('2d').drawImage(img, 0, 0, width, height)
     props.form[field] = canvas.toDataURL('image/jpeg', 0.92)
   }
-  img.onerror = () => { alert('Could not read that image. Please try a different file.') }
+  img.onerror = () => {
+    lowResWarnings[field] = 'Could not read that image. Please try a different file.'
+    event.target.value = ''
+  }
   img.src = URL.createObjectURL(file)
 }
 
@@ -250,7 +263,15 @@ function initAutocomplete() {
 .field-hint { font-size: 0.72rem; color: #9ca3af; margin: 0.35rem 0 0; }
 .opt { font-weight: 400; color: #9ca3af; font-size: 0.72rem; margin-left: 0.25rem; }
 .upload-section { margin-bottom: 1.1rem; }
-.upload-hint { font-size: 0.78rem; color: #9ca3af; margin: 0.25rem 0 0.75rem; }
+.upload-hint { font-size: 0.78rem; color: #9ca3af; margin: 0.25rem 0 0.25rem; }
+.upload-tip { font-size: 0.72rem; color: #64748b; margin: 0 0 0.75rem; line-height: 1.4; font-style: italic; }
+.upload-warning {
+  font-size: 0.75rem; color: #b45309;
+  background: #fffbeb; border: 1px solid #fde68a;
+  border-radius: 6px; padding: 0.5rem 0.65rem; margin-top: 0.5rem;
+  display: flex; align-items: flex-start; gap: 0.4rem; line-height: 1.4;
+}
+.warning-dot { flex-shrink: 0; font-size: 0.88rem; }
 .upload-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; }
 .upload-card {
   border: 2px dashed #e2e4ea;

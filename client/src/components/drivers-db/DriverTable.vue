@@ -88,6 +88,31 @@
             </div>
           </div>
 
+          <!-- Original Application Details — everything the driver submitted -->
+          <div v-if="docsData.application" class="docs-section">
+            <div class="docs-title">Application Details</div>
+            <div class="app-grid">
+              <div v-if="docsData.application.dob" class="app-item"><span class="app-label">Date of Birth</span><span>{{ docsData.application.dob }}</span></div>
+              <div v-if="docsData.application.drivers_license" class="app-item"><span class="app-label">Driver's License #</span><span>{{ docsData.application.drivers_license }}</span></div>
+              <div v-if="docsData.application.position" class="app-item"><span class="app-label">Position Applied For</span><span>{{ docsData.application.position }}</span></div>
+              <div v-if="docsData.application.experience" class="app-item"><span class="app-label">Experience Level</span><span>{{ docsData.application.experience }}</span></div>
+              <div v-if="docsData.application.has_cdl" class="app-item"><span class="app-label">Has CDL</span><span>{{ docsData.application.has_cdl }}</span></div>
+              <div v-if="docsData.application.work_authorized" class="app-item"><span class="app-label">Work Authorized</span><span>{{ docsData.application.work_authorized }}</span></div>
+              <div v-if="docsData.application.felony_convicted" class="app-item"><span class="app-label">Felony Convicted</span><span>{{ docsData.application.felony_convicted }}</span></div>
+              <div v-if="docsData.application.felony_explanation" class="app-item full"><span class="app-label">Felony Explanation</span><span>{{ docsData.application.felony_explanation }}</span></div>
+              <div v-if="docsData.application.accident_history" class="app-item"><span class="app-label">Accident History</span><span>{{ docsData.application.accident_history }}</span></div>
+              <div v-if="docsData.application.accident_description" class="app-item full"><span class="app-label">Accident Description</span><span>{{ docsData.application.accident_description }}</span></div>
+              <div v-if="docsData.application.traffic_citations" class="app-item full"><span class="app-label">Traffic Citations</span><span>{{ docsData.application.traffic_citations }}</span></div>
+              <div v-if="docsData.application.certifications" class="app-item full"><span class="app-label">Certifications / Endorsements</span><span>{{ docsData.application.certifications }}</span></div>
+              <div v-if="docsData.application.availability" class="app-item"><span class="app-label">Availability</span><span>{{ docsData.application.availability }}</span></div>
+              <div v-if="docsData.application.skills" class="app-item full"><span class="app-label">Skills</span><span>{{ docsData.application.skills }}</span></div>
+              <div v-if="docsData.application.reference_info" class="app-item full"><span class="app-label">References</span><span class="prewrap">{{ docsData.application.reference_info }}</span></div>
+              <div v-if="docsData.application.additional_info" class="app-item full"><span class="app-label">Additional Info</span><span class="prewrap">{{ docsData.application.additional_info }}</span></div>
+              <div v-if="docsData.application.signature" class="app-item"><span class="app-label">Signature</span><span>{{ docsData.application.signature }}</span></div>
+              <div v-if="docsData.application.signature_date" class="app-item"><span class="app-label">Signed On</span><span>{{ docsData.application.signature_date }}</span></div>
+            </div>
+          </div>
+
           <!-- Signed Onboarding Documents -->
           <div class="docs-section">
             <div class="docs-title">Signed Onboarding Documents</div>
@@ -679,6 +704,11 @@ function handleConfirmDelete() {
 
 .docs-section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #e8edf2; }
 .docs-title { font-size: 0.72rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.6rem; }
+.app-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1rem; }
+.app-item { display: flex; flex-direction: column; gap: 0.1rem; font-size: 0.82rem; }
+.app-item.full { grid-column: 1 / -1; }
+.app-label { font-size: 0.68rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.prewrap { white-space: pre-wrap; }
 .docs-empty { font-size: 0.78rem; color: #9ca3af; padding: 0.5rem 0; }
 .doc-row {
   display: flex; align-items: center; justify-content: space-between;

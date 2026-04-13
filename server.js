@@ -1275,13 +1275,24 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 			"SELECT doc_key, doc_name, signed, signature_text, signed_at, signed_pdf_url FROM onboarding_documents WHERE user_id = ? ORDER BY id"
 		).all(user.id);
 
-		// SSN is pulled from the original job application. Super Admin only — not exposed to Dispatchers.
+		// Pull the original job application record so the profile card can
+		// display everything the applicant submitted. SSN is kept out of the
+		// application object and returned as a separate, Super-Admin-only field.
+		const fullApplication = db.prepare(
+			"SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)"
+		).get(user.id);
 		let ssn = null;
-		if (req.session.user.role === "Super Admin") {
-			const application = db.prepare(
-				"SELECT ssn FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)"
-			).get(user.id);
-			ssn = application?.ssn || null;
+		let application = null;
+		if (fullApplication) {
+			const isSuperAdmin = req.session.user.role === "Super Admin";
+			if (isSuperAdmin) {
+				ssn = fullApplication.ssn || null;
+			}
+			// Strip SSN + heavy base64 document fields. Driver's license number is
+			// also sensitive PII — only Super Admins see it; Dispatchers get the
+			// rest of the application detail without the DL#.
+			const { ssn: _drop, cdl_front, cdl_back, medical_card, drivers_license, ...safeApp } = fullApplication;
+			application = isSuperAdmin ? { ...safeApp, drivers_license } : safeApp;
 		}
 
 		res.json({
@@ -1294,6 +1305,7 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 			onboardingStatus: onboarding?.status || null,
 			linked: true,
 			ssn,
+			application,
 		});
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -1714,15 +1726,16 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 	}
 });
 
-app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
+app.get("/api/applications/:id/pdf", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const app = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(parseInt(req.params.id));
 		if (!app) return res.status(404).json({ error: "Application not found" });
 
+		// Capture pdfkit output into a buffer so we can optionally append
+		// uploaded-PDF pages via pdf-lib before sending to the client.
 		const doc = new PDFDocument({ size: "LETTER", margin: 50 });
-		res.setHeader("Content-Type", "application/pdf");
-		res.setHeader("Content-Disposition", `inline; filename=application-${app.full_name.replace(/\s+/g, "-")}.pdf`);
-		doc.pipe(res);
+		const pdfkitChunks = [];
+		doc.on("data", (c) => pdfkitChunks.push(c));
 
 		// Header
 		doc.fontSize(20).font("Helvetica-Bold").text("LogisX Employment Application", { align: "center" });
@@ -1818,15 +1831,20 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 				height: (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23],
 			};
 		};
+		// Collect uploaded PDFs so we can merge them at the end via pdf-lib.
+		// Each entry: { label, base64 }
+		const uploadedPdfs = [];
 		const embedImage = (label, base64) => {
 			if (!base64) return;
 			try {
 				if (base64.startsWith("data:application/pdf")) {
-					// PDF uploads: skip embedding (can't embed PDF inside PDF with pdfkit)
+					// Queue the PDF for merging at the end. Also add a title-page
+					// in the pdfkit output so reviewers see a clear separator.
+					uploadedPdfs.push({ label, base64 });
 					doc.addPage();
 					doc.fontSize(14).font("Helvetica-Bold").fillColor("#0ea5e9").text(label, { align: "center" });
 					doc.moveDown(0.5);
-					doc.fontSize(10).font("Helvetica").fillColor("#6b7280").text("[PDF document uploaded — see original file]", { align: "center" });
+					doc.fontSize(10).font("Helvetica").fillColor("#6b7280").text("(original PDF appended on the following pages)", { align: "center" });
 					return;
 				}
 				const data = base64.replace(/^data:image\/\w+;base64,/, "");
@@ -1868,9 +1886,41 @@ app.get("/api/applications/:id/pdf", requireRole("Super Admin"), (req, res) => {
 		embedImage("CDL - Back", app.cdl_back);
 		embedImage("Medical Card", app.medical_card);
 
+		// Finalize pdfkit output to the buffer, then merge uploaded PDFs (if any)
+		// via pdf-lib before streaming the final bytes to the client.
 		doc.end();
+		await new Promise((resolve) => doc.on("end", resolve));
+		const basePdfBuf = Buffer.concat(pdfkitChunks);
+
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader("Content-Disposition", `inline; filename=application-${app.full_name.replace(/\s+/g, "-")}.pdf`);
+
+		if (uploadedPdfs.length === 0) {
+			return res.end(basePdfBuf);
+		}
+		try {
+			const mergedPdf = await PdfLibDocument.load(basePdfBuf);
+			for (const { base64 } of uploadedPdfs) {
+				try {
+					const pdfBytes = Buffer.from(base64.replace(/^data:application\/pdf;base64,/, ""), "base64");
+					const srcPdf = await PdfLibDocument.load(pdfBytes, { ignoreEncryption: true });
+					const pages = await mergedPdf.copyPages(srcPdf, srcPdf.getPageIndices());
+					pages.forEach((p) => mergedPdf.addPage(p));
+				} catch (mergeErr) {
+					console.error("Application PDF: failed to merge uploaded PDF:", mergeErr.message);
+					// Skip the unmergeable attachment — the placeholder page in
+					// the pdfkit output already tells the reviewer it was uploaded.
+				}
+			}
+			const finalBytes = await mergedPdf.save();
+			res.end(Buffer.from(finalBytes));
+		} catch (err) {
+			console.error("Application PDF: pdf-lib merge failed, sending pdfkit-only version:", err.message);
+			res.end(basePdfBuf);
+		}
 	} catch (err) {
-		res.status(500).json({ error: err.message });
+		console.error("Application PDF: generation failed:", err.message);
+		if (!res.headersSent) res.status(500).json({ error: "Failed to generate application PDF" });
 	}
 });
 
@@ -3748,6 +3798,67 @@ app.get("/api/auth/session", (req, res) => {
 		res.json({ authenticated: true, user: req.session.user });
 	} else {
 		res.json({ authenticated: false });
+	}
+});
+
+// Change the current user's own password. Requires the current password
+// to prevent someone with an unattended session from locking the real user out.
+// Rate-limited (5/15min per IP) to defeat brute-force against currentPassword.
+// On success, purges all other sessions for this user and rotates the current
+// session ID so any hijacked cookies are invalidated immediately.
+const changePasswordLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 5,
+	message: { error: "Too many password change attempts. Try again in 15 minutes." },
+	standardHeaders: true,
+});
+app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async (req, res) => {
+	try {
+		const { currentPassword, newPassword } = req.body;
+		if (!currentPassword || !newPassword) {
+			return res.status(400).json({ error: "Current and new password required" });
+		}
+		if (typeof newPassword !== "string" || newPassword.length < 8) {
+			return res.status(400).json({ error: "New password must be at least 8 characters" });
+		}
+		if (newPassword.length > 200) {
+			return res.status(400).json({ error: "New password is too long" });
+		}
+		const userId = req.session.user.id;
+		const row = db.prepare("SELECT id, password_hash FROM users WHERE id = ?").get(userId);
+		if (!row) return res.status(404).json({ error: "User not found" });
+		const valid = await bcrypt.compare(currentPassword, row.password_hash);
+		if (!valid) return res.status(401).json({ error: "Current password is incorrect" });
+		const hash = await bcrypt.hash(newPassword, 10);
+		db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hash, userId);
+
+		// Invalidate every other session for this user. Connect-style session
+		// stores serialize the session as JSON in the `sess` column, so we use
+		// json_extract to match and delete. The current session is preserved
+		// by matching on sid; we then rotate its ID via regenerate() below.
+		const currentSid = req.sessionID;
+		try {
+			db.prepare(
+				"DELETE FROM sessions WHERE json_extract(sess, '$.user.id') = ? AND sid != ?"
+			).run(userId, currentSid);
+		} catch (purgeErr) {
+			console.error("change-password: session purge failed:", purgeErr.message);
+		}
+
+		// Rotate the current session ID so a previously captured cookie
+		// (the pre-change one) no longer authenticates.
+		const userSnapshot = { ...req.session.user };
+		req.session.regenerate((regenErr) => {
+			if (regenErr) {
+				console.error("change-password: regenerate failed:", regenErr.message);
+				return res.status(500).json({ error: "Password updated but session rotate failed. Please log out and back in." });
+			}
+			req.session.user = userSnapshot;
+			req.session.save(() => res.json({ success: true }));
+		});
+	} catch (err) {
+		console.error("change-password error:", err.message);
+		res.status(500).json({ error: "Failed to change password" });
 	}
 });
 

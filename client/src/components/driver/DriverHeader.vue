@@ -5,17 +5,24 @@
       <span class="driver-name-label">{{ driverName }}</span>
     </div>
     <div class="app-header-right">
+      <button class="header-btn" title="Change password" @click="showPwModal = true">Password</button>
       <button class="header-btn danger" @click="$emit('logout')">Logout</button>
     </div>
+    <ChangePasswordModal :open="showPwModal" @close="showPwModal = false" />
   </header>
 </template>
 
 <script setup>
+import { ref } from 'vue'
+import ChangePasswordModal from './ChangePasswordModal.vue'
+
 defineProps({
   driverName: { type: String, default: '' },
 })
 
 defineEmits(['logout'])
+
+const showPwModal = ref(false)
 </script>
 
 <style scoped>

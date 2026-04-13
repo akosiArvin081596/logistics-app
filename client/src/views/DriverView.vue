@@ -259,6 +259,15 @@
             @uploaded="onStatusDocUploaded"
           />
           <DocumentList ref="statusDocListRef" :load-id="getLoadId(currentActiveLoad)" />
+
+          <div class="status-section-divider">Log Expense</div>
+          <ExpenseForm
+            v-if="currentActiveLoad"
+            :loads="[currentActiveLoad]"
+            :driver-name="driverName"
+            :headers="driverStore.headers.jobTracking"
+            @submit="handleExpenseSubmit"
+          />
         </div>
       </section>
 
