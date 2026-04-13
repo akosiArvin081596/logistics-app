@@ -7383,13 +7383,17 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		const rptStatusCol = findCol(jobTracking.headers, /status/i);
 		const rptCompletedStatuses = /^(delivered|completed|pod received)$/i;
 
-		let totalRevenue = 0, paidRevenue = 0;
+		// Only count revenue from rows in a completed status (delivered,
+		// completed, pod received) — matches the investor dashboard logic
+		// so the PDF and the dashboard always show the same totalRevenue.
+		// Prior semantic also counted dispatched/in-transit rows, creating
+		// a confusing gap between the two surfaces.
+		let totalRevenue = 0;
 		filteredJobData.forEach(r => {
 			const amt = parseFloat(String((jtRateCol2 ? r[jtRateCol2] : "0")).replace(/[$,]/g, "")) || 0;
 			if (!amt) return;
-			totalRevenue += amt;
 			const st = rptStatusCol ? (r[rptStatusCol] || "").trim() : "";
-			if (rptCompletedStatuses.test(st)) paidRevenue += amt;
+			if (rptCompletedStatuses.test(st)) totalRevenue += amt;
 		});
 
 		// Fleet purchase price — sum actual trucks.purchase_price column.
@@ -7595,7 +7599,8 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 
 		// ── Production
 		sectionHeader("Production Performance");
-		kpiRow("Total Revenue", fmt(totalRevenue), "Paid / Collected", fmt(paidRevenue));
+		const avgPerLoad = completedJobs > 0 ? totalRevenue / completedJobs : 0;
+		kpiRow("Total Revenue", fmt(totalRevenue), "Avg Revenue / Load", fmt(avgPerLoad));
 		kpiRow("Completed Loads", String(completedJobs), "Total Jobs", String(filteredJobData.length));
 
 		// ── Asset
