@@ -17,6 +17,7 @@
           <th>Plate</th>
           <th>Status</th>
           <th>Driver</th>
+          <th>Loads</th>
           <th v-if="showOwner">Owner</th>
           <th v-if="canEdit"></th>
         </tr>
@@ -34,6 +35,7 @@
           <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
             {{ truck.AssignedDriver || '\u2014' }}
           </td>
+          <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
           <td v-if="showOwner" :style="{ color: truck.OwnerId ? 'var(--text)' : 'var(--text-dim)' }">
             {{ ownerName(truck.OwnerId) }}
           </td>
@@ -209,6 +211,7 @@
           <div class="view-row"><span class="view-label">License Plate</span><span>{{ viewTruck.LicensePlate || '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Status</span><span :class="['status-badge', statusClass(viewTruck.Status)]">{{ viewTruck.Status }}</span></div>
           <div class="view-row"><span class="view-label">Assigned Driver</span><span>{{ viewTruck.AssignedDriver || '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Completed Loads</span><span>{{ viewTruck.LoadCount ?? 0 }}</span></div>
           <div v-if="showOwner" class="view-row"><span class="view-label">Owner</span><span>{{ ownerName(viewTruck.OwnerId) }}</span></div>
           <div class="view-row"><span class="view-label">Purchase Price</span><span>{{ viewTruck.PurchasePrice ? '$' + Number(viewTruck.PurchasePrice).toLocaleString() : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Title Status</span><span>{{ viewTruck.TitleStatus || '\u2014' }}</span></div>

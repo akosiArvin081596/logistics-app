@@ -4225,7 +4225,7 @@ async function checkDriverActiveLoad(driverName) {
 }
 
 // Truck Database: list all trucks (Investor sees only their own)
-app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
+app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	const user = req.session.user;
 	let rows;
 	if (user.role === "Investor") {
@@ -4233,31 +4233,65 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), (re
 	} else {
 		rows = db.prepare("SELECT * FROM trucks ORDER BY unit_number ASC").all();
 	}
-	const trucks = rows.map((t) => ({
-		id: t.id,
-		UnitNumber: t.unit_number,
-		Make: t.make,
-		Model: t.model,
-		Year: t.year,
-		VIN: t.vin,
-		LicensePlate: t.license_plate,
-		Status: t.status,
-		AssignedDriver: t.assigned_driver,
-		OwnerId: t.owner_id || 0,
-		Notes: t.notes,
-		CreatedAt: t.created_at,
-		Photo: t.photo || '',
-		InsuranceMonthly: t.insurance_monthly || 0,
-		EldMonthly: t.eld_monthly || 0,
-		HvutAnnual: t.hvut_annual || 0,
-		IrpAnnual: t.irp_annual || 0,
-		AdminFeePct: t.admin_fee_pct ?? 50,
-		DriverPayDaily: t.driver_pay_daily || 0,
-		PurchasePrice: t.purchase_price || 0,
-		TitleStatus: t.title_status || 'Clean',
-		TitleState: t.title_state || '',
-		MaintenanceFundMonthly: t.maintenance_fund_monthly || 0,
-	}));
+
+	// Build completed-load counts per truck from the cached Job Tracking sheet.
+	// Preferred match: exact truck column (populated by n8n). Fallback: match
+	// the load's driver against the truck's assigned_driver. If the sheet
+	// fetch fails, return 0 counts rather than failing the whole endpoint.
+	let loadsByTruck = {};
+	let loadsByDriver = {};
+	try {
+		const jt = await getJobTrackingCached();
+		const statusCol = findCol(jt.headers, /status/i);
+		const driverCol = findCol(jt.headers, /^driver$/i);
+		const truckCol = findCol(jt.headers, /^truck$|truck.?(unit|number|#)|unit.?number/i);
+		const completedRe = /^(delivered|completed|pod received)$/i;
+		jt.data.forEach((r) => {
+			const st = statusCol ? (r[statusCol] || "").trim() : "";
+			if (!completedRe.test(st)) return;
+			const driver = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
+			const truckUnit = truckCol ? (r[truckCol] || "").trim().toLowerCase() : "";
+			if (truckUnit) loadsByTruck[truckUnit] = (loadsByTruck[truckUnit] || 0) + 1;
+			if (driver) loadsByDriver[driver] = (loadsByDriver[driver] || 0) + 1;
+		});
+	} catch (err) {
+		console.error("/api/trucks: job tracking fetch failed:", err.message);
+	}
+
+	const trucks = rows.map((t) => {
+		const unitLower = (t.unit_number || "").toLowerCase();
+		const driverLower = (t.assigned_driver || "").trim().toLowerCase();
+		const directCount = loadsByTruck[unitLower];
+		const loadCount = (directCount !== undefined)
+			? directCount
+			: (loadsByDriver[driverLower] || 0);
+		return {
+			id: t.id,
+			UnitNumber: t.unit_number,
+			Make: t.make,
+			Model: t.model,
+			Year: t.year,
+			VIN: t.vin,
+			LicensePlate: t.license_plate,
+			Status: t.status,
+			AssignedDriver: t.assigned_driver,
+			OwnerId: t.owner_id || 0,
+			Notes: t.notes,
+			CreatedAt: t.created_at,
+			Photo: t.photo || '',
+			InsuranceMonthly: t.insurance_monthly || 0,
+			EldMonthly: t.eld_monthly || 0,
+			HvutAnnual: t.hvut_annual || 0,
+			IrpAnnual: t.irp_annual || 0,
+			AdminFeePct: t.admin_fee_pct ?? 50,
+			DriverPayDaily: t.driver_pay_daily || 0,
+			PurchasePrice: t.purchase_price || 0,
+			TitleStatus: t.title_status || 'Clean',
+			TitleState: t.title_state || '',
+			MaintenanceFundMonthly: t.maintenance_fund_monthly || 0,
+			LoadCount: loadCount,
+		};
+	});
 	res.json({ trucks });
 });
 
