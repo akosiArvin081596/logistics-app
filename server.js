@@ -8319,6 +8319,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const jtDateCol = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i)
 			|| findCol(jobTracking.headers, /date/i);
 		const jtDriverCol = findCol(jobTracking.headers, /^driver$/i);
+		const jtTruckCol = findCol(jobTracking.headers, /^truck$|truck.?(unit|number|#)|unit.?number/i);
 		const statusCol = findCol(jobTracking.headers, /status/i);
 		const pickupDateCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
 		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
@@ -8366,6 +8367,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const monthlyRevenue = {};
 		const completedLoadIds = new Set();
 		const grossByDriver = {};       // per-driver completed revenue (replaces Pass 3 inner loop)
+		const loadsByDriver = {};       // per-driver completed load count (fallback when no truck column)
+		const loadsByTruck = {};        // per-truck completed load count (preferred when truck column exists)
 		const driverDaySets = {};        // per-driver active day Sets (all-time, used for totals)
 		// Driver active days bucketed by LOAD'S ASSIGNED MONTH (not by physical day).
 		// This matches how revenue is bucketed — both should answer the question:
@@ -8380,6 +8383,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		filteredJobData.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
 			const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
+			const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
 
 			// Resolve the load's assigned-month key once (used by both revenue and driver pay)
 			let assignedMonthKey = null;
@@ -8390,6 +8394,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 			// Revenue (completed loads only)
 			if (completedStatuses.test(st)) {
+				if (driver) loadsByDriver[driver] = (loadsByDriver[driver] || 0) + 1;
+				if (truckUnit) loadsByTruck[truckUnit] = (loadsByTruck[truckUnit] || 0) + 1;
 				const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
 				if (amt) {
 					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
@@ -8704,11 +8710,20 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const odo = odoByDriver[driverName];
 				const totalMiles = (odo?.maxOdo && odo?.minOdo) ? Math.round(odo.maxOdo - odo.minOdo) : 0;
 
+				// Prefer direct truck-column attribution (loads tagged with this unit
+				// number) over driver-based attribution, which is stale if a driver
+				// switched trucks. Fall back to driver-based when the sheet has no
+				// truck column for a given row.
+				const truckLoadCount = loadsByTruck[unitLower];
+				const loadCount = (truckLoadCount !== undefined)
+					? truckLoadCount
+					: (loadsByDriver[driverName] || 0);
 				perTruckData[truck.unit_number] = {
 					unitMonthlyGross: avgMonthlyGross,
 					unitMonthlyExpenses: avgMonthlyExpenses,
 					estAnnualRevenue: Math.round((avgMonthlyGross - avgMonthlyExpenses) * 12),
 					totalMiles,
+					loadCount,
 				};
 			});
 		}

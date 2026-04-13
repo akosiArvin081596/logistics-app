@@ -35,6 +35,7 @@
           <th>VIN</th>
           <th>Status</th>
           <th>Driver</th>
+          <th>Loads</th>
         </tr>
       </thead>
       <tbody>
@@ -46,6 +47,7 @@
           <td class="mono">{{ t.VIN ? t.VIN.slice(-6) : '-' }}</td>
           <td><span :class="['status-pill', statusClass(t.Status)]">{{ t.Status }}</span></td>
           <td>{{ t.AssignedDriver || '-' }}</td>
+          <td class="mono">{{ loadCountFor(t) }}</td>
         </tr>
       </tbody>
     </table>
@@ -59,8 +61,14 @@ import { useToast } from '../../composables/useToast'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
+  production: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['reload'])
+
+function loadCountFor(t) {
+  const unitKey = t.UnitNumber || t.unit_number || ''
+  return (props.production?.perTruckData || {})[unitKey]?.loadCount ?? 0
+}
 
 const api = useApi()
 const { show: toast } = useToast()

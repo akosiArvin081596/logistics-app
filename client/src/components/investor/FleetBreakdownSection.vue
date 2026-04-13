@@ -15,6 +15,7 @@
           <th>Make / Model</th>
           <th>Status</th>
           <th>Driver</th>
+          <th>Loads</th>
           <th>Miles</th>
           <th>Est. Revenue</th>
           <th>ROI</th>
@@ -35,6 +36,7 @@
             <td :style="{ color: t.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
               {{ t.AssignedDriver || '\u2014' }}
             </td>
+            <td class="mono">{{ t.loadCount || 0 }}</td>
             <td class="mono">{{ (t.totalMiles || 0).toLocaleString() }}</td>
             <td class="mono">{{ fmt(t.estRevenue) }}</td>
             <td>
@@ -45,13 +47,13 @@
           </tr>
           <!-- Expandable P&L breakdown -->
           <tr v-if="expandedUnit === (t.UnitNumber || t.unit_number)" class="detail-row">
-            <td colspan="8">
+            <td colspan="9">
               <div class="truck-detail">
                 <div class="detail-header">{{ t.UnitNumber }} &middot; {{ [t.Make, t.Model].filter(Boolean).join(' ') }} &middot; {{ t.AssignedDriver || 'Unassigned' }}</div>
-                <div class="detail-sub">Monthly Avg (based on {{ truckMonths(t) }} month{{ truckMonths(t) !== 1 ? 's' : '' }})</div>
+                <div class="detail-sub">{{ t.loadCount || 0 }} completed load{{ t.loadCount !== 1 ? 's' : '' }} &middot; Monthly avg based on {{ truckMonths(t) }} month{{ truckMonths(t) !== 1 ? 's' : '' }}</div>
                 <div class="detail-breakdown">
                   <div class="bd-row">
-                    <span>Revenue ({{ t.AssignedDriver || 'driver' }} loads)</span>
+                    <span>Revenue ({{ t.loadCount || 0 }} load{{ t.loadCount !== 1 ? 's' : '' }})</span>
                     <span class="bd-val" style="color:var(--accent)">{{ fmt(perUnit(t)?.unitMonthlyGross) }}</span>
                   </div>
                   <div class="bd-row deduct">
@@ -92,7 +94,9 @@
       </tbody>
       <tfoot>
         <tr>
-          <td colspan="6" class="total-label">Fleet Total</td>
+          <td colspan="5" class="total-label">Fleet Total</td>
+          <td class="mono total-val">{{ totalLoads }}</td>
+          <td></td>
           <td class="mono total-val">{{ fmt(totalEstRevenue) }}</td>
           <td>
             <span :class="['roi-badge', fleetROI >= 0 ? 'positive' : 'negative']">
@@ -167,11 +171,13 @@ const trucksWithROI = computed(() => {
     // ROI = annual net profit / truck investment cost
     const roi = truckPrice > 0 ? (estRevenue / truckPrice) * 100 : 0
     const totalMiles = perUnit?.totalMiles ?? 0
-    return { ...t, estRevenue, roi, totalMiles }
+    const loadCount = perUnit?.loadCount ?? 0
+    return { ...t, estRevenue, roi, totalMiles, loadCount }
   })
 })
 
 const totalEstRevenue = computed(() => trucksWithROI.value.reduce((s, t) => s + t.estRevenue, 0))
+const totalLoads = computed(() => trucksWithROI.value.reduce((s, t) => s + (t.loadCount || 0), 0))
 // Fleet ROI = total est annual net / total fleet purchase price
 const fleetROI = computed(() => {
   const totalPrice = props.production?.totalPurchasePrice || props.asset?.purchasePrice || 0

@@ -54,7 +54,7 @@
         <TrendSection :production="store.production" />
       </div>
       <AssetSection v-if="store.asset?.totalMiles > 0" :asset="store.asset" :config="store.config" />
-      <MyTrucks :trucks="trucks" @reload="loadData" />
+      <MyTrucks :trucks="trucks" :production="store.production" @reload="loadData" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <!-- <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" /> -->
