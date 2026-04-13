@@ -4244,7 +4244,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		const jt = await getJobTrackingCached();
 		const statusCol = findCol(jt.headers, /status/i);
 		const driverCol = findCol(jt.headers, /^driver$/i);
-		const truckCol = findCol(jt.headers, /^truck$|truck.?(unit|number|#)|unit.?number/i);
+		const truckCol = findCol(jt.headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
 		const completedRe = /^(delivered|completed|pod received)$/i;
 		jt.data.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
@@ -8464,7 +8464,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const jtDateCol = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i)
 			|| findCol(jobTracking.headers, /date/i);
 		const jtDriverCol = findCol(jobTracking.headers, /^driver$/i);
-		const jtTruckCol = findCol(jobTracking.headers, /^truck$|truck.?(unit|number|#)|unit.?number/i);
+		const jtTruckCol = findCol(jobTracking.headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
 		const statusCol = findCol(jobTracking.headers, /status/i);
 		const pickupDateCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
 		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
