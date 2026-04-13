@@ -220,8 +220,10 @@
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '\u2014' }}</span></div>
         </div>
-        <!-- Driver Files — files belonging to the driver assigned to this truck -->
-        <div v-if="viewTruck.AssignedDriver" class="driver-files-section">
+        <!-- Driver Files — files belonging to the driver assigned to this truck.
+             Hidden from Investor role (CDL, medical, drug test, signed docs
+             are confidential per 2026-04-13 client feedback). -->
+        <div v-if="viewTruck.AssignedDriver && canViewDriverFiles" class="driver-files-section">
           <div class="driver-files-title">
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
             Driver Files — {{ viewTruck.AssignedDriver }}
@@ -287,8 +289,17 @@ import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import { useApi } from '../../composables/useApi'
+import { useAuthStore } from '../../stores/auth'
 
 const api = useApi()
+const authStore = useAuthStore()
+// Investors never see driver files (CDL, medical, drug test, signed docs).
+// Gated here so the fetch is skipped AND the section is hidden. The backend
+// also rejects the request for Investor role as defense in depth.
+const canViewDriverFiles = computed(() => {
+  const role = authStore.user?.role
+  return role === 'Super Admin' || role === 'Dispatcher'
+})
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
@@ -338,6 +349,9 @@ watch(() => viewTruck.value?.id, async (truckId) => {
   driverFiles.value = { driverName: '', files: [], onboardingDocs: [], drugTest: null }
   driverFilesError.value = ''
   if (!truckId) return
+  // Skip the fetch entirely for investors — the backend rejects this role
+  // and the section is hidden from the template anyway.
+  if (!canViewDriverFiles.value) return
   driverFilesLoading.value = true
   try {
     driverFiles.value = await api.get(`/api/trucks/${truckId}/driver-files`)

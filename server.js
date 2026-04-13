@@ -4624,16 +4624,20 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 });
 
 // GET /api/trucks/:id/driver-files — Files belonging to the driver assigned
-// to this truck. Investors can only see files for trucks they own. Returns
-// CDL front/back + medical card (base64 or PDF) from the job application,
-// plus NON-CONFIDENTIAL signed onboarding PDFs and the drug test file URL.
+// to this truck. Super Admin + Dispatcher only. Returns CDL front/back +
+// medical card from the application, signed onboarding PDFs, and the drug
+// test file URL.
 //
 // SECURITY notes:
+// - Investor role is NOT allowed on this endpoint. Per 2026-04-13 client
+//   feedback, investors should not see driver confidential files (CDL,
+//   medical card, drug test, signed policies) even for trucks they own —
+//   these are between the driver, dispatch, and Super Admin only.
 // - Confidential onboarding docs (W-9, contractor agreement, NDA) are
 //   filtered out — only non-confidential docs are returned.
 // - signature_text is NOT returned: it is the driver's typed legal name
-//   acting as their e-signature on legally binding docs. Investors see
-//   signed/unsigned status only.
+//   acting as their e-signature on legally binding docs. Non-admin
+//   viewers see signed/unsigned status only.
 // - SSN and driver's license number never flow through this endpoint.
 // - Dedicated rate limiter (30/15min) prevents bulk enumeration of
 //   base64-heavy document payloads.
@@ -4643,15 +4647,11 @@ const driverFilesLimiter = rateLimit({
 	message: { error: "Too many requests. Try again later." },
 	standardHeaders: true,
 });
-app.get("/api/trucks/:id/driver-files", requireRole("Super Admin", "Dispatcher", "Investor"), driverFilesLimiter, (req, res) => {
+app.get("/api/trucks/:id/driver-files", requireRole("Super Admin", "Dispatcher"), driverFilesLimiter, (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
 		const truck = db.prepare("SELECT id, unit_number, assigned_driver, owner_id FROM trucks WHERE id = ?").get(id);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
-		// Investors can only see files for trucks they own.
-		if (req.session.user.role === "Investor" && truck.owner_id !== req.session.user.id) {
-			return res.status(403).json({ error: "Forbidden" });
-		}
 		const driverName = (truck.assigned_driver || "").trim();
 		if (!driverName) {
 			return res.json({ driverName: "", files: [], onboardingDocs: [], drugTest: null });
@@ -4679,7 +4679,7 @@ app.get("/api/trucks/:id/driver-files", requireRole("Super Admin", "Dispatcher",
 		}
 		// Only non-confidential onboarding docs. Never expose signature_text.
 		// Super Admin gets to see the full list via a different endpoint; this
-		// one is scoped to what investors/dispatchers legitimately need.
+		// one is scoped to what dispatchers legitimately need for operations.
 		const onboardingDocs = db.prepare(
 			"SELECT doc_key, doc_name, signed, signed_at, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND (confidential = 0 OR confidential IS NULL) ORDER BY id"
 		).all(user.id);
@@ -7392,14 +7392,55 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			if (rptCompletedStatuses.test(st)) paidRevenue += amt;
 		});
 
-		const purchasePrice = parseFloat(config.truck_purchase_price) || 58000;
+		// Fleet purchase price — sum actual trucks.purchase_price column.
+		// Was previously hardcoded to $58,000 via config.truck_purchase_price
+		// fallback, which was wrong once real purchase prices were entered
+		// in the trucks table. Per 2026-04-13 client feedback.
 		const ownedTrucks2 = isSuperAdmin
 			? db.prepare("SELECT * FROM trucks").all()
 			: db.prepare("SELECT * FROM trucks WHERE owner_id = ?").all(user.id);
 		const totalTrucks = ownedTrucks2.length || 1;
-		const totalPurchasePrice = purchasePrice * totalTrucks;
+		const totalPurchasePrice = ownedTrucks2.reduce((sum, t) => sum + (t.purchase_price || 0), 0);
+		// "Per truck" shows the single value for a one-truck fleet and the
+		// average for multi-truck fleets (same pattern as /api/investor).
+		const purchasePrice = ownedTrucks2.length === 1
+			? (ownedTrucks2[0].purchase_price || 0)
+			: (totalTrucks > 0 ? Math.round(totalPurchasePrice / totalTrucks) : 0);
 		const totalStartupExpenses = 5000 * totalTrucks;
-		const currentValue = Math.round(purchasePrice * 0.80);
+		const currentValue = Math.round(totalPurchasePrice * 0.80);
+
+		// Helper: how many months does this truck appear in the report period?
+		// - With a date range: clamp to the range, bounded by created_at
+		// - All-time: from truck.created_at to now
+		// - Missing created_at (legacy data): fall back to the fleet-wide
+		//   earliest created_at, or to 1 month as a floor
+		const reportNow = new Date();
+		const fleetEarliestCreated = ownedTrucks2
+			.map(t => (t.created_at ? new Date(t.created_at) : null))
+			.filter(d => d && !isNaN(d))
+			.reduce((min, d) => (min === null || d < min ? d : min), null);
+		function truckMonthsInPeriod(t) {
+			const createdAt = t.created_at ? new Date(t.created_at) : null;
+			const truckStart = (createdAt && !isNaN(createdAt))
+				? createdAt
+				: fleetEarliestCreated; // legacy data fallback
+			let start, end;
+			if (filterStart || filterEnd) {
+				start = filterStart || truckStart || reportNow;
+				end = filterEnd || reportNow;
+			} else {
+				start = truckStart || reportNow;
+				end = reportNow;
+			}
+			// If the truck was created after the period ended, zero months.
+			if (truckStart && filterEnd && truckStart > filterEnd) return 0;
+			// Clamp start to truck creation.
+			if (truckStart && start < truckStart) start = truckStart;
+			if (end < start) return 0;
+			const months = (end.getFullYear() - start.getFullYear()) * 12
+				+ (end.getMonth() - start.getMonth()) + 1;
+			return Math.max(1, months);
+		}
 
 		let totalExpenses = 0;
 		let fuelExpenses = 0, maintenanceExpenses = 0, complianceExpenses = 0, otherExpenses = 0;
@@ -7408,24 +7449,80 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		const dateParams = [];
 		if (filterStart) { dateWhere += ' AND date >= ?'; dateParams.push(filterStart.toISOString().slice(0, 10)); }
 		if (filterEnd) { dateWhere += ' AND date <= ?'; dateParams.push(filterEnd.toISOString().slice(0, 10)); }
-		if (investorDriverSet && investorDriverSet.size > 0) {
-			const driverList = [...investorDriverSet];
-			const ph = driverList.map(() => '?').join(',');
-			// Itemized expenses by type
-			const expRows = db.prepare(`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE LOWER(driver) IN (${ph})${dateWhere} GROUP BY LOWER(type)`).all(...driverList, ...dateParams);
+
+		// Itemized trip expenses by type — runs for both Super Admin and Investor.
+		// Investor: filter by their assigned driver list. Super Admin: no driver
+		// filter (aggregate everything). Previously this block was gated on
+		// investorDriverSet being populated, which silently zeroed all expense
+		// lines on Super Admin reports.
+		{
+			let whereClause = '';
+			const whereParams = [];
+			if (investorDriverSet && investorDriverSet.size > 0) {
+				const driverList = [...investorDriverSet];
+				const ph = driverList.map(() => '?').join(',');
+				whereClause = ` AND LOWER(driver) IN (${ph})`;
+				whereParams.push(...driverList);
+			}
+			const expRows = db.prepare(
+				`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE 1=1${whereClause}${dateWhere} GROUP BY LOWER(type)`
+			).all(...whereParams, ...dateParams);
+			// Categorization per 2026-04-13 client feedback:
+			// - Fuel → Fuel Expenses
+			// - Repair / Maintenance / Tire / Oil → Maintenance & Repairs
+			// - Everything else (Wear & Tear, Toll, Food, Other) → Other Expenses
 			expRows.forEach(r => {
 				if (/fuel/i.test(r.t)) fuelExpenses += r.total;
 				else if (/maint|repair|tire|oil/i.test(r.t)) maintenanceExpenses += r.total;
 				else otherExpenses += r.total;
 				totalExpenses += r.total;
 			});
-			const maintTotal = (db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id=?`).get(user.id)).t;
+		}
+
+		// Maintenance fund disbursements (truck-level service payments)
+		{
+			const maintTotal = (investorDriverSet
+				? db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND mf.type='service'`).get(user.id)
+				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service'`).get()
+			).t;
 			maintenanceExpenses += maintTotal;
 			totalExpenses += maintTotal;
-			const compTotal = (db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND cf.status='Paid'`).get(user.id)).t;
-			complianceExpenses += compTotal;
-			totalExpenses += compTotal;
 		}
+
+		// Compliance / Regulatory = truck fixed costs (ELD + HVUT/12 + IRP/12)
+		// per month, multiplied by the number of months each truck was active
+		// in the report period. PLUS any manually-logged compliance_fees rows.
+		// Per 2026-04-13 client feedback: "Compliance/Regulatory is the ELD,
+		// HVUT, IRP added up and divided by 12 months which is part of the
+		// fixed expenses. On run report period it needs to show this month
+		// per month."
+		{
+			for (const t of ownedTrucks2) {
+				const monthlyFixed = (t.eld_monthly || 0)
+					+ ((t.hvut_annual || 0) / 12)
+					+ ((t.irp_annual || 0) / 12);
+				const months = truckMonthsInPeriod(t);
+				const truckFixed = monthlyFixed * months;
+				complianceExpenses += truckFixed;
+				totalExpenses += truckFixed;
+			}
+			const compFees = (investorDriverSet
+				? db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND cf.status='Paid'`).get(user.id)
+				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid'`).get()
+			).t;
+			complianceExpenses += compFees;
+			totalExpenses += compFees;
+		}
+
+		// Round category totals AFTER all sources have been summed, then
+		// derive totalExpenses from the ROUNDED categories so the P&L adds
+		// up exactly — otherwise independent rounding can drift by $1-2.
+		fuelExpenses = Math.round(fuelExpenses);
+		maintenanceExpenses = Math.round(maintenanceExpenses);
+		complianceExpenses = Math.round(complianceExpenses);
+		otherExpenses = Math.round(otherExpenses);
+		totalExpenses = fuelExpenses + maintenanceExpenses + complianceExpenses + otherExpenses;
+
 		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
 		const netCashFlow = totalRevenue - totalExpenses;
 		const ownerEarnings = netCashFlow * 0.5;
@@ -7518,6 +7615,16 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		kpiRow("Business ROI", `${roiPct}%`, "Section 179 Deduction", fmt(purchasePrice));
 
 		// ── P&L Statement (RFD-26)
+		// Helper: add a page break if the next line wouldn't fit above the
+		// footer. Fixes the "Total Expenses" orphan + gap bug where the loop
+		// used to let pdfkit split a row across pages, leaving a huge blank
+		// space on page 2. Per 2026-04-13 client feedback.
+		const footerSafety = 60;
+		const ensureSpace = (needed) => {
+			if (doc.y + needed > doc.page.height - footerSafety) {
+				doc.addPage();
+			}
+		};
 		sectionHeader("Income Statement (Profit & Loss)");
 		const plLines = [
 			{ label: "Gross Revenue", value: fmt(totalRevenue), indent: false, bold: true },
@@ -7529,23 +7636,34 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			{ label: "Net Profit", value: fmt(netCashFlow), indent: false, bold: true },
 			{ label: "Investor Payout (50%)", value: fmt(ownerEarnings), indent: false, bold: true },
 		];
+		const plLineHeight = 18;
 		const plX = 50, plW = doc.page.width - 100;
 		plLines.forEach((line, i) => {
 			if (i === plLines.length - 3) { // separator before net profit
+				// Keep the separator AND the following three bold rows together
+				// so they don't split across pages.
+				ensureSpace(plLineHeight * 3 + 10);
 				doc.moveTo(plX, doc.y).lineTo(plX + plW, doc.y).strokeColor("#cccccc").stroke();
 				doc.moveDown(0.3);
+			} else {
+				ensureSpace(plLineHeight);
 			}
 			const y = doc.y;
 			doc.font(line.bold ? "Helvetica-Bold" : "Helvetica").fontSize(10).fillColor(line.indent ? "#555555" : "#000000")
 				.text(line.label, plX + (line.indent ? 15 : 0), y, { width: plW - 80 })
 				.font(line.bold ? "Helvetica-Bold" : "Helvetica").fillColor(line.bold ? "#0f3460" : "#333333")
 				.text(line.value, plX + plW - 80, y, { width: 80, align: "right" });
-			doc.moveDown(0.6);
+			// Force consistent line spacing regardless of pdfkit's per-text
+			// auto-advance, so ensureSpace() math stays predictable.
+			doc.y = y + plLineHeight;
 		});
 		doc.moveDown(0.5);
 
 		// ── Monthly Revenue Table
 		if (monthlyData2.length > 0) {
+			// Keep the section header + header row + first data row together.
+			// sectionHeader ~52pt + 18pt header row + 16pt data row = 86pt.
+			ensureSpace(90);
 			sectionHeader("Monthly Revenue");
 			const colW = [120, 100];
 			const tableX = 50;
@@ -7556,7 +7674,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 				.text("Revenue", tableX + colW[0] + 5, ty + 5, { width: colW[1] });
 			ty += 18;
 			monthlyData2.forEach((m, i) => {
-				if (ty > doc.page.height - 100) { doc.addPage(); ty = 50; }
+				if (ty > doc.page.height - footerSafety) { doc.addPage(); ty = 50; }
 				doc.rect(tableX, ty, colW[0] + colW[1], 16).fill(i % 2 === 0 ? "#ffffff" : "#f8f9fa");
 				doc.fillColor("#333333").font("Helvetica").fontSize(9)
 					.text(m.month, tableX + 5, ty + 4, { width: colW[0] })
@@ -7568,8 +7686,11 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 
 		// ── Per-Truck
 		if (ownedTrucks2.length > 0) {
+			// Section header ~52pt + first kpiRow ~36pt = 88pt.
+			ensureSpace(90);
 			sectionHeader("Fleet Breakdown");
 			ownedTrucks2.forEach(t => {
+				ensureSpace(36);
 				kpiRow(
 					`Unit ${t.unit_number}`,
 					`${t.make||""} ${t.model||""}`.trim() || "—",
