@@ -231,43 +231,39 @@
             <span class="warning-dot">&#9888;</span> {{ driverFilesError }}
           </div>
           <template v-else>
-            <!-- Application uploads (CDL / Medical) -->
-            <div v-if="driverFiles.files && driverFiles.files.length" class="driver-files-grid">
-              <div v-for="(f, i) in driverFiles.files" :key="'f'+i" class="driver-file-card">
-                <a v-if="f.data" :href="f.data" :download="`${viewTruck.UnitNumber}-${f.label.replace(/\s+/g,'-')}.${f.type === 'pdf' ? 'pdf' : 'jpg'}`" target="_blank" rel="noopener">
-                  <div v-if="f.type === 'image'" class="driver-file-thumb" :style="{ backgroundImage: `url(${f.data})` }"></div>
-                  <div v-else class="driver-file-thumb pdf">&#128196;</div>
+            <!-- Images group (JPG / PNG uploads like CDL / Medical photos) -->
+            <div v-if="driverFilesByType.image.length" class="driver-files-subsection">
+              <div class="driver-files-sublabel">
+                <svg class="type-icon" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                Images ({{ driverFilesByType.image.length }})
+              </div>
+              <div class="driver-files-grid">
+                <a v-for="(f, i) in driverFilesByType.image" :key="'img'+i" :href="f.url" :download="f.downloadName" target="_blank" rel="noopener" class="driver-file-card">
+                  <div class="driver-file-thumb" :style="{ backgroundImage: `url(${f.url})` }"></div>
                   <div class="driver-file-label">{{ f.label }}</div>
-                  <div class="driver-file-type">{{ f.type === 'pdf' ? 'PDF' : 'Image' }} — click to view</div>
+                  <div class="driver-file-type">{{ f.meta }}</div>
                 </a>
               </div>
             </div>
 
-            <!-- Signed onboarding docs -->
-            <div v-if="driverFiles.onboardingDocs && driverFiles.onboardingDocs.filter(d => d.signed).length" class="driver-files-subsection">
-              <div class="driver-files-sublabel">Signed Onboarding Documents</div>
+            <!-- PDF Documents group -->
+            <div v-if="driverFilesByType.pdf.length" class="driver-files-subsection">
+              <div class="driver-files-sublabel">
+                <svg class="type-icon" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                PDF Documents ({{ driverFilesByType.pdf.length }})
+              </div>
               <div class="driver-files-grid">
-                <a v-for="doc in driverFiles.onboardingDocs.filter(d => d.signed)" :key="doc.doc_key" :href="doc.signed_pdf_url" target="_blank" rel="noopener" class="driver-file-card">
-                  <div class="driver-file-thumb pdf">&#128196;</div>
-                  <div class="driver-file-label">{{ doc.doc_name }}</div>
-                  <div class="driver-file-type">Signed by {{ doc.signature_text || 'driver' }}</div>
+                <a v-for="(f, i) in driverFilesByType.pdf" :key="'pdf'+i" :href="f.url" :download="f.downloadName" target="_blank" rel="noopener" class="driver-file-card">
+                  <div class="driver-file-thumb pdf">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                  </div>
+                  <div class="driver-file-label">{{ f.label }}</div>
+                  <div class="driver-file-type" :class="f.metaClass">{{ f.meta }}</div>
                 </a>
               </div>
             </div>
 
-            <!-- Drug test -->
-            <div v-if="driverFiles.drugTest && driverFiles.drugTest.file_url" class="driver-files-subsection">
-              <div class="driver-files-sublabel">Pre-Employment Drug Test</div>
-              <div class="driver-files-grid">
-                <a :href="driverFiles.drugTest.file_url" target="_blank" rel="noopener" class="driver-file-card">
-                  <div class="driver-file-thumb pdf">&#128196;</div>
-                  <div class="driver-file-label">Drug Test Result</div>
-                  <div class="driver-file-type" :class="driverFiles.drugTest.result === 'pass' ? 'dt-pass' : 'dt-fail'">{{ (driverFiles.drugTest.result || '').toUpperCase() }}</div>
-                </a>
-              </div>
-            </div>
-
-            <div v-if="!driverFiles.files?.length && !driverFiles.onboardingDocs?.filter(d => d.signed).length && !driverFiles.drugTest?.file_url" class="driver-files-empty">
+            <div v-if="!driverFilesByType.image.length && !driverFilesByType.pdf.length" class="driver-files-empty">
               No driver files uploaded yet.
             </div>
           </template>
@@ -351,6 +347,52 @@ watch(() => viewTruck.value?.id, async (truckId) => {
   } finally {
     driverFilesLoading.value = false
   }
+})
+
+// Flatten application uploads + signed onboarding docs + drug test into
+// two groups keyed by underlying file type so the modal shows them under
+// "Images" and "PDF Documents" rather than by business domain.
+const driverFilesByType = computed(() => {
+  const image = []
+  const pdf = []
+  const unit = viewTruck.value?.UnitNumber || 'truck'
+  const slug = (s) => (s || '').replace(/\s+/g, '-')
+  // Application uploads (CDL front/back, medical card)
+  for (const f of driverFiles.value.files || []) {
+    if (!f.data) continue
+    const entry = {
+      label: f.label,
+      url: f.data,
+      downloadName: `${unit}-${slug(f.label)}.${f.type === 'pdf' ? 'pdf' : 'jpg'}`,
+      meta: 'Application upload — click to view',
+      metaClass: '',
+    }
+    if (f.type === 'image') image.push(entry)
+    else if (f.type === 'pdf') pdf.push(entry)
+  }
+  // Signed onboarding docs (always PDFs)
+  for (const doc of (driverFiles.value.onboardingDocs || [])) {
+    if (!doc.signed || !doc.signed_pdf_url) continue
+    pdf.push({
+      label: doc.doc_name,
+      url: doc.signed_pdf_url,
+      downloadName: `${unit}-${slug(doc.doc_name)}.pdf`,
+      meta: doc.signed_at ? `Signed ${new Date(doc.signed_at).toLocaleDateString()}` : 'Signed',
+      metaClass: '',
+    })
+  }
+  // Drug test
+  const dt = driverFiles.value.drugTest
+  if (dt && dt.file_url) {
+    pdf.push({
+      label: 'Drug Test Result',
+      url: dt.file_url,
+      downloadName: `${unit}-drug-test.pdf`,
+      meta: (dt.result || '').toUpperCase(),
+      metaClass: dt.result === 'pass' ? 'dt-pass' : 'dt-fail',
+    })
+  }
+  return { image, pdf }
 })
 
 const editModelOptions = computed(() => truckModels[editForm.make] || [])
@@ -569,7 +611,9 @@ function handleConfirmDelete() {
   font-size: 0.68rem; font-weight: 700; color: #64748b;
   text-transform: uppercase; letter-spacing: 0.05em;
   margin: 0.85rem 0 0.5rem;
+  display: flex; align-items: center; gap: 0.4rem;
 }
+.driver-files-sublabel .type-icon { color: #3b82f6; }
 .driver-files-subsection { margin-top: 0.5rem; }
 .driver-files-empty { font-size: 0.82rem; color: #94a3b8; font-style: italic; padding: 0.75rem 0; }
 .driver-files-error {
@@ -596,9 +640,10 @@ function handleConfirmDelete() {
   width: 100%; height: 100px; border-radius: 6px;
   background-color: #e2e8f0; background-size: cover; background-position: center;
   display: flex; align-items: center; justify-content: center;
-  font-size: 2rem; color: #64748b; margin-bottom: 0.5rem;
+  color: #64748b; margin-bottom: 0.5rem;
 }
 .driver-file-thumb.pdf { background-color: #fef2f2; color: #dc2626; }
+.driver-file-thumb svg { display: block; }
 .driver-file-label { font-size: 0.78rem; font-weight: 600; color: #0f172a; margin-bottom: 0.15rem; }
 .driver-file-type { font-size: 0.68rem; color: #94a3b8; font-family: 'JetBrains Mono', monospace; }
 .driver-file-type.dt-pass { color: #16a34a; font-weight: 700; }
