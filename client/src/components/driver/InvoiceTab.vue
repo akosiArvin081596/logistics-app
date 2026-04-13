@@ -71,7 +71,7 @@
             :disabled="submitting"
             @click="handleSubmit"
           >
-            {{ submitting ? 'Submitting...' : 'Submit Invoice' }}
+            {{ submitting ? 'Submitting...' : 'Submit & Send to Admin' }}
           </button>
         </div>
       </div>

@@ -11,14 +11,16 @@ export const useInvoicesStore = defineStore('invoices', {
 
   getters: {
     byStatus: (s) => (status) => s.invoices.filter(i => i.status === status),
-    draftCount:     (s) => s.invoices.filter(i => i.status === 'Draft').length,
-    submittedCount: (s) => s.invoices.filter(i => i.status === 'Submitted').length,
-    approvedCount:  (s) => s.invoices.filter(i => i.status === 'Approved').length,
-    paidCount:      (s) => s.invoices.filter(i => i.status === 'Paid').length,
-    rejectedCount:  (s) => s.invoices.filter(i => i.status === 'Rejected').length,
-    totalSubmitted: (s) => s.invoices.filter(i => i.status === 'Submitted').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
-    totalApproved:  (s) => s.invoices.filter(i => i.status === 'Approved').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
-    totalPaid:      (s) => s.invoices.filter(i => i.status === 'Paid').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
+    draftCount:      (s) => s.invoices.filter(i => i.status === 'Draft').length,
+    submittedCount:  (s) => s.invoices.filter(i => i.status === 'Submitted').length,
+    approvedCount:   (s) => s.invoices.filter(i => i.status === 'Approved').length,
+    processingCount: (s) => s.invoices.filter(i => i.status === 'Processing').length,
+    paidCount:       (s) => s.invoices.filter(i => i.status === 'Paid').length,
+    rejectedCount:   (s) => s.invoices.filter(i => i.status === 'Rejected').length,
+    totalSubmitted:  (s) => s.invoices.filter(i => i.status === 'Submitted').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
+    totalApproved:   (s) => s.invoices.filter(i => i.status === 'Approved').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
+    totalProcessing: (s) => s.invoices.filter(i => i.status === 'Processing').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
+    totalPaid:       (s) => s.invoices.filter(i => i.status === 'Paid').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
   },
 
   actions: {
@@ -32,7 +34,7 @@ export const useInvoicesStore = defineStore('invoices', {
       }
     },
 
-    // action: 'approve' | 'reject' | 'paid'
+    // action: 'approve' | 'reject' | 'processing' | 'paid'
     async updateStatus(id, action, rejectionNote) {
       const body = { action }
       if (action === 'reject' && rejectionNote) body.rejectionNote = rejectionNote

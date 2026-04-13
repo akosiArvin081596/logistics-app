@@ -126,8 +126,13 @@
                 <Button class="w-full bg-red-600 hover:bg-red-700 text-white" @click="showRejectPrompt = true">Reject</Button>
               </div>
               <div v-else-if="selectedInvoice.status === 'Approved'" class="flex flex-col gap-2">
+                <Button class="w-full bg-amber-500 hover:bg-amber-600 text-white" @click="doAction('processing')">Mark as Processing</Button>
                 <Button class="w-full bg-blue-600 hover:bg-blue-700 text-white" @click="doAction('paid')">Mark as Paid</Button>
-                <p class="text-[11px] text-gray-500 text-center">Click when you have sent the payment via your bank.</p>
+                <p class="text-[11px] text-gray-500 text-center">Use <b>Processing</b> when payment is initiated but not yet confirmed. Use <b>Paid</b> when funds are confirmed.</p>
+              </div>
+              <div v-else-if="selectedInvoice.status === 'Processing'" class="flex flex-col gap-2">
+                <Button class="w-full bg-blue-600 hover:bg-blue-700 text-white" @click="doAction('paid')">Mark as Paid</Button>
+                <p class="text-[11px] text-gray-500 text-center">Payment is in flight. Click when the funds clear.</p>
               </div>
               <div v-else-if="selectedInvoice.status === 'Paid'" class="paid-banner">
                 <div class="paid-icon">&#10003;</div>
@@ -199,6 +204,7 @@ const filteredInvoices = computed(() => {
 const kpiCards = computed(() => [
   { label: 'Submitted',  value: store.submittedCount, sub: `$${fmtMoney(store.totalSubmitted)} pending review`, icon: '&#128228;', theme: 'kpi-amber',   iconTheme: 'kpi-icon-amber',   filter: 'Submitted' },
   { label: 'Approved',   value: store.approvedCount,  sub: `$${fmtMoney(store.totalApproved)} ready to pay`,   icon: '&#10003;',  theme: 'kpi-blue',    iconTheme: 'kpi-icon-blue',    filter: 'Approved' },
+  { label: 'Processing', value: store.processingCount, sub: `$${fmtMoney(store.totalProcessing)} payment in flight`, icon: '&#8644;', theme: 'kpi-amber',   iconTheme: 'kpi-icon-amber',   filter: 'Processing' },
   { label: 'Paid',       value: store.paidCount,      sub: `$${fmtMoney(store.totalPaid)} settled`,            icon: '&#128176;', theme: 'kpi-emerald', iconTheme: 'kpi-icon-emerald', filter: 'Paid' },
   { label: 'Rejected',   value: store.rejectedCount,  sub: 'Need correction',                                   icon: '&#10007;',  theme: 'kpi-violet',  iconTheme: 'kpi-icon-violet',  filter: 'Rejected' },
 ])
@@ -300,10 +306,11 @@ function formatWeek(start, end) {
   return `${s} – ${e}`
 }
 function statusBadge(status) {
-  if (status === 'Draft')     return 'bg-gray-50 text-gray-600 border border-gray-200 text-[11px] font-semibold'
-  if (status === 'Submitted') return 'bg-amber-50 text-amber-700 border border-amber-200 text-[11px] font-semibold'
-  if (status === 'Approved')  return 'bg-blue-50 text-blue-700 border border-blue-200 text-[11px] font-semibold'
-  if (status === 'Paid')      return 'bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold'
+  if (status === 'Draft')      return 'bg-gray-50 text-gray-600 border border-gray-200 text-[11px] font-semibold'
+  if (status === 'Submitted')  return 'bg-amber-50 text-amber-700 border border-amber-200 text-[11px] font-semibold'
+  if (status === 'Approved')   return 'bg-blue-50 text-blue-700 border border-blue-200 text-[11px] font-semibold'
+  if (status === 'Processing') return 'bg-orange-50 text-orange-700 border border-orange-200 text-[11px] font-semibold'
+  if (status === 'Paid')       return 'bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold'
   return 'bg-red-50 text-red-700 border border-red-200 text-[11px] font-semibold'
 }
 

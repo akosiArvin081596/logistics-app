@@ -793,7 +793,7 @@ db.exec(`
 		total_earnings REAL NOT NULL DEFAULT 0,
 		expenses_total REAL NOT NULL DEFAULT 0,
 		status TEXT NOT NULL DEFAULT 'Draft'
-			CHECK(status IN ('Draft','Submitted','Approved','Rejected','Paid')),
+			CHECK(status IN ('Draft','Submitted','Approved','Processing','Rejected','Paid')),
 		rejection_note TEXT DEFAULT '',
 		pdf_file_name TEXT DEFAULT '',
 		load_ids TEXT DEFAULT '[]',
@@ -804,6 +804,54 @@ db.exec(`
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
+// Migrate: rebuild invoices table if CHECK constraint is outdated (adds 'Processing').
+// Wrapped in a transaction so a crash mid-migration rolls back to the
+// original state — prevents leaving an orphan `invoices_old` table behind.
+// Also cleans up any orphan left by a previous failed attempt.
+try { db.exec("DROP TABLE IF EXISTS invoices_old"); } catch {}
+try {
+	db.prepare("INSERT INTO invoices (invoice_number, driver, week_start, week_end, status) VALUES ('__test_proc__', '__test__', '1970-01-01', '1970-01-07', 'Processing')").run();
+	db.prepare("DELETE FROM invoices WHERE invoice_number = '__test_proc__'").run();
+} catch {
+	const migrateInvoices = db.transaction(() => {
+		db.exec(`
+			ALTER TABLE invoices RENAME TO invoices_old;
+			CREATE TABLE invoices (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				invoice_number TEXT NOT NULL UNIQUE,
+				driver TEXT NOT NULL,
+				week_start TEXT NOT NULL,
+				week_end TEXT NOT NULL,
+				loads_count INTEGER NOT NULL DEFAULT 0,
+				rate_per_load REAL NOT NULL DEFAULT 250.00,
+				total_earnings REAL NOT NULL DEFAULT 0,
+				expenses_total REAL NOT NULL DEFAULT 0,
+				status TEXT NOT NULL DEFAULT 'Draft'
+					CHECK(status IN ('Draft','Submitted','Approved','Processing','Rejected','Paid')),
+				rejection_note TEXT DEFAULT '',
+				pdf_file_name TEXT DEFAULT '',
+				load_ids TEXT DEFAULT '[]',
+				expense_ids TEXT DEFAULT '[]',
+				submitted_at TEXT DEFAULT '',
+				approved_at TEXT DEFAULT '',
+				approved_by TEXT DEFAULT '',
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			);
+			INSERT INTO invoices SELECT * FROM invoices_old;
+			DROP TABLE invoices_old;
+		`);
+	});
+	migrateInvoices();
+	console.log("Migrated invoices table: added 'Processing' to status CHECK");
+}
+// Preserve a per-transition audit trail (approve → processing → paid) so
+// the original approver isn't overwritten when the invoice advances through
+// later states. Each added via ALTER TABLE (idempotent via try-catch).
+try { db.exec("ALTER TABLE invoices ADD COLUMN processed_at TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN processed_by TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN paid_at TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN paid_by TEXT DEFAULT ''"); } catch {}
+
 db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_driver ON invoices(driver)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_week ON invoices(week_start, week_end)`);
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_driver_week ON invoices(driver, week_start)`);
@@ -1079,6 +1127,74 @@ async function sendEmail(to, subject, htmlBody, attachments = []) {
 	} catch (err) {
 		console.error("Email send failed:", err.message);
 	}
+}
+
+// Minimal HTML escape for user-sourced strings interpolated into email
+// templates. Prevents Super Admin-supplied rejection notes or phished
+// DB values from injecting arbitrary markup into outbound email.
+function escHtml(s) {
+	return String(s ?? "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+// Shared HTML wrapper for invoice notifications — matches the
+// driverWelcomeHtml branded template further down in this file so all
+// LogisX outbound emails have a consistent look.
+function invoiceEmailHtml({ heading, bodyHtml, ctaText = "", ctaHref = "" }) {
+	return `
+	<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;color:#1e293b">
+		<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
+			<img src="https://app.logisx.com/logo.avif" alt="LogisX" style="height:36px" />
+		</div>
+		<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none">
+			<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">${heading}</h2>
+			${bodyHtml}
+			${ctaText && ctaHref ? `<div style="margin-top:24px;text-align:center">
+				<a href="${ctaHref}" style="display:inline-block;background:#0f2847;color:#fff;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">${ctaText}</a>
+			</div>` : ""}
+		</div>
+		<div style="padding:16px 32px;text-align:center">
+			<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
+		</div>
+	</div>`;
+}
+
+// Build a status-change email body. Called by the approve endpoint on every
+// transition so the driver stays in the loop automatically.
+function invoiceStatusChangeEmail(invoice, newStatus, rejectionNote = "") {
+	const statusLabel = newStatus;
+	const headline = {
+		Approved: "Your invoice has been approved",
+		Processing: "Your payment is being processed",
+		Paid: "Your invoice has been paid",
+		Rejected: "Your invoice needs attention",
+	}[newStatus] || `Invoice status updated to ${newStatus}`;
+	const statusColor = {
+		Approved: "#16a34a", Processing: "#f59e0b", Paid: "#16a34a", Rejected: "#dc2626",
+	}[newStatus] || "#0ea5e9";
+	const noteBlock = newStatus === "Rejected" && rejectionNote
+		? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin:16px 0;color:#991b1b;font-size:13px"><b>Reason:</b> ${escHtml(rejectionNote)}</div>`
+		: "";
+	const body = `
+		<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${escHtml(invoice.driver)}</b>,</p>
+		<p style="margin:0 0 12px;line-height:1.6;color:#334155">Your invoice <b>${escHtml(invoice.invoice_number)}</b> for the week of ${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)} has been updated.</p>
+		<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;margin:16px 0">
+			<div style="font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.04em">New Status</div>
+			<div style="font-size:22px;font-weight:700;color:${statusColor};margin-top:4px">${statusLabel}</div>
+		</div>
+		<p style="margin:0 0 12px;line-height:1.5;color:#334155;font-size:14px"><b>Total:</b> $${Number(invoice.total_earnings || 0).toFixed(2)}</p>
+		${noteBlock}
+	`;
+	return invoiceEmailHtml({
+		heading: headline,
+		bodyHtml: body,
+		ctaText: "View Invoice",
+		ctaHref: "https://app.logisx.com/invoices",
+	});
 }
 
 // Serve Vue SPA build (client/dist) if it exists, otherwise fall back to public/
@@ -3648,8 +3764,10 @@ app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {
 	}
 });
 
-// PUT /api/invoices/:id/submit — driver submits invoice
-app.put("/api/invoices/:id/submit", requireAuth, (req, res) => {
+// PUT /api/invoices/:id/submit — driver submits invoice AND emails the PDF
+// to Super Admin (info@logisx.com) so the admin can review in their inbox.
+// Email is best-effort: submission succeeds even if the email fails.
+app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
 		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
@@ -3664,34 +3782,109 @@ app.put("/api/invoices/:id/submit", requireAuth, (req, res) => {
 		db.prepare("UPDATE invoices SET status = 'Submitted', submitted_at = ? WHERE id = ?").run(now, invoice.id);
 		notifyChange("invoices");
 		res.json({ success: true });
+
+		// Fire-and-forget: attach the PDF and email the admin. Wrapped in
+		// try/catch so any email failure never blocks the 200 response.
+		(async () => {
+			try {
+				const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
+				const pdfPath = path.join(__dirname, "uploads", "invoices", invoice.pdf_file_name || "");
+				const attachments = invoice.pdf_file_name && fs.existsSync(pdfPath)
+					? [{ filename: invoice.pdf_file_name, path: pdfPath }]
+					: [];
+				const html = invoiceEmailHtml({
+					heading: `New Invoice: ${escHtml(invoice.invoice_number)}`,
+					bodyHtml: `
+						<p style="margin:0 0 12px;line-height:1.6;color:#334155">Driver <b>${escHtml(invoice.driver)}</b> just submitted an invoice for the week of ${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}.</p>
+						<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;margin:16px 0">
+							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Invoice</span><b>${escHtml(invoice.invoice_number)}</b></div>
+							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Driver</span><b>${escHtml(invoice.driver)}</b></div>
+							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Week</span><b>${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}</b></div>
+							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Loads</span><b>${Number(invoice.loads_count || 0)}</b></div>
+							<div style="display:flex;justify-content:space-between;font-size:15px;padding:8px 0 0;border-top:1px solid #bae6fd;margin-top:6px"><span style="color:#64748b;font-weight:600">Total</span><b style="color:#0f172a">$${Number(invoice.total_earnings || 0).toFixed(2)}</b></div>
+						</div>
+						<p style="margin:0 0 12px;line-height:1.5;color:#334155;font-size:13px">The full invoice PDF is attached. Log in to the admin dashboard to approve, reject, or mark as paid.</p>
+					`,
+					ctaText: "Review Invoice",
+					ctaHref: "https://app.logisx.com/invoices",
+				});
+				await sendEmail(adminEmail, `New Invoice: ${invoice.invoice_number} - ${invoice.driver}`, html, attachments);
+			} catch (emailErr) {
+				console.error("Invoice submit email failed:", emailErr.message);
+			}
+		})();
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
 });
 
-// PUT /api/invoices/:id/approve — Super Admin approves or rejects
-app.put("/api/invoices/:id/approve", requireRole("Super Admin"), (req, res) => {
+// PUT /api/invoices/:id/approve — Super Admin transitions invoice status.
+// Valid state machine:
+//   Submitted → Approved (or Rejected)
+//   Approved → Processing (or Paid)
+//   Processing → Paid
+// Every successful transition fires an email to the driver.
+app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
 		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
-		const { action, rejectionNote } = req.body; // action: "approve" | "reject" | "paid"
-		if (!["approve", "reject", "paid"].includes(action)) {
-			return res.status(400).json({ error: "Action must be 'approve', 'reject', or 'paid'" });
+		const { action, rejectionNote } = req.body; // action: "approve" | "reject" | "processing" | "paid"
+		if (!["approve", "reject", "processing", "paid"].includes(action)) {
+			return res.status(400).json({ error: "Action must be 'approve', 'reject', 'processing', or 'paid'" });
+		}
+		// Enforce valid transitions
+		const currentStatus = invoice.status;
+		const transitionOk = {
+			approve: currentStatus === "Submitted",
+			reject: currentStatus === "Submitted",
+			processing: currentStatus === "Approved",
+			paid: currentStatus === "Approved" || currentStatus === "Processing",
+		}[action];
+		if (!transitionOk) {
+			return res.status(400).json({ error: `Cannot ${action} an invoice with status "${currentStatus}"` });
 		}
 		const now = new Date().toISOString();
 		const adminName = req.session.user.username;
+		let newStatus = "";
 		if (action === "approve") {
+			newStatus = "Approved";
 			db.prepare("UPDATE invoices SET status = 'Approved', approved_at = ?, approved_by = ? WHERE id = ?")
 				.run(now, adminName, invoice.id);
 		} else if (action === "reject") {
+			newStatus = "Rejected";
 			db.prepare("UPDATE invoices SET status = 'Rejected', rejection_note = ?, approved_at = ?, approved_by = ? WHERE id = ?")
 				.run(rejectionNote || "", now, adminName, invoice.id);
+		} else if (action === "processing") {
+			newStatus = "Processing";
+			// Record the processing transition in its own fields — do NOT
+			// overwrite approved_at / approved_by (which tracked who first
+			// approved the invoice).
+			db.prepare("UPDATE invoices SET status = 'Processing', processed_at = ?, processed_by = ? WHERE id = ?")
+				.run(now, adminName, invoice.id);
 		} else if (action === "paid") {
-			db.prepare("UPDATE invoices SET status = 'Paid', approved_at = ?, approved_by = ? WHERE id = ?")
+			newStatus = "Paid";
+			// Same principle: paid_at / paid_by are separate from approved_*
+			// so the original approver is preserved in the audit trail.
+			db.prepare("UPDATE invoices SET status = 'Paid', paid_at = ?, paid_by = ? WHERE id = ?")
 				.run(now, adminName, invoice.id);
 		}
 		notifyChange("invoices");
-		res.json({ success: true });
+		res.json({ success: true, status: newStatus });
+
+		// Fire-and-forget: email the driver about the status change. Best-effort.
+		(async () => {
+			try {
+				const driverUser = db.prepare(
+					"SELECT email FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver' LIMIT 1"
+				).get(invoice.driver);
+				if (!driverUser || !driverUser.email) return;
+				const updated = { ...invoice, status: newStatus };
+				const html = invoiceStatusChangeEmail(updated, newStatus, rejectionNote || "");
+				await sendEmail(driverUser.email, `Invoice ${invoice.invoice_number}: ${newStatus}`, html);
+			} catch (emailErr) {
+				console.error("Invoice status email failed:", emailErr.message);
+			}
+		})();
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -9127,7 +9320,7 @@ app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { driver, type, status } = req.query;
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, created_at FROM expenses";
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, created_at FROM expenses";
 		const conditions = [];
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
@@ -9140,6 +9333,87 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 	} catch (err) {
 		console.error("Error fetching all expenses:", err.message);
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/expenses/receipts-download — Super Admin downloads all receipts
+// for a specific truck within a date range as a ZIP bundle. Returns both the
+// receipt files (named by date + expense ID + load ID) and a manifest.csv
+// with all metadata. Used for monthly accounting / tax review.
+app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res) => {
+	try {
+		const { truck, from, to } = req.query;
+		if (!truck || !from || !to) {
+			return res.status(400).json({ error: "truck, from, and to query params are required (YYYY-MM-DD)" });
+		}
+		// Basic date format sanity check (YYYY-MM-DD). Anything else gets rejected.
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+			return res.status(400).json({ error: "Dates must be YYYY-MM-DD" });
+		}
+		if (to < from) {
+			return res.status(400).json({ error: "'to' must be on or after 'from'" });
+		}
+		const expenses = db.prepare(
+			`SELECT id, date, driver, load_id, type, amount, description, photo_data, gallons, odometer
+			 FROM expenses
+			 WHERE LOWER(truck_unit) = LOWER(?) AND date >= ? AND date <= ?
+			 ORDER BY date ASC, id ASC`
+		).all(truck, from, to);
+
+		if (expenses.length === 0) {
+			return res.status(404).json({ error: "No expenses found for that truck and date range" });
+		}
+
+		// Stream a zip directly to the response. Files referenced in
+		// photo_data live under /uploads/expense-receipts/ — any row that
+		// somehow points outside that directory is skipped for safety.
+		const archiver = require("archiver");
+		const safeTruck = truck.replace(/[^a-zA-Z0-9._-]/g, "_");
+		const filename = `${safeTruck}-receipts-${from}-to-${to}.zip`;
+		res.setHeader("Content-Type", "application/zip");
+		res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+		const archive = archiver("zip", { zlib: { level: 9 } });
+		archive.on("error", (err) => {
+			console.error("Receipt zip error:", err.message);
+			if (!res.headersSent) res.status(500).json({ error: "Failed to build receipt archive" });
+		});
+		archive.pipe(res);
+
+		// Manifest CSV — reviewer can open in Excel to reconcile the bundle
+		const csvRows = ["date,expense_id,driver,load_id,type,amount,description,file_name"];
+		const receiptsDir = path.join(__dirname, "uploads", "expense-receipts");
+		let attachedCount = 0;
+		for (const exp of expenses) {
+			const p = exp.photo_data || "";
+			let fileName = "";
+			// Only accept photo_data rows that point at our expense-receipts
+			// directory. This prevents path traversal (../../etc/passwd) or
+			// any stray absolute path that might have been stored before the
+			// disk-migration landed.
+			if (p && p.startsWith("/uploads/expense-receipts/")) {
+				const srcPath = path.join(__dirname, p.replace(/^\//, ""));
+				if (srcPath.startsWith(receiptsDir) && fs.existsSync(srcPath)) {
+					const ext = path.extname(srcPath).toLowerCase() || ".bin";
+					fileName = `${exp.date}_exp-${exp.id}${exp.load_id ? "_load-" + exp.load_id : ""}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+					archive.file(srcPath, { name: `receipts/${fileName}` });
+					attachedCount++;
+				}
+			}
+			// CSV row: always include, so rows without a receipt file are still accounted for
+			const csvCell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+			csvRows.push([
+				exp.date, exp.id, exp.driver, exp.load_id, exp.type,
+				Number(exp.amount || 0).toFixed(2),
+				exp.description, fileName || "(no file)"
+			].map(csvCell).join(","));
+		}
+		archive.append(csvRows.join("\n"), { name: "manifest.csv" });
+		archive.finalize();
+		console.log(`Receipt zip: ${truck} ${from}..${to} — ${expenses.length} rows, ${attachedCount} files`);
+	} catch (err) {
+		console.error("GET /api/expenses/receipts-download error:", err.message);
+		if (!res.headersSent) res.status(500).json({ error: "Failed to download receipts" });
 	}
 });
 
