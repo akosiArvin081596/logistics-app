@@ -8366,7 +8366,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const monthlyRevenue = {};
 		const completedLoadIds = new Set();
 		const grossByDriver = {};       // per-driver completed revenue (replaces Pass 3 inner loop)
-		const driverDaySets = {};        // per-driver active day Sets (was Pass 2)
+		const driverDaySets = {};        // per-driver active day Sets (all-time, used for totals)
+		// Driver active days bucketed by LOAD'S ASSIGNED MONTH (not by physical day).
+		// This matches how revenue is bucketed — both should answer the question:
+		// "for loads assigned in month X, how much did we earn and how much did we
+		// pay the driver?" Previously loads assigned in April with old pickup dates
+		// in 2021 would show their revenue in April but their driver pay in 2021.
+		const driverMonthlyDays = {};    // { driver: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
 		const now = new Date();
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -8374,6 +8380,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		filteredJobData.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
 			const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
+
+			// Resolve the load's assigned-month key once (used by both revenue and driver pay)
+			let assignedMonthKey = null;
+			if (jtDateCol && r[jtDateCol]) {
+				const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				if (d && !isNaN(d)) assignedMonthKey = fmtDate(d).slice(0, 7);
+			}
 
 			// Revenue (completed loads only)
 			if (completedStatuses.test(st)) {
@@ -8383,14 +8396,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					if (lid) completedLoadIds.add(lid);
 					totalRevenue += amt;
 					if (driver) grossByDriver[driver] = (grossByDriver[driver] || 0) + amt;
-					if (jtDateCol && r[jtDateCol]) {
-						// Use parseSheetDate first (consistent local-time parsing), fall back to new Date()
+					if (assignedMonthKey) {
 						const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
-						if (d && !isNaN(d)) {
-							if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
-							const key = fmtDate(d).slice(0, 7); // "YYYY-MM" using local time
-							monthlyRevenue[key] = (monthlyRevenue[key] || 0) + amt;
-						}
+						if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
+						monthlyRevenue[assignedMonthKey] = (monthlyRevenue[assignedMonthKey] || 0) + amt;
 					}
 				}
 			}
@@ -8400,8 +8409,18 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
 				if (pickup) {
+					const days = expandDateRange(pickup, dropoff || pickup);
+					// All-time set (for totals)
 					if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
-					expandDateRange(pickup, dropoff || pickup).forEach(d => driverDaySets[driver].add(d));
+					days.forEach(d => driverDaySets[driver].add(d));
+					// Per-assigned-month set (for monthly P&L). Falls back to the
+					// physical day's month if the load has no assigned date (rare).
+					if (!driverMonthlyDays[driver]) driverMonthlyDays[driver] = {};
+					days.forEach(d => {
+						const bucket = assignedMonthKey || d.slice(0, 7);
+						if (!driverMonthlyDays[driver][bucket]) driverMonthlyDays[driver][bucket] = new Set();
+						driverMonthlyDays[driver][bucket].add(d);
+					});
 				}
 			}
 
@@ -8516,26 +8535,20 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		{
 			const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 
-			// 1. Monthly driver pay — bucket active days by YYYY-MM.
-			// Builds both the monthly total and a per-driver-per-month breakdown
-			// so the frontend can show "tom smith: 8 days × $250 = $2000" for
-			// the selected month (not all-time).
+			// 1. Monthly driver pay — bucketed by each load's ASSIGNED month,
+			// not by the physical day the driver was active. This keeps revenue
+			// and driver pay aligned so a load assigned in April always shows
+			// both its revenue AND its driver pay in April.
 			const monthlyDriverPay = {};
 			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay } } }
-			for (const [driver, detail] of Object.entries(driverPayDetails)) {
-				const rate = detail.dailyRate || 250;
-				// Group dates by month, deduplicate within each month
-				const monthDays = {};
-				for (const d of detail.dates) {
-					const mk = d.slice(0, 7); // "YYYY-MM"
-					if (!monthDays[mk]) monthDays[mk] = new Set();
-					monthDays[mk].add(d);
-				}
-				for (const [mk, days] of Object.entries(monthDays)) {
-					const pay = days.size * rate;
+			for (const [driver, monthsMap] of Object.entries(driverMonthlyDays)) {
+				const rate = (driverPayDetails[driver] && driverPayDetails[driver].dailyRate) || 250;
+				for (const [mk, daySet] of Object.entries(monthsMap)) {
+					const activeDays = daySet.size;
+					const pay = activeDays * rate;
 					monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + pay;
 					if (!monthlyDriverDetails[mk]) monthlyDriverDetails[mk] = {};
-					monthlyDriverDetails[mk][driver] = { activeDays: days.size, dailyRate: rate, totalPay: pay };
+					monthlyDriverDetails[mk][driver] = { activeDays, dailyRate: rate, totalPay: pay };
 				}
 			}
 
