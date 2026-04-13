@@ -8676,7 +8676,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			}
 		});
 
-		// Avg daily revenue = 30-day average (S2)
+		// Avg daily revenue = 30-day average (S2).
+		// Gross = raw top-line from completed loads in the trailing 30 days.
+		// Investor daily = the 50% split after driver pay + fixed + trip expenses
+		// is applied — computed below after netProfit is known for the window.
 		const avgDailyRevenue = last30DaysRevenue / 30;
 
 		// Months of operation and avg monthly owner earnings (S3)
@@ -8982,19 +8985,73 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			investorProfile = db.prepare("SELECT id, profile_picture_url FROM investors WHERE user_id = ?").get(user.id);
 		}
 
+		// ---- Investor-centric aggregates (P0-4/5/6 from 2026-04-12 meeting) ----
+		// Every metric on the investor dashboard must be based on what the
+		// owner actually takes home, not the gross. The backend returns both:
+		// frontend can show "Truck Gross" and "Your Take-Home" side-by-side.
+		const investorNetToDate = Math.round(
+			(monthlyEarnings || []).reduce((s, m) => s + (m.investorEarnings || 0), 0)
+		);
+		// Trailing 3-month average investor take-home. Uses the most recent
+		// 3 entries from monthlyEarnings (which is ordered oldest → newest).
+		// Falls back to all-time avg if fewer than 3 months exist.
+		const recentMonths = (monthlyEarnings || []).slice(-3);
+		const trailing3MonthInvestor = recentMonths.length
+			? recentMonths.reduce((s, m) => s + (m.investorEarnings || 0), 0) / recentMonths.length
+			: 0;
+		const avgMonthlyInvestorEarnings = Math.round(
+			monthsOfOperation > 0 && monthlyEarnings?.length
+				? investorNetToDate / monthlyEarnings.length
+				: 0
+		);
+		// Daily investor take-home: derived from monthly take-home across the
+		// trailing window, divided by days in that window. This is more
+		// accurate than `avgDailyRevenue / 2` because it already accounts for
+		// the actual driver pay / fixed cost / trip expense mix per month.
+		const trailingDays = recentMonths.length * 30;
+		const avgDailyInvestorEarnings = trailingDays > 0
+			? Math.round((recentMonths.reduce((s, m) => s + (m.investorEarnings || 0), 0) / trailingDays) * 100) / 100
+			: 0;
+
+		// Annotate every perTruckData entry with the investor-centric
+		// numbers the frontend needs for ROI and break-even. For the
+		// single-truck investor (the common case) this is just the fleet
+		// totals. For multi-truck investors each truck gets an equal share;
+		// true per-truck monthly tracking is a P1 enhancement.
+		{
+			const truckCount = Math.max(1, allOwnedTrucks.length);
+			const perTruckMonthlyInvestor = Math.round(trailing3MonthInvestor / truckCount);
+			const perTruckEstAnnualInvestor = Math.round(perTruckMonthlyInvestor * 12);
+			for (const unit of Object.keys(perTruckData)) {
+				const price = (allOwnedTrucks.find(t => t.unit_number === unit)?.purchase_price) || 0;
+				perTruckData[unit].monthlyInvestorEarnings = perTruckMonthlyInvestor;
+				perTruckData[unit].estAnnualInvestorRevenue = perTruckEstAnnualInvestor;
+				perTruckData[unit].investorROI = price > 0
+					? Math.round((perTruckEstAnnualInvestor / price) * 1000) / 10
+					: 0;
+				perTruckData[unit].breakEvenMonths = perTruckMonthlyInvestor > 0
+					? Math.ceil(price / perTruckMonthlyInvestor)
+					: null;
+			}
+		}
+
 		res.json({
 			production: {
 				totalRevenue: Math.round(totalRevenue),
 				avgDailyRevenue: Math.round(avgDailyRevenue),
+				avgDailyInvestorEarnings,
 				last30DaysRevenue: Math.round(last30DaysRevenue),
 				monthlyData,
 				avgMonthlyOwnerEarnings,
+				avgMonthlyInvestorEarnings,
+				trailing3MonthInvestor: Math.round(trailing3MonthInvestor),
 				monthsOfOperation,
 				investorSplitPct: parseFloat(config.investor_split_pct) || 50,
 				totalJobs,
 				completedJobs: completedJobCount,
 				totalExpenses: Math.round(totalExpenses),
 				investorEarnings: Math.round((totalRevenue - totalExpenses) / 2),
+				investorNetToDate,
 				totalDriverPay: Math.round(totalDriverPay),
 				driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(([k, v]) => [k, { activeDays: v.activeDays, dailyRate: v.dailyRate, totalPay: v.totalPay }])),
 				netRevenueToDate,

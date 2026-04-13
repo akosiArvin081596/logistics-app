@@ -19,16 +19,28 @@
         <div class="kpi-formula">= MAX(monthlyData[].amount)</div>
       </div>
       <div class="kpi-card">
+        <div class="kpi-label">Truck Gross / Day</div>
+        <div class="kpi-value">{{ fmt(avgDailyGross) }}</div>
+        <div class="kpi-sub">what the truck earns per day</div>
+        <div class="kpi-formula">= last30DaysRevenue / 30</div>
+      </div>
+      <div class="kpi-card accent">
+        <div class="kpi-label">Your Take-Home / Day</div>
+        <div class="kpi-value">{{ fmt(avgDailyTakeHome) }}</div>
+        <div class="kpi-sub">your 50% share per day</div>
+        <div class="kpi-formula">= trailing 3mo take-home / days</div>
+      </div>
+      <div class="kpi-card">
         <div class="kpi-label">Avg Monthly Revenue</div>
         <div class="kpi-value">{{ fmt(avgMonthly) }}</div>
-        <div class="kpi-sub">across {{ months.length }} months</div>
+        <div class="kpi-sub">gross across {{ months.length }} months</div>
         <div class="kpi-formula">= SUM(monthlyData) / months.length</div>
       </div>
-      <div class="kpi-card" :class="projectedAnnual > 0 ? 'accent' : ''">
-        <div class="kpi-label">Projected Annual</div>
-        <div class="kpi-value">{{ fmt(projectedAnnual) }}</div>
-        <div class="kpi-sub">avg daily x 20 days x 12 months</div>
-        <div class="kpi-formula">= avgDailyRevenue * 20 * 12</div>
+      <div class="kpi-card accent">
+        <div class="kpi-label">Projected Annual Take-Home</div>
+        <div class="kpi-value">{{ fmt(projectedAnnualTakeHome) }}</div>
+        <div class="kpi-sub">trailing 3mo take-home x 12</div>
+        <div class="kpi-formula">= trailing3MonthInvestor * 12</div>
       </div>
     </div>
 
@@ -82,10 +94,16 @@ const avgMonthly = computed(() => {
   return months.value.reduce((s, m) => s + m.amount, 0) / months.value.length
 })
 
-// Projected Annual = avg daily earnings × 20 working days/month × 12 months
-const projectedAnnual = computed(() => {
-  const avgDaily = props.production?.avgDailyRevenue || 0
-  return avgDaily * 20 * 12
+// Daily averages — two distinct numbers per the 2026-04-12 meeting:
+// gross (what the truck earns) vs take-home (what the investor pockets).
+const avgDailyGross = computed(() => props.production?.avgDailyRevenue || 0)
+const avgDailyTakeHome = computed(() => props.production?.avgDailyInvestorEarnings || 0)
+// Projected annual take-home uses the trailing 3-month investor average × 12
+// instead of gross × 20 days × 12, so the projection reflects what the
+// investor actually pockets, not topline revenue.
+const projectedAnnualTakeHome = computed(() => {
+  const trailing = props.production?.trailing3MonthInvestor || 0
+  return trailing * 12
 })
 
 const trendPoints = computed(() => {

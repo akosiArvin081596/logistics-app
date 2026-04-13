@@ -17,7 +17,7 @@
           <th>Driver</th>
           <th>Loads</th>
           <th>Miles</th>
-          <th>Est. Revenue</th>
+          <th>Est. Your Revenue</th>
           <th>ROI</th>
         </tr>
       </thead>
@@ -107,7 +107,7 @@
       </tfoot>
     </table>
     <div class="fleet-note">
-      Est. Revenue = (avg monthly gross - avg monthly expenses) x 12. ROI = Est. Revenue / Purchase Price x 100. Based on {{ monthsLabel }} of data — projections become more accurate over time.
+      Est. Your Revenue = trailing 3-month investor take-home × 12 (your 50% share of net profit). ROI = Est. Your Revenue / Purchase Price × 100. Based on {{ monthsLabel }} of data — projections become more accurate over time.
     </div>
   </div>
 </template>
@@ -166,13 +166,18 @@ const trucksWithROI = computed(() => {
   return props.trucks.map(t => {
     const unitKey = t.UnitNumber || t.unit_number || ''
     const perUnit = perTruckData[unitKey]
-    const estRevenue = perUnit?.estAnnualRevenue ?? 0
+    // Investor take-home (50% share), NOT gross. Per the 2026-04-12 meeting:
+    // "all these metrics has to be based on what the investor is actually
+    // taking home". The backend now computes estAnnualInvestorRevenue from
+    // the trailing 3-month investor earnings × 12.
+    const estRevenue = perUnit?.estAnnualInvestorRevenue ?? 0
     const truckPrice = t.PurchasePrice || t.purchase_price || purchasePrice
-    // ROI = annual net profit / truck investment cost
+    // ROI = estimated annual investor take-home / truck investment cost
     const roi = truckPrice > 0 ? (estRevenue / truckPrice) * 100 : 0
     const totalMiles = perUnit?.totalMiles ?? 0
     const loadCount = perUnit?.loadCount ?? 0
-    return { ...t, estRevenue, roi, totalMiles, loadCount }
+    const breakEvenMonths = perUnit?.breakEvenMonths ?? null
+    return { ...t, estRevenue, roi, totalMiles, loadCount, breakEvenMonths }
   })
 })
 

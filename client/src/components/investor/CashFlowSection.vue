@@ -13,22 +13,22 @@
         <div class="kpi-formula">= totalRevenue - totalExpenses</div>
       </div>
       <div class="kpi-card blue">
-        <div class="kpi-label">Owner Earnings (Est.)</div>
-        <div class="kpi-value">{{ fmt(investorPayout) }}</div>
-        <div class="kpi-sub">at {{ splitPct }}% owner take</div>
-        <div class="kpi-formula">= netCashFlow * {{ splitPct }} / 100</div>
+        <div class="kpi-label">Your Earnings (to date)</div>
+        <div class="kpi-value">{{ fmt(investorNetToDate) }}</div>
+        <div class="kpi-sub">cumulative take-home</div>
+        <div class="kpi-formula">= sum(monthly investor earnings)</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Break-Even</div>
         <div class="kpi-value">{{ breakEvenMonths }} mo</div>
         <div class="kpi-sub">est. {{ breakEvenDate }}</div>
-        <div class="kpi-formula">= purchasePrice / monthlyNetCashFlow</div>
+        <div class="kpi-formula">= purchasePrice / avg monthly take-home</div>
       </div>
       <div class="kpi-card" :class="roiPct >= 0 ? 'accent' : 'danger'">
-        <div class="kpi-label">Business ROI</div>
+        <div class="kpi-label">Your ROI</div>
         <div class="kpi-value">{{ roiPct.toFixed(1) }}%</div>
-        <div class="kpi-sub">total to date</div>
-        <div class="kpi-formula">= netRevenueToDate / purchasePrice * 100</div>
+        <div class="kpi-sub">take-home vs investment</div>
+        <div class="kpi-formula">= (est annual take-home / purchasePrice) × 100</div>
       </div>
     </div>
 
@@ -45,8 +45,8 @@
         <span>{{ fmt(totalPurchasePrice) }}</span>
       </div>
       <div class="timeline-note">
-        Shows how much of your {{ truckWord }} total purchase price ({{ fmt(totalPurchasePrice) }}) has been recovered through net revenue ({{ fmt(netRevenueToDate) }}).
-        At {{ recoveryPct.toFixed(0) }}%, you've earned back {{ fmt(netRevenueToDate) }} of {{ fmt(totalPurchasePrice) }}.
+        Shows how much of your {{ truckWord }} total purchase price ({{ fmt(totalPurchasePrice) }}) has been recovered through your cumulative take-home earnings ({{ fmt(investorNetToDate) }}).
+        At {{ recoveryPct.toFixed(0) }}%, you've earned back {{ fmt(investorNetToDate) }} of {{ fmt(totalPurchasePrice) }}.
         {{ recoveryPct >= 100 ? 'Your fleet has paid for itself!' : 'When the bar reaches 100%, your fleet has paid for itself.' }}
       </div>
     </div>
@@ -68,43 +68,41 @@ const totalExpenses = computed(() => props.production?.totalExpenses || 0)
 const netRevenueToDate = computed(() => props.production?.netRevenueToDate || 0)
 const totalPurchasePrice = computed(() => props.production?.totalPurchasePrice || 0)
 const totalStartupExpenses = computed(() => props.production?.totalStartupExpenses || 0)
-const avgMonthlyOwnerEarnings = computed(() => props.production?.avgMonthlyOwnerEarnings || 0)
+// Investor-take-home fields from the new backend aggregates.
+const investorNetToDate = computed(() => props.production?.investorNetToDate || 0)
+const avgMonthlyInvestorEarnings = computed(() => props.production?.avgMonthlyInvestorEarnings || 0)
+const trailing3MonthInvestor = computed(() => props.production?.trailing3MonthInvestor || 0)
 
-// Total investment = purchase price + startup costs
-const totalInvestment = computed(() => totalPurchasePrice.value + totalStartupExpenses.value)
-
-// Net Cash Flow = revenue - actual expenses from server
+// Net Cash Flow = revenue - actual expenses from server (fleet-level, not yet split)
 const netCashFlow = computed(() => totalRevenue.value - totalExpenses.value)
 
-// Owner Earnings = from config split %
-const splitPct = computed(() => props.production?.investorSplitPct || 50)
-const investorPayout = computed(() => netCashFlow.value * (splitPct.value / 100))
-
-// Payoff progress = net revenue recovered / purchase price
+// Payoff progress uses investor take-home, not fleet net — per Deshorn's
+// meeting note: "all these metrics has to be based on what the investor
+// is actually taking home".
 const recoveryPct = computed(() => {
   if (totalPurchasePrice.value <= 0) return 0
-  return (netRevenueToDate.value / totalPurchasePrice.value) * 100
+  return (investorNetToDate.value / totalPurchasePrice.value) * 100
 })
 
-// Business ROI = net profit / investment cost * 100
+// ROI = estimated annual investor take-home / purchase price × 100.
+// Uses trailing 3-month take-home × 12 to project the next year.
 const roiPct = computed(() => {
   if (totalPurchasePrice.value <= 0) return 0
-  return (netRevenueToDate.value / totalPurchasePrice.value) * 100
+  const estAnnual = trailing3MonthInvestor.value * 12
+  return (estAnnual / totalPurchasePrice.value) * 100
 })
 
-// Break-even = purchase price / monthly net cash flow
 const truckWord = computed(() => {
   const count = props.production?.totalJobs !== undefined ? (props.asset?.totalTrucks || 1) : 1
   return count === 1 ? "truck's" : `fleet's (${count} trucks)`
 })
 
-const monthlyNetCashFlow = computed(() => {
-  const months = props.production?.monthsOfOperation || 1
-  return netCashFlow.value / months
-})
+// Break-even months = purchase price / avg monthly investor take-home.
+// Uses the trailing 3-month average because that is what Deshorn
+// explicitly asked for in the meeting.
 const breakEvenMonths = computed(() => {
-  if (monthlyNetCashFlow.value <= 0) return 'N/A'
-  return Math.ceil(totalPurchasePrice.value / monthlyNetCashFlow.value)
+  if (trailing3MonthInvestor.value <= 0) return 'N/A'
+  return Math.ceil(totalPurchasePrice.value / trailing3MonthInvestor.value)
 })
 
 const breakEvenDate = computed(() => {
