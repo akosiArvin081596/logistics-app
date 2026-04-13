@@ -11,26 +11,8 @@
       </div>
       <div class="status-badges">
         <span :class="['status-badge', stepClass('documents')]">Documents</span>
-        <span :class="['status-badge', stepClass('drugtest')]">Drug Test</span>
         <span :class="['status-badge', stepClass('complete')]">Complete</span>
       </div>
-    </div>
-
-    <!-- Drug test status -->
-    <div v-if="onboarding.drug_test_result" class="card drug-test-card">
-      <div class="drug-test-row">
-        <span>Drug Test Result</span>
-        <span :class="['drug-badge', onboarding.drug_test_result === 'pass' ? 'drug-pass' : 'drug-fail']">
-          {{ onboarding.drug_test_result === 'pass' ? 'Passed' : 'Failed' }}
-        </span>
-      </div>
-    </div>
-    <div v-else class="card drug-test-card">
-      <div class="drug-test-row">
-        <span>Drug Test</span>
-        <span class="drug-badge drug-pending">Pending</span>
-      </div>
-      <div class="drug-test-note">Your administrator will upload your drug test results.</div>
     </div>
 
     <!-- Document list -->
@@ -62,21 +44,15 @@ const props = defineProps({
 const emit = defineEmits(['open-doc'])
 
 const signedCount = computed(() => props.documents.filter(d => d.signed).length)
-const progressPct = computed(() => {
-  const docPct = (signedCount.value / props.totalDocs) * 80
-  const drugPct = props.onboarding.drug_test_result === 'pass' ? 20 : 0
-  return Math.min(docPct + drugPct, 100)
-})
+// Progress bar reflects document signing only. The drug test step is
+// intentionally hidden from drivers (legal requirement) and the final
+// completion status is driven by the admin-side flow.
+const progressPct = computed(() => (signedCount.value / props.totalDocs) * 100)
 
 function stepClass(step) {
   if (step === 'documents') {
     if (signedCount.value === props.totalDocs) return 'step-done'
     if (signedCount.value > 0) return 'step-active'
-    return 'step-pending'
-  }
-  if (step === 'drugtest') {
-    if (props.onboarding.drug_test_result === 'pass') return 'step-done'
-    if (props.onboarding.drug_test_result === 'fail') return 'step-fail'
     return 'step-pending'
   }
   if (step === 'complete') {
@@ -144,30 +120,6 @@ function openDoc(doc) {
 .step-done { background: #d1fae5; color: #065f46; }
 .step-active { background: #dbeafe; color: #1e40af; }
 .step-pending { background: #f3f4f6; color: #6b7280; }
-.step-fail { background: #fee2e2; color: #991b1b; }
-
-.drug-test-card { padding: 0.75rem 1rem; }
-.drug-test-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.88rem;
-  font-weight: 600;
-}
-.drug-test-note {
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  margin-top: 0.25rem;
-}
-.drug-badge {
-  font-size: 0.72rem;
-  padding: 0.15rem 0.6rem;
-  border-radius: 99px;
-  font-weight: 600;
-}
-.drug-pass { background: #d1fae5; color: #065f46; }
-.drug-fail { background: #fee2e2; color: #991b1b; }
-.drug-pending { background: #fef3c7; color: #92400e; }
 
 .doc-card {
   padding: 0.75rem 1rem;

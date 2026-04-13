@@ -28,6 +28,7 @@
     <table v-else class="trucks-table">
       <thead>
         <tr>
+          <th></th>
           <th>Unit #</th>
           <th>Year</th>
           <th>Make</th>
@@ -40,6 +41,10 @@
       </thead>
       <tbody>
         <tr v-for="t in trucks" :key="t.id">
+          <td class="photo-cell">
+            <img v-if="t.Photo" :src="t.Photo" class="truck-thumb" :alt="t.UnitNumber" />
+            <div v-else class="truck-thumb-placeholder">&#128665;</div>
+          </td>
           <td class="mono bold">{{ t.UnitNumber }}</td>
           <td>{{ t.Year || '-' }}</td>
           <td>{{ t.Make || '-' }}</td>
@@ -133,6 +138,16 @@ async function addTruck() {
   text-transform: uppercase; color: var(--text-dim); border-bottom: 1px solid var(--border);
 }
 .trucks-table td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--bg); }
+.photo-cell { width: 52px; padding: 0.3rem 0.25rem; }
+.truck-thumb {
+  width: 48px; height: 36px; object-fit: cover;
+  border-radius: 4px; display: block;
+}
+.truck-thumb-placeholder {
+  width: 48px; height: 36px; border-radius: 4px;
+  background: var(--bg); display: flex; align-items: center;
+  justify-content: center; font-size: 1.1rem; color: var(--text-dim);
+}
 .mono { font-family: 'JetBrains Mono', monospace; }
 .bold { font-weight: 700; }
 .status-pill {

@@ -39,6 +39,47 @@
       </div>
     </div>
 
+    <!-- My Identity Documents — CDL and medical card uploaded during the application -->
+    <div v-if="identityFiles.length > 0" class="card kit-files-card">
+      <div class="kit-files-header">
+        <div class="kit-files-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        </div>
+        <div class="kit-files-title">My Identity Documents</div>
+        <span class="kit-files-count">{{ identityFiles.length }}</span>
+      </div>
+      <div class="kit-files-grid">
+        <a v-for="(f, i) in identityFiles" :key="'id'+i" :href="f.data" :download="f.downloadName" target="_blank" rel="noopener" class="kit-file-card">
+          <div v-if="f.type === 'image'" class="kit-file-thumb" :style="{ backgroundImage: `url(${f.data})` }"></div>
+          <div v-else class="kit-file-thumb pdf">
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          </div>
+          <div class="kit-file-label">{{ f.label }}</div>
+          <div class="kit-file-type">{{ f.type === 'pdf' ? 'PDF' : 'Image' }} &middot; tap to view</div>
+        </a>
+      </div>
+    </div>
+
+    <!-- Signed Contracts — onboarding documents the driver has already signed -->
+    <div v-if="signedContracts.length > 0" class="card kit-files-card">
+      <div class="kit-files-header">
+        <div class="kit-files-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        </div>
+        <div class="kit-files-title">Signed Contracts &amp; Agreements</div>
+        <span class="kit-files-count">{{ signedContracts.length }}</span>
+      </div>
+      <div class="kit-files-grid">
+        <a v-for="doc in signedContracts" :key="doc.doc_key" :href="doc.signed_pdf_url" target="_blank" rel="noopener" class="kit-file-card">
+          <div class="kit-file-thumb pdf">
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/></svg>
+          </div>
+          <div class="kit-file-label">{{ doc.doc_name }}</div>
+          <div class="kit-file-type">Signed {{ formatDate(doc.signed_at) }}</div>
+        </a>
+      </div>
+    </div>
+
     <!-- Shared Documents — read-only files Super Admin uploaded through the drivers directory -->
     <div class="card shared-docs-card">
       <div class="shared-docs-header">
@@ -88,7 +129,47 @@ const props = defineProps({
   profilePictureUrl: { type: String, default: '' },
   driverId: { type: Number, default: 0 },
   canUpload: { type: Boolean, default: true },
+  // The driver's original job application (minus SSN) for showing CDL /
+  // medical card and other identity documents they submitted.
+  application: { type: Object, default: null },
+  // Signed onboarding PDFs (lease, contractor, W-9, etc.) — filtered to
+  // non-confidential + signed on the frontend.
+  onboardingDocuments: { type: Array, default: () => [] },
 })
+
+// Flatten CDL front/back and medical card into a display list. Detects
+// whether each upload is a PDF or an image from its data URI prefix.
+const identityFiles = computed(() => {
+  const out = []
+  const app = props.application
+  if (!app) return out
+  const detect = (b64) => {
+    if (!b64) return null
+    if (b64.startsWith('data:application/pdf')) return 'pdf'
+    if (b64.startsWith('data:image/')) return 'image'
+    return null
+  }
+  const add = (label, b64) => {
+    const type = detect(b64)
+    if (!type) return
+    out.push({
+      label,
+      type,
+      data: b64,
+      downloadName: `${label.replace(/\s+/g, '-')}.${type === 'pdf' ? 'pdf' : 'jpg'}`,
+    })
+  }
+  add('CDL Front', app.cdl_front)
+  add('CDL Back', app.cdl_back)
+  add('Medical Card', app.medical_card)
+  return out
+})
+
+// Only the contracts the driver has already signed, and only
+// non-confidential ones (the confidentiality flag comes from the backend).
+const signedContracts = computed(() =>
+  (props.onboardingDocuments || []).filter(d => d.signed && d.signed_pdf_url)
+)
 
 const uploading = ref(false)
 
@@ -396,5 +477,90 @@ function formatDate(ts) {
 }
 .shared-doc-view:hover {
   opacity: 0.85;
+}
+
+/* My Identity Documents + Signed Contracts cards */
+.kit-files-card {
+  margin-bottom: 1rem;
+}
+.kit-files-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+.kit-files-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.kit-files-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text);
+  flex: 1;
+}
+.kit-files-count {
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: var(--accent-dim);
+  color: var(--accent);
+  padding: 0.15rem 0.55rem;
+  border-radius: 99px;
+}
+.kit-files-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.65rem;
+}
+.kit-file-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  background: #fafbfd;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.55rem;
+  transition: all 0.15s;
+}
+.kit-file-card:hover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.08);
+}
+.kit-file-thumb {
+  width: 100%;
+  height: 96px;
+  border-radius: 6px;
+  background-color: #e2e8f0;
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  margin-bottom: 0.45rem;
+}
+.kit-file-thumb.pdf {
+  background-color: #fef2f2;
+  color: #dc2626;
+}
+.kit-file-thumb svg { display: block; }
+.kit-file-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 0.15rem;
+}
+.kit-file-type {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
 }
 </style>

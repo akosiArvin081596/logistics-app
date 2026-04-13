@@ -37,24 +37,14 @@
           </div>
         </div>
 
-        <!-- Step 2: Drug test -->
-        <div class="card ob-step">
-          <div class="ob-step-header">
-            <div :class="['ob-step-num', drugTestPassed ? 'ob-done' : (allDocsSigned ? 'ob-active' : 'ob-pending')]">2</div>
-            <div class="ob-step-info">
-              <div class="ob-step-title">Pre-Employment Drug Test</div>
-              <div class="ob-step-sub" v-if="drugTestPassed">Passed</div>
-              <div class="ob-step-sub" v-else-if="driverStore.onboarding?.drug_test_result === 'fail'">Failed — contact your administrator</div>
-              <div class="ob-step-sub" v-else>Waiting for administrator to upload results</div>
-            </div>
-          </div>
-          <!-- Next-steps alert when all docs are signed -->
-          <div v-if="allDocsSigned && !drugTestPassed" class="ob-next-steps">
+        <!-- Next-steps alert when all docs are signed -->
+        <div v-if="allDocsSigned" class="card ob-step">
+          <div class="ob-next-steps">
             <div class="ob-next-title">Onboarding Status: Documents Received!</div>
             <p>Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
             <p><b>Here is what happens next:</b></p>
             <ul>
-              <li><b>Pre-Employment Screening:</b> A member of our safety team will contact you shortly to schedule your <b>pre-appointment drug test</b>. If you've already completed one recently for another carrier, let us know, but expect to be sent for a new one under the LogisX account.</li>
+              <li><b>Pre-Employment Screening:</b> A member of our safety team will contact you shortly to schedule your pre-appointment screening. If you've already completed one recently for another carrier, let us know, but expect to be sent for a new one under the LogisX account.</li>
               <li><b>FMCSA Clearinghouse: This is mandatory.</b> If you haven't already, make sure you are enrolled in the <b>FMCSA Clearinghouse</b> and have granted LogisX Inc. permission to run your full query. We cannot put you in a truck until this is cleared.</li>
               <li><b>Driver Training:</b> While we finalize your background check, it's time to get in the right mindset. At LogisX, we pride ourselves on professional, elite operation.</li>
             </ul>
@@ -63,10 +53,10 @@
           </div>
         </div>
 
-        <!-- Step 3: Complete -->
+        <!-- Step 2: Complete -->
         <div class="card ob-step">
           <div class="ob-step-header">
-            <div :class="['ob-step-num', 'ob-pending']">3</div>
+            <div :class="['ob-step-num', 'ob-pending']">2</div>
             <div class="ob-step-info">
               <div class="ob-step-title">Start Driving</div>
               <div class="ob-step-sub">You'll be added to the fleet once all steps are complete</div>
@@ -282,6 +272,8 @@
           :driver-info="driverStore.driverInfo"
           :headers="driverStore.headers.carrierDB"
           :shared-documents="driverStore.sharedDocuments"
+          :application="driverStore.application"
+          :onboarding-documents="driverStore.onboarding?.documents || []"
           :profile-picture-url="driverStore.profilePictureUrl"
           :driver-id="driverStore.driverDirectoryId"
         />
@@ -446,12 +438,11 @@ const onboardingDocs = computed(() => driverStore.onboarding?.documents || [])
 const totalDocs = computed(() => driverStore.onboarding?.totalDocs || 6)
 const signedCount = computed(() => onboardingDocs.value.filter(d => d.signed).length)
 const allDocsSigned = computed(() => signedCount.value === totalDocs.value)
-const drugTestPassed = computed(() => driverStore.onboarding?.drug_test_result === 'pass')
-const onboardingPct = computed(() => {
-  const docPct = (signedCount.value / totalDocs.value) * 80
-  const drugPct = drugTestPassed.value ? 20 : 0
-  return Math.round(Math.min(docPct + drugPct, 100))
-})
+// Drug test progress is intentionally NOT shown to drivers (legal requirement).
+// Progress reflects document signing only; admin handles the final activation.
+const onboardingPct = computed(() =>
+  Math.round((signedCount.value / totalDocs.value) * 100)
+)
 
 const currentTab = ref('loads')
 const selectedStatusRowIndex = ref(null)

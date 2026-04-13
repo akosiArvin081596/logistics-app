@@ -6215,12 +6215,30 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			 FROM trucks WHERE LOWER(assigned_driver) = ?`
 		).get(nameLower) || null;
 
-		// Onboarding data (if driver has an onboarding record)
+		// Onboarding data (if driver has an onboarding record).
+		// IMPORTANT: drivers must NOT see their own drug test result — legal
+		// requirement. We explicitly enumerate the columns returned here and
+		// omit drug_test_result / drug_test_file_url / drug_test_uploaded_at.
+		// Super Admin / Dispatcher still sees them via /api/drivers-directory/:id/documents.
 		const userId = req.session.user.id;
-		const onboarding = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId) || null;
+		const onboarding = db.prepare(
+			"SELECT id, user_id, application_id, driver_name, status, onboarded_at, created_at FROM driver_onboarding WHERE user_id = ?"
+		).get(userId) || null;
 		const onboardingDocs = onboarding
 			? db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId)
 			: [];
+		// Also fetch the original application so the driver Kit can display
+		// the documents and qualifications the applicant submitted. SSN is
+		// stripped; drivers_license and CDL/medical uploads are kept — the
+		// driver is allowed to see their own license and uploaded documents.
+		let application = null;
+		if (onboarding?.application_id) {
+			const fullApp = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(onboarding.application_id);
+			if (fullApp) {
+				const { ssn: _drop, ...safeApp } = fullApp;
+				application = safeApp;
+			}
+		}
 		// Recent invoices
 		const driverInvoices = db.prepare(
 			`SELECT id, invoice_number, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at, created_at
@@ -6260,6 +6278,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 				documents: onboardingDocs,
 				totalDocs: ONBOARDING_DOCS.length,
 			} : null,
+			application,
 			invoices: driverInvoices,
 			sharedDocuments,
 			profilePictureUrl,

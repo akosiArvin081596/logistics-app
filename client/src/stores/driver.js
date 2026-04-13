@@ -18,6 +18,7 @@ export const useDriverStore = defineStore('driver', {
     onboarding: null,
     invoices: [],
     sharedDocuments: [],
+    application: null,
     profilePictureUrl: '',
     driverDirectoryId: 0,
     currentTab: 'loads',
@@ -212,6 +213,7 @@ export const useDriverStore = defineStore('driver', {
         this.onboarding = data.onboarding || null
         this.invoices = data.invoices || []
         this.sharedDocuments = data.sharedDocuments || []
+        this.application = data.application || null
         this.profilePictureUrl = data.profilePictureUrl || ''
         this.driverDirectoryId = data.driverDirectoryId || 0
 
