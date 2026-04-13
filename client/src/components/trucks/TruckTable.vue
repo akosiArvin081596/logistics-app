@@ -220,6 +220,59 @@
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '\u2014' }}</span></div>
         </div>
+        <!-- Driver Files — files belonging to the driver assigned to this truck -->
+        <div v-if="viewTruck.AssignedDriver" class="driver-files-section">
+          <div class="driver-files-title">
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            Driver Files — {{ viewTruck.AssignedDriver }}
+          </div>
+          <div v-if="driverFilesLoading" class="driver-files-empty">Loading...</div>
+          <div v-else-if="driverFilesError" class="driver-files-error">
+            <span class="warning-dot">&#9888;</span> {{ driverFilesError }}
+          </div>
+          <template v-else>
+            <!-- Application uploads (CDL / Medical) -->
+            <div v-if="driverFiles.files && driverFiles.files.length" class="driver-files-grid">
+              <div v-for="(f, i) in driverFiles.files" :key="'f'+i" class="driver-file-card">
+                <a v-if="f.data" :href="f.data" :download="`${viewTruck.UnitNumber}-${f.label.replace(/\s+/g,'-')}.${f.type === 'pdf' ? 'pdf' : 'jpg'}`" target="_blank" rel="noopener">
+                  <div v-if="f.type === 'image'" class="driver-file-thumb" :style="{ backgroundImage: `url(${f.data})` }"></div>
+                  <div v-else class="driver-file-thumb pdf">&#128196;</div>
+                  <div class="driver-file-label">{{ f.label }}</div>
+                  <div class="driver-file-type">{{ f.type === 'pdf' ? 'PDF' : 'Image' }} — click to view</div>
+                </a>
+              </div>
+            </div>
+
+            <!-- Signed onboarding docs -->
+            <div v-if="driverFiles.onboardingDocs && driverFiles.onboardingDocs.filter(d => d.signed).length" class="driver-files-subsection">
+              <div class="driver-files-sublabel">Signed Onboarding Documents</div>
+              <div class="driver-files-grid">
+                <a v-for="doc in driverFiles.onboardingDocs.filter(d => d.signed)" :key="doc.doc_key" :href="doc.signed_pdf_url" target="_blank" rel="noopener" class="driver-file-card">
+                  <div class="driver-file-thumb pdf">&#128196;</div>
+                  <div class="driver-file-label">{{ doc.doc_name }}</div>
+                  <div class="driver-file-type">Signed by {{ doc.signature_text || 'driver' }}</div>
+                </a>
+              </div>
+            </div>
+
+            <!-- Drug test -->
+            <div v-if="driverFiles.drugTest && driverFiles.drugTest.file_url" class="driver-files-subsection">
+              <div class="driver-files-sublabel">Pre-Employment Drug Test</div>
+              <div class="driver-files-grid">
+                <a :href="driverFiles.drugTest.file_url" target="_blank" rel="noopener" class="driver-file-card">
+                  <div class="driver-file-thumb pdf">&#128196;</div>
+                  <div class="driver-file-label">Drug Test Result</div>
+                  <div class="driver-file-type" :class="driverFiles.drugTest.result === 'pass' ? 'dt-pass' : 'dt-fail'">{{ (driverFiles.drugTest.result || '').toUpperCase() }}</div>
+                </a>
+              </div>
+            </div>
+
+            <div v-if="!driverFiles.files?.length && !driverFiles.onboardingDocs?.filter(d => d.signed).length && !driverFiles.drugTest?.file_url" class="driver-files-empty">
+              No driver files uploaded yet.
+            </div>
+          </template>
+        </div>
+
         <div style="margin-top:1.25rem;border-top:1px solid #e5e7eb;padding-top:1rem;">
           <LegalDocumentPortal :truck-id="viewTruck.id" :unit-number="viewTruck.UnitNumber" />
         </div>
@@ -233,10 +286,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
+import { useApi } from '../../composables/useApi'
+
+const api = useApi()
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
@@ -275,6 +331,27 @@ const emit = defineEmits(['delete', 'update'])
 const showConfirm = ref(false)
 const pendingTruck = ref(null)
 const viewTruck = ref(null)
+
+// Driver files section — fetched when the truck modal opens (keyed by truck.id
+// so the watcher only refires when a different truck is selected, never on
+// field edits within the same truck).
+const driverFiles = ref({ driverName: '', files: [], onboardingDocs: [], drugTest: null })
+const driverFilesLoading = ref(false)
+const driverFilesError = ref('')
+watch(() => viewTruck.value?.id, async (truckId) => {
+  driverFiles.value = { driverName: '', files: [], onboardingDocs: [], drugTest: null }
+  driverFilesError.value = ''
+  if (!truckId) return
+  driverFilesLoading.value = true
+  try {
+    driverFiles.value = await api.get(`/api/trucks/${truckId}/driver-files`)
+  } catch (err) {
+    driverFilesError.value = err?.message || 'Failed to load driver files.'
+    console.error('Driver files load failed:', err)
+  } finally {
+    driverFilesLoading.value = false
+  }
+})
 
 const editModelOptions = computed(() => truckModels[editForm.make] || [])
 
@@ -479,4 +556,51 @@ function handleConfirmDelete() {
 .view-grid { display: flex; flex-direction: column; gap: 0.4rem; }
 .view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
 .view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+
+/* Driver Files section in the truck detail modal */
+.driver-files-section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; }
+.driver-files-title {
+  display: flex; align-items: center; gap: 0.5rem;
+  font-size: 0.82rem; font-weight: 700; color: #0f172a;
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.75rem;
+}
+.driver-files-title svg { color: #3b82f6; }
+.driver-files-sublabel {
+  font-size: 0.68rem; font-weight: 700; color: #64748b;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin: 0.85rem 0 0.5rem;
+}
+.driver-files-subsection { margin-top: 0.5rem; }
+.driver-files-empty { font-size: 0.82rem; color: #94a3b8; font-style: italic; padding: 0.75rem 0; }
+.driver-files-error {
+  font-size: 0.82rem; color: #b45309;
+  background: #fffbeb; border: 1px solid #fde68a;
+  border-radius: 6px; padding: 0.6rem 0.75rem; margin: 0.4rem 0;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.driver-files-error .warning-dot { font-size: 1rem; }
+.driver-files-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.65rem;
+}
+.driver-file-card {
+  display: block; text-decoration: none; color: inherit;
+  background: #fafbfd; border: 1px solid #e2e8f0; border-radius: 8px;
+  padding: 0.6rem; transition: all 0.15s;
+}
+.driver-file-card:hover {
+  border-color: #3b82f6; background: #f0f9ff;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.08);
+}
+.driver-file-thumb {
+  width: 100%; height: 100px; border-radius: 6px;
+  background-color: #e2e8f0; background-size: cover; background-position: center;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 2rem; color: #64748b; margin-bottom: 0.5rem;
+}
+.driver-file-thumb.pdf { background-color: #fef2f2; color: #dc2626; }
+.driver-file-label { font-size: 0.78rem; font-weight: 600; color: #0f172a; margin-bottom: 0.15rem; }
+.driver-file-type { font-size: 0.68rem; color: #94a3b8; font-family: 'JetBrains Mono', monospace; }
+.driver-file-type.dt-pass { color: #16a34a; font-weight: 700; }
+.driver-file-type.dt-fail { color: #dc2626; font-weight: 700; }
 </style>

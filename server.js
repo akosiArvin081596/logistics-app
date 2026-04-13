@@ -4421,6 +4421,78 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 	}
 });
 
+// GET /api/trucks/:id/driver-files — Files belonging to the driver assigned
+// to this truck. Investors can only see files for trucks they own. Returns
+// CDL front/back + medical card (base64 or PDF) from the job application,
+// plus NON-CONFIDENTIAL signed onboarding PDFs and the drug test file URL.
+//
+// SECURITY notes:
+// - Confidential onboarding docs (W-9, contractor agreement, NDA) are
+//   filtered out — only non-confidential docs are returned.
+// - signature_text is NOT returned: it is the driver's typed legal name
+//   acting as their e-signature on legally binding docs. Investors see
+//   signed/unsigned status only.
+// - SSN and driver's license number never flow through this endpoint.
+// - Dedicated rate limiter (30/15min) prevents bulk enumeration of
+//   base64-heavy document payloads.
+const driverFilesLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	message: { error: "Too many requests. Try again later." },
+	standardHeaders: true,
+});
+app.get("/api/trucks/:id/driver-files", requireRole("Super Admin", "Dispatcher", "Investor"), driverFilesLimiter, (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		const truck = db.prepare("SELECT id, unit_number, assigned_driver, owner_id FROM trucks WHERE id = ?").get(id);
+		if (!truck) return res.status(404).json({ error: "Truck not found" });
+		// Investors can only see files for trucks they own.
+		if (req.session.user.role === "Investor" && truck.owner_id !== req.session.user.id) {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+		const driverName = (truck.assigned_driver || "").trim();
+		if (!driverName) {
+			return res.json({ driverName: "", files: [], onboardingDocs: [], drugTest: null });
+		}
+		// Resolve driver_name → user_id → application_id to reach the uploaded files.
+		const user = db.prepare("SELECT id, driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(driverName);
+		if (!user) {
+			return res.json({ driverName, files: [], onboardingDocs: [], drugTest: null });
+		}
+		const onboarding = db.prepare("SELECT application_id, drug_test_result, drug_test_file_url, drug_test_uploaded_at FROM driver_onboarding WHERE user_id = ?").get(user.id);
+		const files = [];
+		if (onboarding?.application_id) {
+			const app = db.prepare("SELECT cdl_front, cdl_back, medical_card FROM job_applications WHERE id = ?").get(onboarding.application_id);
+			if (app) {
+				const mime = (b64) => {
+					if (!b64) return null;
+					if (b64.startsWith("data:application/pdf")) return "pdf";
+					if (b64.startsWith("data:image/")) return "image";
+					return null;
+				};
+				if (app.cdl_front) files.push({ label: "CDL Front", type: mime(app.cdl_front), data: app.cdl_front });
+				if (app.cdl_back) files.push({ label: "CDL Back", type: mime(app.cdl_back), data: app.cdl_back });
+				if (app.medical_card) files.push({ label: "Medical Card", type: mime(app.medical_card), data: app.medical_card });
+			}
+		}
+		// Only non-confidential onboarding docs. Never expose signature_text.
+		// Super Admin gets to see the full list via a different endpoint; this
+		// one is scoped to what investors/dispatchers legitimately need.
+		const onboardingDocs = db.prepare(
+			"SELECT doc_key, doc_name, signed, signed_at, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND (confidential = 0 OR confidential IS NULL) ORDER BY id"
+		).all(user.id);
+		const drugTest = onboarding && onboarding.drug_test_result ? {
+			result: onboarding.drug_test_result,
+			file_url: onboarding.drug_test_file_url,
+			uploaded_at: onboarding.drug_test_uploaded_at,
+		} : null;
+		res.json({ driverName, files, onboardingDocs, drugTest });
+	} catch (err) {
+		console.error("GET /api/trucks/:id/driver-files error:", err.message);
+		res.status(500).json({ error: "Failed to load driver files" });
+	}
+});
+
 // Truck Database: delete a truck
 app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
