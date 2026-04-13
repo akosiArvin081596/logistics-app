@@ -82,14 +82,19 @@
             <p>To understand the standard of safety we expect, take a look at what <em>not</em> to do out there. Check out these "professional" moves on <strong>Bonehead Truckers</strong> — study them so you don't repeat them.</p>
           </div>
 
-          <div class="video-embed">
-            <iframe
-              src="https://www.youtube.com/embed/KpHxeBQ3TSc?list=PL7DBE50EBBC23F024"
-              title="Bonehead Truckers"
-              frameborder="0"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-              allowfullscreen
-            ></iframe>
+          <!-- Link button instead of iframe embed — the video owner disabled
+               off-site playback so the embed rendered as "Video unavailable".
+               Matches the red CTA button used in the acceptance email. -->
+          <div class="video-link-wrap">
+            <a
+              href="https://www.youtube.com/watch?v=KpHxeBQ3TSc&list=PL7DBE50EBBC23F024"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="video-link"
+            >
+              <span class="video-link-play">&#9654;</span>
+              Watch Bonehead Truckers
+            </a>
           </div>
 
           <div class="standby-note">
@@ -600,11 +605,31 @@ async function submitForm() {
 .pro-tip-header { font-size: 0.88rem; font-weight: 700; color: #92400e; margin-bottom: 0.5rem; }
 .pro-tip p { font-size: 0.85rem; color: #78350f; line-height: 1.6; margin: 0; }
 
-.video-embed {
-  margin-top: 1.5rem; border-radius: 12px; overflow: hidden;
-  aspect-ratio: 16 / 9; background: #000;
+.video-link-wrap {
+  margin-top: 1.5rem;
+  text-align: center;
 }
-.video-embed iframe { width: 100%; height: 100%; }
+.video-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: #dc2626;
+  color: #ffffff;
+  padding: 0.75rem 1.75rem;
+  border-radius: 8px;
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 0.88rem;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.video-link:hover {
+  background: #b91c1c;
+  transform: translateY(-1px);
+}
+.video-link-play {
+  font-size: 0.85rem;
+  line-height: 1;
+}
 
 .standby-note {
   margin-top: 1.75rem; text-align: center;
