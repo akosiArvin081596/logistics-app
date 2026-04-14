@@ -4,7 +4,7 @@
     <aside class="apply-sidebar">
       <div class="sidebar-top">
         <div class="sidebar-logo">
-          <img src="/logo.avif" alt="LogisX" class="sidebar-logo-img" />
+          <img src="/logo.png" alt="LogisX" class="sidebar-logo-img" />
         </div>
         <div class="sidebar-subtitle">Driver Application</div>
       </div>
@@ -40,8 +40,7 @@
     <!-- ═══ MOBILE TOP BAR ═══ -->
     <div v-if="!submitted" class="mobile-topbar">
       <div class="mobile-logo">
-        <img src="/logo.avif" alt="LogisX" class="mobile-logo-img" />
-        <span>LogisX</span>
+        <img src="/logo.png" alt="LogisX" class="mobile-logo-img" />
       </div>
       <div class="mobile-steps">
         <div v-for="(s, i) in sidebarSteps" :key="i" class="mobile-dot" :class="{ active: step === i, done: step > i }" />
