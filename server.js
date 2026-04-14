@@ -47,7 +47,11 @@ app.set("trust proxy", 1); // Behind nginx — use real client IP for rate limit
 const ALLOWED_FILE_EXTS = new Set([".pdf",".jpg",".jpeg",".png",".gif",".webp",".doc",".docx",".xls",".xlsx",".csv",".txt"]);
 function validateFileExt(fileName) { return ALLOWED_FILE_EXTS.has(path.extname(fileName || "").toLowerCase()); }
 app.use(compression());
-app.use(express.json({ limit: "20mb" }));
+// 50 MB body limit — covers driver application payloads that bundle
+// 3 high-res iPhone photos (CDL front + back + medical card) as base64.
+// nginx client_max_body_size is set slightly above this so rejections
+// always come from Express as JSON instead of a bare 413 from nginx.
+app.use(express.json({ limit: "50mb" }));
 // NOTE: /uploads static mount is deferred to after requireAuth is defined (see below),
 // so every file under uploads/ requires an authenticated session.
 
