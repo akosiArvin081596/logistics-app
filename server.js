@@ -366,6 +366,13 @@ try { db.exec("ALTER TABLE job_applications ADD COLUMN dot TEXT DEFAULT ''"); } 
 try { db.exec("ALTER TABLE job_applications ADD COLUMN mc TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE job_applications ADD COLUMN hazmat TEXT DEFAULT ''"); } catch {}
 
+// Performance indexes for /applications list query (created_at sort + status filter + FK join)
+db.exec(`
+	CREATE INDEX IF NOT EXISTS idx_ja_created_at ON job_applications(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_ja_status     ON job_applications(status);
+	CREATE INDEX IF NOT EXISTS idx_do_app_id     ON driver_onboarding(application_id);
+`);
+
 // Migration: add asset_ref to messages (for "Share Asset" in chat)
 try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } catch {}
 
@@ -1702,13 +1709,36 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 	}
 });
 
+// List endpoint is lightweight — excludes base64 image/signature/ssn/long-text columns
+// that the table UI doesn't render. Detail endpoint below serves the full record.
 app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
 	try {
-		const apps = db.prepare(`SELECT ja.*, do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result
+		const apps = db.prepare(`SELECT
+				ja.id, ja.full_name, ja.email, ja.phone, ja.dob, ja.address,
+				ja.drivers_license, ja.position, ja.experience, ja.has_cdl,
+				ja.work_authorized, ja.felony_convicted, ja.accident_history,
+				ja.certifications, ja.status, ja.created_at,
+				ja.city, ja.state, ja.zip, ja.cell, ja.dot, ja.mc, ja.hazmat,
+				do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result
 			FROM job_applications ja
 			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
 			ORDER BY ja.created_at DESC`).all();
 		res.json(apps);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// Detail endpoint — returns full record including base64 images, signature,
+// SSN, skills, references, availability, etc. Used by the detail modal.
+app.get("/api/applications/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const row = db.prepare(`SELECT ja.*, do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result
+			FROM job_applications ja
+			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
+			WHERE ja.id = ?`).get(Number(req.params.id));
+		if (!row) return res.status(404).json({ error: "Application not found" });
+		res.json(row);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}

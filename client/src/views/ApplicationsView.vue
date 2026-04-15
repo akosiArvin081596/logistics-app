@@ -255,15 +255,24 @@ async function updateStatus(id, status) {
     } else {
       toast(`Status updated to ${status}`, 'success')
     }
-    await load()
+    const row = applications.value.find(a => a.id === id)
+    if (row) row.status = status
   } catch (err) {
     toast(err.message, 'error')
   }
 }
 
-function openDetail(app) {
+async function openDetail(app) {
   selectedApp.value = app
   showDetail.value = true
+  try {
+    const full = await api.get(`/api/applications/${app.id}`)
+    if (selectedApp.value && selectedApp.value.id === app.id) {
+      selectedApp.value = full
+    }
+  } catch (err) {
+    toast(err.message, 'error')
+  }
 }
 
 function formatDate(d) {
