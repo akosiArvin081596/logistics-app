@@ -6130,19 +6130,14 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			return !isNaN(d) && d >= monthStart && d <= now;
 		}).length;
 
-		// Fleet utilization (Google Sheets + SQLite trucks)
-		const sqliteTruckCount = db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE status IN ('Active','Maintenance')").get().cnt;
-		const totalTrucks = carrierDB.data.length + sqliteTruckCount;
-		const activeDriverNames = new Set(
-			activeJobs
-				.map((r) => (driverCol ? (r[driverCol] || "").trim().toLowerCase() : ""))
-				.filter(Boolean),
-		);
-		const sheetAssigned = carrierDB.data.filter((r) =>
-			activeDriverNames.has((r[carrierDriverCol] || "").trim().toLowerCase()),
-		).length;
-		const sqliteAssigned = db.prepare("SELECT COUNT(*) AS cnt FROM trucks WHERE assigned_driver != '' AND status = 'Active'").get().cnt;
-		const assignedTrucks = sheetAssigned + sqliteAssigned;
+		// Fleet utilization — mirror the /trucks page: total = every truck in the
+		// fleet (all statuses), assigned = any truck with a driver. Previous logic
+		// excluded Inactive/OOS trucks and conflated drivers_directory rows with
+		// trucks, producing "0/0" when the real fleet had Inactive rows.
+		const totalTrucks = db.prepare("SELECT COUNT(*) AS cnt FROM trucks").get().cnt;
+		const assignedTrucks = db.prepare(
+			"SELECT COUNT(*) AS cnt FROM trucks WHERE TRIM(assigned_driver) != ''"
+		).get().cnt;
 
 		// Revenue
 		function parseAmount(str) {
