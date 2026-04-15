@@ -24,15 +24,11 @@
       <header class="panel-header">
         <div class="panel-brand">
           <div class="brand-mark">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-              <line x1="12" y1="17" x2="12.01" y2="17" />
-            </svg>
+            <WizardBot size="small" variant="light" />
           </div>
           <div class="brand-text">
             <strong>LogisX Guide</strong>
-            <span>Guided walkthrough</span>
+            <span>Your onboarding buddy</span>
           </div>
         </div>
         <button class="icon-btn" type="button" aria-label="Close guide" @click="$emit('close')">
@@ -54,6 +50,9 @@
       </div>
 
       <div v-if="step" class="panel-body">
+        <div v-if="showHero" class="panel-hero">
+          <WizardBot size="large" variant="default" waving />
+        </div>
         <h3 :id="titleId" class="panel-title">{{ step.title }}</h3>
         <p class="panel-text" aria-live="polite">{{ step.body }}</p>
 
@@ -121,6 +120,7 @@
 
 <script setup>
 import { computed } from 'vue';
+import WizardBot from './WizardBot.vue';
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -133,6 +133,11 @@ const props = defineProps({
 });
 
 defineEmits(['close', 'next', 'back', 'skip', 'open-faq', 'restore']);
+
+const showHero = computed(() => {
+  const id = props.step?.id || '';
+  return id === 'WELCOME' || id === 'COMPLETION';
+});
 
 const titleId = 'wizard-panel-title';
 const nextLabel = computed(() => {
@@ -225,13 +230,14 @@ const nextLabel = computed(() => {
   gap: 12px;
 }
 .brand-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.12);
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.14);
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 3px;
 }
 .brand-text {
   display: flex;
@@ -294,6 +300,11 @@ const nextLabel = computed(() => {
   padding: 20px 22px;
   overflow-y: auto;
   flex: 1;
+}
+.panel-hero {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 14px;
 }
 .panel-title {
   margin: 0 0 10px;
