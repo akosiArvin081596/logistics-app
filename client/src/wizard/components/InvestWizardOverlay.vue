@@ -35,6 +35,7 @@
     />
     <WizardFab
       :has-progress="engine.state.hasPersistedProgress && !engine.state.completed"
+      :hidden="engine.state.open"
       @toggle="toggleWizard"
     />
   </div>
@@ -198,6 +199,22 @@ watch(() => props.completed, (isDone) => {
   }
 });
 
+watch(
+  () => ({
+    mobile: isMobile.value,
+    open: engine.state.open,
+    minimized: minimized.value,
+  }),
+  ({ mobile, open, minimized: mn }) => {
+    if (typeof document === 'undefined') return;
+    const active = mobile && (open || mn);
+    const expanded = mobile && open && !mn;
+    document.body.classList.toggle('wizard-mobile-pill-active', active && mn);
+    document.body.classList.toggle('wizard-mobile-panel-active', expanded);
+  },
+  { immediate: true }
+);
+
 onMounted(() => {
   mobileMedia = window.matchMedia('(max-width: 768px)');
   isMobile.value = mobileMedia.matches;
@@ -257,6 +274,8 @@ onBeforeUnmount(() => {
       mobileMedia.removeListener(handleMobileChange);
     }
   }
+  document.body.classList.remove('wizard-mobile-pill-active');
+  document.body.classList.remove('wizard-mobile-panel-active');
   spotlight.cleanup();
 });
 </script>
@@ -264,5 +283,16 @@ onBeforeUnmount(() => {
 <style scoped>
 .wizard-root {
   font-family: 'DM Sans', system-ui, sans-serif;
+}
+</style>
+
+<style>
+@media (max-width: 768px) {
+  body.wizard-mobile-pill-active .invest-content {
+    padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+  body.wizard-mobile-panel-active .invest-content {
+    padding-bottom: calc(52vh + env(safe-area-inset-bottom, 0px)) !important;
+  }
 }
 </style>

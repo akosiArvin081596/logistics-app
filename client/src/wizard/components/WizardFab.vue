@@ -1,9 +1,11 @@
 <template>
   <button
     class="wizard-fab"
-    :class="{ 'has-progress': hasProgress }"
+    :class="{ 'has-progress': hasProgress, 'is-hidden': hidden }"
     type="button"
     aria-label="Open guided tour"
+    :aria-hidden="hidden"
+    :tabindex="hidden ? -1 : 0"
     @click="$emit('toggle')"
   >
     <WizardBot size="medium" variant="light" />
@@ -16,6 +18,7 @@ import WizardBot from './WizardBot.vue';
 
 defineProps({
   hasProgress: { type: Boolean, default: false },
+  hidden: { type: Boolean, default: false },
 });
 defineEmits(['toggle']);
 </script>
@@ -44,6 +47,11 @@ defineEmits(['toggle']);
   background: linear-gradient(145deg, #22507d, #122f52);
   transform: translateY(-3px);
   box-shadow: 0 14px 32px rgba(15, 40, 71, 0.5), 0 4px 12px rgba(15, 40, 71, 0.28);
+}
+.wizard-fab.is-hidden {
+  opacity: 0;
+  transform: scale(0.8) translateY(8px);
+  pointer-events: none;
 }
 .wizard-fab:focus-visible {
   outline: 3px solid #3b82f6;
