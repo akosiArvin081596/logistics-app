@@ -72,6 +72,20 @@
                   <select class="text-[12px] border border-[#e2e4ea] rounded-md px-2 py-1 bg-white" :value="app.status" @change="updateStatus(app.id, $event.target.value)">
                     <option v-for="s in statuses" :key="s" :value="s">{{ s }}</option>
                   </select>
+                  <button
+                    type="button"
+                    class="delete-icon-btn"
+                    aria-label="Remove applicant from list"
+                    title="Remove from list"
+                    @click="confirmDelete(app)"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="3 6 5 6 21 6"></polyline>
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                      <path d="M10 11v6M14 11v6"></path>
+                      <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                  </button>
                 </div>
               </TableCell>
             </TableRow>
@@ -79,6 +93,30 @@
         </Table>
       </CardContent>
     </Card>
+
+    <!-- Soft-delete Confirmation Dialog -->
+    <Dialog v-model:open="showDeleteConfirm">
+      <DialogContent class="sm:max-w-[420px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden">
+        <DialogHeader class="px-6 pt-5 pb-4 border-b border-[#e8edf2] bg-gradient-to-b from-red-50/70 to-white">
+          <DialogTitle class="text-[1.1rem] font-bold text-gray-900">Remove applicant?</DialogTitle>
+          <DialogDescription class="text-[13px] text-gray-500">
+            Are you sure? This will hide the applicant from the list. The record stays in the database and can be restored later.
+          </DialogDescription>
+        </DialogHeader>
+        <div v-if="deleteTarget" class="px-6 py-4">
+          <div class="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg">
+            <span class="text-[12px] text-gray-500 font-medium">Applicant</span>
+            <span class="text-[14px] font-semibold text-gray-900">{{ deleteTarget.full_name }}</span>
+          </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 px-6 py-4 border-t border-[#e8edf2] bg-gray-50/40">
+          <Button variant="outline" class="rounded-md text-[13px] h-9" :disabled="deleting" @click="cancelDelete">Cancel</Button>
+          <Button class="rounded-md text-[13px] h-9 bg-red-600 hover:bg-red-700 text-white" :disabled="deleting" @click="performDelete">
+            {{ deleting ? 'Removing...' : 'Remove from list' }}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
 
     <!-- Credentials Dialog (shown after accepting an application) -->
     <Dialog v-model:open="showCredentials">
@@ -244,6 +282,9 @@ async function load() {
 
 const showCredentials = ref(false)
 const createdCredentials = ref(null)
+const showDeleteConfirm = ref(false)
+const deleteTarget = ref(null)
+const deleting = ref(false)
 
 async function updateStatus(id, status) {
   try {
@@ -272,6 +313,33 @@ async function openDetail(app) {
     }
   } catch (err) {
     toast(err.message, 'error')
+  }
+}
+
+function confirmDelete(app) {
+  deleteTarget.value = app
+  showDeleteConfirm.value = true
+}
+
+function cancelDelete() {
+  showDeleteConfirm.value = false
+  deleteTarget.value = null
+}
+
+async function performDelete() {
+  if (!deleteTarget.value) return
+  const id = deleteTarget.value.id
+  deleting.value = true
+  try {
+    await api.del(`/api/applications/${id}`)
+    applications.value = applications.value.filter(a => a.id !== id)
+    toast('Applicant removed from list', 'success')
+    showDeleteConfirm.value = false
+    deleteTarget.value = null
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    deleting.value = false
   }
 }
 
@@ -306,6 +374,30 @@ onMounted(load)
 </script>
 
 <style scoped>
+.delete-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-left: 2px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.delete-icon-btn:hover {
+  color: #dc2626;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+.delete-icon-btn:focus-visible {
+  outline: 2px solid #dc2626;
+  outline-offset: 2px;
+}
+
 .detail-grid {
   display: flex;
   flex-direction: column;

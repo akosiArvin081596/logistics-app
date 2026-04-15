@@ -366,10 +366,14 @@ try { db.exec("ALTER TABLE job_applications ADD COLUMN dot TEXT DEFAULT ''"); } 
 try { db.exec("ALTER TABLE job_applications ADD COLUMN mc TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE job_applications ADD COLUMN hazmat TEXT DEFAULT ''"); } catch {}
 
-// Performance indexes for /applications list query (created_at sort + status filter + FK join)
+// Migration: soft-delete column (NULL = visible, timestamp = hidden from list)
+try { db.exec("ALTER TABLE job_applications ADD COLUMN deleted_at DATETIME DEFAULT NULL"); } catch {}
+
+// Performance indexes for /applications list query (created_at sort + status filter + FK join + soft-delete filter)
 db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_ja_created_at ON job_applications(created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_ja_status     ON job_applications(status);
+	CREATE INDEX IF NOT EXISTS idx_ja_deleted_at ON job_applications(deleted_at);
 	CREATE INDEX IF NOT EXISTS idx_do_app_id     ON driver_onboarding(application_id);
 `);
 
@@ -1711,19 +1715,63 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 
 // List endpoint is lightweight — excludes base64 image/signature/ssn/long-text columns
 // that the table UI doesn't render. Detail endpoint below serves the full record.
+// Filters out soft-deleted rows (deleted_at IS NOT NULL) by default.
+// Pass ?include_deleted=true to see all rows (for admin recovery).
 app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
 	try {
+		const includeDeleted = req.query.include_deleted === "true";
+		const whereClause = includeDeleted ? "" : "WHERE ja.deleted_at IS NULL";
 		const apps = db.prepare(`SELECT
 				ja.id, ja.full_name, ja.email, ja.phone, ja.dob, ja.address,
 				ja.drivers_license, ja.position, ja.experience, ja.has_cdl,
 				ja.work_authorized, ja.felony_convicted, ja.accident_history,
-				ja.certifications, ja.status, ja.created_at,
+				ja.certifications, ja.status, ja.created_at, ja.deleted_at,
 				ja.city, ja.state, ja.zip, ja.cell, ja.dot, ja.mc, ja.hazmat,
 				do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result
 			FROM job_applications ja
 			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
+			${whereClause}
 			ORDER BY ja.created_at DESC`).all();
 		res.json(apps);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// Soft-delete an application. Sets deleted_at = CURRENT_TIMESTAMP.
+// Row stays in DB and remains accessible via detail endpoint and ?include_deleted=true.
+app.delete("/api/applications/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		if (!Number.isInteger(id) || id <= 0) {
+			return res.status(400).json({ error: "Invalid application id" });
+		}
+		const result = db.prepare(
+			"UPDATE job_applications SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
+		).run(id);
+		if (result.changes === 0) {
+			return res.status(404).json({ error: "Application not found or already deleted" });
+		}
+		res.json({ success: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// Restore a soft-deleted application. Sets deleted_at = NULL.
+app.post("/api/applications/:id/restore", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		if (!Number.isInteger(id) || id <= 0) {
+			return res.status(400).json({ error: "Invalid application id" });
+		}
+		const result = db.prepare(
+			"UPDATE job_applications SET deleted_at = NULL WHERE id = ?"
+		).run(id);
+		if (result.changes === 0) {
+			return res.status(404).json({ error: "Application not found" });
+		}
+		res.json({ success: true });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
