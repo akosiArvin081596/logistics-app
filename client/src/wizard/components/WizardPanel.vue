@@ -127,9 +127,9 @@ const nextLabel = computed(() => {
   position: fixed;
   top: 24px;
   right: 24px;
-  bottom: 24px;
   width: 380px;
   max-width: calc(100vw - 48px);
+  max-height: min(560px, calc(100vh - 140px));
   background: #fff;
   border: 1px solid #e2e8f0;
   border-radius: 18px;
@@ -347,7 +347,7 @@ const nextLabel = computed(() => {
     left: 0;
     width: 100%;
     max-width: none;
-    max-height: 70vh;
+    max-height: 60vh;
     border-radius: 18px 18px 0 0;
   }
   .panel-enter-from, .panel-leave-to {
