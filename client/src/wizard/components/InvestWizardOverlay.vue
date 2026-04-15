@@ -6,11 +6,12 @@
       @dismiss="dismissResume"
     />
     <WizardSpotlight
-      :rect="engine.state.open ? spotlight.targetRect.value : null"
+      :rect="engine.state.open && !minimized ? spotlight.targetRect.value : null"
       :variant="activeHighlight"
     />
     <WizardPanel
       :open="engine.state.open"
+      :minimized="minimized"
       :step="engine.currentStep.value"
       :progress-index="engine.progressIndex.value"
       :progress-percent="engine.progressPercent.value"
@@ -21,6 +22,7 @@
       @back="engine.back()"
       @skip="engine.skip()"
       @open-faq="openFaqItem"
+      @restore="restorePanel"
     />
     <WizardFaqDrawer
       :open="faqDrawerOpen"
@@ -72,6 +74,7 @@ const spotlight = useSpotlight();
 const showResumeBanner = ref(false);
 const faqDrawerOpen = ref(false);
 const activeFaq = ref(null);
+const minimized = ref(false);
 
 const activeHighlight = computed(() => {
   const step = engine.currentStep.value;
@@ -97,11 +100,28 @@ function closeFaqDrawer() {
 }
 
 function toggleWizard() {
-  if (engine.state.open) {
+  if (engine.state.open && !minimized.value) {
     engine.close();
   } else {
     engine.open();
+    minimized.value = false;
     showResumeBanner.value = false;
+    applyCurrentTarget();
+  }
+}
+
+function restorePanel() {
+  if (!minimized.value) return;
+  minimized.value = false;
+  nextTick(() => applyCurrentTarget());
+}
+
+function handlePageInteraction(e) {
+  if (!engine.state.open || minimized.value) return;
+  const inWizard = e.target?.closest?.('.wizard-root, .wizard-panel, .wizard-fab, .faq-drawer, .wizard-resume');
+  if (!inWizard) {
+    minimized.value = true;
+    spotlight.cleanup();
   }
 }
 
@@ -135,14 +155,18 @@ function handleEscape(e) {
 
 watch(() => engine.state.open, (isOpen) => {
   if (isOpen) {
+    minimized.value = false;
     applyCurrentTarget();
   } else {
     spotlight.cleanup();
   }
 });
 
-watch(() => engine.currentStep.value?.id || engine.state.currentStepId, () => {
-  if (engine.state.open) applyCurrentTarget();
+watch(() => engine.state.currentStepId, () => {
+  if (engine.state.open) {
+    minimized.value = false;
+    applyCurrentTarget();
+  }
 });
 
 watch(() => props.completed, (isDone) => {
@@ -154,6 +178,8 @@ watch(() => props.completed, (isDone) => {
 
 onMounted(() => {
   window.addEventListener('keydown', handleEscape);
+  document.addEventListener('mousedown', handlePageInteraction, true);
+  document.addEventListener('focusin', handlePageInteraction, true);
   const urlParams = new URLSearchParams(window.location.search);
   const forceGuide = urlParams.get('guide') === '1';
 
@@ -181,6 +207,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleEscape);
+  document.removeEventListener('mousedown', handlePageInteraction, true);
+  document.removeEventListener('focusin', handlePageInteraction, true);
   spotlight.cleanup();
 });
 </script>

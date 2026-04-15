@@ -1,6 +1,26 @@
 <template>
   <transition name="panel">
-    <aside v-if="open" class="wizard-panel" role="dialog" aria-modal="false" :aria-labelledby="titleId">
+    <aside
+      v-if="open"
+      class="wizard-panel"
+      :class="{ minimized }"
+      role="dialog"
+      aria-modal="false"
+      :aria-labelledby="titleId"
+    >
+      <div
+        v-if="minimized"
+        class="minimized-tab"
+        role="button"
+        aria-label="Restore guide"
+        tabindex="0"
+        @mouseenter="$emit('restore')"
+        @click="$emit('restore')"
+        @keydown.enter="$emit('restore')"
+      >
+        <span class="tab-bar" aria-hidden="true" />
+        <span class="tab-label">Guide</span>
+      </div>
       <header class="panel-header">
         <div class="panel-brand">
           <div class="brand-mark">
@@ -104,6 +124,7 @@ import { computed } from 'vue';
 
 const props = defineProps({
   open: { type: Boolean, default: false },
+  minimized: { type: Boolean, default: false },
   step: { type: Object, default: null },
   progressIndex: { type: Number, default: 0 },
   progressPercent: { type: Number, default: 0 },
@@ -111,7 +132,7 @@ const props = defineProps({
   faqLookup: { type: Function, default: () => null },
 });
 
-defineEmits(['close', 'next', 'back', 'skip', 'open-faq']);
+defineEmits(['close', 'next', 'back', 'skip', 'open-faq', 'restore']);
 
 const titleId = 'wizard-panel-title';
 const nextLabel = computed(() => {
@@ -140,6 +161,55 @@ const nextLabel = computed(() => {
   z-index: 9999;
   font-family: 'DM Sans', system-ui, sans-serif;
   color: #0f172a;
+  transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s ease;
+}
+.wizard-panel.minimized {
+  transform: translateX(calc(100% - 40px));
+  pointer-events: none;
+  box-shadow: 0 18px 40px -18px rgba(15, 23, 42, 0.28);
+}
+.wizard-panel.minimized .panel-header,
+.wizard-panel.minimized .panel-progress,
+.wizard-panel.minimized .panel-body,
+.wizard-panel.minimized .panel-footer {
+  opacity: 0.18;
+  transition: opacity 0.25s ease;
+}
+.minimized-tab {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 20;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.88));
+  border-right: 1px solid #eef2f7;
+}
+.tab-bar {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 54px;
+  background: #3b82f6;
+  border-radius: 0 4px 4px 0;
+}
+.tab-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  writing-mode: vertical-rl;
+  color: #3b82f6;
+  letter-spacing: 0.14em;
+  transform: rotate(180deg);
 }
 .panel-header {
   display: flex;
@@ -362,5 +432,6 @@ const nextLabel = computed(() => {
     transform: none;
   }
   .progress-fill { transition: none; }
+  .wizard-panel { transition: opacity 0.2s ease; }
 }
 </style>
