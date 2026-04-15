@@ -26,8 +26,9 @@ defineEmits(['toggle']);
 <style scoped>
 .wizard-fab {
   position: fixed;
-  left: 24px;
-  bottom: calc(24px + var(--wizard-kb-offset, 0px) + env(safe-area-inset-bottom, 0px));
+  right: 28px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 64px;
   height: 64px;
   border-radius: 50%;
@@ -40,17 +41,17 @@ defineEmits(['toggle']);
   cursor: pointer;
   padding: 6px;
   box-shadow: 0 10px 28px rgba(15, 40, 71, 0.4), 0 2px 8px rgba(15, 40, 71, 0.2);
-  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, bottom 0.25s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, opacity 0.25s ease;
   z-index: 9997;
 }
 .wizard-fab:hover {
   background: linear-gradient(145deg, #22507d, #122f52);
-  transform: translateY(-3px);
+  transform: translateY(-50%) scale(1.06);
   box-shadow: 0 14px 32px rgba(15, 40, 71, 0.5), 0 4px 12px rgba(15, 40, 71, 0.28);
 }
 .wizard-fab.is-hidden {
   opacity: 0;
-  transform: scale(0.8) translateY(8px);
+  transform: translateY(-50%) scale(0.8);
   pointer-events: none;
 }
 .wizard-fab:focus-visible {
@@ -70,14 +71,23 @@ defineEmits(['toggle']);
 }
 @media (max-width: 768px) {
   .wizard-fab {
+    right: auto;
     left: 16px;
+    top: auto;
     bottom: calc(16px + var(--wizard-kb-offset, 0px) + env(safe-area-inset-bottom, 0px));
+    transform: none;
     width: 58px;
     height: 58px;
   }
+  .wizard-fab:hover {
+    transform: translateY(-2px);
+  }
+  .wizard-fab.is-hidden {
+    transform: scale(0.8) translateY(6px);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .wizard-fab { transition: none; }
-  .wizard-fab:hover { transform: none; }
+  .wizard-fab { transition: opacity 0.2s ease; }
+  .wizard-fab:hover { transform: translateY(-50%); }
 }
 </style>
