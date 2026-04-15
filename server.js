@@ -6145,16 +6145,25 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 				parseFloat(String(str || "0").replace(/[$,]/g, "")) || 0
 			);
 		}
+		// Revenue — only count rows that map to one of the three dashboard
+		// buckets (completed, active, unassigned/empty). Canceled and
+		// uncategorized rows (status matches none of the four regexes) are
+		// excluded from all three totals so the cards match the breakdown
+		// modal content exactly.
 		let revTotal = 0,
 			revPaid = 0,
 			revPending = 0;
 		jobTracking.data.filter(hasLoadId).forEach((r) => {
 			const amt = parseAmount(jtPayCol ? r[jtPayCol] : 0);
 			if (!amt) return;
-			revTotal += amt;
 			const status = statusCol ? (r[statusCol] || "").trim() : "";
-			if (completedStatuses.test(status)) revPaid += amt;
-			else revPending += amt;
+			if (completedStatuses.test(status)) {
+				revTotal += amt;
+				revPaid += amt;
+			} else if (activeStatuses.test(status) || unassignedStatuses.test(status) || !status) {
+				revTotal += amt;
+				revPending += amt;
+			}
 		});
 
 		// Driver list for dispatch dropdown — only active drivers (pending = awaiting drug test, inactive = disabled)
