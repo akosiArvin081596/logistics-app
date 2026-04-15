@@ -26,9 +26,8 @@ defineEmits(['toggle']);
 <style scoped>
 .wizard-fab {
   position: fixed;
-  right: 28px;
-  top: 50%;
-  transform: translateY(-50%);
+  left: 314px;
+  bottom: 24px;
   width: 64px;
   height: 64px;
   border-radius: 50%;
@@ -46,12 +45,12 @@ defineEmits(['toggle']);
 }
 .wizard-fab:hover {
   background: linear-gradient(145deg, #22507d, #122f52);
-  transform: translateY(-50%) scale(1.06);
+  transform: translateY(-3px);
   box-shadow: 0 14px 32px rgba(15, 40, 71, 0.5), 0 4px 12px rgba(15, 40, 71, 0.28);
 }
 .wizard-fab.is-hidden {
   opacity: 0;
-  transform: translateY(-50%) scale(0.8);
+  transform: scale(0.8) translateY(8px);
   pointer-events: none;
 }
 .wizard-fab:focus-visible {
@@ -71,23 +70,14 @@ defineEmits(['toggle']);
 }
 @media (max-width: 768px) {
   .wizard-fab {
-    right: auto;
     left: 16px;
-    top: auto;
     bottom: calc(16px + var(--wizard-kb-offset, 0px) + env(safe-area-inset-bottom, 0px));
-    transform: none;
     width: 58px;
     height: 58px;
-  }
-  .wizard-fab:hover {
-    transform: translateY(-2px);
-  }
-  .wizard-fab.is-hidden {
-    transform: scale(0.8) translateY(6px);
   }
 }
 @media (prefers-reduced-motion: reduce) {
   .wizard-fab { transition: opacity 0.2s ease; }
-  .wizard-fab:hover { transform: translateY(-50%); }
+  .wizard-fab:hover { transform: none; }
 }
 </style>
