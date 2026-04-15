@@ -1,0 +1,402 @@
+{
+  "version": "1.0.0",
+  "lastUpdated": "2026-04-15",
+  "steps": {
+    "WELCOME": {
+      "title": "Welcome to LogisX",
+      "body": "Hi! I'm your guided assistant. I'll walk you through becoming a LogisX truck investor in about 10 minutes. There are 3 steps: your application, your trucks and documents, then your banking. You can pause anytime — everything auto-saves.",
+      "target": ".invest-page",
+      "action": "info",
+      "highlight": "none",
+      "next": "OVERVIEW",
+      "canSkip": true,
+      "faqLinks": ["what_is_logisx", "how_long_does_this_take"],
+      "parentStep": 0
+    },
+    "OVERVIEW": {
+      "title": "3 steps, 3 sections",
+      "body": "On the left you'll see 3 steps: Application, Fleet & Documents, and Banking. You're on Step 1 right now. Let's fill it out together — I'll highlight each field as we go.",
+      "target": "[data-wizard-target='sidebar-steps']",
+      "action": "info",
+      "highlight": "spotlight",
+      "next": "LEGAL_BASICS",
+      "canSkip": true,
+      "parentStep": 0
+    },
+    "LEGAL_BASICS": {
+      "title": "Your legal name",
+      "body": "Use the exact name on your ID or business filing. If you're applying as an individual, use your full name (First Last). If you're applying as a company, use the full legal entity name.",
+      "target": "[data-wizard-target='legal-name']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "DBA_OPTIONAL",
+      "examples": ["John Smith", "Doe Enterprises LLC"],
+      "faqLinks": ["individual_vs_entity"],
+      "parentStep": 0
+    },
+    "DBA_OPTIONAL": {
+      "title": "Doing Business As (DBA)",
+      "body": "If you operate under a different name than your legal name — like a trade name — enter it here. If not, you can leave this blank.",
+      "target": "[data-wizard-target='dba']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "ENTITY_TYPE",
+      "canSkip": true,
+      "faqLinks": ["what_if_no_dba"],
+      "parentStep": 0
+    },
+    "ENTITY_TYPE": {
+      "title": "What type of business?",
+      "body": "Pick the legal structure of your business. LLC and Corp are for registered companies. Sole Prop is for individual owners with no formal entity. If you're unsure, pick the one that matches what your accountant files.",
+      "target": "[data-wizard-target='entity-type']",
+      "action": "select",
+      "highlight": "spotlight",
+      "next": "ADDRESS_HELP",
+      "faqLinks": ["ein_vs_ssn"],
+      "parentStep": 0
+    },
+    "ADDRESS_HELP": {
+      "title": "Principal business address",
+      "body": "This is your main business or home address. Start typing and we'll suggest matches from Google Maps. You can also click the pin icon to drop a marker on a map, or the target icon to use your current location.",
+      "target": "[data-wizard-target='address']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "CONTACT_INFO",
+      "faqLinks": ["why_address"],
+      "parentStep": 0
+    },
+    "CONTACT_INFO": {
+      "title": "How we'll reach you",
+      "body": "Enter a phone number and email we can use to contact you about your application. We'll send a confirmation to the email once you submit, and login credentials once you're approved.",
+      "target": "[data-wizard-target='phone']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "EIN_OR_SSN",
+      "faqLinks": ["when_will_i_hear_back"],
+      "parentStep": 0
+    },
+    "EIN_OR_SSN": {
+      "title": "EIN or SSN",
+      "body": "We need a tax ID to report your earnings. If you're an LLC or Corp, enter your EIN (Employer Identification Number). If you're a sole proprietor or individual, your SSN is fine. Format: 9 digits, with or without dashes.",
+      "target": "[data-wizard-target='ein-ssn']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "STEP0_REVIEW",
+      "examples": ["12-3456789", "123-45-6789"],
+      "faqLinks": ["ein_vs_ssn", "is_my_data_safe"],
+      "parentStep": 0
+    },
+    "STEP0_REVIEW": {
+      "title": "Ready to continue?",
+      "body": "Nice work — that's Step 1 done. Click Continue at the bottom to move on to your fleet and documents. If the button is grey, you've missed a required field (legal name, address, phone, email, or EIN/SSN).",
+      "target": "[data-wizard-target='continue-step0']",
+      "action": "click",
+      "highlight": "pulse",
+      "next": "FLEET_INTRO",
+      "faqLinks": ["continue_grey"],
+      "parentStep": 0
+    },
+    "FLEET_INTRO": {
+      "title": "Now let's add your trucks",
+      "body": "Step 2 has two parts: tell us about your trucks, then sign three documents. Start by entering how many trucks you're adding. You can add between 1 and 20.",
+      "target": "[data-wizard-target='fleet-size']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "VEHICLE_MAKE",
+      "faqLinks": ["do_i_need_to_own", "add_more_later"],
+      "parentStep": 1
+    },
+    "VEHICLE_MAKE": {
+      "title": "Truck details: Make",
+      "body": "For each truck, pick the manufacturer from the dropdown. We support all major brands: Freightliner, Kenworth, Peterbilt, Volvo, International, Mack, and more.",
+      "target": "[data-wizard-target='vehicle-make']",
+      "action": "select",
+      "highlight": "spotlight",
+      "next": "VEHICLE_MODEL",
+      "parentStep": 1
+    },
+    "VEHICLE_MODEL": {
+      "title": "Truck details: Model",
+      "body": "Pick the model. The options update based on the make you just selected. If your exact model isn't listed, pick the closest match — we can confirm later.",
+      "target": "[data-wizard-target='vehicle-model']",
+      "action": "select",
+      "highlight": "spotlight",
+      "next": "VEHICLE_YEAR",
+      "parentStep": 1
+    },
+    "VEHICLE_YEAR": {
+      "title": "Truck details: Year",
+      "body": "Enter the model year. This is on the vehicle title or registration.",
+      "target": "[data-wizard-target='vehicle-year']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "VEHICLE_VIN",
+      "parentStep": 1
+    },
+    "VEHICLE_VIN": {
+      "title": "Truck details: VIN",
+      "body": "The VIN is a 17-character code unique to your truck. You can find it on the dashboard, the driver-side door frame, the engine block, or your registration and insurance documents.",
+      "target": "[data-wizard-target='vehicle-vin']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "DOCS_INTRO",
+      "faqLinks": ["where_find_vin"],
+      "parentStep": 1
+    },
+    "DOCS_INTRO": {
+      "title": "Time to sign 3 documents",
+      "body": "You need to sign all 3 documents before we can submit your application. Click any card to open it. Inside, you'll see the full document, type your name, draw your signature, and click Sign. Start with the Master Agreement.",
+      "target": "[data-wizard-target='docs-list']",
+      "action": "info",
+      "highlight": "spotlight",
+      "next": "MASTER_AGREEMENT_OPEN",
+      "faqLinks": ["what_am_i_signing", "legally_binding"],
+      "parentStep": 1
+    },
+    "MASTER_AGREEMENT_OPEN": {
+      "title": "Open the Master Agreement",
+      "body": "Click the Master Participation & Management Agreement card. This document describes how LogisX manages your trucks and how you get paid.",
+      "target": "[data-wizard-target='doc-master_agreement']",
+      "action": "click",
+      "highlight": "pulse",
+      "next": "VEHICLE_LEASE_OPEN",
+      "parentStep": 1
+    },
+    "VEHICLE_LEASE_OPEN": {
+      "title": "Next: Vehicle Lease",
+      "body": "Now click the Commercial Vehicle Lease Agreement card. This is the lease that puts your trucks under the LogisX operating authority.",
+      "target": "[data-wizard-target='doc-vehicle_lease']",
+      "action": "click",
+      "highlight": "pulse",
+      "next": "W9_OPEN",
+      "parentStep": 1
+    },
+    "W9_OPEN": {
+      "title": "Last: W-9 tax form",
+      "body": "Finally, click the W-9 Tax Form. This is the standard IRS form we need to report your earnings. We pre-fill most of it from what you entered earlier.",
+      "target": "[data-wizard-target='doc-w9']",
+      "action": "click",
+      "highlight": "pulse",
+      "next": "STEP1_REVIEW",
+      "parentStep": 1
+    },
+    "STEP1_REVIEW": {
+      "title": "Ready for Step 3?",
+      "body": "You've added your fleet and signed all 3 documents. Click Continue to move on to your banking info. If the button is still grey, check that every truck has a year, make, model, and VIN, and that all 3 documents show as signed.",
+      "target": "[data-wizard-target='continue-step1']",
+      "action": "click",
+      "highlight": "pulse",
+      "next": "BANKING_INTRO",
+      "parentStep": 1
+    },
+    "BANKING_INTRO": {
+      "title": "Your payout account",
+      "body": "We pay investors via ACH direct deposit, usually Net-60 from the load delivery date. Enter the bank where you want your payouts sent. Your info is encrypted and stored securely.",
+      "target": "[data-wizard-target='banking-section']",
+      "action": "info",
+      "highlight": "spotlight",
+      "next": "BANK_NAME",
+      "faqLinks": ["is_banking_secure", "how_often_paid"],
+      "parentStep": 2
+    },
+    "BANK_NAME": {
+      "title": "Your bank",
+      "body": "Start typing your bank's name. We'll autocomplete from a list of major US banks. If your bank isn't on the list, keep typing — we'll still accept it.",
+      "target": "[data-wizard-target='bank-name']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "ROUTING_NUMBER",
+      "parentStep": 2
+    },
+    "ROUTING_NUMBER": {
+      "title": "Routing number",
+      "body": "Your 9-digit bank routing number is on the bottom-left of your check, or in your bank's online banking under account details. All US banks have unique routing numbers.",
+      "target": "[data-wizard-target='routing-number']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "ACCOUNT_NUMBER",
+      "faqLinks": ["where_find_routing"],
+      "parentStep": 2
+    },
+    "ACCOUNT_NUMBER": {
+      "title": "Account number",
+      "body": "Enter the account number you want payouts sent to. This is usually next to the routing number on your check, or in your online banking. Double-check this carefully — a wrong number can delay your first payment.",
+      "target": "[data-wizard-target='account-number']",
+      "action": "input",
+      "highlight": "spotlight",
+      "next": "REVIEW_OPEN",
+      "parentStep": 2
+    },
+    "REVIEW_OPEN": {
+      "title": "Review everything",
+      "body": "Click Review & Complete to see a summary of everything you've entered. You'll get one last chance to go back and fix anything before submitting.",
+      "target": "[data-wizard-target='review-open']",
+      "action": "click",
+      "highlight": "pulse",
+      "next": "REVIEW_WALKTHROUGH",
+      "parentStep": 2
+    },
+    "REVIEW_WALKTHROUGH": {
+      "title": "Double-check your info",
+      "body": "Here's everything you've entered. Account number is masked for security — click the eye icon to reveal it. If anything looks wrong, click Go Back & Edit. Otherwise click Confirm & Complete Onboarding to submit.",
+      "target": "[data-wizard-target='review-modal']",
+      "action": "info",
+      "highlight": "spotlight",
+      "next": "SUBMIT_CONFIRM",
+      "parentStep": 2
+    },
+    "SUBMIT_CONFIRM": {
+      "title": "Submit when ready",
+      "body": "Clicking Confirm will submit your application, generate your signed PDFs, and email our team. You'll see a success screen and get a confirmation email within a minute.",
+      "target": "[data-wizard-target='submit-confirm']",
+      "action": "click",
+      "highlight": "pulse",
+      "next": "COMPLETION",
+      "parentStep": 2
+    },
+    "COMPLETION": {
+      "title": "You're all done!",
+      "body": "Congratulations — your application is submitted. Our team will review it within 1-2 business days, and we'll email you login credentials once you're approved. You'll be redirected to logisx.com in a few seconds.",
+      "target": ".success-wrap",
+      "action": "info",
+      "highlight": "none",
+      "canSkip": true,
+      "parentStep": 2
+    }
+  },
+  "faqs": {
+    "what_is_logisx": {
+      "q": "What is LogisX?",
+      "a": "LogisX is a trucking logistics company. As an investor, you lease your truck(s) to us. We handle dispatch, loads, insurance, and paperwork. You get paid monthly based on your truck's earnings.",
+      "category": "about"
+    },
+    "how_long_does_this_take": {
+      "q": "How long will this take?",
+      "a": "About 10 minutes if you have your documents handy — your ID or EIN, vehicle VINs, and bank routing/account numbers. Your progress auto-saves, so you can pause anytime.",
+      "category": "process"
+    },
+    "individual_vs_entity": {
+      "q": "Should I apply as an individual or as a company?",
+      "a": "Apply as whichever entity will own the lease. If your truck is titled under an LLC, apply as the LLC. If you personally own it, apply as an individual. When in doubt, match what your accountant uses for taxes.",
+      "category": "legal"
+    },
+    "what_if_no_dba": {
+      "q": "What if I don't have a DBA?",
+      "a": "Leave the DBA field blank. It's optional — only fill it in if you operate under a trade name that's different from your legal name.",
+      "category": "legal"
+    },
+    "ein_vs_ssn": {
+      "q": "What's the difference between EIN and SSN?",
+      "a": "EIN (Employer Identification Number) is for businesses. SSN (Social Security Number) is for individuals. If you're filing as an LLC or Corp, you need an EIN. If you're a sole proprietor or individual, your SSN works.",
+      "category": "legal"
+    },
+    "why_address": {
+      "q": "Why do you need my address?",
+      "a": "We need a principal business address for your tax forms (W-9) and for mailing any physical paperwork. We never share it with third parties.",
+      "category": "privacy"
+    },
+    "when_will_i_hear_back": {
+      "q": "How long until I hear back?",
+      "a": "1-2 business days for an initial review. We email you directly at the address you provide. Once approved, you'll get login credentials to access your investor dashboard.",
+      "category": "process"
+    },
+    "is_my_data_safe": {
+      "q": "Is my personal info safe?",
+      "a": "Yes. All data is transmitted over encrypted HTTPS and stored in a secure database. Your SSN/EIN and banking info are never displayed back in full once you submit.",
+      "category": "privacy"
+    },
+    "continue_grey": {
+      "q": "Why is the Continue button grey?",
+      "a": "You're missing a required field. The required fields are: Legal Name, Principal Address, Phone, Email, and EIN/SSN. Fill all of them and the button turns blue.",
+      "category": "troubleshooting"
+    },
+    "do_i_need_to_own": {
+      "q": "Do I need to own my truck outright?",
+      "a": "You should be the titled owner or lien-holder. If there's an active lien, that's fine — just note it during review. Financed trucks are welcome.",
+      "category": "fleet"
+    },
+    "add_more_later": {
+      "q": "Can I add more trucks later?",
+      "a": "Yes. After approval, you'll have access to your investor dashboard where you can add trucks. For this application, list only the trucks you want to onboard right now.",
+      "category": "fleet"
+    },
+    "where_find_vin": {
+      "q": "Where do I find my VIN?",
+      "a": "On the driver-side dashboard (visible through the windshield), the driver-side door frame, the engine block, or any of: registration, insurance card, or title.",
+      "category": "fleet"
+    },
+    "what_am_i_signing": {
+      "q": "What am I actually signing?",
+      "a": "Three documents: (1) Master Agreement — how LogisX manages your truck; (2) Vehicle Lease — the operating authority lease; (3) W-9 — the IRS tax form. All three are standard documents used by freight carriers.",
+      "category": "documents"
+    },
+    "legally_binding": {
+      "q": "Are these documents legally binding?",
+      "a": "Yes. Your electronic signature is legally binding under the ESIGN Act. You'll get a copy of each signed document emailed to you after submission. Read each one carefully before signing.",
+      "category": "documents"
+    },
+    "is_banking_secure": {
+      "q": "Is my banking info secure?",
+      "a": "Yes. It's encrypted in transit and at rest. We use it only to send you ACH payouts. You can update it any time from your investor dashboard after approval.",
+      "category": "banking"
+    },
+    "how_often_paid": {
+      "q": "How often do I get paid?",
+      "a": "Payouts run monthly on Net-60 terms from the load delivery date. You'll see a statement each month with load details and your share.",
+      "category": "banking"
+    },
+    "where_find_routing": {
+      "q": "Where do I find my routing number?",
+      "a": "On the bottom-left of a physical check (9 digits, before your account number), or in your bank's online banking under Account Details → Direct Deposit info.",
+      "category": "banking"
+    }
+  },
+  "tooltips": {
+    "form.legal_name": "Your exact legal name — must match your tax filing",
+    "form.dba": "Optional — your trade name, if different from your legal name",
+    "form.entity_type": "LLC, Corp, Sole Prop, or Other",
+    "form.address": "Principal business or home address",
+    "form.contact_person": "Primary point of contact for your application",
+    "form.contact_title": "Their role at your company",
+    "form.phone": "Best number to reach you",
+    "form.email": "We'll send confirmation and login details here",
+    "form.years_in_operation": "How many years you've been in trucking (0 is fine for new owners)",
+    "form.industry_experience": "Have you worked in trucking or logistics before?",
+    "form.preferred_communication": "How you'd like us to reach you",
+    "form.tax_classification": "Your tax filing type",
+    "form.ein_ssn": "9 digits, with or without dashes",
+    "form.reporting_preference": "How you want to receive monthly reports",
+    "form.fleet_size": "1-20 trucks",
+    "vehicles.make": "Truck manufacturer",
+    "vehicles.model": "Specific model (depends on make)",
+    "vehicles.year": "Model year from the title",
+    "vehicles.vin": "17-character Vehicle Identification Number",
+    "vehicles.licensePlate": "Current license plate",
+    "vehicles.mileage": "Current odometer reading",
+    "vehicles.titleState": "State where the title is registered",
+    "banking.bank_name": "Your bank — autocompletes from major US banks",
+    "banking.account_type": "Checking or savings",
+    "banking.account_name": "Name on the account as it appears at your bank",
+    "banking.routing_number": "9 digits on the bottom-left of your check",
+    "banking.account_number": "Your bank account number for ACH payouts"
+  },
+  "errorExplanations": {
+    "canProceedStep1_failed": {
+      "plain": "You need to fill in all the required fields before continuing.",
+      "required": ["legal_name", "address", "phone", "email", "ein_ssn"],
+      "helpNode": "STEP0_REVIEW"
+    },
+    "allVehiclesValid_failed": {
+      "plain": "Every truck needs a year, make, model, and VIN before you can continue.",
+      "helpNode": "VEHICLE_VIN"
+    },
+    "signedCount_failed": {
+      "plain": "All 3 documents need to be signed before you can submit.",
+      "helpNode": "DOCS_INTRO"
+    },
+    "canSubmitBanking_failed": {
+      "plain": "You need to fill in your bank name, routing number, and account number to submit.",
+      "helpNode": "BANK_NAME"
+    }
+  }
+}

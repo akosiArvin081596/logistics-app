@@ -9,7 +9,7 @@
         <div class="sidebar-subtitle">Investor Onboarding Wizard</div>
       </div>
 
-      <nav class="sidebar-steps">
+      <nav class="sidebar-steps" data-wizard-target="sidebar-steps">
         <div
           v-for="(s, i) in sidebarSteps"
           :key="i"
@@ -95,15 +95,15 @@
           <div class="form-grid">
             <div class="field full">
               <label>Legal Name (Individual or Entity) <span class="req">*</span></label>
-              <input v-model="form.legal_name" placeholder="e.g. John Doe or Doe Enterprises LLC" required />
+              <input v-model="form.legal_name" placeholder="e.g. John Doe or Doe Enterprises LLC" data-wizard-target="legal-name" required />
             </div>
             <div class="field">
               <label>DBA <span class="opt">(if applicable)</span></label>
-              <input v-model="form.dba" placeholder="Doing business as..." />
+              <input v-model="form.dba" placeholder="Doing business as..." data-wizard-target="dba" />
             </div>
             <div class="field">
               <label>Entity Type</label>
-              <select v-model="form.entity_type">
+              <select v-model="form.entity_type" data-wizard-target="entity-type">
                 <option value="">Select type...</option>
                 <option>LLC</option><option>Corp</option><option>Sole Prop</option><option>Other</option>
               </select>
@@ -112,7 +112,7 @@
               <label>Principal Address <span class="req">*</span></label>
               <div class="address-row">
                 <div class="address-input-wrap">
-                  <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." required autocomplete="off" />
+                  <input ref="addressInput" v-model="form.address" placeholder="Start typing an address..." data-wizard-target="address" required autocomplete="off" />
                   <button type="button" class="addr-action-btn" :disabled="geolocating" @click="useCurrentLocation" title="Use my current location">
                     <svg v-if="!geolocating" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
                     <span v-else class="spinner"></span>
@@ -133,8 +133,8 @@
                 <option>Director</option><option>CFO</option><option>Other</option>
               </select>
             </div>
-            <div class="field"><label>Phone <span class="req">*</span></label><input v-model="form.phone" type="tel" placeholder="(555) 123-4567" required /></div>
-            <div class="field"><label>Email <span class="req">*</span></label><input v-model="form.email" type="email" placeholder="you@company.com" required /></div>
+            <div class="field"><label>Phone <span class="req">*</span></label><input v-model="form.phone" type="tel" placeholder="(555) 123-4567" data-wizard-target="phone" required /></div>
+            <div class="field"><label>Email <span class="req">*</span></label><input v-model="form.email" type="email" placeholder="you@company.com" data-wizard-target="email" required /></div>
           </div>
 
           <div class="section-divider">
@@ -162,7 +162,7 @@
               <label>Tax Classification</label>
               <select v-model="form.tax_classification"><option value="">Select...</option><option>C-Corp</option><option>S-Corp</option><option>Partnership</option><option>Individual/LLC</option></select>
             </div>
-            <div class="field"><label>EIN or SSN <span class="req">*</span></label><input v-model="form.ein_ssn" placeholder="XX-XXXXXXX" required /></div>
+            <div class="field"><label>EIN or SSN <span class="req">*</span></label><input v-model="form.ein_ssn" placeholder="XX-XXXXXXX" data-wizard-target="ein-ssn" required /></div>
             <div class="field">
               <label>Monthly Reporting Delivery</label>
               <select v-model="form.reporting_preference"><option value="">Select...</option><option>Digital Portal</option><option>Email PDF</option></select>
@@ -171,7 +171,7 @@
 
           <div class="step-actions">
             <div></div>
-            <button class="btn-primary" :disabled="!canProceedStep1 || submitting" @click="submitApplication">
+            <button class="btn-primary" :disabled="!canProceedStep1 || submitting" data-wizard-target="continue-step0" @click="submitApplication">
               <span v-if="submitting" class="spinner light"></span>
               {{ submitting ? 'Submitting...' : 'Continue' }}
               <svg v-if="!submitting" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
@@ -202,7 +202,7 @@
               <div class="form-grid" style="margin-bottom: 1.25rem;">
                 <div class="field">
                   <label>Total Fleet Size (Currently Owned) <span class="req">*</span></label>
-                  <input v-model="form.fleet_size" type="number" min="1" max="20" placeholder="How many vehicles?" />
+                  <input v-model="form.fleet_size" type="number" min="1" max="20" placeholder="How many vehicles?" data-wizard-target="fleet-size" />
                 </div>
               </div>
 
@@ -223,20 +223,20 @@
                 <div class="form-grid">
                   <div class="field">
                     <label>Make <span class="req">*</span></label>
-                    <select v-model="vehicles[activeVehicleTab].make">
+                    <select v-model="vehicles[activeVehicleTab].make" data-wizard-target="vehicle-make">
                       <option value="">-- Select make --</option>
                       <option v-for="m in truckMakes" :key="m" :value="m">{{ m }}</option>
                     </select>
                   </div>
                   <div class="field">
                     <label>Model <span class="req">*</span></label>
-                    <select v-model="vehicles[activeVehicleTab].model" :disabled="!vehicles[activeVehicleTab].make">
+                    <select v-model="vehicles[activeVehicleTab].model" :disabled="!vehicles[activeVehicleTab].make" data-wizard-target="vehicle-model">
                       <option value="">{{ vehicles[activeVehicleTab].make ? '-- Select model --' : '-- Select make first --' }}</option>
                       <option v-for="m in activeModelOptions" :key="m" :value="m">{{ m }}</option>
                     </select>
                   </div>
-                  <div class="field"><label>Year <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].year" type="number" placeholder="e.g. 2022" required /></div>
-                  <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].vin" placeholder="Vehicle Identification Number" required /></div>
+                  <div class="field"><label>Year <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].year" type="number" placeholder="e.g. 2022" data-wizard-target="vehicle-year" required /></div>
+                  <div class="field"><label>VIN <span class="req">*</span></label><input v-model="vehicles[activeVehicleTab].vin" placeholder="Vehicle Identification Number" data-wizard-target="vehicle-vin" required /></div>
                   <div class="field"><label>License Plate</label><input v-model="vehicles[activeVehicleTab].licensePlate" placeholder="e.g. ABC-1234" /></div>
                   <div class="field"><label>Current Mileage</label><input v-model="vehicles[activeVehicleTab].mileage" placeholder="e.g. 120,000" /></div>
                   <div class="field state-field">
@@ -274,8 +274,8 @@
               </span>
             </summary>
             <div class="accordion-body">
-              <div class="doc-list">
-                <div v-for="doc in documents" :key="doc.doc_key" class="doc-card" :class="{ signed: doc.signed }" @click="openDoc(doc)">
+              <div class="doc-list" data-wizard-target="docs-list">
+                <div v-for="doc in documents" :key="doc.doc_key" class="doc-card" :class="{ signed: doc.signed }" :data-wizard-target="'doc-' + doc.doc_key" @click="openDoc(doc)">
                   <div class="doc-icon-wrap" :class="doc.signed ? 'done' : 'pending'">
                     <svg v-if="doc.signed" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
                     <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -294,7 +294,7 @@
 
           <div class="step-actions">
             <div></div>
-            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" @click="vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
+            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" data-wizard-target="continue-step1" @click="vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
               Continue
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
@@ -309,7 +309,7 @@
             <p>ACH/Direct Deposit details for Net-60 settlements</p>
           </div>
 
-          <div class="bank-security-note">
+          <div class="bank-security-note" data-wizard-target="banking-section">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             <span>Your banking information is encrypted and stored securely.</span>
           </div>
@@ -319,7 +319,7 @@
               <label>Bank Name <span class="req">*</span></label>
               <input
                 v-model="banking.bank_name" placeholder="Start typing bank name..."
-                autocomplete="off" required
+                autocomplete="off" data-wizard-target="bank-name" required
                 @focus="bankDropOpen = true"
                 @blur="window.setTimeout(() => bankDropOpen = false, 200)"
               />
@@ -349,8 +349,8 @@
                 >{{ n }}</div>
               </div>
             </div>
-            <div class="field"><label>Routing Number <span class="req">*</span></label><input v-model="banking.routing_number" placeholder="9-digit routing number" required /></div>
-            <div class="field"><label>Account Number <span class="req">*</span></label><input v-model="banking.account_number" placeholder="Account number" required /></div>
+            <div class="field"><label>Routing Number <span class="req">*</span></label><input v-model="banking.routing_number" placeholder="9-digit routing number" data-wizard-target="routing-number" required /></div>
+            <div class="field"><label>Account Number <span class="req">*</span></label><input v-model="banking.account_number" placeholder="Account number" data-wizard-target="account-number" required /></div>
           </div>
 
           <div class="step-actions">
@@ -358,7 +358,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
               Back
             </button>
-            <button class="btn-primary" :disabled="!canSubmitBanking || submitting" @click="showReviewModal = true">
+            <button class="btn-primary" :disabled="!canSubmitBanking || submitting" data-wizard-target="review-open" @click="showReviewModal = true">
               {{ 'Review & Complete' }}
             </button>
           </div>
@@ -374,7 +374,7 @@
 
     <!-- Review Modal -->
     <div v-if="showReviewModal" class="review-overlay" @click.self="showReviewModal = false">
-      <div class="review-modal">
+      <div class="review-modal" data-wizard-target="review-modal">
         <div class="review-header">
           <h3>Review Your Application</h3>
           <button class="review-close" @click="showReviewModal = false">&times;</button>
@@ -466,7 +466,7 @@
 
         <div class="review-footer">
           <button class="btn-ghost" @click="showReviewModal = false">Go Back & Edit</button>
-          <button class="btn-primary" :disabled="submitting" @click="showReviewModal = false; submitOnboarding()">
+          <button class="btn-primary" :disabled="submitting" data-wizard-target="submit-confirm" @click="showReviewModal = false; submitOnboarding()">
             <span v-if="submitting" class="spinner light"></span>
             {{ submitting ? 'Submitting...' : 'Confirm & Complete Onboarding' }}
           </button>
@@ -495,6 +495,16 @@
         <iframe :src="reviewPdfUrl" class="pdf-viewer-frame" />
       </div>
     </div>
+
+    <!-- Guided wizard overlay -->
+    <InvestWizardOverlay
+      :page-step="step"
+      :form="form"
+      :vehicles="vehicles"
+      :banking="banking"
+      :signatures="signatures"
+      :completed="completed"
+    />
   </div>
 </template>
 
@@ -504,6 +514,7 @@ import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import InvestorSignModal from '../components/invest/InvestorSignModal.vue'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
+import InvestWizardOverlay from '../wizard/components/InvestWizardOverlay.vue'
 
 const sidebarSteps = [
   { title: 'Application', desc: 'Business & contact info' },

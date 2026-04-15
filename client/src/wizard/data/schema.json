@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LogisX Invest Wizard Knowledge Base",
+  "type": "object",
+  "required": ["version", "steps", "tooltips"],
+  "properties": {
+    "version": { "type": "string" },
+    "lastUpdated": { "type": "string" },
+    "steps": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["title", "body"],
+        "properties": {
+          "title": { "type": "string", "maxLength": 80 },
+          "body": { "type": "string", "maxLength": 500 },
+          "target": { "type": ["string", "null"] },
+          "action": {
+            "type": "string",
+            "enum": ["info", "input", "click", "select", "wait"]
+          },
+          "highlight": {
+            "type": "string",
+            "enum": ["spotlight", "pulse", "arrow", "none"]
+          },
+          "next": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "when": { "type": "string" },
+                    "goto": { "type": "string" }
+                  },
+                  "required": ["goto"]
+                }
+              }
+            ]
+          },
+          "canSkip": { "type": "boolean" },
+          "examples": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "faqLinks": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "enterCondition": { "type": "string" },
+          "exitCondition": { "type": "string" },
+          "parentStep": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          }
+        }
+      }
+    },
+    "faqs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["q", "a"],
+        "properties": {
+          "q": { "type": "string" },
+          "a": { "type": "string" },
+          "category": { "type": "string" }
+        }
+      }
+    },
+    "tooltips": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "errorExplanations": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["plain"],
+        "properties": {
+          "plain": { "type": "string" },
+          "required": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "helpNode": { "type": "string" }
+        }
+      }
+    }
+  }
+}
