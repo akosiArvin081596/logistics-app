@@ -927,7 +927,6 @@ async function submitOnboarding() {
 .sidebar-logo-img {
   height: 32px;
   display: block;
-  filter: brightness(0) invert(1);
 }
 .sidebar-subtitle {
   margin-top: 0.6rem;
@@ -1575,7 +1574,6 @@ async function submitOnboarding() {
   }
   .mobile-logo-img {
     height: 26px;
-    filter: brightness(0) invert(1);
   }
 
   .mobile-steps {

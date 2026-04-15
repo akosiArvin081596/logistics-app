@@ -478,7 +478,7 @@ async function submitForm() {
 }
 .sidebar-top { margin-bottom: 2.5rem; }
 .sidebar-logo { display: flex; align-items: center; gap: 0.65rem; }
-.sidebar-logo-img { height: 32px; display: block; filter: brightness(0) invert(1); }
+.sidebar-logo-img { height: 32px; display: block; }
 .sidebar-subtitle {
   margin-top: 0.6rem; font-size: 0.78rem; color: rgba(255,255,255,0.4);
   font-weight: 500; letter-spacing: 0.03em;
@@ -681,7 +681,7 @@ async function submitForm() {
     gap: 0.75rem; padding: 1.25rem 1.5rem; background: #0f2847;
   }
   .mobile-logo { display: flex; align-items: center; gap: 0.5rem; font-size: 1.1rem; font-weight: 800; color: #fff; }
-  .mobile-logo-img { height: 26px; filter: brightness(0) invert(1); }
+  .mobile-logo-img { height: 26px; }
   .mobile-steps { display: flex; gap: 0.5rem; align-items: center; }
   .mobile-dot {
     width: 10px; height: 10px; border-radius: 50%;
