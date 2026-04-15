@@ -925,7 +925,7 @@ async function submitOnboarding() {
   gap: 0.65rem;
 }
 .sidebar-logo-img {
-  height: 32px;
+  height: 64px;
   display: block;
 }
 .sidebar-subtitle {
@@ -1573,7 +1573,7 @@ async function submitOnboarding() {
     color: #fff;
   }
   .mobile-logo-img {
-    height: 26px;
+    height: 48px;
   }
 
   .mobile-steps {
