@@ -4,7 +4,7 @@
     <aside class="invest-sidebar">
       <div class="sidebar-top">
         <div class="sidebar-logo">
-          <img src="/logo.avif" alt="LogisX" class="sidebar-logo-img" />
+          <img src="/logo.png" alt="LogisX" class="sidebar-logo-img" />
         </div>
         <div class="sidebar-subtitle">Investor Onboarding Wizard</div>
       </div>
@@ -42,8 +42,7 @@
     <!-- ═══ MOBILE TOP BAR (hidden on desktop) ═══ -->
     <div v-if="!completed" class="mobile-topbar">
       <div class="mobile-logo">
-        <img src="/logo.avif" alt="LogisX" class="mobile-logo-img" />
-        <span>LogisX</span>
+        <img src="/logo.png" alt="LogisX" class="mobile-logo-img" />
       </div>
       <div class="mobile-steps">
         <div

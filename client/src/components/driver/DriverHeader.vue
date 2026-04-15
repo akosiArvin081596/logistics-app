@@ -1,7 +1,7 @@
 <template>
   <header class="app-header">
     <div class="app-header-left">
-      <img src="/logo.avif" alt="LogisX" class="header-logo" />
+      <img src="/logo.png" alt="LogisX" class="header-logo" />
       <span class="driver-name-label">{{ driverName }}</span>
     </div>
     <div class="app-header-right">

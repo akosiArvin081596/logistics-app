@@ -2,7 +2,7 @@
   <aside :class="['sidebar', { collapsed }]">
     <div class="sidebar-header">
       <div class="header-top">
-        <h1><img src="/logo.avif" alt="LogisX" class="sidebar-logo" /></h1>
+        <h1><img src="/logo.png" alt="LogisX" class="sidebar-logo" /></h1>
         <button class="collapse-btn" @click="toggle" :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'">
           <span class="collapse-icon" :class="{ flipped: collapsed }">&#9664;</span>
         </button>

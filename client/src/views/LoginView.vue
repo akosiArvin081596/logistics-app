@@ -3,7 +3,7 @@
     <!-- Left Panel: Branding -->
     <div class="login-brand">
       <div class="brand-center">
-        <img src="/logo.avif" alt="LogisX" class="brand-logo" />
+        <img src="/logo.png" alt="LogisX" class="brand-logo" />
         <div class="brand-divider"></div>
         <p class="brand-tagline">Dispatch &amp; Fleet Management<br />Operations Platform</p>
         <div class="brand-features">
@@ -19,7 +19,7 @@
       <div class="form-wrapper">
         <!-- Mobile logo -->
         <div class="mobile-logo">
-          <img src="/logo.avif" alt="LogisX" />
+          <img src="/logo.png" alt="LogisX" />
         </div>
 
         <!-- SETUP FORM -->
