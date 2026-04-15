@@ -15,7 +15,7 @@
           />
         </mask>
       </defs>
-      <rect width="100%" height="100%" fill="rgba(15, 23, 42, 0.55)" mask="url(#spot-mask)" />
+      <rect width="100%" height="100%" class="spot-dim" mask="url(#spot-mask)" />
     </svg>
     <div
       class="spot-ring"
@@ -49,6 +49,9 @@ defineProps({
   width: 100%;
   height: 100%;
 }
+.spot-dim {
+  fill: rgba(15, 23, 42, 0.55);
+}
 .spot-ring {
   position: absolute;
   border: 2px solid #3b82f6;
@@ -71,6 +74,22 @@ defineProps({
 }
 .wizard-spotlight.none {
   display: none;
+}
+@media (max-width: 768px) {
+  .spot-dim {
+    fill: rgba(15, 23, 42, 0.32);
+  }
+  .spot-ring {
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.22), 0 0 14px rgba(59, 130, 246, 0.4);
+  }
+  @keyframes pulse-ring {
+    0%, 100% {
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.22), 0 0 14px rgba(59, 130, 246, 0.4);
+    }
+    50% {
+      box-shadow: 0 0 0 6px rgba(59, 130, 246, 0.12), 0 0 18px rgba(59, 130, 246, 0.5);
+    }
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .spot-ring { animation: none; }

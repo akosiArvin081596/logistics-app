@@ -46,7 +46,7 @@ export function useSpotlight() {
     }
   }
 
-  function setTarget(selector) {
+  function setTarget(selector, { scroll = true } = {}) {
     cleanup();
     if (!selector) {
       targetRect.value = null;
@@ -67,7 +67,9 @@ export function useSpotlight() {
     expandCollapsedAncestors(el);
     currentTarget = el;
     measure(el);
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    if (scroll) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
     scrollHandler = () => scheduleMeasure(el);
     window.addEventListener('scroll', scrollHandler, { passive: true, capture: true });
     window.addEventListener('resize', scrollHandler, { passive: true });

@@ -24,7 +24,7 @@ defineEmits(['toggle']);
 .wizard-fab {
   position: fixed;
   right: 24px;
-  bottom: 24px;
+  bottom: calc(24px + var(--wizard-kb-offset, 0px) + env(safe-area-inset-bottom, 0px));
   width: 64px;
   height: 64px;
   border-radius: 50%;
@@ -37,7 +37,7 @@ defineEmits(['toggle']);
   cursor: pointer;
   padding: 6px;
   box-shadow: 0 10px 28px rgba(15, 40, 71, 0.4), 0 2px 8px rgba(15, 40, 71, 0.2);
-  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, bottom 0.25s ease;
   z-index: 9997;
 }
 .wizard-fab:hover {
@@ -63,7 +63,7 @@ defineEmits(['toggle']);
 @media (max-width: 768px) {
   .wizard-fab {
     right: 16px;
-    bottom: 16px;
+    bottom: calc(16px + var(--wizard-kb-offset, 0px) + env(safe-area-inset-bottom, 0px));
     width: 58px;
     height: 58px;
   }

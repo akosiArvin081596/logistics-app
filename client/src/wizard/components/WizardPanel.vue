@@ -14,12 +14,22 @@
         role="button"
         aria-label="Restore guide"
         tabindex="0"
-        @mouseenter="$emit('restore')"
+        @mouseenter="onHoverRestore"
         @click="$emit('restore')"
         @keydown.enter="$emit('restore')"
       >
-        <span class="tab-bar" aria-hidden="true" />
-        <span class="tab-label">Guide</span>
+        <span v-if="!isMobile" class="tab-bar" aria-hidden="true" />
+        <div v-if="isMobile" class="pill-inner">
+          <WizardBot size="tiny" variant="default" :animate="false" />
+          <div class="pill-text">
+            <strong>Tap to show guide</strong>
+            <span>Step {{ progressIndex + 1 }} of {{ totalSteps }}</span>
+          </div>
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="18 15 12 9 6 15"></polyline>
+          </svg>
+        </div>
+        <span v-else class="tab-label">Guide</span>
       </div>
       <header class="panel-header">
         <div class="panel-brand">
@@ -125,6 +135,7 @@ import WizardBot from './WizardBot.vue';
 const props = defineProps({
   open: { type: Boolean, default: false },
   minimized: { type: Boolean, default: false },
+  isMobile: { type: Boolean, default: false },
   step: { type: Object, default: null },
   progressIndex: { type: Number, default: 0 },
   progressPercent: { type: Number, default: 0 },
@@ -132,12 +143,18 @@ const props = defineProps({
   faqLookup: { type: Function, default: () => null },
 });
 
-defineEmits(['close', 'next', 'back', 'skip', 'open-faq', 'restore']);
+const emit = defineEmits(['close', 'next', 'back', 'skip', 'open-faq', 'restore']);
 
 const showHero = computed(() => {
   const id = props.step?.id || '';
   return id === 'WELCOME' || id === 'COMPLETION';
 });
+
+const totalSteps = computed(() => 27);
+
+function onHoverRestore() {
+  if (!props.isMobile) emit('restore');
+}
 
 const titleId = 'wizard-panel-title';
 const nextLabel = computed(() => {
@@ -424,15 +441,83 @@ const nextLabel = computed(() => {
   .wizard-panel {
     top: auto;
     right: 0;
-    bottom: 0;
+    bottom: calc(var(--wizard-kb-offset, 0px) + env(safe-area-inset-bottom, 0px));
     left: 0;
     width: 100%;
     max-width: none;
-    max-height: 60vh;
+    max-height: 48vh;
     border-radius: 18px 18px 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+                bottom 0.25s ease,
+                opacity 0.25s ease;
+  }
+  .wizard-panel.minimized {
+    transform: translateY(calc(100% - 56px - env(safe-area-inset-bottom, 0px)));
+    pointer-events: auto;
+    max-height: 48vh;
+  }
+  .wizard-panel.minimized .panel-header,
+  .wizard-panel.minimized .panel-progress,
+  .wizard-panel.minimized .panel-body,
+  .wizard-panel.minimized .panel-footer {
+    opacity: 0;
+    transition: opacity 0.2s ease;
   }
   .panel-enter-from, .panel-leave-to {
     transform: translateY(20px);
+  }
+  .panel-hero { display: none; }
+  .panel-body { padding: 16px 18px; }
+  .panel-title { font-size: 1.1rem; }
+  .panel-text { font-size: 0.88rem; }
+  .panel-footer {
+    position: sticky;
+    bottom: 0;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  .panel-header { padding: 12px 14px; }
+  .panel-progress { padding: 10px 16px 6px; }
+
+  .minimized-tab {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: auto;
+    width: 100%;
+    height: 56px;
+    padding: 0 18px calc(0px + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(90deg, #fff 0%, #f8fafc 100%);
+    border-right: none;
+    border-bottom: 1px solid #eef2f7;
+  }
+  .pill-inner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    max-width: 480px;
+    color: #0f2847;
+  }
+  .pill-text {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+  }
+  .pill-text strong {
+    font-size: 0.86rem;
+    font-weight: 600;
+  }
+  .pill-text span {
+    font-size: 0.7rem;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
   }
 }
 @media (prefers-reduced-motion: reduce) {

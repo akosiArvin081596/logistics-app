@@ -1,5 +1,5 @@
 <template>
-  <div class="wizard-root">
+  <div class="wizard-root" :style="rootStyle">
     <WizardResumeBanner
       :show="showResumeBanner"
       @resume="handleResume"
@@ -12,6 +12,7 @@
     <WizardPanel
       :open="engine.state.open"
       :minimized="minimized"
+      :is-mobile="isMobile"
       :step="engine.currentStep.value"
       :progress-index="engine.progressIndex.value"
       :progress-percent="engine.progressPercent.value"
@@ -75,6 +76,12 @@ const showResumeBanner = ref(false);
 const faqDrawerOpen = ref(false);
 const activeFaq = ref(null);
 const minimized = ref(false);
+const isMobile = ref(false);
+const keyboardOffset = ref(0);
+
+const rootStyle = computed(() => ({
+  '--wizard-kb-offset': keyboardOffset.value + 'px',
+}));
 
 const activeHighlight = computed(() => {
   const step = engine.currentStep.value;
@@ -144,7 +151,22 @@ function applyCurrentTarget() {
     spotlight.cleanup();
     return;
   }
-  nextTick(() => spotlight.setTarget(step.target));
+  nextTick(() => spotlight.setTarget(step.target, { scroll: !isMobile.value }));
+}
+
+function updateKeyboardOffset() {
+  const vv = window.visualViewport;
+  if (!vv) {
+    keyboardOffset.value = 0;
+    return;
+  }
+  const delta = window.innerHeight - vv.height - vv.offsetTop;
+  keyboardOffset.value = delta > 40 ? delta : 0;
+}
+
+let mobileMedia = null;
+function handleMobileChange(e) {
+  isMobile.value = e.matches;
 }
 
 function handleEscape(e) {
@@ -177,9 +199,24 @@ watch(() => props.completed, (isDone) => {
 });
 
 onMounted(() => {
+  mobileMedia = window.matchMedia('(max-width: 768px)');
+  isMobile.value = mobileMedia.matches;
+  if (typeof mobileMedia.addEventListener === 'function') {
+    mobileMedia.addEventListener('change', handleMobileChange);
+  } else if (typeof mobileMedia.addListener === 'function') {
+    mobileMedia.addListener(handleMobileChange);
+  }
+
   window.addEventListener('keydown', handleEscape);
-  document.addEventListener('mousedown', handlePageInteraction, true);
+  document.addEventListener('pointerdown', handlePageInteraction, true);
   document.addEventListener('focusin', handlePageInteraction, true);
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', updateKeyboardOffset);
+    window.visualViewport.addEventListener('scroll', updateKeyboardOffset);
+    updateKeyboardOffset();
+  }
+
   const urlParams = new URLSearchParams(window.location.search);
   const forceGuide = urlParams.get('guide') === '1';
 
@@ -207,8 +244,19 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleEscape);
-  document.removeEventListener('mousedown', handlePageInteraction, true);
+  document.removeEventListener('pointerdown', handlePageInteraction, true);
   document.removeEventListener('focusin', handlePageInteraction, true);
+  if (window.visualViewport) {
+    window.visualViewport.removeEventListener('resize', updateKeyboardOffset);
+    window.visualViewport.removeEventListener('scroll', updateKeyboardOffset);
+  }
+  if (mobileMedia) {
+    if (typeof mobileMedia.removeEventListener === 'function') {
+      mobileMedia.removeEventListener('change', handleMobileChange);
+    } else if (typeof mobileMedia.removeListener === 'function') {
+      mobileMedia.removeListener(handleMobileChange);
+    }
+  }
   spotlight.cleanup();
 });
 </script>
