@@ -1586,6 +1586,18 @@ function requireRole(...roles) {
 // instead of direct static URLs, so locking this down does not break any public page.
 app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads")));
 
+// Read-only demo account lockdown. demo_viewer can GET anything (Super Admin role
+// so they see the full app), but any mutation returns 403 with a friendly message.
+// Logout is explicitly allowed so they can sign out.
+app.use("/api", (req, res, next) => {
+	if (!req.session.user) return next();
+	if (req.session.user.username !== "demo_viewer") return next();
+	const method = req.method.toUpperCase();
+	if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+	if (req.path === "/auth/logout") return next();
+	return res.status(403).json({ error: "This is a read-only demo account. Sign up at /invest to create your own investor account." });
+});
+
 // ============================================================
 // PUBLIC: Job Application
 // ============================================================
