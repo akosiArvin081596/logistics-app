@@ -70,7 +70,8 @@ defineEmits(['toggle']);
 }
 @media (max-width: 768px) {
   .wizard-fab {
-    right: 16px;
+    right: auto;
+    left: 16px;
     bottom: calc(16px + var(--wizard-kb-offset, 0px) + env(safe-area-inset-bottom, 0px));
     width: 58px;
     height: 58px;
