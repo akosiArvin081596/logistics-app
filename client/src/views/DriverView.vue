@@ -272,6 +272,7 @@
           :driver-info="driverStore.driverInfo"
           :headers="driverStore.headers.carrierDB"
           :shared-documents="driverStore.sharedDocuments"
+          :truck-documents="driverStore.truckDocuments"
           :application="driverStore.application"
           :onboarding-documents="driverStore.onboarding?.documents || []"
           :profile-picture-url="driverStore.profilePictureUrl"

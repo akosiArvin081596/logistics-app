@@ -1,5 +1,5 @@
 <template>
-  <div v-if="!driverInfo && sharedDocuments.length === 0" class="empty-state">
+  <div v-if="!driverInfo && sharedDocuments.length === 0 && truckDocuments.length === 0" class="empty-state">
     <div class="empty-icon">&#128196;</div>
     No driver profile found.
   </div>
@@ -109,6 +109,37 @@
         </div>
       </div>
     </div>
+
+    <!-- Truck Documents — admin-flagged docs from the truck currently assigned to this driver.
+         View-only in the browser; no file_url ever reaches this component. -->
+    <div v-if="truckDocuments.length > 0" class="card shared-docs-card">
+      <div class="shared-docs-header">
+        <div class="shared-docs-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 3h15v13H1z"/><path d="M16 8h4l3 3v5h-7z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+        </div>
+        <div class="shared-docs-title">Truck Documents</div>
+        <span class="shared-docs-count">{{ truckDocuments.length }}</span>
+      </div>
+      <div class="shared-docs-hint">From your assigned truck. Tap View to open in a new tab.</div>
+      <div class="shared-docs-list">
+        <div v-for="doc in truckDocuments" :key="'t'+doc.id" class="shared-doc-row">
+          <div class="shared-doc-info">
+            <div class="shared-doc-name">{{ doc.file_name }}</div>
+            <div class="shared-doc-meta">
+              <span class="shared-doc-type">{{ doc.doc_type }}</span>
+              <span class="shared-doc-date">{{ formatDate(doc.uploaded_at) }}</span>
+            </div>
+            <div v-if="doc.notes" class="shared-doc-notes">{{ doc.notes }}</div>
+          </div>
+          <a
+            :href="`/api/driver/truck-documents/${doc.id}/view`"
+            target="_blank"
+            rel="noopener"
+            class="shared-doc-view"
+          >View</a>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -136,6 +167,9 @@ const props = defineProps({
   // Signed onboarding PDFs (lease, contractor, W-9, etc.) — filtered to
   // non-confidential + signed on the frontend.
   onboardingDocuments: { type: Array, default: () => [] },
+  // Docs uploaded to the driver's currently-assigned truck that admin
+  // flagged as driver-visible. View-only — no file_url reaches the client.
+  truckDocuments: { type: Array, default: () => [] },
 })
 
 // Flatten CDL front/back and medical card into a display list. Detects
@@ -407,6 +441,11 @@ function formatDate(ts) {
   color: var(--text-dim);
   padding: 0.5rem 0 0.25rem;
   font-style: italic;
+}
+.shared-docs-hint {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  padding: 0 0 0.6rem;
 }
 .shared-docs-list {
   display: flex;

@@ -21,6 +21,10 @@
         {{ uploadForm.file ? uploadForm.file.name : 'Choose File' }}
         <input type="file" style="display:none" @change="onFileChange" />
       </label>
+      <label v-if="canShareWithDriver" class="visible-toggle" title="Let the currently-assigned driver see this doc in their Driver Kit (view-only)">
+        <input type="checkbox" v-model="uploadForm.visibleToDriver" />
+        <span>Visible to assigned driver</span>
+      </label>
       <button class="btn-upload" :disabled="!uploadForm.file || !uploadForm.docType || uploading" @click="upload">
         {{ uploading ? 'Uploading...' : 'Upload' }}
       </button>
@@ -56,13 +60,24 @@
       </thead>
       <tbody>
         <tr v-for="doc in docs" :key="doc.id">
-          <td><span class="type-badge">{{ doc.doc_type }}</span></td>
+          <td>
+            <span class="type-badge">{{ doc.doc_type }}</span>
+            <span v-if="doc.visible_to_driver === 1 && isTruckScoped(doc)" class="visible-badge" title="Visible in the assigned driver's Driver Kit">Driver</span>
+          </td>
           <td class="file-name">{{ doc.file_name }}</td>
           <td class="notes-col">{{ doc.notes || '\u2014' }}</td>
           <td class="date-col">{{ fmtDate(doc.uploaded_at) }}</td>
           <td class="by-col">{{ doc.uploaded_by }}</td>
           <td>
             <a :href="doc.file_url" target="_blank" rel="noopener" class="btn-view">View</a>
+            <button
+              v-if="!readOnly && isSuperAdmin && isTruckScoped(doc)"
+              class="btn-visibility"
+              :class="{ active: doc.visible_to_driver === 1 }"
+              :title="doc.visible_to_driver === 1 ? 'Hide from driver' : 'Show in Driver Kit'"
+              :disabled="togglingId === doc.id"
+              @click="toggleVisibility(doc)"
+            >{{ doc.visible_to_driver === 1 ? 'Hide' : 'Show driver' }}</button>
             <button v-if="!readOnly && (isSuperAdmin || doc.uploaded_by === auth.user?.username)" class="btn-del" @click="remove(doc)">&#x2715;</button>
           </td>
         </tr>
@@ -114,7 +129,40 @@ const uploadForm = reactive({
   file: null,
   fileBase64: '',
   selectedTruckId: null,
+  visibleToDriver: false,
 })
+
+// Driver visibility only makes sense for truck-scoped uploads. In truck modal
+// mode (truckId is set) it's always available; in investor-profile mode it
+// activates only when the admin has picked a specific truck from the dropdown.
+const canShareWithDriver = computed(() => {
+  if (isDriverMode.value) return false
+  if (props.truckId) return true
+  if (isSuperAdmin.value && uploadForm.selectedTruckId) return true
+  return false
+})
+
+const togglingId = ref(0)
+
+function isTruckScoped(doc) {
+  return doc && doc.truck_id > 0 && !(doc.driver_id > 0) && !(doc.investor_id > 0)
+}
+
+async function toggleVisibility(doc) {
+  if (!isTruckScoped(doc)) return
+  const next = doc.visible_to_driver === 1 ? 0 : 1
+  const prev = doc.visible_to_driver
+  doc.visible_to_driver = next // optimistic
+  togglingId.value = doc.id
+  try {
+    await api.patch(`/api/legal-documents/${doc.id}/visibility`, { visibleToDriver: next === 1 })
+  } catch {
+    doc.visible_to_driver = prev // rollback
+    errorMsg.value = 'Visibility update failed.'
+  } finally {
+    togglingId.value = 0
+  }
+}
 
 async function load() {
   loading.value = true
@@ -161,12 +209,14 @@ async function upload() {
       uploadedBy: auth.user?.username || 'admin',
       investorId: props.driverId ? undefined : (props.investorId || undefined),
       driverId: props.driverId || undefined,
+      visibleToDriver: canShareWithDriver.value ? uploadForm.visibleToDriver : false,
     })
     uploadForm.file = null
     uploadForm.fileBase64 = ''
     uploadForm.docType = ''
     uploadForm.notes = ''
     uploadForm.selectedTruckId = null
+    uploadForm.visibleToDriver = false
     await load()
   } catch {
     errorMsg.value = 'Upload failed.'
@@ -283,6 +333,34 @@ onMounted(() => {
   transition: opacity 0.15s;
 }
 .btn-view:hover { opacity: 0.75; }
+
+.visible-toggle {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.35rem 0.6rem; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 0.75rem; color: var(--text-dim); cursor: pointer;
+  user-select: none; white-space: nowrap;
+}
+.visible-toggle input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; margin: 0; }
+.visible-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+.visible-badge {
+  display: inline-flex; padding: 0.12rem 0.5rem; margin-left: 0.4rem;
+  border-radius: 10px; font-size: 0.62rem; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  background: rgba(16, 185, 129, 0.14); color: #059669;
+}
+.btn-visibility {
+  padding: 0.2rem 0.55rem; font-size: 0.7rem; border-radius: 5px;
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border); cursor: pointer; font-weight: 600;
+  margin-right: 0.35rem; transition: all 0.15s;
+}
+.btn-visibility:hover { border-color: var(--accent); color: var(--accent); }
+.btn-visibility.active {
+  background: rgba(16, 185, 129, 0.12); color: #059669; border-color: #a7f3d0;
+}
+.btn-visibility:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-del {
   padding: 0.2rem 0.45rem; font-size: 0.7rem; border-radius: 5px;
   background: var(--danger-dim); color: var(--danger);

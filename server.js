@@ -644,6 +644,13 @@ try { db.exec("ALTER TABLE legal_documents ADD COLUMN investor_id INTEGER DEFAUL
 try { db.exec("ALTER TABLE legal_documents ADD COLUMN driver_id INTEGER DEFAULT 0"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_legal_docs_driver ON legal_documents(driver_id)"); } catch {}
 
+// Migration: add visible_to_driver flag for per-truck docs that the assigned
+// driver should see in their Driver Kit. Default 0 keeps every existing row
+// hidden — opt-in only, no accidental exposure of Title / Lease / Tax docs
+// that were uploaded before this flag existed.
+try { db.exec("ALTER TABLE legal_documents ADD COLUMN visible_to_driver INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_legal_docs_truck_visible ON legal_documents(truck_id, visible_to_driver)"); } catch {}
+
 // Migration: messages attachment columns
 try { db.prepare("SELECT attachment_url FROM messages LIMIT 1").get(); }
 catch {
@@ -6564,9 +6571,27 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 
 		// Assigned truck from SQLite
 		const assignedTruck = db.prepare(
-			`SELECT unit_number, make, model, year, vin, license_plate, status, photo
+			`SELECT id, unit_number, make, model, year, vin, license_plate, status, photo
 			 FROM trucks WHERE LOWER(assigned_driver) = ?`
 		).get(nameLower) || null;
+
+		// Truck-scoped legal documents the admin has explicitly marked as
+		// driver-visible. Only truck-scoped rows (truck_id > 0, no driver_id,
+		// no investor_id) participate. `file_url` is deliberately NOT returned
+		// — drivers only ever get the row id and hit the view endpoint, which
+		// re-checks the active assignment at request time.
+		let truckDocuments = [];
+		if (assignedTruck && assignedTruck.id > 0) {
+			truckDocuments = db.prepare(
+				`SELECT id, doc_type, file_name, notes, uploaded_at
+				 FROM legal_documents
+				 WHERE truck_id = ?
+				   AND visible_to_driver = 1
+				   AND (driver_id IS NULL OR driver_id = 0)
+				   AND (investor_id IS NULL OR investor_id = 0)
+				 ORDER BY uploaded_at DESC`
+			).all(assignedTruck.id);
+		}
 
 		// Onboarding data (if driver has an onboarding record).
 		// IMPORTANT: drivers must NOT see their own drug test result — legal
@@ -6634,6 +6659,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			application,
 			invoices: driverInvoices,
 			sharedDocuments,
+			truckDocuments,
 			profilePictureUrl,
 			driverDirectoryId,
 		});
@@ -6673,6 +6699,70 @@ app.get("/api/driver/shared-documents/:id/download", requireAuth, (req, res) => 
 		res.sendFile(filePath);
 	} catch (err) {
 		console.error("Shared doc download error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/driver/truck-documents/:id/view — View-only inline preview for a
+// truck's driver-visible legal document. Works for the assigned driver, Super
+// Admin, and Dispatcher. No file_url is ever exposed to the driver client —
+// they only hold the row id and hit this endpoint, which re-checks the active
+// truck_assignments row on every request (so reassignment revokes access
+// immediately). Streams inline; we intentionally do not set
+// Content-Disposition: attachment, matching the "view-only" product decision.
+const truckDocViewLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	message: { error: "Too many requests. Try again later." },
+	standardHeaders: true,
+});
+app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter, (req, res) => {
+	try {
+		const docId = parseInt(req.params.id);
+		if (!docId || docId <= 0) return res.status(400).json({ error: "Invalid document id" });
+		const doc = db.prepare(
+			"SELECT id, truck_id, driver_id, investor_id, visible_to_driver, file_url, file_name FROM legal_documents WHERE id = ?"
+		).get(docId);
+		if (!doc) return res.status(404).json({ error: "Document not found" });
+		// Only truck-scoped, driver-visible docs flow through here. Any other
+		// category (driver-shared, investor-profile) is rejected so this
+		// endpoint cannot be used to bypass the other auth paths.
+		if (!doc.truck_id || doc.truck_id <= 0 || doc.visible_to_driver !== 1
+			|| (doc.driver_id && doc.driver_id > 0) || (doc.investor_id && doc.investor_id > 0)) {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+		const role = req.session.user.role;
+		if (role !== "Super Admin" && role !== "Dispatcher") {
+			if (role !== "Driver") return res.status(403).json({ error: "Forbidden" });
+			// Driver must be the one currently assigned to this truck.
+			const sessionDriver = (req.session.user.driverName || req.session.user.driver_name || "").trim().toLowerCase();
+			if (!sessionDriver) return res.status(403).json({ error: "Forbidden" });
+			const active = db.prepare(
+				`SELECT 1 FROM truck_assignments
+				 WHERE truck_id = ? AND end_date = '' AND LOWER(driver_name) = ?
+				 LIMIT 1`
+			).get(doc.truck_id, sessionDriver);
+			if (!active) {
+				// Fallback: trucks.assigned_driver is kept in sync with the
+				// active assignment, so accept that too in case the history
+				// table lags.
+				const truck = db.prepare("SELECT assigned_driver FROM trucks WHERE id = ?").get(doc.truck_id);
+				if (!truck || (truck.assigned_driver || "").trim().toLowerCase() !== sessionDriver) {
+					return res.status(403).json({ error: "Forbidden" });
+				}
+			}
+		}
+		if (!doc.file_url) return res.status(404).json({ error: "File missing" });
+		const filePath = path.join(__dirname, doc.file_url);
+		if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File missing" });
+		res.setHeader("X-Content-Type-Options", "nosniff");
+		res.setHeader(
+			"Content-Disposition",
+			`inline; filename="${(doc.file_name || "document").replace(/[^a-zA-Z0-9._-]/g, "_")}"`
+		);
+		res.sendFile(filePath);
+	} catch (err) {
+		console.error("Truck doc view error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -7188,7 +7278,7 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 // POST /api/legal-documents/upload — Super Admin or Investor uploads a legal doc
 app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
-		const { truckId, unitNumber, docType, fileData, fileName, notes, investorId, driverId } = req.body;
+		const { truckId, unitNumber, docType, fileData, fileName, notes, investorId, driverId, visibleToDriver } = req.body;
 		if (!fileData || !fileName) {
 			return res.status(400).json({ error: "fileData and fileName are required" });
 		}
@@ -7218,12 +7308,36 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), 
 		const finalTruckId = drvId > 0 ? 0 : (parseInt(truckId) || 0);
 		const finalInvId = drvId > 0 ? 0 : invId;
 		const finalUnit = drvId > 0 ? '' : (unitNumber || '');
+		// visible_to_driver only applies to truck-scoped docs. Driver-shared and
+		// investor-profile docs already have their own visibility paths.
+		const finalVisible = (finalTruckId > 0 && drvId === 0 && finalInvId === 0 && visibleToDriver) ? 1 : 0;
 		const result = db.prepare(
-			`INSERT INTO legal_documents (truck_id, unit_number, doc_type, file_name, file_url, notes, uploaded_by, investor_id, driver_id) VALUES (?,?,?,?,?,?,?,?,?)`
-		).run(finalTruckId, finalUnit, safeType, fileName, fileUrl, notes || '', req.session.user.username, finalInvId, drvId);
-		res.json({ success: true, id: result.lastInsertRowid, fileUrl });
+			`INSERT INTO legal_documents (truck_id, unit_number, doc_type, file_name, file_url, notes, uploaded_by, investor_id, driver_id, visible_to_driver) VALUES (?,?,?,?,?,?,?,?,?,?)`
+		).run(finalTruckId, finalUnit, safeType, fileName, fileUrl, notes || '', req.session.user.username, finalInvId, drvId, finalVisible);
+		res.json({ success: true, id: result.lastInsertRowid, fileUrl, visibleToDriver: finalVisible === 1 });
 	} catch (err) {
 		console.error("Legal doc upload error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// PATCH /api/legal-documents/:id/visibility — Super Admin toggles driver visibility
+// on an existing truck-scoped doc. Driver-shared and investor-profile docs ignore
+// the flag (those have their own visibility paths), so we reject them with 400.
+app.patch("/api/legal-documents/:id/visibility", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		if (!id || id <= 0) return res.status(400).json({ error: "Invalid document id" });
+		const doc = db.prepare("SELECT id, truck_id, driver_id, investor_id FROM legal_documents WHERE id = ?").get(id);
+		if (!doc) return res.status(404).json({ error: "Document not found" });
+		if (!doc.truck_id || doc.truck_id <= 0 || (doc.driver_id && doc.driver_id > 0) || (doc.investor_id && doc.investor_id > 0)) {
+			return res.status(400).json({ error: "Only truck-scoped documents support driver visibility" });
+		}
+		const next = req.body && req.body.visibleToDriver ? 1 : 0;
+		db.prepare("UPDATE legal_documents SET visible_to_driver = ? WHERE id = ?").run(next, id);
+		res.json({ success: true, id, visibleToDriver: next === 1 });
+	} catch (err) {
+		console.error("Visibility toggle error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
