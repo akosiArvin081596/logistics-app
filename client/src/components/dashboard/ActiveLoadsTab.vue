@@ -41,7 +41,7 @@
                     <Button v-if="reassignSelections[job._rowIndex]" size="sm" @click="confirmReassign(job)">Go</Button>
                   </div>
                 </div>
-                <Button variant="destructive" size="sm" style="flex-shrink:0;margin-top:14px;" @click="confirmCancel(job)">&#10005;</Button>
+                <Button v-if="auth.isSuperAdmin" variant="destructive" size="sm" style="flex-shrink:0;margin-top:14px;" title="Cancel assignment" @click="confirmCancel(job)">&#10005;</Button>
               </div>
             </TableCell>
           </TableRow>

@@ -5941,8 +5941,11 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 	}
 });
 
-// POST /api/dispatch/cancel — Cancel a load assignment (set back to Unassigned)
-app.post("/api/dispatch/cancel", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+// POST /api/dispatch/cancel — Cancel a load assignment (set back to Unassigned).
+// Super Admin only. Per 2026-04-19 client decision, dispatchers can reassign
+// and update status but cannot cancel jobs outright — that call belongs to
+// ownership.
+app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { rowIndex, loadId, driver } = req.body;
 		if (!rowIndex) {
