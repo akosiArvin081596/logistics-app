@@ -33,7 +33,8 @@ GOOGLE_DRIVE_FOLDER_ID=<Drive folder ID for POD uploads — optional, uploads sk
 GOOGLE_MAPS_API_KEY=<Google Maps API key — required for maps, routing, geocoding, and places>
 GMAIL_USER=<Gmail address for sending onboarding/outreach emails>
 GMAIL_APP_PASSWORD=<Gmail app password for nodemailer>
-ANTHROPIC_API_KEY=<optional — enables receipt OCR auto-fill via Claude Haiku 4.5 vision; form falls back to manual entry when unset>
+GEMINI_API_KEY=<optional — enables receipt OCR auto-fill via Gemini 2.5 Flash vision; form falls back to manual entry when unset>
+GEMINI_OCR_MODEL=<optional — override the default gemini-2.5-flash model>
 PORT=3000  # optional, defaults to 3000
 ```
 
