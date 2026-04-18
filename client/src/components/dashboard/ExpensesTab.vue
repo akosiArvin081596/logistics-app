@@ -1021,8 +1021,10 @@ tr:hover td { background: var(--surface-hover); }
 .st-rejected { background: var(--danger-dim); color: var(--danger); }
 
 .receipt-thumb {
-  width: 36px; height: 28px; object-fit: cover; border-radius: 4px;
+  width: 80px; height: 60px; object-fit: cover; border-radius: 4px;
   cursor: pointer; transition: opacity 0.15s;
+  border: 1px solid var(--border);
+  background: #fafbfd;
 }
 .receipt-thumb:hover { opacity: 0.7; }
 

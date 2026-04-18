@@ -33,17 +33,24 @@ GOOGLE_DRIVE_FOLDER_ID=<Drive folder ID for POD uploads — optional, uploads sk
 GOOGLE_MAPS_API_KEY=<Google Maps API key — required for maps, routing, geocoding, and places>
 GMAIL_USER=<Gmail address for sending onboarding/outreach emails>
 GMAIL_APP_PASSWORD=<Gmail app password for nodemailer>
+ANTHROPIC_API_KEY=<optional — enables receipt OCR auto-fill via Claude Haiku 4.5 vision; form falls back to manual entry when unset>
 PORT=3000  # optional, defaults to 3000
 ```
 
 Hardcoded values in `server.js` (change if forking):
-- Spreadsheet ID: `"1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"`
+- Spreadsheet ID: `"1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"` — the production Dispatch Management sheet that n8n writes into. A separate archive sheet (`1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI`) is referenced only by the archive viewer.
 - Session secret: Set via `SESSION_SECRET` env var (required for production; falls back to default for dev)
+
+Helper scripts in `scripts/`:
+- `reset-super-admin-password.js` — reset the Super Admin password against the local SQLite DB.
+- `truncate-and-seed.js` — wipe and reseed the local DB for clean-slate testing.
+- `seed-staging.js` — seed a staging DB.
+- `geocode-loads.js` — backfill geocodes for rows in "Job Tracking".
 
 ## Architecture
 
 ### Backend (`server.js`)
-Single-file Node.js/Express server (~7800 lines) using Google Sheets as the primary database via Sheets API v4, with SQLite for local data. Google Drive API for document uploads. Socket.IO for real-time events.
+Single-file Node.js/Express server (~10,500 lines, ~140 REST endpoints) using Google Sheets as the primary database via Sheets API v4, with SQLite for local data. Google Drive API for document uploads. Socket.IO for real-time events. Body limit raised to 50mb to accept large application payloads with embedded base64 photos/signatures.
 
 **Static file serving**: Express checks if `client/dist/` exists (production build) → falls back to `public/` (legacy vanilla HTML/JS). SPA catch-all `app.get("*")` serves `index.html` for client-side routing.
 
@@ -136,7 +143,11 @@ REST endpoints (grouped by domain):
 **Invoices**:
 - `POST /api/invoices/generate` — generate invoice PDF from load data
 - `GET /api/invoices`, `GET /api/invoices/:id/pdf` — list and download invoices
-- `PUT /api/invoices/:id/submit`, `PUT /api/invoices/:id/approve` — invoice workflow
+- `PUT /api/invoices/:id/submit` — submit an invoice (driver/dispatcher)
+- `PUT /api/invoices/:id/approve` — approve submitted invoice (Super Admin only)
+
+**Financials** (Super Admin only):
+- `GET /api/financials` — aggregated P&L: revenue, expenses, driver pay, profit. Revenue counts in the month the load was **assigned**, not delivered, to match the dashboard. Only completed loads count toward `totalRevenue`.
 
 **Documents & uploads**:
 - `POST /api/documents/upload` — upload POD/documents to Google Drive
@@ -206,11 +217,11 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 Vue 3 + Vite SPA with Vue Router, Pinia stores, Tailwind CSS v4, shadcn-vue components (via radix-vue/reka-ui), Vant mobile UI, Leaflet + Google Maps for maps, and Socket.IO client for real-time updates.
 
 Key directories:
-- `stores/` — auth, dashboard, sheets, driver, messages, investor, users, adminTools, dispatchNotifications, driversDb, investors, trucks, trailers
+- `stores/` — auth, dashboard, sheets, driver, messages, investor, users, adminTools, dispatchNotifications, driversDb, investors, trucks, trailers, invoices, financials
 - `composables/` — useApi, useSocket, useToast, usePagination, useGeolocation, useGeocode, useGoogleMaps
 - `components/ui/` — shadcn-vue primitives (badge, button, card, dialog, input, select, skeleton, table, tabs)
 - `components/` — feature-organized: layout, shared, dashboard, data-manager, driver, drivers-db, trucks, investors, investor, invest, apply, users
-- `views/` — 21 view components
+- `views/` — 23 view components
 
 **Vite proxy** (`client/vite.config.js`): `/api` and `/socket.io` (with `ws: true`) both proxy to `http://localhost:3000`.
 
@@ -222,7 +233,7 @@ Key directories:
 
 **Optimistic updates**: Both `driver` and `messages` stores append messages locally before the API request completes.
 
-**Routing** (21 routes with role-based guards):
+**Routing** (23 routes with role-based guards):
 
 | Route | Access | Notes |
 |-------|--------|-------|
@@ -233,6 +244,7 @@ Key directories:
 | `/jobs/new` | Super Admin | Create new job |
 | `/tracking` | Super Admin, Dispatcher | |
 | `/expenses` | Super Admin, Dispatcher | |
+| `/invoices` | Super Admin | Invoice workflow |
 | `/messages` | Super Admin, Dispatcher | |
 | `/notifications` | Super Admin, Dispatcher | |
 | `/data` | Super Admin | Sheet data manager |
@@ -246,6 +258,7 @@ Key directories:
 | `/applications` | Super Admin | Driver applications review |
 | `/investor-applications` | Super Admin | Investor applications review |
 | `/admin/tools` | Super Admin | Admin data tools |
+| `/admin/financials` | Super Admin | Company P&L view |
 | `/archive` | Super Admin | Archived data viewer |
 
 Auth guard calls `checkSession()` on first navigation only (blocks until resolved), then subsequent navigations use cached `isAuthenticated` state. Unauthorized users redirect to `auth.roleHome` (Driver → `/driver`, Dispatcher → `/dashboard`, Investor → `/investor`).
