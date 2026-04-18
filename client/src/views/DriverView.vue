@@ -331,9 +331,17 @@
             v-for="(exp, i) in driverStore.expenses"
             :key="exp.id || i"
             :expense="exp"
+            @preview="receiptPreview = $event"
           />
         </div>
       </section>
+
+      <!-- Receipt preview overlay (shared with any card in the expenses list) -->
+      <Teleport to="body">
+        <div v-if="receiptPreview" class="receipt-preview-overlay" @click="receiptPreview = ''">
+          <img :src="receiptPreview" class="receipt-preview-img" alt="Receipt preview" />
+        </div>
+      </Teleport>
 
       <!-- INVOICES TAB -->
       <section v-if="currentTab === 'invoices'" class="tab-panel">
@@ -452,6 +460,7 @@ const showFilters = ref(false)
 const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
 const showWelcomeModal = ref(false)
+const receiptPreview = ref('')
 let isMounted = false
 
 // Welcome / activation modal — shows once per driver, first login after fully_onboarded
@@ -1488,5 +1497,24 @@ onUnmounted(() => {
   background: var(--danger, #ef4444);
   color: #fff;
   border: none;
+}
+
+/* Full-screen receipt preview overlay — same pattern used on admin /expenses */
+.receipt-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+  cursor: zoom-out;
+  padding: 1rem;
+}
+.receipt-preview-img {
+  max-width: 95vw;
+  max-height: 90vh;
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
 }
 </style>
