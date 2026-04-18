@@ -75,6 +75,58 @@
       />
     </template>
 
+    <!-- LOCATION LOCK SCREEN — shown to fully-onboarded drivers until the
+         browser has granted geolocation permission. Replaces the normal UI
+         entirely so dispatch cannot have a driver active without GPS. -->
+    <template v-else-if="isLocationBlocked">
+      <DriverHeader :driver-name="driverName" @logout="handleLogout" />
+      <main class="app-content location-locked">
+        <div class="card loc-card">
+          <div class="loc-icon">&#128205;</div>
+          <div class="loc-title">Location Access Required</div>
+          <div class="loc-sub">
+            LogisX needs your location so dispatch can track your progress and
+            auto-update load status at pickup &amp; delivery. You can't receive
+            assignments without it.
+          </div>
+
+          <div v-if="locationPermission === 'checking'" class="loc-status">
+            Checking location access&hellip;
+          </div>
+          <div v-else-if="locationPermission === 'denied'" class="loc-guide">
+            <p><b>Location is blocked for this site.</b> Re-enable it:</p>
+            <ul>
+              <li><b>iPhone Safari:</b> tap the "aA" icon in the address bar &rarr; Website Settings &rarr; Location &rarr; Allow.</li>
+              <li><b>Android Chrome:</b> tap the lock icon in the address bar &rarr; Permissions &rarr; Location &rarr; Allow.</li>
+              <li><b>Desktop:</b> click the lock in the address bar &rarr; Site Settings &rarr; Location &rarr; Allow, then reload.</li>
+            </ul>
+          </div>
+          <div v-else-if="locationPermission === 'unavailable'" class="loc-guide">
+            <p><b>Your device isn't returning a location.</b></p>
+            <ul>
+              <li><b>iPhone:</b> Settings &rarr; Privacy &amp; Security &rarr; Location Services &rarr; On.</li>
+              <li><b>Android:</b> Quick Settings &rarr; tap the Location tile to turn it on.</li>
+              <li>Move somewhere with a clearer view of the sky &mdash; parking garages and basements block GPS.</li>
+            </ul>
+          </div>
+          <div v-else-if="locationPermission === 'timeout'" class="loc-guide">
+            <p>Location request timed out. Try again from a spot with a better GPS signal.</p>
+          </div>
+          <div v-else-if="locationPermission === 'unsupported'" class="loc-guide">
+            <p>This browser doesn't support location services. Try Chrome or Safari.</p>
+          </div>
+          <div v-else-if="locationPermission === 'error'" class="loc-guide">
+            <p>{{ locationReason || 'Something went wrong while checking location.' }}</p>
+          </div>
+
+          <button class="loc-btn" :disabled="checkingPermission" @click="retryLocation">
+            {{ checkingPermission ? 'Requesting&hellip;' : 'Turn on Location' }}
+          </button>
+          <button class="loc-btn-sub" @click="handleLogout">Log Out</button>
+        </div>
+      </main>
+    </template>
+
     <!-- NORMAL DRIVER UI — shown when fully onboarded (or no onboarding record) -->
     <template v-else>
     <!-- Welcome / Activation Modal — shown once when a driver first lands here after becoming fully onboarded -->
@@ -443,6 +495,11 @@ const isOnboarding = computed(() => {
   const ob = driverStore.onboarding
   return ob && ob.status !== 'fully_onboarded'
 })
+// True while we haven't confirmed browser geolocation permission. Drives the
+// full-screen "Location Access Required" gate below, but only for drivers who
+// are already through onboarding — unsigned-docs drivers still see their
+// paperwork flow first.
+const isLocationBlocked = computed(() => !isOnboarding.value && locationPermission.value !== 'granted')
 const onboardingDocs = computed(() => driverStore.onboarding?.documents || [])
 const totalDocs = computed(() => driverStore.onboarding?.totalDocs || 6)
 const signedCount = computed(() => onboardingDocs.value.filter(d => d.signed).length)
@@ -461,6 +518,13 @@ const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
 const showWelcomeModal = ref(false)
 const receiptPreview = ref('')
+
+// Location permission gate state. Blocks the full driver UI until the
+// browser geolocation permission is granted. See requestPermission() in
+// useGeolocation for the state enum.
+const locationPermission = ref('checking')
+const locationReason = ref('')
+const checkingPermission = ref(false)
 let isMounted = false
 
 // Welcome / activation modal — shows once per driver, first login after fully_onboarded
@@ -951,6 +1015,21 @@ watch(
   { immediate: true }
 )
 
+async function verifyLocationPermission() {
+  checkingPermission.value = true
+  try {
+    const r = await geo.requestPermission()
+    locationPermission.value = r.state
+    locationReason.value = r.reason || ''
+  } finally {
+    checkingPermission.value = false
+  }
+}
+
+async function retryLocation() {
+  await verifyLocationPermission()
+}
+
 onMounted(async () => {
   isMounted = true
   driverStore.driverName = driverName.value
@@ -959,6 +1038,13 @@ onMounted(async () => {
     maybeShowWelcome()
   } catch {
     toast.show('Failed to load data', 'error')
+  }
+
+  // Enforce geolocation permission once per session for fully-onboarded
+  // drivers. Paperwork-stage drivers stay on the onboarding lock and don't
+  // need GPS yet.
+  if (!isOnboarding.value) {
+    await verifyLocationPermission()
   }
 
   // Socket.IO
@@ -1498,6 +1584,85 @@ onUnmounted(() => {
   color: #fff;
   border: none;
 }
+
+/* Location permission lock — mirrors the onboarding lock layout so the two
+   gate screens feel like siblings. */
+.location-locked {
+  max-width: 520px;
+  margin: 0 auto;
+  padding-bottom: 2rem;
+}
+.loc-card {
+  text-align: center;
+  padding: 1.5rem 1.25rem;
+}
+.loc-icon {
+  font-size: 2.6rem;
+  line-height: 1;
+  margin-bottom: 0.6rem;
+}
+.loc-title {
+  font-size: 1.15rem;
+  font-weight: 800;
+  margin-bottom: 0.4rem;
+}
+.loc-sub {
+  font-size: 0.88rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+  margin-bottom: 1rem;
+}
+.loc-status {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 0.75rem 0;
+}
+.loc-guide {
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  margin-bottom: 1rem;
+  line-height: 1.5;
+}
+.loc-guide p { margin: 0 0 0.5rem; }
+.loc-guide ul { margin: 0.25rem 0 0; padding-left: 1.1rem; }
+.loc-guide li { margin-bottom: 0.35rem; }
+.loc-btn {
+  display: block;
+  width: 100%;
+  padding: 0.85rem 1rem;
+  background: var(--accent, #10b981);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-bottom: 0.6rem;
+  transition: opacity 0.15s;
+  font-family: inherit;
+}
+.loc-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.loc-btn:hover:not(:disabled) { opacity: 0.9; }
+.loc-btn-sub {
+  display: block;
+  width: 100%;
+  padding: 0.65rem 1rem;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.loc-btn-sub:hover { background: var(--bg); }
 
 /* Full-screen receipt preview overlay — same pattern used on admin /expenses */
 .receipt-preview-overlay {

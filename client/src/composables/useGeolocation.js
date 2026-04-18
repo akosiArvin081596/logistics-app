@@ -115,7 +115,46 @@ export function useGeolocation(api) {
     activeLoadId = loadId || ''
   }
 
+  // Check / request geolocation permission. Returns a normalized result so
+  // callers can render the right guidance without duplicating error-code logic.
+  // Shape: { state, reason? }
+  //   state: 'granted' | 'denied' | 'unavailable' | 'unsupported' | 'timeout' | 'error'
+  async function requestPermission() {
+    if (!navigator.geolocation) {
+      return { state: 'unsupported', reason: 'Geolocation not available in this browser' }
+    }
+    // Preflight via Permissions API for an instant answer without triggering
+    // the OS prompt when we already know the state.
+    if (navigator.permissions && navigator.permissions.query) {
+      try {
+        const p = await navigator.permissions.query({ name: 'geolocation' })
+        if (p.state === 'granted') return { state: 'granted' }
+        if (p.state === 'denied') {
+          return { state: 'denied', reason: 'Permission blocked in browser settings' }
+        }
+        // 'prompt' → fall through and trigger getCurrentPosition below
+      } catch {
+        // Older browsers without the Permissions API — fall through
+      }
+    }
+    // Triggers the OS prompt (if not already decided) and also catches the
+    // "OS Location Services disabled" case, which the Permissions API cannot
+    // distinguish from 'granted'.
+    return await new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        () => resolve({ state: 'granted' }),
+        (err) => {
+          if (err.code === 1) resolve({ state: 'denied', reason: 'You denied location access' })
+          else if (err.code === 2) resolve({ state: 'unavailable', reason: 'Device cannot determine location' })
+          else if (err.code === 3) resolve({ state: 'timeout', reason: 'Location request timed out' })
+          else resolve({ state: 'error', reason: err.message || 'Unknown error' })
+        },
+        { timeout: 10000, maximumAge: 0, enableHighAccuracy: false },
+      )
+    })
+  }
+
   onUnmounted(stop)
 
-  return { lastPosition, error, tracking, distanceWarning, start, stop, updateLoadId }
+  return { lastPosition, error, tracking, distanceWarning, start, stop, updateLoadId, requestPermission }
 }
