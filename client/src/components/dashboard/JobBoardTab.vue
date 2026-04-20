@@ -7,7 +7,31 @@
 
     <div class="overflow-x-auto">
       <SkeletonLoader v-if="loading" />
-      <Table v-else-if="filteredJobs.length > 0">
+      <EmptyState v-else-if="filteredJobs.length === 0">{{ searchQuery ? 'No loads match your search.' : 'All loads are assigned.' }}</EmptyState>
+      <!-- Mobile: card-per-load. Tap the card body → detail modal. Assign
+           dropdown stays inline so dispatch can handle the most common
+           action without opening anything. -->
+      <div v-else-if="isMobile" class="mobile-job-list">
+        <div v-for="job in paginatedItems" :key="job._rowIndex" class="mobile-job-card" @click="openDetail(job)">
+          <div class="mobile-job-head">
+            <div class="mobile-job-id">{{ cellValue(job, loadIdCol) || '—' }}</div>
+            <StatusBadge :status="statusValueOf(job) || 'Unassigned'" />
+          </div>
+          <div class="mobile-job-route">
+            <div class="mobile-job-row"><span class="mobile-job-label">Pickup</span><span>{{ job._pickupLocation || '—' }}</span></div>
+            <div class="mobile-job-row"><span class="mobile-job-label">Drop-off</span><span>{{ job._dropLocation || '—' }}</span></div>
+          </div>
+          <div v-if="!hideAssign(job)" class="mobile-job-actions" @click.stop>
+            <select v-model="assignSelections[job._rowIndex]" class="dash-select mobile-job-select">
+              <option value="">Select driver</option>
+              <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
+            </select>
+            <Button size="sm" class="mobile-job-btn" @click="assign(job)">Assign</Button>
+          </div>
+        </div>
+      </div>
+      <!-- Desktop: existing table unchanged -->
+      <Table v-else>
         <TableHeader>
           <TableRow>
             <TableHead v-for="col in displayCols" :key="col">{{ col }}</TableHead>
@@ -33,7 +57,6 @@
           </TableRow>
         </TableBody>
       </Table>
-      <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'All loads are assigned.' }}</EmptyState>
     </div>
     <Dialog :open="!!selectedJob" @update:open="v => { if (!v) selectedJob = null }">
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
@@ -74,6 +97,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
+import { useViewport } from '../../composables/useViewport'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
@@ -89,6 +113,8 @@ watch(() => props.active, v => { if (!v) selectedJob.value = null })
 const emit = defineEmits(['assign'])
 const api = useApi()
 const { show: toast } = useToast()
+const { isMobile } = useViewport()
+function statusValueOf(job) { return statusCol.value ? (job[statusCol.value] || '').trim() : '' }
 const assignSelections = reactive({})
 watch(() => props.jobs, (jobs) => { jobs.forEach(j => { if (!(j._rowIndex in assignSelections)) assignSelections[j._rowIndex] = '' }) }, { immediate: true })
 const selectedJob = ref(null)
@@ -185,3 +211,68 @@ const detailSections = computed(() => {
 })
 function assign(j) { const d = assignSelections[j._rowIndex]; if (!d) { toast('Select a driver first', 'error'); return }; emit('assign', { rowIndex: j._rowIndex, driver: d, job: j }) }
 </script>
+
+<style scoped>
+.mobile-job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.25rem;
+}
+.mobile-job-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.85rem 0.95rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.mobile-job-card:active { border-color: #0f3460; }
+.mobile-job-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.mobile-job-id {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: #0f172a;
+}
+.mobile-job-route {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid #f1f5f9;
+}
+.mobile-job-row {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+.mobile-job-label {
+  width: 70px;
+  color: #94a3b8;
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.mobile-job-actions {
+  display: flex;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #f1f5f9;
+}
+.mobile-job-select {
+  flex: 1;
+  min-width: 0;
+}
+.mobile-job-btn { flex-shrink: 0; }
+</style>

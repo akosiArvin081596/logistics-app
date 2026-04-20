@@ -365,6 +365,19 @@ body {
 @media (max-width: 900px) {
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
 }
+/* RevenueGrid uses 3 columns by default (its own variant). */
+.kpi-grid.revenue-grid { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 720px) {
+  .kpi-grid.revenue-grid { grid-template-columns: repeat(3, 1fr); gap: 0.75rem; }
+}
+/* Mobile: stack to 1 column on narrow phones so values don't truncate. */
+@media (max-width: 480px) {
+  .kpi-grid,
+  .kpi-grid.revenue-grid {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+}
 
 /* KPI Cards */
 .kpi-card {

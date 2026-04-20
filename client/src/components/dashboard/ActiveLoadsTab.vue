@@ -6,7 +6,48 @@
     </div>
 
     <div class="overflow-x-auto">
-      <Table v-if="filteredJobs.length > 0">
+      <EmptyState v-if="filteredJobs.length === 0">{{ searchQuery ? 'No loads match your search.' : 'No active loads right now.' }}</EmptyState>
+      <!-- Mobile: card per active load. Tap the card body → detail modal
+           (which carries the full status history, Cancel, Delete, and map).
+           Inline Status + Driver selects stay because they're the two
+           actions a dispatcher does dozens of times a day from the list. -->
+      <div v-else-if="isMobile" class="mobile-load-list">
+        <div v-for="job in paginatedItems" :key="job._rowIndex" class="mobile-load-card" @click="openDetail(job)">
+          <div class="mobile-load-head">
+            <div class="mobile-load-id">{{ cellValue(job, loadIdCol) || '—' }}</div>
+            <StatusBadge v-if="getCurrentStatus(job)" :status="getCurrentStatus(job)" />
+          </div>
+          <div class="mobile-load-route">
+            <div class="mobile-load-row"><span class="mobile-load-label">Pickup</span><span>{{ job._pickupLocation || '—' }}</span></div>
+            <div class="mobile-load-row"><span class="mobile-load-label">Drop-off</span><span>{{ job._dropLocation || '—' }}</span></div>
+            <div class="mobile-load-row"><span class="mobile-load-label">Driver</span><span>{{ getCurrentDriver(job) || '—' }}</span></div>
+          </div>
+          <div class="mobile-load-actions" @click.stop>
+            <div class="mobile-load-action">
+              <span class="mobile-load-action-label">Status</span>
+              <div class="mobile-load-action-row">
+                <select v-model="statusSelections[job._rowIndex]" class="dash-select dash-select-sm mobile-load-select">
+                  <option value="">Pick status</option>
+                  <option v-for="s in statusOptions" :key="s" :value="s">{{ s }}</option>
+                </select>
+                <Button v-if="statusSelections[job._rowIndex]" size="sm" @click="confirmStatusUpdate(job)">Go</Button>
+              </div>
+            </div>
+            <div class="mobile-load-action">
+              <span class="mobile-load-action-label">Driver</span>
+              <div class="mobile-load-action-row">
+                <select v-model="reassignSelections[job._rowIndex]" class="dash-select dash-select-sm mobile-load-select">
+                  <option value="">Pick driver</option>
+                  <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
+                </select>
+                <Button v-if="reassignSelections[job._rowIndex]" size="sm" @click="confirmReassign(job)">Go</Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Desktop: existing table unchanged -->
+      <Table v-else>
         <TableHeader>
           <TableRow>
             <TableHead v-for="col in displayCols" :key="col">{{ col }}</TableHead>
@@ -47,7 +88,6 @@
           </TableRow>
         </TableBody>
       </Table>
-      <EmptyState v-else>{{ searchQuery ? 'No loads match your search.' : 'No active loads right now.' }}</EmptyState>
     </div>
     <Dialog :open="!!selectedJob" @update:open="v => { if (!v) closeDetail() }">
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
@@ -156,10 +196,12 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
+import { useViewport } from '../../composables/useViewport'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 const api = useApi()
 const auth = useAuthStore()
 const dashStore = useDashboardStore()
+const { isMobile } = useViewport()
 const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] }, active: { type: Boolean, default: true }, focusLoadId: { type: String, default: '' } })
 watch(() => props.active, v => { if (!v) { selectedJob.value = null; selectedDriverPosition.value = null } })
 const emit = defineEmits(['reassign', 'cancel', 'status-update', 'deleted', 'focus-consumed'])
@@ -340,3 +382,77 @@ const detailSections = computed(() => {
   if (rem.length) secs.push({ title: 'Other Details', fields: rem }); return secs.filter(s => s.fields.length > 0)
 })
 </script>
+
+<style scoped>
+.mobile-load-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.25rem;
+}
+.mobile-load-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.85rem 0.95rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.mobile-load-card:active { border-color: #0f3460; }
+.mobile-load-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.mobile-load-id {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: #0f172a;
+}
+.mobile-load-route {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid #f1f5f9;
+}
+.mobile-load-row {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+.mobile-load-label {
+  width: 70px;
+  color: #94a3b8;
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.mobile-load-actions {
+  display: flex;
+  gap: 0.5rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid #f1f5f9;
+}
+.mobile-load-action { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+.mobile-load-action-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+}
+.mobile-load-action-row {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+.mobile-load-select { flex: 1; min-width: 0; }
+</style>

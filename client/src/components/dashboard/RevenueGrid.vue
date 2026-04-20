@@ -1,6 +1,6 @@
 <template>
   <div>
-    <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);">
+    <div class="kpi-grid revenue-grid">
       <Card
         v-for="card in cards"
         :key="card.key"
