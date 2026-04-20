@@ -78,6 +78,36 @@
         </div>
 
         <div v-if="allExpenses.length === 0" class="empty-msg">No expenses found.</div>
+        <!-- Mobile: card list. Tap the card → detail modal (shipped
+             2026-04-20, already mobile-friendly). Approve / Reject full
+             width in the card footer. -->
+        <div v-else-if="isMobile" class="mobile-exp-list">
+          <div v-for="e in allExpenses" :key="e.id" class="mobile-exp-card" @click="openExpenseDetail(e)">
+            <div class="mobile-exp-top">
+              <div class="mobile-exp-top-left">
+                <div class="mobile-exp-date">{{ fmtDate(e.date) }}</div>
+                <div class="mobile-exp-driver">{{ e.driver }}</div>
+              </div>
+              <span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span>
+            </div>
+            <div v-if="e.description" class="mobile-exp-desc">{{ e.description }}</div>
+            <div class="mobile-exp-bottom">
+              <div class="mobile-exp-amount">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
+              <div class="mobile-exp-bottom-right">
+                <img v-if="e.photo_data" :src="e.photo_data" class="receipt-thumb mobile-exp-thumb" @click.stop="previewImg = e.photo_data" alt="Receipt" />
+                <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
+              </div>
+            </div>
+            <div class="mobile-exp-actions" @click.stop>
+              <template v-if="(e.status || 'Pending') === 'Pending'">
+                <button class="btn-approve mobile-exp-btn" @click="setStatus(e.id, 'Approved')">Approve</button>
+                <button class="btn-reject mobile-exp-btn" @click="setStatus(e.id, 'Rejected')">Reject</button>
+              </template>
+              <button v-else-if="e.status !== 'Pending'" class="btn-undo mobile-exp-btn" @click="setStatus(e.id, 'Pending')">Undo</button>
+            </div>
+          </div>
+        </div>
+        <!-- Desktop: existing table unchanged -->
         <table v-else class="data-table">
           <thead>
             <tr>
@@ -474,10 +504,12 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useAuthStore } from '../../stores/auth'
+import { useViewport } from '../../composables/useViewport'
 
 const api = useApi()
 const { show: toast } = useToast()
 const auth = useAuthStore()
+const { isMobile } = useViewport()
 
 const allSubTabs = [
   { key: 'all', label: 'All Expenses' },
@@ -1281,5 +1313,128 @@ tr:hover td { background: var(--surface-hover); }
   border: 1px solid #fecaca;
   padding: 0.4rem 0.6rem;
   border-radius: 6px;
+}
+
+/* ---- Mobile (≤ 767 px) ------------------------------------------------
+ * Expense row gets a card layout. Download-ZIP + Log-Expense forms stack
+ * vertically so inputs don't squish. Sub-tab strip becomes scrollable.
+ * Detail modal (selectedExpense) already fits via the Teleport we shipped
+ * earlier — no change needed there.                                       */
+@media (max-width: 767px) {
+  /* Scrollable sub-tabs (All / Fuel / Maintenance / IFTA) */
+  .sub-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .sub-tabs::-webkit-scrollbar { display: none; }
+  .sub-tab { flex-shrink: 0; }
+
+  /* Download Receipts form — stack inputs */
+  .download-receipts-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+  .download-receipts-row .add-input,
+  .download-receipts-row .btn { max-width: none !important; width: 100%; }
+
+  /* Log Expense form — stack all inputs; both rows become columns */
+  .add-expense-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+  .add-expense-row .add-input,
+  .add-expense-row .add-btn { max-width: none !important; width: 100%; flex: 1 1 auto; }
+
+  /* Filter strip wraps instead of forcing a horizontal scroll */
+  .filter-row { flex-wrap: wrap; gap: 0.5rem; }
+  .filter-select { flex: 1; min-width: 120px; }
+  .filter-count { width: 100%; }
+
+  /* Mobile expense cards */
+  .mobile-exp-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    padding: 0.25rem 0;
+  }
+  .mobile-exp-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 0.85rem 0.95rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .mobile-exp-card:active { border-color: #0f3460; }
+  .mobile-exp-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+  .mobile-exp-top-left { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .mobile-exp-date {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.75rem;
+    color: #64748b;
+  }
+  .mobile-exp-driver {
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: #0f172a;
+  }
+  .mobile-exp-desc {
+    font-size: 0.82rem;
+    color: #475569;
+    line-height: 1.35;
+    padding-top: 0.35rem;
+    border-top: 1px solid #f1f5f9;
+  }
+  .mobile-exp-bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid #f1f5f9;
+  }
+  .mobile-exp-bottom-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+  .mobile-exp-amount {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #0f172a;
+  }
+  .mobile-exp-thumb {
+    width: 48px;
+    height: 36px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid #e2e8f0;
+    cursor: pointer;
+  }
+  .mobile-exp-actions {
+    display: flex;
+    gap: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #f1f5f9;
+  }
+  .mobile-exp-btn {
+    flex: 1;
+    padding: 0.6rem 0.75rem !important;
+    font-size: 0.82rem !important;
+    font-weight: 600;
+  }
 }
 </style>
