@@ -3,7 +3,7 @@
     <div class="page-header">
       <h2>Notifications</h2>
       <button
-        v-if="store.unreadCount > 0"
+        v-if="store.unreadCount > 0 && !isMobile"
         class="btn btn-secondary btn-sm"
         @click="store.markAllRead()"
       >Mark all read</button>
@@ -12,33 +12,76 @@
       <div v-if="store.notifications.length === 0" class="notif-empty">
         No notifications yet.
       </div>
-      <div
-        v-for="n in store.notifications"
-        :key="n.id"
-        :class="['notif-item', { unread: !n.read }]"
-        @click="handleTap(n)"
-      >
-        <div class="notif-icon" v-html="iconFor(n.type)"></div>
-        <div class="notif-content">
-          <div class="notif-title">{{ n.title }}</div>
-          <div class="notif-body" v-if="n.body">{{ n.body }}</div>
-          <div class="notif-time">{{ formatNotificationTime(n.createdAt) }}</div>
+      <!-- Day-bucket grouping. Triages a long backlog far faster than a flat
+           list — "what came in today?" is the common question on mobile. -->
+      <template v-else v-for="group in groupedNotifications" :key="group.key">
+        <div v-if="group.items.length" class="notif-group-header">
+          {{ group.label }}
+          <span class="notif-group-count">{{ group.items.length }}</span>
         </div>
-        <span v-if="!n.read" class="notif-dot"></span>
-      </div>
+        <div
+          v-for="n in group.items"
+          :key="n.id"
+          :class="['notif-item', { unread: !n.read }]"
+          @click="handleTap(n)"
+        >
+          <div class="notif-icon" v-html="iconFor(n.type)"></div>
+          <div class="notif-content">
+            <div class="notif-title">{{ n.title }}</div>
+            <div class="notif-body" v-if="n.body">{{ n.body }}</div>
+            <div class="notif-time">{{ formatNotificationTime(n.createdAt) }}</div>
+          </div>
+          <span v-if="!n.read" class="notif-dot"></span>
+        </div>
+      </template>
+    </div>
+    <!-- Mobile: Mark-all-read as a sticky action bar. On desktop the page
+         header button covers this; we hide it above 767 px. -->
+    <div v-if="isMobile && store.unreadCount > 0" class="notif-mobile-footer">
+      <button class="btn btn-secondary" @click="store.markAllRead()">
+        Mark all {{ store.unreadCount }} as read
+      </button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDispatchNotificationsStore } from '../stores/dispatchNotifications'
 import { useSocket } from '../composables/useSocket'
+import { useViewport } from '../composables/useViewport'
 
 const store = useDispatchNotificationsStore()
 const socket = useSocket()
 const router = useRouter()
+const { isMobile } = useViewport()
+
+// Day-bucket grouping. Today / Yesterday / This Week / Older — applied to
+// both desktop and mobile because scanning a 200-row flat list is tedious
+// everywhere. Items within a bucket preserve their existing ORDER BY id
+// DESC server-side sort (newest first).
+const groupedNotifications = computed(() => {
+  const groups = [
+    { key: 'today',     label: 'Today',     items: [] },
+    { key: 'yesterday', label: 'Yesterday', items: [] },
+    { key: 'thisWeek',  label: 'This Week', items: [] },
+    { key: 'older',     label: 'Older',     items: [] },
+  ]
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const startOfYesterday = startOfToday - 24 * 3600 * 1000
+  const sevenDaysAgo = startOfToday - 7 * 24 * 3600 * 1000
+  for (const n of store.notifications) {
+    const t = n.createdAt ? new Date(n.createdAt).getTime() : 0
+    if (!t || isNaN(t)) { groups[3].items.push(n); continue }
+    if (t >= startOfToday) groups[0].items.push(n)
+    else if (t >= startOfYesterday) groups[1].items.push(n)
+    else if (t >= sevenDaysAgo) groups[2].items.push(n)
+    else groups[3].items.push(n)
+  }
+  return groups
+})
 
 function iconFor(type) {
   if (type === 'status-updated') return '&#128260;'
@@ -171,5 +214,65 @@ onUnmounted(() => {
   background: var(--accent);
   flex-shrink: 0;
   margin-top: 0.35rem;
+}
+
+/* Day-bucket header — visible on desktop and mobile. */
+.notif-group-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.65rem 1rem 0.45rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.notif-group-count {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 700;
+  font-size: 0.65rem;
+  background: var(--border);
+  color: var(--text-dim);
+  padding: 0.1rem 0.45rem;
+  border-radius: 10px;
+}
+
+/* Mobile — larger tap targets, sticky mark-all-read footer. */
+@media (max-width: 767px) {
+  .notif-item {
+    min-height: 56px;
+    padding: 0.9rem 0.85rem;
+    gap: 0.65rem;
+  }
+  .notif-icon {
+    width: 36px;
+    height: 36px;
+    font-size: 1.15rem;
+  }
+  .notif-title { font-size: 0.9rem; }
+  .notif-body { font-size: 0.8rem; }
+  .notif-time { font-size: 0.72rem; margin-top: 0.3rem; }
+  .notif-mobile-footer {
+    position: sticky;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 0.75rem;
+    background: rgba(255, 255, 255, 0.96);
+    backdrop-filter: blur(6px);
+    border-top: 1px solid var(--border);
+    margin-top: 0.75rem;
+    z-index: 10;
+  }
+  .notif-mobile-footer .btn {
+    display: block;
+    width: 100%;
+    padding: 0.85rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
 }
 </style>
