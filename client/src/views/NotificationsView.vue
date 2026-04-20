@@ -32,11 +32,13 @@
 
 <script setup>
 import { onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useDispatchNotificationsStore } from '../stores/dispatchNotifications'
 import { useSocket } from '../composables/useSocket'
 
 const store = useDispatchNotificationsStore()
 const socket = useSocket()
+const router = useRouter()
 
 function iconFor(type) {
   if (type === 'status-updated') return '&#128260;'
@@ -59,6 +61,18 @@ function timeAgo(ts) {
 function handleTap(n) {
   if (!n.read) {
     store.markRead([n.id])
+  }
+  // Route to /dashboard?load=<id> when the notification carries one.
+  // Every server emitter today puts loadId in metadata — see server.js
+  // dispatch notification insertions. DashboardView opens the matching
+  // load's detail modal automatically.
+  let loadId = ''
+  try {
+    const meta = typeof n.metadata === 'string' ? JSON.parse(n.metadata || '{}') : (n.metadata || {})
+    loadId = meta.loadId || meta.load_id || ''
+  } catch { /* ignore unparseable metadata */ }
+  if (loadId) {
+    router.push({ path: '/dashboard', query: { load: loadId } })
   }
 }
 

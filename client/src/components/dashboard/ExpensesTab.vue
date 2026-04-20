@@ -92,20 +92,20 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="e in allExpenses" :key="e.id">
+            <tr v-for="e in allExpenses" :key="e.id" class="expense-row" @click="openExpenseDetail(e)">
               <td class="mono-sm">{{ fmtDate(e.date) }}</td>
               <td>{{ e.driver }}</td>
               <td><span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span></td>
               <td class="desc-cell">{{ e.description || '\u2014' }}</td>
               <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
-              <td>
+              <td @click.stop>
                 <img v-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
                 <span v-else class="dim">\u2014</span>
               </td>
               <td>
                 <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
               </td>
-              <td class="action-cell">
+              <td class="action-cell" @click.stop>
                 <template v-if="(e.status || 'Pending') === 'Pending'">
                   <button class="btn-approve" @click="setStatus(e.id, 'Approved')">Approve</button>
                   <button class="btn-reject" @click="setStatus(e.id, 'Rejected')">Reject</button>
@@ -121,6 +121,63 @@
       <Teleport to="body">
         <div v-if="previewImg" class="preview-overlay" @click="previewImg = null">
           <img :src="previewImg" class="preview-img" />
+        </div>
+      </Teleport>
+
+      <!-- Expense breakdown modal. Opens on row click. Shows the same fields
+           that live in the DB but aren't in the list (gallons, odometer,
+           derived price-per-gallon) plus a bigger receipt preview. -->
+      <Teleport to="body">
+        <div v-if="selectedExpense" class="exp-overlay" @click.self="selectedExpense = null">
+          <div class="exp-dialog">
+            <div class="exp-header">
+              <div>
+                <div class="exp-type" :class="'type-' + (selectedExpense.type || 'other').toLowerCase()">{{ selectedExpense.type || 'Other' }}</div>
+                <div class="exp-amount">${{ Number(selectedExpense.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
+                <div class="exp-sub">{{ fmtDate(selectedExpense.date) }} &middot; {{ selectedExpense.driver }}</div>
+              </div>
+              <button class="exp-close" @click="selectedExpense = null" aria-label="Close">&times;</button>
+            </div>
+            <div class="exp-grid">
+              <template v-if="isFuelExpense(selectedExpense)">
+                <div class="exp-stat">
+                  <span class="exp-stat-label">Gallons</span>
+                  <span class="exp-stat-value">{{ Number(selectedExpense.gallons || 0).toFixed(2) }}</span>
+                </div>
+                <div class="exp-stat">
+                  <span class="exp-stat-label">Price / Gallon</span>
+                  <span class="exp-stat-value">${{ pricePerGallon(selectedExpense) }}</span>
+                </div>
+                <div class="exp-stat">
+                  <span class="exp-stat-label">Odometer</span>
+                  <span class="exp-stat-value">{{ selectedExpense.odometer ? Number(selectedExpense.odometer).toLocaleString() : '\u2014' }}</span>
+                </div>
+              </template>
+              <div class="exp-stat">
+                <span class="exp-stat-label">Status</span>
+                <span class="exp-stat-value">
+                  <span :class="['status-pill', 'st-' + (selectedExpense.status || 'Pending').toLowerCase()]">{{ selectedExpense.status || 'Pending' }}</span>
+                </span>
+              </div>
+              <div v-if="selectedExpense.load_id" class="exp-stat">
+                <span class="exp-stat-label">Load</span>
+                <span class="exp-stat-value mono-sm">{{ selectedExpense.load_id }}</span>
+              </div>
+              <div v-if="selectedExpense.truck_unit" class="exp-stat">
+                <span class="exp-stat-label">Truck</span>
+                <span class="exp-stat-value">#{{ selectedExpense.truck_unit }}</span>
+              </div>
+            </div>
+            <div v-if="selectedExpense.description" class="exp-desc">
+              <div class="exp-desc-label">Description</div>
+              <div>{{ selectedExpense.description }}</div>
+            </div>
+            <div v-if="selectedExpense.photo_data" class="exp-receipt">
+              <div class="exp-desc-label">Receipt</div>
+              <img :src="selectedExpense.photo_data" class="exp-receipt-img" @click="previewImg = selectedExpense.photo_data" />
+              <div class="exp-receipt-hint">Click to enlarge</div>
+            </div>
+          </div>
         </div>
       </Teleport>
     </div>
@@ -440,6 +497,20 @@ const allExpenses = ref([])
 const allLoading = ref(true)
 const allDrivers = ref([])
 const previewImg = ref(null)
+const selectedExpense = ref(null)
+
+function openExpenseDetail(e) {
+  selectedExpense.value = e
+}
+function isFuelExpense(e) {
+  return e && (e.type || '').toLowerCase() === 'fuel' && Number(e.gallons) > 0
+}
+function pricePerGallon(e) {
+  const amt = Number(e.amount) || 0
+  const g = Number(e.gallons) || 0
+  if (g <= 0) return '\u2014'
+  return (amt / g).toFixed(3)
+}
 const expenseTypes = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
 const allFilter = reactive({ driver: '', type: '', status: '' })
 
@@ -1045,6 +1116,116 @@ tr:hover td { background: var(--surface-hover); }
   z-index: 300; cursor: pointer;
 }
 .preview-img { max-width: 90vw; max-height: 85vh; border-radius: 8px; }
+
+/* Row click affordance + detail modal */
+.expense-row { cursor: pointer; transition: background 0.12s; }
+.expense-row:hover { background: #f8fafc; }
+
+.exp-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 250;
+  padding: 1rem;
+}
+.exp-dialog {
+  background: #fff;
+  border-radius: 14px;
+  width: 100%;
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 1.5rem;
+  box-shadow: 0 25px 50px rgba(0, 0, 0, 0.25);
+}
+.exp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.25rem;
+}
+.exp-type {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.2rem 0.55rem;
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+  background: var(--border); color: var(--text-dim);
+}
+.exp-type.type-fuel { background: #dbeafe; color: #1e40af; }
+.exp-type.type-maintenance, .exp-type.type-repair { background: #fed7aa; color: #9a3412; }
+.exp-type.type-toll { background: #ddd6fe; color: #5b21b6; }
+.exp-type.type-food { background: #dcfce7; color: #166534; }
+.exp-amount { font-size: 1.75rem; font-weight: 800; color: #0f172a; }
+.exp-sub { font-size: 0.78rem; color: #64748b; margin-top: 0.25rem; }
+.exp-close {
+  background: transparent;
+  border: none;
+  font-size: 1.5rem;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.exp-close:hover { color: #0f172a; }
+.exp-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+.exp-stat {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.exp-stat-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+}
+.exp-stat-value { font-size: 0.95rem; font-weight: 600; color: #0f172a; }
+.exp-desc, .exp-receipt { margin-top: 0.75rem; }
+.exp-desc-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  margin-bottom: 0.4rem;
+}
+.exp-desc > div:last-child {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.75rem 0.9rem;
+  font-size: 0.85rem;
+  color: #0f172a;
+  line-height: 1.4;
+}
+.exp-receipt-img {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 8px;
+  cursor: zoom-in;
+  display: block;
+  border: 1px solid #e2e8f0;
+}
+.exp-receipt-hint {
+  font-size: 0.7rem;
+  color: #94a3b8;
+  margin-top: 0.35rem;
+  font-style: italic;
+}
 
 /* Add Expense form */
 .add-expense-card {

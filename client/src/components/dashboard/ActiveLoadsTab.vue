@@ -54,17 +54,30 @@
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;">
             <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
-            <button
-              v-if="loadIdValue"
-              type="button"
-              :style="copyBtnStyle"
-              :title="'Share tracking link with the customer'"
-              @click="copyTrackingLink"
-            >
-              <svg v-if="!linkCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M20 6 9 17l-5-5"/></svg>
-              {{ linkCopied ? 'Link copied' : 'Copy tracking link' }}
-            </button>
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+              <button
+                v-if="loadIdValue"
+                type="button"
+                :style="copyBtnStyle"
+                :title="'Share tracking link with the customer'"
+                @click="copyTrackingLink"
+              >
+                <svg v-if="!linkCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M20 6 9 17l-5-5"/></svg>
+                {{ linkCopied ? 'Link copied' : 'Copy tracking link' }}
+              </button>
+              <button
+                v-if="loadIdValue && auth.isSuperAdmin"
+                type="button"
+                :style="deleteBtnStyle"
+                :disabled="deleting"
+                title="Remove this load from every list and KPI (soft delete, recoverable)"
+                @click="showDeleteConfirm = true"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                {{ deleting ? 'Deleting...' : 'Delete' }}
+              </button>
+            </div>
           </div>
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
@@ -113,6 +126,17 @@
         </div>
       </DialogContent>
     </Dialog>
+
+    <!-- Delete confirm — soft delete, reversible in SQL but not from the UI -->
+    <ConfirmModal
+      :open="showDeleteConfirm"
+      title="Delete this load?"
+      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.`"
+      confirm-text="Delete"
+      :danger="true"
+      @confirm="runDelete"
+      @cancel="showDeleteConfirm = false"
+    />
   </div>
 </template>
 
@@ -131,17 +155,22 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 
 import { useAuthStore } from '../../stores/auth'
+import { useDashboardStore } from '../../stores/dashboard'
+import ConfirmModal from '../shared/ConfirmModal.vue'
 const api = useApi()
 const auth = useAuthStore()
-const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] }, active: { type: Boolean, default: true } })
+const dashStore = useDashboardStore()
+const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] }, active: { type: Boolean, default: true }, focusLoadId: { type: String, default: '' } })
 watch(() => props.active, v => { if (!v) { selectedJob.value = null; selectedDriverPosition.value = null } })
-const emit = defineEmits(['reassign', 'cancel', 'status-update'])
+const emit = defineEmits(['reassign', 'cancel', 'status-update', 'deleted', 'focus-consumed'])
 const searchQuery = ref('')
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 const statusOptions = ['At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
+const showDeleteConfirm = ref(false)
+const deleting = ref(false)
 let linkCopiedTimer = null
 const copyBtnStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
@@ -150,6 +179,16 @@ const copyBtnStyle = computed(() => ({
   border: '1px solid ' + (linkCopied.value ? '#16a34a' : '#d1d5db'),
   background: linkCopied.value ? '#dcfce7' : '#ffffff',
   color: linkCopied.value ? '#166534' : '#374151',
+  transition: 'all 0.15s',
+}))
+const deleteBtnStyle = computed(() => ({
+  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+  borderRadius: '6px', cursor: deleting.value ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+  border: '1px solid #fecaca',
+  background: '#fef2f2',
+  color: '#b91c1c',
+  opacity: deleting.value ? 0.6 : 1,
   transition: 'all 0.15s',
 }))
 async function copyTrackingLink() {
@@ -184,7 +223,42 @@ function getCurrentDriver(j) { return driverCol.value ? (j[driverCol.value] || '
 function confirmReassign(j) { const d = reassignSelections[j._rowIndex]; if (!d) return; if (confirm(`Reassign to ${d}?`)) { emit('reassign', { rowIndex: j._rowIndex, newDriver: d, job: j }); reassignSelections[j._rowIndex] = '' } }
 function confirmCancel(j) { if (confirm('Cancel this assignment?')) emit('cancel', { rowIndex: j._rowIndex, job: j }) }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
-function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null } }
+function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }; showDeleteConfirm.value = false }
+
+async function runDelete() {
+  if (!loadIdValue.value || deleting.value) return
+  deleting.value = true
+  try {
+    await dashStore.deleteLoad(loadIdValue.value)
+    showDeleteConfirm.value = false
+    const deletedId = loadIdValue.value
+    closeDetail()
+    emit('deleted', { loadId: deletedId })
+  } catch {
+    // swallow — parent shows toast via watcher if needed
+  } finally {
+    deleting.value = false
+  }
+}
+
+// When the parent passes focusLoadId (e.g. /dashboard?load=LD-123 from a
+// notification click), auto-open that load's detail modal. Matches by Load
+// ID case-insensitively. Emits focus-consumed so the parent can clear the
+// query param and avoid re-triggering on refresh.
+watch([() => props.focusLoadId, () => props.jobs], ([focus, jobs]) => {
+  if (!focus || !jobs || jobs.length === 0) return
+  if (selectedJob.value) {
+    const cur = loadIdValue.value
+    if (cur && cur.toString().trim().toLowerCase() === focus.trim().toLowerCase()) return
+  }
+  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h))
+  if (!lc) return
+  const match = jobs.find(j => (j[lc] || '').toString().trim().toLowerCase() === focus.trim().toLowerCase())
+  if (match) {
+    openDetail(match)
+    emit('focus-consumed')
+  }
+}, { immediate: true })
 async function openDetail(job) {
   selectedJob.value = { ...job }; selectedDriverPosition.value = null; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (job[dc] || '').trim() : ''
@@ -208,9 +282,47 @@ async function submitRating(r) {
   try { await api.put(`/api/load-ratings/${encodeURIComponent(lid)}`, { rating: r, driverName: dn }); loadRating.value = r } catch {}
 }
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null); const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
-const displayCols = computed(() => { const kw = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery']; const m = []; for (const k of kw) { const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !m.includes(h)); if (c) m.push(c) }; return (m.length < 3 ? props.headers.slice(0, 8) : m).filter(c => c !== brokerSourceCol.value && c !== phoneSourceCol.value) })
+// See JobBoardTab for the rationale — Pickup/Drop-off columns now render
+// server-enriched "City, ST ZIP" strings instead of broker-reference blobs.
+const ORIGIN_KW_RE = /origin|pickup|shipper/i
+const DEST_KW_RE = /dest|drop|receiver|delivery/i
+const displayCols = computed(() => {
+  const kw = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery']
+  const raw = []
+  for (const k of kw) {
+    const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !raw.includes(h))
+    if (c) raw.push(c)
+  }
+  const base = (raw.length < 3 ? props.headers.slice(0, 8) : raw)
+    .filter(c => c !== brokerSourceCol.value && c !== phoneSourceCol.value && !/lat|lng|lon/i.test(c))
+  const out = []
+  let pickupDone = false
+  let dropDone = false
+  for (const col of base) {
+    if (!pickupDone && ORIGIN_KW_RE.test(col) && !/lat|lng|lon|date|time|appt|eta/i.test(col)) {
+      out.push('Pickup')
+      pickupDone = true
+      continue
+    }
+    if (!dropDone && DEST_KW_RE.test(col) && !/lat|lng|lon|date|time|appt|eta/i.test(col)) {
+      out.push('Drop-off')
+      dropDone = true
+      continue
+    }
+    out.push(col)
+  }
+  if (!pickupDone) out.splice(Math.min(3, out.length), 0, 'Pickup')
+  if (!dropDone) out.splice(Math.min(4, out.length), 0, 'Drop-off')
+  return out
+})
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
-function cellValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
+function cellValue(j, c) {
+  if (c === 'Pickup') return j._pickupLocation || '\u2014'
+  if (c === 'Drop-off') return j._dropLocation || '\u2014'
+  const v = j[c] || ''
+  const p = parseJsonCell(v)
+  return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v
+}
 function detailValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? Object.entries(p).filter(([,x]) => x).map(([k,x]) => `${k}: ${x}`).join(', ') : v }
 const sectionPatterns = [
   { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },

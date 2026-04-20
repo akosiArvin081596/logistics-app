@@ -72,6 +72,11 @@ export const useDashboardStore = defineStore('dashboard', {
       await api.post('/api/dispatch/cancel', { rowIndex, loadId, driver })
     },
 
+    async deleteLoad(loadId) {
+      if (!loadId) throw new Error('No load id')
+      await api.del(`/api/loads/${encodeURIComponent(loadId)}`)
+    },
+
     async updateStatus(rowIndex, driverName, loadId, newStatus, rowData) {
       await api.put('/api/driver/status', { rowIndex, driverName, loadId, newStatus, rowData })
     },

@@ -37,7 +37,7 @@
             <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" />
           </TabsContent>
           <TabsContent value="activeLoads" style="margin-top:0;">
-            <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" />
+            <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" :focus-load-id="focusLoadId" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" @deleted="handleDeleted" @focus-consumed="onFocusConsumed" />
           </TabsContent>
           <TabsContent value="completed" style="margin-top:0;">
             <CompletedLoadsTab :active="activeTab === 'completed'" :jobs="store.completedJobs" :headers="store.completedHeaders" />
@@ -52,7 +52,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useDashboardStore } from '../stores/dashboard'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
@@ -72,7 +73,27 @@ const store = useDashboardStore()
 const auth = useAuthStore()
 const { show: toast } = useToast()
 const socket = useSocket()
+const route = useRoute()
+const router = useRouter()
 const activeTab = ref('jobBoard')
+// Notification click targets: /dashboard?load=LD-1234 → focusLoadId flows
+// into ActiveLoadsTab which auto-opens that load's detail modal. We switch
+// to the Active Loads tab so the modal is visible.
+const focusLoadId = ref('')
+function applyRouteFocus() {
+  const v = (route.query.load || '').toString().trim()
+  if (v) {
+    focusLoadId.value = v
+    activeTab.value = 'activeLoads'
+  }
+}
+function onFocusConsumed() {
+  focusLoadId.value = ''
+  if (route.query.load) {
+    // Clear the query param so refreshes don't re-open the same modal.
+    router.replace({ path: route.path, query: { ...route.query, load: undefined } })
+  }
+}
 useSocketRefresh('dashboard:changed', () => refresh())
 
 const tabs = computed(() => [
@@ -92,11 +113,14 @@ async function refresh() { try { await store.refresh() } catch { toast('Failed t
 async function handleAssign({ rowIndex, driver, job }) { try { await store.assignDriver(rowIndex, driver, job, store.headers); const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); toast(`${driver} assigned to ${lc ? job[lc] : 'load'}`, 'success'); refresh() } catch { toast('Failed to assign', 'error') } }
 async function handleReassign({ rowIndex, newDriver, job }) { try { await store.reassignDriver(rowIndex, newDriver, job, store.headers); toast(`Reassigned to ${newDriver}`, 'success'); refresh() } catch { toast('Failed to reassign', 'error') } }
 async function handleCancel({ rowIndex, job }) { try { await store.cancelLoad(rowIndex, job, store.headers); toast('Assignment cancelled', 'success'); refresh() } catch { toast('Failed to cancel', 'error') } }
+function handleDeleted({ loadId }) { toast(`Load ${loadId} deleted`, 'success'); refresh() }
 async function handleStatusUpdate({ rowIndex, newStatus, job }) { try { const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); const dc = store.headers.find(h => /driver/i.test(h)); await store.updateStatus(rowIndex, dc ? job[dc] || '' : '', lc ? job[lc] || '' : '', newStatus, job); toast(`Status: ${newStatus}`, 'success'); refresh() } catch { toast('Failed to update', 'error') } }
 function onStatusUpdated(p) { toast(`${p.driverName}: ${p.newStatus}`, 'info'); refresh() }
 function onPodUploaded(p) { toast(`POD uploaded: ${p.loadId}`, 'success'); refresh() }
 function onNewLoad() { toast('New load received', 'info'); refresh() }
 
-onMounted(() => { refresh(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); socket.on('new-load', onNewLoad) })
+onMounted(() => { applyRouteFocus(); refresh(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); socket.on('new-load', onNewLoad) })
+// Reapply when navigated into with a new ?load= while already on the page.
+watch(() => route.query.load, () => applyRouteFocus())
 onUnmounted(() => { socket.off('status-updated', onStatusUpdated); socket.off('pod-uploaded', onPodUploaded); socket.off('new-load', onNewLoad) })
 </script>

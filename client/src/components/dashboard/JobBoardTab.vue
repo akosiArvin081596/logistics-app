@@ -120,9 +120,52 @@ const mapHeaders = computed(() => {
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null)
 const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
-const displayCols = computed(() => { const kw = ['load', 'status', 'origin', 'pickup', 'destination', 'drop', 'rate', 'amount']; const m = []; for (const k of kw) { const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !m.includes(h)); if (c) m.push(c) }; return (m.length < 3 ? props.headers.slice(0, 8) : m).filter(c => c !== brokerSourceCol.value && c !== phoneSourceCol.value) })
+// Display columns: pick a small set of load-shape columns, then swap any
+// matched origin/pickup and destination/drop columns for synthetic
+// "Pickup" / "Drop-off" labels that render clean "City, ST ZIP" values
+// from the server-side _pickupLocation / _dropLocation enrichment.
+// Deshorn asked for this 2026-04-20 — the raw pickup-info / drop-off-info
+// sheet columns carry broker references that were confusing.
+const ORIGIN_KW_RE = /origin|pickup|shipper/i
+const DEST_KW_RE = /dest|drop|receiver|delivery/i
+const displayCols = computed(() => {
+  const kw = ['load', 'status', 'origin', 'pickup', 'destination', 'drop', 'rate', 'amount']
+  const raw = []
+  for (const k of kw) {
+    const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !raw.includes(h))
+    if (c) raw.push(c)
+  }
+  const base = (raw.length < 3 ? props.headers.slice(0, 8) : raw)
+    .filter(c => c !== brokerSourceCol.value && c !== phoneSourceCol.value && !/lat|lng|lon/i.test(c))
+  // Swap first origin/pickup col for synthetic "Pickup", first dest/drop col for "Drop-off"
+  const out = []
+  let pickupDone = false
+  let dropDone = false
+  for (const col of base) {
+    if (!pickupDone && ORIGIN_KW_RE.test(col) && !/lat|lng|lon|date|time|appt|eta/i.test(col)) {
+      out.push('Pickup')
+      pickupDone = true
+      continue
+    }
+    if (!dropDone && DEST_KW_RE.test(col) && !/lat|lng|lon|date|time|appt|eta/i.test(col)) {
+      out.push('Drop-off')
+      dropDone = true
+      continue
+    }
+    out.push(col)
+  }
+  if (!pickupDone) out.splice(Math.min(2, out.length), 0, 'Pickup')
+  if (!dropDone) out.splice(Math.min(3, out.length), 0, 'Drop-off')
+  return out
+})
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
-function cellValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
+function cellValue(j, c) {
+  if (c === 'Pickup') return j._pickupLocation || '\u2014'
+  if (c === 'Drop-off') return j._dropLocation || '\u2014'
+  const v = j[c] || ''
+  const p = parseJsonCell(v)
+  return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v
+}
 function detailValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? Object.entries(p).filter(([,x]) => x).map(([k,x]) => `${k}: ${x}`).join(', ') : v }
 const sectionPatterns = [
   { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },

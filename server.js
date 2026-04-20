@@ -651,6 +651,21 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_legal_docs_driver ON legal_documen
 try { db.exec("ALTER TABLE legal_documents ADD COLUMN visible_to_driver INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_legal_docs_truck_visible ON legal_documents(truck_id, visible_to_driver)"); } catch {}
 
+// Soft-deleted loads. Row stays in the Google Sheet for audit / external
+// integrations, but admin views and every KPI filter by this table. Reversible
+// in SQL if a delete was a mistake. Added 2026-04-20 per client request for a
+// real "Delete load" that stays out of numbers/financials.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS deleted_loads (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		load_id TEXT NOT NULL,
+		row_index INTEGER DEFAULT 0,
+		deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		deleted_by TEXT DEFAULT ''
+	)
+`);
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_deleted_loads_load_id ON deleted_loads(load_id)"); } catch {}
+
 // Migration: messages attachment columns
 try { db.prepare("SELECT attachment_url FROM messages LIMIT 1").get(); }
 catch {
@@ -2839,11 +2854,33 @@ const TRACK_STAGES = [
 	{ key: "delivered", name: "Delivered", matchStatus: /^(delivered|pod received|completed)$/i },
 ];
 function parseOriginDestCity(addr) {
-	if (!addr || typeof addr !== "string") return { city: "", state: "" };
+	if (!addr || typeof addr !== "string") return { city: "", state: "", zip: "" };
 	const trimmed = addr.trim();
-	const m = trimmed.match(/([^,]+),\s*([A-Za-z]{2})(?:\s+\d{5})?\s*$/);
-	if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
-	return { city: trimmed.split(",")[0].trim(), state: "" };
+	// Prefer "City, ST 12345" at end; capture ZIP when present.
+	const m = trimmed.match(/([^,]+),\s*([A-Za-z]{2})(?:\s+(\d{5}))?\s*$/);
+	if (m) return { city: m[1].trim(), state: m[2].toUpperCase(), zip: m[3] || "" };
+	return { city: trimmed.split(",")[0].trim(), state: "", zip: "" };
+}
+
+// Build the short "Dallas, TX 75201" label used on the admin dashboard Pickup
+// / Drop-off columns. Prefers the geocoded address in load_coordinates (clean
+// canonical string set by /api/geocode/load/:loadId) and falls back to
+// parsing whatever the sheet has for that column. Returns "" when nothing
+// parseable is available, which the UI renders as "—".
+function resolveCityState(row, kind, loadId, sheetAddr) {
+	const lid = (loadId || "").toString().trim().toLowerCase().replace(/^#/, "");
+	let candidate = "";
+	if (lid) {
+		try {
+			const lc = db.prepare("SELECT pickup_address, dropoff_address FROM load_coordinates WHERE load_id = ?").get(lid);
+			if (lc) candidate = (kind === "drop" ? lc.dropoff_address : lc.pickup_address) || "";
+		} catch { /* ignore */ }
+	}
+	if (!candidate) candidate = (sheetAddr || "").toString();
+	const parsed = parseOriginDestCity(candidate);
+	if (!parsed.city) return "";
+	const base = parsed.state ? `${parsed.city}, ${parsed.state}` : parsed.city;
+	return parsed.zip ? `${base} ${parsed.zip}` : base;
 }
 app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 	res.setHeader("X-Robots-Tag", "noindex, nofollow");
@@ -6125,10 +6162,14 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 	}
 });
 
-// POST /api/dispatch/cancel — Cancel a load assignment (set back to Unassigned).
-// Super Admin only. Per 2026-04-19 client decision, dispatchers can reassign
-// and update status but cannot cancel jobs outright — that call belongs to
-// ownership.
+// POST /api/dispatch/cancel — Truly cancel a load. Status becomes "Cancelled"
+// so it drops out of every KPI, list, and financial total. Super Admin only.
+//
+// Before 2026-04-20 this endpoint set status back to "Unassigned" and the row
+// stayed on the job board. Per client feedback, that behaviour duplicated the
+// Driver reassign dropdown (which already re-picks a driver without touching
+// status). Now "Cancel" means what it says. If dispatch wants to swap drivers
+// without cancelling, they still use the reassign dropdown.
 app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const { rowIndex, loadId, driver } = req.body;
@@ -6145,8 +6186,8 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 		const driverColIdx = headers.findIndex((h) => /driver/i.test(h));
 		const statusColIdx = headers.findIndex((h) => /status/i.test(h));
 
-		// Clear driver and set status to Unassigned
-		const requests = [];
+		// Clear driver (no point keeping a driver on a cancelled load) and set
+		// status to Cancelled so the load is excluded from every KPI loop.
 		if (driverColIdx !== -1) {
 			await sheets.spreadsheets.values.update({
 				spreadsheetId: SPREADSHEET_ID,
@@ -6160,7 +6201,7 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 				spreadsheetId: SPREADSHEET_ID,
 				range: `Job Tracking!${colLetter(statusColIdx)}${rowIndex}`,
 				valueInputOption: "USER_ENTERED",
-				requestBody: { values: [["Unassigned"]] },
+				requestBody: { values: [["Cancelled"]] },
 			});
 		}
 
@@ -6195,6 +6236,54 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error cancelling load:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// DELETE /api/loads/:loadId — Soft-delete a load. Row stays in the Google
+// Sheet for audit / external integrations; admin views and every KPI loop
+// filter it out via excludeDroppedLoads(). Super Admin only. Reversible
+// via `DELETE FROM deleted_loads WHERE load_id = ?` in SQL.
+app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const rawId = (req.params.loadId || "").trim();
+		if (!rawId || !/^[A-Za-z0-9\-_.#]{1,40}$/.test(rawId)) {
+			return res.status(400).json({ error: "Invalid load id" });
+		}
+		const lid = rawId.toLowerCase().replace(/^#/, "");
+
+		// Best-effort lookup of the current row index for the audit record. A
+		// mismatch is fine — the Google Sheet row can shift later, but the
+		// load_id stays authoritative for filtering.
+		let rowIndex = 0;
+		try {
+			const jobTracking = await getJobTrackingCached();
+			const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
+			if (loadIdCol) {
+				const hit = jobTracking.data.find((r) => (r[loadIdCol] || "").toString().trim().toLowerCase().replace(/^#/, "") === lid);
+				if (hit && hit._rowIndex) rowIndex = hit._rowIndex;
+			}
+		} catch { /* don't block delete if sheet read hiccups */ }
+
+		const deletedBy = req.session.user.username || req.session.user.full_name || "";
+		db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_by) VALUES (?, ?, ?)").run(lid, rowIndex, deletedBy);
+
+		insertDispatchNotification.run(
+			"load-deleted",
+			`Deleted Load ${rawId}`,
+			`Removed by ${deletedBy || "admin"}`,
+			JSON.stringify({ loadId: rawId, deletedBy, rowIndex }),
+		);
+		io.to("dispatch").emit("dispatch-notification", {
+			type: "load-deleted",
+			title: `Deleted Load ${rawId}`,
+			body: `Removed by ${deletedBy || "admin"}`,
+		});
+		notifyChange("dashboard");
+		jtCacheInvalidate();
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error deleting load:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
@@ -6348,6 +6437,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Use shared 60s Job Tracking cache (invalidated by mutations) instead of
 		// hitting Sheets on every dashboard load.
 		const jobTracking = await getJobTrackingCached();
+		// Filter out soft-deleted + cancelled loads BEFORE any aggregation so every
+		// downstream KPI, list, and revenue total sees the same consistent view.
+		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Identify key columns
@@ -6492,6 +6584,26 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			};
 		});
 
+		// Pre-resolve origin/destination address columns so we can enrich every
+		// job row with plain "City, ST ZIP" strings that the new Pickup/Drop-off
+		// table columns render. Deshorn asked for this 2026-04-20 because the
+		// raw "Pickup Info" sheet column carries broker-facing references like
+		// "Brothers WMS RDC - MPS REF/PU#: 29284990" that are useless for
+		// scanning the dispatch board.
+		const originAddrCol = jobTracking.headers.find((h) => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const destAddrCol = jobTracking.headers.find((h) => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		function enrichLocations(rows) {
+			for (const r of rows) {
+				const lid = loadIdCol ? r[loadIdCol] : "";
+				r._pickupLocation = resolveCityState(r, "pickup", lid, originAddrCol ? r[originAddrCol] : "");
+				r._dropLocation = resolveCityState(r, "drop", lid, destAddrCol ? r[destAddrCol] : "");
+			}
+			return rows;
+		}
+		enrichLocations(unassignedJobs);
+		enrichLocations(activeJobs);
+		enrichLocations(completedJobs);
+
 		// Sanitize broker contact data for non-Admin roles
 		const respUnassigned = req.session.user.role !== "Super Admin"
 			? sanitizeBrokerColumns(jobTracking.headers, unassignedJobs)
@@ -6616,6 +6728,35 @@ function sanitizeBrokerColumns(headers, rows) {
 
 function findCol(headers, regex) {
 	return headers.find((h) => regex.test(h)) || null;
+}
+
+// Load-drop filtering — single source of truth for "this load should not
+// appear in any admin list or KPI". Combines two exclusion reasons:
+//   1. Status is Cancelled (set by POST /api/dispatch/cancel)
+//   2. The load_id was soft-deleted (row in deleted_loads)
+// Used by /api/dashboard, /api/financials, /api/investor, and /api/public/track
+// so every surface stays consistent.
+const CANCELED_STATUS_RE = /^(cancel|canceled|cancelled)$/i;
+function getDeletedLoadIds() {
+	try {
+		const rows = db.prepare("SELECT load_id FROM deleted_loads").all();
+		return new Set(rows.map((r) => (r.load_id || "").toString().trim().toLowerCase()));
+	} catch {
+		return new Set();
+	}
+}
+function excludeDroppedLoads(rows, headers, deletedIds) {
+	if (!Array.isArray(rows) || rows.length === 0) return rows || [];
+	const loadIdCol = findCol(headers || [], /load.?id|job.?id/i);
+	const statusCol = findCol(headers || [], /^(job[\s._-]?)?status$/i) || findCol(headers || [], /status/i);
+	const ids = deletedIds instanceof Set ? deletedIds : getDeletedLoadIds();
+	return rows.filter((r) => {
+		const lid = loadIdCol ? (r[loadIdCol] || "").toString().trim().toLowerCase() : "";
+		if (lid && ids.has(lid)) return false;
+		const st = statusCol ? (r[statusCol] || "").toString().trim() : "";
+		if (CANCELED_STATUS_RE.test(st)) return false;
+		return true;
+	});
 }
 
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
@@ -7175,8 +7316,13 @@ app.put("/api/notifications/read", requireAuth, (req, res) => {
 // GET /api/dispatch-notifications — Fetch dispatch notifications
 app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
+		// SQLite's CURRENT_TIMESTAMP is UTC but serializes without a zone
+		// ("2026-04-20 14:30:00"), which JS parses as local time — every row
+		// then looks ~N hours in the future and the UI stuck on "just now".
+		// Force ISO-8601 with Z so `new Date(...)` parses it as UTC.
 		const notifications = db.prepare(
-			`SELECT id, type, title, body, metadata, read, created_at AS createdAt
+			`SELECT id, type, title, body, metadata, read,
+			        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS createdAt
 			 FROM dispatch_notifications ORDER BY id DESC LIMIT 200`
 		).all();
 		const unreadCount = db.prepare(
@@ -9452,6 +9598,9 @@ function jtCacheInvalidate() { _jtCache = null; }
 app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const jobTracking = await getJobTrackingCached();
+		// Drop soft-deleted + cancelled loads before any aggregation so investor
+		// dashboards match the admin KPIs exactly.
+		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = getCarrierDBFromSQLite();
 
 		const user = req.session.user;
@@ -10082,6 +10231,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const jobTracking = await getJobTrackingCached();
+		// Drop soft-deleted + cancelled loads before any aggregation so the P&L
+		// numbers match the dashboard KPIs exactly.
+		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 
 		// Column resolution (same regex as investor endpoint)
 		const jtRateCol = findCol(jobTracking.headers, /payment|rate|amount|revenue/i);
