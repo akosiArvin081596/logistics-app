@@ -150,6 +150,15 @@ body {
   flex-direction: column;
   transition: margin-left 0.25s ease, width 0.25s ease;
 }
+
+/* Mobile: leave room at the top for the hamburger button (fixed top-left
+   ~0.6rem + 44px). 3rem top padding gives content air to breathe without
+   sitting under the menu icon. Desktop behaviour above is untouched. */
+@media (max-width: 767px) {
+  .main {
+    padding: 3rem 0.75rem 1.25rem;
+  }
+}
 .page-header {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 1.5rem; flex-wrap: wrap; gap: 0.5rem;
