@@ -367,10 +367,16 @@ body {
 }
 /* RevenueGrid uses 3 columns by default (its own variant). */
 .kpi-grid.revenue-grid { grid-template-columns: repeat(3, 1fr); }
-@media (max-width: 720px) {
-  .kpi-grid.revenue-grid { grid-template-columns: repeat(3, 1fr); gap: 0.75rem; }
+/* Below 900 px the 3 revenue cards get too cramped to fit the $##,###
+   values, so we drop to a single column straight away. The third card
+   dangling alone in a 2-col grid also reads awkwardly. */
+@media (max-width: 900px) {
+  .kpi-grid.revenue-grid {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
 }
-/* Mobile: stack to 1 column on narrow phones so values don't truncate. */
+/* Mobile: stack everything to 1 column. */
 @media (max-width: 480px) {
   .kpi-grid,
   .kpi-grid.revenue-grid {
