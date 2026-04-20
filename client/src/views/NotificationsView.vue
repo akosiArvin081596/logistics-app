@@ -22,7 +22,7 @@
         <div class="notif-content">
           <div class="notif-title">{{ n.title }}</div>
           <div class="notif-body" v-if="n.body">{{ n.body }}</div>
-          <div class="notif-time">{{ timeAgo(n.createdAt) }}</div>
+          <div class="notif-time">{{ formatNotificationTime(n.createdAt) }}</div>
         </div>
         <span v-if="!n.read" class="notif-dot"></span>
       </div>
@@ -47,15 +47,23 @@ function iconFor(type) {
   return '&#128276;'
 }
 
-function timeAgo(ts) {
+// Absolute timestamp — "04/15/2026 10:30PM" — per 2026-04-21 client request.
+// Exact times are more useful than "2h ago" for operational logs (POD hits,
+// driver arrivals, cancellations). Input is ISO-UTC from the server; JS
+// converts to the viewer's local timezone automatically.
+function formatNotificationTime(ts) {
   if (!ts) return ''
-  const diff = Date.now() - new Date(ts).getTime()
-  if (diff < 60000) return 'just now'
-  const mins = Math.floor(diff / 60000)
-  if (mins < 60) return `${mins}m ago`
-  const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h ago`
-  return `${Math.floor(hrs / 24)}d ago`
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  const mm = pad(d.getMonth() + 1)
+  const dd = pad(d.getDate())
+  const yyyy = d.getFullYear()
+  let h = d.getHours()
+  const m = pad(d.getMinutes())
+  const ampm = h >= 12 ? 'PM' : 'AM'
+  h = h % 12 || 12
+  return `${mm}/${dd}/${yyyy} ${h}:${m}${ampm}`
 }
 
 function handleTap(n) {
