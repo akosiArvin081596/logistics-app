@@ -24,51 +24,56 @@
         </div>
       </div>
 
-      <!-- Upload gate: require POD before allowing "Delivered" -->
-      <div v-if="requiresUpload" class="upload-hint">
-        Upload a Proof of Delivery in the <strong>Documents</strong> section before marking as Delivered.
-      </div>
+      <!-- Driver-only action UI. Suppressed entirely in readOnly mode
+           (public tracker page) so customers see the stepper without any
+           controls that would 403 on them. -->
+      <template v-if="!readOnly">
+        <!-- Upload gate: require POD before allowing "Delivered" -->
+        <div v-if="requiresUpload" class="upload-hint">
+          Upload a Proof of Delivery in the <strong>Documents</strong> section before marking as Delivered.
+        </div>
 
-      <!-- Blocked: another job is active -->
-      <div v-else-if="blocked" class="blocked-hint">
-        Complete your current active job before starting a new one.
-      </div>
+        <!-- Blocked: another job is active -->
+        <div v-else-if="blocked" class="blocked-hint">
+          Complete your current active job before starting a new one.
+        </div>
 
-      <!-- Normal action button -->
-      <template v-else>
-        <button
-          v-if="allDone"
-          class="action-btn completed-btn"
-          disabled
-        >&#10003; Load Delivered</button>
-        <button
-          v-else-if="nextStep"
-          class="action-btn primary"
-          :disabled="updating"
-          @click="showConfirm = true"
-        >{{ updating ? 'Updating...' : nextStep.label }}</button>
+        <!-- Normal action button -->
+        <template v-else>
+          <button
+            v-if="allDone"
+            class="action-btn completed-btn"
+            disabled
+          >&#10003; Load Delivered</button>
+          <button
+            v-else-if="nextStep"
+            class="action-btn primary"
+            :disabled="updating"
+            @click="showConfirm = true"
+          >{{ updating ? 'Updating...' : nextStep.label }}</button>
+        </template>
       </template>
     </div>
 
-    <!-- Confirm modal -->
-    <ConfirmModal
-      :open="showConfirm"
-      title="Update Status"
-      :message="`Set status to &quot;${nextStep ? nextStep.label : ''}&quot;?`"
-      confirm-text="Confirm"
-      @confirm="onConfirm"
-      @cancel="showConfirm = false"
-    />
-
-    <!-- POD reminder after arriving at receiver -->
-    <ConfirmModal
-      :open="showPodReminder"
-      title="Upload Proof of Delivery"
-      message="You've arrived at the receiver. Please upload a Proof of Delivery (POD) in the Documents section before marking this load as Delivered."
-      confirm-text="Got it"
-      @confirm="showPodReminder = false"
-      @cancel="showPodReminder = false"
-    />
+    <!-- Confirm modals — driver-only; never render in readOnly mode. -->
+    <template v-if="!readOnly">
+      <ConfirmModal
+        :open="showConfirm"
+        title="Update Status"
+        :message="`Set status to &quot;${nextStep ? nextStep.label : ''}&quot;?`"
+        confirm-text="Confirm"
+        @confirm="onConfirm"
+        @cancel="showConfirm = false"
+      />
+      <ConfirmModal
+        :open="showPodReminder"
+        title="Upload Proof of Delivery"
+        message="You've arrived at the receiver. Please upload a Proof of Delivery (POD) in the Documents section before marking this load as Delivered."
+        confirm-text="Got it"
+        @confirm="showPodReminder = false"
+        @cancel="showPodReminder = false"
+      />
+    </template>
   </div>
 </template>
 
@@ -83,6 +88,9 @@ const props = defineProps({
   currentStatus: { type: String, default: '' },
   driverName: { type: String, default: '' },
   blocked: { type: Boolean, default: false },
+  // When true, hide every driver-side action button / modal. Used by the
+  // public /track/:loadId page where customers only read the progression.
+  readOnly: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['update'])

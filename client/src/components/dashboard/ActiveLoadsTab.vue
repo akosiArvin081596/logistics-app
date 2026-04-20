@@ -52,7 +52,20 @@
     <Dialog :open="!!selectedJob" @update:open="v => { if (!v) closeDetail() }">
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
-          <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;">
+            <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+            <button
+              v-if="loadIdValue"
+              type="button"
+              :style="copyBtnStyle"
+              :title="'Share tracking link with the customer'"
+              @click="copyTrackingLink"
+            >
+              <svg v-if="!linkCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M20 6 9 17l-5-5"/></svg>
+              {{ linkCopied ? 'Link copied' : 'Copy tracking link' }}
+            </button>
+          </div>
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
@@ -128,7 +141,30 @@ const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.tes
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 const statusOptions = ['At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
-const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0)
+const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
+let linkCopiedTimer = null
+const copyBtnStyle = computed(() => ({
+  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+  borderRadius: '6px', cursor: 'pointer', fontFamily: 'inherit',
+  border: '1px solid ' + (linkCopied.value ? '#16a34a' : '#d1d5db'),
+  background: linkCopied.value ? '#dcfce7' : '#ffffff',
+  color: linkCopied.value ? '#166534' : '#374151',
+  transition: 'all 0.15s',
+}))
+async function copyTrackingLink() {
+  if (!loadIdValue.value) return
+  const url = `${window.location.origin}/track/${encodeURIComponent(loadIdValue.value)}`
+  try {
+    await navigator.clipboard.writeText(url)
+    linkCopied.value = true
+    if (linkCopiedTimer) clearTimeout(linkCopiedTimer)
+    linkCopiedTimer = setTimeout(() => { linkCopied.value = false }, 1500)
+  } catch {
+    // Clipboard API blocked (non-HTTPS, permission, etc.) — fall back to prompt
+    window.prompt('Copy this tracking link:', url)
+  }
+}
 const isSelectedLoadCompleted = computed(() => {
   if (!selectedJob.value) return false
   const sc = props.headers.find(h => /status/i.test(h))
@@ -148,7 +184,7 @@ function getCurrentDriver(j) { return driverCol.value ? (j[driverCol.value] || '
 function confirmReassign(j) { const d = reassignSelections[j._rowIndex]; if (!d) return; if (confirm(`Reassign to ${d}?`)) { emit('reassign', { rowIndex: j._rowIndex, newDriver: d, job: j }); reassignSelections[j._rowIndex] = '' } }
 function confirmCancel(j) { if (confirm('Cancel this assignment?')) emit('cancel', { rowIndex: j._rowIndex, job: j }) }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
-function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null }
+function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null } }
 async function openDetail(job) {
   selectedJob.value = { ...job }; selectedDriverPosition.value = null; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (job[dc] || '').trim() : ''

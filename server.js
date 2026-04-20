@@ -2809,6 +2809,190 @@ app.post("/api/public/investor-preview-pdf/:docKey", async (req, res) => {
 	}
 });
 
+// ============================================================
+// PUBLIC: Track-My-Load (customer-facing, no auth)
+// ============================================================
+// GET /api/public/track/:loadId — customers (shippers / consignees / brokers)
+// look up a load by ID and see its current stage, last driver ping, and ETA.
+// No login. Loaded by /track/:loadId in the SPA. Design notes:
+//   - Verification is Load-ID-only (per client decision). Mitigations:
+//     * strict rate limit (60 / 15min / IP)
+//     * strict regex on the ID before any sheet lookup
+//     * response is a pure whitelist — no driver name, no phone, no broker,
+//       no rate / financial columns EVER flow through
+//     * X-Robots-Tag keeps tracker URLs out of search indexes
+//   - Driver GPS privacy: only the last ping is returned, and only if it's
+//     within the last 2 hours — prevents leaking a driver's off-shift
+//     location after they stop reporting.
+const trackPublicLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60, // higher than publicFormLimiter — customers refresh a lot
+	message: { error: "Too many requests. Try again later." },
+	standardHeaders: true,
+});
+const TRACK_STAGES = [
+	{ key: "dispatched", name: "Dispatched", matchStatus: /^(dispatched|assigned)$/i },
+	{ key: "at_shipper", name: "At Shipper", matchStatus: /^at shipper$/i },
+	{ key: "loading", name: "Loading", matchStatus: /^loading$/i },
+	{ key: "in_transit", name: "In Transit", matchStatus: /^in transit$/i },
+	{ key: "at_receiver", name: "At Receiver", matchStatus: /^(at receiver|unloading)$/i },
+	{ key: "delivered", name: "Delivered", matchStatus: /^(delivered|pod received|completed)$/i },
+];
+function parseOriginDestCity(addr) {
+	if (!addr || typeof addr !== "string") return { city: "", state: "" };
+	const trimmed = addr.trim();
+	const m = trimmed.match(/([^,]+),\s*([A-Za-z]{2})(?:\s+\d{5})?\s*$/);
+	if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
+	return { city: trimmed.split(",")[0].trim(), state: "" };
+}
+app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
+	res.setHeader("X-Robots-Tag", "noindex, nofollow");
+	try {
+		const rawId = (req.params.loadId || "").trim();
+		if (!rawId || !/^[A-Za-z0-9\-_.#]{1,40}$/.test(rawId)) {
+			return res.status(400).json({ error: "Invalid load id" });
+		}
+		const sheets = await getSheets();
+		const response = await sheets.spreadsheets.values.batchGet({
+			spreadsheetId: SPREADSHEET_ID,
+			ranges: ["Job Tracking"],
+		});
+		const rangeData = response.data.valueRanges || [];
+		const jobTracking = parseSheet(rangeData[0]);
+		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
+		const headers = jobTracking.headers;
+		const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+		if (!loadIdCol) return res.status(500).json({ error: "Sheet misconfigured" });
+		const target = rawId.toLowerCase().replace(/^#/, "");
+		const load = jobTracking.data.find((r) => (r[loadIdCol] || "").toString().trim().toLowerCase().replace(/^#/, "") === target);
+		if (!load) return res.status(404).json({ error: "not_found" });
+		const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
+		const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
+		const originAddrCol = headers.find((h) => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const destAddrCol = headers.find((h) => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const originLatCol = findCol(headers, /origin.*lat|pickup.*lat|shipper.*lat/i);
+		const originLngCol = findCol(headers, /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i);
+		const destLatCol = findCol(headers, /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i);
+		const destLngCol = findCol(headers, /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i);
+		const pickupDateCol = headers.find((h) => /pickup.*date|pickup.*appoint/i.test(h)) || null;
+		const deliveryDateCol = headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint|completion.*date/i.test(h)) || null;
+		const statusUpdateCol = headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) || null;
+
+		const status = (load[statusCol] || "").toString().trim();
+		const statusLower = status.toLowerCase();
+		const currentStageIdx = TRACK_STAGES.findIndex((s) => s.matchStatus.test(status));
+		const lastTransitionAt = statusUpdateCol ? (load[statusUpdateCol] || "").toString().trim() : "";
+		const stages = TRACK_STAGES.map((s, i) => ({
+			key: s.key,
+			name: s.name,
+			completed: currentStageIdx >= 0 && i < currentStageIdx,
+			current: currentStageIdx >= 0 && i === currentStageIdx,
+			at: currentStageIdx >= 0 && i === currentStageIdx ? lastTransitionAt : null,
+		}));
+		if (currentStageIdx === TRACK_STAGES.length - 1) {
+			stages.forEach((s, i) => { s.completed = i <= currentStageIdx; s.current = i === currentStageIdx; });
+		}
+
+		const originAddr = originAddrCol ? (load[originAddrCol] || "") : "";
+		const destAddr = destAddrCol ? (load[destAddrCol] || "") : "";
+		const origin = parseOriginDestCity(originAddr);
+		const destination = parseOriginDestCity(destAddr);
+
+		let originLat = null, originLng = null, destLat = null, destLng = null;
+		if (originLatCol && originLngCol) {
+			const oLat = parseFloat(load[originLatCol]);
+			const oLng = parseFloat(load[originLngCol]);
+			if (!isNaN(oLat) && !isNaN(oLng)) { originLat = oLat; originLng = oLng; }
+		}
+		if (destLatCol && destLngCol) {
+			const dLat = parseFloat(load[destLatCol]);
+			const dLng = parseFloat(load[destLngCol]);
+			if (!isNaN(dLat) && !isNaN(dLng)) { destLat = dLat; destLng = dLng; }
+		}
+		if (originLat == null || destLat == null) {
+			const lc = db.prepare("SELECT * FROM load_coordinates WHERE load_id = ?").get(target);
+			if (lc) {
+				if (originLat == null && lc.origin_lat) { originLat = lc.origin_lat; originLng = lc.origin_lng; }
+				if (destLat == null && lc.dest_lat) { destLat = lc.dest_lat; destLng = lc.dest_lng; }
+			}
+		}
+
+		const driverNameRaw = driverCol ? (load[driverCol] || "").toString().trim() : "";
+		let lastPing = null;
+		let lastPingSpeed = 0;
+		if (driverNameRaw) {
+			const row = db.prepare(
+				`SELECT latitude, longitude, speed, timestamp FROM driver_locations
+				 WHERE LOWER(driver) = ? ORDER BY timestamp DESC LIMIT 1`
+			).get(driverNameRaw.toLowerCase());
+			if (row && row.timestamp) {
+				const ageMs = Date.now() - new Date(row.timestamp).getTime();
+				if (!isNaN(ageMs) && ageMs >= 0 && ageMs <= 2 * 60 * 60 * 1000) {
+					lastPing = { lat: row.latitude, lng: row.longitude, at: row.timestamp };
+					lastPingSpeed = row.speed || 0;
+				}
+			}
+		}
+
+		let eta = null;
+		const deliveredRe = /^(delivered|pod received|completed)$/i;
+		const isDelivered = deliveredRe.test(statusLower);
+		if (!isDelivered && lastPing && destLat != null && destLng != null) {
+			const DEFAULT_SPEED_MPS = 24.587; // ~55 mph
+			const distMeters = geolib.getDistance(
+				{ latitude: lastPing.lat, longitude: lastPing.lng },
+				{ latitude: destLat, longitude: destLng },
+			);
+			const speed = lastPingSpeed > 1 ? lastPingSpeed : DEFAULT_SPEED_MPS;
+			const etaSeconds = distMeters / speed;
+			const minutesRemaining = Math.round(etaSeconds / 60);
+			const expectedAt = new Date(Date.now() + etaSeconds * 1000).toISOString();
+			let onTime = null;
+			const schedRaw = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
+			if (schedRaw) {
+				const scheduled = new Date(schedRaw);
+				if (!isNaN(scheduled)) onTime = new Date(expectedAt) <= scheduled;
+			}
+			eta = {
+				distanceMiles: Math.round((distMeters / 1609.34) * 10) / 10,
+				minutesRemaining,
+				expectedAt,
+				onTime,
+			};
+		}
+
+		let truckUnit = "";
+		if (driverNameRaw) {
+			const t = db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) LIMIT 1").get(driverNameRaw);
+			if (t && t.unit_number) truckUnit = String(t.unit_number);
+		}
+
+		let deliveredAt = null;
+		if (isDelivered) deliveredAt = statusUpdateCol ? (load[statusUpdateCol] || "").toString().trim() : "";
+
+		return res.json({
+			loadId: (load[loadIdCol] || "").toString().trim(),
+			status,
+			stages,
+			origin,
+			destination,
+			originLat,
+			originLng,
+			destLat,
+			destLng,
+			truckUnit,
+			lastPing,
+			eta,
+			scheduledPickup: pickupDateCol ? (load[pickupDateCol] || "").toString().trim() : "",
+			scheduledDelivery: deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "",
+			deliveredAt,
+		});
+	} catch (err) {
+		console.error("Public track error:", err.message);
+		res.status(500).json({ error: "track_failed" });
+	}
+});
+
 // Signed investor PDFs are served by the authenticated /uploads mount (see top of file).
 
 // Admin: list investor applications

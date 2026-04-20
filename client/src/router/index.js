@@ -23,6 +23,18 @@ const routes = [
     meta: { public: true, noSidebar: true },
   },
   {
+    path: '/track',
+    name: 'track-search',
+    component: () => import('../views/TrackLoadView.vue'),
+    meta: { public: true, noSidebar: true, alwaysPublic: true },
+  },
+  {
+    path: '/track/:loadId',
+    name: 'track-load',
+    component: () => import('../views/TrackLoadView.vue'),
+    meta: { public: true, noSidebar: true, alwaysPublic: true },
+  },
+  {
     path: '/dashboard',
     name: 'dashboard',
     component: () => import('../views/DashboardView.vue'),
@@ -164,9 +176,11 @@ router.beforeEach(async (to) => {
     await auth.checkSession()
   }
 
-  // Public pages
+  // Public pages. `alwaysPublic` routes (like /track) stay reachable even
+  // for logged-in admins — handy when a dispatcher wants to preview what a
+  // customer sees.
   if (to.meta.public) {
-    if (auth.isAuthenticated) return { path: auth.roleHome }
+    if (auth.isAuthenticated && !to.meta.alwaysPublic) return { path: auth.roleHome }
     return true
   }
 

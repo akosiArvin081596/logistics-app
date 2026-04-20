@@ -53,6 +53,10 @@ const props = defineProps({
   headers: { type: Array, default: () => [] },
   driverPosition: { type: Object, default: null },
   dispatchMode: { type: Boolean, default: false },
+  // When true, strip any driver-identifying info off the map. Used by the
+  // public /track/:loadId customer page — customers see the pin but not the
+  // driver's name.
+  publicMode: { type: Boolean, default: false },
 })
 
 const api = useApi()
@@ -186,7 +190,7 @@ function renderMarkers() {
     destMarker = new google.maps.marker.AdvancedMarkerElement({ position: destLatLng.value, map, content: createDotPin('#dc2626', 14), title: 'Drop-off' })
   }
   if (driverLatLng.value) {
-    driverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map, content: createDotPin('#2563eb', 16), title: driverName.value || 'Driver' })
+    driverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map, content: createDotPin('#2563eb', 16), title: props.publicMode ? 'Driver' : (driverName.value || 'Driver') })
   }
 
   if (routePoints.value.length >= 2) {
@@ -288,7 +292,7 @@ function renderExpandedMap() {
     exDestMarker = new google.maps.marker.AdvancedMarkerElement({ position: destLatLng.value, map: expandedMap, content: createDotPin('#dc2626', 14), title: 'Drop-off' })
   }
   if (driverLatLng.value) {
-    exDriverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map: expandedMap, content: createDotPin('#2563eb', 16), title: driverName.value || 'Driver' })
+    exDriverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map: expandedMap, content: createDotPin('#2563eb', 16), title: props.publicMode ? 'Driver' : (driverName.value || 'Driver') })
   }
   if (routePoints.value.length >= 2) {
     const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))
