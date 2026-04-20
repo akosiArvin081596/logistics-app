@@ -1,5 +1,5 @@
 <template>
-  <div class="msg-layout">
+  <div :class="['msg-layout', { 'msg-has-active': !!store.selectedDriver }]">
     <!-- Sidebar: conversations grouped by driver + load -->
     <div class="msg-sidebar" style="position:relative;">
       <div class="msg-sidebar-header">
@@ -41,6 +41,14 @@
     <!-- Chat area -->
     <div class="msg-chat">
       <div class="msg-chat-header">
+        <!-- Mobile back arrow — returns to the conversation list. Hidden on
+             desktop via CSS; the two-pane grid means both are visible. -->
+        <button
+          v-if="store.selectedDriver"
+          class="msg-back-btn"
+          aria-label="Back to conversations"
+          @click="deselectConversation"
+        >&#8592;</button>
         <template v-if="store.selectedDriver">
           {{ store.selectedDriver }}
           <span v-if="store.selectedLoadId" class="msg-header-load">— Load {{ store.selectedLoadId }}</span>
@@ -146,6 +154,13 @@ function isActive(c) {
   return store.selectedDriver &&
     c.driver.toLowerCase() === store.selectedDriver.toLowerCase() &&
     c.loadId === store.selectedLoadId
+}
+
+function deselectConversation() {
+  // Clears the active conversation so the mobile view returns to the
+  // conversation list. Desktop doesn't use this — both panes are always
+  // visible there.
+  if (store.selectConversation) store.selectConversation('', '')
 }
 
 function selectConversation(c) {

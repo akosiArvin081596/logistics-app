@@ -208,4 +208,60 @@ onUnmounted(() => {
 :deep(.msg-attach-remove) {
   background: none; border: none; cursor: pointer; font-size: 1rem; color: #6b7280;
 }
+
+/* Back arrow — only visible on mobile. Desktop shows both panes side-by-side
+   so a "back" action is meaningless. */
+:deep(.msg-back-btn) {
+  display: none;
+  background: transparent;
+  border: none;
+  padding: 0.25rem 0.5rem;
+  margin-right: 0.25rem;
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Mobile (≤ 767 px): the messages surface becomes single-pane. When a
+   conversation is active (msg-has-active on .msg-layout), the sidebar
+   hides and the chat fills; otherwise the sidebar fills and the chat is
+   hidden. A back arrow returns to the list. */
+@media (max-width: 767px) {
+  :deep(.msg-layout) {
+    grid-template-columns: 1fr;
+  }
+  :deep(.msg-layout .msg-sidebar) {
+    display: block;
+    border-right: none;
+  }
+  :deep(.msg-layout .msg-chat) {
+    display: none;
+  }
+  :deep(.msg-layout.msg-has-active .msg-sidebar) {
+    display: none;
+  }
+  :deep(.msg-layout.msg-has-active .msg-chat) {
+    display: flex;
+  }
+  :deep(.msg-back-btn) { display: inline-flex; align-items: center; }
+
+  /* Sticky input bar + iOS safe-area. padding-bottom picks up the home
+     indicator inset; on non-iOS devices env() returns 0. */
+  :deep(.msg-chat-input) {
+    padding-bottom: calc(0.6rem + env(safe-area-inset-bottom, 0));
+  }
+  :deep(.msg-chat-header) {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  :deep(.msg-input) {
+    font-size: 0.95rem; /* iOS Safari zooms on focus below 16 px */
+  }
+  :deep(.msg-bubble) { max-width: 85%; }
+  /* Attachment preview thumbnails smaller on mobile. */
+  :deep(.msg-attach-preview) { padding: 0.35rem 0.75rem; font-size: 0.72rem; }
+}
 </style>
