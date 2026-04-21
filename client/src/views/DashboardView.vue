@@ -34,7 +34,7 @@
         </TabsList>
         <CardContent style="padding:0;">
           <TabsContent value="jobBoard" style="margin-top:0;">
-            <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" />
+            <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" @cancel="handleCancel" @deleted="handleDeleted" />
           </TabsContent>
           <TabsContent value="activeLoads" style="margin-top:0;">
             <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" :focus-load-id="focusLoadId" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" @deleted="handleDeleted" @focus-consumed="onFocusConsumed" />

@@ -27,6 +27,7 @@
               <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
             </select>
             <Button size="sm" class="mobile-job-btn" @click="assign(job)">Assign</Button>
+            <Button v-if="auth.isSuperAdmin" variant="destructive" size="sm" class="mobile-job-btn" title="Cancel load (no driver needed)" @click="confirmCancel(job)">&#10005;</Button>
           </div>
         </div>
       </div>
@@ -51,6 +52,7 @@
                   <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
                 </select>
                 <Button size="sm" @click="assign(job)">Assign</Button>
+                <Button v-if="auth.isSuperAdmin" variant="destructive" size="sm" title="Cancel load (no driver needed)" @click="confirmCancel(job)">&#10005;</Button>
               </div>
               <span v-else class="text-gray-300">&mdash;</span>
             </TableCell>
@@ -61,9 +63,35 @@
     <Dialog :open="!!selectedJob" @update:open="v => { if (!v) selectedJob = null }">
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
-          <div class="flex items-center gap-3">
-            <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
-            <StatusBadge v-if="statusValue" :status="statusValue" />
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap;">
+            <div class="flex items-center gap-3">
+              <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+              <StatusBadge v-if="statusValue" :status="statusValue" />
+            </div>
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+              <button
+                v-if="loadIdValue"
+                type="button"
+                :style="copyBtnStyle"
+                title="Share tracking link with the customer"
+                @click="copyTrackingLink"
+              >
+                <svg v-if="!linkCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M20 6 9 17l-5-5"/></svg>
+                {{ linkCopied ? 'Link copied' : 'Copy tracking link' }}
+              </button>
+              <button
+                v-if="loadIdValue && auth.isSuperAdmin"
+                type="button"
+                :style="deleteBtnStyle"
+                :disabled="deleting"
+                title="Remove this load from every list and KPI (soft delete, recoverable)"
+                @click="showDeleteConfirm = true"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                {{ deleting ? 'Deleting...' : 'Delete' }}
+              </button>
+            </div>
           </div>
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
@@ -89,6 +117,17 @@
         </div>
       </DialogContent>
     </Dialog>
+
+    <!-- Soft delete confirm — same pattern as ActiveLoadsTab. -->
+    <ConfirmModal
+      :open="showDeleteConfirm"
+      title="Delete this load?"
+      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.`"
+      confirm-text="Delete"
+      :danger="true"
+      @confirm="runDelete"
+      @cancel="showDeleteConfirm = false"
+    />
   </div>
 </template>
 
@@ -107,13 +146,21 @@ import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import SkeletonLoader from '../shared/SkeletonLoader.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
+import ConfirmModal from '../shared/ConfirmModal.vue'
+import { useAuthStore } from '../../stores/auth'
+import { useDashboardStore } from '../../stores/dashboard'
 
 const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
-const emit = defineEmits(['assign'])
+// Phase: cancel/delete for unassigned loads (2026-04-22 client request). The
+// parent DashboardView already has a handleCancel that reuses the same
+// endpoint Active Loads uses; we just add the two new emits to opt in.
+const emit = defineEmits(['assign', 'cancel', 'deleted'])
 const api = useApi()
 const { show: toast } = useToast()
 const { isMobile } = useViewport()
+const auth = useAuthStore()
+const dashStore = useDashboardStore()
 function statusValueOf(job) { return statusCol.value ? (job[statusCol.value] || '').trim() : '' }
 const assignSelections = reactive({})
 watch(() => props.jobs, (jobs) => { jobs.forEach(j => { if (!(j._rowIndex in assignSelections)) assignSelections[j._rowIndex] = '' }) }, { immediate: true })
@@ -210,6 +257,75 @@ const detailSections = computed(() => {
   if (rem.length) secs.push({ title: 'Other Details', fields: rem }); return secs.filter(s => s.fields.length > 0)
 })
 function assign(j) { const d = assignSelections[j._rowIndex]; if (!d) { toast('Select a driver first', 'error'); return }; emit('assign', { rowIndex: j._rowIndex, driver: d, job: j }) }
+
+// Cancel / delete for unassigned loads. `cancel` reuses the same endpoint
+// Active Loads calls (POST /api/dispatch/cancel) — it clears the driver
+// column (no-op for unassigned) and sets status to "Cancelled" so the
+// load drops out of every KPI via excludeDroppedLoads() server-side.
+// `deleted` soft-deletes via DELETE /api/loads/:loadId.
+const showDeleteConfirm = ref(false)
+const deleting = ref(false)
+const linkCopied = ref(false)
+let linkCopiedTimer = null
+
+function confirmCancel(j) {
+  if (!confirm(`Cancel load ${cellValue(j, loadIdCol.value) || 'this load'}? It will be removed from every list and KPI.`)) return
+  emit('cancel', { rowIndex: j._rowIndex, job: j })
+}
+
+async function copyTrackingLink() {
+  if (!loadIdValue.value) return
+  const url = `${window.location.origin}/track/${encodeURIComponent(loadIdValue.value)}`
+  try {
+    await navigator.clipboard.writeText(url)
+    linkCopied.value = true
+    if (linkCopiedTimer) clearTimeout(linkCopiedTimer)
+    linkCopiedTimer = setTimeout(() => { linkCopied.value = false }, 1500)
+  } catch {
+    window.prompt('Copy this tracking link:', url)
+  }
+}
+
+async function runDelete() {
+  if (!loadIdValue.value || deleting.value) return
+  deleting.value = true
+  try {
+    await dashStore.deleteLoad(loadIdValue.value)
+    showDeleteConfirm.value = false
+    const deletedId = loadIdValue.value
+    selectedJob.value = null
+    linkCopied.value = false
+    if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }
+    emit('deleted', { loadId: deletedId })
+  } catch {
+    // parent can surface a toast via the store; staying silent here keeps this consistent with ActiveLoadsTab
+  } finally {
+    deleting.value = false
+  }
+}
+
+// Inline styles for the two header buttons (copy + delete). Consistent with
+// ActiveLoadsTab's approach of computed style objects — the file already uses
+// inline styling throughout so this keeps the house style.
+const copyBtnStyle = computed(() => ({
+  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+  borderRadius: '6px', cursor: 'pointer', fontFamily: 'inherit',
+  border: '1px solid ' + (linkCopied.value ? '#16a34a' : '#d1d5db'),
+  background: linkCopied.value ? '#dcfce7' : '#ffffff',
+  color: linkCopied.value ? '#166534' : '#374151',
+  transition: 'all 0.15s',
+}))
+const deleteBtnStyle = computed(() => ({
+  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+  borderRadius: '6px', cursor: deleting.value ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+  border: '1px solid #fecaca',
+  background: '#fef2f2',
+  color: '#b91c1c',
+  opacity: deleting.value ? 0.6 : 1,
+  transition: 'all 0.15s',
+}))
 </script>
 
 <style scoped>
