@@ -18,6 +18,7 @@
           <th>Status</th>
           <th>Current Driver</th>
           <th>Loads</th>
+          <th>Routemate</th>
           <th v-if="showOwner">Owner</th>
           <th v-if="canEdit"></th>
         </tr>
@@ -36,6 +37,25 @@
             {{ truck.AssignedDriver || '\u2014' }}
           </td>
           <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
+          <td>
+            <span
+              v-if="truck.RoutemateVehicleId"
+              class="rm-linked"
+              :title="`Routemate vehicle ID: ${truck.RoutemateVehicleId}`"
+            ><span class="rm-dot"></span>Linked</span>
+            <button
+              v-else-if="canEdit"
+              class="btn-link-rm"
+              @click.stop="openLinkModal(truck)"
+            >Link</button>
+            <span v-else class="rm-unlinked">&mdash;</span>
+            <button
+              v-if="truck.RoutemateVehicleId && canEdit"
+              class="btn-unlink-rm"
+              title="Clear the Routemate device link"
+              @click.stop="handleUnlink(truck)"
+            >&times;</button>
+          </td>
           <td v-if="showOwner" :style="{ color: truck.OwnerId ? 'var(--text)' : 'var(--text-dim)' }">
             {{ ownerName(truck.OwnerId) }}
           </td>
@@ -48,6 +68,61 @@
         </tr>
       </tbody>
     </table>
+
+    <!-- Routemate link modal \u2014 picks an unlinked Routemate vehicle to bind
+         to a LogisX truck. Auto-match-by-VIN tries an exact VIN match first
+         and is the fast path when both records carry the same VIN. -->
+    <Teleport to="body">
+      <div v-if="showLinkRm" class="confirm-overlay" @click.self="closeLinkModal">
+        <div class="confirm-dialog" style="max-width:560px;">
+          <h3>Link Truck {{ linkTruck?.UnitNumber || '' }} to a Routemate device</h3>
+          <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.85rem;">
+            Pick a Routemate vehicle from the company inventory. After linking, live GPS,
+            fault codes, and fuel data flow against this truck.
+          </p>
+
+          <div v-if="linkTruck && linkTruck.VIN" style="margin-bottom:0.75rem;">
+            <button
+              class="btn btn-primary"
+              :disabled="linkBusy"
+              @click="handleAutoLink"
+            >Auto-match by VIN ({{ linkTruck.VIN }})</button>
+          </div>
+
+          <div v-if="linkLoading" class="rm-pick-empty">Loading Routemate vehicles...</div>
+          <div v-else-if="linkError" class="rm-pick-error">{{ linkError }}</div>
+          <div v-else-if="unlinkedVehicles.length === 0" class="rm-pick-empty">
+            No unlinked Routemate vehicles available. Run sync from Admin Tools to refresh.
+          </div>
+          <div v-else class="rm-pick-list">
+            <div
+              v-for="rv in unlinkedVehicles"
+              :key="rv.routemate_vehicle_id"
+              :class="['rm-pick-item', { selected: pickedRoutemateId === rv.routemate_vehicle_id }]"
+              @click="pickedRoutemateId = rv.routemate_vehicle_id"
+            >
+              <div class="rm-pick-line1">
+                <span class="rm-pick-id">{{ rv.vehicle_id || rv.routemate_vehicle_id }}</span>
+                <span v-if="rv.vin" class="rm-pick-vin">VIN {{ rv.vin }}</span>
+              </div>
+              <div class="rm-pick-line2">
+                {{ [rv.year, rv.make, rv.model].filter(Boolean).join(' ') || '\u2014' }}
+                <span v-if="rv.eld_id" class="rm-pick-eld">ELD {{ rv.eld_id }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="confirm-actions">
+            <button class="btn btn-secondary" :disabled="linkBusy" @click="closeLinkModal">Cancel</button>
+            <button
+              class="btn btn-primary"
+              :disabled="!pickedRoutemateId || linkBusy"
+              @click="handleLink"
+            >{{ linkBusy ? 'Linking...' : 'Link Selected' }}</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- Edit Modal -->
     <Teleport to="body">
@@ -504,6 +579,84 @@ function handleConfirmDelete() {
   showConfirm.value = false
   pendingTruck.value = null
 }
+
+// --- Routemate device linkage ---
+const showLinkRm = ref(false)
+const linkTruck = ref(null)
+const unlinkedVehicles = ref([])
+const pickedRoutemateId = ref('')
+const linkBusy = ref(false)
+const linkLoading = ref(false)
+const linkError = ref('')
+
+async function openLinkModal(truck) {
+  linkTruck.value = truck
+  pickedRoutemateId.value = ''
+  linkError.value = ''
+  showLinkRm.value = true
+  linkLoading.value = true
+  try {
+    const r = await api.get('/api/routemate/vehicles/unlinked')
+    unlinkedVehicles.value = r.vehicles || []
+  } catch (err) {
+    linkError.value = err?.message || 'Failed to load Routemate vehicles.'
+  } finally {
+    linkLoading.value = false
+  }
+}
+
+function closeLinkModal() {
+  if (linkBusy.value) return
+  showLinkRm.value = false
+  linkTruck.value = null
+  unlinkedVehicles.value = []
+  pickedRoutemateId.value = ''
+  linkError.value = ''
+}
+
+async function handleLink() {
+  if (!linkTruck.value || !pickedRoutemateId.value) return
+  linkBusy.value = true
+  linkError.value = ''
+  try {
+    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, {
+      routemateVehicleId: pickedRoutemateId.value,
+    })
+    showLinkRm.value = false
+    // Tell parent to refresh; the trucks store call repopulates the table
+    // and the new RoutemateVehicleId field flips the cell to "Linked".
+    emit('update', { id: linkTruck.value.id, data: {} })
+  } catch (err) {
+    linkError.value = err?.message || 'Failed to link Routemate vehicle.'
+  } finally {
+    linkBusy.value = false
+  }
+}
+
+async function handleAutoLink() {
+  if (!linkTruck.value || !linkTruck.value.VIN) return
+  linkBusy.value = true
+  linkError.value = ''
+  try {
+    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, { auto: true })
+    showLinkRm.value = false
+    emit('update', { id: linkTruck.value.id, data: {} })
+  } catch (err) {
+    linkError.value = err?.message || 'No Routemate vehicle matches this VIN.'
+  } finally {
+    linkBusy.value = false
+  }
+}
+
+async function handleUnlink(truck) {
+  // No confirm modal — unlink is reversible (admin can re-link any time).
+  try {
+    await api.del(`/api/trucks/${truck.id}/link-routemate`)
+    emit('update', { id: truck.id, data: {} })
+  } catch (err) {
+    console.error('Routemate unlink failed:', err)
+  }
+}
 </script>
 
 <style scoped>
@@ -662,4 +815,61 @@ function handleConfirmDelete() {
 .driver-file-type { font-size: 0.68rem; color: #94a3b8; font-family: 'JetBrains Mono', monospace; }
 .driver-file-type.dt-pass { color: #16a34a; font-weight: 700; }
 .driver-file-type.dt-fail { color: #dc2626; font-weight: 700; }
+
+/* Routemate column — minimal "Linked / Link / —" affordances. */
+.rm-linked {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 0.7rem; font-weight: 600;
+  padding: 0.15rem 0.5rem; border-radius: 10px;
+  background: #dcfce7; color: #166534;
+  border: 1px solid #bbf7d0;
+}
+.rm-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: #16a34a;
+}
+.rm-unlinked { color: var(--text-dim); }
+.btn-link-rm {
+  padding: 0.3rem 0.65rem; font-size: 0.7rem; border-radius: 6px;
+  border: 1px solid #bfdbfe; background: #eff6ff;
+  cursor: pointer; font-family: inherit; font-weight: 600;
+  color: #1e40af; transition: all 0.15s;
+}
+.btn-link-rm:hover { background: #dbeafe; border-color: #93c5fd; }
+.btn-unlink-rm {
+  margin-left: 0.35rem;
+  width: 18px; height: 18px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-dim); border-radius: 50%;
+  cursor: pointer; line-height: 1;
+  font-size: 0.85rem; padding: 0;
+}
+.btn-unlink-rm:hover { background: var(--danger-dim); color: var(--danger); border-color: var(--danger-dim); }
+
+/* Pick list inside the link modal */
+.rm-pick-list {
+  max-height: 320px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+.rm-pick-item {
+  padding: 0.6rem 0.75rem; cursor: pointer;
+  border-bottom: 1px solid var(--bg);
+  transition: background 0.1s;
+}
+.rm-pick-item:last-child { border-bottom: none; }
+.rm-pick-item:hover { background: var(--bg); }
+.rm-pick-item.selected { background: #eff6ff; border-left: 3px solid #3b82f6; padding-left: calc(0.75rem - 3px); }
+.rm-pick-line1 {
+  display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.15rem;
+}
+.rm-pick-id { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.78rem; }
+.rm-pick-vin { font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-dim); }
+.rm-pick-line2 { font-size: 0.72rem; color: var(--text-dim); display: flex; gap: 0.6rem; }
+.rm-pick-eld { font-family: 'JetBrains Mono', monospace; }
+.rm-pick-empty { padding: 1rem; font-size: 0.82rem; color: var(--text-dim); text-align: center; }
+.rm-pick-error {
+  padding: 0.6rem 0.75rem; font-size: 0.78rem;
+  background: #fef2f2; color: #991b1b;
+  border: 1px solid #fecaca; border-radius: 6px; margin-bottom: 0.75rem;
+}
 </style>

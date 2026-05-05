@@ -181,7 +181,19 @@
             </div>
           </div>
           <div>
-            <div class="dash-section-title">Route Map</div>
+            <div class="dash-section-title" style="display:flex;align-items:center;gap:0.5rem;">
+              <span>Route Map</span>
+              <span
+                v-if="selectedDriverPosition && selectedDriverPosition.source === 'routemate'"
+                style="font-size:0.6rem;font-weight:700;letter-spacing:0.05em;padding:1px 6px;border-radius:4px;background:#dcfce7;color:#166534;border:1px solid #bbf7d0;"
+                :title="`Live position from the truck's Routemate ELD device${selectedDriverPosition.lastPingAge != null ? ' — ' + formatPingAge(selectedDriverPosition.lastPingAge) + ' ago' : ''}`"
+              >ELD</span>
+              <span
+                v-else-if="selectedDriverPosition && selectedDriverPosition.source === 'phone'"
+                style="font-size:0.6rem;font-weight:700;letter-spacing:0.05em;padding:1px 6px;border-radius:4px;background:#f3f4f6;color:#4b5563;border:1px solid #e5e7eb;"
+                :title="`Live position from the driver's phone${selectedDriverPosition.lastPingAge != null ? ' — ' + formatPingAge(selectedDriverPosition.lastPingAge) + ' ago' : ''}`"
+              >Phone</span>
+            </div>
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="selectedDriverPosition" dispatch-mode />
           </div>
         </div>
@@ -342,6 +354,15 @@ const mapHeaders = computed(() => {
 const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || ''); const driverCol = computed(() => props.headers.find(h => /driver/i.test(h)) || '')
 function getCurrentStatus(j) { return statusCol.value ? (j[statusCol.value] || '') : '' }
 function getCurrentDriver(j) { return driverCol.value ? (j[driverCol.value] || '') : '' }
+function formatPingAge(ms) {
+  if (ms == null || isNaN(ms)) return ''
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.round(m / 60)
+  return `${h}h`
+}
 function confirmReassign(j) { const d = reassignSelections[j._rowIndex]; if (!d) return; if (confirm(`Reassign to ${d}?`)) { emit('reassign', { rowIndex: j._rowIndex, newDriver: d, job: j }); reassignSelections[j._rowIndex] = '' } }
 function confirmCancel(j) { if (confirm('Cancel this assignment?')) emit('cancel', { rowIndex: j._rowIndex, job: j }) }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
@@ -429,7 +450,7 @@ async function openDetail(job) {
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (job[dc] || '').trim() : ''
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []
-  if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => x.driver.toLowerCase() === dn.toLowerCase() && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude } }).catch(() => {}))
+  if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => x.driver.toLowerCase() === dn.toLowerCase() && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude, source: l.source || '', lastPingAge: l.lastPingAge != null ? l.lastPingAge : null } }).catch(() => {}))
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
   if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
   const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))

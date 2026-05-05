@@ -40,7 +40,19 @@
             >
               <span :class="['driver-dot', loc.noGps ? 'no-gps' : isOnline(loc) ? 'online' : 'offline']"></span>
               <div class="driver-info">
-                <span class="driver-name">{{ loc.driver }}</span>
+                <span class="driver-name">
+                  {{ loc.driver }}
+                  <span
+                    v-if="loc.source === 'routemate'"
+                    class="src-badge src-eld"
+                    title="Live position sourced from the truck's Routemate ELD device"
+                  >ELD</span>
+                  <span
+                    v-else-if="loc.source === 'phone'"
+                    class="src-badge src-phone"
+                    title="Live position sourced from the driver's phone (no ELD or stale)"
+                  >Phone</span>
+                </span>
                 <span v-if="loc.noGps" class="driver-meta">
                   <span class="status-text no-gps">No location data</span>
                 </span>
@@ -1304,6 +1316,30 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Source badge — tells dispatchers whether the live position is from the
+   truck's Routemate ELD device or the driver's phone. Tiny chip next to
+   the driver name. */
+.src-badge {
+  display: inline-block;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-left: 0.35rem;
+  vertical-align: middle;
+}
+.src-badge.src-eld {
+  background: #dcfce7;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+.src-badge.src-phone {
+  background: #f3f4f6;
+  color: #4b5563;
+  border: 1px solid #e5e7eb;
 }
 
 .driver-meta {
