@@ -852,8 +852,15 @@ async function handleStatusUpdate({ newStatus, load }) {
   try {
     await driverStore.updateStatus(loadId, newStatus, load._rowIndex, load)
     toast.show(`Status updated to ${newStatus}`)
-  } catch {
-    toast.show('Failed to update status', 'error')
+  } catch (err) {
+    if (err && err.code === 'POD_REQUIRED') {
+      // POD gate: surface the server message and keep the driver on the Status tab
+      // so the Documents section directly below the stepper is one tap away.
+      toast.show(err.message || 'Upload a POD before marking Delivered', 'error')
+      currentTab.value = 'status'
+    } else {
+      toast.show((err && err.message) || 'Failed to update status', 'error')
+    }
   }
 }
 

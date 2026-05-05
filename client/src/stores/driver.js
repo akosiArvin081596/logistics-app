@@ -46,7 +46,7 @@ export const useDriverStore = defineStore('driver', {
       const statusCol = findCol(state.headers.jobTracking, /status/i)
       const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
       if (!statusCol) return []
-      const workingRe = /^(assigned|at shipper|loading|in transit|at receiver)$/i
+      const workingRe = /^(assigned|heading to shipper|at shipper|loading|in transit|at receiver)$/i
       const filtered = state.loads.filter((l) => {
         const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
         return hasId && workingRe.test((l[statusCol] || '').trim())

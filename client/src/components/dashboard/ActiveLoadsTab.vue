@@ -209,7 +209,7 @@ const searchQuery = ref('')
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
-const statusOptions = ['At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
+const statusOptions = ['Dispatched', 'Heading to Shipper', 'At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
 const showDeleteConfirm = ref(false)
 const deleting = ref(false)

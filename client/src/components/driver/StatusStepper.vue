@@ -100,6 +100,7 @@ const showPodReminder = ref(false)
 const updating = ref(false)
 
 const statusFlow = [
+  { value: 'Heading to Shipper', label: 'Heading to Shipper' },
   { value: 'At Shipper', label: 'Arrived at Shipper' },
   { value: 'Loading', label: 'Loading' },
   { value: 'In Transit', label: 'In Transit' },
@@ -116,6 +117,7 @@ const loadId = computed(() => loadIdCol.value ? props.load[loadIdCol.value] : ''
 
 const currentIdx = computed(() => {
   const s = (props.currentStatus || '').trim()
+  // Assigned/Dispatched come before the first step (Heading to Shipper).
   if (/^(assigned|dispatched)$/i.test(s)) return -1
   return statusFlow.findIndex(
     (st) => st.value.toLowerCase() === s.toLowerCase()

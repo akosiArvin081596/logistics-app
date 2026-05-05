@@ -7167,7 +7167,7 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 		if (/^at shipper$/i.test(newStatus)) {
 			const driverCol = headers.findIndex((h) => /driver/i.test(h));
 			if (driverCol !== -1) {
-				const activeRe = /^(at shipper|loading|in transit|at receiver)$/i;
+				const activeRe = /^(heading to shipper|at shipper|loading|in transit|at receiver)$/i;
 				const hasActive = dataRows.some((row, i) => {
 					const rIdx = i + 2;
 					if (rIdx === rowIndex) return false;
@@ -7180,6 +7180,21 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 						error: "You already have an active job. Complete it before starting another.",
 					});
 				}
+			}
+		}
+
+		// POD gate: require at least one POD document before allowing a delivered/completed transition.
+		// CEO requirement (2026-05-05): drivers and dispatchers cannot mark Delivered without proof.
+		// Backend enforcement covers the dispatcher dropdown bypass that the client-side gate misses.
+		if (/^(delivered|completed|pod received)$/i.test((newStatus || "").trim())) {
+			const podRow = db
+				.prepare("SELECT COUNT(*) AS n FROM documents WHERE load_id = ? AND UPPER(type) = 'POD'")
+				.get(loadId || "");
+			if (!podRow || podRow.n === 0) {
+				return res.status(409).json({
+					code: "POD_REQUIRED",
+					error: "Upload a Proof of Delivery (POD) before marking this load as Delivered.",
+				});
 			}
 		}
 
@@ -8663,10 +8678,18 @@ app.post("/api/location", requireAuth, async (req, res) => {
 							const statusCol = headers.find((h) => /status/i.test(h));
 							const currentStatus = statusCol ? (loadObj[statusCol] || "").toLowerCase() : "";
 
-							// Guard: only auto-update if status is a valid predecessor
-							const canUpdate =
-								(geofenceTriggered === "At Shipper" && /^(dispatched|assigned)$/i.test(currentStatus)) ||
-								(geofenceTriggered === "At Receiver" && /^(in transit)$/i.test(currentStatus));
+							// Defense in depth: geofence must NEVER auto-write a completion status.
+							// CEO requirement (2026-05-05): completion requires manual driver confirmation + POD upload.
+							// checkGeofence only ever produces "At Shipper" or "At Receiver" today, but this guard
+							// makes the intent explicit and survives any future expansion of geofence triggers.
+							const isCompletionTrigger = /^(delivered|completed|pod received)$/i.test(geofenceTriggered);
+
+							// Guard: only auto-update if status is a valid predecessor.
+							// "Heading to Shipper" added 2026-05-05 so drivers en route auto-advance on arrival.
+							const canUpdate = !isCompletionTrigger && (
+								(geofenceTriggered === "At Shipper" && /^(dispatched|assigned|heading to shipper)$/i.test(currentStatus)) ||
+								(geofenceTriggered === "At Receiver" && /^(in transit)$/i.test(currentStatus))
+							);
 
 							if (canUpdate && statusCol) {
 								// Update status in sheet
