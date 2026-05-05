@@ -37,6 +37,7 @@
           <th>Status</th>
           <th>Current Driver</th>
           <th>Loads</th>
+          <th title="7-day average miles per gallon, derived from ELD telemetry. Tank size assumed 200 gal — value is a trend signal more than a calibrated number.">MPG (7d)</th>
         </tr>
       </thead>
       <tbody>
@@ -53,6 +54,7 @@
           <td><span :class="['status-pill', statusClass(t.Status)]">{{ t.Status }}</span></td>
           <td>{{ t.AssignedDriver || '-' }}</td>
           <td class="mono">{{ loadCountFor(t) }}</td>
+          <td class="mono">{{ mpgFor(t) }}</td>
         </tr>
       </tbody>
     </table>
@@ -60,7 +62,7 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { reactive, ref, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 
@@ -73,6 +75,28 @@ const emit = defineEmits(['reload'])
 function loadCountFor(t) {
   const unitKey = t.UnitNumber || t.unit_number || ''
   return (props.production?.perTruckData || {})[unitKey]?.loadCount ?? 0
+}
+
+// Per-truck 7-day MPG (telemetry-derived). The server scopes this endpoint
+// to the investor's own trucks via trucks.owner_id, so we can safely fetch
+// from this component without extra filtering.
+const fuelByTruck = ref({})
+async function loadFuel() {
+  try {
+    const r = await useApi().get('/api/routemate/fuel/summary?days=7')
+    const map = {}
+    for (const f of (r.trucks || [])) map[f.truckId] = f
+    fuelByTruck.value = map
+  } catch {
+    // Silent — MPG column simply renders '—' when fuel data is unavailable.
+  }
+}
+onMounted(loadFuel)
+
+function mpgFor(t) {
+  const f = fuelByTruck.value[t.id]
+  if (!f || f.mpgAvg == null) return '—'
+  return f.mpgAvg.toFixed(1)
 }
 
 const api = useApi()

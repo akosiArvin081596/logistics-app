@@ -40,6 +40,7 @@
             <th>Speed</th>
             <th>Idle</th>
             <th>Fuel</th>
+            <th title="7-day average miles per gallon, derived from telemetry. Tank size assumed 200 gal.">MPG (7d)</th>
             <th>Last Fix</th>
             <th>Location</th>
           </tr>
@@ -54,6 +55,7 @@
             <td class="mono">{{ t.speedMph != null ? t.speedMph + ' mph' : '—' }}</td>
             <td class="mono">{{ formatIdle(t) }}</td>
             <td class="mono">{{ t.fuelPct != null ? t.fuelPct + '%' : '—' }}</td>
+            <td class="mono">{{ formatMpg(t.truckId) }}</td>
             <td class="mono fh-age">{{ t.lastFixAgeSec != null ? formatAgeSec(t.lastFixAgeSec) : '—' }}</td>
             <td class="fh-location">{{ t.geocodedLocation || '—' }}</td>
           </tr>
@@ -75,6 +77,7 @@ import { useApi } from '../composables/useApi'
 
 const api = useApi()
 const trucks = ref([])
+const fuelByTruck = ref({})
 const loading = ref(false)
 const error = ref('')
 const search = ref('')
@@ -85,14 +88,28 @@ async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    const r = await api.get('/api/admin/fleet-health')
-    trucks.value = r.trucks || []
+    // Fetch in parallel — fuel summary changes infrequently but keeping the
+    // calls together avoids a second waterfall.
+    const [fleet, fuel] = await Promise.all([
+      api.get('/api/admin/fleet-health'),
+      api.get('/api/routemate/fuel/summary?days=7').catch(() => ({ trucks: [] })),
+    ])
+    trucks.value = fleet.trucks || []
+    const map = {}
+    for (const f of (fuel.trucks || [])) map[f.truckId] = f
+    fuelByTruck.value = map
     lastRefreshAt.value = Date.now()
   } catch (err) {
     error.value = err?.message || 'Failed to load fleet health.'
   } finally {
     loading.value = false
   }
+}
+
+function formatMpg(truckId) {
+  const f = fuelByTruck.value[truckId]
+  if (!f || f.mpgAvg == null) return '—'
+  return f.mpgAvg.toFixed(1)
 }
 
 const filteredTrucks = computed(() => {

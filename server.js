@@ -983,6 +983,122 @@ async function routemateSyncTelemetry() {
 // Reset 24h error counter daily at boot-aligned hour.
 setInterval(() => { routemateHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
 
+// --- Phase 4: telemetry-derived MPG rollup ---
+// Routemate's IFTA endpoint returns mileage only (no gallons), and live
+// locations don't carry fuel-event records. So MPG is derived from each
+// vehicle's telemetry: miles = odometer delta over the day; gallons =
+// (sum of positive fuel_pct drops) × tank_size / 100. Refuels (fuel_pct
+// going UP) are intentionally ignored. Tank size is a fixed assumption —
+// Class 8 sleeper tractors typically carry ~200 gallons across two saddle
+// tanks. If a fleet drifts from that, MPG values stay useful as TRENDS
+// even if the absolute number is off; absolute precision would require
+// a per-truck override which Phase 4 doesn't include.
+const ROUTEMATE_DEFAULT_TANK_GALLONS = 200;
+
+const routemateUpsertFuelDailyStmt = db.prepare(`
+	INSERT INTO routemate_fuel_daily
+		(routemate_vehicle_id, date, miles, gallons_est, mpg, derivation_notes)
+	VALUES (@routemate_vehicle_id, @date, @miles, @gallons_est, @mpg, @derivation_notes)
+	ON CONFLICT(routemate_vehicle_id, date) DO UPDATE SET
+		miles = excluded.miles,
+		gallons_est = excluded.gallons_est,
+		mpg = excluded.mpg,
+		derivation_notes = excluded.derivation_notes
+`);
+
+function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
+	const rows = db.prepare(`
+		SELECT odometer, fuel_pct, location_date_ms
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id = ?
+		  AND location_date_ms >= ?
+		  AND location_date_ms < ?
+		ORDER BY location_date_ms ASC
+	`).all(routemateVehicleId, dayStartMs, dayEndMs);
+
+	if (rows.length < 2) return null;
+
+	// Miles = max odometer − min odometer (telemetry is append-only and
+	// odometer is monotonically increasing per vehicle).
+	const odoVals = rows.map(r => r.odometer).filter(o => o > 0);
+	if (odoVals.length < 2) return null;
+	const miles = Math.max(...odoVals) - Math.min(...odoVals);
+	if (miles <= 0) return { miles: 0, gallons_est: 0, mpg: 0, derivation_notes: "no_movement" };
+
+	// Gallons = sum of positive fuel_pct drops × tank size / 100.
+	let consumptionPct = 0;
+	let prevFuel = null;
+	let fuelSamples = 0;
+	for (const r of rows) {
+		if (r.fuel_pct == null) continue;
+		fuelSamples += 1;
+		if (prevFuel != null && r.fuel_pct < prevFuel) {
+			consumptionPct += (prevFuel - r.fuel_pct);
+		}
+		prevFuel = r.fuel_pct;
+	}
+	const gallons = consumptionPct * ROUTEMATE_DEFAULT_TANK_GALLONS / 100;
+	if (gallons < 0.5 || fuelSamples < 2) {
+		return { miles: round1(miles), gallons_est: round1(gallons), mpg: 0, derivation_notes: "insufficient_fuel_samples" };
+	}
+	const mpg = miles / gallons;
+	// Sanity-clamp the MPG so a single bad telemetry row can't poison the
+	// dashboard. Class 8 trucks are 4–10 mpg in real life; we widen to 0–20
+	// before flagging as outlier.
+	if (mpg < 0 || mpg > 20) {
+		return { miles: round1(miles), gallons_est: round1(gallons), mpg: round1(mpg), derivation_notes: "outlier_clamped" };
+	}
+	return { miles: round1(miles), gallons_est: round1(gallons), mpg: round1(mpg), derivation_notes: "" };
+}
+
+function round1(n) { return Math.round(n * 10) / 10; }
+
+function routemateRollupFuelDaily(daysBack = 7) {
+	try {
+		const linkedVehicles = db.prepare(`
+			SELECT DISTINCT routemate_vehicle_id FROM trucks
+			WHERE COALESCE(routemate_vehicle_id, '') <> ''
+		`).all().map(r => r.routemate_vehicle_id);
+		if (linkedVehicles.length === 0) return { rolledUp: 0 };
+
+		const now = new Date();
+		// Roll up the last `daysBack` days, idempotent. Day boundaries are UTC.
+		let rolledUp = 0;
+		const txn = db.transaction(() => {
+			for (let d = 0; d < daysBack; d++) {
+				const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - d));
+				const dayStartMs = day.getTime();
+				const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+				const dateStr = day.toISOString().slice(0, 10);
+				for (const vid of linkedVehicles) {
+					const r = rollupOneDay(vid, dayStartMs, dayEndMs);
+					if (!r) continue;
+					routemateUpsertFuelDailyStmt.run({
+						routemate_vehicle_id: vid,
+						date: dateStr,
+						miles: r.miles,
+						gallons_est: r.gallons_est,
+						mpg: r.mpg,
+						derivation_notes: r.derivation_notes,
+					});
+					rolledUp += 1;
+				}
+			}
+		});
+		txn();
+		routemateHealth.lastSync.fuelDaily = new Date().toISOString();
+		return { rolledUp };
+	} catch (err) {
+		routemateHealth.lastError = { at: new Date().toISOString(), source: "fuelDaily", message: err.message };
+		console.error("[routemate] fuel daily rollup failed:", err.message);
+		return { rolledUp: 0, error: err.message };
+	}
+}
+
+// Run at boot (5min delay so telemetry has had time to ingest) and every 6h.
+setTimeout(() => routemateRollupFuelDaily(7), 5 * 60 * 1000);
+setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
+
 // Live telemetry: poll every ROUTEMATE_POLL_LIVE_SEC (default 60s).
 const ROUTEMATE_POLL_LIVE_MS = (parseInt(process.env.ROUTEMATE_POLL_LIVE_SEC || "60", 10) || 60) * 1000;
 setInterval(routemateSyncTelemetry, ROUTEMATE_POLL_LIVE_MS);
@@ -7875,6 +7991,64 @@ app.get("/api/admin/fleet-health", requireRole("Super Admin", "Dispatcher"), (re
 		res.json({ trucks: result, generatedAt: new Date().toISOString() });
 	} catch (err) {
 		console.error("fleet-health error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/routemate/fuel/summary?days=7 — Per-truck rolling MPG. Available
+// to Super Admin / Dispatcher (full fleet) and Investor (own trucks only,
+// scoped by trucks.owner_id like /api/trucks does).
+app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
+	try {
+		const days = Math.max(1, Math.min(parseInt(req.query.days, 10) || 7, 30));
+		const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+		const user = req.session.user;
+
+		const trucks = (user.role === "Investor")
+			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
+			: db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks").all();
+
+		const fuelStmt = db.prepare(`
+			SELECT
+				SUM(miles) AS miles_total,
+				SUM(gallons_est) AS gallons_total,
+				COUNT(*) AS day_count,
+				MAX(date) AS latest_date
+			FROM routemate_fuel_daily
+			WHERE routemate_vehicle_id = ?
+			  AND date >= ?
+		`);
+
+		const result = trucks.map(t => {
+			let miles_total = 0, gallons_total = 0, day_count = 0, latest_date = null, mpg_avg = null;
+			if (t.routemate_vehicle_id) {
+				const r = fuelStmt.get(t.routemate_vehicle_id, fromDate);
+				miles_total = r.miles_total || 0;
+				gallons_total = r.gallons_total || 0;
+				day_count = r.day_count || 0;
+				latest_date = r.latest_date;
+				if (gallons_total > 0) mpg_avg = round1(miles_total / gallons_total);
+			}
+			return {
+				truckId: t.id,
+				unitNumber: t.unit_number,
+				routemateVehicleId: t.routemate_vehicle_id || "",
+				milesTotal: round1(miles_total),
+				gallonsTotal: round1(gallons_total),
+				dayCount: day_count,
+				latestDate: latest_date,
+				mpgAvg: mpg_avg,
+			};
+		});
+
+		res.json({
+			days,
+			tankAssumptionGallons: ROUTEMATE_DEFAULT_TANK_GALLONS,
+			derivedFromTelemetry: true,
+			trucks: result,
+		});
+	} catch (err) {
+		console.error("fuel summary error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
