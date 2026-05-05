@@ -148,6 +148,17 @@
                 </div>
               </div>
             </div>
+            <!-- Admin upload: dispatcher / Super Admin can attach a doc on the
+                 driver's behalf (e.g. POD they emailed in). Reuses the same
+                 component the driver uses on /driver. -->
+            <div v-if="loadIdValue" style="margin-top:0.75rem;">
+              <DocumentUpload
+                :load-id="loadIdValue"
+                :driver-name="selectedJobDriverName"
+                :row-index="selectedJob?._rowIndex || 0"
+                @uploaded="refreshDocs"
+              />
+            </div>
           </div>
           <div v-if="auth.isSuperAdmin && isSelectedLoadCompleted" style="margin-bottom:1rem;">
             <div class="dash-section-title">Driver Rating</div>
@@ -193,6 +204,7 @@ import StarRating from '../shared/StarRating.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
+import DocumentUpload from '../driver/DocumentUpload.vue'
 
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
@@ -374,6 +386,17 @@ const sectionPatterns = [
 ]
 const hiddenCols = /broker|phone|email|contact|contract/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
+const selectedJobDriverName = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /driver/i.test(h)); return c ? (selectedJob.value[c] || '').toString().trim() : '' })
+
+async function refreshDocs() {
+  if (!loadIdValue.value) return
+  try {
+    const r = await api.get(`/api/documents/${encodeURIComponent(loadIdValue.value)}`)
+    loadDocs.value = r.documents || []
+  } catch {
+    // Keep existing list on transient failure; the upload itself already succeeded.
+  }
+}
 const detailSections = computed(() => {
   if (!selectedJob.value) return []; const used = new Set(); const secs = []
   for (const c of props.headers) { if (hiddenCols.test(c)) used.add(c) }

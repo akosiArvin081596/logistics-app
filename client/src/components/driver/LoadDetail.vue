@@ -99,7 +99,13 @@
       </van-collapse-item>
 
       <van-collapse-item title="Documents" name="documents">
-        <DocumentList :load-id="loadId" />
+        <DocumentUpload
+          :load-id="loadId"
+          :driver-name="driverName"
+          :row-index="load._rowIndex"
+          @uploaded="onUploaded"
+        />
+        <DocumentList ref="docListRef" :load-id="loadId" />
       </van-collapse-item>
 
       <van-collapse-item title="Expenses" name="expenses">
@@ -137,6 +143,7 @@ import { computed, ref } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
 import StatusBadge from '../shared/StatusBadge.vue'
 import DocumentList from './DocumentList.vue'
+import DocumentUpload from './DocumentUpload.vue'
 import DriverRouteMap from './DriverRouteMap.vue'
 import ExpenseForm from './ExpenseForm.vue'
 import ExpenseCard from './ExpenseCard.vue'
@@ -156,6 +163,15 @@ const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'declin
 const openSections = ref(['map'])
 const copiedField = ref(null)
 const routeMapRef = ref(null)
+const docListRef = ref(null)
+
+function onUploaded(payload) {
+  // Refresh the document list so the new upload appears immediately.
+  docListRef.value?.refresh?.()
+  // Bubble up so DriverView can refresh derived state (e.g. _podCount which
+  // gates the Delivered button in StatusStepper).
+  emit('uploaded', payload)
+}
 
 function isAddress(header) {
   return /address|addr|location/i.test(header)
