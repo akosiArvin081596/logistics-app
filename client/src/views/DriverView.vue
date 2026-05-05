@@ -280,6 +280,29 @@
           </EmptyState>
         </div>
         <div v-else>
+          <!-- Multi-load picker. Auto-picks the highest-priority active load
+               (In Transit > At Receiver > Unloading > At Shipper > Loading >
+               Heading to Shipper > Assigned). Driver can override; selection
+               persists to localStorage and is cleared automatically when the
+               chosen load is no longer active. -->
+          <div v-if="driverStore.workingLoads.length > 1" class="status-load-picker">
+            <label class="picker-label">Active Load</label>
+            <select
+              class="picker-select"
+              :value="getLoadId(currentActiveLoad)"
+              @change="setStatusLoad($event.target.value)"
+            >
+              <option
+                v-for="l in driverStore.workingLoads"
+                :key="l._rowIndex"
+                :value="getLoadId(l)"
+              >{{ getLoadId(l) }} &mdash; {{ getLoadStatus(l) || 'No status' }}</option>
+            </select>
+            <span class="picker-hint">
+              {{ isStatusLoadManual ? '(manual)' : '(auto-selected)' }}
+            </span>
+          </div>
+
           <div class="status-load-header">
             <span class="status-load-id">{{ getLoadId(currentActiveLoad) }}</span>
             <StatusBadge :status="getLoadStatus(currentActiveLoad)" />
@@ -626,9 +649,74 @@ const detailLoadExpenses = computed(() => {
   return driverStore.expenses.filter(e => (e.load_id || '').toString().trim() === lid)
 })
 
-// Current active load for status tab (only working loads — not pending/delivered)
+// Current active load for status tab.
+// Priority order matches real-world dispatch: drivers should land on the
+// load they're physically moving with, not the most recently sheet-rowed one.
+// A manual override (persisted per-driver) wins when the chosen load is
+// still in workingLoads; otherwise we fall back to priority-based pick.
+const STATUS_PRIORITY = [
+  /^in transit$/i,
+  /^at receiver$/i,
+  /^unloading$/i,
+  /^at shipper$/i,
+  /^loading$/i,
+  /^heading to shipper$/i,
+  /^assigned$/i,
+]
+
+function statusPriorityScore(status) {
+  const s = (status || '').trim()
+  for (let i = 0; i < STATUS_PRIORITY.length; i++) {
+    if (STATUS_PRIORITY[i].test(s)) return i
+  }
+  return STATUS_PRIORITY.length
+}
+
+function statusLoadStorageKey() {
+  return `logisx_driver_status_load_${(driverName.value || 'anon').toLowerCase()}`
+}
+
+const manualStatusLoadId = ref('')
+try { manualStatusLoadId.value = localStorage.getItem(statusLoadStorageKey()) || '' } catch { /* private mode */ }
+
 const currentActiveLoad = computed(() => {
-  return driverStore.workingLoads[0] || null
+  const loads = driverStore.workingLoads
+  if (loads.length === 0) return null
+
+  // Manual override: use it only if the load is still active.
+  if (manualStatusLoadId.value) {
+    const match = loads.find((l) => getLoadId(l) === manualStatusLoadId.value)
+    if (match) return match
+  }
+
+  // Priority-based pick. Tie-breaker = highest _rowIndex (matches today's behavior).
+  return [...loads].sort((a, b) => {
+    const sa = statusPriorityScore(getLoadStatus(a))
+    const sb = statusPriorityScore(getLoadStatus(b))
+    if (sa !== sb) return sa - sb
+    return (b._rowIndex || 0) - (a._rowIndex || 0)
+  })[0] || null
+})
+
+const isStatusLoadManual = computed(() => {
+  if (!manualStatusLoadId.value || !currentActiveLoad.value) return false
+  return getLoadId(currentActiveLoad.value) === manualStatusLoadId.value
+})
+
+function setStatusLoad(loadId) {
+  manualStatusLoadId.value = loadId || ''
+  try {
+    if (loadId) localStorage.setItem(statusLoadStorageKey(), loadId)
+    else localStorage.removeItem(statusLoadStorageKey())
+  } catch { /* private mode */ }
+}
+
+// If the manually-selected load is no longer active (delivered, reassigned,
+// etc.), clear the override so the priority pick takes over on next render.
+watch(() => driverStore.workingLoads, (loads) => {
+  if (!manualStatusLoadId.value) return
+  const stillActive = loads.some((l) => getLoadId(l) === manualStatusLoadId.value)
+  if (!stillActive) setStatusLoad('')
 })
 
 // Client-side distance warning — computed from GPS position and the currently viewed load
@@ -1370,6 +1458,42 @@ onUnmounted(() => {
   padding: 0.1rem 0.5rem;
   border-radius: 20px;
   color: var(--text-dim);
+}
+
+/* Multi-load picker (only renders when workingLoads.length > 1) */
+.status-load-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 0.65rem;
+  flex-wrap: wrap;
+}
+.picker-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.picker-select {
+  flex: 1;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.82rem;
+  background: var(--surface);
+  color: var(--text);
+}
+.picker-hint {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 /* Load selector */
