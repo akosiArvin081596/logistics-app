@@ -204,6 +204,69 @@
       </div>
     </div>
 
+    <!-- Routemate ELD Integration -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <div class="section-dot" style="background: #16a34a;"></div>
+          Routemate ELD Integration
+        </div>
+        <button
+          class="btn btn-primary btn-sm"
+          :disabled="rmSyncBusy || !rmHealth?.enabled"
+          @click="runRoutemateSync"
+        >{{ rmSyncBusy ? 'Syncing...' : 'Sync Vehicles Now' }}</button>
+      </div>
+      <div class="card-body">
+        <div v-if="rmHealthLoading" class="scan-empty">Loading status...</div>
+        <div v-else-if="!rmHealth" class="scan-empty">Status unavailable.</div>
+        <div v-else>
+          <div class="rm-status-grid">
+            <div class="rm-status-row">
+              <span class="rm-status-label">Kill switch</span>
+              <span :class="['rm-pill', rmHealth.enabled ? 'rm-pill-on' : 'rm-pill-off']">
+                {{ rmHealth.enabled ? 'ENABLED' : 'DISABLED' }}
+              </span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">API key</span>
+              <span :class="['rm-pill', rmHealth.hasKey ? 'rm-pill-on' : 'rm-pill-off']">
+                {{ rmHealth.hasKey ? 'CONFIGURED' : 'MISSING' }}
+              </span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">Base URL</span>
+              <span class="rm-status-mono">{{ rmHealth.baseUrl || '—' }}</span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">Last vehicles sync</span>
+              <span class="rm-status-mono">{{ formatRmTs(rmHealth.lastSync?.vehicles) }}</span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">Last telemetry sync</span>
+              <span class="rm-status-mono">{{ formatRmTs(rmHealth.lastSync?.telemetry) }}</span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">Errors (last 24h)</span>
+              <span :class="['rm-status-mono', rmHealth.errorsLast24h > 0 ? 'rm-error-text' : '']">
+                {{ rmHealth.errorsLast24h ?? 0 }}
+              </span>
+            </div>
+          </div>
+          <div v-if="rmHealth.lastError" class="rm-last-error">
+            <strong>{{ rmHealth.lastError.source || 'error' }}:</strong>
+            {{ rmHealth.lastError.message }}
+            <span v-if="rmHealth.lastError.status">(HTTP {{ rmHealth.lastError.status }})</span>
+          </div>
+          <p class="rm-help">
+            Sync pulls the company vehicle inventory into LogisX so trucks can be linked
+            to Routemate devices on the <code>/trucks</code> page. Live GPS auto-syncs every 60s
+            once the kill switch is on.
+          </p>
+        </div>
+      </div>
+    </div>
+
     <!-- Business Configuration (Investor Settings) -->
     <ConfigPanel
       :config="investorStore.config"
@@ -217,12 +280,58 @@ import { ref, computed, onMounted } from 'vue'
 import { useAdminToolsStore } from '../stores/adminTools'
 import { useInvestorStore } from '../stores/investor'
 import { useToast } from '../composables/useToast'
+import { useApi } from '../composables/useApi'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 
 const store = useAdminToolsStore()
 const investorStore = useInvestorStore()
+const api = useApi()
 
-onMounted(() => { if (!investorStore.data) investorStore.load().catch(() => {}) })
+const rmHealth = ref(null)
+const rmHealthLoading = ref(true)
+const rmSyncBusy = ref(false)
+
+async function loadRoutemateHealth() {
+  rmHealthLoading.value = true
+  try {
+    rmHealth.value = await api.get('/api/routemate/health')
+  } catch {
+    rmHealth.value = null
+  } finally {
+    rmHealthLoading.value = false
+  }
+}
+
+async function runRoutemateSync() {
+  if (rmSyncBusy.value) return
+  rmSyncBusy.value = true
+  try {
+    const r = await api.post('/api/admin/routemate/sync-now', {})
+    toast(`Synced ${r.vehiclesSynced} Routemate vehicle${r.vehiclesSynced === 1 ? '' : 's'}`)
+    await loadRoutemateHealth()
+  } catch (err) {
+    toast(err?.message || 'Routemate sync failed', 'error')
+    await loadRoutemateHealth()
+  } finally {
+    rmSyncBusy.value = false
+  }
+}
+
+function formatRmTs(iso) {
+  if (!iso) return 'Never'
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso
+  const ageSec = Math.round((Date.now() - d.getTime()) / 1000)
+  if (ageSec < 60) return `${ageSec}s ago`
+  if (ageSec < 3600) return `${Math.round(ageSec / 60)}m ago`
+  if (ageSec < 86400) return `${Math.round(ageSec / 3600)}h ago`
+  return d.toLocaleString()
+}
+
+onMounted(() => {
+  if (!investorStore.data) investorStore.load().catch(() => {})
+  loadRoutemateHealth()
+})
 const { show: toast } = useToast()
 const dupShowCount = ref(20)
 
@@ -704,4 +813,44 @@ async function fixName(oldName, newName) {
 .btn-danger { background: var(--danger); color: #fff; }
 .btn-sm { padding: 0.35rem 0.7rem; font-size: 0.75rem; }
 .btn-xs { padding: 0.2rem 0.5rem; font-size: 0.7rem; }
+
+/* Routemate ELD status card */
+.rm-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.4rem 1rem;
+  margin-bottom: 0.6rem;
+}
+.rm-status-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.35rem 0; border-bottom: 1px dashed var(--bg);
+  font-size: 0.78rem;
+}
+.rm-status-label {
+  color: var(--text-dim); font-weight: 600;
+  text-transform: uppercase; font-size: 0.66rem; letter-spacing: 0.04em;
+}
+.rm-status-mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem; color: var(--text);
+}
+.rm-error-text { color: var(--danger); font-weight: 700; }
+.rm-pill {
+  font-size: 0.6rem; font-weight: 700; letter-spacing: 0.05em;
+  padding: 2px 8px; border-radius: 10px;
+}
+.rm-pill-on { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+.rm-pill-off { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.rm-last-error {
+  margin-top: 0.5rem; padding: 0.55rem 0.75rem;
+  background: #fef2f2; border: 1px solid #fecaca;
+  border-radius: 6px; color: #991b1b; font-size: 0.78rem;
+}
+.rm-help {
+  margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-dim); line-height: 1.45;
+}
+.rm-help code {
+  font-family: 'JetBrains Mono', monospace;
+  background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 0.72rem;
+}
 </style>

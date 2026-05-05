@@ -974,6 +974,14 @@ setInterval(routemateSyncTelemetry, ROUTEMATE_POLL_LIVE_MS);
 // list rarely changes — admins shouldn't need to manually re-sync.
 setInterval(() => { routemateSyncVehicles().catch(() => {}); }, 24 * 60 * 60 * 1000);
 
+// Boot-time vehicle sync — populates routemate_vehicles shortly after start
+// so the truck-link UI has data without waiting 24h for the daily interval
+// or requiring an admin to click "Sync Now". 5s delay lets Express finish
+// binding before any outbound HTTP. Errors are surfaced via routemateHealth.
+if (ROUTEMATE_ENABLED && ROUTEMATE_API_KEY) {
+	setTimeout(() => { routemateSyncVehicles().catch(() => {}); }, 5000);
+}
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_config (
 		key TEXT PRIMARY KEY,
@@ -7759,6 +7767,97 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (r
 		res.json({ success: true, truckId });
 	} catch (err) {
 		console.error("routemate unlink error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/admin/fleet-health — Phase 3 dashboard data. Per-truck snapshot
+// blending the trucks table with the latest Routemate telemetry row, plus
+// a derived "idle seconds" (time since the truck last moved at >5 mph).
+// Super Admin + Dispatcher only. No alerts here — Phase 5 owns thresholds.
+app.get("/api/admin/fleet-health", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const trucks = db.prepare(`
+			SELECT id, unit_number, vin, status, assigned_driver, routemate_vehicle_id
+			FROM trucks
+			ORDER BY unit_number ASC
+		`).all();
+
+		// Pre-fetch latest telemetry per linked vehicle and the latest "moving"
+		// timestamp in one pass so we don't N+1 the DB.
+		const linkedIds = trucks.map(t => t.routemate_vehicle_id).filter(Boolean);
+		const latestByVehicle = {};
+		const lastMovingByVehicle = {};
+		if (linkedIds.length > 0) {
+			const placeholders = linkedIds.map(() => "?").join(",");
+			const latestRows = db.prepare(`
+				SELECT rt.routemate_vehicle_id, rt.latitude, rt.longitude, rt.speed,
+				       rt.fuel_pct, rt.odometer, rt.engine_hours, rt.geocoded_location,
+				       rt.location_date_ms
+				FROM routemate_telemetry rt
+				INNER JOIN (
+					SELECT routemate_vehicle_id, MAX(id) AS max_id
+					FROM routemate_telemetry
+					WHERE routemate_vehicle_id IN (${placeholders})
+					GROUP BY routemate_vehicle_id
+				) latest ON rt.id = latest.max_id
+			`).all(...linkedIds);
+			for (const r of latestRows) latestByVehicle[r.routemate_vehicle_id] = r;
+
+			const MOVING_MPH_M_PER_S = 2.235; // ~5 mph
+			const movingRows = db.prepare(`
+				SELECT routemate_vehicle_id, MAX(location_date_ms) AS last_moving_ms
+				FROM routemate_telemetry
+				WHERE routemate_vehicle_id IN (${placeholders})
+				  AND speed > ?
+				GROUP BY routemate_vehicle_id
+			`).all(...linkedIds, MOVING_MPH_M_PER_S);
+			for (const r of movingRows) lastMovingByVehicle[r.routemate_vehicle_id] = r.last_moving_ms;
+		}
+
+		const FRESH_MS = 5 * 60 * 1000;
+		const now = Date.now();
+		const result = trucks.map((t) => {
+			const rmId = t.routemate_vehicle_id || "";
+			const tel = rmId ? latestByVehicle[rmId] : null;
+			const isFresh = !!(tel && tel.location_date_ms && (now - tel.location_date_ms) < FRESH_MS);
+			let idleSeconds = null;
+			if (tel) {
+				const lastMoving = lastMovingByVehicle[rmId];
+				const speedMps = tel.speed || 0;
+				if (speedMps <= 2.235) {
+					// Stationary now; clock starts at last_moving_ms (or fall back to
+					// the latest fix if we have no record of the truck ever moving).
+					const since = lastMoving || tel.location_date_ms;
+					idleSeconds = since ? Math.round((now - since) / 1000) : null;
+				} else {
+					idleSeconds = 0;
+				}
+			}
+			return {
+				truckId: t.id,
+				unitNumber: t.unit_number,
+				vin: t.vin || "",
+				truckStatus: t.status,
+				assignedDriver: t.assigned_driver || "",
+				routemateVehicleId: rmId,
+				source: rmId && isFresh ? "routemate" : (rmId ? "stale" : "unlinked"),
+				latitude: tel ? tel.latitude : null,
+				longitude: tel ? tel.longitude : null,
+				speedMph: tel ? Math.round((tel.speed || 0) * 2.237) : null,
+				fuelPct: tel && tel.fuel_pct != null ? tel.fuel_pct : null,
+				odometer: tel ? tel.odometer : null,
+				engineHours: tel ? tel.engine_hours : null,
+				geocodedLocation: tel ? tel.geocoded_location : "",
+				lastFixMs: tel ? tel.location_date_ms : null,
+				lastFixAgeSec: tel ? Math.round((now - tel.location_date_ms) / 1000) : null,
+				idleSeconds,
+			};
+		});
+
+		res.json({ trucks: result, generatedAt: new Date().toISOString() });
+	} catch (err) {
+		console.error("fleet-health error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });

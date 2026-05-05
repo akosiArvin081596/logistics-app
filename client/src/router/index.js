@@ -143,6 +143,12 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    path: '/admin/fleet-health',
+    name: 'admin-fleet-health',
+    component: () => import('../views/FleetHealthView.vue'),
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
     path: '/admin/financials',
     name: 'admin-financials',
     component: () => import('../views/FinancialsView.vue'),
