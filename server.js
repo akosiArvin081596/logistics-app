@@ -883,6 +883,19 @@ const routemateInsertTelemetryStmt = db.prepare(`
 	VALUES (@routemate_vehicle_id, @latitude, @longitude, @speed, @bearing, @odometer, @engine_hours, @fuel_pct, @geocoded_location, @location_date_ms)
 `);
 
+// Minimal vehicle upsert used by the telemetry sync to keep routemate_vehicles
+// populated with at least the IDs even when the upstream vehicles-list endpoint
+// is unavailable (Routemate's /api/v0/assets/vehicles returns 500 for some
+// accounts as of 2026-05-06). COALESCE preserves richer fields (VIN, make,
+// model) if they were ever populated by routemateSyncVehicles.
+const routemateUpsertVehicleMinimalStmt = db.prepare(`
+	INSERT INTO routemate_vehicles (routemate_vehicle_id, vehicle_id, last_synced_at)
+	VALUES (?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(routemate_vehicle_id) DO UPDATE SET
+		vehicle_id = COALESCE(NULLIF(excluded.vehicle_id, ''), routemate_vehicles.vehicle_id),
+		last_synced_at = CURRENT_TIMESTAMP
+`);
+
 async function routemateSyncVehicles() {
 	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return { skipped: true, reason: "disabled" };
 	const creds = routemateCreds();
@@ -951,10 +964,14 @@ async function routemateSyncTelemetry() {
 					geocoded_location: t.geocoded_location || "",
 					location_date_ms: t.location_date_ms || Date.now(),
 				});
+				// Also keep routemate_vehicles fresh with at least the IDs. This
+				// covers us when the upstream vehicles-list endpoint is broken.
+				routemateUpsertVehicleMinimalStmt.run(t.routemate_vehicle_id, t.vehicle_id || "");
 			}
 		});
 		txn(rows);
 		routemateHealth.lastSync.telemetry = new Date().toISOString();
+		routemateHealth.lastSync.vehicles = routemateHealth.lastSync.vehicles || new Date().toISOString();
 		routemateHealth.lastError = null;
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "telemetry", message: err.message, status: err.status || null };
