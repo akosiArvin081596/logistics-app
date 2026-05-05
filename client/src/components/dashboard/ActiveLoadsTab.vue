@@ -107,6 +107,16 @@
                 {{ linkCopied ? 'Link copied' : 'Copy tracking link' }}
               </button>
               <button
+                v-if="loadIdValue && (auth.isSuperAdmin || auth.user?.role === 'Dispatcher')"
+                type="button"
+                :style="overrideBtnStyle"
+                title="Override load status (e.g. revert from Delivered) — requires a reason and is logged."
+                @click="openOverride"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                Override
+              </button>
+              <button
                 v-if="loadIdValue && auth.isSuperAdmin"
                 type="button"
                 :style="deleteBtnStyle"
@@ -178,6 +188,50 @@
       </DialogContent>
     </Dialog>
 
+    <!-- Override Status modal — Super Admin + Dispatcher. Bypasses POD gate;
+         requires a written reason and is logged to audit_trail. -->
+    <Dialog :open="showOverride" @update:open="v => { if (!v) closeOverride() }">
+      <DialogContent class="max-w-[460px]" style="padding:0;">
+        <DialogHeader style="padding:1rem 1.25rem;border-bottom:1px solid #f3f4f6;">
+          <DialogTitle>Override Status — {{ loadIdValue }}</DialogTitle>
+          <DialogDescription class="sr-only">Force a load to a different status, bypassing the POD requirement. Reason required.</DialogDescription>
+        </DialogHeader>
+        <div style="padding:1.25rem;display:flex;flex-direction:column;gap:0.85rem;">
+          <div>
+            <label style="font-size:0.7rem;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:0.04em;">New Status</label>
+            <select v-model="overrideStatus" style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.875rem;">
+              <option v-for="s in statusOptions" :key="s" :value="s">{{ s }}</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:0.7rem;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:0.04em;">Reason <span style="color:#dc2626;">*</span></label>
+            <textarea
+              v-model="overrideReason"
+              rows="3"
+              placeholder="e.g. Driver tagged the wrong load. Real one was LD-1234."
+              style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.875rem;resize:vertical;"
+            />
+            <div style="font-size:0.7rem;color:#9ca3af;margin-top:0.25rem;">Min 5 characters. Logged to audit trail.</div>
+          </div>
+          <div v-if="overrideError" style="padding:0.5rem 0.75rem;background:#fef2f2;color:#991b1b;border-radius:6px;font-size:0.8rem;">{{ overrideError }}</div>
+          <div style="display:flex;gap:0.5rem;justify-content:flex-end;">
+            <button
+              type="button"
+              :disabled="overriding"
+              style="padding:0.5rem 0.9rem;border:1px solid #d1d5db;background:#fff;color:#374151;border-radius:6px;font-family:inherit;font-size:0.85rem;font-weight:600;cursor:pointer;"
+              @click="closeOverride"
+            >Cancel</button>
+            <button
+              type="button"
+              :disabled="overriding || overrideReason.trim().length < 5 || !overrideStatus"
+              style="padding:0.5rem 0.9rem;border:none;background:#f59e0b;color:#fff;border-radius:6px;font-family:inherit;font-size:0.85rem;font-weight:600;cursor:pointer;"
+              @click="submitOverride"
+            >{{ overriding ? 'Overriding...' : 'Confirm Override' }}</button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+
     <!-- Delete confirm — soft delete, reversible in SQL but not from the UI -->
     <ConfirmModal
       :open="showDeleteConfirm"
@@ -225,6 +279,11 @@ const statusOptions = ['Dispatched', 'Heading to Shipper', 'At Shipper', 'Loadin
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
 const showDeleteConfirm = ref(false)
 const deleting = ref(false)
+const showOverride = ref(false)
+const overriding = ref(false)
+const overrideStatus = ref('')
+const overrideReason = ref('')
+const overrideError = ref('')
 let linkCopiedTimer = null
 const copyBtnStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
@@ -233,6 +292,15 @@ const copyBtnStyle = computed(() => ({
   border: '1px solid ' + (linkCopied.value ? '#16a34a' : '#d1d5db'),
   background: linkCopied.value ? '#dcfce7' : '#ffffff',
   color: linkCopied.value ? '#166534' : '#374151',
+  transition: 'all 0.15s',
+}))
+const overrideBtnStyle = computed(() => ({
+  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+  borderRadius: '6px', cursor: 'pointer', fontFamily: 'inherit',
+  border: '1px solid #fde68a',
+  background: '#fffbeb',
+  color: '#92400e',
   transition: 'all 0.15s',
 }))
 const deleteBtnStyle = computed(() => ({
@@ -278,6 +346,49 @@ function confirmReassign(j) { const d = reassignSelections[j._rowIndex]; if (!d)
 function confirmCancel(j) { if (confirm('Cancel this assignment?')) emit('cancel', { rowIndex: j._rowIndex, job: j }) }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
 function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }; showDeleteConfirm.value = false }
+
+function openOverride() {
+  if (!loadIdValue.value) return
+  // Pre-select the current status so it's a one-step change for the common case
+  // of "fix the typo" rather than always defaulting to a fresh value.
+  overrideStatus.value = (statusCol.value && selectedJob.value ? (selectedJob.value[statusCol.value] || '') : '') || statusOptions[0]
+  overrideReason.value = ''
+  overrideError.value = ''
+  showOverride.value = true
+}
+
+function closeOverride() {
+  if (overriding.value) return
+  showOverride.value = false
+}
+
+async function submitOverride() {
+  if (!loadIdValue.value || overriding.value) return
+  if (overrideReason.value.trim().length < 5) {
+    overrideError.value = 'Reason must be at least 5 characters.'
+    return
+  }
+  overriding.value = true
+  overrideError.value = ''
+  try {
+    await api.put(`/api/loads/${encodeURIComponent(loadIdValue.value)}/status-override`, {
+      newStatus: overrideStatus.value,
+      reason: overrideReason.value.trim(),
+    })
+    showOverride.value = false
+    // Patch the in-modal job so the user sees the new status without needing
+    // to close and reopen. The dashboard refresh below picks up the canonical
+    // value from the sheet on the next pass.
+    if (selectedJob.value && statusCol.value) {
+      selectedJob.value = { ...selectedJob.value, [statusCol.value]: overrideStatus.value }
+    }
+    emit('status-update', { rowIndex: selectedJob.value?._rowIndex || 0, newStatus: overrideStatus.value, job: selectedJob.value, _override: true })
+  } catch (err) {
+    overrideError.value = (err && err.message) || 'Failed to override status.'
+  } finally {
+    overriding.value = false
+  }
+}
 
 async function runDelete() {
   if (!loadIdValue.value || deleting.value) return

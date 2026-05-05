@@ -7250,6 +7250,106 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 	}
 });
 
+// PUT /api/loads/:loadId/status-override — Admin status reversion
+//
+// CEO requirement (2026-05-05): Super Admins and Dispatchers must be able to
+// revert a load that was tagged with the wrong status (e.g. accidentally
+// marked Delivered before POD was uploaded). Bypasses the POD gate that
+// blocks PUT /api/driver/status — that's the whole point of an override.
+// Every override is reason-tagged and audit-logged.
+app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const { loadId } = req.params;
+		const { newStatus, reason } = req.body || {};
+		if (!newStatus || typeof newStatus !== "string") {
+			return res.status(400).json({ error: "newStatus is required" });
+		}
+		if (!reason || typeof reason !== "string" || reason.trim().length < 5) {
+			return res.status(400).json({ error: "reason is required (min 5 chars)" });
+		}
+
+		const sheets = await getSheets();
+		const sheetRes = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+		});
+		const allRows = sheetRes.data.values || [];
+		const headers = allRows[0] || [];
+		const dataRows = allRows.slice(1);
+
+		const statusIdx = headers.findIndex((h) => /status/i.test(h));
+		const dateIdx = headers.findIndex((h) => /status.*update.*date|update.*date/i.test(h));
+		const compDateIdx = headers.findIndex((h) => /completion.*date/i.test(h));
+		const loadIdIdx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
+		const driverIdx = headers.findIndex((h) => /driver/i.test(h));
+
+		if (statusIdx === -1 || loadIdIdx === -1) {
+			return res.status(400).json({ error: "Status or Load ID column not found in sheet" });
+		}
+
+		// Find the matching row (last match wins for safety with corrected duplicates)
+		const targetLid = loadId.toString().trim().toLowerCase().replace(/^#/, "");
+		let rowIndex = -1;
+		for (let i = dataRows.length - 1; i >= 0; i--) {
+			const lid = (dataRows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
+			if (lid === targetLid) { rowIndex = i + 2; break; }
+		}
+		if (rowIndex === -1) {
+			return res.status(404).json({ error: `Load ${loadId} not found` });
+		}
+
+		const currentRow = dataRows[rowIndex - 2] || [];
+		const oldStatus = currentRow[statusIdx] || "";
+		const driverName = driverIdx !== -1 ? (currentRow[driverIdx] || "") : "";
+
+		const now = new Date();
+		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+
+		const updateData = [
+			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[newStatus]] },
+		];
+		if (dateIdx !== -1) {
+			updateData.push({ range: `Job Tracking!${colLetter(dateIdx)}${rowIndex}`, values: [[dateTime]] });
+		}
+		// Reverting away from a completed status: clear the Completion Date so the
+		// column doesn't lie. Setting to a completed status: populate it.
+		if (compDateIdx !== -1) {
+			const isCompletion = /^(delivered|completed|pod received)$/i.test(newStatus);
+			updateData.push({
+				range: `Job Tracking!${colLetter(compDateIdx)}${rowIndex}`,
+				values: [[isCompletion ? dateTime : ""]],
+			});
+		}
+
+		await sheets.spreadsheets.values.batchUpdate({
+			spreadsheetId: SPREADSHEET_ID,
+			requestBody: { valueInputOption: "USER_ENTERED", data: updateData },
+		});
+
+		jtCacheInvalidate();
+		const overrideUser = req.session?.user?.username || "admin";
+		const detailMsg = `Override: "${oldStatus}" → "${newStatus}" — ${reason.trim()}`;
+		io.to("dispatch").emit("status-updated", { loadId, driverName, newStatus });
+		insertDispatchNotification.run(
+			'status-override',
+			`${driverName || "Load"}: ${newStatus} (override)`,
+			detailMsg,
+			JSON.stringify({ loadId, driverName, newStatus, oldStatus, reason: reason.trim(), by: overrideUser })
+		);
+		io.to("dispatch").emit("dispatch-notification", {
+			type: 'status-override',
+			title: `${driverName || "Load"}: ${newStatus} (override)`,
+			body: detailMsg,
+		});
+
+		logAudit(req, 'status_override', 'load', loadId, `Override "${oldStatus}" → "${newStatus}" by ${overrideUser}: ${reason.trim()}`);
+		res.json({ success: true, oldStatus, newStatus });
+	} catch (error) {
+		console.error("Error overriding load status:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // POST /api/messages — Send a new message
 app.post("/api/messages", requireAuth, (req, res) => {
 	try {
