@@ -977,10 +977,10 @@ setInterval(() => { routemateSyncVehicles().catch(() => {}); }, 24 * 60 * 60 * 1
 // Boot-time vehicle sync — populates routemate_vehicles shortly after start
 // so the truck-link UI has data without waiting 24h for the daily interval
 // or requiring an admin to click "Sync Now". 5s delay lets Express finish
-// binding before any outbound HTTP. Errors are surfaced via routemateHealth.
-if (ROUTEMATE_ENABLED && ROUTEMATE_API_KEY) {
-	setTimeout(() => { routemateSyncVehicles().catch(() => {}); }, 5000);
-}
+// binding before any outbound HTTP. The helper itself no-ops when the kill
+// switch is off; we don't gate here because ROUTEMATE_ENABLED is declared
+// later in the file (TDZ would crash the boot).
+setTimeout(() => { routemateSyncVehicles().catch(() => {}); }, 5000);
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_config (
