@@ -18,6 +18,7 @@ const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { renderPolicy } = require("./lib/policy-renderer");
 const { getStateFromCoords } = require("./lib/ifta-states");
+const routemate = require("./lib/routemate-client");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -725,6 +726,116 @@ function purgeOldDriverLocations() {
 purgeOldDriverLocations();
 setInterval(purgeOldDriverLocations, 7 * 24 * 60 * 60 * 1000); // weekly
 
+// --- Routemate ELD/telematics tables (Phase 1 — additive) ---
+// All six tables follow the existing IF NOT EXISTS migration style.
+// driver_locations is intentionally untouched; Routemate gets its own table
+// so phone-GPS and ELD streams can coexist (hybrid source priority added in
+// Phase 2 inside GET /api/locations/latest).
+db.exec(`
+	CREATE TABLE IF NOT EXISTS routemate_vehicles (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		routemate_vehicle_id TEXT NOT NULL UNIQUE,
+		vehicle_id TEXT DEFAULT '',
+		vin TEXT DEFAULT '',
+		make TEXT DEFAULT '',
+		model TEXT DEFAULT '',
+		year INTEGER DEFAULT 0,
+		fuel_type TEXT DEFAULT '',
+		license_num TEXT DEFAULT '',
+		eld_id TEXT DEFAULT '',
+		gps_ids TEXT DEFAULT '[]',
+		state TEXT DEFAULT '',
+		active INTEGER DEFAULT 1,
+		raw_json TEXT DEFAULT '',
+		last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_routemate_vehicles_vin ON routemate_vehicles(vin)`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS routemate_telemetry (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		routemate_vehicle_id TEXT NOT NULL,
+		latitude REAL,
+		longitude REAL,
+		speed REAL DEFAULT 0,
+		bearing TEXT DEFAULT '',
+		odometer REAL DEFAULT 0,
+		engine_hours REAL DEFAULT 0,
+		fuel_pct INTEGER,
+		geocoded_location TEXT DEFAULT '',
+		location_date_ms INTEGER DEFAULT 0,
+		fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_vid_date ON routemate_telemetry(routemate_vehicle_id, location_date_ms DESC)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_fetched ON routemate_telemetry(fetched_at)`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS routemate_fault_codes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		routemate_vehicle_id TEXT NOT NULL,
+		code TEXT NOT NULL,
+		status TEXT DEFAULT '',
+		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+		last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+		ack_by_user_id INTEGER DEFAULT 0,
+		ack_at DATETIME,
+		UNIQUE (routemate_vehicle_id, code)
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_vid ON routemate_fault_codes(routemate_vehicle_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_ack ON routemate_fault_codes(ack_at)`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS routemate_dvir (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		routemate_vehicle_id TEXT NOT NULL,
+		dvir_id TEXT NOT NULL UNIQUE,
+		date_ms INTEGER DEFAULT 0,
+		driver_name TEXT DEFAULT '',
+		report_type TEXT DEFAULT '',
+		status TEXT DEFAULT '',
+		unresolved_defects TEXT DEFAULT '[]',
+		corrected_defects TEXT DEFAULT '[]',
+		fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_dvir_vid ON routemate_dvir(routemate_vehicle_id)`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS routemate_fuel_daily (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		routemate_vehicle_id TEXT NOT NULL,
+		date TEXT NOT NULL,
+		miles REAL DEFAULT 0,
+		gallons_est REAL DEFAULT 0,
+		mpg REAL DEFAULT 0,
+		derivation_notes TEXT DEFAULT '',
+		UNIQUE (routemate_vehicle_id, date)
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fuel_vid ON routemate_fuel_daily(routemate_vehicle_id)`);
+
+db.exec(`
+	CREATE TABLE IF NOT EXISTS routemate_hos_daily (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		driver_id TEXT NOT NULL,
+		driver_name TEXT DEFAULT '',
+		date TEXT NOT NULL,
+		on_duty_min INTEGER DEFAULT 0,
+		driving_min INTEGER DEFAULT 0,
+		idle_min INTEGER DEFAULT 0,
+		UNIQUE (driver_id, date)
+	)
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_hos_driver ON routemate_hos_daily(driver_id)`);
+
+// trucks gets a single additive column for the Routemate vehicle linkage.
+// Pattern matches the existing ALTER TABLE migration style at server.js:257.
+try { db.prepare("SELECT routemate_vehicle_id FROM trucks LIMIT 1").get(); }
+catch { db.exec(`ALTER TABLE trucks ADD COLUMN routemate_vehicle_id TEXT DEFAULT ''`); }
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_config (
 		key TEXT PRIMARY KEY,
@@ -1279,6 +1390,22 @@ const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 // production so credentials can be rotated once across the org.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_OCR_MODEL = process.env.GEMINI_OCR_MODEL || "gemini-2.5-flash";
+
+// Routemate AI ELD/telematics integration. Phase 1 deploys with the kill
+// switch off (ROUTEMATE_ENABLED=false) so the foundation lands before the
+// API key is wired. Sync intervals (live GPS, fault codes, daily rollups)
+// added in later phases also gate on ROUTEMATE_ENABLED.
+const ROUTEMATE_BASE_URL = process.env.ROUTEMATE_BASE_URL || "https://cloud.routemate.ai";
+const ROUTEMATE_API_KEY = process.env.ROUTEMATE_API_KEY || "";
+const ROUTEMATE_ENABLED = String(process.env.ROUTEMATE_ENABLED || "").toLowerCase() === "true";
+function routemateCreds() { return { apiKey: ROUTEMATE_API_KEY, baseUrl: ROUTEMATE_BASE_URL }; }
+// Last-sync tracker for /api/routemate/health. Updated by the manual probe
+// endpoint and (later phases) by interval sync jobs.
+const routemateHealth = {
+	lastSync: { vehicles: null, telemetry: null, faultCodes: null, dvirs: null, hosDaily: null, fuelDaily: null },
+	lastError: null,
+	errorsLast24h: 0,
+};
 
 async function getSheets() {
 	if (!sheetsClient) {
@@ -7348,6 +7475,103 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		console.error("Error overriding load status:", error.message);
 		res.status(500).json({ error: error.message });
 	}
+});
+
+// --- Routemate ELD/telematics probe endpoints (Phase 1) ---
+// The sync intervals come in Phase 2+. For now these two endpoints validate
+// that the API key works and mirror the vehicle list into routemate_vehicles
+// so admins can link trucks → Routemate devices in TrucksView (Phase 2).
+
+// POST /api/admin/routemate/sync-now — Manual probe + vehicle list mirror.
+// Super Admin only. No-ops with a clean 503 when ROUTEMATE_ENABLED is false
+// or the key is unset; that keeps the kill switch usable from the UI.
+app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req, res) => {
+	if (!ROUTEMATE_ENABLED) {
+		return res.status(503).json({ error: "Routemate integration disabled (set ROUTEMATE_ENABLED=true)" });
+	}
+	if (!ROUTEMATE_API_KEY) {
+		return res.status(503).json({ error: "Routemate API key not configured (set ROUTEMATE_API_KEY)" });
+	}
+	const creds = routemateCreds();
+	const upsert = db.prepare(`
+		INSERT INTO routemate_vehicles
+			(routemate_vehicle_id, vehicle_id, vin, make, model, year, fuel_type, license_num, eld_id, gps_ids, state, active, raw_json, last_synced_at)
+		VALUES (@routemate_vehicle_id, @vehicle_id, @vin, @make, @model, @year, @fuel_type, @license_num, @eld_id, @gps_ids, @state, @active, @raw_json, CURRENT_TIMESTAMP)
+		ON CONFLICT(routemate_vehicle_id) DO UPDATE SET
+			vehicle_id = excluded.vehicle_id,
+			vin = excluded.vin,
+			make = excluded.make,
+			model = excluded.model,
+			year = excluded.year,
+			fuel_type = excluded.fuel_type,
+			license_num = excluded.license_num,
+			eld_id = excluded.eld_id,
+			gps_ids = excluded.gps_ids,
+			state = excluded.state,
+			active = excluded.active,
+			raw_json = excluded.raw_json,
+			last_synced_at = CURRENT_TIMESTAMP
+	`);
+	try {
+		// Smoke test first via the lightest call before paginating vehicles.
+		await routemate.getCompany(creds);
+		// Walk pages until we get a short page or hit a hard cap.
+		const HARD_PAGE_CAP = 50;
+		let page = 0;
+		let total = 0;
+		while (page < HARD_PAGE_CAP) {
+			const batch = await routemate.listVehicles(creds, { page, elements: 200 });
+			if (!batch || batch.length === 0) break;
+			const txn = db.transaction((rows) => {
+				for (const v of rows) {
+					upsert.run({
+						routemate_vehicle_id: v.routemate_vehicle_id,
+						vehicle_id: v.vehicle_id,
+						vin: v.vin,
+						make: v.make,
+						model: v.model,
+						year: v.year,
+						fuel_type: v.fuel_type,
+						license_num: v.license_num,
+						eld_id: v.eld_id,
+						gps_ids: JSON.stringify(v.gps_ids || []),
+						state: v.state,
+						active: v.active ? 1 : 0,
+						raw_json: JSON.stringify(v.raw || {}),
+					});
+				}
+			});
+			txn(batch);
+			total += batch.length;
+			if (batch.length < 200) break;
+			page += 1;
+		}
+		routemateHealth.lastSync.vehicles = new Date().toISOString();
+		routemateHealth.lastError = null;
+		logAudit(req, 'routemate_sync', 'vehicles', '', `Synced ${total} Routemate vehicles`);
+		res.json({ success: true, vehiclesSynced: total });
+	} catch (err) {
+		routemateHealth.lastError = { at: new Date().toISOString(), message: err.message, status: err.status || null };
+		routemateHealth.errorsLast24h += 1;
+		console.error("Routemate sync-now error:", err.message);
+		res.status(err.status === 401 || err.status === 403 ? err.status : 502).json({
+			error: err.message || "Routemate sync failed",
+			code: err.code || "ROUTEMATE_SYNC_FAILED",
+		});
+	}
+});
+
+// GET /api/routemate/health — Last-sync timestamps + recent error count.
+// Super Admin only. Used by the manual probe UI in TrucksView (Phase 2).
+app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
+	res.json({
+		enabled: ROUTEMATE_ENABLED,
+		hasKey: !!ROUTEMATE_API_KEY,
+		baseUrl: ROUTEMATE_BASE_URL,
+		lastSync: routemateHealth.lastSync,
+		lastError: routemateHealth.lastError,
+		errorsLast24h: routemateHealth.errorsLast24h,
+	});
 });
 
 // POST /api/messages — Send a new message
