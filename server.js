@@ -1038,6 +1038,21 @@ const routemateUpsertFuelDailyStmt = db.prepare(`
 		derivation_notes = excluded.derivation_notes
 `);
 
+// 3-point median filter — kills single-sample sensor flicker (e.g.
+// 8% → 7% → 8% reads as 8% → 8% → 8%) without losing real consumption.
+// At array edges we just copy the original value.
+function medianFilter3(arr) {
+	if (arr.length < 3) return arr.slice();
+	const out = [arr[0]];
+	for (let i = 1; i < arr.length - 1; i++) {
+		const a = arr[i - 1], b = arr[i], c = arr[i + 1];
+		const sorted = [a, b, c].sort((x, y) => x - y);
+		out.push(sorted[1]);
+	}
+	out.push(arr[arr.length - 1]);
+	return out;
+}
+
 function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 	const rows = db.prepare(`
 		SELECT odometer, fuel_pct, location_date_ms
@@ -1057,21 +1072,28 @@ function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 	const miles = Math.max(...odoVals) - Math.min(...odoVals);
 	if (miles <= 0) return { miles: 0, gallons_est: 0, mpg: 0, derivation_notes: "no_movement" };
 
-	// Gallons = sum of positive fuel_pct drops × tank size / 100.
-	let consumptionPct = 0;
-	let prevFuel = null;
-	let fuelSamples = 0;
-	for (const r of rows) {
-		if (r.fuel_pct == null) continue;
-		fuelSamples += 1;
-		if (prevFuel != null && r.fuel_pct < prevFuel) {
-			consumptionPct += (prevFuel - r.fuel_pct);
-		}
-		prevFuel = r.fuel_pct;
+	// Build a smoothed fuel_pct series. Two filters in series:
+	//   1. Drop null/empty samples.
+	//   2. Apply a 3-point median filter to kill single-sample noise +
+	//      tank-slosh spikes (a common telemetry artifact when the truck
+	//      hits a hill and fuel sloshes against the sensor).
+	const fuelRaw = rows.map(r => r.fuel_pct).filter(f => f != null);
+	if (fuelRaw.length < 3) {
+		return { miles: round1(miles), gallons_est: 0, mpg: 0, derivation_notes: "insufficient_fuel_samples" };
 	}
+	const fuelSmooth = medianFilter3(fuelRaw);
+
+	// Sum negative deltas in the smoothed series. Refuels (positive deltas)
+	// are still ignored — refuel events look like a cliff up to ~95-100%.
+	let consumptionPct = 0;
+	for (let i = 1; i < fuelSmooth.length; i++) {
+		const delta = fuelSmooth[i] - fuelSmooth[i - 1];
+		if (delta < 0) consumptionPct += -delta;
+	}
+
 	const gallons = consumptionPct * ROUTEMATE_DEFAULT_TANK_GALLONS / 100;
-	if (gallons < 0.5 || fuelSamples < 2) {
-		return { miles: round1(miles), gallons_est: round1(gallons), mpg: 0, derivation_notes: "insufficient_fuel_samples" };
+	if (gallons < 0.5) {
+		return { miles: round1(miles), gallons_est: round1(gallons), mpg: 0, derivation_notes: "negligible_fuel_change" };
 	}
 	const mpg = miles / gallons;
 	// Sanity-clamp the MPG so a single bad telemetry row can't poison the
