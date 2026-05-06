@@ -3575,18 +3575,53 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		}
 
 		const driverNameRaw = driverCol ? (load[driverCol] || "").toString().trim() : "";
+		const driverNameKey = driverNameRaw.toLowerCase().replace(/\s+/g, " ").trim();
 		let lastPing = null;
 		let lastPingSpeed = 0;
-		if (driverNameRaw) {
-			const row = db.prepare(
-				`SELECT latitude, longitude, speed, timestamp FROM driver_locations
-				 WHERE LOWER(driver) = ? ORDER BY timestamp DESC LIMIT 1`
-			).get(driverNameRaw.toLowerCase());
-			if (row && row.timestamp) {
-				const ageMs = Date.now() - new Date(row.timestamp).getTime();
-				if (!isNaN(ageMs) && ageMs >= 0 && ageMs <= 2 * 60 * 60 * 1000) {
-					lastPing = { lat: row.latitude, lng: row.longitude, at: row.timestamp };
-					lastPingSpeed = row.speed || 0;
+		const MAX_PING_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours — accommodates rural coverage gaps
+		if (driverNameKey) {
+			// Source priority: Routemate ELD telemetry first (hardware GPS, independent
+			// of the driver's phone). Falls back to driver_locations if the truck isn't
+			// linked to an ELD or the latest telemetry row is stale.
+			let rmRow = null;
+			try {
+				rmRow = db.prepare(`
+					SELECT rt.latitude, rt.longitude, rt.speed, rt.location_date_ms
+					FROM truck_assignments ta
+					JOIN trucks t ON t.id = ta.truck_id
+					JOIN routemate_telemetry rt ON rt.routemate_vehicle_id = t.routemate_vehicle_id
+					WHERE ta.end_date = ''
+					  AND COALESCE(t.routemate_vehicle_id, '') <> ''
+					  AND TRIM(LOWER(ta.driver_name)) = ?
+					  AND rt.id = (
+						SELECT MAX(rt2.id) FROM routemate_telemetry rt2
+						WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+					  )
+					LIMIT 1
+				`).get(driverNameKey);
+			} catch { /* tables may not exist on legacy installs */ }
+			if (rmRow && rmRow.location_date_ms) {
+				const age = Date.now() - rmRow.location_date_ms;
+				if (age >= 0 && age <= MAX_PING_AGE_MS) {
+					lastPing = {
+						lat: rmRow.latitude,
+						lng: rmRow.longitude,
+						at: new Date(rmRow.location_date_ms).toISOString(),
+					};
+					lastPingSpeed = rmRow.speed || 0;
+				}
+			}
+			if (!lastPing) {
+				const row = db.prepare(
+					`SELECT latitude, longitude, speed, timestamp FROM driver_locations
+					 WHERE TRIM(LOWER(driver)) = ? ORDER BY timestamp DESC LIMIT 1`
+				).get(driverNameKey);
+				if (row && row.timestamp) {
+					const ageMs = Date.now() - new Date(row.timestamp).getTime();
+					if (!isNaN(ageMs) && ageMs >= 0 && ageMs <= MAX_PING_AGE_MS) {
+						lastPing = { lat: row.latitude, lng: row.longitude, at: row.timestamp };
+						lastPingSpeed = row.speed || 0;
+					}
 				}
 			}
 		}
@@ -10106,17 +10141,17 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					}
 				}
 
-				const DEFAULT_SPEED_MPS = 24.587; // ~55 mph in m/s
+				const DEFAULT_SPEED_MPS = 24.587; // ~55 mph fallback when Routes API fails
 
+				// First pass: attach loads + coords, collect ETA work
+				const etaTasks = [];
 				for (const loc of locations) {
 					loc.etaStatus = "unknown";
 					loc.etaMinutes = null;
 
-					// Attach all active loads for this driver
 					const driverKey = (loc.driver || "").toLowerCase();
 					loc.activeLoads = driverActiveLoadsMap[driverKey] || [];
 
-					// Override stale load_id: prefer the driver's active load from Google Sheets
 					const sheetActiveLoad = driverActiveLoadMap[driverKey];
 					if (sheetActiveLoad && loc.loadId !== sheetActiveLoad && loadMap[sheetActiveLoad]) {
 						loc.loadId = sheetActiveLoad;
@@ -10125,7 +10160,6 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					if (!loc.loadId || !loadMap[loc.loadId]) continue;
 					const load = loadMap[loc.loadId];
 
-					// Attach origin coordinates
 					if (originLatCol && originLngCol) {
 						const oLat = parseFloat(load[originLatCol]);
 						const oLng = parseFloat(load[originLngCol]);
@@ -10142,27 +10176,43 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 							loc.destLat = dLat;
 							loc.destLng = dLng;
 							if (loc.latitude == null || loc.longitude == null) continue;
-							const distMeters = geolib.getDistance(
-								{ latitude: loc.latitude, longitude: loc.longitude },
-								{ latitude: dLat, longitude: dLng }
-							);
-							const speed = loc.speed > 1 ? loc.speed : DEFAULT_SPEED_MPS;
-							const etaSeconds = distMeters / speed;
-							loc.etaMinutes = Math.round(etaSeconds / 60);
-
-							// Compare against scheduled delivery time
-							if (deliveryTimeCol && load[deliveryTimeCol]) {
-								try {
-									const scheduled = new Date(load[deliveryTimeCol]);
-									if (!isNaN(scheduled)) {
-										const arrival = new Date(Date.now() + etaSeconds * 1000);
-										loc.etaStatus = arrival <= scheduled ? "on-time" : "delayed";
-									}
-								} catch { /* ignore parse error */ }
-							}
+							etaTasks.push({ loc, dLat, dLng, load });
 						}
 					}
 				}
+
+				// Second pass: parallel Routes API calls (cached internally for 15 min,
+				// keyed by lat/lng rounded to 3 decimals — repeat polls hit the cache).
+				// Falls back to haversine ÷ 55 mph when Routes returns null.
+				await Promise.all(etaTasks.map(async ({ loc, dLat, dLng, load }) => {
+					let etaSeconds;
+					const route = await getRoute(
+						{ latitude: loc.latitude, longitude: loc.longitude },
+						{ latitude: dLat, longitude: dLng },
+					);
+					if (route) {
+						loc.etaMinutes = route.durationMin;
+						etaSeconds = route.durationMin * 60;
+					} else {
+						const distMeters = geolib.getDistance(
+							{ latitude: loc.latitude, longitude: loc.longitude },
+							{ latitude: dLat, longitude: dLng },
+						);
+						const speed = loc.speed > 1 ? loc.speed : DEFAULT_SPEED_MPS;
+						etaSeconds = distMeters / speed;
+						loc.etaMinutes = Math.round(etaSeconds / 60);
+					}
+
+					if (deliveryTimeCol && load[deliveryTimeCol]) {
+						try {
+							const scheduled = new Date(load[deliveryTimeCol]);
+							if (!isNaN(scheduled)) {
+								const arrival = new Date(Date.now() + etaSeconds * 1000);
+								loc.etaStatus = arrival <= scheduled ? "on-time" : "delayed";
+							}
+						} catch { /* ignore parse error */ }
+					}
+				}));
 			}
 		} catch (etaErr) {
 			console.error("ETA enrichment error:", etaErr.message);
