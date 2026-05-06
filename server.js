@@ -3489,12 +3489,25 @@ function resolveCityState(row, kind, loadId, sheetAddr) {
 	const base = parsed.state ? `${parsed.city}, ${parsed.state}` : parsed.city;
 	return parsed.zip ? `${base} ${parsed.zip}` : base;
 }
+
+// Per-loadId TTL cache for the public tracker. Caps Google Routes API spend
+// when many customers (or bots) poll the same load. Sits inside the rate
+// limiter so it never bypasses trackPublicLimiter.
+const trackResponseCache = new Map();
+const TRACK_CACHE_TTL_MS = 30 * 1000;
+const TRACK_CACHE_MAX = 200;
+
 app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 	res.setHeader("X-Robots-Tag", "noindex, nofollow");
 	try {
 		const rawId = (req.params.loadId || "").trim();
 		if (!rawId || !/^[A-Za-z0-9\-_.#]{1,40}$/.test(rawId)) {
 			return res.status(400).json({ error: "Invalid load id" });
+		}
+		const cacheKey = rawId.toLowerCase().replace(/^#/, "");
+		const cached = trackResponseCache.get(cacheKey);
+		if (cached && Date.now() - cached.time < TRACK_CACHE_TTL_MS) {
+			return res.json(cached.response);
 		}
 		const sheets = await getSheets();
 		const response = await sheets.spreadsheets.values.batchGet({
@@ -3582,27 +3595,35 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		const deliveredRe = /^(delivered|pod received|completed)$/i;
 		const isDelivered = deliveredRe.test(statusLower);
 		if (!isDelivered && lastPing && destLat != null && destLng != null) {
-			const DEFAULT_SPEED_MPS = 24.587; // ~55 mph
-			const distMeters = geolib.getDistance(
+			let distanceMiles, minutesRemaining, expectedAt;
+			const route = await getRoute(
 				{ latitude: lastPing.lat, longitude: lastPing.lng },
 				{ latitude: destLat, longitude: destLng },
 			);
-			const speed = lastPingSpeed > 1 ? lastPingSpeed : DEFAULT_SPEED_MPS;
-			const etaSeconds = distMeters / speed;
-			const minutesRemaining = Math.round(etaSeconds / 60);
-			const expectedAt = new Date(Date.now() + etaSeconds * 1000).toISOString();
+			if (route) {
+				distanceMiles = route.distanceMiles;
+				minutesRemaining = route.durationMin;
+				expectedAt = new Date(Date.now() + route.durationMin * 60 * 1000).toISOString();
+			} else {
+				console.warn(`[track] getRoute fallback for load=${target}`);
+				const DEFAULT_SPEED_MPS = 24.587; // ~55 mph
+				const distMeters = geolib.getDistance(
+					{ latitude: lastPing.lat, longitude: lastPing.lng },
+					{ latitude: destLat, longitude: destLng },
+				);
+				const speed = lastPingSpeed > 1 ? lastPingSpeed : DEFAULT_SPEED_MPS;
+				const etaSeconds = distMeters / speed;
+				distanceMiles = Math.round((distMeters / 1609.34) * 10) / 10;
+				minutesRemaining = Math.round(etaSeconds / 60);
+				expectedAt = new Date(Date.now() + etaSeconds * 1000).toISOString();
+			}
 			let onTime = null;
 			const schedRaw = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
 			if (schedRaw) {
 				const scheduled = new Date(schedRaw);
 				if (!isNaN(scheduled)) onTime = new Date(expectedAt) <= scheduled;
 			}
-			eta = {
-				distanceMiles: Math.round((distMeters / 1609.34) * 10) / 10,
-				minutesRemaining,
-				expectedAt,
-				onTime,
-			};
+			eta = { distanceMiles, minutesRemaining, expectedAt, onTime };
 		}
 
 		let truckUnit = "";
@@ -3614,7 +3635,7 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		let deliveredAt = null;
 		if (isDelivered) deliveredAt = statusUpdateCol ? (load[statusUpdateCol] || "").toString().trim() : "";
 
-		return res.json({
+		const payload = {
 			loadId: (load[loadIdCol] || "").toString().trim(),
 			status,
 			stages,
@@ -3630,7 +3651,10 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			scheduledPickup: pickupDateCol ? (load[pickupDateCol] || "").toString().trim() : "",
 			scheduledDelivery: deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "",
 			deliveredAt,
-		});
+		};
+		trackResponseCache.set(cacheKey, { response: payload, time: Date.now() });
+		if (trackResponseCache.size > TRACK_CACHE_MAX) trackResponseCache.delete(trackResponseCache.keys().next().value);
+		return res.json(payload);
 	} catch (err) {
 		console.error("Public track error:", err.message);
 		res.status(500).json({ error: "track_failed" });
