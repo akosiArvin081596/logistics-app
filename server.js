@@ -949,6 +949,20 @@ async function routemateSyncTelemetry() {
 			routemateHealth.lastSync.telemetry = new Date().toISOString();
 			return;
 		}
+		// Build a one-shot lookup of routemate_vehicle_id → driver_name so each
+		// telemetry row can fan out a Socket.IO location-update to dispatch
+		// viewers. Without this, the /tracking map only refreshes on page-load
+		// — ELD positions would appear frozen until the user F5s.
+		const driverByVehicle = {};
+		for (const r of db.prepare(`
+			SELECT t.routemate_vehicle_id, ta.driver_name
+			FROM truck_assignments ta
+			JOIN trucks t ON t.id = ta.truck_id
+			WHERE ta.end_date = '' AND COALESCE(t.routemate_vehicle_id, '') <> ''
+		`).all()) {
+			driverByVehicle[r.routemate_vehicle_id] = r.driver_name;
+		}
+
 		const txn = db.transaction((items) => {
 			for (const t of items) {
 				if (!t.routemate_vehicle_id) continue;
@@ -973,6 +987,24 @@ async function routemateSyncTelemetry() {
 		routemateHealth.lastSync.telemetry = new Date().toISOString();
 		routemateHealth.lastSync.vehicles = routemateHealth.lastSync.vehicles || new Date().toISOString();
 		routemateHealth.lastError = null;
+
+		// Fan out per-driver location-update events. Same payload shape as
+		// POST /api/location uses for phone GPS so the frontend handler
+		// (TrackingMap onLocationUpdate) doesn't need to know the source.
+		// `source: 'routemate'` lets the client flip the badge to ELD live.
+		for (const t of rows) {
+			const driverName = driverByVehicle[t.routemate_vehicle_id];
+			if (!driverName) continue;
+			io.to("dispatch").emit("location-update", {
+				driver: driverName,
+				latitude: t.latitude,
+				longitude: t.longitude,
+				speed: t.speed || 0,
+				loadId: "",
+				timestamp: new Date(t.location_date_ms || Date.now()).toISOString(),
+				source: "routemate",
+			});
+		}
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "telemetry", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
@@ -9446,6 +9478,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 			speed: speed || 0,
 			loadId: loadId || "",
 			timestamp,
+			source: "phone",
 		});
 
 		// Geofence check if loadId is provided

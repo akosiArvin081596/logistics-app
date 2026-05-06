@@ -1043,6 +1043,11 @@ function onLocationUpdate(payload) {
     locations.value[idx].speed = payload.speed || 0
     locations.value[idx].loadId = payload.loadId || ''
     locations.value[idx].timestamp = payload.timestamp
+    // Honor source/lastPingAge from the emitter so the ELD/Phone badge flips
+    // live without waiting for the next /api/locations/latest fetch.
+    if (payload.source) locations.value[idx].source = payload.source
+    locations.value[idx].lastPingAge = 0
+    if (locations.value[idx].noGps) locations.value[idx].noGps = false
   } else {
     locations.value.push({
       driver: payload.driver,
