@@ -7966,6 +7966,15 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 // POST /api/admin/routemate/sync-now — Manual probe + vehicle list mirror.
 // Super Admin only. No-ops with a clean 503 when ROUTEMATE_ENABLED is false
 // or the key is unset; that keeps the kill switch usable from the UI.
+// Method guard — without this, a stray GET to this URL falls through to the
+// SPA catch-all and serves index.html, which looks like the endpoint is
+// world-readable. POST is properly auth-gated below; this just keeps the
+// 405 error explicit for any tooling that probes both verbs.
+app.all("/api/admin/routemate/sync-now", (req, res, next) => {
+	if (req.method === "POST") return next();
+	res.set("Allow", "POST");
+	res.status(405).json({ error: "Method not allowed", expected: "POST" });
+});
 app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req, res) => {
 	if (!ROUTEMATE_ENABLED) {
 		return res.status(503).json({ error: "Routemate integration disabled (set ROUTEMATE_ENABLED=true)" });
