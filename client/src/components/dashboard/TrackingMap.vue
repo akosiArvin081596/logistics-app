@@ -153,6 +153,7 @@ let originMarker = null
 let destMarker = null
 let distanceLabelMarker = null
 let routePolyline = null
+let passedPolyline = null         // dashed gray segment behind the driver
 let driverRouteOverlays = []      // { polyline, originMarker, destMarker, infoO, infoD }
 let allRouteOverlays = []         // same shape, for "All Drivers" view
 let driverInfoWindows = new Map() // driver name -> google.maps.InfoWindow
@@ -293,9 +294,44 @@ function safeFitBounds(points, options = {}) {
 // ---- Clear overlay helpers ----
 function clearSingleLoadOverlays() {
   if (routePolyline) { routePolyline.setMap(null); routePolyline = null }
+  if (passedPolyline) { passedPolyline.setMap(null); passedPolyline = null }
   if (originMarker) { originMarker.map = null; originMarker = null }
   if (destMarker) { destMarker.map = null; destMarker = null }
   if (distanceLabelMarker) { distanceLabelMarker.map = null; distanceLabelMarker = null }
+}
+
+// Find the closest point on the route polyline to the driver's position and
+// split the polyline there. Used to render "already-driven" portion as a
+// dashed gray line and "remaining" portion as the prominent blue line, so
+// the route reflects live progress instead of staying static behind the pin.
+function splitRouteAtDriver(routePts, driverLat, driverLng) {
+  if (!routePts || routePts.length < 2) return { passed: [], remaining: routePts || [] }
+  let minDistSq = Infinity
+  let bestIdx = 0
+  let bestT = 0
+  for (let i = 0; i < routePts.length - 1; i++) {
+    const ax = routePts[i][1], ay = routePts[i][0]
+    const bx = routePts[i + 1][1], by = routePts[i + 1][0]
+    const px = driverLng, py = driverLat
+    const dx = bx - ax, dy = by - ay
+    const lenSq = dx * dx + dy * dy
+    let t = lenSq === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = ax + t * dx
+    const projY = ay + t * dy
+    const distSq = (projX - px) ** 2 + (projY - py) ** 2
+    if (distSq < minDistSq) {
+      minDistSq = distSq
+      bestIdx = i
+      bestT = t
+    }
+  }
+  const a = routePts[bestIdx]
+  const b = routePts[bestIdx + 1]
+  const splitPt = [a[0] + bestT * (b[0] - a[0]), a[1] + bestT * (b[1] - a[1])]
+  const passed = [...routePts.slice(0, bestIdx + 1), splitPt]
+  const remaining = [splitPt, ...routePts.slice(bestIdx + 1)]
+  return { passed, remaining }
 }
 
 function clearDriverRouteOverlays() {
@@ -323,20 +359,53 @@ function renderSingleLoadRoute() {
   if (!map) return
   if (selectedDriver.value === '__all__' || !expandedLoadId.value) return
 
-  // Route polyline
+  // Route polyline — split at the driver's current position so the portion
+  // already driven renders as dashed gray and the remaining trip stays as
+  // the prominent solid blue line. Falls back to a single polyline when no
+  // driver position is available.
   if (routePoints.value.length >= 2) {
+    let driverLat = null, driverLng = null
+    if (selectedDriver.value && selectedDriver.value !== '__all__') {
+      const loc = locations.value.find(l => l.driver === selectedDriver.value)
+      if (loc && loc.latitude != null && loc.longitude != null) {
+        driverLat = loc.latitude
+        driverLng = loc.longitude
+      }
+    }
+
+    let remainingPts = routePoints.value
+    if (driverLat != null && driverLng != null) {
+      const { passed, remaining } = splitRouteAtDriver(routePoints.value, driverLat, driverLng)
+      if (passed.length >= 2) {
+        // Dashed gray "already driven" segment.
+        passedPolyline = new google.maps.Polyline({
+          path: passed.map(p => ({ lat: p[0], lng: p[1] })),
+          strokeOpacity: 0,
+          strokeWeight: 4,
+          icons: [{
+            icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3, strokeColor: '#9ca3af' },
+            offset: '0',
+            repeat: '12px',
+          }],
+          map,
+        })
+      }
+      if (remaining.length >= 2) remainingPts = remaining
+    }
+
     routePolyline = new google.maps.Polyline({
-      path: routePoints.value.map(p => ({ lat: p[0], lng: p[1] })),
+      path: remainingPts.map(p => ({ lat: p[0], lng: p[1] })),
       strokeColor: '#000000',
       strokeOpacity: 0.7,
       strokeWeight: 6,
       map,
     })
 
-    // Distance label at midpoint
-    if (routeDistance.value != null) {
-      const mid = Math.floor(routePoints.value.length / 2)
-      const midPt = routePoints.value[mid]
+    // Distance label at midpoint of the REMAINING segment so the number
+    // reflects what's still ahead of the driver.
+    if (routeDistance.value != null && remainingPts.length >= 2) {
+      const mid = Math.floor(remainingPts.length / 2)
+      const midPt = remainingPts[mid]
       const labelEl = document.createElement('div')
       labelEl.textContent = routeDistance.value + ' mi'
       labelEl.style.cssText = 'color:#333;font-size:11px;font-weight:700;font-family:JetBrains Mono,monospace;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px;white-space:nowrap;pointer-events:none;'
@@ -1078,6 +1147,18 @@ function onLocationUpdate(payload) {
     destLatLng.value
   ) {
     checkOffRoute(payload.latitude, payload.longitude)
+  }
+
+  // Live re-render so the split point (driven vs remaining) tracks the pin
+  // as the driver moves along the route. Without this, the dashed/solid
+  // boundary stays frozen at the position where the route was first fetched
+  // and the solid blue line ends up extending behind the driver.
+  if (
+    selectedDriver.value === payload.driver &&
+    expandedLoadId.value &&
+    routePoints.value.length >= 2
+  ) {
+    renderSingleLoadRoute()
   }
 }
 
