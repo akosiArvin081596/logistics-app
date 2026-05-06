@@ -3453,7 +3453,7 @@ const trackPublicLimiter = rateLimit({
 	standardHeaders: true,
 });
 const TRACK_STAGES = [
-	{ key: "dispatched", name: "Dispatched", matchStatus: /^(dispatched|assigned)$/i },
+	{ key: "dispatched", name: "Dispatched", matchStatus: /^(dispatched|assigned|heading to shipper)$/i },
 	{ key: "at_shipper", name: "At Shipper", matchStatus: /^at shipper$/i },
 	{ key: "loading", name: "Loading", matchStatus: /^loading$/i },
 	{ key: "in_transit", name: "In Transit", matchStatus: /^in transit$/i },
@@ -5341,7 +5341,7 @@ async function checkDriverActiveLoad(driverName) {
 		const driverCol = headers.findIndex(h => /^driver$/i.test(h));
 		const statusCol = headers.findIndex(h => /status/i.test(h));
 		if (driverCol === -1 || statusCol === -1) return null;
-		const activeRe = /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i;
+		const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 		for (let i = 1; i < rows.length; i++) {
 			const r = rows[i];
 			const driver = (r[driverCol] || "").trim().toLowerCase();
@@ -6068,7 +6068,7 @@ app.get("/api/admin/scan-stale-locations", requireRole("Super Admin"), async (re
 
 		// Build sheet lookup: loadId → { status, driver, origin, dest, details }
 		const sheetLoads = {};
-		const activeRe = /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i;
+		const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 		const driverActiveLoads = {}; // driver → most recent active loadId from sheet
 		for (let i = 1; i < rows.length; i++) {
 			const lid = (rows[i][loadIdIdx] || "").trim().replace(/^#/, "");
@@ -10038,7 +10038,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				const detailsCol = headers.find((h) => /^details$/i.test(h));
 				const pickupAddrCol = headers.find((h) => /pickup.*addr|origin.*addr|shipper.*addr/i.test(h));
 				const dropoffAddrCol = headers.find((h) => /drop.*addr|dest.*addr|receiver.*addr|delivery.*addr/i.test(h));
-				const activeRe = /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i;
+				const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 				const workingRe = /^(assigned|at shipper|loading|in transit|at receiver)$/i;
 				const driverActiveLoadMap = {};   // driver → first active loadId (for override, includes dispatched)
 				const driverActiveLoadsMap = {};  // driver → working loads for panel (matches driver app's Active tab)
@@ -10886,7 +10886,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 
 		// ---- Single-pass: revenue + driver pay + operating period + per-driver gross ----
-		const activeWorkStatuses = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
+		const activeWorkStatuses = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
 		let totalRevenue = 0;
 		let last30DaysRevenue = 0;
 		let earliestDate = null;
@@ -11420,7 +11420,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
-		const activeWorkStatuses = /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
+		const activeWorkStatuses = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
 
 		function parseSheetDate(val) {
 			if (!val) return null;
