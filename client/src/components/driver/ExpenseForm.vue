@@ -85,6 +85,7 @@
             :after-read="handlePhoto"
             accept="image/*"
             capture="camera"
+            result-type="file"
           />
         </template>
       </van-field>
@@ -184,44 +185,43 @@ const ocrLoading = ref(false)
 const ocrApplied = ref(false)
 const ocrConfidence = ref('')
 
-function enhanceCanvas(ctx, w, h) {
-  // Grayscale + linear contrast stretch. Keeps receipt paper bright white and
-  // text crisp black; the cheap 2D canvas pass is fast even on low-end phones.
-  const img = ctx.getImageData(0, 0, w, h)
-  const d = img.data
-  for (let i = 0; i < d.length; i += 4) {
-    const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
-    // Pull midtones toward 76 (our pivot) and stretch by 1.35.
-    const boosted = Math.max(0, Math.min(255, (gray - 76) * 1.35 + 76))
-    d[i] = d[i + 1] = d[i + 2] = boosted
-  }
-  ctx.putImageData(img, 0, 0)
-}
-
-function handlePhoto(file) {
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    const img = new Image()
-    img.onload = async () => {
-      const canvas = document.createElement('canvas')
-      const MAX = 1600
-      let w = img.width
-      let h = img.height
-      if (w > MAX || h > MAX) {
-        if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
-        else { w = Math.round((w * MAX) / h); h = MAX }
-      }
-      canvas.width = w
-      canvas.height = h
-      const ctx = canvas.getContext('2d')
-      ctx.drawImage(img, 0, 0, w, h)
-      enhanceCanvas(ctx, w, h)
-      photoBase64.value = canvas.toDataURL('image/jpeg', 0.9)
-      await runReceiptOcr()
+async function handlePhoto(file) {
+  const blob = file && file.file
+  if (!blob) return
+  const MAX = 1024
+  try {
+    // Decode + downscale in one pass via createImageBitmap. Without resize
+    // options, a 12MP phone photo would materialize ~48MB of raw RGBA in
+    // memory before we touch the canvas — that's what was OOM-killing the
+    // tab on low-RAM phones and bouncing the driver to /login.
+    const probe = await createImageBitmap(blob)
+    let w = probe.width
+    let h = probe.height
+    probe.close()
+    if (w > MAX || h > MAX) {
+      if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
+      else { w = Math.round((w * MAX) / h); h = MAX }
     }
-    img.src = e.target.result
+    const bitmap = await createImageBitmap(blob, {
+      resizeWidth: w,
+      resizeHeight: h,
+      resizeQuality: 'medium',
+    })
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    canvas.getContext('2d').drawImage(bitmap, 0, 0)
+    bitmap.close()
+    photoBase64.value = canvas.toDataURL('image/jpeg', 0.8)
+    // Release the canvas backing store now that the encoded string is captured.
+    canvas.width = 0
+    canvas.height = 0
+  } catch {
+    photoBase64.value = ''
+    toast.show("Couldn't process the photo — please retake", 'error')
+    return
   }
-  reader.readAsDataURL(file.file)
+  await runReceiptOcr()
 }
 
 async function runReceiptOcr() {
