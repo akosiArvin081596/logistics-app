@@ -64,29 +64,29 @@ function test(name, pass) { results.push({ name, pass }); }
   test("9. Investor API loads", inv.status === 200 && inv.body.production);
 
   // 10. Monthly earnings array
-  test("10. monthlyEarnings array present", Array.isArray(inv.body.production.monthlyEarnings));
+  test("10. monthlyEarnings array present", Array.isArray(inv.body?.production?.monthlyEarnings));
 
   // 11. Per-truck data
-  test("11. perTruckData present", typeof inv.body.production.perTruckData === "object");
+  test("11. perTruckData present", typeof inv.body?.production?.perTruckData === "object");
 
   // 12. Driver pay dates stripped
-  const dpd = inv.body.production.driverPayDetails || {};
+  const dpd = inv.body?.production?.driverPayDetails || {};
   const fd = Object.values(dpd)[0];
   test("12. driverPayDetails dates stripped", fd ? !fd.dates : true);
 
   // 13. investorEarnings field
-  test("13. investorEarnings computed", typeof inv.body.production.investorEarnings === "number");
+  test("13. investorEarnings computed", typeof inv.body?.production?.investorEarnings === "number");
 
   // 14. paidRevenue removed
-  test("14. paidRevenue removed from response", inv.body.production.paidRevenue === undefined);
+  test("14. paidRevenue removed from response", inv.body?.production?.paidRevenue === undefined);
 
   // 15. Trucks API
   const tr = await req("GET", "/api/trucks", null, ac);
-  test("15. Trucks API loads", tr.status === 200 && Array.isArray(tr.body.trucks));
+  test("15. Trucks API loads", tr.status === 200 && Array.isArray(tr.body?.trucks));
 
   // 16. Users API
   const us = await req("GET", "/api/users", null, ac);
-  test("16. Users API loads", us.status === 200 && Array.isArray(us.body.users));
+  test("16. Users API loads", us.status === 200 && Array.isArray(us.body?.users));
 
   // 17. Drivers directory
   const dr = await req("GET", "/api/drivers-directory", null, ac);
@@ -106,7 +106,7 @@ function test(name, pass) { results.push({ name, pass }); }
 
   // 21. Maps key accessible
   const mk = await req("GET", "/api/config/maps-key");
-  test("21. Maps key endpoint works", mk.status === 200 && mk.body.key);
+  test("21. Maps key endpoint works", mk.status === 200 && mk.body?.key);
 
   // 22. Investor blocked from expenses
   const ie = await req("POST", "/api/expenses", { driver: "test", type: "Fuel", amount: 10, date: "2026-04-11" }, ic);
@@ -121,7 +121,7 @@ function test(name, pass) { results.push({ name, pass }); }
   test("24. Good file extension accepted", gf.status === 200);
 
   // 25. Canceled jobs excluded from dashboard
-  const unassigned = dash.body.unassignedJobs || [];
+  const unassigned = dash.body?.unassignedJobs || [];
   const hasCanceled = unassigned.some(j => /cancel/i.test(Object.values(j).join(" ")));
   test("25. Canceled jobs excluded from unassigned", !hasCanceled);
 
