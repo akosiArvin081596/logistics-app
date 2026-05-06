@@ -40,6 +40,7 @@
         :can-edit="authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Dispatcher'"
         @delete="handleDeleteTruck"
         @update="handleUpdateTruck"
+        @linkage-changed="handleLinkageChanged"
       />
     </template>
   </div>
@@ -89,6 +90,18 @@ async function handleUpdateTruck({ id, data }) {
     toast('Truck updated')
   } catch (err) {
     toast(err.message || 'Failed to update truck', 'error')
+  }
+}
+
+// Routemate linkage events from TruckTable. Reload-only — the link/unlink
+// API calls are made inside TruckTable; we just refresh the table so the
+// "Linked" badge appears (or disappears) on the affected row.
+async function handleLinkageChanged() {
+  try {
+    await store.loadTrucks()
+    toast('Routemate link updated')
+  } catch (err) {
+    toast(err.message || 'Failed to refresh trucks', 'error')
   }
 }
 

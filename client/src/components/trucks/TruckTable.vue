@@ -408,7 +408,7 @@ const props = defineProps({
   canEdit: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['delete', 'update'])
+const emit = defineEmits(['delete', 'update', 'linkage-changed'])
 
 const showConfirm = ref(false)
 const pendingTruck = ref(null)
@@ -623,9 +623,10 @@ async function handleLink() {
       routemateVehicleId: pickedRoutemateId.value,
     })
     showLinkRm.value = false
-    // Tell parent to refresh; the trucks store call repopulates the table
-    // and the new RoutemateVehicleId field flips the cell to "Linked".
-    emit('update', { id: linkTruck.value.id, data: {} })
+    // Reload-only signal: the parent should refetch trucks so the row's
+    // RoutemateVehicleId flips to "Linked". Distinct from `update` (which
+    // sends a PUT to /api/trucks for actual field edits).
+    emit('linkage-changed', { id: linkTruck.value.id })
   } catch (err) {
     linkError.value = err?.message || 'Failed to link Routemate vehicle.'
   } finally {
@@ -640,7 +641,7 @@ async function handleAutoLink() {
   try {
     await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, { auto: true })
     showLinkRm.value = false
-    emit('update', { id: linkTruck.value.id, data: {} })
+    emit('linkage-changed', { id: linkTruck.value.id })
   } catch (err) {
     linkError.value = err?.message || 'No Routemate vehicle matches this VIN.'
   } finally {
@@ -652,7 +653,7 @@ async function handleUnlink(truck) {
   // No confirm modal — unlink is reversible (admin can re-link any time).
   try {
     await api.del(`/api/trucks/${truck.id}/link-routemate`)
-    emit('update', { id: truck.id, data: {} })
+    emit('linkage-changed', { id: truck.id })
   } catch (err) {
     console.error('Routemate unlink failed:', err)
   }
