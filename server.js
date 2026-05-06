@@ -10395,6 +10395,56 @@ function routeCacheKey(from, to) {
 	return `${from.latitude.toFixed(3)},${from.longitude.toFixed(3)}>${to.latitude.toFixed(3)},${to.longitude.toFixed(3)}`;
 }
 
+// Persist routeCache across pm2 restarts via a single SQLite row. Avoids the
+// per-deploy burst of cold Google Routes calls when many customers are
+// actively tracking the same in-flight loads. No per-request DB writes —
+// snapshot is taken on graceful shutdown only.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS server_state (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+function loadRouteCacheSnapshot() {
+	try {
+		const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get("route_cache_snapshot");
+		if (!row || !row.value) return;
+		const data = JSON.parse(row.value);
+		if (!Array.isArray(data)) return;
+		const now = Date.now();
+		let hydrated = 0;
+		for (const [k, v] of data) {
+			if (v && v.result && typeof v.time === "number" && now - v.time < ROUTE_CACHE_TTL) {
+				routeCache.set(k, v);
+				hydrated++;
+			}
+		}
+		if (hydrated > 0) console.log(`[route-cache] hydrated ${hydrated} entries from snapshot`);
+	} catch (err) {
+		console.error("[route-cache] hydrate failed:", err.message);
+	}
+}
+function saveRouteCacheSnapshot() {
+	try {
+		const entries = [];
+		const now = Date.now();
+		for (const [k, v] of routeCache.entries()) {
+			// Only persist successful, unexpired results — nulls are transient API
+			// errors that should be retried on next attempt, not served stale.
+			if (v && v.result && typeof v.time === "number" && now - v.time < ROUTE_CACHE_TTL) {
+				entries.push([k, v]);
+			}
+		}
+		db.prepare(`INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`)
+			.run("route_cache_snapshot", JSON.stringify(entries));
+		console.log(`[route-cache] snapshot saved: ${entries.length} entries`);
+	} catch (err) {
+		console.error("[route-cache] snapshot failed:", err.message);
+	}
+}
+loadRouteCacheSnapshot();
+
 // Get driving route between two points using Google Routes API
 async function getRoute(from, to, retries = 2) {
 	if (!from || !to) return null;
@@ -12466,6 +12516,7 @@ server.listen(PORT, async () => {
 const { shutdownBrowser } = require("./lib/pdf-browser");
 async function gracefulShutdown(signal) {
 	console.log(`${signal} received — shutting down Puppeteer browser`);
+	try { saveRouteCacheSnapshot(); } catch { /* ignore */ }
 	try { await shutdownBrowser(); } catch { /* ignore */ }
 	process.exit(0);
 }
