@@ -41,6 +41,7 @@
             <th>Idle</th>
             <th>Fuel</th>
             <th title="7-day average miles per gallon, derived from telemetry. Tank size assumed 200 gal.">MPG (7d)</th>
+            <th title="Open ELD fault codes (DTCs) — click count to view + acknowledge.">Faults</th>
             <th>Last Fix</th>
             <th>Location</th>
           </tr>
@@ -56,6 +57,14 @@
             <td class="mono">{{ formatIdle(t) }}</td>
             <td class="mono">{{ t.fuelPct != null ? t.fuelPct + '%' : '—' }}</td>
             <td class="mono">{{ formatMpg(t.truckId) }}</td>
+            <td>
+              <button
+                v-if="faultCountFor(t.truckId) > 0"
+                class="fault-pill"
+                @click.stop="openFaultsModal(t)"
+              >{{ faultCountFor(t.truckId) }} open</button>
+              <span v-else class="mono fh-age">—</span>
+            </td>
             <td class="mono fh-age">{{ t.lastFixAgeSec != null ? formatAgeSec(t.lastFixAgeSec) : '—' }}</td>
             <td class="fh-location">{{ t.geocodedLocation || '—' }}</td>
           </tr>
@@ -65,9 +74,48 @@
         Showing {{ filteredTrucks.length }} of {{ trucks.length }} trucks &middot;
         {{ liveCount }} live &middot;
         {{ staleCount }} stale &middot;
-        {{ unlinkedCount }} unlinked
+        {{ unlinkedCount }} unlinked &middot;
+        {{ totalOpenFaults }} open faults
       </div>
     </div>
+
+    <!-- Faults modal — lists open ELD fault codes for a single truck with
+         per-row Acknowledge buttons. Acked faults stop counting toward the
+         badge but stay in the table for audit. -->
+    <Teleport to="body">
+      <div v-if="faultsModalOpen" class="fh-overlay" @click.self="closeFaultsModal">
+        <div class="fh-dialog">
+          <div class="fh-dialog-header">
+            <span>Open ELD Faults — {{ faultsModalTruck?.unitNumber || '' }}</span>
+            <button class="fh-x" @click="closeFaultsModal">&times;</button>
+          </div>
+          <div class="fh-dialog-body">
+            <div v-if="faultsLoading" class="fh-empty">Loading...</div>
+            <div v-else-if="faultsForModal.length === 0" class="fh-empty">No open faults for this truck.</div>
+            <table v-else class="fh-fault-table">
+              <thead>
+                <tr><th>Code</th><th>Status</th><th>First Seen</th><th>Last Seen</th><th></th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="f in faultsForModal" :key="f.id">
+                  <td class="mono bold">{{ f.code }}</td>
+                  <td class="mono">{{ f.status || '—' }}</td>
+                  <td class="mono fh-age">{{ formatTs(f.first_seen) }}</td>
+                  <td class="mono fh-age">{{ formatTs(f.last_seen) }}</td>
+                  <td>
+                    <button
+                      class="btn btn-secondary btn-sm"
+                      :disabled="ackBusy === f.id"
+                      @click="ackFault(f.id)"
+                    >{{ ackBusy === f.id ? 'Ack...' : 'Acknowledge' }}</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -78,32 +126,104 @@ import { useApi } from '../composables/useApi'
 const api = useApi()
 const trucks = ref([])
 const fuelByTruck = ref({})
+const faultCountByTruck = ref({})
 const loading = ref(false)
 const error = ref('')
 const search = ref('')
 const lastRefreshAt = ref(null)
 let pollTimer = null
 
+// Faults modal state
+const faultsModalOpen = ref(false)
+const faultsModalTruck = ref(null)
+const faultsForModal = ref([])
+const faultsLoading = ref(false)
+const ackBusy = ref(0)
+
 async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    // Fetch in parallel — fuel summary changes infrequently but keeping the
-    // calls together avoids a second waterfall.
-    const [fleet, fuel] = await Promise.all([
+    // Three parallel fetches — fleet, fuel, fault counts. The summary endpoints
+    // are cheap (one per-truck SQL count) so doing them every 30s is fine.
+    const [fleet, fuel, faults] = await Promise.all([
       api.get('/api/admin/fleet-health'),
       api.get('/api/routemate/fuel/summary?days=7').catch(() => ({ trucks: [] })),
+      api.get('/api/routemate/fault-codes/summary').catch(() => ({ trucks: [] })),
     ])
     trucks.value = fleet.trucks || []
-    const map = {}
-    for (const f of (fuel.trucks || [])) map[f.truckId] = f
-    fuelByTruck.value = map
+    const fuelMap = {}
+    for (const f of (fuel.trucks || [])) fuelMap[f.truckId] = f
+    fuelByTruck.value = fuelMap
+    const faultMap = {}
+    for (const f of (faults.trucks || [])) faultMap[f.truckId] = f.openFaults || 0
+    faultCountByTruck.value = faultMap
     lastRefreshAt.value = Date.now()
   } catch (err) {
     error.value = err?.message || 'Failed to load fleet health.'
   } finally {
     loading.value = false
   }
+}
+
+function faultCountFor(truckId) {
+  return faultCountByTruck.value[truckId] || 0
+}
+
+const totalOpenFaults = computed(() => {
+  let n = 0
+  for (const v of Object.values(faultCountByTruck.value)) n += v
+  return n
+})
+
+async function openFaultsModal(truck) {
+  faultsModalTruck.value = truck
+  faultsModalOpen.value = true
+  faultsForModal.value = []
+  faultsLoading.value = true
+  try {
+    const r = await api.get('/api/routemate/fault-codes')
+    faultsForModal.value = (r.faults || []).filter(f => f.truckId === truck.truckId)
+  } catch {
+    faultsForModal.value = []
+  } finally {
+    faultsLoading.value = false
+  }
+}
+
+function closeFaultsModal() {
+  if (ackBusy.value) return
+  faultsModalOpen.value = false
+  faultsModalTruck.value = null
+  faultsForModal.value = []
+}
+
+async function ackFault(faultId) {
+  ackBusy.value = faultId
+  try {
+    await api.post(`/api/routemate/fault-codes/${faultId}/ack`, {})
+    // Drop from the modal list immediately + decrement the per-truck count.
+    faultsForModal.value = faultsForModal.value.filter(f => f.id !== faultId)
+    if (faultsModalTruck.value) {
+      const tid = faultsModalTruck.value.truckId
+      faultCountByTruck.value = {
+        ...faultCountByTruck.value,
+        [tid]: Math.max(0, (faultCountByTruck.value[tid] || 0) - 1),
+      }
+    }
+  } catch {
+    // Silent — the modal will retry on next refresh.
+  } finally {
+    ackBusy.value = 0
+  }
+}
+
+function formatTs(s) {
+  if (!s) return '—'
+  // SQLite returns "YYYY-MM-DD HH:MM:SS" (UTC); render relative.
+  const d = new Date(s.replace(' ', 'T') + 'Z')
+  if (isNaN(d.getTime())) return s
+  return formatAgeSec(Math.round((Date.now() - d.getTime()) / 1000)) + ' ago'
 }
 
 function formatMpg(truckId) {
@@ -253,4 +373,64 @@ onUnmounted(() => {
   background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
 }
 .btn-sm { padding: 0.35rem 0.7rem; font-size: 0.75rem; }
+
+/* Fault count pill — clickable, opens the faults modal for the truck */
+.fault-pill {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.fault-pill:hover { background: #fecaca; }
+
+/* Faults modal */
+.fh-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200;
+}
+.fh-dialog {
+  background: var(--surface);
+  border-radius: var(--radius);
+  width: 90%; max-width: 720px;
+  max-height: 80vh; overflow: hidden;
+  display: flex; flex-direction: column;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+}
+.fh-dialog-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.92rem; font-weight: 700;
+}
+.fh-x {
+  background: none; border: none; cursor: pointer;
+  font-size: 1.4rem; line-height: 1; color: var(--text-dim);
+  padding: 0 0.4rem;
+}
+.fh-x:hover { color: var(--text); }
+.fh-dialog-body {
+  padding: 1rem; overflow-y: auto; flex: 1;
+}
+.fh-fault-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.fh-fault-table th {
+  text-align: left; padding: 0.5rem 0.6rem;
+  font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-dim); border-bottom: 1px solid var(--border);
+}
+.fh-fault-table td {
+  padding: 0.55rem 0.6rem; border-bottom: 1px solid var(--bg);
+}
+.fh-fault-table .bold { font-weight: 700; }
 </style>

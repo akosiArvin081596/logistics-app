@@ -1131,6 +1131,153 @@ function routemateRollupFuelDaily(daysBack = 7) {
 setTimeout(() => routemateRollupFuelDaily(7), 5 * 60 * 1000);
 setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
 
+// --- Phase 5: fault codes (DTC) + DVIR sync ---
+// Routemate's /dtc/{vehicleId} returns {code, status} pairs per vehicle.
+// We diff against routemate_fault_codes: existing rows get last_seen
+// bumped; brand-new codes raise a dispatch_notifications entry so
+// dispatchers see "ELD Fault" alerts in their notifications panel.
+// Acked codes stop counting toward the open-fault badge.
+
+const routemateSelectFaultStmt = db.prepare(`
+	SELECT id, ack_at FROM routemate_fault_codes
+	WHERE routemate_vehicle_id = ? AND code = ?
+`);
+const routemateInsertFaultStmt = db.prepare(`
+	INSERT INTO routemate_fault_codes (routemate_vehicle_id, code, status, first_seen, last_seen)
+	VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+`);
+const routemateBumpFaultStmt = db.prepare(`
+	UPDATE routemate_fault_codes SET last_seen = CURRENT_TIMESTAMP, status = ? WHERE id = ?
+`);
+
+async function routemateSyncFaultCodes() {
+	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return;
+	try {
+		const linkedVehicles = db.prepare(`
+			SELECT t.routemate_vehicle_id, t.unit_number, ta.driver_name
+			FROM trucks t
+			LEFT JOIN truck_assignments ta ON ta.truck_id = t.id AND ta.end_date = ''
+			WHERE COALESCE(t.routemate_vehicle_id, '') <> ''
+		`).all();
+		if (linkedVehicles.length === 0) return;
+
+		let newCount = 0;
+		for (const v of linkedVehicles) {
+			let codes;
+			try {
+				codes = await routemate.listFaultCodes(routemateCreds(), v.routemate_vehicle_id);
+			} catch (err) {
+				// Per-vehicle failures shouldn't kill the whole sync.
+				routemateHealth.lastError = { at: new Date().toISOString(), source: "faultCodes:" + v.unit_number, message: err.message, status: err.status || null };
+				routemateHealth.errorsLast24h += 1;
+				continue;
+			}
+			if (!codes || codes.length === 0) continue;
+			const txn = db.transaction((items) => {
+				for (const f of items) {
+					if (!f.code) continue;
+					const existing = routemateSelectFaultStmt.get(v.routemate_vehicle_id, f.code);
+					if (existing) {
+						routemateBumpFaultStmt.run(f.status || "", existing.id);
+					} else {
+						const r = routemateInsertFaultStmt.run(v.routemate_vehicle_id, f.code, f.status || "");
+						newCount += 1;
+						// Notify dispatch about brand-new codes only. Acked codes that
+						// re-appear later won't re-notify — admins re-review the panel.
+						const title = `ELD Fault: ${v.unit_number}`;
+						const body = `${f.code}${f.status ? " (" + f.status + ")" : ""}${v.driver_name ? " — " + v.driver_name : ""}`;
+						insertDispatchNotification.run(
+							'eld-fault',
+							title,
+							body,
+							JSON.stringify({ truckUnit: v.unit_number, code: f.code, status: f.status || "", routemateVehicleId: v.routemate_vehicle_id, faultId: r.lastInsertRowid })
+						);
+						io.to("dispatch").emit("dispatch-notification", {
+							type: 'eld-fault',
+							title,
+							body,
+						});
+					}
+				}
+			});
+			txn(codes);
+		}
+		routemateHealth.lastSync.faultCodes = new Date().toISOString();
+		if (newCount === 0) routemateHealth.lastError = null;
+	} catch (err) {
+		routemateHealth.lastError = { at: new Date().toISOString(), source: "faultCodes", message: err.message, status: err.status || null };
+		routemateHealth.errorsLast24h += 1;
+		console.error("[routemate] fault-codes sync failed:", err.message);
+	}
+}
+
+const routemateUpsertDvirStmt = db.prepare(`
+	INSERT INTO routemate_dvir
+		(routemate_vehicle_id, dvir_id, date_ms, driver_name, report_type, status, unresolved_defects, corrected_defects, fetched_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(dvir_id) DO UPDATE SET
+		date_ms = excluded.date_ms,
+		driver_name = excluded.driver_name,
+		report_type = excluded.report_type,
+		status = excluded.status,
+		unresolved_defects = excluded.unresolved_defects,
+		corrected_defects = excluded.corrected_defects,
+		fetched_at = CURRENT_TIMESTAMP
+`);
+
+async function routemateSyncDvirs() {
+	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return;
+	try {
+		const linkedVehicles = db.prepare(`
+			SELECT routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> ''
+		`).all();
+		if (linkedVehicles.length === 0) return;
+		let totalRows = 0;
+		for (const v of linkedVehicles) {
+			let dvirs;
+			try {
+				dvirs = await routemate.listDvirs(routemateCreds(), v.routemate_vehicle_id);
+			} catch (err) {
+				routemateHealth.lastError = { at: new Date().toISOString(), source: "dvir", message: err.message, status: err.status || null };
+				routemateHealth.errorsLast24h += 1;
+				continue;
+			}
+			if (!dvirs || dvirs.length === 0) continue;
+			const txn = db.transaction((items) => {
+				for (const d of items) {
+					if (!d.dvir_id) continue;
+					routemateUpsertDvirStmt.run(
+						v.routemate_vehicle_id,
+						d.dvir_id,
+						d.date_ms || 0,
+						d.driver_name || "",
+						d.report_type || "",
+						d.status || "",
+						JSON.stringify(d.unresolved_defects || []),
+						JSON.stringify(d.corrected_defects || []),
+					);
+				}
+			});
+			txn(dvirs);
+			totalRows += dvirs.length;
+		}
+		routemateHealth.lastSync.dvirs = new Date().toISOString();
+	} catch (err) {
+		routemateHealth.lastError = { at: new Date().toISOString(), source: "dvir", message: err.message, status: err.status || null };
+		routemateHealth.errorsLast24h += 1;
+		console.error("[routemate] dvir sync failed:", err.message);
+	}
+}
+
+// Fault codes poll every ROUTEMATE_POLL_FAULTS_SEC (default 5min).
+const ROUTEMATE_POLL_FAULTS_MS = (parseInt(process.env.ROUTEMATE_POLL_FAULTS_SEC || "300", 10) || 300) * 1000;
+setTimeout(() => routemateSyncFaultCodes(), 7 * 60 * 1000);
+setInterval(routemateSyncFaultCodes, ROUTEMATE_POLL_FAULTS_MS);
+
+// DVIR sync once per 6h. Inspections are added a few times a day max.
+setTimeout(() => routemateSyncDvirs(), 8 * 60 * 1000);
+setInterval(routemateSyncDvirs, 6 * 60 * 60 * 1000);
+
 // Live telemetry: poll every ROUTEMATE_POLL_LIVE_SEC (default 60s).
 const ROUTEMATE_POLL_LIVE_MS = (parseInt(process.env.ROUTEMATE_POLL_LIVE_SEC || "60", 10) || 60) * 1000;
 setInterval(routemateSyncTelemetry, ROUTEMATE_POLL_LIVE_MS);
@@ -8081,6 +8228,84 @@ app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", 
 		});
 	} catch (err) {
 		console.error("fuel summary error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/routemate/fault-codes — Open ELD fault codes per truck. "Open"
+// means last_seen within 24h AND not acked. Investor sees only own trucks.
+app.get("/api/routemate/fault-codes", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
+	try {
+		const user = req.session.user;
+		const trucksFilter = (user.role === "Investor")
+			? db.prepare("SELECT id, unit_number, routemate_vehicle_id, assigned_driver FROM trucks WHERE owner_id = ? AND COALESCE(routemate_vehicle_id, '') <> ''").all(user.id)
+			: db.prepare("SELECT id, unit_number, routemate_vehicle_id, assigned_driver FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> ''").all();
+		if (trucksFilter.length === 0) return res.json({ faults: [] });
+		const placeholders = trucksFilter.map(() => "?").join(",");
+		const args = trucksFilter.map(t => t.routemate_vehicle_id);
+		const faults = db.prepare(`
+			SELECT id, routemate_vehicle_id, code, status, first_seen, last_seen, ack_by_user_id, ack_at
+			FROM routemate_fault_codes
+			WHERE routemate_vehicle_id IN (${placeholders})
+			  AND ack_at IS NULL
+			  AND last_seen > datetime('now', '-1 day')
+			ORDER BY last_seen DESC
+		`).all(...args);
+		const byVehicle = {};
+		for (const t of trucksFilter) byVehicle[t.routemate_vehicle_id] = t;
+		const enriched = faults.map(f => {
+			const t = byVehicle[f.routemate_vehicle_id] || {};
+			return { ...f, truckId: t.id || null, unitNumber: t.unit_number || "", assignedDriver: t.assigned_driver || "" };
+		});
+		res.json({ faults: enriched });
+	} catch (err) {
+		console.error("fault-codes list error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/routemate/fault-codes/summary — Open fault count per truck.
+// Used by FleetHealthView and InvestorView for the badge.
+app.get("/api/routemate/fault-codes/summary", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
+	try {
+		const user = req.session.user;
+		const trucks = (user.role === "Investor")
+			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
+			: db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks").all();
+		const countStmt = db.prepare(`
+			SELECT COUNT(*) AS n FROM routemate_fault_codes
+			WHERE routemate_vehicle_id = ?
+			  AND ack_at IS NULL
+			  AND last_seen > datetime('now', '-1 day')
+		`);
+		const result = trucks.map(t => ({
+			truckId: t.id,
+			unitNumber: t.unit_number,
+			openFaults: t.routemate_vehicle_id ? (countStmt.get(t.routemate_vehicle_id).n || 0) : 0,
+		}));
+		res.json({ trucks: result });
+	} catch (err) {
+		console.error("fault-codes summary error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/routemate/fault-codes/:id/ack — Mark a fault as acknowledged.
+// Sets ack_at + ack_by_user_id; the row stays in the table for audit but
+// stops counting toward the open-fault badge. Super Admin + Dispatcher.
+app.post("/api/routemate/fault-codes/:id/ack", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id, 10);
+		if (!id) return res.status(400).json({ error: "Invalid fault id" });
+		const fault = db.prepare("SELECT id, routemate_vehicle_id, code, ack_at FROM routemate_fault_codes WHERE id = ?").get(id);
+		if (!fault) return res.status(404).json({ error: "Fault not found" });
+		if (fault.ack_at) return res.status(409).json({ error: "Already acknowledged" });
+		const userId = req.session?.user?.id || 0;
+		db.prepare("UPDATE routemate_fault_codes SET ack_at = CURRENT_TIMESTAMP, ack_by_user_id = ? WHERE id = ?").run(userId, id);
+		logAudit(req, 'routemate_fault_ack', 'fault_code', String(id), `Acknowledged ELD fault ${fault.code} (vehicle ${fault.routemate_vehicle_id})`);
+		res.json({ success: true });
+	} catch (err) {
+		console.error("fault-codes ack error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });

@@ -38,6 +38,7 @@
           <th>Current Driver</th>
           <th>Loads</th>
           <th title="7-day average miles per gallon, derived from ELD telemetry. Tank size assumed 200 gal — value is a trend signal more than a calibrated number.">MPG (7d)</th>
+          <th title="Open ELD fault codes (DTCs) — admin acknowledges them on the Fleet Health page.">Faults</th>
         </tr>
       </thead>
       <tbody>
@@ -55,6 +56,10 @@
           <td>{{ t.AssignedDriver || '-' }}</td>
           <td class="mono">{{ loadCountFor(t) }}</td>
           <td class="mono">{{ mpgFor(t) }}</td>
+          <td>
+            <span v-if="faultCountFor(t) > 0" class="my-fault-pill">{{ faultCountFor(t) }}</span>
+            <span v-else class="mono" style="color:var(--text-dim);">—</span>
+          </td>
         </tr>
       </tbody>
     </table>
@@ -81,6 +86,7 @@ function loadCountFor(t) {
 // to the investor's own trucks via trucks.owner_id, so we can safely fetch
 // from this component without extra filtering.
 const fuelByTruck = ref({})
+const faultCountByTruck = ref({})
 async function loadFuel() {
   try {
     const r = await useApi().get('/api/routemate/fuel/summary?days=7')
@@ -91,12 +97,25 @@ async function loadFuel() {
     // Silent — MPG column simply renders '—' when fuel data is unavailable.
   }
 }
-onMounted(loadFuel)
+async function loadFaults() {
+  try {
+    const r = await useApi().get('/api/routemate/fault-codes/summary')
+    const map = {}
+    for (const t of (r.trucks || [])) map[t.truckId] = t.openFaults || 0
+    faultCountByTruck.value = map
+  } catch {
+    // Silent
+  }
+}
+onMounted(() => { loadFuel(); loadFaults() })
 
 function mpgFor(t) {
   const f = fuelByTruck.value[t.id]
   if (!f || f.mpgAvg == null) return '—'
   return f.mpgAvg.toFixed(1)
+}
+function faultCountFor(t) {
+  return faultCountByTruck.value[t.id] || 0
 }
 
 const api = useApi()
@@ -181,5 +200,11 @@ async function addTruck() {
 .pill-amber { background: #fef3c7; color: #92400e; }
 .pill-red { background: #fee2e2; color: #991b1b; }
 .pill-gray { background: #f3f4f6; color: #6b7280; }
+.my-fault-pill {
+  display: inline-block;
+  font-size: 0.68rem; font-weight: 700;
+  padding: 0.15rem 0.5rem; border-radius: 10px;
+  background: #fef2f2; color: #991b1b; border: 1px solid #fecaca;
+}
 @media (max-width: 640px) { .form-grid { grid-template-columns: 1fr; } }
 </style>
