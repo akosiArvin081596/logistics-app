@@ -7064,8 +7064,12 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const truckCol = findCol(carrierDB.headers, /truck|unit|vehicle/i);
 
 		// Status patterns
+		// "heading to shipper" added 2026-05-07 — was missed when the status was
+		// introduced on 2026-05-05; loads in that status had been falling through
+		// all three buckets (Active / Unassigned / Completed) and silently
+		// disappearing from the dashboard until the geofence flipped them.
 		const activeStatuses =
-			/^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
+			/^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 		const canceledStatuses = /^(cancel|canceled|cancelled)$/i;
 		const unassignedStatuses =
