@@ -11817,13 +11817,24 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// Real maintenance spend already flows through `maintSum` (actual
 		// service payments from the maintenance_fund table). Including the
 		// reserve here would double-count maintenance for the whole fleet.
+		// Operating-window rule mirrors the per-truck loop below: prefer the
+		// truck's first→last load date range, fall back to created_at-capped
+		// fleet months only when the truck has no recorded loads. Keeps the
+		// fleet KPI reconciled with sum(perTruck.fixedTotal).
 		const allTrucks = db.prepare("SELECT * FROM trucks").all();
 		let totalFixedCosts = 0;
 		for (const t of allTrucks) {
 			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
 				+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
+			const unitLower = (t.unit_number || "").toLowerCase();
 			let truckMonths = monthsOfOperation;
-			if (t.created_at) {
+			if (truckLoadDates[unitLower]) {
+				const { first, last } = truckLoadDates[unitLower];
+				truckMonths = Math.max(1,
+					(last.getFullYear() - first.getFullYear()) * 12
+					+ (last.getMonth() - first.getMonth()) + 1
+				);
+			} else if (t.created_at) {
 				const td = new Date(t.created_at);
 				if (!isNaN(td)) {
 					truckMonths = Math.max(1, (now.getFullYear() - td.getFullYear()) * 12 + (now.getMonth() - td.getMonth()) + 1);
@@ -11932,11 +11943,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			const net = gross - expenses;
 
 			// Miles: same truck-first rule (already in place pre-patch).
+			// Compute $/mile from the unrounded mile count so small-fleet
+			// rates don't drift (e.g. 1.4 mi rounds to 1, halving the rate).
 			const truckMiles = milesByTruck[unitLower];
-			const totalMiles = Math.round(
-				truckMiles !== undefined ? truckMiles : (milesByDriver[driverName] || 0)
-			);
-			const ratePerMile = totalMiles > 0 ? Math.round((gross / totalMiles) * 100) / 100 : 0;
+			const rawMiles = truckMiles !== undefined ? truckMiles : (milesByDriver[driverName] || 0);
+			const totalMiles = Math.round(rawMiles);
+			const ratePerMile = rawMiles > 0 ? Math.round((gross / rawMiles) * 100) / 100 : 0;
 			const truckLoadCount = loadsByTruck[unitLower];
 			const loadCount = (truckLoadCount !== undefined) ? truckLoadCount : (loadsByDriver[driverName] || 0);
 
@@ -11976,7 +11988,8 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			if (d && !driverDisplayNames[d.toLowerCase()]) driverDisplayNames[d.toLowerCase()] = d;
 		});
 		const drivers = Object.entries(grossByDriver).map(([lcName, gross]) => {
-			const totalMiles = Math.round(milesByDriver[lcName] || 0);
+			const rawMiles = milesByDriver[lcName] || 0;
+			const totalMiles = Math.round(rawMiles);
 			const pay = driverPayDetails[lcName]?.totalPay || 0;
 			return {
 				name: driverDisplayNames[lcName] || lcName,
@@ -11984,7 +11997,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				grossRevenue: Math.round(gross), // revenue the driver generated
 				loadCount: loadsByDriver[lcName] || 0,
 				totalMiles,
-				avgRatePerMile: totalMiles > 0 ? Math.round((gross / totalMiles) * 100) / 100 : 0,
+				avgRatePerMile: rawMiles > 0 ? Math.round((gross / rawMiles) * 100) / 100 : 0,
 			};
 		}).sort((a, b) => b.grossRevenue - a.grossRevenue);
 		// Reconcile the leaderboard with totalRevenue: any completed revenue
@@ -12000,16 +12013,17 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				grossRevenue: Math.round(unassignedGross),
 				loadCount: unassignedLoadCount,
 				totalMiles: uMiles,
-				avgRatePerMile: uMiles > 0 ? Math.round((unassignedGross / uMiles) * 100) / 100 : 0,
+				avgRatePerMile: unassignedMiles > 0 ? Math.round((unassignedGross / unassignedMiles) * 100) / 100 : 0,
 				isUnassigned: true, // flag for frontend styling
 			});
 		}
 
-		// Fleet-wide avg rate/mile — uses the haversine miles accumulated
-		// in the single-pass loop, rounded to whole miles for the summary.
+		// Fleet-wide avg rate/mile — divides by the unrounded mile count to
+		// avoid drift on tiny mile totals; the rounded value is only used
+		// for the totalMiles summary display.
 		const fleetTotalMilesRounded = Math.round(fleetTotalMiles);
-		const avgRatePerMile = fleetTotalMilesRounded > 0
-			? Math.round((totalRevenue / fleetTotalMilesRounded) * 100) / 100
+		const avgRatePerMile = fleetTotalMiles > 0
+			? Math.round((totalRevenue / fleetTotalMiles) * 100) / 100
 			: 0;
 
 		res.json({

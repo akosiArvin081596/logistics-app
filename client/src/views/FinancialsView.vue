@@ -52,19 +52,19 @@
             <div class="kpi-sub">Before investor split</div>
           </div>
           <div class="kpi-card">
-            <div class="kpi-label">Biggest Category</div>
+            <div class="kpi-label">Biggest Trip Expense</div>
             <div class="kpi-value">{{ store.summary.biggestExpenseCategory?.name || '—' }}</div>
             <div class="kpi-sub">{{ fmt(store.summary.biggestExpenseCategory?.amount || 0) }}</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Avg Rate/Mile</div>
             <div class="kpi-value">${{ store.summary.avgRatePerMile?.toFixed(2) || '0.00' }}</div>
-            <div class="kpi-sub">Revenue per odometer mile</div>
+            <div class="kpi-sub">Revenue per route mile</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Total Miles</div>
             <div class="kpi-value">{{ (store.summary.totalMiles || 0).toLocaleString() }}</div>
-            <div class="kpi-sub">From driver odometer readings</div>
+            <div class="kpi-sub">From load route coordinates</div>
           </div>
         </div>
       </section>
