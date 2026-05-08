@@ -11166,18 +11166,20 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 
 		// ---- Add truck fixed costs (excluding driver pay — now computed above) ----
-		// NOTE: maintenance_fund_monthly here is the monthly RESERVE budget from the
-		// trucks table. See comment above for distinction from maintenance_fund table.
+		// `maintenance_fund_monthly` is intentionally OMITTED. It's a budget
+		// reserve allocation, not an actual cost — actuals already flow
+		// through `maintenanceExpenses` from maintenance_fund service rows
+		// elsewhere in this handler. Including the reserve here would
+		// double-count maintenance. Same fix as /api/financials.
 		{
 			const truckQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly, created_at FROM trucks WHERE owner_id = ?"
-				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly, created_at FROM trucks";
+				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ?"
+				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks";
 			const truckArgs = investorDriverSet ? [user.id] : [];
 			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
 			for (const t of fleetTrucks) {
 				const fixedPerMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
-					+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12)
-					+ (t.maintenance_fund_monthly || 0);
+					+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 				let truckMonths = monthsOfOperation;
 				if (t.created_at) {
 					const truckDate = new Date(t.created_at);
@@ -11241,18 +11243,20 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			}
 
-			// 3. Monthly fixed costs — constant per month per truck (only months truck existed)
+			// 3. Monthly fixed costs — constant per month per truck (only months truck existed).
+			// maintenance_fund_monthly omitted on purpose — see fleet-totals
+			// fix above. Reserve budget ≠ actual cost; actual maintenance
+			// flows through monthlyTripExp / maintByTruck.
 			const truckFixedQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly, created_at FROM trucks WHERE owner_id = ?"
-				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, maintenance_fund_monthly, created_at FROM trucks";
+				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ?"
+				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks";
 			const truckFixedArgs = investorDriverSet ? [user.id] : [];
 			const fixedTrucks = db.prepare(truckFixedQuery).all(...truckFixedArgs);
 			function getMonthlyFixedCosts(monthKey) {
 				let total = 0;
 				for (const t of fixedTrucks) {
 					const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
-						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12)
-						+ (t.maintenance_fund_monthly || 0);
+						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 					// Only count if truck existed in this month
 					if (t.created_at) {
 						const td = new Date(t.created_at);
@@ -11350,9 +11354,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const varExp = expByDriver[driverName] || 0;
 				const maintExp = maintByTruck[unitLower] || 0;
 				const compExp = compByTruck[unitLower] || 0;
+				// Fixed costs per truck per month — exclude
+				// maintenance_fund_monthly (reserve budget, not actual
+				// cost; actuals are in maintExp). Same fix applied to the
+				// fleet totalExpenses loop and /api/financials.
 				const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0)
-					+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12)
-					+ (truck.maintenance_fund_monthly || 0);
+					+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12);
 				let truckMonths = monthsOfOperation;
 				if (truck.created_at) {
 					const td = new Date(truck.created_at);
@@ -11616,6 +11623,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		let unassignedMiles = 0;
 		const completedLoadIds = new Set();  // unique load IDs — used for expense matching
 		const grossByDriver = {};
+		const grossByTruck = {};         // sum revenue per truck (truck-column attribution)
 		const milesByDriver = {};        // sum of haversine miles per driver
 		const milesByTruck = {};         // sum of haversine miles per truck
 		let fleetTotalMiles = 0;
@@ -11623,6 +11631,8 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const loadsByDriver = {};
 		const loadsByTruck = {};
 		const driverDaySets = {};
+		const truckDaySets = {};         // active days per truck (per-truck driver pay)
+		const truckLoadDates = {};       // {first, last} per truck — accurate operating window
 		const completedLoads = []; // for highest/lowest — store minimal fields
 		const now = new Date();
 
@@ -11657,6 +11667,22 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 						unassignedGross += amt;
 						unassignedLoadCount += 1;
 					}
+					if (truckUnit) {
+						grossByTruck[truckUnit] = (grossByTruck[truckUnit] || 0) + amt;
+						// First/last load date per truck — used to bound the
+						// fixed-cost accrual window so a truck idle for half
+						// the year doesn't get charged 12 months of insurance.
+						if (jtDateCol && r[jtDateCol]) {
+							const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+							if (d && !isNaN(d)) {
+								if (!truckLoadDates[truckUnit]) truckLoadDates[truckUnit] = { first: d, last: d };
+								else {
+									if (d < truckLoadDates[truckUnit].first) truckLoadDates[truckUnit].first = d;
+									if (d > truckLoadDates[truckUnit].last) truckLoadDates[truckUnit].last = d;
+								}
+							}
+						}
+					}
 					// Miles for this load (straight-line from load_coordinates).
 					// Loads without coordinates contribute 0 — counted separately
 					// as loadsWithCoords so the frontend can show coverage %.
@@ -11682,14 +11708,23 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				}
 			}
 
-			// Active-day sets for driver pay
-			if (activeWorkStatuses.test(st) && driverLc) {
+			// Active-day sets for driver pay (per-driver and per-truck).
+			// Per-truck days × that truck's `driver_pay_daily` is the
+			// authoritative per-row driver pay; per-driver days remain as
+			// the fallback when the sheet has no truck-column attribution.
+			if (activeWorkStatuses.test(st)) {
 				const pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
 				if (pickup) {
 					const days = expandDateRange(pickup, dropoff || pickup);
-					if (!driverDaySets[driverLc]) driverDaySets[driverLc] = new Set();
-					days.forEach(d => driverDaySets[driverLc].add(d));
+					if (driverLc) {
+						if (!driverDaySets[driverLc]) driverDaySets[driverLc] = new Set();
+						days.forEach(d => driverDaySets[driverLc].add(d));
+					}
+					if (truckUnit) {
+						if (!truckDaySets[truckUnit]) truckDaySets[truckUnit] = new Set();
+						days.forEach(d => truckDaySets[truckUnit].add(d));
+					}
 				}
 			}
 		});
@@ -11743,12 +11778,16 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		// ---- Truck fixed costs ----
+		// `maintenance_fund_monthly` is intentionally OMITTED. It's a budget
+		// reserve allocation (see comment at line ~11134), not a real cost.
+		// Real maintenance spend already flows through `maintSum` (actual
+		// service payments from the maintenance_fund table). Including the
+		// reserve here would double-count maintenance for the whole fleet.
 		const allTrucks = db.prepare("SELECT * FROM trucks").all();
 		let totalFixedCosts = 0;
 		for (const t of allTrucks) {
 			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
-				+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12)
-				+ (t.maintenance_fund_monthly || 0);
+				+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 			let truckMonths = monthsOfOperation;
 			if (t.created_at) {
 				const td = new Date(t.created_at);
@@ -11771,8 +11810,18 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		// ---- Per-Truck Performance ----
+		// Attribution rule: every per-truck term must use the truck's
+		// unit_number as the key. Driver-keyed maps are only used as a
+		// fallback when the entire fleet has no truck-column attribution
+		// (legacy single-driver fleet). Partial fallback would let one
+		// truck inherit another truck's revenue/expenses when a single
+		// load is missing its truck column — that was the source of the
+		// negative-Net rows reported by Deshorn on /admin/financials.
 		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses GROUP BY LOWER(driver)`).all();
 		const expByDriver = Object.fromEntries(expByDriverRows.map(r => [r.d, r.t]));
+		const expByTruck = Object.fromEntries(
+			db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' GROUP BY LOWER(truck_unit)`).all().map(r => [r.u, r.t])
+		);
 		const maintByTruck = Object.fromEntries(
 			db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' GROUP BY LOWER(truck)`).all().map(r => [r.u, r.t])
 		);
@@ -11780,31 +11829,75 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' GROUP BY LOWER(truck)`).all().map(r => [r.u, r.t])
 		);
 
+		// Fleet-wide attribution flags: decide whether to fall back to
+		// driver-keyed maps for trucks that have zero truck-attributed data.
+		const fleetHasTruckRevenue = Object.keys(grossByTruck).length > 0;
+		const fleetHasTruckExpenses = Object.keys(expByTruck).length > 0;
+		const fleetHasTruckDays = Object.keys(truckDaySets).length > 0;
+
 		const perTruck = allTrucks.map((truck) => {
 			const driverName = (truck.assigned_driver || "").trim().toLowerCase();
 			const unitLower = (truck.unit_number || "").toLowerCase();
-			const gross = grossByDriver[driverName] || 0;
-			const varExp = expByDriver[driverName] || 0;
+
+			// Revenue: truck-first, with safe fallback only when no truck
+			// in the fleet has any truck-attributed gross. Avoids the
+			// "blank/mismatched assigned_driver → $0 gross + thousands in
+			// expenses → big negative Net" failure mode.
+			const gross = grossByTruck[unitLower] !== undefined
+				? grossByTruck[unitLower]
+				: (fleetHasTruckRevenue ? 0 : (grossByDriver[driverName] || 0));
+
+			// Variable expenses: truck-first via expenses.truck_unit.
+			const varExp = expByTruck[unitLower] !== undefined
+				? expByTruck[unitLower]
+				: (fleetHasTruckExpenses ? 0 : (expByDriver[driverName] || 0));
+
 			const maintExp = maintByTruck[unitLower] || 0;
 			const compExp = compByTruck[unitLower] || 0;
+
+			// Fixed costs: drop maintenance_fund_monthly (reserve budget,
+			// already counted via maintExp service rows). Same rationale
+			// as the fleet totalFixedCosts loop above — keeps fleet and
+			// per-truck consistent.
 			const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0)
-				+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12)
-				+ (truck.maintenance_fund_monthly || 0);
+				+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12);
+
+			// Operating window: prefer the actual range of load dates for
+			// THIS truck. Falls back to created_at-capped fleet months only
+			// when the truck has no recorded loads (then it's all overhead
+			// and Net should be negative — that's accurate, not a bug).
 			let truckMonths = monthsOfOperation;
-			if (truck.created_at) {
+			if (truckLoadDates[unitLower]) {
+				const { first, last } = truckLoadDates[unitLower];
+				truckMonths = Math.max(1,
+					(last.getFullYear() - first.getFullYear()) * 12
+					+ (last.getMonth() - first.getMonth()) + 1
+				);
+			} else if (truck.created_at) {
 				const td = new Date(truck.created_at);
 				if (!isNaN(td)) {
 					truckMonths = Math.max(1, (now.getFullYear() - td.getFullYear()) * 12 + (now.getMonth() - td.getMonth()) + 1);
 					truckMonths = Math.min(truckMonths, monthsOfOperation);
 				}
 			}
-			const driverPay = driverPayDetails[driverName]?.totalPay || 0;
+
+			// Driver pay: per-truck active days × this truck's daily rate.
+			// dailyRate=0 silently defaults to $250/day (preserved for
+			// backwards compat); flagged via driverPayUsedDefault so the
+			// UI can warn.
+			const truckDays = truckDaySets[unitLower]?.size || 0;
+			const dailyRateRaw = truck.driver_pay_daily || 0;
+			const dailyRate = dailyRateRaw > 0 ? dailyRateRaw : 250;
+			const driverPayUsedDefault = dailyRateRaw === 0;
+			const driverPay = truckDays > 0
+				? truckDays * dailyRate
+				: (fleetHasTruckDays ? 0 : (driverPayDetails[driverName]?.totalPay || 0));
+
 			const fixedTotal = fixedPerMonth * truckMonths;
 			const expenses = varExp + maintExp + compExp + fixedTotal + driverPay;
 			const net = gross - expenses;
-			// Per-truck miles from haversine: prefer truck-column attribution,
-			// fall back to driver attribution for loads that have no truck
-			// column (same pattern as loadCount below).
+
+			// Miles: same truck-first rule (already in place pre-patch).
 			const truckMiles = milesByTruck[unitLower];
 			const totalMiles = Math.round(
 				truckMiles !== undefined ? truckMiles : (milesByDriver[driverName] || 0)
@@ -11812,6 +11905,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			const ratePerMile = totalMiles > 0 ? Math.round((gross / totalMiles) * 100) / 100 : 0;
 			const truckLoadCount = loadsByTruck[unitLower];
 			const loadCount = (truckLoadCount !== undefined) ? truckLoadCount : (loadsByDriver[driverName] || 0);
+
 			return {
 				unitNumber: truck.unit_number,
 				assignedDriver: truck.assigned_driver || "—",
@@ -11822,6 +11916,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				totalMiles,
 				ratePerMile,
 				monthlyCost: Math.round(fixedPerMonth),
+				// Data-quality flags so the UI can explain surprising rows.
+				operatingMonths: truckMonths,
+				driverPayUsedDefault,
+				attributionMode: grossByTruck[unitLower] !== undefined
+					? "truck"
+					: (fleetHasTruckRevenue ? "no-data" : "driver-fallback"),
 			};
 		});
 
