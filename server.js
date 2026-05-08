@@ -932,11 +932,12 @@ async function routemateSyncVehicles() {
 		}
 		routemateHealth.lastSync.vehicles = new Date().toISOString();
 		routemateHealth.lastError = null;
+		clearRoutemateLogState("vehicles");
 		return { synced: total };
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "vehicles", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
-		console.error("[routemate] vehicles sync failed:", err.message);
+		logRoutemateSyncFailure("vehicles", err);
 		throw err;
 	}
 }
@@ -987,6 +988,7 @@ async function routemateSyncTelemetry() {
 		routemateHealth.lastSync.telemetry = new Date().toISOString();
 		routemateHealth.lastSync.vehicles = routemateHealth.lastSync.vehicles || new Date().toISOString();
 		routemateHealth.lastError = null;
+		clearRoutemateLogState("telemetry");
 
 		// Fan out per-driver location-update events. Same payload shape as
 		// POST /api/location uses for phone GPS so the frontend handler
@@ -1008,7 +1010,7 @@ async function routemateSyncTelemetry() {
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "telemetry", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
-		console.error("[routemate] telemetry sync failed:", err.message);
+		logRoutemateSyncFailure("telemetry", err);
 	}
 }
 
@@ -1226,10 +1228,11 @@ async function routemateSyncFaultCodes() {
 		}
 		routemateHealth.lastSync.faultCodes = new Date().toISOString();
 		if (newCount === 0) routemateHealth.lastError = null;
+		clearRoutemateLogState("fault-codes");
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "faultCodes", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
-		console.error("[routemate] fault-codes sync failed:", err.message);
+		logRoutemateSyncFailure("fault-codes", err);
 	}
 }
 
@@ -1284,10 +1287,11 @@ async function routemateSyncDvirs() {
 			totalRows += dvirs.length;
 		}
 		routemateHealth.lastSync.dvirs = new Date().toISOString();
+		clearRoutemateLogState("dvir");
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "dvir", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
-		console.error("[routemate] dvir sync failed:", err.message);
+		logRoutemateSyncFailure("dvir", err);
 	}
 }
 
@@ -1886,6 +1890,36 @@ const routemateHealth = {
 	lastError: null,
 	errorsLast24h: 0,
 };
+
+// Per-source error de-dup state. Long-running upstream outages (e.g. the
+// /assets/vehicles 500 loop on Routemate's side) should log ONCE on first
+// occurrence + every 50th repeat, not every poll cycle. Cleared when the
+// sync recovers or the error message changes — recovery emits a single
+// summary line so we know the outage ended.
+const routemateLogState = {};
+function logRoutemateSyncFailure(source, err) {
+	const msg = err.message || String(err);
+	const state = routemateLogState[source];
+	if (!state || state.message !== msg) {
+		if (state && state.count > 1) {
+			console.error(`[routemate] ${source} prior error cleared (${state.count}x): ${state.message}`);
+		}
+		console.error(`[routemate] ${source} sync failed:`, msg);
+		routemateLogState[source] = { message: msg, count: 1, firstSeen: new Date().toISOString() };
+	} else {
+		state.count += 1;
+		if (state.count % 50 === 0) {
+			console.error(`[routemate] ${source} sync still failing (${state.count}x since ${state.firstSeen}):`, msg);
+		}
+	}
+}
+function clearRoutemateLogState(source) {
+	const state = routemateLogState[source];
+	if (state && state.count > 1) {
+		console.log(`[routemate] ${source} sync recovered after ${state.count} consecutive failures`);
+	}
+	delete routemateLogState[source];
+}
 
 async function getSheets() {
 	if (!sheetsClient) {
