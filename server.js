@@ -5891,6 +5891,18 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		sqlFixes.messages_from = db.prepare("UPDATE messages SET \"from\" = ? WHERE LOWER(\"from\") = ?").run(newName.trim(), oldLower).changes;
 		sqlFixes.messages_to = db.prepare("UPDATE messages SET \"to\" = ? WHERE LOWER(\"to\") = ?").run(newName.trim(), oldLower).changes;
 		sqlFixes.users = db.prepare("UPDATE users SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.users_full_name = db.prepare("UPDATE users SET full_name = ? WHERE LOWER(full_name) = ? AND role = 'Driver'").run(newName.trim(), oldLower).changes;
+		sqlFixes.truck_assignments = db.prepare("UPDATE truck_assignments SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.driver_onboarding = db.prepare("UPDATE driver_onboarding SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.trucks_assigned_driver = db.prepare("UPDATE trucks SET assigned_driver = ? WHERE LOWER(assigned_driver) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.job_applications = db.prepare("UPDATE job_applications SET full_name = ? WHERE LOWER(full_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.load_ratings = db.prepare("UPDATE load_ratings SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.carrier_driver_history = db.prepare("UPDATE carrier_driver_history SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.documents = db.prepare("UPDATE documents SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.driver_locations = db.prepare("UPDATE driver_locations SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.invoices = db.prepare("UPDATE invoices SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.routemate_dvir = db.prepare("UPDATE routemate_dvir SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.routemate_hos_daily = db.prepare("UPDATE routemate_hos_daily SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
 		sqlFixes.dispatch_notif_title = db.prepare("UPDATE dispatch_notifications SET title = REPLACE(title, ?, ?) WHERE title LIKE ?").run(oldName.trim(), newName.trim(), `%${oldName.trim()}%`).changes;
 		sqlFixes.dispatch_notif_body = db.prepare("UPDATE dispatch_notifications SET body = REPLACE(body, ?, ?) WHERE body LIKE ?").run(oldName.trim(), newName.trim(), `%${oldName.trim()}%`).changes;
 
