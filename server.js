@@ -9044,9 +9044,16 @@ async function extractReceiptText(imageBuffer) {
 }
 
 // GET /api/documents/:loadId — Fetch all documents for a load
-app.get("/api/documents/:loadId", requireAuth, (req, res) => {
+app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 	try {
 		const loadId = decodeURIComponent(req.params.loadId);
+		// SECURITY: drivers can only read documents for their own loads.
+		// Without this guard, any logged-in driver could enumerate PODs and
+		// receipts on any other driver's load by guessing the loadId.
+		if (req.session.user.role === "Driver") {
+			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
+		}
 		const docs = db
 			.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, uploaded_at, ocr_text
@@ -10961,6 +10968,13 @@ app.get("/api/geocode/search", async (req, res) => {
 app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 	try {
 		const loadId = decodeURIComponent(req.params.loadId).trim().toLowerCase().replace(/^#/, "");
+		// SECURITY: drivers can only fetch coords for their own loads. Otherwise
+		// a driver could pull pickup/dropoff coordinates for any load and use
+		// them for competitive intel or location enumeration.
+		if (req.session.user.role === "Driver") {
+			const owned = await loadBelongsToDriver(req.params.loadId, req.session.user.driverName);
+			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
+		}
 		let row = db.prepare("SELECT * FROM load_coordinates WHERE load_id = ?").get(loadId);
 
 		// On miss (or partial coverage): find addresses in the sheet, geocode, and cache
