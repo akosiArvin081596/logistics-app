@@ -4588,11 +4588,10 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		// space) in the sheet — exact equality silently dropped real deliveries
 		// when older sheet rows had a typo'd double space.
 		const completedRe = /delivered|completed|pod received/i;
-		const normName = (s) => (s || "").trim().toLowerCase().replace(/\s+/g, " ");
 		const nameLower = driverName.toLowerCase();
-		const nameNorm = normName(driverName);
+		const nameNorm = normalizeDriverName(driverName);
 		const weekLoads = data.filter(row => {
-			if (!driverCol || normName(row[driverCol]) !== nameNorm) return false;
+			if (!driverCol || normalizeDriverName(row[driverCol]) !== nameNorm) return false;
 			if (!statusCol || !completedRe.test(row[statusCol])) return false;
 			if (!dateCol) return true; // if no date column, include all completed
 			// Parse date and check if in week range
@@ -5455,11 +5454,12 @@ async function checkDriverActiveLoad(driverName) {
 		const statusCol = headers.findIndex(h => /status/i.test(h));
 		if (driverCol === -1 || statusCol === -1) return null;
 		const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
+		const targetName = normalizeDriverName(driverName);
 		for (let i = 1; i < rows.length; i++) {
 			const r = rows[i];
-			const driver = (r[driverCol] || "").trim().toLowerCase();
+			const driver = normalizeDriverName(r[driverCol]);
 			const status = (r[statusCol] || "").trim();
-			if (driver === driverName.trim().toLowerCase() && activeRe.test(status)) {
+			if (driver === targetName && activeRe.test(status)) {
 				const loadIdCol = headers.findIndex(h => /load.?id|job.?id/i.test(h));
 				const loadId = loadIdCol !== -1 ? (r[loadIdCol] || "unknown") : "unknown";
 				return `${driverName} has an active load (${loadId}, status: ${status}). Complete or cancel the load before reassigning.`;
@@ -5501,7 +5501,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		jt.data.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
 			if (!completedRe.test(st)) return;
-			const driver = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
+			const driver = driverCol ? normalizeDriverName(r[driverCol]) : "";
 			const truckUnit = truckCol ? (r[truckCol] || "").trim().toLowerCase() : "";
 			if (truckUnit) loadsByTruck[truckUnit] = (loadsByTruck[truckUnit] || 0) + 1;
 			if (driver) loadsByDriver[driver] = (loadsByDriver[driver] || 0) + 1;
@@ -5512,7 +5512,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 
 	const trucks = rows.map((t) => {
 		const unitLower = (t.unit_number || "").toLowerCase();
-		const driverLower = (t.assigned_driver || "").trim().toLowerCase();
+		const driverLower = normalizeDriverName(t.assigned_driver);
 		const directCount = loadsByTruck[unitLower];
 		const loadCount = (directCount !== undefined)
 			? directCount
@@ -7299,10 +7299,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Fleet details
 		const fleet = carrierDB.data.map((r) => {
 			const name = (r[carrierDriverCol] || "").trim();
-			const nameLower = name.toLowerCase();
+			const nameNorm = normalizeDriverName(name);
 			const currentLoad = activeJobs.find(
 				(j) =>
-					driverCol && (j[driverCol] || "").trim().toLowerCase() === nameLower,
+					driverCol && normalizeDriverName(j[driverCol]) === nameNorm,
 			);
 			const phoneCol = findCol(carrierDB.headers, /phone|contact/i);
 			return {
@@ -7316,7 +7316,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 						: ""
 					: "",
 				CompletedLoads: completedJobs.filter((j) => {
-					return driverCol && (j[driverCol] || "").trim().toLowerCase() === nameLower;
+					return driverCol && normalizeDriverName(j[driverCol]) === nameNorm;
 				}).length,
 			};
 		});
@@ -7467,6 +7467,15 @@ function findCol(headers, regex) {
 	return headers.find((h) => regex.test(h)) || null;
 }
 
+// Normalize a driver name for comparison. Lowercases, trims, AND collapses
+// internal whitespace. Use this any time a driver name read from the Job
+// Tracking sheet is being matched against a session/user driverName — exact
+// equality silently dropped real loads when older sheet rows had typo'd
+// double-spaces (see invoice generator regression May 2026).
+function normalizeDriverName(s) {
+	return (s || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 // Load-drop filtering — single source of truth for "this load should not
 // appear in any admin list or KPI". Combines two exclusion reasons:
 //   1. Status is Cancelled (set by POST /api/dispatch/cancel)
@@ -7525,12 +7534,13 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		const carrierDriverCol =
 			findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
 
-		// Filter loads for this driver
+		// Filter loads for this driver. normalizeDriverName tolerates internal
+		// whitespace variants in the sheet so a typo'd row doesn't silently
+		// drop loads from the driver's app.
+		const driverNameNorm = normalizeDriverName(driverName);
 		const loads = driverCol
 			? jobTracking.data.filter(
-					(r) =>
-						(r[driverCol] || "").trim().toLowerCase() ===
-						driverName.toLowerCase(),
+					(r) => normalizeDriverName(r[driverCol]) === driverNameNorm,
 				)
 			: [];
 
@@ -7905,12 +7915,13 @@ app.put("/api/driver/status", requireAuth, async (req, res) => {
 			const driverCol = headers.findIndex((h) => /driver/i.test(h));
 			if (driverCol !== -1) {
 				const activeRe = /^(heading to shipper|at shipper|loading|in transit|at receiver)$/i;
+				const driverNameNorm = normalizeDriverName(driverName);
 				const hasActive = dataRows.some((row, i) => {
 					const rIdx = i + 2;
 					if (rIdx === rowIndex) return false;
-					const drv = (row[driverCol] || "").trim().toLowerCase();
+					const drv = normalizeDriverName(row[driverCol]);
 					const sts = (row[statusIdx] || "").trim();
-					return drv === driverName.toLowerCase() && activeRe.test(sts);
+					return drv === driverNameNorm && activeRe.test(sts);
 				});
 				if (hasActive) {
 					return res.status(409).json({
