@@ -7699,14 +7699,19 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			load._accepted = acceptedSet.has(lid);
 		});
 
-		// Build list of all driver names for recipient picker
-		const carrierDriverNames = [
-			...new Set(
-				carrierDB.data
-					.map((r) => (r[carrierDriverCol] || "").trim())
-					.filter(Boolean),
-			),
-		].sort();
+		// PRIVACY: do not expose other drivers' names to a Driver-role caller.
+		// Previously this returned the full carrier driver list to every
+		// /api/driver/:name response. The driver UI never consumed it; admin
+		// views fetch the list separately via /api/data?sheet=Carrier+Database.
+		const carrierDriverNames = req.session.user.role === "Driver"
+			? []
+			: [
+				...new Set(
+					carrierDB.data
+						.map((r) => (r[carrierDriverCol] || "").trim())
+						.filter(Boolean),
+				),
+			].sort();
 
 		// Assigned truck from SQLite
 		const assignedTruck = db.prepare(
@@ -8570,8 +8575,12 @@ app.post("/api/messages", requireAuth, (req, res) => {
 			JSON.stringify({ from, to, loadId: loadId || '' })
 		);
 
-		// Broadcast via Socket.IO for real-time delivery
-		io.emit("new-message", {
+		// PRIVACY: only emit to the actual participants + the dispatch room
+		// (so admins can see all messages they're authorized to see). Previously
+		// this used io.emit() which broadcast every message to every connected
+		// client — drivers were receiving messages between other parties even
+		// though the UI hid them.
+		const payload = {
 			id: result.lastInsertRowid,
 			notificationId: msgNotif.lastInsertRowid,
 			timestamp,
@@ -8581,7 +8590,14 @@ app.post("/api/messages", requireAuth, (req, res) => {
 			loadId: loadId || "",
 			attachment_url: attachmentUrl || "",
 			attachment_type: attachmentType || "",
-		});
+		};
+		const fromRoom = (from || "").trim().toLowerCase();
+		const toRoom = (to || "").trim().toLowerCase();
+		if (fromRoom) io.to(fromRoom).emit("new-message", payload);
+		if (toRoom && toRoom !== fromRoom) io.to(toRoom).emit("new-message", payload);
+		if (fromRoom !== "dispatch" && toRoom !== "dispatch") {
+			io.to("dispatch").emit("new-message", payload);
+		}
 
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
