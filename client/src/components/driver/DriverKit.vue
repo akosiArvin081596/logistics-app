@@ -39,6 +39,39 @@
       </div>
     </div>
 
+    <!-- Truck Documents — pinned to the top of the Kit (after profile) so it's
+         the first thing a driver sees during a roadside inspection. Admin-
+         flagged docs from the truck currently assigned to this driver.
+         View-only in the browser; no file_url ever reaches this component. -->
+    <div v-if="truckDocuments.length > 0" class="card shared-docs-card kit-truck-docs">
+      <div class="shared-docs-header">
+        <div class="shared-docs-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 3h15v13H1z"/><path d="M16 8h4l3 3v5h-7z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+        </div>
+        <div class="shared-docs-title">Truck Documents</div>
+        <span class="shared-docs-count">{{ truckDocuments.length }}</span>
+      </div>
+      <div class="shared-docs-hint">Registration, insurance, IFTA, and other papers for your assigned truck. Show these during inspections.</div>
+      <div class="shared-docs-list">
+        <div v-for="doc in truckDocuments" :key="'t'+doc.id" class="shared-doc-row">
+          <div class="shared-doc-info">
+            <div class="shared-doc-name">{{ doc.file_name }}</div>
+            <div class="shared-doc-meta">
+              <span class="shared-doc-type">{{ doc.doc_type }}</span>
+              <span class="shared-doc-date">{{ formatDate(doc.uploaded_at) }}</span>
+            </div>
+            <div v-if="doc.notes" class="shared-doc-notes">{{ doc.notes }}</div>
+          </div>
+          <a
+            :href="`/api/driver/truck-documents/${doc.id}/view`"
+            target="_blank"
+            rel="noopener"
+            class="shared-doc-view"
+          >View</a>
+        </div>
+      </div>
+    </div>
+
     <!-- My Identity Documents — CDL and medical card uploaded during the application -->
     <div v-if="identityFiles.length > 0" class="card kit-files-card">
       <div class="kit-files-header">
@@ -110,36 +143,6 @@
       </div>
     </div>
 
-    <!-- Truck Documents — admin-flagged docs from the truck currently assigned to this driver.
-         View-only in the browser; no file_url ever reaches this component. -->
-    <div v-if="truckDocuments.length > 0" class="card shared-docs-card">
-      <div class="shared-docs-header">
-        <div class="shared-docs-icon">
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 3h15v13H1z"/><path d="M16 8h4l3 3v5h-7z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
-        </div>
-        <div class="shared-docs-title">Truck Documents</div>
-        <span class="shared-docs-count">{{ truckDocuments.length }}</span>
-      </div>
-      <div class="shared-docs-hint">From your assigned truck. Tap View to open in a new tab.</div>
-      <div class="shared-docs-list">
-        <div v-for="doc in truckDocuments" :key="'t'+doc.id" class="shared-doc-row">
-          <div class="shared-doc-info">
-            <div class="shared-doc-name">{{ doc.file_name }}</div>
-            <div class="shared-doc-meta">
-              <span class="shared-doc-type">{{ doc.doc_type }}</span>
-              <span class="shared-doc-date">{{ formatDate(doc.uploaded_at) }}</span>
-            </div>
-            <div v-if="doc.notes" class="shared-doc-notes">{{ doc.notes }}</div>
-          </div>
-          <a
-            :href="`/api/driver/truck-documents/${doc.id}/view`"
-            target="_blank"
-            rel="noopener"
-            class="shared-doc-view"
-          >View</a>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -404,6 +407,12 @@ function formatDate(ts) {
 
 .shared-docs-card {
   margin-top: 1rem;
+}
+/* Highlight Truck Documents at the top of the Kit so it reads as the primary
+   inspection-day surface. Light accent border, no other layout change. */
+.kit-truck-docs {
+  border-left: 3px solid var(--accent, #10b981);
+  padding-left: 0.75rem;
 }
 .shared-docs-header {
   display: flex;

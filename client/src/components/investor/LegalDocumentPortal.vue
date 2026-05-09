@@ -129,7 +129,10 @@ const uploadForm = reactive({
   file: null,
   fileBase64: '',
   selectedTruckId: null,
-  visibleToDriver: false,
+  // Default ON: truck-scoped docs are inspection-critical (registration,
+  // insurance, IFTA, cab card). Drivers need them in their Driver Kit by
+  // default; admin can untick for internal-only docs.
+  visibleToDriver: true,
 })
 
 // Driver visibility only makes sense for truck-scoped uploads. In truck modal
@@ -216,7 +219,7 @@ async function upload() {
     uploadForm.docType = ''
     uploadForm.notes = ''
     uploadForm.selectedTruckId = null
-    uploadForm.visibleToDriver = false
+    uploadForm.visibleToDriver = true
     await load()
   } catch {
     errorMsg.value = 'Upload failed.'

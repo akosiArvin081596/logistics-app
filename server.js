@@ -7024,12 +7024,19 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 // POST /api/driver/respond — Driver accepts or declines a load assignment
 app.post("/api/driver/respond", requireAuth, async (req, res) => {
 	try {
-		const { loadId, rowIndex, response, driverName } = req.body;
+		const { loadId, rowIndex, response } = req.body;
+		const driverName = resolveDriverActor(req, res, req.body.driverName);
+		if (driverName === null) return; // 401/403 already sent
 		if (!loadId || !rowIndex || !response || !driverName) {
 			return res.status(400).json({ error: "loadId, rowIndex, response, and driverName required" });
 		}
 		if (!["accepted", "declined"].includes(response)) {
 			return res.status(400).json({ error: "response must be 'accepted' or 'declined'" });
+		}
+		// SECURITY: drivers can only respond to loads currently assigned to them
+		if (req.session.user.role === "Driver") {
+			const owned = await loadBelongsToDriver(loadId, driverName);
+			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 
 		// Check for duplicate response (scoped to load_id + driver + rowIndex)
@@ -7476,6 +7483,55 @@ function normalizeDriverName(s) {
 	return (s || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// SECURITY: enforce that a Driver-role user is acting only on their own
+// account. Super Admin / Dispatcher can act on behalf of any driver (they
+// need to for dispatch operations), but a Driver MUST be the one named in
+// the request. Returns the resolved driverName string, or null after sending
+// the appropriate 401/403 response. Always check `=== null` and early-return.
+function resolveDriverActor(req, res, bodyDriverName) {
+	const user = req.session?.user;
+	if (!user) {
+		res.status(401).json({ error: "Not authenticated" });
+		return null;
+	}
+	if (user.role === "Driver") {
+		const sessionName = (user.driverName || "").trim();
+		if (!sessionName) {
+			res.status(403).json({ error: "Driver session has no name" });
+			return null;
+		}
+		const requested = (bodyDriverName || "").trim();
+		if (requested && normalizeDriverName(requested) !== normalizeDriverName(sessionName)) {
+			res.status(403).json({ error: "Drivers can only act on their own account" });
+			return null;
+		}
+		return sessionName;
+	}
+	return (bodyDriverName || "").trim();
+}
+
+// SECURITY: verify that a Job Tracking load is currently assigned to the
+// given driver (case + whitespace tolerant). Used by driver-side write paths
+// (status update, POD upload, GPS ping) to reject spoofed rowIndex/loadId.
+// Uses the cached sheet so it does not add a Sheets API call per request.
+async function loadBelongsToDriver(loadId, driverName) {
+	if (!loadId || !driverName) return false;
+	const target = normalizeDriverName(driverName);
+	const targetLid = String(loadId).trim().toLowerCase().replace(/^#/, "");
+	let jt;
+	try { jt = await getJobTrackingCached(); } catch { return false; }
+	const headers = jt.headers || [];
+	const driverCol = findCol(headers, /driver/i);
+	const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+	if (!driverCol || !loadIdCol) return false;
+	for (const row of jt.data || []) {
+		const lid = String(row[loadIdCol] || "").trim().toLowerCase().replace(/^#/, "");
+		if (lid !== targetLid) continue;
+		if (normalizeDriverName(row[driverCol]) === target) return true;
+	}
+	return false;
+}
+
 // Load-drop filtering — single source of truth for "this load should not
 // appear in any admin list or KPI". Combines two exclusion reasons:
 //   1. Status is Cancelled (set by POST /api/dispatch/cancel)
@@ -7853,7 +7909,16 @@ app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter
 // PUT /api/driver/status — Update load status
 app.put("/api/driver/status", requireAuth, async (req, res) => {
 	try {
-		let { rowIndex, driverName, loadId, newStatus, rowData } = req.body;
+		let { rowIndex, loadId, newStatus, rowData } = req.body;
+		const driverName = resolveDriverActor(req, res, req.body.driverName);
+		if (driverName === null) return;
+		// SECURITY: drivers can only update loads assigned to them.
+		// Admin/Dispatcher use the /api/loads/:loadId/status-override flow,
+		// which has its own audit/reason gate, so this guard is Driver-only.
+		if (req.session.user.role === "Driver") {
+			const owned = await loadBelongsToDriver(loadId, driverName);
+			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
+		}
 		const sheets = await getSheets();
 
 		// Read entire sheet to verify exact row
@@ -8533,10 +8598,20 @@ app.put("/api/messages/read", requireAuth, (req, res) => {
 			return res.json({ success: true });
 		}
 
+		// SECURITY: Drivers can only mark messages addressed TO them. Admin/
+		// Dispatcher keep the broader behavior so they can clear inbox-wide.
 		const placeholders = messageIds.map(() => "?").join(",");
-		db.prepare(
-			`UPDATE messages SET read = 1 WHERE id IN (${placeholders})`,
-		).run(...messageIds);
+		const user = req.session.user;
+		if (user.role === "Driver") {
+			const recipient = (user.driverName || "").trim();
+			db.prepare(
+				`UPDATE messages SET read = 1 WHERE id IN (${placeholders}) AND LOWER("to") = LOWER(?)`,
+			).run(...messageIds, recipient);
+		} else {
+			db.prepare(
+				`UPDATE messages SET read = 1 WHERE id IN (${placeholders})`,
+			).run(...messageIds);
+		}
 
 		res.json({ success: true });
 	} catch (error) {
@@ -8551,7 +8626,16 @@ app.put("/api/notifications/read", requireAuth, (req, res) => {
 		const { ids } = req.body;
 		if (!ids || !ids.length) return res.json({ success: true });
 		const placeholders = ids.map(() => "?").join(",");
-		db.prepare(`UPDATE notifications SET read = 1 WHERE id IN (${placeholders})`).run(...ids);
+		// SECURITY: Drivers can only mark their own notifications. Admin keeps
+		// broader behavior (e.g. clearing dispatch alerts on behalf).
+		const user = req.session.user;
+		if (user.role === "Driver") {
+			const driverNameLower = (user.driverName || "").trim().toLowerCase();
+			db.prepare(`UPDATE notifications SET read = 1 WHERE id IN (${placeholders}) AND LOWER(driver_name) = ?`)
+				.run(...ids, driverNameLower);
+		} else {
+			db.prepare(`UPDATE notifications SET read = 1 WHERE id IN (${placeholders})`).run(...ids);
+		}
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error marking notifications read:", error.message);
@@ -8701,19 +8785,18 @@ function saveReceiptToDisk(photoData) {
 // POST /api/expenses — Log a new expense (SQLite)
 app.post("/api/expenses", requireAuth, (req, res) => {
 	try {
-		const { driver, loadId, type, amount, description, date, photoData, gallons, odometer } =
+		const { loadId, type, amount, description, date, photoData, gallons, odometer } =
 			req.body;
+		// SECURITY: drivers must use their session identity; admin/dispatcher
+		// can pass driver in the body to log on behalf. Investors cannot log
+		// at all. resolveDriverActor returns null after sending the response.
+		if (req.session.user.role === "Investor") {
+			return res.status(403).json({ error: "Investors cannot submit expenses" });
+		}
+		const driver = resolveDriverActor(req, res, req.body.driver);
+		if (driver === null) return;
 		if (!driver || !type || !amount || !date) {
 			return res.status(400).json({ error: "Missing required fields" });
-		}
-		// Ownership: Drivers can only submit their own expenses; Investors cannot submit at all
-		const userRole = req.session.user.role;
-		if (userRole === "Driver") {
-			if (driver.trim().toLowerCase() !== (req.session.user.driverName || "").trim().toLowerCase()) {
-				return res.status(403).json({ error: "Drivers can only submit their own expenses" });
-			}
-		} else if (userRole === "Investor") {
-			return res.status(403).json({ error: "Investors cannot submit expenses" });
 		}
 		const VALID_EXPENSE_TYPES = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other'];
 		if (!VALID_EXPENSE_TYPES.includes(type)) {
@@ -9688,12 +9771,19 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 // POST /api/documents/upload — Upload document (images → PDF, or direct file)
 app.post("/api/documents/upload", requireAuth, async (req, res) => {
 	try {
-		const { loadId, rowIndex, photoData, driverName, fileType, fileName: clientFileName } = req.body;
+		const { loadId, rowIndex, photoData, fileType, fileName: clientFileName } = req.body;
+		const driverName = resolveDriverActor(req, res, req.body.driverName);
+		if (driverName === null) return;
 		const docType = req.body.docType || req.body.type || "POD";
 		if (!loadId || !rowIndex || !photoData) {
 			return res
 				.status(400)
 				.json({ error: "Please select a file before uploading." });
+		}
+		// SECURITY: drivers can only upload docs for loads assigned to them
+		if (req.session.user.role === "Driver") {
+			const owned = await loadBelongsToDriver(loadId, driverName);
+			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
 
 		const timestamp = Date.now();
@@ -9861,18 +9951,29 @@ app.post("/api/location", requireAuth, async (req, res) => {
 			return res.status(400).json({ error: "latitude and longitude required" });
 		}
 
+		// SECURITY: if a Driver provides a loadId, silently strip it when the
+		// load isn't assigned to them. Don't 403 — frontend pings every 60s and
+		// blocking would surface as silent location loss; stripping the loadId
+		// keeps the GPS trail flowing without polluting another driver's
+		// geofence triggers.
+		let effectiveLoadId = loadId || "";
+		if (effectiveLoadId && req.session.user.role === "Driver") {
+			const owned = await loadBelongsToDriver(effectiveLoadId, driverName);
+			if (!owned) effectiveLoadId = "";
+		}
+
 		const timestamp = new Date().toISOString();
 		db.prepare(
 			`INSERT INTO driver_locations (driver, latitude, longitude, accuracy, speed, heading, timestamp, load_id)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-		).run(driverName, latitude, longitude, accuracy || 0, speed || 0, heading || 0, timestamp, loadId || "");
+		).run(driverName, latitude, longitude, accuracy || 0, speed || 0, heading || 0, timestamp, effectiveLoadId);
 
 		// Broadcast to dispatch
 		io.to("dispatch").emit("location-update", {
 			driver: driverName,
 			latitude, longitude,
 			speed: speed || 0,
-			loadId: loadId || "",
+			loadId: effectiveLoadId,
 			timestamp,
 			source: "phone",
 		});
@@ -9880,7 +9981,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 		// Geofence check if loadId is provided
 		let geofenceTriggered = null;
 		let distanceWarning = null;
-		if (loadId) {
+		if (effectiveLoadId) {
 			try {
 				const sheets = await getSheets();
 				const headerResp = await sheets.spreadsheets.values.get({

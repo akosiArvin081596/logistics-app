@@ -295,57 +295,10 @@
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '\u2014' }}</span></div>
         </div>
-        <!-- Driver Files — files belonging to the driver assigned to this truck.
-             Hidden from Investor role (CDL, medical, drug test, signed docs
-             are confidential per 2026-04-13 client feedback). -->
-        <div v-if="viewTruck.AssignedDriver && canViewDriverFiles" class="driver-files-section">
-          <div class="driver-files-title">
-            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            Driver Files — {{ viewTruck.AssignedDriver }}
-          </div>
-          <div v-if="driverFilesLoading" class="driver-files-empty">Loading...</div>
-          <div v-else-if="driverFilesError" class="driver-files-error">
-            <span class="warning-dot">&#9888;</span> {{ driverFilesError }}
-          </div>
-          <template v-else>
-            <!-- Images group (JPG / PNG uploads like CDL / Medical photos) -->
-            <div v-if="driverFilesByType.image.length" class="driver-files-subsection">
-              <div class="driver-files-sublabel">
-                <svg class="type-icon" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-                Images ({{ driverFilesByType.image.length }})
-              </div>
-              <div class="driver-files-grid">
-                <a v-for="(f, i) in driverFilesByType.image" :key="'img'+i" :href="f.url" :download="f.downloadName" target="_blank" rel="noopener" class="driver-file-card">
-                  <div class="driver-file-thumb" :style="{ backgroundImage: `url(${f.url})` }"></div>
-                  <div class="driver-file-label">{{ f.label }}</div>
-                  <div class="driver-file-type">{{ f.meta }}</div>
-                </a>
-              </div>
-            </div>
-
-            <!-- PDF Documents group -->
-            <div v-if="driverFilesByType.pdf.length" class="driver-files-subsection">
-              <div class="driver-files-sublabel">
-                <svg class="type-icon" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-                PDF Documents ({{ driverFilesByType.pdf.length }})
-              </div>
-              <div class="driver-files-grid">
-                <a v-for="(f, i) in driverFilesByType.pdf" :key="'pdf'+i" :href="f.url" :download="f.downloadName" target="_blank" rel="noopener" class="driver-file-card">
-                  <div class="driver-file-thumb pdf">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-                  </div>
-                  <div class="driver-file-label">{{ f.label }}</div>
-                  <div class="driver-file-type" :class="f.metaClass">{{ f.meta }}</div>
-                </a>
-              </div>
-            </div>
-
-            <div v-if="!driverFilesByType.image.length && !driverFilesByType.pdf.length" class="driver-files-empty">
-              No driver files uploaded yet.
-            </div>
-          </template>
-        </div>
-
+        <!-- Driver-personal files (CDL, medical, signed contracts) intentionally
+             NOT shown here. They live with the driver, not the truck. Manage
+             them from the Drivers Database page. CEO requirement 2026-05-09:
+             keep the truck view focused on truck-scoped documents only. -->
         <div style="margin-top:1.25rem;border-top:1px solid #e5e7eb;padding-top:1rem;">
           <LegalDocumentPortal :truck-id="viewTruck.id" :unit-number="viewTruck.UnitNumber" />
         </div>
@@ -359,22 +312,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import { useApi } from '../../composables/useApi'
-import { useAuthStore } from '../../stores/auth'
 
 const api = useApi()
-const authStore = useAuthStore()
-// Investors never see driver files (CDL, medical, drug test, signed docs).
-// Gated here so the fetch is skipped AND the section is hidden. The backend
-// also rejects the request for Investor role as defense in depth.
-const canViewDriverFiles = computed(() => {
-  const role = authStore.user?.role
-  return role === 'Super Admin' || role === 'Dispatcher'
-})
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
@@ -413,76 +357,6 @@ const emit = defineEmits(['delete', 'update', 'linkage-changed'])
 const showConfirm = ref(false)
 const pendingTruck = ref(null)
 const viewTruck = ref(null)
-
-// Driver files section — fetched when the truck modal opens (keyed by truck.id
-// so the watcher only refires when a different truck is selected, never on
-// field edits within the same truck).
-const driverFiles = ref({ driverName: '', files: [], onboardingDocs: [], drugTest: null })
-const driverFilesLoading = ref(false)
-const driverFilesError = ref('')
-watch(() => viewTruck.value?.id, async (truckId) => {
-  driverFiles.value = { driverName: '', files: [], onboardingDocs: [], drugTest: null }
-  driverFilesError.value = ''
-  if (!truckId) return
-  // Skip the fetch entirely for investors — the backend rejects this role
-  // and the section is hidden from the template anyway.
-  if (!canViewDriverFiles.value) return
-  driverFilesLoading.value = true
-  try {
-    driverFiles.value = await api.get(`/api/trucks/${truckId}/driver-files`)
-  } catch (err) {
-    driverFilesError.value = err?.message || 'Failed to load driver files.'
-    console.error('Driver files load failed:', err)
-  } finally {
-    driverFilesLoading.value = false
-  }
-})
-
-// Flatten application uploads + signed onboarding docs + drug test into
-// two groups keyed by underlying file type so the modal shows them under
-// "Images" and "PDF Documents" rather than by business domain.
-const driverFilesByType = computed(() => {
-  const image = []
-  const pdf = []
-  const unit = viewTruck.value?.UnitNumber || 'truck'
-  const slug = (s) => (s || '').replace(/\s+/g, '-')
-  // Application uploads (CDL front/back, medical card)
-  for (const f of driverFiles.value.files || []) {
-    if (!f.data) continue
-    const entry = {
-      label: f.label,
-      url: f.data,
-      downloadName: `${unit}-${slug(f.label)}.${f.type === 'pdf' ? 'pdf' : 'jpg'}`,
-      meta: 'Application upload — click to view',
-      metaClass: '',
-    }
-    if (f.type === 'image') image.push(entry)
-    else if (f.type === 'pdf') pdf.push(entry)
-  }
-  // Signed onboarding docs (always PDFs)
-  for (const doc of (driverFiles.value.onboardingDocs || [])) {
-    if (!doc.signed || !doc.signed_pdf_url) continue
-    pdf.push({
-      label: doc.doc_name,
-      url: doc.signed_pdf_url,
-      downloadName: `${unit}-${slug(doc.doc_name)}.pdf`,
-      meta: doc.signed_at ? `Signed ${new Date(doc.signed_at).toLocaleDateString()}` : 'Signed',
-      metaClass: '',
-    })
-  }
-  // Drug test
-  const dt = driverFiles.value.drugTest
-  if (dt && dt.file_url) {
-    pdf.push({
-      label: 'Drug Test Result',
-      url: dt.file_url,
-      downloadName: `${unit}-drug-test.pdf`,
-      meta: (dt.result || '').toUpperCase(),
-      metaClass: dt.result === 'pass' ? 'dt-pass' : 'dt-fail',
-    })
-  }
-  return { image, pdf }
-})
 
 const editModelOptions = computed(() => truckModels[editForm.make] || [])
 
@@ -766,56 +640,6 @@ async function handleUnlink(truck) {
 .view-grid { display: flex; flex-direction: column; gap: 0.4rem; }
 .view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
 .view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
-
-/* Driver Files section in the truck detail modal */
-.driver-files-section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; }
-.driver-files-title {
-  display: flex; align-items: center; gap: 0.5rem;
-  font-size: 0.82rem; font-weight: 700; color: #0f172a;
-  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.75rem;
-}
-.driver-files-title svg { color: #3b82f6; }
-.driver-files-sublabel {
-  font-size: 0.68rem; font-weight: 700; color: #64748b;
-  text-transform: uppercase; letter-spacing: 0.05em;
-  margin: 0.85rem 0 0.5rem;
-  display: flex; align-items: center; gap: 0.4rem;
-}
-.driver-files-sublabel .type-icon { color: #3b82f6; }
-.driver-files-subsection { margin-top: 0.5rem; }
-.driver-files-empty { font-size: 0.82rem; color: #94a3b8; font-style: italic; padding: 0.75rem 0; }
-.driver-files-error {
-  font-size: 0.82rem; color: #b45309;
-  background: #fffbeb; border: 1px solid #fde68a;
-  border-radius: 6px; padding: 0.6rem 0.75rem; margin: 0.4rem 0;
-  display: flex; align-items: center; gap: 0.5rem;
-}
-.driver-files-error .warning-dot { font-size: 1rem; }
-.driver-files-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 0.65rem;
-}
-.driver-file-card {
-  display: block; text-decoration: none; color: inherit;
-  background: #fafbfd; border: 1px solid #e2e8f0; border-radius: 8px;
-  padding: 0.6rem; transition: all 0.15s;
-}
-.driver-file-card:hover {
-  border-color: #3b82f6; background: #f0f9ff;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.08);
-}
-.driver-file-thumb {
-  width: 100%; height: 100px; border-radius: 6px;
-  background-color: #e2e8f0; background-size: cover; background-position: center;
-  display: flex; align-items: center; justify-content: center;
-  color: #64748b; margin-bottom: 0.5rem;
-}
-.driver-file-thumb.pdf { background-color: #fef2f2; color: #dc2626; }
-.driver-file-thumb svg { display: block; }
-.driver-file-label { font-size: 0.78rem; font-weight: 600; color: #0f172a; margin-bottom: 0.15rem; }
-.driver-file-type { font-size: 0.68rem; color: #94a3b8; font-family: 'JetBrains Mono', monospace; }
-.driver-file-type.dt-pass { color: #16a34a; font-weight: 700; }
-.driver-file-type.dt-fail { color: #dc2626; font-weight: 700; }
 
 /* Routemate column — minimal "Linked / Link / —" affordances. */
 .rm-linked {
