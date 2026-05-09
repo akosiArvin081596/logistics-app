@@ -11112,7 +11112,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		filteredJobData.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
-			const driver = jtDriverCol ? (r[jtDriverCol] || "").trim().toLowerCase() : "";
+			const driver = jtDriverCol ? normalizeDriverName(r[jtDriverCol]) : "";
 			const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
 
 			// Resolve the load's assigned-month key once (used by both revenue and driver pay)
@@ -11229,7 +11229,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				? "SELECT assigned_driver, driver_pay_daily FROM trucks WHERE owner_id = ?"
 				: "SELECT assigned_driver, driver_pay_daily FROM trucks";
 			db.prepare(truckQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => {
-				const d = (t.assigned_driver || "").trim().toLowerCase();
+				const d = normalizeDriverName(t.assigned_driver);
 				if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
 			});
 			for (const [driver, daySet] of Object.entries(driverDaySets)) {
@@ -11423,7 +11423,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			);
 			// Use allOwnedTrucks (already fetched for asset section) — no extra query
 			allOwnedTrucks.forEach((truck) => {
-				const driverName = (truck.assigned_driver || "").trim().toLowerCase();
+				const driverName = normalizeDriverName(truck.assigned_driver);
 				const unitLower = truck.unit_number.toLowerCase();
 				// Revenue from grossByDriver map (computed in single pass above)
 				const unitTotalGross = grossByDriver[driverName] || 0;
@@ -11716,7 +11716,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		jobTracking.data.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
 			const driver = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
-			const driverLc = driver.toLowerCase();
+			const driverLc = normalizeDriverName(driver);
 			const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
 
 			// Operating period
@@ -11841,7 +11841,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// ---- Driver pay from active-day sets ----
 		const trucksByDriver = {};
 		db.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {
-			const d = (t.assigned_driver || "").trim().toLowerCase();
+			const d = normalizeDriverName(t.assigned_driver);
 			if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
 		});
 		const driverPayDetails = {};
@@ -11924,7 +11924,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const fleetHasTruckDays = Object.keys(truckDaySets).length > 0;
 
 		const perTruck = allTrucks.map((truck) => {
-			const driverName = (truck.assigned_driver || "").trim().toLowerCase();
+			const driverName = normalizeDriverName(truck.assigned_driver);
 			const unitLower = (truck.unit_number || "").toLowerCase();
 
 			// Revenue: truck-first, with safe fallback only when no truck
@@ -12028,7 +12028,8 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const driverDisplayNames = {};
 		jobTracking.data.forEach(r => {
 			const d = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
-			if (d && !driverDisplayNames[d.toLowerCase()]) driverDisplayNames[d.toLowerCase()] = d;
+			const k = normalizeDriverName(d);
+			if (d && k && !driverDisplayNames[k]) driverDisplayNames[k] = d;
 		});
 		const drivers = Object.entries(grossByDriver).map(([lcName, gross]) => {
 			const rawMiles = milesByDriver[lcName] || 0;
