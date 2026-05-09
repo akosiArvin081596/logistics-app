@@ -9065,7 +9065,14 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 	try {
 		const user = req.session.user;
 		const isSuperAdmin = user.role === "Super Admin";
-		let truckId = req.query.truckId ? parseInt(req.query.truckId) : null;
+		// Accept BOTH snake_case (frontend convention) and camelCase (legacy).
+		// Previously only `truckId` was read while the frontend always sent
+		// `truck_id` — silently making truckId null and falling through to the
+		// "return ALL docs" branch, leaking the entire fleet's docs into every
+		// truck modal.
+		let truckId = req.query.truck_id
+			? parseInt(req.query.truck_id)
+			: (req.query.truckId ? parseInt(req.query.truckId) : null);
 		if (!truckId && req.query.unit_number) {
 			const t = db.prepare("SELECT id FROM trucks WHERE LOWER(unit_number) = LOWER(?)").get(req.query.unit_number.trim());
 			if (t) truckId = t.id;
@@ -9102,19 +9109,29 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 			const invId = inv ? inv.id : 0;
 			const owned = db.prepare("SELECT id FROM trucks WHERE owner_id = ?").all(user.id).map(t => t.id);
 			if (owned.length === 0 && !invId) return res.json({ documents: [] });
-			// Get truck docs + investor-profile docs
-			const conditions = [];
-			const params = [];
-			if (owned.length > 0) {
-				conditions.push(`ld.truck_id IN (${owned.map(() => '?').join(',')})`);
-				params.push(...owned);
+
+			// Per-truck scope: when the investor requests a specific truck, only
+			// return docs for THAT truck (after verifying they own it). Previously
+			// this branch always returned every doc across every truck the
+			// investor owned, even when viewing a single-truck modal.
+			if (truckId) {
+				if (!owned.includes(truckId)) return res.json({ documents: [] });
+				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE ld.truck_id = ? ORDER BY ld.uploaded_at DESC`).all(truckId);
+			} else {
+				// Fleet-wide view: all owned-truck docs + investor-profile docs.
+				const conditions = [];
+				const params = [];
+				if (owned.length > 0) {
+					conditions.push(`ld.truck_id IN (${owned.map(() => '?').join(',')})`);
+					params.push(...owned);
+				}
+				if (invId) {
+					conditions.push(`ld.investor_id = ?`);
+					params.push(invId);
+				}
+				const where = conditions.length > 0 ? `WHERE (${conditions.join(' OR ')})` : '';
+				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ${where} ORDER BY ld.uploaded_at DESC`).all(...params);
 			}
-			if (invId) {
-				conditions.push(`ld.investor_id = ?`);
-				params.push(invId);
-			}
-			const where = conditions.length > 0 ? `WHERE (${conditions.join(' OR ')})` : '';
-			docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ${where} ORDER BY ld.uploaded_at DESC`).all(...params);
 		}
 		res.json({ documents: docs });
 	} catch (err) {
