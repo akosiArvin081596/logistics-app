@@ -4553,7 +4553,10 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		const existing = db.prepare("SELECT * FROM invoices WHERE LOWER(driver) = ? AND week_start = ?")
 			.get(driverName.toLowerCase(), weekStart);
 		if (existing && existing.status !== "Draft") {
-			return res.status(409).json({ error: "Invoice already submitted for this week", invoice: existing });
+			return res.status(409).json({
+				error: `Invoice already exists for this week (${existing.invoice_number}, status: ${existing.status}). Contact admin if this needs to be regenerated.`,
+				invoice: existing,
+			});
 		}
 
 		// Fetch loads from Google Sheets
@@ -4579,11 +4582,16 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		const dateCol = headers.find(h => /status.*update.*date|completion.*date|drop.?off.*date|deliv.*date/i.test(h))
 			|| headers.find(h => /date/i.test(h));
 
-		// Filter completed loads for this driver in the week
+		// Filter completed loads for this driver in the week.
+		// Tolerate internal-whitespace variants (e.g. "Shorn  King" with double
+		// space) in the sheet — exact equality silently dropped real deliveries
+		// when older sheet rows had a typo'd double space.
 		const completedRe = /delivered|completed|pod received/i;
+		const normName = (s) => (s || "").trim().toLowerCase().replace(/\s+/g, " ");
 		const nameLower = driverName.toLowerCase();
+		const nameNorm = normName(driverName);
 		const weekLoads = data.filter(row => {
-			if (!driverCol || (row[driverCol] || "").trim().toLowerCase() !== nameLower) return false;
+			if (!driverCol || normName(row[driverCol]) !== nameNorm) return false;
 			if (!statusCol || !completedRe.test(row[statusCol])) return false;
 			if (!dateCol) return true; // if no date column, include all completed
 			// Parse date and check if in week range
