@@ -4511,9 +4511,10 @@ function getWeekRange(referenceDate) {
 }
 
 function isAfterDeadline(weekEndDate) {
+	// Submission cutoff: Friday 6:30 PM CST (per CEO policy).
 	const nowStr = new Date().toLocaleString("en-US", { timeZone: "America/Chicago" });
 	const now = new Date(nowStr);
-	const deadline = new Date(weekEndDate + "T18:00:00");
+	const deadline = new Date(weekEndDate + "T18:30:00");
 	return now > deadline;
 }
 
@@ -4649,12 +4650,23 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 
 		const pickupCol = headers.find(h => /pickup.*appo|pickup.*date/i.test(h));
 		const dropoffCol = headers.find(h => /drop.?off.*appo|drop.?off.*date|deliv.*appoint/i.test(h));
+		// Used as a fallback "actual end" when the dropoff appointment is blank
+		// — common when dispatch never set a delivery appointment but the
+		// driver still completed the run. Prefer Completion Date, then Status
+		// Update Date, since both reflect when the load actually ended.
+		const completionCol = headers.find(h => /completion.*date|status.*update.*date/i.test(h));
 		const activeDaySet = new Set();
 		const dayLoadMap = {}; // date string → [load IDs]
 
 		for (const load of uniqueLoads) {
 			const pickup = parseInvoiceDate(pickupCol ? load[pickupCol] : null);
-			const dropoff = parseInvoiceDate(dropoffCol ? load[dropoffCol] : null);
+			let dropoff = parseInvoiceDate(dropoffCol ? load[dropoffCol] : null);
+			// Fallback: delivered loads with no dropoff appointment lose the
+			// hauling days between pickup and actual delivery. Use the actual
+			// completion timestamp instead so the driver gets credited.
+			if (!dropoff && completionCol && /delivered|completed|pod received/i.test(load[statusCol] || "")) {
+				dropoff = parseInvoiceDate(load[completionCol]);
+			}
 			if (!pickup) continue;
 			const start = new Date(pickup); start.setHours(12, 0, 0, 0);
 			const end = dropoff ? new Date(dropoff) : new Date(pickup);

@@ -14,7 +14,7 @@
 
     <!-- Deadline warning -->
     <div v-if="isCurrentWeek && pastDeadline" class="card deadline-warning">
-      The submission deadline (Friday 6:00 PM CST) has passed for this week.
+      The submission deadline (Friday 6:30 PM CST) has passed for this week.
     </div>
 
     <!-- Generate button -->
@@ -98,6 +98,15 @@ const selectedInvoice = ref(null)
 // Week navigation
 const weekOffset = ref(0)
 
+// Format a Date as "YYYY-MM-DD" using its LOCAL components. Avoid
+// `toISOString()` here — that converts to UTC and shifts the day for any
+// browser east/west of UTC, so the displayed Sat–Fri range disagrees with
+// the user's actual week.
+const fmtLocalYMD = (d) =>
+  d.getFullYear() + '-' +
+  String(d.getMonth() + 1).padStart(2, '0') + '-' +
+  String(d.getDate()).padStart(2, '0')
+
 const weekRange = computed(() => {
   const now = new Date()
   // Shift by offset weeks
@@ -113,14 +122,17 @@ const weekRange = computed(() => {
   return { start, end }
 })
 
-const weekStart = computed(() => weekRange.value.start.toISOString().split('T')[0])
-const weekEnd = computed(() => weekRange.value.end.toISOString().split('T')[0])
+const weekStart = computed(() => fmtLocalYMD(weekRange.value.start))
+const weekEnd = computed(() => fmtLocalYMD(weekRange.value.end))
 const isCurrentWeek = computed(() => weekOffset.value === 0)
 
 const pastDeadline = computed(() => {
-  const now = new Date()
-  const fri = new Date(weekEnd.value + 'T18:00:00')
-  return now > fri
+  // Deadline is Friday 6:30 PM CST. Compare current CST clock against the
+  // deadline expressed in the same parsed-local frame so the cutoff fires
+  // at the correct moment regardless of the viewer's browser timezone.
+  const cstNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
+  const deadline = new Date(weekEnd.value + 'T18:30:00')
+  return cstNow > deadline
 })
 
 const invoices = computed(() => driverStore.invoices || [])
