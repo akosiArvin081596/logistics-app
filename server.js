@@ -47,6 +47,26 @@ function notifyChange(domain) {
 app.set("trust proxy", 1); // Behind nginx — use real client IP for rate limiting
 const ALLOWED_FILE_EXTS = new Set([".pdf",".jpg",".jpeg",".png",".gif",".webp",".doc",".docx",".xls",".xlsx",".csv",".txt"]);
 function validateFileExt(fileName) { return ALLOWED_FILE_EXTS.has(path.extname(fileName || "").toLowerCase()); }
+// Verify image magic bytes — the data URI Content-Type alone is client-controlled
+// and a driver could base64-wrap an HTML or PHP payload as `data:image/jpeg;...`.
+// Checking the actual decoded bytes blocks that. Supports JPEG / PNG / WebP / GIF
+// (the formats imageToPdf can render); anything else is rejected before pdfkit
+// tries to parse it as an image.
+function isValidImageMagic(buf) {
+	if (!Buffer.isBuffer(buf) || buf.length < 12) return false;
+	// JPEG: FF D8 FF
+	if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return true;
+	// PNG: 89 50 4E 47 0D 0A 1A 0A
+	if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47 &&
+		buf[4] === 0x0D && buf[5] === 0x0A && buf[6] === 0x1A && buf[7] === 0x0A) return true;
+	// WebP: "RIFF" .... "WEBP"
+	if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+		buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return true;
+	// GIF: "GIF87a" or "GIF89a"
+	if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38 &&
+		(buf[4] === 0x37 || buf[4] === 0x39) && buf[5] === 0x61) return true;
+	return false;
+}
 app.use(compression());
 // 50 MB body limit — covers driver application payloads that bundle
 // 3 high-res iPhone photos (CDL front + back + medical card) as base64.
@@ -1675,20 +1695,24 @@ if (!process.env.SESSION_SECRET) {
 	console.warn("WARNING: SESSION_SECRET not set in environment — using dev fallback. Set it in .env for production.");
 }
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev-only-fallback-do-not-use-in-production";
-app.use(
-	session({
-		store: new SqliteStore({ client: db, expired: { clear: true, intervalMs: 3600000 } }),
-		secret: SESSION_SECRET,
-		resave: false,
-		saveUninitialized: false,
-		cookie: {
-			maxAge: 24 * 60 * 60 * 1000,
-			httpOnly: true,
-			secure: process.env.NODE_ENV === "production",
-			sameSite: "strict",
-		},
-	}),
-);
+// Shared between Express and Socket.IO so connection upgrades inherit the
+// session object. socket.io v4's engine.use() runs middleware on the
+// underlying HTTP request before the WebSocket upgrade completes — that
+// gives the connection handler a populated `socket.request.session`.
+const sessionMiddleware = session({
+	store: new SqliteStore({ client: db, expired: { clear: true, intervalMs: 3600000 } }),
+	secret: SESSION_SECRET,
+	resave: false,
+	saveUninitialized: false,
+	cookie: {
+		maxAge: 24 * 60 * 60 * 1000,
+		httpOnly: true,
+		secure: process.env.NODE_ENV === "production",
+		sameSite: "strict",
+	},
+});
+app.use(sessionMiddleware);
+io.engine.use(sessionMiddleware);
 // ============================================================
 // n8n Webhook: Upsert job into sheet_job_tracking (replaces Google Sheets write)
 // ============================================================
@@ -7021,8 +7045,29 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 	}
 });
 
+// Per-IP throttle for driver write paths. Sized for one human driver hitting
+// these from a phone — a normal shift sees < 60 status/respond/message/expense
+// writes per minute. The Sheets API ceiling is 300 req/min for the whole
+// fleet, so a runaway client could drain the quota for everyone without this.
+// Location pings get a tighter limit since the client already self-throttles
+// to one per ~30s; anything above 12/min is misbehaving.
+const driverWriteLimiter = rateLimit({
+	windowMs: 60 * 1000,
+	max: 60,
+	message: { error: "Too many requests. Please slow down." },
+	standardHeaders: true,
+	legacyHeaders: false,
+});
+const locationLimiter = rateLimit({
+	windowMs: 60 * 1000,
+	max: 12,
+	message: { error: "Too many location updates." },
+	standardHeaders: true,
+	legacyHeaders: false,
+});
+
 // POST /api/driver/respond — Driver accepts or declines a load assignment
-app.post("/api/driver/respond", requireAuth, async (req, res) => {
+app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
 		const { loadId, rowIndex, response } = req.body;
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
@@ -7518,6 +7563,10 @@ async function loadBelongsToDriver(loadId, driverName) {
 	if (!loadId || !driverName) return false;
 	const target = normalizeDriverName(driverName);
 	const targetLid = String(loadId).trim().toLowerCase().replace(/^#/, "");
+	// Soft-deleted loads are not assignable. A driver who cached the loadId
+	// before admin removed the load can otherwise still drive status mutations
+	// against the sheet row, which would re-surface the load in admin lists.
+	if (getDeletedLoadIds().has(targetLid)) return false;
 	let jt;
 	try { jt = await getJobTrackingCached(); } catch { return false; }
 	const headers = jt.headers || [];
@@ -7912,7 +7961,7 @@ app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter
 });
 
 // PUT /api/driver/status — Update load status
-app.put("/api/driver/status", requireAuth, async (req, res) => {
+app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
 		let { rowIndex, loadId, newStatus, rowData } = req.body;
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
@@ -8552,9 +8601,19 @@ app.post("/api/routemate/fault-codes/:id/ack", requireRole("Super Admin", "Dispa
 });
 
 // POST /api/messages — Send a new message
-app.post("/api/messages", requireAuth, (req, res) => {
+app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 	try {
-		const { from, to, message, loadId, attachmentUrl, attachmentType, assetRef } = req.body;
+		const { to, message, loadId, attachmentUrl, attachmentType, assetRef } = req.body;
+		// SECURITY: never trust the client-supplied `from`. A logged-in driver
+		// who hits this endpoint directly could otherwise impersonate any user
+		// (including dispatch). Drivers + Investors are pinned to their session
+		// identity; Super Admin / Dispatcher may speak as the dispatch desk so
+		// we keep their `from` overridable but default it to driverName / username.
+		const sessionUser = req.session.user;
+		const sessionName = (sessionUser?.driverName || sessionUser?.username || "").trim();
+		const isPrivilegedSender = sessionUser?.role === "Super Admin" || sessionUser?.role === "Dispatcher";
+		const requestedFrom = (req.body.from || "").trim();
+		const from = isPrivilegedSender ? (requestedFrom || sessionName) : sessionName;
 		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
@@ -8571,7 +8630,7 @@ app.post("/api/messages", requireAuth, (req, res) => {
 		const msgNotif = insertNotification.run(
 			to.trim().toLowerCase(), 'message',
 			`New message from ${from}`,
-			message.length > 100 ? message.substring(0, 100) + '...' : message,
+			(message || "").length > 100 ? message.substring(0, 100) + '...' : (message || ""),
 			JSON.stringify({ from, to, loadId: loadId || '' })
 		);
 
@@ -8607,7 +8666,7 @@ app.post("/api/messages", requireAuth, (req, res) => {
 });
 
 // PUT /api/messages/read — Mark messages as read
-app.put("/api/messages/read", requireAuth, (req, res) => {
+app.put("/api/messages/read", requireAuth, driverWriteLimiter, (req, res) => {
 	try {
 		const { messageIds } = req.body; // array of message IDs
 		if (!messageIds || !messageIds.length) {
@@ -8637,7 +8696,7 @@ app.put("/api/messages/read", requireAuth, (req, res) => {
 });
 
 // PUT /api/notifications/read — Mark notifications as read
-app.put("/api/notifications/read", requireAuth, (req, res) => {
+app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) => {
 	try {
 		const { ids } = req.body;
 		if (!ids || !ids.length) return res.json({ success: true });
@@ -8799,7 +8858,7 @@ function saveReceiptToDisk(photoData) {
 }
 
 // POST /api/expenses — Log a new expense (SQLite)
-app.post("/api/expenses", requireAuth, (req, res) => {
+app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
 		const { loadId, type, amount, description, date, photoData, gallons, odometer } =
 			req.body;
@@ -8826,6 +8885,15 @@ app.post("/api/expenses", requireAuth, (req, res) => {
 		// Sanitize free-text fields
 		const safeDescription = (description || "").toString().slice(0, 500);
 		const safeLoadId = (loadId || "").toString().slice(0, 100);
+
+		// SECURITY: drivers can only file expenses against loads assigned to
+		// them. Without this check a driver could pollute another driver's
+		// load expense history (and their per-load profitability roll-up).
+		// Admin/Dispatcher act on behalf of any driver so they're exempt.
+		if (req.session.user.role === "Driver" && safeLoadId) {
+			const owned = await loadBelongsToDriver(safeLoadId, driver);
+			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
+		}
 
 		const timestamp = new Date().toISOString();
 		// Look up truck/owner for this driver to stamp on expense
@@ -9809,7 +9877,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 });
 
 // POST /api/documents/upload — Upload document (images → PDF, or direct file)
-app.post("/api/documents/upload", requireAuth, async (req, res) => {
+app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
 		const { loadId, rowIndex, photoData, fileType, fileName: clientFileName } = req.body;
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
@@ -9842,9 +9910,18 @@ app.post("/api/documents/upload", requireAuth, async (req, res) => {
 			// Image upload — convert to multi-page PDF
 			const photoArray = Array.isArray(photoData) ? photoData : [photoData];
 			const imageBuffers = photoArray.map(p => {
-				const base64 = p.replace(/^data:image\/\w+;base64,/, "");
+				const base64 = (typeof p === "string" ? p : "").replace(/^data:image\/\w+;base64,/, "");
 				return Buffer.from(base64, "base64");
 			});
+			// SECURITY: client-supplied data URI Content-Type is trivially forged
+			// (a driver could send `data:image/jpeg;base64,<html-payload>`).
+			// Reject anything whose decoded bytes don't carry a real image header
+			// before we hand it to pdfkit (or, worse, write it to /uploads).
+			for (const buf of imageBuffers) {
+				if (!isValidImageMagic(buf)) {
+					return res.status(400).json({ error: "Uploaded photo is not a recognized image format." });
+				}
+			}
 			try {
 				fileBuffer = await imageToPdf(imageBuffers);
 			} catch (pdfErr) {
@@ -9983,7 +10060,7 @@ function checkGeofence(lat, lng, loadData, headers) {
 }
 
 // POST /api/location — Driver reports location
-app.post("/api/location", requireAuth, async (req, res) => {
+app.post("/api/location", requireAuth, locationLimiter, async (req, res) => {
 	try {
 		const { latitude, longitude, accuracy, speed, heading, loadId } = req.body;
 		const driverName = req.session?.user?.driverName || req.session?.user?.username || "";
@@ -10002,6 +10079,36 @@ app.post("/api/location", requireAuth, async (req, res) => {
 			if (!owned) effectiveLoadId = "";
 		}
 
+		// SECURITY: a Driver can spoof lat/lng over the wire. The geofence path
+		// auto-writes "At Shipper" / "At Receiver" to the sheet, which dispatch
+		// notifications fan out from — so a driver could fake intermediate
+		// progress without physically being there. Defense: compare against
+		// the previous ping. If the implied speed exceeds ~150 mph (67 m/s)
+		// the new coordinate is implausible — still record it so we don't
+		// drop the trail, but skip the geofence auto-update.
+		let gpsImplausible = false;
+		try {
+			const prev = db.prepare(
+				`SELECT latitude, longitude, timestamp FROM driver_locations
+				 WHERE driver = ? ORDER BY id DESC LIMIT 1`
+			).get(driverName);
+			if (prev && prev.latitude != null && prev.longitude != null && prev.timestamp) {
+				const prevMs = new Date(prev.timestamp).getTime();
+				const deltaSec = (Date.now() - prevMs) / 1000;
+				if (deltaSec > 0 && deltaSec < 60 * 60) {
+					const deltaMeters = geolib.getDistance(
+						{ latitude: prev.latitude, longitude: prev.longitude },
+						{ latitude, longitude }
+					);
+					// 67 m/s ≈ 150 mph — well above any legal trucking speed but
+					// within margin for cellular ping clock skew on legitimate moves.
+					if ((deltaMeters / deltaSec) > 67) gpsImplausible = true;
+				}
+			}
+		} catch (plausErr) {
+			console.error("GPS plausibility check error:", plausErr.message);
+		}
+
 		const timestamp = new Date().toISOString();
 		db.prepare(
 			`INSERT INTO driver_locations (driver, latitude, longitude, accuracy, speed, heading, timestamp, load_id)
@@ -10018,10 +10125,12 @@ app.post("/api/location", requireAuth, async (req, res) => {
 			source: "phone",
 		});
 
-		// Geofence check if loadId is provided
+		// Geofence check if loadId is provided. Skipped when the ping looks
+		// spoofed (see plausibility check above) so a fake coordinate cannot
+		// auto-promote a load to "At Shipper" / "At Receiver".
 		let geofenceTriggered = null;
 		let distanceWarning = null;
-		if (effectiveLoadId) {
+		if (effectiveLoadId && !gpsImplausible) {
 			try {
 				const sheets = await getSheets();
 				const headerResp = await sheets.spreadsheets.values.get({
@@ -10074,6 +10183,7 @@ app.post("/api/location", requireAuth, async (req, res) => {
 									valueInputOption: "USER_ENTERED",
 									requestBody: { values: [[geofenceTriggered]] },
 								});
+								jtCacheInvalidate();
 								const geoMsg = geofenceTriggered === "At Shipper"
 									? `You have arrived at the pickup location`
 									: `You have arrived at the delivery location`;
@@ -10260,7 +10370,14 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			for (const loc of locations) {
 				const key = (loc.driver || "").toLowerCase();
 				const rm = routemateByDriver[key];
-				if (rm) {
+				// Only overlay Routemate when telemetry has a valid fix.
+				// A linked truck whose ELD lost GPS sends NULL/0 lat/lng — letting that
+				// through would clobber phone GPS and pin the truck at the equator.
+				const rmHasFix = rm
+					&& Number.isFinite(rm.latitude)
+					&& Number.isFinite(rm.longitude)
+					&& (rm.latitude !== 0 || rm.longitude !== 0);
+				if (rmHasFix) {
 					loc.latitude = rm.latitude;
 					loc.longitude = rm.longitude;
 					loc.speed = rm.speed || 0;
@@ -12729,8 +12846,39 @@ app.get("*", (req, res) => {
 // Socket.IO — Real-time messaging + live reload
 // ============================================================
 io.on("connection", (socket) => {
-	socket.on("register", (name) => {
-		if (name) socket.join(name.trim().toLowerCase());
+	// Auth gate: every Socket.IO connection must carry a valid session cookie.
+	// Without this, an anonymous client could `emit("register", "dispatch")`
+	// and silently receive every live location update, geofence trigger,
+	// dispatch notification, and inter-driver chat message.
+	const sessionUser = socket.request?.session?.user;
+	if (!sessionUser || !sessionUser.role) {
+		socket.disconnect(true);
+		return;
+	}
+	const role = sessionUser.role;
+	const driverNameLower = (sessionUser.driverName || "").trim().toLowerCase();
+	const usernameLower = (sessionUser.username || "").trim().toLowerCase();
+
+	socket.on("register", (clientName) => {
+		const requested = (clientName || "").trim().toLowerCase();
+		// The client passes a room name (their driver name, "dispatch",
+		// "investor"). We ignore it for routing decisions and instead derive
+		// rooms from the session role/identity.
+		if (role === "Super Admin" || role === "Dispatcher") {
+			socket.join("dispatch");
+			if (usernameLower) socket.join(usernameLower);
+		} else if (role === "Investor") {
+			socket.join("investor");
+			if (usernameLower) socket.join(usernameLower);
+		} else if (role === "Driver") {
+			if (driverNameLower) socket.join(driverNameLower);
+		}
+		// Honor the client's requested room only when it matches an identity
+		// they're allowed to occupy. Keeps existing client code (which sends
+		// `socket.emit("register", driverName)`) working.
+		if (requested && (requested === driverNameLower || requested === usernameLower)) {
+			socket.join(requested);
+		}
 	});
 });
 
