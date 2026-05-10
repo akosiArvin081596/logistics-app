@@ -516,7 +516,11 @@ function onDocSigned(docKey) {
 }
 const isOnboarding = computed(() => {
   const ob = driverStore.onboarding
-  return ob && ob.status !== 'fully_onboarded'
+  // ob.status can briefly be null/undefined while the first /api/driver/* fetch
+  // is in flight, or if the backend ever serves a partial record. Treating
+  // that as "needs onboarding" used to lock fully-onboarded drivers behind
+  // the document-signing screen until they refreshed.
+  return !!ob?.status && ob.status !== 'fully_onboarded'
 })
 // True while we haven't confirmed browser geolocation permission. Drives the
 // full-screen "Location Access Required" gate below, but only for drivers who
@@ -552,7 +556,15 @@ let isMounted = false
 
 // Welcome / activation modal — shows once per driver, first login after fully_onboarded
 function welcomeStorageKey() {
-  const uid = auth.user?.id || driverStore.onboarding?.user_id || 'anon'
+  // Falling back to a literal 'anon' meant two test drivers in the same
+  // browser would share a flag and only one would see the celebration.
+  // Prefer any stable identity; if none exists, return null so callers skip
+  // the localStorage round-trip entirely.
+  const uid = auth.user?.id
+    || driverStore.onboarding?.user_id
+    || auth.user?.driverName
+    || auth.user?.username
+  if (!uid) return null
   return `logisx_welcome_seen_${uid}`
 }
 function maybeShowWelcome() {
@@ -564,14 +576,17 @@ function maybeShowWelcome() {
   if (isNaN(onboardedMs)) return
   const daysSince = (Date.now() - onboardedMs) / (1000 * 60 * 60 * 24)
   if (daysSince > 14) return
+  const key = welcomeStorageKey()
   try {
-    if (localStorage.getItem(welcomeStorageKey())) return
+    if (key && localStorage.getItem(key)) return
   } catch { /* private mode */ }
   showWelcomeModal.value = true
 }
 function dismissWelcome() {
   showWelcomeModal.value = false
-  try { localStorage.setItem(welcomeStorageKey(), new Date().toISOString()) } catch { /* ignore */ }
+  const key = welcomeStorageKey()
+  if (!key) return
+  try { localStorage.setItem(key, new Date().toISOString()) } catch { /* ignore */ }
 }
 // If a driver is on the onboarding lock screen when the admin uploads their drug test,
 // the store refreshes, isOnboarding flips to false — surface the celebration at that moment too.

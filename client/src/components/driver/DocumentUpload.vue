@@ -116,38 +116,40 @@ const hintText = computed(() => {
   return `Take photos or upload files for Load ${props.loadId}`
 })
 
-function compressImage(file) {
-  return new Promise((resolve) => {
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const img = new Image()
-      img.onload = () => {
-        const canvas = document.createElement('canvas')
-        const MAX = 1200
-        let w = img.width
-        let h = img.height
-        if (w > MAX || h > MAX) {
-          if (w > h) {
-            h = Math.round((h * MAX) / w)
-            w = MAX
-          } else {
-            w = Math.round((w * MAX) / h)
-            h = MAX
-          }
-        }
-        canvas.width = w
-        canvas.height = h
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h)
-        resolve(canvas.toDataURL('image/jpeg', 0.8))
-      }
-      img.onerror = () => {
-        // If image can't be rendered (unsupported format), fall back to raw file
-        resolve(e.target.result)
-      }
-      img.src = e.target.result
+async function compressImage(file) {
+  const MAX = 1200
+  // Decode + downscale via createImageBitmap. The previous Image+Canvas path
+  // materialised a 12MP photo as ~48MB of raw RGBA before drawing, which
+  // OOM-killed the tab on low-RAM phones (same fix already applied to the
+  // ExpenseForm receipt path in commit 59fcd80).
+  try {
+    const probe = await createImageBitmap(file)
+    let w = probe.width
+    let h = probe.height
+    probe.close()
+    if (w > MAX || h > MAX) {
+      if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
+      else { w = Math.round((w * MAX) / h); h = MAX }
     }
-    reader.readAsDataURL(file)
-  })
+    const bitmap = await createImageBitmap(file, {
+      resizeWidth: w,
+      resizeHeight: h,
+      resizeQuality: 'medium',
+    })
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    canvas.getContext('2d').drawImage(bitmap, 0, 0)
+    bitmap.close()
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.8)
+    canvas.width = 0
+    canvas.height = 0
+    return dataUrl
+  } catch {
+    // Unsupported format (HEIC on older browsers, etc.) — fall back to the
+    // raw file so the upload can still proceed without compression.
+    return await readFileAsDataURL(file)
+  }
 }
 
 function readFileAsDataURL(file) {

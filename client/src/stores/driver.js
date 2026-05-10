@@ -244,7 +244,15 @@ export const useDriverStore = defineStore('driver', {
       if (response === 'accepted') {
         this.acceptedLoadIds.add(loadId)
       }
-      await this.loadData()
+      // Refresh from server. If the refresh itself fails (network blip,
+      // 500), undo the optimistic accept so the UI doesn't lie and let the
+      // caller surface the error.
+      try {
+        await this.loadData()
+      } catch (err) {
+        if (response === 'accepted') this.acceptedLoadIds.delete(loadId)
+        throw err
+      }
     },
 
     async updateStatus(loadId, newStatus, rowIndex, rowData) {
