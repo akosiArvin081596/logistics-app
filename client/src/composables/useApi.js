@@ -4,9 +4,16 @@ export function useApi() {
       headers: { 'Content-Type': 'application/json', ...options.headers },
       ...options,
     })
-    const data = await res.json()
+    // Non-JSON responses (nginx 413, gateway errors, etc.) used to crash
+    // res.json() and bubble up an opaque SyntaxError. Fall back to a friendly
+    // message so the caller can surface something meaningful.
+    let data = {}
+    try { data = await res.json() } catch { data = {} }
     if (!res.ok) {
-      const err = new Error(data.error || `Request failed (${res.status})`)
+      const fallback = res.status === 413
+        ? 'File too large for the server to accept.'
+        : `Request failed (${res.status})`
+      const err = new Error(data.error || fallback)
       err.status = res.status
       err.code = data.code || ''
       err.data = data

@@ -221,8 +221,8 @@ async function upload() {
     uploadForm.selectedTruckId = null
     uploadForm.visibleToDriver = true
     await load()
-  } catch {
-    errorMsg.value = 'Upload failed.'
+  } catch (err) {
+    errorMsg.value = err?.message || 'Upload failed.'
   } finally {
     uploading.value = false
   }
