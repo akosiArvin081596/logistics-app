@@ -4575,6 +4575,45 @@ function generateInvoiceNumber(driverName, weekStart) {
 	return `INV-${initials}-${year}W${weekStr}-${seq}`;
 }
 
+// === Shared driver-pay helpers (used by /api/financials and /api/investor) ===
+// Branching on each driver's pay_type so percentage-paid owner-ops (e.g. Rodney
+// Brown at 30%) get the same math their invoice uses, instead of the legacy
+// activeDays × $250 estimate that overstated/understated their pay in the P&L.
+
+// Returns { [driver_name_lc]: { payType, payPercentage } } for branch decisions.
+function getDriverPayStructures() {
+	const rows = db.prepare(
+		"SELECT LOWER(driver_name) AS name_lc, pay_type, pay_percentage FROM drivers_directory"
+	).all();
+	const out = {};
+	for (const r of rows) {
+		out[r.name_lc] = {
+			payType: (r.pay_type || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed",
+			payPercentage: Math.max(0, Math.min(100, Number(r.pay_percentage) || 0)),
+		};
+	}
+	return out;
+}
+
+// Returns { [driver_name_lc]: { [yyyy-mm]: total, _total: allTime } } summing
+// Fuel + Maintenance only, Rejected excluded — the same filter the invoice
+// endpoint uses. One round-trip so financials/investor don't fan out.
+function getDeductibleExpensesByDriverMonth() {
+	const rows = db.prepare(`
+		SELECT LOWER(driver) AS name_lc, substr(date, 1, 7) AS month, SUM(amount) AS total
+		FROM expenses
+		WHERE type IN ('Fuel', 'Maintenance') AND status != 'Rejected'
+		GROUP BY LOWER(driver), month
+	`).all();
+	const out = {};
+	for (const r of rows) {
+		if (!out[r.name_lc]) out[r.name_lc] = { _total: 0 };
+		if (r.month) out[r.name_lc][r.month] = r.total || 0;
+		out[r.name_lc]._total += (r.total || 0);
+	}
+	return out;
+}
+
 // POST /api/invoices/generate — driver generates weekly invoice
 app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 	try {
@@ -11458,6 +11497,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// pay the driver?" Previously loads assigned in April with old pickup dates
 		// in 2021 would show their revenue in April but their driver pay in 2021.
 		const driverMonthlyDays = {};    // { driver: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
+		// Per-driver per-month REVENUE (completed loads only). Used by the
+		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
+		const driverMonthlyRevenue = {}; // { driver: { "YYYY-MM": revenue } }
 		const now = new Date();
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -11494,6 +11536,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
 						if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
 						monthlyRevenue[assignedMonthKey] = (monthlyRevenue[assignedMonthKey] || 0) + amt;
+						if (driver) {
+							if (!driverMonthlyRevenue[driver]) driverMonthlyRevenue[driver] = {};
+							driverMonthlyRevenue[driver][assignedMonthKey] =
+								(driverMonthlyRevenue[driver][assignedMonthKey] || 0) + amt;
+						}
 					}
 				}
 			}
@@ -11571,11 +11618,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid'`).get().total;
 		}
 
-		// ---- Driver Pay from active-day sets (computed in single pass above) ----
+		// ---- Driver Pay (branches on each driver's pay_type) ----
+		// Fixed drivers: activeDays × per-truck dailyRate (legacy logic).
+		// Percentage drivers (e.g. Rodney): max(0, weekly load revenue − Fuel & Maintenance) × pct.
+		// Same formula their invoice uses, so the P&L matches reality.
+		const payStructures = getDriverPayStructures();
+		const expensesByDriverMonth = getDeductibleExpensesByDriverMonth();
 		const driverPayDetails = {};
 		let totalDriverPay = 0;
 		{
-			// Get daily rates from trucks (one query, not per-truck)
 			const trucksByDriver = {};
 			const truckQuery = investorDriverSet
 				? "SELECT assigned_driver, driver_pay_daily FROM trucks WHERE owner_id = ?"
@@ -11585,11 +11636,27 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
 			});
 			for (const [driver, daySet] of Object.entries(driverDaySets)) {
-				const rate = trucksByDriver[driver] || 250;
+				const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
 				const activeDays = daySet.size;
-				const pay = activeDays * rate;
+				let pay, dailyRate;
+				if (struct.payType === "percentage") {
+					const totalRev = Object.values(driverMonthlyRevenue[driver] || {}).reduce((s, v) => s + v, 0);
+					const totalExp = (expensesByDriverMonth[driver] || {})._total || 0;
+					const net = Math.max(0, totalRev - totalExp);
+					pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
+					dailyRate = 0;
+				} else {
+					dailyRate = trucksByDriver[driver] || 250;
+					pay = activeDays * dailyRate;
+				}
 				totalDriverPay += pay;
-				driverPayDetails[driver] = { activeDays, dailyRate: rate, totalPay: pay, dates: [...daySet].sort() };
+				driverPayDetails[driver] = {
+					activeDays, dailyRate, totalPay: pay,
+					dates: [...daySet].sort(),
+					payType: struct.payType,
+					payPercentage: struct.payType === "percentage" ? struct.payPercentage : 0,
+					source: "estimate",
+				};
 			}
 			totalExpenses += totalDriverPay;
 		}
@@ -11638,16 +11705,33 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// not by the physical day the driver was active. This keeps revenue
 			// and driver pay aligned so a load assigned in April always shows
 			// both its revenue AND its driver pay in April.
+			// Branches on pay_type: percentage drivers use (monthRevenue − monthDeductible) × pct.
 			const monthlyDriverPay = {};
-			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay } } }
+			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay, payType, payPercentage, source } } }
 			for (const [driver, monthsMap] of Object.entries(driverMonthlyDays)) {
-				const rate = (driverPayDetails[driver] && driverPayDetails[driver].dailyRate) || 250;
+				const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
+				const fixedRate = (driverPayDetails[driver] && driverPayDetails[driver].dailyRate) || 250;
 				for (const [mk, daySet] of Object.entries(monthsMap)) {
 					const activeDays = daySet.size;
-					const pay = activeDays * rate;
+					let pay, dailyRate;
+					if (struct.payType === "percentage") {
+						const monthRev = (driverMonthlyRevenue[driver] || {})[mk] || 0;
+						const monthExp = (expensesByDriverMonth[driver] || {})[mk] || 0;
+						const net = Math.max(0, monthRev - monthExp);
+						pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
+						dailyRate = 0;
+					} else {
+						dailyRate = fixedRate;
+						pay = activeDays * dailyRate;
+					}
 					monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + pay;
 					if (!monthlyDriverDetails[mk]) monthlyDriverDetails[mk] = {};
-					monthlyDriverDetails[mk][driver] = { activeDays, dailyRate: rate, totalPay: pay };
+					monthlyDriverDetails[mk][driver] = {
+						activeDays, dailyRate, totalPay: pay,
+						payType: struct.payType,
+						payPercentage: struct.payType === "percentage" ? struct.payPercentage : 0,
+						source: "estimate",
+					};
 				}
 			}
 
@@ -12063,6 +12147,9 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const truckDaySets = {};         // active days per truck (per-truck driver pay)
 		const truckLoadDates = {};       // {first, last} per truck — accurate operating window
 		const completedLoads = []; // for highest/lowest — store minimal fields
+		// Per-driver per-month REVENUE (completed loads only). Used by the
+		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
+		const driverMonthlyRevenue = {}; // { driver_lc: { "YYYY-MM": revenue } }
 		const now = new Date();
 
 		jobTracking.data.forEach((r) => {
@@ -12134,6 +12221,15 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 						amount: amt,
 						date: dateStr,
 					});
+					// Per-driver per-month revenue (for percentage-pay branch)
+					if (driverLc && jtDateCol && r[jtDateCol]) {
+						const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+						if (d && !isNaN(d)) {
+							const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+							if (!driverMonthlyRevenue[driverLc]) driverMonthlyRevenue[driverLc] = {};
+							driverMonthlyRevenue[driverLc][mk] = (driverMonthlyRevenue[driverLc][mk] || 0) + amt;
+						}
+					}
 				}
 			}
 
@@ -12190,7 +12286,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const maintSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service'`).get().t;
 		const compSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid'`).get().t;
 
-		// ---- Driver pay from active-day sets ----
+		// ---- Driver pay (branches on each driver's pay_type) ----
+		// Fixed drivers: activeDays × per-truck dailyRate (legacy logic).
+		// Percentage drivers: max(0, completed-load revenue − Fuel & Maintenance) × pct.
+		// Same formula their invoice uses, so /admin/financials matches reality.
+		const payStructures = getDriverPayStructures();
+		const expensesByDriverMonth = getDeductibleExpensesByDriverMonth();
 		const trucksByDriver = {};
 		db.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all().forEach(t => {
 			const d = normalizeDriverName(t.assigned_driver);
@@ -12199,11 +12300,26 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const driverPayDetails = {};
 		let totalDriverPay = 0;
 		for (const [driver, daySet] of Object.entries(driverDaySets)) {
-			const rate = trucksByDriver[driver] || 250;
+			const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
 			const activeDays = daySet.size;
-			const pay = activeDays * rate;
+			let pay, dailyRate;
+			if (struct.payType === "percentage") {
+				const totalRev = Object.values(driverMonthlyRevenue[driver] || {}).reduce((s, v) => s + v, 0);
+				const totalExp = (expensesByDriverMonth[driver] || {})._total || 0;
+				const net = Math.max(0, totalRev - totalExp);
+				pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
+				dailyRate = 0;
+			} else {
+				dailyRate = trucksByDriver[driver] || 250;
+				pay = activeDays * dailyRate;
+			}
 			totalDriverPay += pay;
-			driverPayDetails[driver] = { activeDays, dailyRate: rate, totalPay: pay };
+			driverPayDetails[driver] = {
+				activeDays, dailyRate, totalPay: pay,
+				payType: struct.payType,
+				payPercentage: struct.payType === "percentage" ? struct.payPercentage : 0,
+				source: "estimate",
+			};
 		}
 
 		// ---- Truck fixed costs ----
@@ -12325,13 +12441,34 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// dailyRate=0 silently defaults to $250/day (preserved for
 			// backwards compat); flagged via driverPayUsedDefault so the
 			// UI can warn.
+			// Percentage drivers (e.g. Rodney) bypass the daily-rate path and
+			// use the per-driver totalPay computed above, pro-rated by this
+			// truck's share of the driver's total active days so multi-truck
+			// drivers don't double-count.
 			const truckDays = truckDaySets[unitLower]?.size || 0;
 			const dailyRateRaw = truck.driver_pay_daily || 0;
 			const dailyRate = dailyRateRaw > 0 ? dailyRateRaw : 250;
-			const driverPayUsedDefault = dailyRateRaw === 0;
-			const driverPay = truckDays > 0
-				? truckDays * dailyRate
-				: (fleetHasTruckDays ? 0 : (driverPayDetails[driverName]?.totalPay || 0));
+			const driverStruct = (driverName && payStructures[driverName]) || { payType: "fixed", payPercentage: 0 };
+			let driverPay;
+			let driverPayUsedDefault;
+			if (driverStruct.payType === "percentage") {
+				const driverTotalPay = driverPayDetails[driverName]?.totalPay || 0;
+				if (truckDays > 0) {
+					const driverDays = driverDaySets[driverName]?.size || 0;
+					const share = driverDays > 0 ? Math.min(1, truckDays / driverDays) : 1;
+					driverPay = driverTotalPay * share;
+				} else if (fleetHasTruckDays) {
+					driverPay = 0;
+				} else {
+					driverPay = driverTotalPay;
+				}
+				driverPayUsedDefault = false;
+			} else {
+				driverPayUsedDefault = dailyRateRaw === 0;
+				driverPay = truckDays > 0
+					? truckDays * dailyRate
+					: (fleetHasTruckDays ? 0 : (driverPayDetails[driverName]?.totalPay || 0));
+			}
 
 			const fixedTotal = fixedPerMonth * truckMonths;
 			const expenses = varExp + maintExp + compExp + fixedTotal + driverPay;
@@ -12360,6 +12497,8 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				// Data-quality flags so the UI can explain surprising rows.
 				operatingMonths: truckMonths,
 				driverPayUsedDefault,
+				driverPayType: driverStruct.payType,
+				driverPayPercentage: driverStruct.payType === "percentage" ? driverStruct.payPercentage : 0,
 				attributionMode: grossByTruck[unitLower] !== undefined
 					? "truck"
 					: (fleetHasTruckRevenue ? "no-data" : "driver-fallback"),
