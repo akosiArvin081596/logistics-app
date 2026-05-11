@@ -79,6 +79,8 @@ async function regenerate(db, sheets, invoice) {
 	const pickupCol = headers.find(h => /pickup.*appo|pickup.*date/i.test(h));
 	const dropoffCol = headers.find(h => /drop.?off.*appo|drop.?off.*date|deliv.*appoint/i.test(h));
 	const completionCol = headers.find(h => /completion.*date|status.*update.*date/i.test(h));
+	const rateCol = headers.find(h => /payment|rate|amount|pay/i.test(h));
+	const parseAmount = (s) => parseFloat(String(s || "0").replace(/[$,]/g, "")) || 0;
 
 	const completedRe = /delivered|completed|pod received/i;
 	const nameNorm = normalizeDriverName(driverName);
@@ -132,71 +134,129 @@ async function regenerate(db, sheets, invoice) {
 	}
 
 	const activeDays = activeDaySet.size;
-	const computedTotal = activeDays * dailyRate;
-	console.log(`  recomputed active_days=${activeDays} total=$${computedTotal.toFixed(2)} (DB stored: $${Number(storedTotal).toFixed(2)})`);
 
-	if (Math.abs(computedTotal - Number(storedTotal)) > 0.01) {
-		console.log(`  ! Total mismatch — REFUSING to overwrite (would change historical amount). Skipping.`);
-		return;
-	}
-
-	// --- Build daysMap (Sat–Fri grid) ---
-	const DAY_NAMES = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
-	const daysMap = {};
-	for (const d of DAY_NAMES) daysMap[d] = { loadBol: "", total: 0, completed: false };
-	for (const ds of activeDaySet) {
-		const dt = new Date(ds + "T12:00:00");
-		const jsDay = dt.getDay();
-		const templateDay = DAY_NAMES[(jsDay + 1) % 7];
-		const entry = daysMap[templateDay];
-		entry.total += dailyRate;
-		entry.completed = true;
-		const bols = dayLoadMap[ds] || [];
-		entry.loadBol = entry.loadBol
-			? `${entry.loadBol}, ${bols.join(", ")}`.replace(/, $/, "")
-			: bols.join(", ");
-	}
-
-	// --- Provider info from local SQLite ---
+	// --- Provider info from local SQLite (includes pay structure for branch decision) ---
 	const driverUser = db.prepare("SELECT id FROM users WHERE LOWER(driver_name) = LOWER(?)").get(driverName);
 	const payInfo = driverUser
 		? db.prepare("SELECT * FROM driver_payment_info WHERE user_id = ?").get(driverUser.id)
 		: null;
 	const driverRow = db.prepare(
-		"SELECT address, city, state, zip, phone, cell FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)"
+		"SELECT address, city, state, zip, phone, cell, pay_type, pay_percentage FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)"
 	).get(driverName);
 	const providerAddress = driverRow
 		? [driverRow.address, driverRow.city, driverRow.state, driverRow.zip].filter(Boolean).join(", ")
 		: "";
 	const providerPhone = driverRow ? (driverRow.phone || driverRow.cell || "") : "";
+	const payType = (driverRow?.pay_type || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
+	const payPercentage = Math.max(0, Math.min(100, Number(driverRow?.pay_percentage || 0)));
 
-	// Use the original invoice's submission date (created_at) so the doc stays
-	// historically consistent — only the billing-period dates are the actual fix here.
 	const createdAt = db.prepare("SELECT datetime(created_at) AS c FROM invoices WHERE id = ?").get(id).c;
 	const submissionDate = new Date(createdAt + "Z").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 	const fmtWeekDate = (s) =>
 		new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
-	// --- Render PDF ---
-	const pdfBuffer = await renderPolicy("service_invoice", {
-		driverName,
-		businessName: driverName,
-		providerAddress,
-		providerPhone,
-		invoiceNumberSuffix: invoice_number.replace(/^INV-/, ""),
-		submissionDate,
-		signatureDate: submissionDate,
-		billingPeriodStart: fmtWeekDate(week_start),
-		billingPeriodEnd: fmtWeekDate(week_end),
-		totalDue: computedTotal,
-		bankOnFile: payInfo?.bank_name || "",
-		accountType: (payInfo?.account_type || "").toLowerCase(),
-		days: daysMap,
-		hasEldData: true,
-		hasBol: true,
-		hasDvir: true,
-		hasFuelReceipts: true,
-	});
+	let computedTotal;
+	let pdfBuffer;
+	if (payType === "percentage") {
+		// Owner-op pay: % of (load revenue − fuel/maintenance expenses).
+		const expenses = db.prepare(
+			"SELECT * FROM expenses WHERE LOWER(driver) = ? AND date >= ? AND date <= ? ORDER BY date ASC"
+		).all(driverName.toLowerCase(), week_start, week_end);
+		const fuelMaintExpenses = expenses.filter(e =>
+			(e.type === "Fuel" || e.type === "Maintenance") && e.status !== "Rejected"
+		);
+		const grossRevenue = uniqueLoads.reduce((sum, l) => sum + parseAmount(rateCol ? l[rateCol] : 0), 0);
+		const deductible = fuelMaintExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+		const net = Math.max(0, grossRevenue - deductible);
+		computedTotal = Math.round((net * payPercentage / 100) * 100) / 100;
+		console.log(`  [percentage @ ${payPercentage}%] gross=$${grossRevenue.toFixed(2)} deductible=$${deductible.toFixed(2)} net=$${net.toFixed(2)} → total=$${computedTotal.toFixed(2)} (DB stored: $${Number(storedTotal).toFixed(2)})`);
+		if (Math.abs(computedTotal - Number(storedTotal)) > 0.01) {
+			console.log(`  ! Total mismatch — REFUSING to overwrite (would change historical amount). Skipping.`);
+			return;
+		}
+		pdfBuffer = await renderPolicy("service_invoice_owner_op", {
+			driverName,
+			businessName: driverName,
+			providerAddress,
+			providerPhone,
+			invoiceNumberSuffix: invoice_number.replace(/^INV-/, ""),
+			submissionDate,
+			signatureDate: submissionDate,
+			billingPeriodStart: fmtWeekDate(week_start),
+			billingPeriodEnd: fmtWeekDate(week_end),
+			loads: uniqueLoads.map(l => {
+				const dt = parseInvoiceDate(
+					(completionCol ? l[completionCol] : null) ||
+					(dropoffCol ? l[dropoffCol] : null) ||
+					(pickupCol ? l[pickupCol] : null)
+				);
+				return {
+					date: dt ? fmtLocalDate(dt) : "",
+					loadId: loadIdCol ? (l[loadIdCol] || "") : "",
+					rate: parseAmount(rateCol ? l[rateCol] : 0),
+				};
+			}),
+			fuelMaintExpenses: fuelMaintExpenses.map(e => ({
+				date: e.date,
+				type: e.type,
+				description: e.description || "",
+				amount: e.amount || 0,
+			})),
+			grossRevenue,
+			deductible,
+			net,
+			payPercentage,
+			totalEarnings: computedTotal,
+			bankOnFile: payInfo?.bank_name || "",
+			accountType: (payInfo?.account_type || "").toLowerCase(),
+			hasEldData: true,
+			hasBol: true,
+			hasDvir: true,
+			hasFuelReceipts: true,
+		});
+	} else {
+		// Fixed-rate path (existing behavior)
+		computedTotal = activeDays * dailyRate;
+		console.log(`  [fixed @ $${dailyRate}/day] active_days=${activeDays} total=$${computedTotal.toFixed(2)} (DB stored: $${Number(storedTotal).toFixed(2)})`);
+		if (Math.abs(computedTotal - Number(storedTotal)) > 0.01) {
+			console.log(`  ! Total mismatch — REFUSING to overwrite (would change historical amount). Skipping.`);
+			return;
+		}
+		const DAY_NAMES = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+		const daysMap = {};
+		for (const d of DAY_NAMES) daysMap[d] = { loadBol: "", total: 0, completed: false };
+		for (const ds of activeDaySet) {
+			const dt = new Date(ds + "T12:00:00");
+			const jsDay = dt.getDay();
+			const templateDay = DAY_NAMES[(jsDay + 1) % 7];
+			const entry = daysMap[templateDay];
+			entry.total += dailyRate;
+			entry.completed = true;
+			const bols = dayLoadMap[ds] || [];
+			entry.loadBol = entry.loadBol
+				? `${entry.loadBol}, ${bols.join(", ")}`.replace(/, $/, "")
+				: bols.join(", ");
+		}
+		pdfBuffer = await renderPolicy("service_invoice", {
+			driverName,
+			businessName: driverName,
+			providerAddress,
+			providerPhone,
+			invoiceNumberSuffix: invoice_number.replace(/^INV-/, ""),
+			submissionDate,
+			signatureDate: submissionDate,
+			billingPeriodStart: fmtWeekDate(week_start),
+			billingPeriodEnd: fmtWeekDate(week_end),
+			totalDue: computedTotal,
+			bankOnFile: payInfo?.bank_name || "",
+			accountType: (payInfo?.account_type || "").toLowerCase(),
+			days: daysMap,
+			hasEldData: true,
+			hasBol: true,
+			hasDvir: true,
+			hasFuelReceipts: true,
+		});
+	}
 
 	const pdfPath = path.join(__dirname, "..", "uploads", "invoices", pdf_file_name);
 	fs.writeFileSync(pdfPath, pdfBuffer);

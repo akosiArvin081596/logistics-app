@@ -546,6 +546,12 @@ try {
 try { db.exec("ALTER TABLE drivers_directory ADD COLUMN profile_picture_url TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE investors ADD COLUMN profile_picture_url TEXT DEFAULT ''"); } catch {}
 
+// Migration: add pay_type + pay_percentage for owner-operator driver pay model.
+// Existing rows stay 'fixed' (current $250/day behavior preserved); admins can flip individual
+// drivers (e.g. Rodney Brown) to 'percentage' and set their cut from the Drivers Directory UI.
+try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_type TEXT DEFAULT 'fixed'"); } catch {}
+try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFAULT 0"); } catch {}
+
 // One-time seed: import Carrier Database from Google Sheet into SQLite on first boot
 const driverCount = db.prepare("SELECT COUNT(*) AS cnt FROM drivers_directory").get().cnt;
 if (driverCount === 0) {
@@ -2022,12 +2028,14 @@ app.get("/api/drivers-directory", requireAuth, (req, res) => {
 	try {
 		const drivers = db.prepare("SELECT * FROM drivers_directory ORDER BY driver_name ASC").all();
 		// Return in a format compatible with the old sheet-based response
-		const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating", "Status"];
+		const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating", "Status", "PayType", "PayPercentage"];
 		const data = drivers.map(d => ({
 			Driver: d.driver_name, "Carrier Name": d.carrier_name, State: d.state, City: d.city,
 			ZIP: d.zip, Address: d.address, Trucks: d.trucks, Hazmat: d.hazmat,
 			PhoneNumber: d.phone, CellNumber: d.cell, Email: d.email, DOT: d.dot, MC: d.mc, Rating: d.rating,
 			Status: d.status || 'active',
+			PayType: d.pay_type || 'fixed',
+			PayPercentage: d.pay_percentage || 0,
 			ProfilePictureUrl: d.profile_picture_url || '',
 			_rowIndex: d.id, _id: d.id,
 		}));
@@ -2044,12 +2052,14 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
-		db.prepare(`INSERT OR REPLACE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		const insPayType = (obj.PayType || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
+		const insPayPct = Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0));
+		db.prepare(`INSERT OR REPLACE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating, status, pay_type, pay_percentage)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
-				obj.Status || "active");
+				obj.Status || "active", insPayType, insPayPct);
 		// Sync carrier-driver history on write (not on read)
 		if (obj.Driver && obj["Carrier Name"]) {
 			syncCarrierDriverHistory([obj], "Driver", "Carrier Name");
@@ -2069,14 +2079,21 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
-		// Keep existing status if the client didn't send one
-		const current = db.prepare("SELECT status FROM drivers_directory WHERE id = ?").get(id);
+		// Keep existing status / pay fields if the client didn't send them
+		const current = db.prepare("SELECT status, pay_type, pay_percentage FROM drivers_directory WHERE id = ?").get(id);
 		const nextStatus = obj.Status || current?.status || "active";
-		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=?, status=? WHERE id=?`)
+		const sentPayType = (obj.PayType || "").toLowerCase();
+		const nextPayType = sentPayType === "fixed" || sentPayType === "percentage"
+			? sentPayType
+			: (current?.pay_type || "fixed");
+		const nextPayPct = obj.PayPercentage !== undefined && obj.PayPercentage !== ""
+			? Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0))
+			: (current?.pay_percentage || 0);
+		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=?, status=?, pay_type=?, pay_percentage=? WHERE id=?`)
 			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
-				nextStatus, id);
+				nextStatus, nextPayType, nextPayPct, id);
 		// Sync carrier-driver history on write (not on read)
 		if (obj.Driver && obj["Carrier Name"]) {
 			syncCarrierDriverHistory([obj], "Driver", "Carrier Name");
@@ -4678,6 +4695,9 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		// driver still completed the run. Prefer Completion Date, then Status
 		// Update Date, since both reflect when the load actually ended.
 		const completionCol = headers.find(h => /completion.*date|status.*update.*date/i.test(h));
+		// Broker-rate column for owner-op % pay. Same regex /api/dashboard uses.
+		const rateCol = headers.find(h => /payment|rate|amount|pay/i.test(h));
+		const parseAmount = (s) => parseFloat(String(s || "0").replace(/[$,]/g, "")) || 0;
 		const activeDaySet = new Set();
 		const dayLoadMap = {}; // date string → [load IDs]
 
@@ -4710,7 +4730,8 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		}
 
 		const activeDays = activeDaySet.size;
-		const totalEarnings = activeDays * dailyRate;
+		// `let` because owner-op (percentage) drivers override this further down.
+		let totalEarnings = activeDays * dailyRate;
 
 		// Generate invoice number
 		// Delete existing draft if any
@@ -4747,48 +4768,110 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		const payInfo = driverUser
 			? db.prepare("SELECT * FROM driver_payment_info WHERE user_id = ?").get(driverUser.id)
 			: null;
-		// Pull provider address + phone from drivers_directory (populated during onboarding)
+		// Pull provider address + phone + pay structure from drivers_directory.
 		const driverRow = db.prepare(
-			"SELECT address, city, state, zip, phone, cell FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)"
+			"SELECT address, city, state, zip, phone, cell, pay_type, pay_percentage FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)"
 		).get(driverName);
 		const providerAddress = driverRow
 			? [driverRow.address, driverRow.city, driverRow.state, driverRow.zip].filter(Boolean).join(", ")
 			: "";
 		const providerPhone = driverRow ? (driverRow.phone || driverRow.cell || "") : "";
+		const payType = (driverRow?.pay_type || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
+		const payPercentage = Math.max(0, Math.min(100, Number(driverRow?.pay_percentage || 0)));
 
 		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 		const fmtWeekDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-		const pdfBuffer = await renderPolicy("service_invoice", {
-			driverName,
-			businessName: driverName,
-			providerAddress,
-			providerPhone,
-			invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
-			submissionDate: nowStr,
-			signatureDate: nowStr,
-			billingPeriodStart: fmtWeekDate(weekStart),
-			billingPeriodEnd: fmtWeekDate(computedWeekEnd),
-			totalDue: totalEarnings,
-			bankOnFile: payInfo?.bank_name || "",
-			accountType: (payInfo?.account_type || "").toLowerCase(),
-			days: daysMap,
-			// Default compliance checkboxes to checked — the driver is certifying they've
-			// uploaded these documents via the app. Unchecking is a manual override.
-			hasEldData: true,
-			hasBol: true,
-			hasDvir: true,
-			hasFuelReceipts: true,
-		});
+
+		let pdfBuffer;
+		let invoiceRatePerLoad = dailyRate;
+		let invoiceLoadsCount = activeDays;
+		if (payType === "percentage") {
+			// Owner-operator pay: % of (week's load revenue − fuel & maintenance).
+			const grossRevenue = uniqueLoads.reduce((sum, l) => sum + parseAmount(rateCol ? l[rateCol] : 0), 0);
+			const fuelMaintExpenses = expenses.filter(e =>
+				(e.type === "Fuel" || e.type === "Maintenance") && e.status !== "Rejected"
+			);
+			const deductible = fuelMaintExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+			const net = Math.max(0, grossRevenue - deductible);
+			totalEarnings = Math.round((net * payPercentage / 100) * 100) / 100;
+			invoiceRatePerLoad = payPercentage; // overload the column to store the % for this row
+			invoiceLoadsCount = uniqueLoads.length;
+			pdfBuffer = await renderPolicy("service_invoice_owner_op", {
+				driverName,
+				businessName: driverName,
+				providerAddress,
+				providerPhone,
+				invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
+				submissionDate: nowStr,
+				signatureDate: nowStr,
+				billingPeriodStart: fmtWeekDate(weekStart),
+				billingPeriodEnd: fmtWeekDate(computedWeekEnd),
+				loads: uniqueLoads.map(l => {
+					const dt = parseInvoiceDate(
+						(completionCol ? l[completionCol] : null) ||
+						(dropoffCol ? l[dropoffCol] : null) ||
+						(pickupCol ? l[pickupCol] : null)
+					);
+					return {
+						date: dt ? fmtLocalDate(dt) : "",
+						loadId: loadIdCol ? (l[loadIdCol] || "") : "",
+						rate: parseAmount(rateCol ? l[rateCol] : 0),
+					};
+				}),
+				fuelMaintExpenses: fuelMaintExpenses.map(e => ({
+					date: e.date,
+					type: e.type,
+					description: e.description || "",
+					amount: e.amount || 0,
+				})),
+				grossRevenue,
+				deductible,
+				net,
+				payPercentage,
+				totalEarnings,
+				bankOnFile: payInfo?.bank_name || "",
+				accountType: (payInfo?.account_type || "").toLowerCase(),
+				hasEldData: true,
+				hasBol: true,
+				hasDvir: true,
+				hasFuelReceipts: true,
+			});
+		} else {
+			pdfBuffer = await renderPolicy("service_invoice", {
+				driverName,
+				businessName: driverName,
+				providerAddress,
+				providerPhone,
+				invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
+				submissionDate: nowStr,
+				signatureDate: nowStr,
+				billingPeriodStart: fmtWeekDate(weekStart),
+				billingPeriodEnd: fmtWeekDate(computedWeekEnd),
+				totalDue: totalEarnings,
+				bankOnFile: payInfo?.bank_name || "",
+				accountType: (payInfo?.account_type || "").toLowerCase(),
+				days: daysMap,
+				// Default compliance checkboxes to checked — the driver is certifying they've
+				// uploaded these documents via the app. Unchecking is a manual override.
+				hasEldData: true,
+				hasBol: true,
+				hasDvir: true,
+				hasFuelReceipts: true,
+			});
+		}
 		fs.writeFileSync(pdfPath, pdfBuffer);
 
-		// Insert into DB (rate_per_load stores daily rate; loads_count stores active days for this invoice)
+		// Insert into DB. Schema is shared between fixed/percentage drivers — for
+		// fixed: loads_count=activeDays, rate_per_load=$250. For percentage:
+		// loads_count=uniqueLoads.length, rate_per_load=payPercentage (overloaded
+		// to carry the % so admin tooling has a single column to read).
 		const result = db.prepare(
 			`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, ?, ?)`
 		).run(
 			invoiceNumber, driverName.toLowerCase(), weekStart, computedWeekEnd,
-			activeDays, dailyRate, totalEarnings, expensesTotal,
+			invoiceLoadsCount, invoiceRatePerLoad, totalEarnings, expensesTotal,
 			pdfFileName, JSON.stringify(loadIds), JSON.stringify(expenseIds)
 		);
 

@@ -269,6 +269,25 @@
             <p class="status-help">Drivers become Active automatically after passing their drug test. Use this toggle to override.</p>
           </div>
 
+          <fieldset class="pay-section">
+            <legend>Pay Structure</legend>
+            <div class="pay-options">
+              <label class="pay-radio">
+                <input type="radio" v-model="editForm.payType" value="fixed" />
+                <span>Fixed Daily Rate ($250/day &times; active days)</span>
+              </label>
+              <label class="pay-radio">
+                <input type="radio" v-model="editForm.payType" value="percentage" />
+                <span>Percentage of Net Load Revenue (owner-operator)</span>
+              </label>
+            </div>
+            <div v-if="editForm.payType === 'percentage'" class="edit-field" style="margin-top:0.5rem;">
+              <label>Owner-Operator Share (%)</label>
+              <input v-model.number="editForm.payPercentage" type="number" min="0" max="100" step="0.1" placeholder="e.g. 30" />
+              <p class="status-help">Driver gets {{ Number(editForm.payPercentage) || 0 }}% of (weekly load revenue &minus; fuel &amp; maintenance expenses). LogisX keeps the rest.</p>
+            </div>
+          </fieldset>
+
           <div class="confirm-actions">
             <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
             <button class="btn btn-primary" @click="handleSaveEdit">Save</button>
@@ -431,6 +450,7 @@ const editForm = reactive({
   driver: '', carrierName: '', state: '', city: '', zip: '', address: '',
   trucks: '', hazmat: 'NO', phone: '', cell: '', email: '',
   dot: '', mc: '', rating: 'Not Rated', status: 'active',
+  payType: 'fixed', payPercentage: 0,
 })
 
 function statusClass(d) {
@@ -469,6 +489,8 @@ function openEdit(d) {
   editForm.mc = d[h.value.mc] || ''
   editForm.rating = d[h.value.rating] || 'Not Rated'
   editForm.status = d.Status || 'active'
+  editForm.payType = d.PayType || 'fixed'
+  editForm.payPercentage = Number(d.PayPercentage) || 0
   showEdit.value = true
 }
 
@@ -480,6 +502,8 @@ function handleSaveEdit() {
       editForm.zip, editForm.address, editForm.trucks, editForm.hazmat,
       editForm.phone, editForm.cell, editForm.email,
       editForm.dot, editForm.mc, editForm.rating, editForm.status,
+      editForm.payType,
+      editForm.payType === 'percentage' ? (Number(editForm.payPercentage) || 0) : 0,
     ],
   })
   showEdit.value = false
@@ -549,6 +573,34 @@ function handleConfirmDelete() {
   margin: 0.3rem 0 0;
   line-height: 1.4;
 }
+
+.pay-section {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.65rem 0.8rem 0.5rem;
+  margin: 0.6rem 0 0.25rem;
+}
+.pay-section legend {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 0.4rem;
+}
+.pay-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.pay-radio {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.pay-radio input[type="radio"] { margin: 0; }
 
 .action-btns { display: flex; gap: 0.35rem; justify-content: flex-end; }
 .btn-edit, .btn-remove {
