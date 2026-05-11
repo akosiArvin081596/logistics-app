@@ -4757,6 +4757,8 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		const providerPhone = driverRow ? (driverRow.phone || driverRow.cell || "") : "";
 
 		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+		const fmtWeekDate = (s) =>
+			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 		const pdfBuffer = await renderPolicy("service_invoice", {
 			driverName,
 			businessName: driverName,
@@ -4765,6 +4767,8 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 			invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
 			submissionDate: nowStr,
 			signatureDate: nowStr,
+			billingPeriodStart: fmtWeekDate(weekStart),
+			billingPeriodEnd: fmtWeekDate(computedWeekEnd),
 			totalDue: totalEarnings,
 			bankOnFile: payInfo?.bank_name || "",
 			accountType: (payInfo?.account_type || "").toLowerCase(),
