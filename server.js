@@ -10576,9 +10576,15 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						}
 						if (workingRe.test(status)) {
 							if (!driverActiveLoadsMap[key]) driverActiveLoadsMap[key] = [];
-							const entry = { loadId: lid, status, details: detailsCol ? (obj[detailsCol] || "") : "" };
-							if (pickupAddrCol) entry.pickupAddress = obj[pickupAddrCol] || "";
-							if (dropoffAddrCol) entry.dropoffAddress = obj[dropoffAddrCol] || "";
+							const rawPickup  = pickupAddrCol  ? (obj[pickupAddrCol]  || "") : "";
+							const rawDropoff = dropoffAddrCol ? (obj[dropoffAddrCol] || "") : "";
+							const entry = {
+								loadId: lid,
+								status,
+								details: detailsCol ? (obj[detailsCol] || "") : "",
+								pickupAddress:  resolveCityState(obj, "pickup", lid, rawPickup),
+								dropoffAddress: resolveCityState(obj, "drop",   lid, rawDropoff),
+							};
 							if (originLatCol && originLngCol) {
 								const oLat = parseFloat(obj[originLatCol]);
 								const oLng = parseFloat(obj[originLngCol]);

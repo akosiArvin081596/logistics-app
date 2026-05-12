@@ -127,7 +127,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
-import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
+import { useGoogleMaps, createDotPin, createTruckArrow } from '../../composables/useGoogleMaps'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -569,10 +569,12 @@ function syncDriverMarkers() {
     if (!marker) {
       // Create new marker for this driver
       const isOn = isOnline(loc)
+      const moving = (loc.speed || 0) > 0.5  // ~1 mph
+      const heading = Number.isFinite(loc.heading) ? loc.heading : 0
       marker = new google.maps.marker.AdvancedMarkerElement({
         position: { lat: loc.latitude, lng: loc.longitude },
         map,
-        content: createDotPin(isOn ? '#16a34a' : '#9ca3af', 14),
+        content: createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving }),
         title: loc.driver,
         zIndex: 1000,
       })
@@ -596,9 +598,11 @@ function syncDriverMarkers() {
       } else {
         marker.position = { lat: loc.latitude, lng: loc.longitude }
       }
-      // Update dot color based on online status
+      // Update arrow rotation/state based on speed + heading + online status
       const isOn = isOnline(loc)
-      marker.content = createDotPin(isOn ? '#16a34a' : '#9ca3af', 14)
+      const moving = (loc.speed || 0) > 0.5
+      const heading = Number.isFinite(loc.heading) ? loc.heading : 0
+      marker.content = createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving })
     }
   }
 
