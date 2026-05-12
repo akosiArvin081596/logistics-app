@@ -3568,6 +3568,23 @@ function resolveCityState(row, kind, loadId, sheetAddr) {
 	return parsed.zip ? `${base} ${parsed.zip}` : base;
 }
 
+// Sanitize the free-text "Details" column for display. Two cleanups:
+//   1. Strip the "[NEEDS RATE CON]" marker n8n prepends to body-only Bison-style
+//      emails. The marker is an internal signal, not a user-facing message.
+//   2. Detect the "N/A, N/A, N/A - N/A, N/A, N/A" placeholder that the n8n
+//      distance-update node writes when both pickup and dropoff addresses are
+//      missing — replace with the cleaner "Awaiting Rate Con" label.
+// Returns the cleaned string, or "Awaiting Rate Con" when the whole field
+// reduces to placeholders, or "" when there's nothing usable to display.
+function sanitizeDetails(raw) {
+	const s = (raw || "").toString().trim();
+	if (!s) return "";
+	const stripped = s.replace(/^\s*\[NEEDS RATE CON\]\s*/i, "").trim();
+	const naPlaceholder = /^\s*n\/?a\s*,?\s*n\/?a\s*,?\s*n\/?a(\s*[-–]\s*n\/?a\s*,?\s*n\/?a\s*,?\s*n\/?a)?\s*$/i;
+	if (!stripped || naPlaceholder.test(stripped)) return "Awaiting Rate Con";
+	return stripped;
+}
+
 // Per-loadId TTL cache for the public tracker. Caps Google Routes API spend
 // when many customers (or bots) poll the same load. Sits inside the rate
 // limiter so it never bypasses trackPublicLimiter.
@@ -10609,7 +10626,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 							const entry = {
 								loadId: lid,
 								status,
-								details: detailsCol ? (obj[detailsCol] || "") : "",
+								details: sanitizeDetails(detailsCol ? obj[detailsCol] : ""),
 								pickupAddress:  resolveCityState(obj, "pickup", lid, rawPickup),
 								dropoffAddress: resolveCityState(obj, "drop",   lid, rawDropoff),
 							};

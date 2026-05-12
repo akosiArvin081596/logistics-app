@@ -1000,6 +1000,9 @@ function driverOutOfRange(loc) {
       if (d < minDist) minDist = d
     }
   }
+  // No usable coords on any load (e.g. "Awaiting Rate Con" loads with empty
+  // addresses) — don't render the distance pill at all; "∞ mi away" was the bug.
+  if (!Number.isFinite(minDist)) return ''
   if (minDist > 1243) return `${Math.round(minDist).toLocaleString()} mi away`
   return ''
 }
