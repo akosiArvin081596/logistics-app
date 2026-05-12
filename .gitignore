@@ -11,7 +11,13 @@ app.db
 app.db-shm
 app.db-wal
 app.db.bak*
+app.db.docgen*
+app.db.production*
+app.db.prod-capture*
 logisxdb.db
+
+# Production/staging DB snapshots pulled down for screenshot capture
+scripts/docs/app.db.*
 
 # User uploads (PII — receipts, photos, signed docs)
 uploads/
@@ -24,3 +30,8 @@ attachments/
 # Claude
 .claude/
 .claude*
+
+# Personal daily-timeline / invoice artifacts (billing records, not code)
+docs/*timeline*.docx
+docs/*timeline*.html
+scripts/generate-timeline*.py

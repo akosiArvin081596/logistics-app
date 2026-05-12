@@ -79,7 +79,7 @@ app.use(express.json({ limit: "50mb" }));
 // ============================================================
 // SQLite — Local database for app data (messages, users, expenses)
 // ============================================================
-const db = new Database(path.join(__dirname, "app.db"));
+const db = new Database(process.env.DATABASE_PATH || path.join(__dirname, "app.db"));
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
@@ -95,8 +95,8 @@ db.exec(`
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_from ON messages("from")`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_to ON messages("to")`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_from ON messages("from")`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_to ON messages("to")`); } catch {}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS notifications (
@@ -110,7 +110,7 @@ db.exec(`
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_notifications_driver ON notifications(driver_name)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_notifications_driver ON notifications(driver_name)`); } catch {}
 
 const insertNotification = db.prepare(
 	`INSERT INTO notifications (driver_name, type, title, body, metadata) VALUES (?, ?, ?, ?, ?)`
@@ -142,8 +142,8 @@ db.exec(`
 		responded_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_load_responses_driver ON load_responses(driver_name)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_load_responses_load ON load_responses(load_id, driver_name)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_load_responses_driver ON load_responses(driver_name)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_load_responses_load ON load_responses(load_id, driver_name)`); } catch {}
 
 const insertLoadResponse = db.prepare(
 	`INSERT INTO load_responses (load_id, row_index, driver_name, response) VALUES (?, ?, ?, ?)`
@@ -209,14 +209,17 @@ db.exec(`
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_driver ON expenses(driver)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner ON expenses(owner_id)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses(status)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner_date ON expenses(owner_id, date)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_trucks_owner ON trucks(owner_id)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_maintenance_truck ON maintenance_fund(truck)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_compliance_truck ON compliance_fees(truck)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_driver ON expenses(driver)`); } catch {}
+// owner_id is added below via ALTER on first boot — wrap so a fresh DB can bootstrap;
+// these indexes succeed on the next boot once the column exists.
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner ON expenses(owner_id)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses(status)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner_date ON expenses(owner_id, date)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_trucks_owner ON trucks(owner_id)`); } catch {}
+// These tables are created later in the file — guard for fresh-DB bootstrap.
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_maintenance_truck ON maintenance_fund(truck)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_compliance_truck ON compliance_fees(truck)`); } catch {}
 
 // Migrate: add gallons + odometer columns to expenses table (fuel tracking)
 try {
@@ -391,12 +394,12 @@ try { db.exec("ALTER TABLE job_applications ADD COLUMN hazmat TEXT DEFAULT ''");
 try { db.exec("ALTER TABLE job_applications ADD COLUMN deleted_at DATETIME DEFAULT NULL"); } catch {}
 
 // Performance indexes for /applications list query (created_at sort + status filter + FK join + soft-delete filter)
-db.exec(`
+try { db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_ja_created_at ON job_applications(created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_ja_status     ON job_applications(status);
 	CREATE INDEX IF NOT EXISTS idx_ja_deleted_at ON job_applications(deleted_at);
 	CREATE INDEX IF NOT EXISTS idx_do_app_id     ON driver_onboarding(application_id);
-`);
+`); } catch {}
 
 // Migration: add asset_ref to messages (for "Share Asset" in chat)
 try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } catch {}
@@ -432,8 +435,8 @@ db.exec(`
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_trail(timestamp)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_trail(entity, entity_id)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_trail(timestamp)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_trail(entity, entity_id)`); } catch {}
 
 function logAudit(req, action, entity, entityId, details) {
 	try {
@@ -477,8 +480,8 @@ db.exec(`
 		ended_at DATETIME
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_cdh_carrier ON carrier_driver_history(carrier_name)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_cdh_driver ON carrier_driver_history(driver_name)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_cdh_carrier ON carrier_driver_history(carrier_name)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_cdh_driver ON carrier_driver_history(driver_name)`); } catch {}
 
 // Geocode cache (address → lat/lng, persistent across restarts)
 db.exec(`
@@ -733,11 +736,11 @@ db.exec(`
 		load_id TEXT DEFAULT ''
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver ON driver_locations(driver)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_ts ON driver_locations(timestamp)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_load_id ON driver_locations(load_id)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver_ts ON driver_locations(driver, timestamp DESC)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver_load ON driver_locations(driver, load_id)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver ON driver_locations(driver)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_ts ON driver_locations(timestamp)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_load_id ON driver_locations(load_id)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver_ts ON driver_locations(driver, timestamp DESC)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_driver_load ON driver_locations(driver, load_id)`); } catch {}
 
 // driver_locations grows unbounded (every active driver pings every 30s).
 // Purge rows older than 90 days on a weekly schedule + once at boot to seed.
@@ -776,7 +779,7 @@ db.exec(`
 		last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_routemate_vehicles_vin ON routemate_vehicles(vin)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_routemate_vehicles_vin ON routemate_vehicles(vin)`); } catch {}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS routemate_telemetry (
@@ -794,8 +797,8 @@ db.exec(`
 		fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_vid_date ON routemate_telemetry(routemate_vehicle_id, location_date_ms DESC)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_fetched ON routemate_telemetry(fetched_at)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_vid_date ON routemate_telemetry(routemate_vehicle_id, location_date_ms DESC)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_fetched ON routemate_telemetry(fetched_at)`); } catch {}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS routemate_fault_codes (
@@ -810,8 +813,8 @@ db.exec(`
 		UNIQUE (routemate_vehicle_id, code)
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_vid ON routemate_fault_codes(routemate_vehicle_id)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_ack ON routemate_fault_codes(ack_at)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_vid ON routemate_fault_codes(routemate_vehicle_id)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_ack ON routemate_fault_codes(ack_at)`); } catch {}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS routemate_dvir (
@@ -827,7 +830,7 @@ db.exec(`
 		fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_dvir_vid ON routemate_dvir(routemate_vehicle_id)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_dvir_vid ON routemate_dvir(routemate_vehicle_id)`); } catch {}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS routemate_fuel_daily (
@@ -841,7 +844,7 @@ db.exec(`
 		UNIQUE (routemate_vehicle_id, date)
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fuel_vid ON routemate_fuel_daily(routemate_vehicle_id)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fuel_vid ON routemate_fuel_daily(routemate_vehicle_id)`); } catch {}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS routemate_hos_daily (
@@ -855,7 +858,7 @@ db.exec(`
 		UNIQUE (driver_id, date)
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_hos_driver ON routemate_hos_daily(driver_id)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_hos_driver ON routemate_hos_daily(driver_id)`); } catch {}
 
 // trucks gets a single additive column for the Routemate vehicle linkage.
 // Pattern matches the existing ALTER TABLE migration style at server.js:257.
@@ -1515,8 +1518,8 @@ try { db.exec("ALTER TABLE invoices ADD COLUMN processed_by TEXT DEFAULT ''"); }
 try { db.exec("ALTER TABLE invoices ADD COLUMN paid_at TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE invoices ADD COLUMN paid_by TEXT DEFAULT ''"); } catch {}
 
-db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_driver ON invoices(driver)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_week ON invoices(week_start, week_end)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_driver ON invoices(driver)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_week ON invoices(week_start, week_end)`); } catch {}
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_driver_week ON invoices(driver, week_start)`);
 
 // Onboarding document definitions
@@ -1667,8 +1670,8 @@ db.exec(`
 		FOREIGN KEY (truck_id) REFERENCES trucks(id)
 	)
 `);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_truck ON truck_assignments(truck_id)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(driver_name)`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_truck ON truck_assignments(truck_id)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(driver_name)`); } catch {}
 
 // Helper: assign a driver to a truck (closes previous assignments, updates trucks.assigned_driver)
 function assignDriverToTruck(truckId, driverName) {

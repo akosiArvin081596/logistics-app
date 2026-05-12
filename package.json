@@ -8,6 +8,8 @@
     "dev": "nodemon --ext js server.js",
     "dev:client": "cd client && npm run dev",
     "build:client": "cd client && npm run build",
+    "docs:build": "node scripts/docs/generate-docs.js",
+    "docs:screenshots": "node scripts/docs/capture-screenshots.js",
     "postinstall": "cd client && npm install"
   },
   "dependencies": {
@@ -31,6 +33,7 @@
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
+    "marked": "^18.0.3",
     "nodemon": "^3.1.14"
   }
 }
