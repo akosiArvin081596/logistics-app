@@ -1818,12 +1818,12 @@ Field rules:
 - "Broker Email": email of the booking agent.
 - "Driver Name": pre-assigned driver if listed on the rate-con. Null otherwise.
 - "Pickup Company Information": the SHIPPER company name (e.g. "Jacobson Warehouse", "XPO", "GXO", "Pepsi DC").
-- "Pickup Address": full street, city, state, zip of the shipper. Combine multiple address lines.
+- "Pickup Address": ALWAYS combine the street, city, state, zip into a single string like "500 Bell Avenue, Ames, IA 50010". The PDF often lists address line / city / state / zip on separate rows — concatenate them.
 - "Pickup Appointment Time": M/D/YYYY HH:MM. Use the earliest time in the window if only a range is given. Never return 00:00 unless explicitly midnight.
 - "P/U Reference Number": pickup ref number presented at shipper (Pick Up #, PU #, Pickup Ref). Single value only.
 - "Pickup Notes/Instructions": shipper-specific notes / hours / requirements.
 - "Drop-off Company Information": the RECEIVER company name. Do NOT use commodity names, shipper names, addresses, or reference numbers.
-- "Drop-off Address": full street, city, state, zip of the consignee.
+- "Drop-off Address": ALWAYS combine the street, city, state, zip into a single string like "2930 114th Street, Grand Prairie, TX 75050". Concatenate separate address/city/state/zip rows.
 - "Delivery Appointment Time": M/D/YYYY HH:MM.
 - "Delivery Reference Number": delivery ref presented at receiver. Only include if DIFFERENT from P/U Reference Number.
 - "Delivery Notes/Instructions": receiver-specific notes.
@@ -1887,7 +1887,13 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 			],
 			generationConfig: {
 				temperature: 0.1,
-				maxOutputTokens: 2000,
+				// Gemini 2.5 Flash "thinking" is on by default and chews ~2k tokens
+				// before producing the structured output. For deterministic field
+				// extraction we don't need reasoning — disable it so the entire
+				// budget goes to the JSON response. Without this, the 18-field
+				// schema truncates mid-output and parsing fails.
+				thinkingConfig: { thinkingBudget: 0 },
+				maxOutputTokens: 4000,
 				responseMimeType: "application/json",
 				responseSchema: RATECON_PDF_RESPONSE_SCHEMA,
 			},
