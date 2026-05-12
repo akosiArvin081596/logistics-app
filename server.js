@@ -10477,8 +10477,19 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const routemateRows = db.prepare(`
 				SELECT
 					LOWER(ta.driver_name) AS driver_lc,
-					rt.latitude, rt.longitude, rt.speed,
-					rt.location_date_ms
+					rt.latitude, rt.longitude, rt.speed, rt.bearing,
+					rt.location_date_ms,
+					-- Prior telemetry row's coords, used as a fallback heading source
+					-- when rt.bearing is missing or non-numeric. Index idx_rm_tel_vid_date
+					-- covers (routemate_vehicle_id, location_date_ms DESC) so this stays cheap.
+					(SELECT rt2.latitude  FROM routemate_telemetry rt2
+					   WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+					     AND rt2.id < rt.id
+					   ORDER BY rt2.id DESC LIMIT 1) AS prev_lat,
+					(SELECT rt2.longitude FROM routemate_telemetry rt2
+					   WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+					     AND rt2.id < rt.id
+					   ORDER BY rt2.id DESC LIMIT 1) AS prev_lng
 				FROM truck_assignments ta
 				JOIN trucks t ON t.id = ta.truck_id
 				JOIN routemate_telemetry rt
@@ -10514,6 +10525,20 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.source = "routemate";
 					loc.lastPingAge = now - rm.location_date_ms;
 					if (loc.noGps) loc.noGps = false;
+					// Heading: prefer Routemate's published bearing; fall back to the
+					// rhumb-line bearing between the previous and current telemetry rows.
+					// Without this the arrow would inherit the driver's stale phone-GPS
+					// heading from driver_locations (often pointing the wrong way or zero).
+					const bearingNum = Number(rm.bearing);
+					if (Number.isFinite(bearingNum) && bearingNum >= 0 && bearingNum <= 360) {
+						loc.heading = bearingNum;
+					} else if (Number.isFinite(rm.prev_lat) && Number.isFinite(rm.prev_lng) &&
+					           (rm.prev_lat !== rm.latitude || rm.prev_lng !== rm.longitude)) {
+						loc.heading = geolib.getRhumbLineBearing(
+							{ latitude: rm.prev_lat, longitude: rm.prev_lng },
+							{ latitude: rm.latitude, longitude: rm.longitude }
+						);
+					}
 				} else {
 					loc.source = loc.noGps ? "none" : "phone";
 					loc.lastPingAge = loc.timestamp ? (now - new Date(loc.timestamp).getTime()) : null;
