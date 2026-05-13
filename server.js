@@ -985,6 +985,35 @@ async function routemateSyncVehicles() {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "vehicles", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
 		logRoutemateSyncFailure("vehicles", err);
+		// Routemate's /api/v0/assets/vehicles endpoint has been returning HTTP 500
+		// (their bug, confirmed against a direct probe). The telemetry endpoint
+		// still works, so derive a minimal vehicle row from any unique routemate
+		// vehicle IDs we've seen in /routemate_telemetry/ — this keeps the Link
+		// modal in /trucks usable for vehicles that are actually reporting GPS,
+		// even when Routemate's vehicle-inventory endpoint is unreachable.
+		try {
+			const telemetryVehicles = db.prepare(`
+				SELECT routemate_vehicle_id,
+				       MAX(routemate_vehicle_id) AS keep
+				FROM routemate_telemetry
+				WHERE routemate_vehicle_id <> ''
+				GROUP BY routemate_vehicle_id
+			`).all();
+			let fallbackSynced = 0;
+			const txn = db.transaction((rows) => {
+				for (const r of rows) {
+					routemateUpsertVehicleMinimalStmt.run(r.routemate_vehicle_id, "");
+					fallbackSynced += 1;
+				}
+			});
+			txn(telemetryVehicles);
+			if (fallbackSynced > 0) {
+				err.fallbackSynced = fallbackSynced;
+				err.fallbackSource = "telemetry";
+			}
+		} catch (fallbackErr) {
+			console.error("[routemate] vehicle-fallback also failed:", fallbackErr.message);
+		}
 		throw err;
 	}
 }
@@ -8810,9 +8839,20 @@ app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req
 		res.json({ success: true, vehiclesSynced: result.synced });
 	} catch (err) {
 		console.error("Routemate sync-now error:", err.message);
+		// Pull telemetry anyway — that endpoint isn't affected by the
+		// /assets/vehicles outage and is what dispatchers actually care about.
+		routemateSyncTelemetry().catch(() => {});
+		const upstream500 = err.status === 500;
+		const fellBackToTelemetry = Number.isFinite(err.fallbackSynced);
 		res.status(err.status === 401 || err.status === 403 ? err.status : 502).json({
 			error: err.message || "Routemate sync failed",
 			code: err.code || "ROUTEMATE_SYNC_FAILED",
+			upstreamStatus: err.status || null,
+			// Helpful breadcrumb for support — explains *what* Routemate broke.
+			hint: upstream500
+				? "Routemate's /api/v0/assets/vehicles endpoint is returning HTTP 500. Telemetry (live GPS) is unaffected. Contact Routemate support — this is upstream."
+				: undefined,
+			fallbackSynced: fellBackToTelemetry ? err.fallbackSynced : undefined,
 		});
 	}
 });
