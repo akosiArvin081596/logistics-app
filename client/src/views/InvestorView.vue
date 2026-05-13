@@ -57,6 +57,7 @@
       <MyTrucks :trucks="trucks" :production="store.production" @reload="loadData" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
+      <ExpensesSection :trucks="trucks" />
       <!-- <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" /> -->
       <InvestorChat :trucks="trucks" />
       <LegalDocumentPortal :trucks="trucks" />
@@ -88,6 +89,7 @@ import TrendSection from '../components/investor/TrendSection.vue'
 import AssetSection from '../components/investor/AssetSection.vue'
 import FleetBreakdownSection from '../components/investor/FleetBreakdownSection.vue'
 import CashFlowSection from '../components/investor/CashFlowSection.vue'
+import ExpensesSection from '../components/investor/ExpensesSection.vue'
 import TaxShieldSection from '../components/investor/TaxShieldSection.vue'
 import InvestorChat from '../components/investor/InvestorChat.vue'
 import DocumentPortal from '../components/investor/DocumentPortal.vue'

@@ -64,6 +64,10 @@
             <option value="">All Drivers</option>
             <option v-for="d in allDrivers" :key="d" :value="d">{{ d }}</option>
           </select>
+          <select v-model="allFilter.truck" class="filter-select" @change="loadAll">
+            <option value="">All Trucks</option>
+            <option v-for="t in truckList" :key="t" :value="t">{{ t }}</option>
+          </select>
           <select v-model="allFilter.type" class="filter-select" @change="loadAll">
             <option value="">All Types</option>
             <option v-for="t in expenseTypes" :key="t" :value="t">{{ t }}</option>
@@ -86,7 +90,7 @@
             <div class="mobile-exp-top">
               <div class="mobile-exp-top-left">
                 <div class="mobile-exp-date">{{ fmtDate(e.date) }}</div>
-                <div class="mobile-exp-driver">{{ e.driver }}</div>
+                <div class="mobile-exp-driver">{{ e.driver }}<span v-if="e.truck_unit" class="mobile-exp-truck"> · #{{ e.truck_unit }}</span></div>
               </div>
               <span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span>
             </div>
@@ -107,12 +111,13 @@
             </div>
           </div>
         </div>
-        <!-- Desktop: existing table unchanged -->
+        <!-- Desktop: existing table with new Truck column -->
         <table v-else class="data-table">
           <thead>
             <tr>
               <th>Date</th>
               <th>Driver</th>
+              <th>Truck</th>
               <th>Type</th>
               <th>Description</th>
               <th>Amount</th>
@@ -125,6 +130,7 @@
             <tr v-for="e in allExpenses" :key="e.id" class="expense-row" @click="openExpenseDetail(e)">
               <td class="mono-sm">{{ fmtDate(e.date) }}</td>
               <td>{{ e.driver }}</td>
+              <td class="mono-sm">{{ e.truck_unit ? '#' + e.truck_unit : '\u2014' }}</td>
               <td><span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span></td>
               <td class="desc-cell">{{ e.description || '\u2014' }}</td>
               <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
@@ -156,17 +162,24 @@
 
       <!-- Expense breakdown modal. Opens on row click. Shows the same fields
            that live in the DB but aren't in the list (gallons, odometer,
-           derived price-per-gallon) plus a bigger receipt preview. -->
+           derived price-per-gallon) plus a bigger receipt preview.
+           Prev/Next cycles through the current filtered list; Approve/Reject
+           inside the modal auto-advance to the next Pending row. -->
       <Teleport to="body">
-        <div v-if="selectedExpense" class="exp-overlay" @click.self="selectedExpense = null">
+        <div v-if="selectedExpense" class="exp-overlay" @click.self="closeExpenseDetail">
           <div class="exp-dialog">
+            <div class="exp-nav">
+              <button class="exp-nav-btn" :disabled="selectedIndex <= 0" @click="goPrev" aria-label="Previous expense" title="Previous (←)">&larr; Prev</button>
+              <span class="exp-nav-counter">{{ selectedIndex + 1 }} of {{ allExpenses.length }}</span>
+              <button class="exp-nav-btn" :disabled="selectedIndex >= allExpenses.length - 1" @click="goNext" aria-label="Next expense" title="Next (→)">Next &rarr;</button>
+            </div>
             <div class="exp-header">
               <div>
                 <div class="exp-type" :class="'type-' + (selectedExpense.type || 'other').toLowerCase()">{{ selectedExpense.type || 'Other' }}</div>
                 <div class="exp-amount">${{ Number(selectedExpense.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
                 <div class="exp-sub">{{ fmtDate(selectedExpense.date) }} &middot; {{ selectedExpense.driver }}</div>
               </div>
-              <button class="exp-close" @click="selectedExpense = null" aria-label="Close">&times;</button>
+              <button class="exp-close" @click="closeExpenseDetail" aria-label="Close (Esc)">&times;</button>
             </div>
             <div class="exp-grid">
               <template v-if="isFuelExpense(selectedExpense)">
@@ -206,6 +219,13 @@
               <div class="exp-desc-label">Receipt</div>
               <img :src="selectedExpense.photo_data" class="exp-receipt-img" @click="previewImg = selectedExpense.photo_data" />
               <div class="exp-receipt-hint">Click to enlarge</div>
+            </div>
+            <div class="exp-actions">
+              <template v-if="(selectedExpense.status || 'Pending') === 'Pending'">
+                <button class="exp-btn-approve" :disabled="approveLoading" @click="approveCurrent">{{ approveLoading ? '…' : 'Approve' }}</button>
+                <button class="exp-btn-reject" :disabled="approveLoading" @click="rejectCurrent">{{ approveLoading ? '…' : 'Reject' }}</button>
+              </template>
+              <button v-else class="exp-btn-undo" :disabled="approveLoading" @click="undoCurrent">{{ approveLoading ? '…' : 'Undo' }}</button>
             </div>
           </div>
         </div>
@@ -500,7 +520,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useAuthStore } from '../../stores/auth'
@@ -529,10 +549,68 @@ const allExpenses = ref([])
 const allLoading = ref(true)
 const allDrivers = ref([])
 const previewImg = ref(null)
-const selectedExpense = ref(null)
+// Detail modal: track by index so Prev/Next can cycle through the current
+// (already-filtered) list. -1 means closed.
+const selectedIndex = ref(-1)
+const selectedExpense = computed(() =>
+  selectedIndex.value >= 0 && selectedIndex.value < allExpenses.value.length
+    ? allExpenses.value[selectedIndex.value]
+    : null
+)
+const approveLoading = ref(false)
 
 function openExpenseDetail(e) {
-  selectedExpense.value = e
+  const idx = allExpenses.value.findIndex(x => x.id === e.id)
+  selectedIndex.value = idx >= 0 ? idx : -1
+}
+function closeExpenseDetail() {
+  selectedIndex.value = -1
+}
+function goPrev() {
+  if (selectedIndex.value > 0) selectedIndex.value -= 1
+}
+function goNext() {
+  if (selectedIndex.value < allExpenses.value.length - 1) selectedIndex.value += 1
+}
+// Walk forward to the next Pending row; close the modal if none remain.
+function advanceToNextPending() {
+  const list = allExpenses.value
+  for (let i = selectedIndex.value + 1; i < list.length; i++) {
+    if ((list[i].status || 'Pending') === 'Pending') {
+      selectedIndex.value = i
+      return
+    }
+  }
+  closeExpenseDetail()
+}
+async function approveCurrent() {
+  const exp = selectedExpense.value
+  if (!exp || approveLoading.value) return
+  approveLoading.value = true
+  try {
+    await setStatus(exp.id, 'Approved')
+    advanceToNextPending()
+  } catch { /* setStatus already toasted */ }
+  finally { approveLoading.value = false }
+}
+async function rejectCurrent() {
+  const exp = selectedExpense.value
+  if (!exp || approveLoading.value) return
+  approveLoading.value = true
+  try {
+    await setStatus(exp.id, 'Rejected')
+    advanceToNextPending()
+  } catch { /* setStatus already toasted */ }
+  finally { approveLoading.value = false }
+}
+async function undoCurrent() {
+  const exp = selectedExpense.value
+  if (!exp || approveLoading.value) return
+  approveLoading.value = true
+  try {
+    await setStatus(exp.id, 'Pending')
+  } catch { /* setStatus already toasted */ }
+  finally { approveLoading.value = false }
 }
 function isFuelExpense(e) {
   return e && (e.type || '').toLowerCase() === 'fuel' && Number(e.gallons) > 0
@@ -544,7 +622,20 @@ function pricePerGallon(e) {
   return (amt / g).toFixed(3)
 }
 const expenseTypes = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
-const allFilter = reactive({ driver: '', type: '', status: '' })
+const allFilter = reactive({ driver: '', type: '', status: '', truck: '' })
+
+// Keyboard nav for the detail modal. Listener attaches only while the
+// modal is open so we don't leak global handlers.
+function onModalKeydown(ev) {
+  if (ev.key === 'ArrowLeft') { ev.preventDefault(); goPrev() }
+  else if (ev.key === 'ArrowRight') { ev.preventDefault(); goNext() }
+  else if (ev.key === 'Escape') { ev.preventDefault(); closeExpenseDetail() }
+}
+watch(selectedExpense, (cur, prev) => {
+  if (cur && !prev) window.addEventListener('keydown', onModalKeydown)
+  else if (!cur && prev) window.removeEventListener('keydown', onModalKeydown)
+})
+onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
 
 // Add Expense form (Super Admin / Dispatcher only)
 const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
@@ -563,7 +654,6 @@ const canDownload = computed(() =>
 )
 
 async function loadTruckList() {
-  if (!auth.isSuperAdmin) return
   try {
     const res = await api.get('/api/trucks')
     const rows = res.data || res.trucks || res || []
@@ -571,7 +661,7 @@ async function loadTruckList() {
     truckList.value = [...new Set(units)].sort()
   } catch (err) {
     console.error('loadTruckList failed:', err)
-    downloadError.value = 'Could not load truck list. Refresh to retry.'
+    if (auth.isSuperAdmin) downloadError.value = 'Could not load truck list. Refresh to retry.'
   }
 }
 
@@ -653,6 +743,7 @@ async function loadAll() {
     if (allFilter.driver) params.set('driver', allFilter.driver)
     if (allFilter.type) params.set('type', allFilter.type)
     if (allFilter.status) params.set('status', allFilter.status)
+    if (allFilter.truck) params.set('truck', allFilter.truck)
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await api.get(`/api/expenses/all${qs}`)
     allExpenses.value = data.expenses || []
@@ -678,8 +769,9 @@ async function setStatus(id, status) {
     const exp = allExpenses.value.find(e => e.id === id)
     if (exp) exp.status = status
     toast(status === 'Approved' ? 'Expense approved' : status === 'Rejected' ? 'Expense rejected' : 'Status reset', 'success')
-  } catch {
+  } catch (err) {
     toast('Failed to update status', 'error')
+    throw err
   }
 }
 
@@ -800,10 +892,10 @@ async function markFeePaid(id) {
 onMounted(() => {
   loadAll()
   loadFuel()
+  loadTruckList()
   if (auth.isSuperAdmin) {
     loadMaintenance()
     loadIfta()
-    loadTruckList()
   }
 })
 </script>
@@ -1259,6 +1351,62 @@ tr:hover td { background: var(--surface-hover); }
   font-style: italic;
 }
 
+.exp-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.85rem;
+  margin-bottom: 0.85rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+.exp-nav-btn {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.exp-nav-btn:hover:not(:disabled) { background: #e2e8f0; color: #0f172a; }
+.exp-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.exp-nav-counter {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #64748b;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.exp-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e2e8f0;
+}
+.exp-btn-approve, .exp-btn-reject, .exp-btn-undo {
+  flex: 1;
+  padding: 0.7rem 1rem;
+  border-radius: 8px;
+  border: none;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.exp-btn-approve { background: var(--accent); color: #fff; }
+.exp-btn-approve:hover:not(:disabled) { opacity: 0.88; }
+.exp-btn-reject { background: var(--danger); color: #fff; }
+.exp-btn-reject:hover:not(:disabled) { opacity: 0.88; }
+.exp-btn-undo { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+.exp-btn-undo:hover:not(:disabled) { background: #e2e8f0; color: #0f172a; }
+.exp-btn-approve:disabled, .exp-btn-reject:disabled, .exp-btn-undo:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* Add Expense form */
 .add-expense-card {
   background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
@@ -1389,6 +1537,12 @@ tr:hover td { background: var(--surface-hover); }
     font-size: 0.92rem;
     font-weight: 600;
     color: #0f172a;
+  }
+  .mobile-exp-truck {
+    font-weight: 500;
+    color: #64748b;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
   }
   .mobile-exp-desc {
     font-size: 0.82rem;

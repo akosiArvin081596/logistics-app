@@ -1728,6 +1728,50 @@ db.exec(`
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_truck ON truck_assignments(truck_id)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(driver_name)`); } catch {}
 
+// Backfill legacy expenses with truck_unit + owner_id. Older expense rows
+// pre-date the columns being stamped on insert (server.js:9370). Pass 1
+// resolves truck_unit + owner_id from truck_assignments history (driver+date).
+// Pass 2 catches rows where truck_unit is set but owner_id is stale because
+// the truck got linked to an investor *after* the expense was logged.
+// Both are idempotent via their WHERE guards.
+try {
+	const pass1 = db.prepare(`
+		UPDATE expenses
+		SET (truck_unit, owner_id) = (
+			SELECT t.unit_number, t.owner_id
+			FROM truck_assignments ta
+			JOIN trucks t ON t.id = ta.truck_id
+			WHERE LOWER(ta.driver_name) = LOWER(expenses.driver)
+			  AND ta.start_date <= expenses.date
+			  AND (ta.end_date = '' OR ta.end_date >= expenses.date)
+			ORDER BY ta.start_date DESC
+			LIMIT 1
+		)
+		WHERE (truck_unit IS NULL OR truck_unit = '')
+		  AND driver IS NOT NULL AND driver != ''
+	`).run();
+	const pass2 = db.prepare(`
+		UPDATE expenses
+		SET owner_id = (
+			SELECT t.owner_id FROM trucks t
+			WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
+			LIMIT 1
+		)
+		WHERE (owner_id IS NULL OR owner_id = 0)
+		  AND truck_unit IS NOT NULL AND truck_unit != ''
+		  AND EXISTS (
+			SELECT 1 FROM trucks t
+			WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
+			  AND t.owner_id > 0
+		  )
+	`).run();
+	if (pass1.changes > 0 || pass2.changes > 0) {
+		console.log(`Expense backfill: pass1 ${pass1.changes} (truck_unit+owner_id), pass2 ${pass2.changes} (owner_id refresh)`);
+	}
+} catch (e) {
+	console.warn("Expense backfill skipped:", e.message);
+}
+
 // Helper: assign a driver to a truck (closes previous assignments, updates trucks.assigned_driver)
 function assignDriverToTruck(truckId, driverName) {
 	const now = new Date().toISOString();
@@ -12415,6 +12459,64 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 	}
 });
 
+// GET /api/investor/expenses — Line-item expenses scoped to the calling
+// investor's trucks. Investors only see expenses where owner_id matches
+// their user.id OR the expense's driver is in their carrier's driver set
+// (legacy fallback for rows logged before owner_id was stamped).
+// Super Admin path returns all rows for impersonation / QA, mirroring
+// the pattern in /api/investor itself.
+app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async (req, res) => {
+	try {
+		const user = req.session.user;
+		const isSuperAdmin = user.role === "Super Admin";
+		const { truck, type, status, from, to } = req.query;
+
+		// Date range sanity check (matches receipts-download convention)
+		if (from && !/^\d{4}-\d{2}-\d{2}$/.test(from)) {
+			return res.status(400).json({ error: "'from' must be YYYY-MM-DD" });
+		}
+		if (to && !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+			return res.status(400).json({ error: "'to' must be YYYY-MM-DD" });
+		}
+
+		const conditions = [];
+		const params = [];
+
+		if (!isSuperAdmin) {
+			// Build the same driver set the dashboard aggregator uses so totals reconcile.
+			const carrierDB = getCarrierDBFromSQLite();
+			const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+			const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
+			const driverSet = getInvestorDriverSet(user.id, carrierDB.data, carrierDriverCol, carrierCarrierCol);
+			const driverList = [...driverSet];
+			if (driverList.length) {
+				const driverPh = driverList.map(() => '?').join(',');
+				conditions.push(`(owner_id = ? OR LOWER(driver) IN (${driverPh}))`);
+				params.push(user.id, ...driverList);
+			} else {
+				conditions.push("owner_id = ?");
+				params.push(user.id);
+			}
+		}
+
+		if (truck) { conditions.push("LOWER(truck_unit) = ?"); params.push(String(truck).toLowerCase()); }
+		if (type) { conditions.push("LOWER(type) = ?"); params.push(String(type).toLowerCase()); }
+		if (status) { conditions.push("LOWER(status) = ?"); params.push(String(status).toLowerCase()); }
+		if (from) { conditions.push("date >= ?"); params.push(from); }
+		if (to) { conditions.push("date <= ?"); params.push(to); }
+
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, created_at FROM expenses";
+		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
+		sql += " ORDER BY date DESC, id DESC LIMIT 1000";
+
+		const expenses = db.prepare(sql).all(...params);
+		res.json({ expenses });
+	} catch (err) {
+		console.error("GET /api/investor/expenses error:", err.message);
+		res.status(500).json({ error: "Failed to load investor expenses" });
+	}
+});
+
 // GET /api/financials — Super Admin financials dashboard (P1-1 from 2026-04-12 meeting)
 // Deshorn asked for a financial overview tab showing expense categories, highest/lowest
 // loads, per-truck macro view, rate-per-mile, and a driver earnings leaderboard. Reuses
@@ -13011,13 +13113,14 @@ app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 // GET /api/expenses/all — All expenses (all types) for dispatcher/admin
 app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
-		const { driver, type, status } = req.query;
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, created_at FROM expenses";
+		const { driver, type, status, truck } = req.query;
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, created_at FROM expenses";
 		const conditions = [];
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
 		if (type) { conditions.push("LOWER(type) = ?"); params.push(type.toLowerCase()); }
 		if (status) { conditions.push("LOWER(status) = ?"); params.push(status.toLowerCase()); }
+		if (truck) { conditions.push("LOWER(truck_unit) = ?"); params.push(String(truck).toLowerCase()); }
 		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 		sql += " ORDER BY id DESC";
 		const expenses = db.prepare(sql).all(...params);
