@@ -209,10 +209,12 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 // Smooth marker tween via requestAnimationFrame. The pin slides across a
 // *static* map; the polyline first-point follows the pin frame-by-frame so
 // the route stays glued to it without a visible gap during the tween.
-// We do NOT call map.panTo() — that auto-follow was the "map refreshing"
-// effect (the world sliding under a static pin instead of the pin sliding
-// across the world). Initial focus (load-click) and pin-click still
-// re-center explicitly.
+// When a load is in focus we also kick a SINGLE map.panTo(to) at the start
+// of the tween — Google's built-in pan animation runs over ~300 ms in
+// parallel and gives the Google-Maps-Navigation camera-follow feel. The
+// previous "map refreshing" effect was caused by calling panTo per frame
+// (~60×/s, each one interrupting the prior animation). One call per ping
+// avoids that entirely.
 function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000) {
   if (activeAnimations[driver]) cancelAnimationFrame(activeAnimations[driver])
   const markerObj = driverMarkers.get(driver)
@@ -220,6 +222,9 @@ function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000) 
   const isSelected = selectedDriver.value
     && selectedDriver.value.toLowerCase() === driver.toLowerCase()
   const followLine = isSelected && !!expandedLoadId.value
+  if (followLine && map) {
+    map.panTo({ lat: toLat, lng: toLng })
+  }
 
   function frame(now) {
     const t = Math.min((now - start) / duration, 1)

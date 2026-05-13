@@ -1019,6 +1019,31 @@ async function routemateSyncTelemetry() {
 		routemateHealth.lastError = null;
 		clearRoutemateLogState("telemetry");
 
+		// Build a {driver_lower → loadId} lookup from the cached Job Tracking
+		// sheet so each socket emit can also fan out a sanitized tracker-update
+		// to the public /public-track namespace's per-load room. Customers with
+		// a tracking link see the truck pin move in real time instead of
+		// waiting for the 30 s HTTP poll cycle.
+		const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
+		const loadIdByDriver = {};
+		try {
+			const jt = await getJobTrackingCached();
+			const headers = jt.headers || [];
+			const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+			const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
+			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
+			if (loadIdCol && statusCol && driverCol) {
+				for (const row of (jt.data || [])) {
+					const d = (row[driverCol] || "").toString().trim().toLowerCase();
+					const s = (row[statusCol] || "").toString().trim();
+					const lid = (row[loadIdCol] || "").toString().trim();
+					if (!d || !lid) continue;
+					if (!activeRe.test(s)) continue;
+					if (!loadIdByDriver[d]) loadIdByDriver[d] = lid;
+				}
+			}
+		} catch { /* lookup is best-effort — emit still happens to dispatch */ }
+
 		// Fan out per-driver location-update events. Same payload shape as
 		// POST /api/location uses for phone GPS so the frontend handler
 		// (TrackingMap onLocationUpdate) doesn't need to know the source.
@@ -1026,15 +1051,26 @@ async function routemateSyncTelemetry() {
 		for (const t of rows) {
 			const driverName = driverByVehicle[t.routemate_vehicle_id];
 			if (!driverName) continue;
+			const driverLower = driverName.trim().toLowerCase();
+			const activeLoadId = loadIdByDriver[driverLower] || "";
+			const timestamp = new Date(t.location_date_ms || Date.now()).toISOString();
 			io.to("dispatch").emit("location-update", {
 				driver: driverName,
 				latitude: t.latitude,
 				longitude: t.longitude,
 				speed: t.speed || 0,
-				loadId: "",
-				timestamp: new Date(t.location_date_ms || Date.now()).toISOString(),
+				loadId: activeLoadId,
+				timestamp,
 				source: "routemate",
 			});
+			if (activeLoadId) {
+				publicTrack.to("load:" + activeLoadId).emit("tracker-update", {
+					lat: t.latitude,
+					lng: t.longitude,
+					speed: t.speed || 0,
+					timestamp,
+				});
+			}
 		}
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "telemetry", message: err.message, status: err.status || null };
@@ -10512,6 +10548,16 @@ app.post("/api/location", requireAuth, locationLimiter, async (req, res) => {
 			timestamp,
 			source: "phone",
 		});
+		// Fan out to public tracker subscribers for this load. Sanitized
+		// payload — same whitelist the public HTTP endpoint enforces.
+		if (effectiveLoadId) {
+			publicTrack.to("load:" + effectiveLoadId).emit("tracker-update", {
+				lat: latitude,
+				lng: longitude,
+				speed: speed || 0,
+				timestamp,
+			});
+		}
 
 		// Geofence check if loadId is provided. Skipped when the ping looks
 		// spoofed (see plausibility check above) so a fake coordinate cannot
@@ -13391,6 +13437,27 @@ io.on("connection", (socket) => {
 		if (requested && (requested === driverNameLower || requested === usernameLower)) {
 			socket.join(requested);
 		}
+	});
+});
+
+// Public tracker namespace — unauthenticated. Customers who have a tracking
+// link can subscribe to live GPS pushes for ONE load without ever opening a
+// session. Payload is a strict whitelist (lat/lng/speed/timestamp) — same
+// data the public HTTP endpoint already exposes. No driver name, broker,
+// rate, phone, etc. ever flows through this namespace.
+const LOAD_ID_RE = /^[A-Za-z0-9\-_.#]{1,40}$/;
+const publicTrack = io.of("/public-track");
+publicTrack.on("connection", (socket) => {
+	socket.on("subscribe", (payload) => {
+		const loadId = (payload && payload.loadId ? String(payload.loadId) : "").trim();
+		if (!LOAD_ID_RE.test(loadId)) return;
+		// One room per load. Server-side emitters use the same key to push.
+		socket.join("load:" + loadId);
+	});
+	socket.on("unsubscribe", (payload) => {
+		const loadId = (payload && payload.loadId ? String(payload.loadId) : "").trim();
+		if (!LOAD_ID_RE.test(loadId)) return;
+		socket.leave("load:" + loadId);
 	});
 });
 

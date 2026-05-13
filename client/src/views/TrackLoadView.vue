@@ -142,6 +142,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { io } from 'socket.io-client'
 import StatusStepper from '../components/driver/StatusStepper.vue'
 import DriverRouteMap from '../components/driver/DriverRouteMap.vue'
 
@@ -211,6 +212,46 @@ function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
 }
 
+// Public-tracker socket. Subscribes to `load:<loadId>` on the server's
+// /public-track namespace (unauthenticated) and pushes lat/lng updates into
+// data.lastPing the instant the server ingests an ELD ping. The 30s HTTP
+// poll above stays in place as a fallback and for ETA/stage refresh.
+let trackSocket = null
+let subscribedLoadId = null
+function openSocket(loadId) {
+  if (!loadId) return
+  if (trackSocket) {
+    if (subscribedLoadId === loadId) return
+    closeSocket()
+  }
+  trackSocket = io('/public-track', { transports: ['websocket', 'polling'] })
+  trackSocket.on('connect', () => {
+    subscribedLoadId = loadId
+    trackSocket.emit('subscribe', { loadId })
+  })
+  trackSocket.on('tracker-update', (payload) => {
+    if (!payload || !data.value) return
+    if (!Number.isFinite(payload.lat) || !Number.isFinite(payload.lng)) return
+    data.value = {
+      ...data.value,
+      lastPing: {
+        lat: payload.lat,
+        lng: payload.lng,
+        at: payload.timestamp || new Date().toISOString(),
+      },
+    }
+    lastUpdatedAt.value = Date.now()
+  })
+}
+function closeSocket() {
+  if (trackSocket) {
+    if (subscribedLoadId) trackSocket.emit('unsubscribe', { loadId: subscribedLoadId })
+    trackSocket.disconnect()
+  }
+  trackSocket = null
+  subscribedLoadId = null
+}
+
 // Re-fetch immediately when the user alt-tabs back into the page.
 function onVisibilityChange() {
   if (document.visibilityState === 'visible') fetchTracker()
@@ -221,6 +262,7 @@ onMounted(async () => {
     loading.value = true
     await fetchTracker()
     startPolling()
+    openSocket(loadIdParam.value)
     visibilityHandler = onVisibilityChange
     document.addEventListener('visibilitychange', visibilityHandler)
   }
@@ -230,6 +272,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopPolling()
+  closeSocket()
   if (visibilityHandler) document.removeEventListener('visibilitychange', visibilityHandler)
   if (tickTimer) clearInterval(tickTimer)
 })
@@ -239,12 +282,14 @@ watch(loadIdParam, async (v, prev) => {
   if (v === prev) return
   data.value = null
   notFound.value = false
+  closeSocket()
   if (v) {
     loading.value = true
     await fetchTracker()
     stopPolling()
     await nextTick()
     startPolling()
+    openSocket(v)
   } else {
     stopPolling()
   }
