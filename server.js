@@ -3846,12 +3846,14 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		let lastPingSpeed = 0;
 		const MAX_PING_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours — accommodates rural coverage gaps
 		if (driverNameKey) {
-			// Source priority: Routemate ELD telemetry first (hardware GPS, independent
-			// of the driver's phone). Falls back to driver_locations if the truck isn't
-			// linked to an ELD or the latest telemetry row is stale.
-			let rmRow = null;
+			// Source priority: pick whichever of ELD telemetry vs phone GPS has the
+			// most recent valid ping within the 3-hour window. ELD is preferred only
+			// when it's genuinely fresher — a stale ELD position must not override a
+			// more recent phone-reported one. When timestamps tie, ELD wins because
+			// hardware GPS is more reliable than a phone left in the cab.
+			let rmCandidate = null;
 			try {
-				rmRow = db.prepare(`
+				const rmRow = db.prepare(`
 					SELECT rt.latitude, rt.longitude, rt.speed, rt.location_date_ms
 					FROM truck_assignments ta
 					JOIN trucks t ON t.id = ta.truck_id
@@ -3865,30 +3867,53 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 					  )
 					LIMIT 1
 				`).get(driverNameKey);
-			} catch { /* tables may not exist on legacy installs */ }
-			if (rmRow && rmRow.location_date_ms) {
-				const age = Date.now() - rmRow.location_date_ms;
-				if (age >= 0 && age <= MAX_PING_AGE_MS) {
-					lastPing = {
-						lat: rmRow.latitude,
-						lng: rmRow.longitude,
-						at: new Date(rmRow.location_date_ms).toISOString(),
-					};
-					lastPingSpeed = rmRow.speed || 0;
-				}
-			}
-			if (!lastPing) {
-				const row = db.prepare(
-					`SELECT latitude, longitude, speed, timestamp FROM driver_locations
-					 WHERE TRIM(LOWER(driver)) = ? ORDER BY timestamp DESC LIMIT 1`
-				).get(driverNameKey);
-				if (row && row.timestamp) {
-					const ageMs = Date.now() - new Date(row.timestamp).getTime();
-					if (!isNaN(ageMs) && ageMs >= 0 && ageMs <= MAX_PING_AGE_MS) {
-						lastPing = { lat: row.latitude, lng: row.longitude, at: row.timestamp };
-						lastPingSpeed = row.speed || 0;
+				// Require a valid GPS fix — an ELD that lost satellites can return
+				// NULL/0 coords, which would otherwise pin the truck at the equator.
+				// Mirrors the rmHasFix check in /api/locations/latest.
+				if (rmRow && rmRow.location_date_ms
+					&& Number.isFinite(rmRow.latitude) && Number.isFinite(rmRow.longitude)
+					&& (rmRow.latitude !== 0 || rmRow.longitude !== 0)) {
+					const age = Date.now() - rmRow.location_date_ms;
+					if (age >= 0 && age <= MAX_PING_AGE_MS) {
+						rmCandidate = {
+							ts: rmRow.location_date_ms,
+							lat: rmRow.latitude,
+							lng: rmRow.longitude,
+							at: new Date(rmRow.location_date_ms).toISOString(),
+							speed: rmRow.speed || 0,
+						};
 					}
 				}
+			} catch { /* tables may not exist on legacy installs */ }
+
+			let phoneCandidate = null;
+			const row = db.prepare(
+				`SELECT latitude, longitude, speed, timestamp FROM driver_locations
+				 WHERE TRIM(LOWER(driver)) = ? ORDER BY timestamp DESC LIMIT 1`
+			).get(driverNameKey);
+			if (row && row.timestamp) {
+				const ts = new Date(row.timestamp).getTime();
+				const ageMs = Date.now() - ts;
+				if (!isNaN(ageMs) && ageMs >= 0 && ageMs <= MAX_PING_AGE_MS) {
+					phoneCandidate = {
+						ts,
+						lat: row.latitude,
+						lng: row.longitude,
+						at: row.timestamp,
+						speed: row.speed || 0,
+					};
+				}
+			}
+
+			let chosen = null;
+			if (rmCandidate && phoneCandidate) {
+				chosen = rmCandidate.ts >= phoneCandidate.ts ? rmCandidate : phoneCandidate;
+			} else {
+				chosen = rmCandidate || phoneCandidate;
+			}
+			if (chosen) {
+				lastPing = { lat: chosen.lat, lng: chosen.lng, at: chosen.at };
+				lastPingSpeed = chosen.speed;
 			}
 		}
 
