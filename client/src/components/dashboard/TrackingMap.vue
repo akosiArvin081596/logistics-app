@@ -321,7 +321,11 @@ function buildSingleLoadPath(driverOverride = null) {
   const isPastPickup = al && PAST_PICKUP_RE.test(al.status)
 
   if (!isPastPickup) {
-    return points.map(p => ({ lat: p[0], lng: p[1] }))
+    const p2 = points.map(p => ({ lat: p[0], lng: p[1] }))
+    if (destLatLng.value && Array.isArray(destLatLng.value) && destLatLng.value.length === 2) {
+      p2.push({ lat: destLatLng.value[0], lng: destLatLng.value[1] })
+    }
+    return p2
   }
 
   const driverPos = driverOverride
@@ -329,7 +333,11 @@ function buildSingleLoadPath(driverOverride = null) {
           ? { lat: loc.latitude, lng: loc.longitude }
           : null)
   if (!driverPos) {
-    return points.map(p => ({ lat: p[0], lng: p[1] }))
+    const p3 = points.map(p => ({ lat: p[0], lng: p[1] }))
+    if (destLatLng.value && Array.isArray(destLatLng.value) && destLatLng.value.length === 2) {
+      p3.push({ lat: destLatLng.value[0], lng: destLatLng.value[1] })
+    }
+    return p3
   }
 
   // Project the driver onto every segment of the route, find the closest one,
@@ -366,6 +374,13 @@ function buildSingleLoadPath(driverOverride = null) {
   const path = [driverPos]
   for (let i = bestIdx + 1; i < points.length; i++) {
     path.push({ lat: points[i][0], lng: points[i][1] })
+  }
+  // Append the exact destination coord so the polyline ends at the red
+  // dot marker. Google snaps the route's last waypoint to the nearest
+  // road, which can leave a 20–80m gap when the destination is a building
+  // off the road (a warehouse loading dock, customer office, etc).
+  if (destLatLng.value && Array.isArray(destLatLng.value) && destLatLng.value.length === 2) {
+    path.push({ lat: destLatLng.value[0], lng: destLatLng.value[1] })
   }
   return path
 }

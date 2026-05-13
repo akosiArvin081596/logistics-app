@@ -185,15 +185,13 @@ function clearMapObjects() {
 function buildRoutePath(driverOverride = null) {
   if (routePoints.value.length < 2) return null
   const points = routePoints.value
-  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
 
-  if (!pickedUp) {
-    const path = points.map(p => ({ lat: p.latitude, lng: p.longitude }))
-    if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
-    if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
-    return path
-  }
-
+  // Always anchor the polyline to the truck pin. The route was fetched
+  // from CURRENT TRUCK POSITION to PICKUP or DROP-OFF (see fetchRoute), so
+  // trimming at the driver keeps the line glued to the pin regardless of
+  // load status. Falling back to the raw route (origin→dest) drew the line
+  // for the wrong leg of the journey while the truck was en route to
+  // pickup, which is exactly what the user reported.
   const dp = driverOverride || driverLatLng.value
   if (!dp) {
     const path = points.map(p => ({ lat: p.latitude, lng: p.longitude }))
@@ -232,7 +230,12 @@ function buildRoutePath(driverOverride = null) {
   for (let i = bestIdx + 1; i < points.length; i++) {
     path.push({ lat: points[i].latitude, lng: points[i].longitude })
   }
-  if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
+  // Append the leg's terminal coord so the polyline ends exactly at the
+  // pickup/dropoff marker (Google snaps route waypoints to roads, which can
+  // leave a small gap to the marker pin).
+  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+  const terminal = pickedUp ? destLatLng.value : originLatLng.value
+  if (terminal && hasCoords.value) path.push(terminal)
   return path
 }
 
@@ -322,14 +325,21 @@ async function fetchRoute(doFit = false) {
   etaMinutes.value = null
   if (!destLatLng.value) return
 
+  // The route should always reflect the truck's CURRENT trajectory so the
+  // polyline visually starts at the pin:
+  //   - Not picked up: truck is heading to PICKUP    → route TRUCK→ORIGIN
+  //   - Picked up:     truck is heading to DROP-OFF → route TRUCK→DEST
+  // Falling back to ORIGIN→DEST (the old default) showed the route for the
+  // wrong leg of the journey while the truck was en route to pickup.
   const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
-  const from = pickedUp && driverLatLng.value ? driverLatLng.value : originLatLng.value
-  if (!from) return
+  const from = driverLatLng.value || originLatLng.value
+  const to = pickedUp ? destLatLng.value : (originLatLng.value || destLatLng.value)
+  if (!from || !to) return
 
   try {
     let data
     try {
-      data = await api.get(`/api/route?fromLat=${from.lat}&fromLng=${from.lng}&toLat=${destLatLng.value.lat}&toLng=${destLatLng.value.lng}`)
+      data = await api.get(`/api/route?fromLat=${from.lat}&fromLng=${from.lng}&toLat=${to.lat}&toLng=${to.lng}`)
     } catch { /* silent */ }
     if ((!data || !data.route) && originLatLng.value && from !== originLatLng.value) {
       try {
