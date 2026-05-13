@@ -359,36 +359,28 @@ let lastRoutePos = null
 let lastRouteTime = 0
 let prevDriverPos = null
 
-// Animate the marker, the polyline first-point, and the map pan together so
-// the dashed line stays glued to the truck pin while it moves and the pin
-// stays centered on the map (auto-follow). Without this, the polyline path
-// only updates when fetchRoute fires (gated by 100m + 60s), so the line
-// visibly disconnects from the pin every time the truck nudges off the
-// route's static start point.
-function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000) {
-  if (!marker || !from || !to) return
-  // Skip the animation loop entirely when from ≈ to (within ~1.1 m). Polling
-  // every 30s often returns the same cached position, which would otherwise
-  // run a full no-op tween — visible as repeated setPath churn on the
-  // polyline and unnecessary panTo calls on the map.
-  const dLat = (to.lat - from.lat)
-  const dLng = (to.lng - from.lng)
-  if ((dLat * dLat + dLng * dLng) < 1e-10) return
-  const start = performance.now()
-  function step(now) {
-    const t = Math.min((now - start) / duration, 1)
-    const ease = t * (2 - t)
-    const lat = from.lat + (to.lat - from.lat) * ease
-    const lng = from.lng + (to.lng - from.lng) * ease
-    marker.position = { lat, lng }
-    if (lineObj) {
-      const path = buildRoutePath({ lat, lng })
-      if (path && path.length >= 2) lineObj.setPath(path)
-    }
-    if (mapObj) mapObj.panTo({ lat, lng })
-    if (t < 1) requestAnimationFrame(step)
+// Snap the marker, polyline, and map to the new position in one shot
+// instead of tweening over 1 s. The previous requestAnimationFrame loop
+// called setPath() and panTo() ~60× per poll; cumulatively that read as
+// the map "reloading" every 30 s. Polling cadence is sparse enough that
+// smooth interpolation adds no real UX value. Dashed-icon flow continues
+// independently via animatePolyline(). `from` and `duration` are kept in
+// the signature for call-site compatibility but are unused.
+function animateDriverMarker(marker, mapObj, lineObj, from, to /* , duration */) {
+  if (!marker || !to) return
+  // No-op when the polled position matches what we last drew (within ~1 m).
+  // Polling every 30 s frequently returns the server's 30 s-cached payload.
+  if (from) {
+    const dLat = (to.lat - from.lat)
+    const dLng = (to.lng - from.lng)
+    if ((dLat * dLat + dLng * dLng) < 1e-10) return
   }
-  requestAnimationFrame(step)
+  marker.position = { lat: to.lat, lng: to.lng }
+  if (lineObj) {
+    const path = buildRoutePath({ lat: to.lat, lng: to.lng })
+    if (path && path.length >= 2) lineObj.setPath(path)
+  }
+  if (mapObj) mapObj.panTo({ lat: to.lat, lng: to.lng })
 }
 
 watch(() => props.driverPosition, (pos) => {
