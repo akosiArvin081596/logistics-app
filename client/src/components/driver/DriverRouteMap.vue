@@ -359,28 +359,35 @@ let lastRoutePos = null
 let lastRouteTime = 0
 let prevDriverPos = null
 
-// Snap the marker, polyline, and map to the new position in one shot
-// instead of tweening over 1 s. The previous requestAnimationFrame loop
-// called setPath() and panTo() ~60× per poll; cumulatively that read as
-// the map "reloading" every 30 s. Polling cadence is sparse enough that
-// smooth interpolation adds no real UX value. Dashed-icon flow continues
-// independently via animatePolyline(). `from` and `duration` are kept in
-// the signature for call-site compatibility but are unused.
-function animateDriverMarker(marker, mapObj, lineObj, from, to /* , duration */) {
-  if (!marker || !to) return
+// Smooth marker tween via requestAnimationFrame. The pin slides across a
+// *static* map; the polyline first-point follows the pin frame-by-frame
+// so the route stays glued to it without a visible gap during the tween.
+// We do NOT call mapObj.panTo() — that auto-follow was the "map
+// refreshing" effect (the world sliding under a static pin instead of the
+// pin sliding across the world). mapObj is left in the signature for
+// call-site compatibility; pin-click still re-centers the map explicitly.
+function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000) {
+  if (!marker || !from || !to) return
   // No-op when the polled position matches what we last drew (within ~1 m).
   // Polling every 30 s frequently returns the server's 30 s-cached payload.
-  if (from) {
-    const dLat = (to.lat - from.lat)
-    const dLng = (to.lng - from.lng)
-    if ((dLat * dLat + dLng * dLng) < 1e-10) return
+  const dLat = (to.lat - from.lat)
+  const dLng = (to.lng - from.lng)
+  if ((dLat * dLat + dLng * dLng) < 1e-10) return
+  void mapObj
+  const start = performance.now()
+  function step(now) {
+    const t = Math.min((now - start) / duration, 1)
+    const ease = t * (2 - t)
+    const lat = from.lat + (to.lat - from.lat) * ease
+    const lng = from.lng + (to.lng - from.lng) * ease
+    marker.position = { lat, lng }
+    if (lineObj) {
+      const path = buildRoutePath({ lat, lng })
+      if (path && path.length >= 2) lineObj.setPath(path)
+    }
+    if (t < 1) requestAnimationFrame(step)
   }
-  marker.position = { lat: to.lat, lng: to.lng }
-  if (lineObj) {
-    const path = buildRoutePath({ lat: to.lat, lng: to.lng })
-    if (path && path.length >= 2) lineObj.setPath(path)
-  }
-  if (mapObj) mapObj.panTo({ lat: to.lat, lng: to.lng })
+  requestAnimationFrame(step)
 }
 
 watch(() => props.driverPosition, (pos) => {

@@ -206,36 +206,41 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
-// Snap the marker, polyline, and map to the new position in one shot
-// instead of tweening over 1 s. The previous requestAnimationFrame loop
-// called setPath() and panTo() ~60× per ping; cumulatively that read as
-// the map "reloading" for 1 s every 30–60 s. ELD/poll cadence is sparse
-// enough that smooth interpolation adds no real UX value — Google Maps,
-// Waze, Uber, etc. all teleport the marker between live-position updates.
-// The dashed-icon flow continues independently via animatePolyline().
-// The `duration` parameter is kept in the signature for call-site
-// compatibility but is unused.
-function animateMarker(driver, fromLat, fromLng, toLat, toLng /* , duration */) {
-  if (activeAnimations[driver]) {
-    cancelAnimationFrame(activeAnimations[driver])
-    delete activeAnimations[driver]
-  }
+// Smooth marker tween via requestAnimationFrame. The pin slides across a
+// *static* map; the polyline first-point follows the pin frame-by-frame so
+// the route stays glued to it without a visible gap during the tween.
+// We do NOT call map.panTo() — that auto-follow was the "map refreshing"
+// effect (the world sliding under a static pin instead of the pin sliding
+// across the world). Initial focus (load-click) and pin-click still
+// re-center explicitly.
+function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000) {
+  if (activeAnimations[driver]) cancelAnimationFrame(activeAnimations[driver])
   const markerObj = driverMarkers.get(driver)
-  if (markerObj) markerObj.position = { lat: toLat, lng: toLng }
-  const loc = locations.value.find((l) => l.driver === driver)
-  if (loc) {
-    loc.latitude = toLat
-    loc.longitude = toLng
-  }
+  const start = performance.now()
   const isSelected = selectedDriver.value
     && selectedDriver.value.toLowerCase() === driver.toLowerCase()
-  if (isSelected && expandedLoadId.value) {
-    if (routePolyline) {
-      const livePath = buildSingleLoadPath({ lat: toLat, lng: toLng })
+  const followLine = isSelected && !!expandedLoadId.value
+
+  function frame(now) {
+    const t = Math.min((now - start) / duration, 1)
+    const eased = t * (2 - t) // ease-out quadratic
+    const lat = fromLat + (toLat - fromLat) * eased
+    const lng = fromLng + (toLng - fromLng) * eased
+    if (markerObj) markerObj.position = { lat, lng }
+    const loc = locations.value.find((l) => l.driver === driver)
+    if (loc) {
+      loc.latitude = lat
+      loc.longitude = lng
+    }
+    if (followLine && routePolyline) {
+      const livePath = buildSingleLoadPath({ lat, lng })
       if (livePath) routePolyline.setPath(livePath)
     }
-    if (map) map.panTo({ lat: toLat, lng: toLng })
+    if (t < 1) activeAnimations[driver] = requestAnimationFrame(frame)
+    else delete activeAnimations[driver]
   }
+
+  activeAnimations[driver] = requestAnimationFrame(frame)
 }
 
 // ---- Animate the dashed-icon polyline by shifting its icon offset each tick ----
