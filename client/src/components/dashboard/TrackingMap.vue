@@ -67,8 +67,16 @@
                     class="src-badge src-phone"
                     title="Live position sourced from the driver's phone (no ELD or stale)"
                   >Phone</span>
+                  <span
+                    v-else-if="loc.assignedTruck && !loc.assignedTruck.hasEld"
+                    class="src-badge src-no-eld"
+                    title="Truck is assigned to this driver but has no Routemate ELD linked"
+                  >No ELD</span>
                 </span>
-                <span v-if="loc.noGps" class="driver-meta">
+                <span v-if="loc.noGps && loc.assignedTruck" class="driver-meta">
+                  <span class="status-text no-gps">{{ loc.assignedTruck.hasEld ? 'ELD offline' : 'No ELD' }} — {{ loc.assignedTruck.unit }}</span>
+                </span>
+                <span v-else-if="loc.noGps" class="driver-meta">
                   <span class="status-text no-gps">No location data</span>
                 </span>
                 <span v-else class="driver-meta">
@@ -1139,7 +1147,23 @@ function timeAgo(ts) {
 
 const locationsWithGps = computed(() => locations.value.filter(loc => !loc.noGps && loc.latitude != null))
 const onlineCount = computed(() => locationsWithGps.value.filter(loc => isOnline(loc)).length)
-const activeLocations = computed(() => locations.value.filter(loc => loc.activeLoads && loc.activeLoads.length > 0))
+// Show every actively-assigned driver in the panel, even when they have
+// no active loads in the Job Tracking sheet (sheet/SQLite name drift) and
+// no live ELD ping. Sort so drivers with GPS come first, then drivers
+// with an assignment but no fix, then sheet-only fallbacks. Without the
+// assignedTruck branch the panel would hide every driver whose name
+// doesn't match a sheet row, which is most of them in production today.
+const activeLocations = computed(() => {
+  const visible = locations.value.filter(loc =>
+    (loc.activeLoads && loc.activeLoads.length > 0) || loc.assignedTruck
+  )
+  const score = (l) => {
+    if (!l.noGps && l.latitude != null) return 0
+    if (l.assignedTruck) return 1
+    return 2
+  }
+  return [...visible].sort((a, b) => score(a) - score(b))
+})
 const selectedDriverSpeed = computed(() => {
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
   return loc?.speed ? Math.round(loc.speed * 2.237) : null
@@ -1608,6 +1632,14 @@ onUnmounted(() => {
   background: #f3f4f6;
   color: #4b5563;
   border: 1px solid #e5e7eb;
+}
+/* Warning chip — driver is on an active assignment but the truck has no
+   Routemate device linked, so we can't show a live pin. Amber so it
+   reads as actionable (link the device) rather than offline. */
+.src-badge.src-no-eld {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
 }
 
 .driver-meta {

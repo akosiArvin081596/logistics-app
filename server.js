@@ -10824,6 +10824,37 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			console.error("Routemate source overlay error:", rmErr.message);
 		}
 
+		// Active truck-assignment overlay. Surfaces every actively-assigned
+		// driver in the dispatcher panel even when their truck isn't
+		// ELD-linked yet — without this, the panel filter
+		// (loc.activeLoads.length > 0) hides every driver whose name doesn't
+		// appear in the Job Tracking sheet, so /tracking looks empty when
+		// only one truck has a Routemate device. Source of truth is
+		// truck_assignments + trucks (not the sheet), so this stays accurate
+		// when the sheet's free-text driver names drift.
+		const assignmentByDriver = {};
+		try {
+			const assignRows = db.prepare(`
+				SELECT LOWER(ta.driver_name) AS driver_lc,
+				       t.id AS truck_id,
+				       t.unit_number,
+				       CASE WHEN COALESCE(t.routemate_vehicle_id, '') = ''
+				            THEN 0 ELSE 1 END AS has_eld
+				FROM truck_assignments ta
+				JOIN trucks t ON t.id = ta.truck_id
+				WHERE ta.end_date = ''
+			`).all();
+			for (const r of assignRows) {
+				assignmentByDriver[r.driver_lc] = {
+					truckId: r.truck_id,
+					unit: r.unit_number || "",
+					hasEld: !!r.has_eld,
+				};
+			}
+		} catch (asErr) {
+			console.error("Truck-assignment overlay error:", asErr.message);
+		}
+
 		// Enrich with ETA data from sheet
 		try {
 			const sheets = await getSheets();
@@ -10923,6 +10954,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 
 					const driverKey = (loc.driver || "").toLowerCase();
 					loc.activeLoads = driverActiveLoadsMap[driverKey] || [];
+					loc.assignedTruck = assignmentByDriver[driverKey] || null;
 
 					const sheetActiveLoad = driverActiveLoadMap[driverKey];
 					if (sheetActiveLoad && loc.loadId !== sheetActiveLoad && loadMap[sheetActiveLoad]) {
