@@ -213,6 +213,16 @@ function renderMarkers() {
 
 function fitBounds() {
   if (!map) return
+  // Once the truck is rolling (post-pickup) and we have a live GPS fix,
+  // focus the map on the driver pin at a close zoom so customers and
+  // dispatchers immediately see what the truck is doing instead of an
+  // origin→destination wide view where the truck is a dot in the middle.
+  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+  if (pickedUp && driverLatLng.value) {
+    map.setCenter(driverLatLng.value)
+    map.setZoom(15)
+    return
+  }
   const bounds = new google.maps.LatLngBounds()
   let count = 0
   if (originLatLng.value) { bounds.extend(originLatLng.value); count++ }

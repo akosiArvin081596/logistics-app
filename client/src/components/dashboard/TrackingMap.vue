@@ -636,14 +636,23 @@ async function toggleLoad(al, loc) {
   await nextTick()
 
   if (map) {
-    const boundsPoints = []
-    if (hasOrigin) boundsPoints.push([oLat, oLng])
-    if (hasDest) boundsPoints.push([dLat, dLng])
-    if (boundsPoints.length >= 2) {
-      safeFitBounds(boundsPoints, { padding: [50, 50], maxZoom: 14 })
-    } else if (boundsPoints.length === 1) {
-      map.setCenter({ lat: boundsPoints[0][0], lng: boundsPoints[0][1] })
-      map.setZoom(12)
+    const hasDriverGps = loc.latitude != null && loc.longitude != null
+    if (isPastPickup && hasDriverGps) {
+      // Snap to the truck pin so dispatchers immediately see what the truck
+      // is doing in its current area. fitBounds(origin, dest) here would zoom
+      // out to ~1000 mi on a long-haul load and bury the pin in the middle.
+      map.setCenter({ lat: loc.latitude, lng: loc.longitude })
+      map.setZoom(15)
+    } else {
+      const boundsPoints = []
+      if (hasOrigin) boundsPoints.push([oLat, oLng])
+      if (hasDest) boundsPoints.push([dLat, dLng])
+      if (boundsPoints.length >= 2) {
+        safeFitBounds(boundsPoints, { padding: [50, 50], maxZoom: 14 })
+      } else if (boundsPoints.length === 1) {
+        map.setCenter({ lat: boundsPoints[0][0], lng: boundsPoints[0][1] })
+        map.setZoom(12)
+      }
     }
   }
 
