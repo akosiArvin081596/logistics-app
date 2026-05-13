@@ -13597,6 +13597,90 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 	}
 });
 
+// GET /api/compliance/ifta/state-detail — daily mileage breakdown for one truck × one state.
+// Mirrors the parent IFTA handler's algorithm so per-day rows reconcile with the parent state total.
+app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const truckId = parseInt(req.query.truck_id, 10);
+		const state = String(req.query.state || "").trim();
+		if (!truckId || !state) {
+			return res.status(400).json({ error: "truck_id and state are required" });
+		}
+
+		const truck = db.prepare(
+			"SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE id = ?"
+		).get(truckId);
+		if (!truck || !truck.routemate_vehicle_id) {
+			return res.status(404).json({ error: "Truck not found or not linked to Routemate" });
+		}
+
+		const startDate = req.query.start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();
+		const endDate = req.query.end || new Date().toISOString();
+		const startMs = new Date(startDate).getTime();
+		const endMs = new Date(endDate).getTime();
+
+		const GAP_MS = 30 * 60 * 1000;
+		const MAX_HOP_MILES = 50;
+		const M_TO_MI = 0.000621371;
+
+		const rows = db.prepare(
+			`SELECT latitude, longitude, location_date_ms
+			 FROM routemate_telemetry
+			 WHERE routemate_vehicle_id = ?
+			   AND location_date_ms >= ? AND location_date_ms <= ?
+			 ORDER BY location_date_ms ASC`
+		).all(truck.routemate_vehicle_id, startMs, endMs);
+
+		const days = {};
+		let totalMiles = 0;
+		for (let i = 1; i < rows.length; i++) {
+			const prev = rows[i - 1];
+			const curr = rows[i];
+			if (curr.location_date_ms - prev.location_date_ms > GAP_MS) continue;
+			const distMeters = geolib.getDistance(
+				{ latitude: prev.latitude, longitude: prev.longitude },
+				{ latitude: curr.latitude, longitude: curr.longitude }
+			);
+			const miles = distMeters * M_TO_MI;
+			if (miles > MAX_HOP_MILES) continue;
+			const midLat = (prev.latitude + curr.latitude) / 2;
+			const midLng = (prev.longitude + curr.longitude) / 2;
+			if (getStateFromCoords(midLat, midLng) !== state) continue;
+
+			const day = new Date(curr.location_date_ms).toISOString().slice(0, 10);
+			if (!days[day]) {
+				days[day] = { miles: 0, firstPing: curr.location_date_ms, lastPing: curr.location_date_ms };
+			}
+			days[day].miles += miles;
+			if (curr.location_date_ms < days[day].firstPing) days[day].firstPing = curr.location_date_ms;
+			if (curr.location_date_ms > days[day].lastPing) days[day].lastPing = curr.location_date_ms;
+			totalMiles += miles;
+		}
+
+		const daysList = Object.entries(days)
+			.map(([date, d]) => ({
+				date,
+				miles: Math.round(d.miles),
+				firstPing: new Date(d.firstPing).toISOString(),
+				lastPing: new Date(d.lastPing).toISOString(),
+			}))
+			.sort((a, b) => a.date.localeCompare(b.date));
+
+		res.json({
+			truckId,
+			unitNumber: truck.unit_number || "",
+			state,
+			totalMiles: Math.round(totalMiles),
+			startDate,
+			endDate,
+			days: daysList,
+		});
+	} catch (error) {
+		console.error("Error calculating IFTA state detail:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // ============================================================
 // SPA Catch-All — Serve Vue app for all non-API routes
 // ============================================================

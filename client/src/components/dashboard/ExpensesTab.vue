@@ -471,13 +471,47 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="s in t.states" :key="s.state">
+              <tr v-for="s in t.states" :key="s.state" class="state-row" @click="openStateDetail(t, s)">
                 <td class="mono bold">{{ s.state }}</td>
                 <td>{{ s.miles.toLocaleString() }}</td>
                 <td>{{ s.pct }}%</td>
               </tr>
             </tbody>
           </table>
+        </div>
+
+        <!-- State daily breakdown modal -->
+        <div v-if="stateDetail" class="exp-overlay" @click.self="closeStateDetail">
+          <div class="exp-dialog">
+            <div class="exp-header">
+              <div>
+                <div class="exp-type">{{ stateDetail.state }}</div>
+                <div class="exp-amount">{{ (stateDetail.totalMiles || 0).toLocaleString() }} mi</div>
+                <div class="exp-sub">{{ stateDetail.unitNumber || ('Truck #' + stateDetail.truckId) }}</div>
+              </div>
+              <button class="exp-close" @click="closeStateDetail" aria-label="Close">&times;</button>
+            </div>
+            <div v-if="stateDetail.loading" class="skeleton skeleton-card"></div>
+            <table v-else-if="stateDetail.days && stateDetail.days.length">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Miles</th>
+                  <th>First ping</th>
+                  <th>Last ping</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="d in stateDetail.days" :key="d.date">
+                  <td class="mono">{{ d.date }}</td>
+                  <td>{{ d.miles.toLocaleString() }}</td>
+                  <td class="mono">{{ fmtHM(d.firstPing) }}</td>
+                  <td class="mono">{{ fmtHM(d.lastPing) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else class="empty-msg">No telemetry recorded in this window.</div>
+          </div>
         </div>
 
         <div v-if="!ifta.trucks?.length" class="empty-msg">
@@ -923,6 +957,42 @@ const iftaStatesTracked = computed(() => {
   return set.size
 })
 
+const stateDetail = ref(null)
+
+function fmtHM(iso) {
+  if (!iso) return '—'
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return '—'
+  }
+}
+
+async function openStateDetail(truck, stateRow) {
+  stateDetail.value = {
+    truckId: truck.truckId,
+    unitNumber: truck.unitNumber,
+    state: stateRow.state,
+    totalMiles: stateRow.miles,
+    days: [],
+    loading: true,
+  }
+  try {
+    const params = new URLSearchParams({
+      truck_id: truck.truckId,
+      state: stateRow.state,
+      start: new Date(iftaStart.value + 'T00:00:00').toISOString(),
+      end: new Date(iftaEnd.value + 'T23:59:59').toISOString(),
+    })
+    const data = await api.get('/api/compliance/ifta/state-detail?' + params.toString())
+    stateDetail.value = { ...stateDetail.value, ...data, loading: false }
+  } catch {
+    if (stateDetail.value) stateDetail.value.loading = false
+  }
+}
+
+function closeStateDetail() { stateDetail.value = null }
+
 async function loadFuel() {
   fuelLoading.value = true
   try {
@@ -1285,6 +1355,9 @@ tr:hover td { background: var(--surface-hover); }
 }
 .truck-title { font-size: 0.95rem; font-weight: 700; }
 .truck-sub { font-size: 0.78rem; color: var(--text-dim); }
+
+.state-row { cursor: pointer; }
+.state-row:hover td { background: var(--surface-hover); }
 
 .filter-label {
   display: inline-flex;
