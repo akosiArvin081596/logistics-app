@@ -13467,9 +13467,9 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 	}
 });
 
-// GET /api/compliance/ifta — Calculate miles per state from Routemate ELD telemetry only.
-// Drivers are attributed via truck_assignments active at each point's timestamp.
-// Phone-GPS is discontinued as a source.
+// GET /api/compliance/ifta — Per-truck miles-by-state from Routemate ELD telemetry.
+// Each truck gets its own state breakdown; drivers attributed via truck_assignments
+// active at each point's timestamp.
 app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { start, end } = req.query;
@@ -13483,7 +13483,8 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 		const M_TO_MI = 0.000621371;
 
 		const eldRows = db.prepare(
-			`SELECT rt.latitude, rt.longitude, rt.location_date_ms, t.id AS truck_id
+			`SELECT rt.latitude, rt.longitude, rt.location_date_ms,
+			        t.id AS truck_id, t.unit_number
 			 FROM routemate_telemetry rt
 			 JOIN trucks t ON t.routemate_vehicle_id = rt.routemate_vehicle_id
 			 WHERE rt.location_date_ms >= ? AND rt.location_date_ms <= ?
@@ -13491,7 +13492,7 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 			 ORDER BY t.id, rt.location_date_ms ASC`
 		).all(startMs, endMs);
 
-		const eldPoints = [];
+		let driverAt = () => null;
 		if (eldRows.length > 0) {
 			const truckIds = [...new Set(eldRows.map((r) => r.truck_id))];
 			const placeholders = truckIds.map(() => "?").join(",");
@@ -13506,7 +13507,7 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 				if (!assignmentsByTruck[a.truck_id]) assignmentsByTruck[a.truck_id] = [];
 				assignmentsByTruck[a.truck_id].push(a);
 			}
-			const driverAt = (truckId, isoTs) => {
+			driverAt = (truckId, isoTs) => {
 				const list = assignmentsByTruck[truckId] || [];
 				for (const a of list) {
 					const startOk = a.start_date && a.start_date <= isoTs;
@@ -13515,29 +13516,40 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 				}
 				return null;
 			};
+		}
 
-			for (const r of eldRows) {
-				const isoTs = new Date(r.location_date_ms).toISOString();
-				const driver = driverAt(r.truck_id, isoTs);
-				if (!driver) continue;
-				eldPoints.push({ driver, latitude: r.latitude, longitude: r.longitude, ts: r.location_date_ms });
+		// Group telemetry points per truck (rows already time-ordered by SQL ORDER BY)
+		const byTruck = {};
+		for (const r of eldRows) {
+			if (!byTruck[r.truck_id]) {
+				byTruck[r.truck_id] = { unitNumber: r.unit_number || "", points: [], drivers: new Set() };
 			}
+			byTruck[r.truck_id].points.push(r);
 		}
 
-		const byDriver = {};
-		for (const p of eldPoints) {
-			if (!byDriver[p.driver]) byDriver[p.driver] = [];
-			byDriver[p.driver].push(p);
-		}
-
-		const stateMileage = {};
+		const trucks = [];
 		let totalMiles = 0;
-		for (const pts of Object.values(byDriver)) {
-			pts.sort((a, b) => a.ts - b.ts);
+		const allDrivers = new Set();
+
+		for (const [truckIdStr, entry] of Object.entries(byTruck)) {
+			const truckId = parseInt(truckIdStr, 10);
+			const pts = entry.points;
+
+			// Attribute every point to a driver (for the truck's drivers list)
+			for (const r of pts) {
+				const d = driverAt(truckId, new Date(r.location_date_ms).toISOString());
+				if (d) {
+					entry.drivers.add(d);
+					allDrivers.add(d);
+				}
+			}
+
+			const stateMileage = {};
+			let truckTotal = 0;
 			for (let i = 1; i < pts.length; i++) {
 				const prev = pts[i - 1];
 				const curr = pts[i];
-				if (curr.ts - prev.ts > GAP_MS) continue;
+				if (curr.location_date_ms - prev.location_date_ms > GAP_MS) continue;
 				const distMeters = geolib.getDistance(
 					{ latitude: prev.latitude, longitude: prev.longitude },
 					{ latitude: curr.latitude, longitude: curr.longitude }
@@ -13547,28 +13559,37 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 				const midLat = (prev.latitude + curr.latitude) / 2;
 				const midLng = (prev.longitude + curr.longitude) / 2;
 				const state = getStateFromCoords(midLat, midLng);
-				if (!stateMileage[state]) stateMileage[state] = { miles: 0, drivers: new Set() };
-				stateMileage[state].miles += miles;
-				stateMileage[state].drivers.add(pts[0].driver);
-				totalMiles += miles;
+				stateMileage[state] = (stateMileage[state] || 0) + miles;
+				truckTotal += miles;
 			}
+
+			const states = Object.entries(stateMileage)
+				.map(([state, miles]) => ({
+					state,
+					miles: Math.round(miles),
+					pct: truckTotal > 0 ? Math.round((miles / truckTotal) * 100) : 0,
+				}))
+				.sort((a, b) => b.miles - a.miles || a.state.localeCompare(b.state));
+
+			trucks.push({
+				truckId,
+				unitNumber: entry.unitNumber,
+				totalMiles: Math.round(truckTotal),
+				drivers: [...entry.drivers],
+				states,
+			});
+			totalMiles += truckTotal;
 		}
 
-		const stateData = Object.entries(stateMileage)
-			.map(([state, d]) => ({
-				state,
-				miles: Math.round(d.miles),
-				pct: totalMiles > 0 ? Math.round((d.miles / totalMiles) * 100) : 0,
-				drivers: [...d.drivers],
-			}))
-			.sort((a, b) => b.miles - a.miles);
+		trucks.sort((a, b) => b.totalMiles - a.totalMiles);
 
 		res.json({
 			totalMiles: Math.round(totalMiles),
+			truckCount: trucks.length,
+			driverCount: allDrivers.size,
 			startDate,
 			endDate,
-			states: stateData,
-			driverCount: Object.keys(byDriver).length,
+			trucks,
 		});
 	} catch (error) {
 		console.error("Error calculating IFTA mileage:", error.message);

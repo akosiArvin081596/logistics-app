@@ -419,6 +419,19 @@
         <div class="skeleton skeleton-card"></div>
       </template>
       <template v-else>
+        <!-- Date filter -->
+        <div class="section-card">
+          <div class="inline-form">
+            <label class="filter-label">From
+              <input v-model="iftaStart" type="date" class="form-input" />
+            </label>
+            <label class="filter-label">To
+              <input v-model="iftaEnd" type="date" class="form-input" />
+            </label>
+            <button class="btn btn-primary" :disabled="iftaLoading" @click="loadIfta">Apply</button>
+          </div>
+        </div>
+
         <!-- IFTA Mileage -->
         <div class="metrics-grid">
           <div class="metric-card">
@@ -427,11 +440,11 @@
           </div>
           <div class="metric-card">
             <div class="metric-label">States Tracked</div>
-            <div class="metric-value">{{ ifta.states?.length || 0 }}</div>
+            <div class="metric-value">{{ iftaStatesTracked }}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">Active Drivers</div>
-            <div class="metric-value">{{ ifta.driverCount || 0 }}</div>
+            <div class="metric-label">Trucks Tracked</div>
+            <div class="metric-value">{{ ifta.truckCount || 0 }}</div>
           </div>
           <div class="metric-card">
             <div class="metric-label">Fees Pending</div>
@@ -439,31 +452,36 @@
           </div>
         </div>
 
-        <!-- State mileage table -->
-        <div v-if="ifta.states?.length" class="section-card">
-          <div class="section-title">Miles by State (IFTA)</div>
-          <table>
+        <!-- Per-truck breakdown -->
+        <div v-for="t in ifta.trucks" :key="t.truckId" class="section-card">
+          <div class="truck-header">
+            <div class="truck-title">{{ t.unitNumber || ('Truck #' + t.truckId) }}</div>
+            <div class="truck-sub">
+              Driver: {{ t.drivers.length ? t.drivers.join(', ') : '—' }}
+              · {{ t.totalMiles.toLocaleString() }} mi
+              · {{ t.states.length }} states
+            </div>
+          </div>
+          <table v-if="t.states.length">
             <thead>
               <tr>
                 <th>State</th>
                 <th>Miles</th>
                 <th>%</th>
-                <th>Drivers</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="s in ifta.states" :key="s.state">
+              <tr v-for="s in t.states" :key="s.state">
                 <td class="mono bold">{{ s.state }}</td>
                 <td>{{ s.miles.toLocaleString() }}</td>
                 <td>{{ s.pct }}%</td>
-                <td>{{ s.drivers.join(', ') }}</td>
               </tr>
             </tbody>
           </table>
         </div>
 
-        <div v-if="!ifta.states?.length" class="empty-msg">
-          No ELD mileage data yet. Link a truck to its Routemate vehicle on the Trucks page to start collecting telemetry.
+        <div v-if="!ifta.trucks?.length" class="empty-msg">
+          No ELD mileage in this window. Try widening the date range, or link a truck to its Routemate vehicle on the Trucks page.
         </div>
 
         <!-- Compliance Fees -->
@@ -885,6 +903,8 @@ const maintForm = reactive({
 // IFTA / Compliance
 const ifta = ref({})
 const iftaLoading = ref(true)
+const iftaStart = ref('2026-01-01')
+const iftaEnd = ref(new Date().toISOString().slice(0, 10))
 const fees = ref({})
 const feeSubmitting = ref(false)
 const feeForm = reactive({
@@ -893,6 +913,14 @@ const feeForm = reactive({
   truck: '',
   dueDate: '',
   description: '',
+})
+
+const iftaStatesTracked = computed(() => {
+  const set = new Set()
+  for (const t of (ifta.value?.trucks || [])) {
+    for (const s of (t.states || [])) set.add(s.state)
+  }
+  return set.size
 })
 
 async function loadFuel() {
@@ -914,8 +942,12 @@ async function loadMaintenance() {
 async function loadIfta() {
   iftaLoading.value = true
   try {
+    const params = new URLSearchParams({
+      start: new Date(iftaStart.value + 'T00:00:00').toISOString(),
+      end: new Date(iftaEnd.value + 'T23:59:59').toISOString(),
+    })
     const [iftaData, feesData] = await Promise.all([
-      api.get('/api/compliance/ifta'),
+      api.get('/api/compliance/ifta?' + params.toString()),
       api.get('/api/compliance/fees'),
     ])
     ifta.value = iftaData
@@ -1242,6 +1274,25 @@ tr:hover td { background: var(--surface-hover); }
 
 .status-pill.pending { background: var(--amber-dim); color: var(--amber); }
 .status-pill.paid { background: rgba(16,185,129,0.15); color: #059669; }
+
+.truck-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding-bottom: 0.6rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.truck-title { font-size: 0.95rem; font-weight: 700; }
+.truck-sub { font-size: 0.78rem; color: var(--text-dim); }
+
+.filter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
 
 .desc-cell {
   max-width: 200px;
