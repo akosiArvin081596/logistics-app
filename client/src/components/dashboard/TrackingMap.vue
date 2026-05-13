@@ -153,8 +153,7 @@ let originMarker = null
 let destMarker = null
 let distanceLabelMarker = null
 let routePolyline = null
-let passedPolyline = null         // dashed gray segment behind the driver
-let driverRouteOverlays = []      // { polyline, originMarker, destMarker, infoO, infoD }
+let routeAnim = null              // setInterval handle for the dashed-blue polyline animation
 let allRouteOverlays = []         // same shape, for "All Drivers" view
 let driverInfoWindows = new Map() // driver name -> google.maps.InfoWindow
 
@@ -172,8 +171,6 @@ const weatherData = ref(null)
 
 // All-drivers route state
 const allRoutes = ref([])
-// Single-driver multi-load route state (when driver selected but no load expanded)
-const driverRoutes = ref([])
 const ROUTE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#65a30d']
 const PAST_PICKUP_RE = /^(at shipper|loading|in transit|at receiver)$/i
 
@@ -237,6 +234,19 @@ function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 800) {
   activeAnimations[driver] = requestAnimationFrame(frame)
 }
 
+// ---- Animate the dashed-icon polyline by shifting its icon offset each tick ----
+// Mirrors DriverRouteMap.vue's animatePolyline so the customer tracker and the
+// admin tracking map look identical when a load is focused.
+function animatePolyline(line) {
+  let offset = 0
+  return setInterval(() => {
+    offset = (offset + 1) % 200
+    const icons = line.get('icons')
+    icons[0].offset = (offset / 2) + '%'
+    line.set('icons', icons)
+  }, 80)
+}
+
 // ---- Client-side road snapping (project GPS onto route polyline) ----
 function closestPointOnSegment(p, a, b) {
   const dx = b[0] - a[0]
@@ -293,55 +303,11 @@ function safeFitBounds(points, options = {}) {
 
 // ---- Clear overlay helpers ----
 function clearSingleLoadOverlays() {
+  if (routeAnim) { clearInterval(routeAnim); routeAnim = null }
   if (routePolyline) { routePolyline.setMap(null); routePolyline = null }
-  if (passedPolyline) { passedPolyline.setMap(null); passedPolyline = null }
   if (originMarker) { originMarker.map = null; originMarker = null }
   if (destMarker) { destMarker.map = null; destMarker = null }
   if (distanceLabelMarker) { distanceLabelMarker.map = null; distanceLabelMarker = null }
-}
-
-// Find the closest point on the route polyline to the driver's position and
-// split the polyline there. Used to render "already-driven" portion as a
-// dashed gray line and "remaining" portion as the prominent blue line, so
-// the route reflects live progress instead of staying static behind the pin.
-function splitRouteAtDriver(routePts, driverLat, driverLng) {
-  if (!routePts || routePts.length < 2) return { passed: [], remaining: routePts || [] }
-  let minDistSq = Infinity
-  let bestIdx = 0
-  let bestT = 0
-  for (let i = 0; i < routePts.length - 1; i++) {
-    const ax = routePts[i][1], ay = routePts[i][0]
-    const bx = routePts[i + 1][1], by = routePts[i + 1][0]
-    const px = driverLng, py = driverLat
-    const dx = bx - ax, dy = by - ay
-    const lenSq = dx * dx + dy * dy
-    let t = lenSq === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / lenSq
-    t = Math.max(0, Math.min(1, t))
-    const projX = ax + t * dx
-    const projY = ay + t * dy
-    const distSq = (projX - px) ** 2 + (projY - py) ** 2
-    if (distSq < minDistSq) {
-      minDistSq = distSq
-      bestIdx = i
-      bestT = t
-    }
-  }
-  const a = routePts[bestIdx]
-  const b = routePts[bestIdx + 1]
-  const splitPt = [a[0] + bestT * (b[0] - a[0]), a[1] + bestT * (b[1] - a[1])]
-  const passed = [...routePts.slice(0, bestIdx + 1), splitPt]
-  const remaining = [splitPt, ...routePts.slice(bestIdx + 1)]
-  return { passed, remaining }
-}
-
-function clearDriverRouteOverlays() {
-  for (const o of driverRouteOverlays) {
-    if (o.polyline) o.polyline.setMap(null)
-    if (o.traveledPolyline) o.traveledPolyline.setMap(null)
-    if (o.originMarker) o.originMarker.map = null
-    if (o.destMarker) o.destMarker.map = null
-  }
-  driverRouteOverlays = []
 }
 
 function clearAllRouteOverlays() {
@@ -359,53 +325,30 @@ function renderSingleLoadRoute() {
   if (!map) return
   if (selectedDriver.value === '__all__' || !expandedLoadId.value) return
 
-  // Route polyline — split at the driver's current position so the portion
-  // already driven renders as dashed gray and the remaining trip stays as
-  // the prominent solid blue line. Falls back to a single polyline when no
-  // driver position is available.
+  // Route polyline — white base with animated blue dashed icons, matching the
+  // public customer tracker (DriverRouteMap.vue) so dispatchers and customers
+  // see the same visual. The route already starts from the driver when past
+  // pickup (toggleLoad fetches /api/route from driver→dest in that case), so
+  // we don't draw a separate "already driven" segment.
   if (routePoints.value.length >= 2) {
-    let driverLat = null, driverLng = null
-    if (selectedDriver.value && selectedDriver.value !== '__all__') {
-      const loc = locations.value.find(l => l.driver === selectedDriver.value)
-      if (loc && loc.latitude != null && loc.longitude != null) {
-        driverLat = loc.latitude
-        driverLng = loc.longitude
-      }
-    }
-
-    let remainingPts = routePoints.value
-    if (driverLat != null && driverLng != null) {
-      const { passed, remaining } = splitRouteAtDriver(routePoints.value, driverLat, driverLng)
-      if (passed.length >= 2) {
-        // Dashed gray "already driven" segment.
-        passedPolyline = new google.maps.Polyline({
-          path: passed.map(p => ({ lat: p[0], lng: p[1] })),
-          strokeOpacity: 0,
-          strokeWeight: 4,
-          icons: [{
-            icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3, strokeColor: '#9ca3af' },
-            offset: '0',
-            repeat: '12px',
-          }],
-          map,
-        })
-      }
-      if (remaining.length >= 2) remainingPts = remaining
-    }
-
     routePolyline = new google.maps.Polyline({
-      path: remainingPts.map(p => ({ lat: p[0], lng: p[1] })),
-      strokeColor: '#000000',
-      strokeOpacity: 0.7,
-      strokeWeight: 6,
+      path: routePoints.value.map(p => ({ lat: p[0], lng: p[1] })),
+      strokeColor: '#ffffff',
+      strokeOpacity: 0.9,
+      strokeWeight: 5,
+      icons: [{
+        icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 },
+        offset: '0',
+        repeat: '20px',
+      }],
       map,
     })
+    routeAnim = animatePolyline(routePolyline)
 
-    // Distance label at midpoint of the REMAINING segment so the number
-    // reflects what's still ahead of the driver.
-    if (routeDistance.value != null && remainingPts.length >= 2) {
-      const mid = Math.floor(remainingPts.length / 2)
-      const midPt = remainingPts[mid]
+    // Distance label at midpoint of the route.
+    if (routeDistance.value != null) {
+      const mid = Math.floor(routePoints.value.length / 2)
+      const midPt = routePoints.value[mid]
       const labelEl = document.createElement('div')
       labelEl.textContent = routeDistance.value + ' mi'
       labelEl.style.cssText = 'color:#333;font-size:11px;font-weight:700;font-family:JetBrains Mono,monospace;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px;white-space:nowrap;pointer-events:none;'
@@ -444,69 +387,6 @@ function renderSingleLoadRoute() {
     const infoContent = `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>Drop-off</strong>${destAddress.value ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + destAddress.value + '</div>' : ''}</div>`
     const info = new google.maps.InfoWindow({ content: infoContent })
     destMarker.addEventListener('gmp-click', () => info.open({ map, anchor: destMarker }))
-  }
-}
-
-function renderDriverRoutes() {
-  clearDriverRouteOverlays()
-  if (!map) return
-  if (selectedDriver.value === '__all__' || expandedLoadId.value) return
-
-  for (const r of driverRoutes.value) {
-    const entry = {}
-
-    // Traveled segment: origin → driver (orange dashed)
-    if (r.traveledRoute && r.traveledRoute.length >= 2) {
-      entry.traveledPolyline = new google.maps.Polyline({
-        path: r.traveledRoute.map(p => ({ lat: p[0], lng: p[1] })),
-        strokeColor: '#f97316',
-        strokeOpacity: 0,
-        strokeWeight: 4,
-        map,
-        icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#f97316', strokeOpacity: 0.8, scale: 3 }, offset: '0', repeat: '16px' }],
-      })
-    }
-
-    // Remaining segment: driver → dest (blue solid) or full route pre-pickup
-    if (r.route.length >= 2) {
-      entry.polyline = new google.maps.Polyline({
-        path: r.route.map(p => ({ lat: p[0], lng: p[1] })),
-        strokeColor: '#2563eb',
-        strokeOpacity: 0.8,
-        strokeWeight: 4,
-        map,
-      })
-    }
-
-    // Always show origin marker
-    if (r.origin) {
-      entry.originMarker = new google.maps.marker.AdvancedMarkerElement({
-        position: { lat: r.origin[0], lng: r.origin[1] },
-        map,
-        content: createDotPin('#16a34a', 18),
-        title: r.loadId + ' - Pickup',
-        zIndex: 800,
-      })
-      const info = new google.maps.InfoWindow({
-        content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Pickup</strong>${r.originAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.originAddress + '</div>' : ''}</div>`,
-      })
-      entry.originMarker.addEventListener('gmp-click', () => info.open({ map, anchor: entry.originMarker }))
-    }
-    if (r.dest) {
-      entry.destMarker = new google.maps.marker.AdvancedMarkerElement({
-        position: { lat: r.dest[0], lng: r.dest[1] },
-        map,
-        content: createDotPin('#dc2626', 18),
-        title: r.loadId + ' - Drop-off',
-        zIndex: 800,
-      })
-      const info = new google.maps.InfoWindow({
-        content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Drop-off</strong>${r.destAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.destAddress + '</div>' : ''}</div>`,
-      })
-      entry.destMarker.addEventListener('gmp-click', () => info.open({ map, anchor: entry.destMarker }))
-    }
-
-    driverRouteOverlays.push(entry)
   }
 }
 
@@ -672,89 +552,26 @@ function focusPoint(lat, lng) {
   }
 }
 
-async function fetchDriverRoutes(loc) {
-  driverRoutes.value = []
-  const loads = loc.activeLoads || []
-  if (loads.length === 0) return
-
-  const hasDriverGps = loc.latitude != null && loc.longitude != null
-  const driverPt = hasDriverGps ? [loc.latitude, loc.longitude] : null
-
-  // Show points immediately from known coords with straight-line routes
-  const routes = []
-  for (let i = 0; i < loads.length; i++) {
-    const al = loads[i]
-    const oLat = Number(al.originLat), oLng = Number(al.originLng)
-    const dLat = Number(al.destLat), dLng = Number(al.destLng)
-    const origin = isFinite(oLat) && isFinite(oLng) ? [oLat, oLng] : null
-    const dest = isFinite(dLat) && isFinite(dLng) ? [dLat, dLng] : null
-    if (!origin && !dest) continue
-    const isPastPickup = PAST_PICKUP_RE.test(al.status)
-    routes.push({
-      loadId: al.loadId,
-      // Traveled segment: origin → driver (orange), only after pickup
-      traveledRoute: (isPastPickup && origin && driverPt) ? [origin, driverPt] : [],
-      // Remaining segment: driver → dest (blue) after pickup, or origin → dest before
-      route: (isPastPickup && driverPt && dest) ? [driverPt, dest] : (origin && dest ? [origin, dest] : []),
-      origin,
-      dest,
-      originAddress: al.pickupAddress || '',
-      destAddress: al.dropoffAddress || '',
-      isPastPickup,
-    })
-  }
-  driverRoutes.value = routes
-
-  // Fetch actual driving routes and replace straight lines
-  for (let i = 0; i < routes.length; i++) {
-    const r = routes[i]
-    const al = loads[i]
-    const isPastPickup = PAST_PICKUP_RE.test(al?.status)
-    let updated = { ...r }
-
-    // Fetch remaining route (driver→dest or origin→dest)
-    const remainFrom = (isPastPickup && driverPt) ? driverPt : r.origin
-    if (remainFrom && r.dest) {
-      try {
-        const data = await api.get(`/api/route?fromLat=${remainFrom[0]}&fromLng=${remainFrom[1]}&toLat=${r.dest[0]}&toLng=${r.dest[1]}`)
-        if (data.route && data.route.length >= 2) updated.route = data.route.map(p => [p.latitude, p.longitude])
-      } catch { /* keep straight line */ }
-    }
-
-    // Fetch traveled route (origin→driver) if past pickup
-    if (isPastPickup && r.origin && driverPt) {
-      try {
-        const data = await api.get(`/api/route?fromLat=${r.origin[0]}&fromLng=${r.origin[1]}&toLat=${driverPt[0]}&toLng=${driverPt[1]}`)
-        if (data.route && data.route.length >= 2) updated.traveledRoute = data.route.map(p => [p.latitude, p.longitude])
-      } catch { /* keep straight line */ }
-    }
-
-    routes[i] = updated
-    driverRoutes.value = [...routes]
-  }
-}
-
 function collapseDriver() {
   ++focusGeneration
   selectedDriver.value = ''
   expandedLoadId.value = ''
-  driverRoutes.value = []
   routePoints.value = []
   originLatLng.value = null
   destLatLng.value = null
   routeDistance.value = null
   fetchingRoute.value = false
   clearSingleLoadOverlays()
-  clearDriverRouteOverlays()
   clearAllRouteOverlays()
 }
 
+// Selecting a driver only re-centers the map on their current GPS — no route
+// polyline is drawn. The route guide is reserved for an expanded load.
 async function focusDriver(loc) {
   ++focusGeneration
   selectedDriver.value = loc.driver
   expandedLoadId.value = ''
   allRoutes.value = []
-  driverRoutes.value = []
   routePoints.value = []
   originLatLng.value = null
   destLatLng.value = null
@@ -788,9 +605,7 @@ async function toggleLoad(al, loc) {
 
   // Expand: show origin/destination markers
   expandedLoadId.value = al.loadId
-  driverRoutes.value = []
   routePoints.value = []
-  clearDriverRouteOverlays()
   clearSingleLoadOverlays()
 
   const oLat = Number(al.originLat)
@@ -905,9 +720,7 @@ async function checkOffRoute(lat, lng) {
 async function focusAll() {
   selectedDriver.value = '__all__'
   expandedLoadId.value = ''
-  driverRoutes.value = []
   clearSingleLoadOverlays()
-  clearDriverRouteOverlays()
   // Clear single-driver state
   trailPoints.value = []
   routePoints.value = []
@@ -1050,21 +863,9 @@ watch(routePoints, () => {
   if (expandedLoadId.value) renderSingleLoadRoute()
 })
 
-watch(driverRoutes, () => {
-  renderDriverRoutes()
-}, { deep: true })
-
 watch(allRoutes, () => {
   renderAllRoutes()
 }, { deep: true })
-
-// Watch selected driver to load routes for the driver
-watch(selectedDriver, async (driverName) => {
-  if (driverName && driverName !== '__all__' && !expandedLoadId.value) {
-    const loc = locations.value.find(l => l.driver === driverName)
-    if (loc) await fetchDriverRoutes(loc)
-  }
-})
 
 let initialFetchDone = false
 
@@ -1147,25 +948,16 @@ function onLocationUpdate(payload) {
     trailPoints.value = [...trailPoints.value, [payload.latitude, payload.longitude]]
   }
 
-  // Auto-reroute if driver is off the planned route
+  // Auto-reroute if driver is off the planned route. checkOffRoute calls
+  // renderSingleLoadRoute() itself when it successfully fetches a new path,
+  // so we don't need a separate per-ping re-render here — the dashed-blue
+  // animation runs independently on the existing polyline.
   if (
     selectedDriver.value === payload.driver &&
     routePoints.value.length >= 2 &&
     destLatLng.value
   ) {
     checkOffRoute(payload.latitude, payload.longitude)
-  }
-
-  // Live re-render so the split point (driven vs remaining) tracks the pin
-  // as the driver moves along the route. Without this, the dashed/solid
-  // boundary stays frozen at the position where the route was first fetched
-  // and the solid blue line ends up extending behind the driver.
-  if (
-    selectedDriver.value === payload.driver &&
-    expandedLoadId.value &&
-    routePoints.value.length >= 2
-  ) {
-    renderSingleLoadRoute()
   }
 }
 
@@ -1261,7 +1053,6 @@ onUnmounted(() => {
   for (const [, iw] of driverInfoWindows) iw.close()
   driverInfoWindows.clear()
   clearSingleLoadOverlays()
-  clearDriverRouteOverlays()
   clearAllRouteOverlays()
   map = null
 })
