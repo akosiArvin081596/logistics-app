@@ -628,19 +628,28 @@ function goNext() {
     }
   }
 }
-// Jump to the first Pending row strictly after the current position.
-// Close the modal if none remain.
+// After Approve/Reject, hop to the next Pending row so the admin can clear
+// the queue in one sitting. Forward first, then wrap to the start of the
+// list. If literally no Pending row exists anywhere, stay on the current
+// row — the modal does NOT auto-close, the counter just reads "0 pending
+// remain" and the action buttons flip to Undo.
 function advanceToNextPending() {
-  const idx = selectedIndex.value
   const list = allExpenses.value
-  if (idx < 0) return closeExpenseDetail()
+  const idx = selectedIndex.value
+  if (idx < 0) return
   for (let i = idx + 1; i < list.length; i++) {
     if ((list[i].status || 'Pending') === 'Pending') {
       selectedId.value = list[i].id
       return
     }
   }
-  closeExpenseDetail()
+  for (let i = 0; i < idx; i++) {
+    if ((list[i].status || 'Pending') === 'Pending') {
+      selectedId.value = list[i].id
+      return
+    }
+  }
+  // No other pending found — stay on the just-approved row.
 }
 async function approveCurrent() {
   const exp = selectedExpense.value
