@@ -103,6 +103,7 @@
             <div class="sign-done-text">Signed by {{ doc.signature_text }}</div>
             <div v-if="doc.signed_at" class="sign-done-date">{{ formatDate(doc.signed_at) }}</div>
             <a v-if="doc.signed_pdf_url" :href="doc.signed_pdf_url" target="_blank" class="view-link">Download Signed PDF</a>
+            <button class="sign-done-back" @click="$emit('close')">Back to Documents</button>
           </div>
         </div>
       </div>
@@ -426,6 +427,21 @@ function formatDate(d) {
   font-weight: 600; text-decoration: none;
 }
 .view-link:hover { text-decoration: underline; }
+.sign-done-back {
+  margin-top: 1.25rem;
+  padding: 0.75rem 1.5rem;
+  background: var(--accent, #6366f1);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  min-width: 180px;
+  transition: opacity 0.15s;
+}
+.sign-done-back:active { opacity: 0.85; }
 
 /* ─── Mobile ─── */
 @media (max-width: 768px) {

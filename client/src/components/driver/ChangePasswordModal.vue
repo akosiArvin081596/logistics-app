@@ -15,7 +15,13 @@
           <div class="pw-field">
             <label>New Password</label>
             <input v-model="newPassword" type="password" autocomplete="new-password" required minlength="8" />
-            <div class="pw-hint">At least 8 characters.</div>
+            <ul class="pw-requirements" aria-label="Password requirements">
+              <li :class="{ met: rules.length }"><span class="pw-tick">{{ rules.length ? '&#10003;' : '&#9675;' }}</span> At least 8 characters</li>
+              <li :class="{ met: rules.upper }"><span class="pw-tick">{{ rules.upper ? '&#10003;' : '&#9675;' }}</span> One uppercase letter (A-Z)</li>
+              <li :class="{ met: rules.lower }"><span class="pw-tick">{{ rules.lower ? '&#10003;' : '&#9675;' }}</span> One lowercase letter (a-z)</li>
+              <li :class="{ met: rules.digit }"><span class="pw-tick">{{ rules.digit ? '&#10003;' : '&#9675;' }}</span> One number (0-9)</li>
+              <li :class="{ met: rules.symbol }"><span class="pw-tick">{{ rules.symbol ? '&#10003;' : '&#9675;' }}</span> One symbol (!@#$%^&amp;* etc.)</li>
+            </ul>
           </div>
           <div class="pw-field">
             <label>Confirm New Password</label>
@@ -54,9 +60,24 @@ const saving = ref(false)
 const error = ref('')
 const success = ref(false)
 
+const rules = computed(() => {
+  const p = newPassword.value || ''
+  return {
+    length: p.length >= 8,
+    upper: /[A-Z]/.test(p),
+    lower: /[a-z]/.test(p),
+    digit: /\d/.test(p),
+    symbol: /[!@#$%^&*()_+\-=[\]{};:'",.<>?/\\|`~]/.test(p),
+  }
+})
+
+const allRulesMet = computed(() =>
+  rules.value.length && rules.value.upper && rules.value.lower && rules.value.digit && rules.value.symbol,
+)
+
 const canSubmit = computed(() =>
   currentPassword.value.length > 0 &&
-  newPassword.value.length >= 8 &&
+  allRulesMet.value &&
   newPassword.value === confirmPassword.value,
 )
 
@@ -83,8 +104,8 @@ async function submit() {
     error.value = 'New passwords do not match.'
     return
   }
-  if (newPassword.value.length < 8) {
-    error.value = 'New password must be at least 8 characters.'
+  if (!allRulesMet.value) {
+    error.value = 'New password does not meet all requirements.'
     return
   }
   saving.value = true
@@ -96,6 +117,8 @@ async function submit() {
     success.value = true
     setTimeout(() => close(), 900)
   } catch (err) {
+    // Server returns code: 'PASSWORD_WEAK' with a specific reason when
+    // the password fails complexity rules. Surface that message directly.
     error.value = err?.message || 'Failed to update password.'
   } finally {
     saving.value = false
@@ -139,6 +162,33 @@ async function submit() {
 }
 .pw-field input:focus { outline: none; border-color: #0ea5e9; }
 .pw-hint { font-size: 0.68rem; color: #94a3b8; margin-top: 0.25rem; }
+.pw-requirements {
+  list-style: none;
+  padding: 0.5rem 0.75rem;
+  margin: 0.4rem 0 0;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.pw-requirements li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #64748b;
+  transition: color 0.15s;
+}
+.pw-requirements li.met { color: #15803d; }
+.pw-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  font-weight: 700;
+}
 .pw-error {
   background: #fef2f2; color: #b91c1c;
   border: 1px solid #fecaca; border-radius: 8px;

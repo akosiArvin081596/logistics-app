@@ -4301,6 +4301,10 @@ async function checkAndCompleteOnboarding(userId) {
 	// Update to documents_signed if all docs signed
 	if (allSigned && ob.status === "documents_pending") {
 		db.prepare("UPDATE driver_onboarding SET status = 'documents_signed' WHERE user_id = ?").run(userId);
+		// Push a socket refresh to admin Applications views so the new signed
+		// state shows up without a manual reload. Without this, admins saw the
+		// driver as still pending and couldn't approve until they refreshed.
+		notifyChange("applications");
 
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 		const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
@@ -4440,6 +4444,7 @@ async function checkAndCompleteOnboarding(userId) {
 	if (allSigned && ob.drug_test_result === "pass") {
 		const now = new Date().toISOString();
 		db.prepare("UPDATE driver_onboarding SET status = 'fully_onboarded', onboarded_at = ? WHERE user_id = ?").run(now, userId);
+		notifyChange("applications");
 		// Sync driver to drivers_directory + activate
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 		const pathTwoApplication = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(ob.application_id);
@@ -5411,10 +5416,28 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 			return res.status(400).json({ error: "Current and new password required" });
 		}
 		if (typeof newPassword !== "string" || newPassword.length < 8) {
-			return res.status(400).json({ error: "New password must be at least 8 characters" });
+			return res.status(400).json({ code: "PASSWORD_WEAK", error: "New password must be at least 8 characters", failed: ["length"] });
 		}
 		if (newPassword.length > 200) {
 			return res.status(400).json({ error: "New password is too long" });
+		}
+		// Complexity rules — mirror the client-side checklist exactly so
+		// the API rejects weak passwords even if someone bypasses the UI.
+		// CEO requirement (2026-05-13): drivers should see what counts as a
+		// valid password instead of vague "too weak" errors.
+		const failed = [];
+		if (!/[A-Z]/.test(newPassword)) failed.push("uppercase");
+		if (!/[a-z]/.test(newPassword)) failed.push("lowercase");
+		if (!/\d/.test(newPassword)) failed.push("digit");
+		if (!/[!@#$%^&*()_+\-=[\]{};:'",.<>?/\\|`~]/.test(newPassword)) failed.push("symbol");
+		if (failed.length > 0) {
+			const labelMap = { uppercase: "an uppercase letter", lowercase: "a lowercase letter", digit: "a number", symbol: "a symbol (!@#$ etc.)" };
+			const missing = failed.map(f => labelMap[f]).join(", ");
+			return res.status(400).json({
+				code: "PASSWORD_WEAK",
+				error: `Password must include ${missing}.`,
+				failed,
+			});
 		}
 		const userId = req.session.user.id;
 		const row = db.prepare("SELECT id, password_hash FROM users WHERE id = ?").get(userId);

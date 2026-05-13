@@ -211,11 +211,15 @@ export const useDriverStore = defineStore('driver', {
         this.expenses = data.expenses || []
         this.drivers = data.drivers || []
         this.headers = data.headers || { jobTracking: [], carrierDB: [] }
-        this.onboarding = data.onboarding || null
+        // Only overwrite onboarding/application when the server actually
+        // returned a record. A transient missing field used to flicker
+        // `isOnboarding` false → drivers got bounced to the regular UI for
+        // ~1-2s on a slow connection after signing a document.
+        if (data.onboarding !== undefined) this.onboarding = data.onboarding
         this.invoices = data.invoices || []
         this.sharedDocuments = data.sharedDocuments || []
         this.truckDocuments = data.truckDocuments || []
-        this.application = data.application || null
+        if (data.application !== undefined) this.application = data.application
         this.profilePictureUrl = data.profilePictureUrl || ''
         this.driverDirectoryId = data.driverDirectoryId || 0
 
