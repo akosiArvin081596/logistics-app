@@ -306,24 +306,67 @@ function clearAllRouteOverlays() {
 
 // ---- Build/rebuild Google Maps overlays from reactive state ----
 
-// Build the polyline path for the focused single load. When past pickup, the
-// driver's live GPS is prepended so the visible line stays anchored to the
-// truck pin even when the driver leaves the planned route (e.g. pulls into a
-// truck-stop parking lot). Pass `driverOverride` from onLocationUpdate to use
-// the freshly-received GPS coords instead of waiting for animateMarker to
-// finish writing them back into locations[].
+// Build the polyline path for the focused single load. Past pickup, this
+// trims the planned route at the closest point to the driver's live GPS so
+// only the *forward* segment is drawn — mirroring Google Maps Navigation.
+// Without trimming, prepending the live position creates a V-shape (line
+// goes back to the route's static start, then forward), which is the artifact
+// the user has been seeing whenever the truck moves more than a few meters.
 function buildSingleLoadPath(driverOverride = null) {
   if (routePoints.value.length < 2) return null
-  const path = routePoints.value.map(p => ({ lat: p[0], lng: p[1] }))
+  const points = routePoints.value
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
   const al = loc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
   const isPastPickup = al && PAST_PICKUP_RE.test(al.status)
-  if (isPastPickup) {
-    const driverPos = driverOverride
-      || (loc && loc.latitude != null && loc.longitude != null
-            ? { lat: loc.latitude, lng: loc.longitude }
-            : null)
-    if (driverPos) path.unshift(driverPos)
+
+  if (!isPastPickup) {
+    return points.map(p => ({ lat: p[0], lng: p[1] }))
+  }
+
+  const driverPos = driverOverride
+    || (loc && loc.latitude != null && loc.longitude != null
+          ? { lat: loc.latitude, lng: loc.longitude }
+          : null)
+  if (!driverPos) {
+    return points.map(p => ({ lat: p[0], lng: p[1] }))
+  }
+
+  // Project the driver onto every segment of the route, find the closest one,
+  // then return [driverPos, projectedPt, ...remainingRoutePoints]. This is
+  // the same trick Google Maps Navigation uses to "consume" the route as you
+  // drive.
+  let minDistSq = Infinity
+  let bestIdx = 0
+  let bestT = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    const ax = a[1], ay = a[0]
+    const bx = b[1], by = b[0]
+    const px = driverPos.lng, py = driverPos.lat
+    const dx = bx - ax, dy = by - ay
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) continue
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = ax + t * dx
+    const projY = ay + t * dy
+    const distSq = (projX - px) ** 2 + (projY - py) ** 2
+    if (distSq < minDistSq) {
+      minDistSq = distSq
+      bestIdx = i
+      bestT = t
+    }
+  }
+  const a = points[bestIdx]
+  const b = points[bestIdx + 1]
+  const splitPt = {
+    lat: a[0] + bestT * (b[0] - a[0]),
+    lng: a[1] + bestT * (b[1] - a[1]),
+  }
+  const path = [driverPos, splitPt]
+  for (let i = bestIdx + 1; i < points.length; i++) {
+    path.push({ lat: points[i][0], lng: points[i][1] })
   }
   return path
 }

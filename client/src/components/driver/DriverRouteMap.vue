@@ -177,6 +177,67 @@ function clearMapObjects() {
   if (routeLine) { routeLine.setMap(null); routeLine = null }
 }
 
+// Build the polyline path: past pickup, trim the route at the driver's
+// projected position so only the forward segment is drawn (Google Maps
+// Navigation behavior). Prevents the V-shape that prepending creates when
+// the truck moves past the static route start. Pass driverOverride from the
+// animation frame to use a live in-flight position.
+function buildRoutePath(driverOverride = null) {
+  if (routePoints.value.length < 2) return null
+  const points = routePoints.value
+  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+
+  if (!pickedUp) {
+    const path = points.map(p => ({ lat: p.latitude, lng: p.longitude }))
+    if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
+    if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
+    return path
+  }
+
+  const dp = driverOverride || driverLatLng.value
+  if (!dp) {
+    const path = points.map(p => ({ lat: p.latitude, lng: p.longitude }))
+    if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
+    return path
+  }
+
+  let minDistSq = Infinity
+  let bestIdx = 0
+  let bestT = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    const ax = a.longitude, ay = a.latitude
+    const bx = b.longitude, by = b.latitude
+    const px = dp.lng, py = dp.lat
+    const dx = bx - ax, dy = by - ay
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) continue
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = ax + t * dx
+    const projY = ay + t * dy
+    const distSq = (projX - px) ** 2 + (projY - py) ** 2
+    if (distSq < minDistSq) {
+      minDistSq = distSq
+      bestIdx = i
+      bestT = t
+    }
+  }
+  const a = points[bestIdx]
+  const b = points[bestIdx + 1]
+  const splitPt = {
+    lat: a.latitude + bestT * (b.latitude - a.latitude),
+    lng: a.longitude + bestT * (b.longitude - a.longitude),
+  }
+  const path = [dp, splitPt]
+  for (let i = bestIdx + 1; i < points.length; i++) {
+    path.push({ lat: points[i].latitude, lng: points[i].longitude })
+  }
+  if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
+  return path
+}
+
 function renderMarkers() {
   if (!map) return
   clearMapObjects()
@@ -198,12 +259,8 @@ function renderMarkers() {
     })
   }
 
-  if (routePoints.value.length >= 2) {
-    const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))
-    // After pickup, start polyline from driver; before pickup, from origin
-    if (pickedUp && driverLatLng.value) path.unshift(driverLatLng.value)
-    else if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
-    if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
+  const path = buildRoutePath()
+  if (path && path.length >= 2) {
     routeLine = new google.maps.Polyline({
       path,
       strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 5,
@@ -286,13 +343,9 @@ function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000)
     const lat = from.lat + (to.lat - from.lat) * ease
     const lng = from.lng + (to.lng - from.lng) * ease
     marker.position = { lat, lng }
-    if (lineObj && routePoints.value.length >= 2) {
-      const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
-      const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))
-      if (pickedUp) path.unshift({ lat, lng })
-      else if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
-      if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
-      lineObj.setPath(path)
+    if (lineObj) {
+      const path = buildRoutePath({ lat, lng })
+      if (path && path.length >= 2) lineObj.setPath(path)
     }
     if (mapObj) mapObj.panTo({ lat, lng })
     if (t < 1) requestAnimationFrame(step)
@@ -343,13 +396,10 @@ function renderExpandedMap() {
       if (expandedMap && pos) { expandedMap.setCenter(pos); expandedMap.setZoom(20) }
     })
   }
-  if (routePoints.value.length >= 2) {
-    const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))
-    if (exPickedUp && driverLatLng.value) path.unshift(driverLatLng.value)
-    else if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
-    if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
+  const exPath = buildRoutePath()
+  if (exPath && exPath.length >= 2) {
     exRouteLine = new google.maps.Polyline({
-      path,
+      path: exPath,
       strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 5,
       map: expandedMap,
       icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
@@ -374,7 +424,11 @@ watch(expanded, async (val) => {
     zoom: map ? map.getZoom() : 5, center, mapTypeId: 'hybrid',
     zoomControl: true, gestureHandling: 'greedy',
     mapTypeControl: true,
-    mapTypeControlOptions: { style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR, position: google.maps.ControlPosition.TOP_LEFT },
+    mapTypeControlOptions: {
+      style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
+      position: google.maps.ControlPosition.TOP_LEFT,
+      mapTypeIds: ['roadmap', 'hybrid'],
+    },
   })
   google.maps.event.addListenerOnce(expandedMap, 'idle', () => renderExpandedMap())
 })
@@ -388,7 +442,17 @@ async function initMap() {
     ? { lat: (originLatLng.value.lat + destLatLng.value.lat) / 2, lng: (originLatLng.value.lng + destLatLng.value.lng) / 2 }
     : originLatLng.value || destLatLng.value || driverLatLng.value || { lat: 0, lng: 0 }
 
-  map = await createMap(mapContainer.value, { zoom: 5, center, mapTypeId: 'hybrid' })
+  map = await createMap(mapContainer.value, {
+    zoom: 5,
+    center,
+    mapTypeId: 'hybrid',
+    mapTypeControl: true,
+    mapTypeControlOptions: {
+      style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
+      position: google.maps.ControlPosition.TOP_LEFT,
+      mapTypeIds: ['roadmap', 'hybrid'],
+    },
+  })
   renderMarkers()
   if (props.dispatchMode && hasCoords.value) fetchRoute(true)
   else if (hasCoords.value && driverLatLng.value) fetchRoute(true)
