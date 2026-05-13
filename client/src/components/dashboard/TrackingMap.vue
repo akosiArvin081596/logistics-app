@@ -1124,11 +1124,23 @@ function onLocationUpdate(payload) {
     locations.value[idx].speed = payload.speed || 0
     locations.value[idx].loadId = payload.loadId || ''
     locations.value[idx].timestamp = payload.timestamp
+    if (Number.isFinite(payload.heading)) locations.value[idx].heading = payload.heading
     // Honor source/lastPingAge from the emitter so the ELD/Phone badge flips
     // live without waiting for the next /api/locations/latest fetch.
     if (payload.source) locations.value[idx].source = payload.source
     locations.value[idx].lastPingAge = 0
     if (locations.value[idx].noGps) locations.value[idx].noGps = false
+    // Re-render marker content so the arrow/parked icon, color (online vs
+    // offline), and heading rotation flip live. animateMarker only moves the
+    // pin — without this the icon stays whatever it was at the previous fetch.
+    const marker = driverMarkers.get(locations.value[idx].driver)
+    if (marker) {
+      const updated = locations.value[idx]
+      const isOn = isOnline(updated)
+      const moving = (updated.speed || 0) > 0.5
+      const heading = headingForMarker(updated)
+      marker.content = createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving })
+    }
   } else {
     locations.value.push({
       driver: payload.driver,
