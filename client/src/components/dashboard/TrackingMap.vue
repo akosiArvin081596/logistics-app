@@ -247,37 +247,6 @@ function animatePolyline(line) {
   }, 80)
 }
 
-// ---- Client-side road snapping (project GPS onto route polyline) ----
-function closestPointOnSegment(p, a, b) {
-  const dx = b[0] - a[0]
-  const dy = b[1] - a[1]
-  if (dx === 0 && dy === 0) return a
-  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)))
-  return [a[0] + t * dx, a[1] + t * dy]
-}
-
-function distSq(a, b) {
-  const dx = a[0] - b[0]
-  const dy = a[1] - b[1]
-  return dx * dx + dy * dy
-}
-
-function snapToRoute(point, route) {
-  if (route.length < 2) return null
-  let minDist = Infinity
-  let closest = null
-  for (let i = 0; i < route.length - 1; i++) {
-    const snapped = closestPointOnSegment(point, route[i], route[i + 1])
-    const d = distSq(point, snapped)
-    if (d < minDist) {
-      minDist = d
-      closest = snapped
-    }
-  }
-  // ~0.002 degrees ~ 200m -- only snap if reasonably close to route
-  return minDist < 0.002 * 0.002 ? closest : null
-}
-
 // ---- Google Maps helpers ----
 
 function safeFitBounds(points, options = {}) {
@@ -894,20 +863,14 @@ async function fetchLocations() {
 }
 
 function onLocationUpdate(payload) {
-  let targetLat = payload.latitude
-  let targetLng = payload.longitude
-
-  // Snap to route if we have one for this driver
-  if (
-    selectedDriver.value === payload.driver &&
-    routePoints.value.length >= 2
-  ) {
-    const snapped = snapToRoute([targetLat, targetLng], routePoints.value)
-    if (snapped) {
-      targetLat = snapped[0]
-      targetLng = snapped[1]
-    }
-  }
+  // Plot the raw GPS coordinates as reported. We used to snap onto the
+  // planned route polyline to hide phone-GPS jitter, but with Routemate ELD
+  // as the primary source the GPS is accurate enough that snapping just
+  // misrepresents the truck's real position (e.g. parked in a yard 100m off
+  // the route would appear to be on the highway). The public /track/:id
+  // tracker also plots raw coords, so this keeps both views consistent.
+  const targetLat = payload.latitude
+  const targetLng = payload.longitude
 
   const idx = locations.value.findIndex(
     (l) => l.driver.toLowerCase() === payload.driver.toLowerCase()
