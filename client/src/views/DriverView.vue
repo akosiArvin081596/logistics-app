@@ -127,6 +127,28 @@
       </main>
     </template>
 
+    <!-- ACCOUNT-LOAD FAILURE — defensive guard so a transient loadData error
+         doesn't drop an in-progress driver onto the regular driver UI by
+         falling through verifyLocationPermission(). Shown when the FIRST
+         loadData() call throws; cleared on a successful Retry. -->
+    <template v-else-if="initialLoadFailed">
+      <DriverHeader :driver-name="driverName" @logout="handleLogout" />
+      <main class="app-content location-locked">
+        <div class="card loc-card">
+          <div class="loc-icon">&#9888;&#65039;</div>
+          <div class="loc-title">Couldn't Load Your Account</div>
+          <div class="loc-sub">
+            We hit a snag fetching your data. This is usually a brief network
+            issue. Tap Retry &mdash; no need to refresh the page.
+          </div>
+          <button class="loc-btn" :disabled="retryingInitialLoad" @click="retryInitialLoad">
+            {{ retryingInitialLoad ? 'Retrying&hellip;' : 'Retry' }}
+          </button>
+          <button class="loc-btn-sub" @click="handleLogout">Log Out</button>
+        </div>
+      </main>
+    </template>
+
     <!-- NORMAL DRIVER UI — shown when fully onboarded (or no onboarding record) -->
     <template v-else>
     <!-- Welcome / Activation Modal — shown once when a driver first lands here after becoming fully onboarded -->
@@ -562,6 +584,14 @@ function isResponding(load) {
 const locationPermission = ref('checking')
 const locationReason = ref('')
 const checkingPermission = ref(false)
+// True when the FIRST loadData() throws on mount. The UI shows a retry
+// screen instead of falling through to verifyLocationPermission() (which
+// would otherwise grant permission and land an in-progress driver on the
+// regular driver UI — the bug the CEO observed as "took him to the
+// regular page... had to refresh every time he logs in").
+const initialLoadFailed = ref(false)
+const retryingInitialLoad = ref(false)
+let socketSetupDone = false
 let isMounted = false
 
 // Welcome / activation modal — shows once per driver, first login after fully_onboarded
@@ -1215,30 +1245,50 @@ async function retryLocation() {
   await verifyLocationPermission()
 }
 
-onMounted(async () => {
-  isMounted = true
-  driverStore.driverName = driverName.value
+async function attemptInitialLoad() {
   try {
     await driverStore.loadData()
+    initialLoadFailed.value = false
     maybeShowWelcome()
   } catch {
+    initialLoadFailed.value = true
     toast.show('Failed to load data', 'error')
+    return
   }
-
   // Enforce geolocation permission once per session for fully-onboarded
   // drivers. Paperwork-stage drivers stay on the onboarding lock and don't
   // need GPS yet.
   if (!isOnboarding.value) {
     await verifyLocationPermission()
   }
+  // Socket.IO — only after the first successful load so we don't register
+  // handlers that act on inconsistent state. Idempotent flag so retries
+  // don't double-register.
+  if (!socketSetupDone) {
+    socket.connect()
+    socket.register(driverName.value)
+    socket.on('new-message', onNewMessage)
+    socket.on('load-assigned', onLoadAssigned)
+    socket.on('load-cancelled', onLoadCancelled)
+    socket.on('geofence-trigger', onGeofenceTrigger)
+    socketSetupDone = true
+  }
+}
 
-  // Socket.IO
-  socket.connect()
-  socket.register(driverName.value)
-  socket.on('new-message', onNewMessage)
-  socket.on('load-assigned', onLoadAssigned)
-  socket.on('load-cancelled', onLoadCancelled)
-  socket.on('geofence-trigger', onGeofenceTrigger)
+async function retryInitialLoad() {
+  if (retryingInitialLoad.value) return
+  retryingInitialLoad.value = true
+  try {
+    await attemptInitialLoad()
+  } finally {
+    retryingInitialLoad.value = false
+  }
+}
+
+onMounted(async () => {
+  isMounted = true
+  driverStore.driverName = driverName.value
+  await attemptInitialLoad()
 })
 
 onUnmounted(() => {
