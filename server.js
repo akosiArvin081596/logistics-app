@@ -989,6 +989,27 @@ async function routemateSyncVehicles() {
 	}
 }
 
+// Routemate's telemetry returns `bearing` as a 16-point compass string
+// ("N", "NE", "ENE", "SE", "SSW", etc.) rather than degrees. Map to degrees
+// so the frontend can rotate the marker arrow. Also accepts numeric input
+// in case Routemate ever switches to degrees.
+const COMPASS_DEG = {
+	N: 0,   NNE: 22.5, NE: 45,  ENE: 67.5,
+	E: 90,  ESE: 112.5, SE: 135, SSE: 157.5,
+	S: 180, SSW: 202.5, SW: 225, WSW: 247.5,
+	W: 270, WNW: 292.5, NW: 315, NNW: 337.5,
+};
+function parseRoutemateBearing(raw) {
+	if (raw === null || raw === undefined) return null;
+	const str = String(raw).trim();
+	if (str === "") return null;
+	const num = Number(str);
+	if (Number.isFinite(num) && num >= 0 && num <= 360) return num;
+	const key = str.toUpperCase();
+	if (Object.prototype.hasOwnProperty.call(COMPASS_DEG, key)) return COMPASS_DEG[key];
+	return null;
+}
+
 async function routemateSyncTelemetry() {
 	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return;
 	try {
@@ -1072,12 +1093,13 @@ async function routemateSyncTelemetry() {
 			const driverLower = driverName.trim().toLowerCase();
 			const activeLoadId = loadIdByDriver[driverLower] || "";
 			const timestamp = new Date(t.location_date_ms || Date.now()).toISOString();
+			const headingDeg = parseRoutemateBearing(t.bearing);
 			io.to("dispatch").emit("location-update", {
 				driver: driverName,
 				latitude: t.latitude,
 				longitude: t.longitude,
 				speed: t.speed || 0,
-				heading: Number.isFinite(parseFloat(t.bearing)) ? parseFloat(t.bearing) : 0,
+				heading: headingDeg != null ? headingDeg : 0,
 				loadId: activeLoadId,
 				timestamp,
 				source: "routemate",
@@ -10780,13 +10802,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.source = "routemate";
 					loc.lastPingAge = now - rm.location_date_ms;
 					if (loc.noGps) loc.noGps = false;
-					// Heading: prefer Routemate's published bearing; fall back to the
-					// rhumb-line bearing between the previous and current telemetry rows.
-					// Without this the arrow would inherit the driver's stale phone-GPS
-					// heading from driver_locations (often pointing the wrong way or zero).
-					const bearingNum = Number(rm.bearing);
-					if (Number.isFinite(bearingNum) && bearingNum >= 0 && bearingNum <= 360) {
-						loc.heading = bearingNum;
+					// Heading: parse Routemate's compass string (NW/SE/SSW/...) or numeric
+					// bearing to degrees; fall back to the rhumb-line bearing between the
+					// previous and current telemetry rows when Routemate sends no bearing.
+					const headingDeg = parseRoutemateBearing(rm.bearing);
+					if (headingDeg != null) {
+						loc.heading = headingDeg;
 					} else if (Number.isFinite(rm.prev_lat) && Number.isFinite(rm.prev_lng) &&
 					           (rm.prev_lat !== rm.latitude || rm.prev_lng !== rm.longitude)) {
 						loc.heading = geolib.getRhumbLineBearing(
