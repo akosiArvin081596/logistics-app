@@ -82,14 +82,14 @@ export function createDotPin(color, size = 14) {
   return el
 }
 
-// Helper: directional truck marker for AdvancedMarkerElement content.
-// moving=true  → SVG arrow rotated to `heading` (deg, 0 = north, clockwise)
+// Helper: truck marker for AdvancedMarkerElement content.
+// moving=true  → SVG arrow, always pointing straight up (no heading rotation)
 // moving=false → square "P" parked pin so it's visually distinct on the map
-export function createTruckArrow({ color = '#16a34a', heading = 0, moving = true, size = 22 } = {}) {
+export function createTruckArrow({ color = '#16a34a', moving = true, size = 22 } = {}) {
   const el = document.createElement('div')
   el.style.cssText = `width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;cursor:pointer;`
   if (moving) {
-    el.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" style="transform:rotate(${heading}deg);transform-origin:50% 50%;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.35));"><path d="M12 2 L19 20 L12 16 L5 20 Z" fill="${color}" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>`
+    el.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" style="filter:drop-shadow(0 1px 2px rgba(0,0,0,0.35));"><path d="M12 2 L19 20 L12 16 L5 20 Z" fill="${color}" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>`
   } else {
     el.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" style="filter:drop-shadow(0 1px 2px rgba(0,0,0,0.35));"><rect x="5" y="5" width="14" height="14" rx="3" fill="${color}" stroke="#fff" stroke-width="1.5"/><text x="12" y="16" text-anchor="middle" font-family="DM Sans,sans-serif" font-size="11" font-weight="700" fill="#fff">P</text></svg>`
   }
