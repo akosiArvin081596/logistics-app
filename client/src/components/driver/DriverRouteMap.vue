@@ -371,6 +371,13 @@ async function fetchRoute(doFit = false) {
 let lastRoutePos = null
 let lastRouteTime = 0
 let prevDriverPos = null
+// Tracks when the previous driverPosition update arrived so the next tween
+// can stretch over the actual inter-update gap. Without this, the tween
+// finishes in 1 s and the pin sits still for the rest of the polling window
+// (typically 15–60 s), producing the "jumpy" motion the user reported.
+let lastPosUpdateAt = 0
+const POS_TWEEN_MIN_MS = 1000
+const POS_TWEEN_MAX_MS = 60000
 
 // Smooth marker tween via requestAnimationFrame. The pin slides across a
 // *static* map; the polyline first-point follows the pin frame-by-frame
@@ -426,10 +433,14 @@ function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000)
   const snapped = snapToRoute(to.lat, to.lng)
   to = { lat: snapped.lat, lng: snapped.lng }
   void mapObj
+  // Long tweens (matching the polling cadence) use linear so the pin moves
+  // at a steady-state pace instead of decelerating halfway through, which
+  // reads as the truck braking when it isn't.
+  const useLinear = duration > 3000
   const start = performance.now()
   function step(now) {
     const t = Math.min((now - start) / duration, 1)
-    const ease = t * (2 - t)
+    const ease = useLinear ? t : t * (2 - t)
     const lat = from.lat + (to.lat - from.lat) * ease
     const lng = from.lng + (to.lng - from.lng) * ease
     marker.position = { lat, lng }
@@ -446,8 +457,15 @@ watch(() => props.driverPosition, (pos) => {
   if (!pos || !destLatLng.value) return
   const to = { lat: pos.latitude, lng: pos.longitude }
   const from = prevDriverPos || to
-  if (driverMarker && map) animateDriverMarker(driverMarker, map, routeLine, from, to)
-  if (exDriverMarker && expandedMap) animateDriverMarker(exDriverMarker, expandedMap, exRouteLine, from, to)
+  // Stretch the tween over the actual inter-update gap so the marker is
+  // moving continuously. First update for the session falls back to 1 s.
+  const nowMs = Date.now()
+  const tweenMs = lastPosUpdateAt
+    ? Math.min(Math.max(nowMs - lastPosUpdateAt, POS_TWEEN_MIN_MS), POS_TWEEN_MAX_MS)
+    : POS_TWEEN_MIN_MS
+  lastPosUpdateAt = nowMs
+  if (driverMarker && map) animateDriverMarker(driverMarker, map, routeLine, from, to, tweenMs)
+  if (exDriverMarker && expandedMap) animateDriverMarker(exDriverMarker, expandedMap, exRouteLine, from, to, tweenMs)
   prevDriverPos = to
   if (!lastRoutePos) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute(true); return }
   const dist = haversineMi({ lat: pos.latitude, lng: pos.longitude }, { lat: lastRoutePos.latitude, lng: lastRoutePos.longitude })

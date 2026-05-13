@@ -12,6 +12,21 @@
         <div class="route-overlay-content">Getting route...</div>
       </div>
 
+      <!-- Follow truck toggle — only visible when a driver is focused.
+           When on, the camera tracks the marker once per second; when off
+           (default), the user can pan freely. Manual drag temporarily
+           suspends follow. -->
+      <button
+        v-if="selectedDriver && selectedDriver !== '__all__'"
+        class="follow-toggle"
+        :class="{ active: followTruck && !followSuppressed }"
+        :title="followTruck ? 'Following truck — click to release camera' : 'Click to follow truck'"
+        @click="toggleFollow"
+      >
+        <span class="follow-icon" aria-hidden="true">⊙</span>
+        <span class="follow-label">{{ followTruck && !followSuppressed ? 'Following' : 'Follow' }}</span>
+      </button>
+
       <!-- Driver list panel -->
       <div class="driver-panel" :class="{ collapsed: panelCollapsed }">
         <button class="panel-toggle" @click="panelCollapsed = !panelCollapsed">
@@ -195,6 +210,67 @@ async function fetchRouteCached(fromLat, fromLng, toLat, toLng) {
 
 // Animation state
 const activeAnimations = {}
+// Per-driver last-ping epoch ms — used to derive a tween duration that
+// matches the Routemate ping cadence (~60s) instead of finishing in 1s
+// and leaving the pin frozen between updates.
+const lastPingAt = new Map()
+const PING_TWEEN_MIN_MS = 1000
+const PING_TWEEN_MAX_MS = 60000  // cap so a multi-minute stall doesn't produce a multi-minute glide
+
+// Follow-truck camera state (opt-in, persisted). followSuppressed must be
+// reactive so the template's "Following / Follow" label flips after a manual
+// drag without needing another state change.
+const FOLLOW_STORAGE_KEY = 'logisx.tracking.followTruck'
+const followTruck = ref(loadFollowPref())
+const followSuppressed = ref(false)
+let followInterval = null    // setInterval handle for the 1Hz panTo loop
+
+function loadFollowPref() {
+  try { return localStorage.getItem(FOLLOW_STORAGE_KEY) === '1' } catch { return false }
+}
+function saveFollowPref(v) {
+  try { localStorage.setItem(FOLLOW_STORAGE_KEY, v ? '1' : '0') } catch { /* ignore */ }
+}
+
+// Pan the map smoothly to the focused driver's current marker position.
+// Called on a 1Hz interval rather than per animation frame because Google
+// batches overlay rendering during panTo and the per-frame setPath inside
+// animateMarker would otherwise visually drop the polyline.
+function followTick() {
+  if (!followTruck.value || followSuppressed.value) return
+  if (!map) return
+  const name = selectedDriver.value
+  if (!name || name === '__all__') return
+  const marker = driverMarkers.get(name)
+  if (!marker || !marker.position) return
+  const pos = marker.position
+  const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat
+  const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    map.panTo({ lat, lng })
+  }
+}
+
+function startFollowLoop() {
+  if (followInterval) return
+  followInterval = setInterval(followTick, 1000)
+}
+function stopFollowLoop() {
+  if (followInterval) { clearInterval(followInterval); followInterval = null }
+}
+
+function toggleFollow() {
+  const next = !followTruck.value || followSuppressed.value
+  followTruck.value = next
+  followSuppressed.value = false
+  saveFollowPref(next)
+  if (next) {
+    followTick()        // pan once immediately so the click feels responsive
+    startFollowLoop()
+  } else {
+    stopFollowLoop()
+  }
+}
 
 // ---- Haversine distance in meters (replaces L.latLng().distanceTo()) ----
 function haversineMeters(lat1, lng1, lat2, lng2) {
@@ -229,9 +305,15 @@ function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000) 
     toLng = s.lng
   }
 
+  // Short tweens (initial draws, dedup-skip recovery) use ease-out for the
+  // satisfying "settle" feel. Long tweens (full inter-ping coverage at 60s)
+  // use linear — ease-out over 60s reads as the truck braking halfway
+  // through, which is wrong; the real truck is driving steady-state.
+  const useLinear = duration > 3000
+
   function frame(now) {
     const t = Math.min((now - start) / duration, 1)
-    const eased = t * (2 - t) // ease-out quadratic
+    const eased = useLinear ? t : t * (2 - t)
     const lat = fromLat + (toLat - fromLat) * eased
     const lng = fromLng + (toLng - fromLng) * eased
     if (markerObj) markerObj.position = { lat, lng }
@@ -654,11 +736,20 @@ function syncDriverMarkers() {
       } else {
         marker.position = { lat: loc.latitude, lng: loc.longitude }
       }
-      // Update arrow rotation/state based on speed + heading + online status
+      // Update arrow rotation/state based on speed + heading + online status.
+      // Mutate the existing content so the CSS transform transition can
+      // smoothly rotate the arrow; legacy markers without the mutators (none
+      // expected after this commit, but defensive) fall back to full replace.
       const isOn = isOnline(loc)
       const moving = (loc.speed || 0) > 0.5
       const heading = headingForMarker(loc)
-      marker.content = createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving })
+      if (marker.content && typeof marker.content.updateHeading === 'function') {
+        marker.content.updateColor(isOn ? '#16a34a' : '#9ca3af')
+        marker.content.updateMoving(moving)
+        marker.content.updateHeading(heading)
+      } else {
+        marker.content = createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving })
+      }
     }
   }
 
@@ -1118,8 +1209,16 @@ function onLocationUpdate(payload) {
   )
   if (idx >= 0) {
     const old = locations.value[idx]
-    // Animate from current display position to new (snapped) position
-    animateMarker(payload.driver, old.latitude, old.longitude, targetLat, targetLng)
+    // Stretch the tween to match the actual inter-ping gap so the pin is
+    // moving continuously instead of finishing in 1s and freezing for 59s.
+    // First ping for this driver falls back to the 1s default.
+    const now = Date.now()
+    const prevAt = lastPingAt.get(payload.driver)
+    const tweenMs = prevAt
+      ? Math.min(Math.max(now - prevAt, PING_TWEEN_MIN_MS), PING_TWEEN_MAX_MS)
+      : PING_TWEEN_MIN_MS
+    lastPingAt.set(payload.driver, now)
+    animateMarker(payload.driver, old.latitude, old.longitude, targetLat, targetLng, tweenMs)
     // Update non-position fields immediately
     locations.value[idx].speed = payload.speed || 0
     locations.value[idx].loadId = payload.loadId || ''
@@ -1130,16 +1229,19 @@ function onLocationUpdate(payload) {
     if (payload.source) locations.value[idx].source = payload.source
     locations.value[idx].lastPingAge = 0
     if (locations.value[idx].noGps) locations.value[idx].noGps = false
-    // Re-render marker content so the arrow/parked icon, color (online vs
-    // offline), and heading rotation flip live. animateMarker only moves the
-    // pin — without this the icon stays whatever it was at the previous fetch.
+    // Mutate the existing marker content instead of replacing it — that lets
+    // the CSS transition on the arrow's transform smoothly rotate over the
+    // tween window. Replacing marker.content tears down the DOM element and
+    // destroys the in-flight transition.
     const marker = driverMarkers.get(locations.value[idx].driver)
-    if (marker) {
+    if (marker && marker.content && typeof marker.content.updateHeading === 'function') {
       const updated = locations.value[idx]
       const isOn = isOnline(updated)
       const moving = (updated.speed || 0) > 0.5
       const heading = headingForMarker(updated)
-      marker.content = createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving })
+      marker.content.updateColor(isOn ? '#16a34a' : '#9ca3af')
+      marker.content.updateMoving(moving)
+      marker.content.updateHeading(heading, tweenMs)
     }
   } else {
     locations.value.push({
@@ -1232,8 +1334,17 @@ async function initMap() {
     },
     minZoom: 3,
   })
+  // Manual pan/drag suspends follow-truck so a dispatcher inspecting a
+  // surrounding area isn't yanked back to the marker every second. The
+  // suspension persists until the user explicitly re-enables follow via
+  // the toggle, matching how Google Maps Navigation handles it.
+  map.addListener('dragstart', () => {
+    if (followTruck.value) followSuppressed.value = true
+  })
   // Render any already-fetched locations onto the map
   syncDriverMarkers()
+  // Honor the persisted follow preference on map ready
+  if (followTruck.value) startFollowLoop()
   if (initialFetchDone) {
     const withGps = locationsWithGps.value
     if (withGps.length > 0) {
@@ -1263,6 +1374,7 @@ onUnmounted(() => {
   socket.off('status-updated', onStatusUpdated)
   Object.values(activeAnimations).forEach(cancelAnimationFrame)
   clearInterval(nowInterval)
+  stopFollowLoop()
   // Clean up Google Maps objects
   for (const [, marker] of driverMarkers) marker.map = null
   driverMarkers.clear()
@@ -1285,6 +1397,43 @@ onUnmounted(() => {
   flex: 1;
   min-height: 400px;
   position: relative;
+}
+
+/* Follow-truck pill — sits top-left so it doesn't fight the driver panel
+   on the right or the Google MapType control just below it. */
+.follow-toggle {
+  position: absolute;
+  top: 56px;
+  left: 10px;
+  z-index: 1000;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #374151;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+.follow-toggle:hover {
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+.follow-toggle.active {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+}
+.follow-icon {
+  font-size: 0.95rem;
+  line-height: 1;
 }
 
 /* Driver panel */
