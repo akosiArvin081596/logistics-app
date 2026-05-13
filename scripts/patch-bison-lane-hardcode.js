@@ -48,35 +48,48 @@ const BISON_DROPOFF = '2930 114th Street, Grand Prairie, TX 75050';
 
 // Bison-aware Pickup/Drop-off Address expressions.
 // Priority:
-//   1. Extracted address (whatever Information Extractor or Email-Body
-//      Extractor produced) — always wins so future Bison lanes auto-capture.
-//   2. Dedicated lane default — only applies when broker is Bison AND the
-//      email/PDF mentions Barilla (the current contract customer). If Bison
-//      opens a NEW lane with a different customer, Barilla won't appear and
-//      we correctly fall through to "Awaiting Rate Con" instead of silently
-//      inheriting the wrong addresses.
-//   3. "Awaiting Rate Con" placeholder for any other [NEEDS RATE CON] case.
-//   4. Empty (LlamaParse-OK path).
+//   1. Extracted address — whatever Information Extractor or Email-Body
+//      Extractor produced. Always wins, so future Bison rate-cons that
+//      DO specify addresses (in the email body or extractable PDF) auto-
+//      capture with no override.
+//   2. Dedicated-lane default — applies ONLY when ALL THREE hold:
+//        a) Broker email is *@bisontransport.com (this carrier's only
+//           dedicated-lane broker today).
+//        b) The email content mentions "Barilla" (current contract
+//           customer). Filters out non-Barilla Bison loads.
+//        c) The direction-specific city name appears in the email content
+//           ("AMES" for pickup, "GRAND PRAIRIE" for drop-off). Filters
+//           out a future Barilla lane with a different origin or
+//           destination — each direction is checked independently, so the
+//           wrong default never silently overrides a real new lane.
+//      All three checks combined mean a new Bison Barilla lane to/from
+//      different cities falls through to "Awaiting Rate Con" for manual
+//      review rather than silently using stale defaults.
+//   3. "Awaiting Rate Con" placeholder for [NEEDS RATE CON] emails that
+//      don't match the dedicated lane.
+//   4. Empty (LlamaParse-OK path with no extraction issue).
 //
-// The Barilla check matches against the combined Details + Drop-off Company
-// + Pickup Notes + Delivery Notes string, case-insensitively.
-const BARILLA_CHECK =
-	"/barilla/i.test(" +
+// All keyword matches are case-insensitive and scan the same combined
+// haystack (Details + Drop-off Company + Pickup Notes + Delivery Notes).
+const HAYSTACK =
 	"(($json.output.Details || '') + ' ' + " +
 	"($json.output['Drop-off Company Information'] || '') + ' ' + " +
 	"($json.output['Pickup Notes/Instructions'] || '') + ' ' + " +
-	"($json.output['Delivery Notes/Instructions'] || ''))" +
-	")";
+	"($json.output['Delivery Notes/Instructions'] || ''))";
+
 const BISON_CHECK = "($json.output['Broker Email'] || '').toLowerCase().endsWith('bisontransport.com')";
+const BARILLA_CHECK = "/barilla/i.test(" + HAYSTACK + ")";
+const AMES_CHECK = "/ames/i.test(" + HAYSTACK + ")";
+const GRAND_PRAIRIE_CHECK = "/grand\\s*prairie/i.test(" + HAYSTACK + ")";
 
 const PICKUP_EXPR =
 	"={{ $json.output['Pickup Address'] " +
-	"|| ((" + BISON_CHECK + " && " + BARILLA_CHECK + ") ? '" + BISON_PICKUP + "' : '') " +
+	"|| ((" + BISON_CHECK + " && " + BARILLA_CHECK + " && " + AMES_CHECK + ") ? '" + BISON_PICKUP + "' : '') " +
 	"|| (($json.output.Details || '').includes('[NEEDS RATE CON]') ? 'Awaiting Rate Con' : '') }}";
 
 const DROPOFF_EXPR =
 	"={{ $json.output['Drop-off Address'] " +
-	"|| ((" + BISON_CHECK + " && " + BARILLA_CHECK + ") ? '" + BISON_DROPOFF + "' : '') " +
+	"|| ((" + BISON_CHECK + " && " + BARILLA_CHECK + " && " + GRAND_PRAIRIE_CHECK + ") ? '" + BISON_DROPOFF + "' : '') " +
 	"|| (($json.output.Details || '').includes('[NEEDS RATE CON]') ? 'Awaiting Rate Con' : '') }}";
 
 async function api(method, path, body) {
