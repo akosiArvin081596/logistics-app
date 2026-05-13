@@ -7200,14 +7200,22 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		);
 		io.to(newDriver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex });
 
-		// Notify old driver
+		// Notify old driver — also emit a socket event so their app
+		// optimistically removes the ghost load instead of waiting for the
+		// next manual refresh. Without this, the old driver's UI keeps the
+		// load visible and they hit a confusing 403 when they try to act on it.
 		if (oldDriver) {
-			insertNotification.run(
-				oldDriver.trim().toLowerCase(), 'load-assigned',
+			const oldDriverKey = oldDriver.trim().toLowerCase();
+			const oldNotif = insertNotification.run(
+				oldDriverKey, 'load-cancelled',
 				`Load Removed: ${loadId || 'Load'}`,
 				`Reassigned to ${newDriver}`,
-				JSON.stringify({ loadId, rowIndex })
+				JSON.stringify({ loadId, rowIndex, reassignedTo: newDriver })
 			);
+			io.to(oldDriverKey).emit("load-cancelled", {
+				loadId, rowIndex, reason: 'reassigned',
+				notificationId: oldNotif.lastInsertRowid,
+			});
 		}
 
 		// Notify dispatch team
@@ -7951,10 +7959,17 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = getCarrierDBFromSQLite();
 
-		// Find driver column in Job Tracking
-		const driverCol = findCol(jobTracking.headers, /driver/i);
+		// Find driver column in Job Tracking. Regex covers the common
+		// labels we've actually seen ("Driver", "Driver Name", "Assigned Driver")
+		// plus "Operator" as a defensive fallback. If a sheet is ever renamed
+		// outside these patterns, log it loudly — silent regex misses used to
+		// return zero loads with no signal to the driver or the operator.
+		const driverCol = findCol(jobTracking.headers, /driver|operator/i);
+		if (!driverCol) {
+			console.error(`[driver-data] No driver column matched in Job Tracking headers for driverName=${driverName}. Headers: ${JSON.stringify(jobTracking.headers)}`);
+		}
 		const carrierDriverCol =
-			findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+			findCol(carrierDB.headers, /driver|operator/i) || carrierDB.headers[0];
 
 		// Filter loads for this driver. normalizeDriverName tolerates internal
 		// whitespace variants in the sheet so a typo'd row doesn't silently
@@ -8331,16 +8346,23 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 				if (rowMatchesData(dataRows[i])) { foundRow = i + 2; break; }
 			}
 			if (foundRow === -1) {
-				// Step 3: fallback to Load ID match (last row with that ID)
+				// Step 3: fallback to Load ID match (last row with that ID).
+				// Logged so we can spot stale-rowData patterns in the wild —
+				// if this fires often, clients are sending out-of-date rowData
+				// and we may need a refresh-before-update flow.
+				let usedLoadIdFallback = false;
 				if (loadId && loadIdIdx !== -1) {
 					const targetLid = loadId.toString().trim().toLowerCase().replace(/^#/, "");
 					for (let i = dataRows.length - 1; i >= 0; i--) {
 						const lid = (dataRows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
-						if (lid === targetLid) { foundRow = i + 2; break; }
+						if (lid === targetLid) { foundRow = i + 2; usedLoadIdFallback = true; break; }
 					}
 				}
 				if (foundRow === -1) {
 					return res.status(404).json({ error: `Could not find exact row for Load ID ${loadId}` });
+				}
+				if (usedLoadIdFallback) {
+					console.warn(`[status-update] stale rowData driver=${driverName} loadId=${loadId} rowIndex=${rowIndex}->${foundRow}; falling back to loadId match.`);
 				}
 			}
 			rowIndex = foundRow;
@@ -8361,6 +8383,7 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 				});
 				if (hasActive) {
 					return res.status(409).json({
+						code: "ACTIVE_JOB_CONFLICT",
 						error: "You already have an active job. Complete it before starting another.",
 					});
 				}
@@ -10449,24 +10472,17 @@ app.post("/api/location", requireAuth, locationLimiter, async (req, res) => {
 		let distanceWarning = null;
 		if (effectiveLoadId && !gpsImplausible) {
 			try {
+				// Use the 60s Job Tracking cache instead of two raw Sheets reads
+				// per ping. A 20-driver fleet pinging every 60s used to do ~40
+				// Sheets reads/min just from this code path; with the cache it
+				// drops to ~1/min worst case.
+				const jt = await getJobTrackingCached();
+				const headers = jt.headers;
 				const sheets = await getSheets();
-				const headerResp = await sheets.spreadsheets.values.get({
-					spreadsheetId: SPREADSHEET_ID,
-					range: "Job Tracking!1:1",
-				});
-				const headers = (headerResp.data.values || [[]])[0];
-
-				// Find the load row
-				const dataResp = await sheets.spreadsheets.values.get({
-					spreadsheetId: SPREADSHEET_ID,
-					range: "Job Tracking",
-				});
-				const rows = dataResp.data.values || [];
-				for (let i = 1; i < rows.length; i++) {
-					const loadObj = {};
-					headers.forEach((h, idx) => { loadObj[h] = rows[i][idx] || ""; });
-					const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
-					const rowStatusCol = headers.find((h) => /status/i.test(h));
+				const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+				const rowStatusCol = headers.find((h) => /status/i.test(h));
+				for (const loadObj of jt.data) {
+					const i = loadObj._rowIndex - 1; // legacy: range row = i + 1 below
 					const rowStatus = rowStatusCol ? (loadObj[rowStatusCol] || "").trim().toLowerCase() : "";
 					// Skip completed/delivered rows to avoid matching stale duplicates
 					if (/^(delivered|completed|pod received|canceled)$/i.test(rowStatus)) continue;

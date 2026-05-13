@@ -128,8 +128,8 @@
 
     <!-- Accept / Reject buttons for dispatched loads -->
     <div v-if="showResponseButtons" class="load-response-actions">
-      <van-button type="danger" plain block @click="$emit('decline', load)">Reject Load</van-button>
-      <van-button type="primary" block @click="$emit('accept', load)">Accept Load</van-button>
+      <van-button type="danger" plain block :loading="responding" :disabled="responding" @click="$emit('decline', load)">Reject Load</van-button>
+      <van-button type="primary" block :loading="responding" :disabled="responding" @click="$emit('accept', load)">Accept Load</van-button>
     </div>
     <div v-else-if="showAcceptedBadge" class="load-accepted-banner">
       <span>&#10003; Load Accepted</span>
@@ -156,6 +156,7 @@ const props = defineProps({
   driverPosition: { type: Object, default: null },
   truck: { type: Object, default: null },
   loadExpenses: { type: Array, default: () => [] },
+  responding: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline', 'expense-submit'])

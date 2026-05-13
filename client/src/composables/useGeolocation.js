@@ -5,12 +5,21 @@ export function useGeolocation(api) {
   const error = ref(null)
   const tracking = ref(false)
   const distanceWarning = ref(null)
+  // 'ok' once the server has accepted at least one report; flips to 'failing'
+  // after N consecutive POST /api/location errors so the UI can surface a
+  // banner. Drivers used to have zero feedback when location reporting broke.
+  const syncStatus = ref('ok')
+  const permissionState = ref('unknown') // 'granted' | 'denied' | 'prompt' | 'unknown'
 
   let watchId = null
   let activeLoadId = ''
   let lastReported = null
   let lastReportTime = 0
   let heartbeatId = null
+  let consecutiveFailures = 0
+  let permissionStatus = null
+  let permissionChangeListener = null
+  const FAILURES_BEFORE_WARNING = 3
 
   const MIN_DISTANCE = 50        // meters — only report if moved this far
   const MIN_INTERVAL = 10 * 1000 // 10s — don't report more often than this
@@ -44,6 +53,8 @@ export function useGeolocation(api) {
     lastReportTime = Date.now()
     try {
       const resp = await api.post('/api/location', data)
+      consecutiveFailures = 0
+      if (syncStatus.value !== 'ok') syncStatus.value = 'ok'
       // Only update warning when server returns one, or when server confirms driver is now close
       if (resp.distanceWarning) {
         distanceWarning.value = resp.distanceWarning
@@ -52,7 +63,12 @@ export function useGeolocation(api) {
         distanceWarning.value = null
       }
     } catch {
-      // Silent fail
+      // Don't toast every failure (noisy when going through a tunnel), but
+      // after a few in a row flip the status so DriverHeader can warn.
+      consecutiveFailures += 1
+      if (consecutiveFailures >= FAILURES_BEFORE_WARNING) {
+        syncStatus.value = 'failing'
+      }
     }
   }
 
@@ -124,10 +140,19 @@ export function useGeolocation(api) {
       return { state: 'unsupported', reason: 'Geolocation not available in this browser' }
     }
     // Preflight via Permissions API for an instant answer without triggering
-    // the OS prompt when we already know the state.
+    // the OS prompt when we already know the state. Also subscribe to
+    // permission-state changes so a mid-session revoke (driver toggles
+    // location off in OS/browser settings) flips `permissionState` and the
+    // caller can re-gate the app instead of silently dropping GPS.
     if (navigator.permissions && navigator.permissions.query) {
       try {
         const p = await navigator.permissions.query({ name: 'geolocation' })
+        permissionStatus = p
+        permissionState.value = p.state
+        if (!permissionChangeListener) {
+          permissionChangeListener = () => { permissionState.value = p.state }
+          p.addEventListener?.('change', permissionChangeListener)
+        }
         if (p.state === 'granted') return { state: 'granted' }
         if (p.state === 'denied') {
           return { state: 'denied', reason: 'Permission blocked in browser settings' }
@@ -142,9 +167,9 @@ export function useGeolocation(api) {
     // distinguish from 'granted'.
     return await new Promise((resolve) => {
       navigator.geolocation.getCurrentPosition(
-        () => resolve({ state: 'granted' }),
+        () => { permissionState.value = 'granted'; resolve({ state: 'granted' }) },
         (err) => {
-          if (err.code === 1) resolve({ state: 'denied', reason: 'You denied location access' })
+          if (err.code === 1) { permissionState.value = 'denied'; resolve({ state: 'denied', reason: 'You denied location access' }) }
           else if (err.code === 2) resolve({ state: 'unavailable', reason: 'Device cannot determine location' })
           else if (err.code === 3) resolve({ state: 'timeout', reason: 'Location request timed out' })
           else resolve({ state: 'error', reason: err.message || 'Unknown error' })
@@ -154,7 +179,16 @@ export function useGeolocation(api) {
     })
   }
 
-  onUnmounted(stop)
+  function cleanup() {
+    stop()
+    if (permissionStatus && permissionChangeListener) {
+      permissionStatus.removeEventListener?.('change', permissionChangeListener)
+      permissionChangeListener = null
+      permissionStatus = null
+    }
+  }
 
-  return { lastPosition, error, tracking, distanceWarning, start, stop, updateLoadId, requestPermission }
+  onUnmounted(cleanup)
+
+  return { lastPosition, error, tracking, distanceWarning, syncStatus, permissionState, start, stop, updateLoadId, requestPermission }
 }

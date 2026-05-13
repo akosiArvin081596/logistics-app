@@ -168,6 +168,8 @@
     <!-- Header -->
     <DriverHeader
       :driver-name="driverName"
+      :gps-status="geo.syncStatus.value"
+      :socket-connected="socket.isConnected.value"
       @logout="handleLogout"
     />
 
@@ -185,6 +187,7 @@
           :driver-position="geo.lastPosition.value"
           :truck="driverStore.truck"
           :load-expenses="detailLoadExpenses"
+          :responding="isResponding(detailLoad)"
           @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
@@ -261,6 +264,7 @@
               :headers="driverStore.headers.jobTracking"
               :pending="driverStore.loadSubTab === 'pending'"
               :accepted="isLoadAccepted(load)"
+              :responding="isResponding(load)"
               @select="handleLoadSelect"
               @chat="handleLoadChat"
               @accept="handleAcceptLoad"
@@ -370,7 +374,7 @@
           :messages="driverStore.messages"
           :loads="driverStore.loads"
           :driver-name="driverName"
-          @send="handleSendMessage"
+          :send-handler="handleSendMessage"
           @mark-read="handleMarkRead"
         />
       </section>
@@ -466,7 +470,7 @@ import 'vant/es/popup/style'
 import 'vant/es/nav-bar/style'
 import 'vant/es/steps/style'
 import 'vant/es/step/style'
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useDriverStore } from '../stores/driver'
@@ -545,6 +549,12 @@ const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
 const showWelcomeModal = ref(false)
 const receiptPreview = ref('')
+const respondingLoadIds = reactive(new Set())
+function isResponding(load) {
+  const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
+  const lid = loadIdCol ? (load?.[loadIdCol] || '') : ''
+  return lid ? respondingLoadIds.has(lid) : false
+}
 
 // Location permission gate state. Blocks the full driver UI until the
 // browser geolocation permission is granted. See requestPermission() in
@@ -882,11 +892,20 @@ function isLoadAccepted(load) {
 async function handleAcceptLoad(load) {
   const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
   const lid = loadIdCol ? (load[loadIdCol] || '') : ''
+  if (lid && respondingLoadIds.has(lid)) return
+  if (lid) respondingLoadIds.add(lid)
   try {
     await driverStore.respondToLoad(lid, load._rowIndex, 'accepted')
     toast.show('Load accepted')
-  } catch {
-    toast.show('Failed to accept load', 'error')
+  } catch (err) {
+    const msg = err?.status === 403
+      ? 'This load is no longer assigned to you'
+      : err?.status === 409
+      ? (err?.message || 'Already responded to this load')
+      : 'Failed to accept load'
+    toast.show(msg, 'error')
+  } finally {
+    if (lid) respondingLoadIds.delete(lid)
   }
 }
 
@@ -904,13 +923,23 @@ async function confirmDecline() {
   if (!load) return
   const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
   const lid = loadIdCol ? (load[loadIdCol] || '') : ''
+  if (lid && respondingLoadIds.has(lid)) {
+    declineTarget.value = null
+    return
+  }
+  if (lid) respondingLoadIds.add(lid)
   try {
     await driverStore.respondToLoad(lid, load._rowIndex, 'declined')
     toast.show('Load declined')
-  } catch {
-    toast.show('Failed to decline load', 'error')
+  } catch (err) {
+    const msg = err?.status === 403
+      ? 'This load is no longer assigned to you'
+      : (err?.message || 'Failed to decline load')
+    toast.show(msg, 'error')
+  } finally {
+    if (lid) respondingLoadIds.delete(lid)
+    declineTarget.value = null
   }
-  declineTarget.value = null
 }
 
 function handleLoadSelect(load) {
@@ -961,6 +990,8 @@ async function handleStatusUpdate({ newStatus, load }) {
       // so the Documents section directly below the stepper is one tap away.
       toast.show(err.message || 'Upload a POD before marking Delivered', 'error')
       currentTab.value = 'status'
+    } else if (err && err.code === 'ACTIVE_JOB_CONFLICT') {
+      toast.show(err.message || 'Complete your current load before starting another', 'error')
     } else {
       toast.show((err && err.message) || 'Failed to update status', 'error')
     }
@@ -968,11 +999,9 @@ async function handleStatusUpdate({ newStatus, load }) {
 }
 
 async function handleSendMessage({ recipient, message, loadId }) {
-  try {
-    await driverStore.sendMessage(recipient, message, loadId)
-  } catch {
-    toast.show('Failed to send message', 'error')
-  }
+  // Let errors propagate so ChatView keeps the input text + shows the
+  // retry chip. Toast would be duplicate and harder to act on.
+  await driverStore.sendMessage(recipient, message, loadId)
 }
 
 function handleMarkRead(ids) {
@@ -1026,16 +1055,36 @@ function viewAssignedLoad() {
 
 function onLoadCancelled(payload) {
   if (!isMounted) return
-  toast.show(`Load ${payload.loadId || ''} has been cancelled by dispatch`)
+  const reassigned = payload.reason === 'reassigned'
+  const toastMsg = reassigned
+    ? `Load ${payload.loadId || ''} was reassigned to another driver`
+    : `Load ${payload.loadId || ''} has been cancelled by dispatch`
+  toast.show(toastMsg)
   driverStore.addNotification({
     id: payload.notificationId || Date.now(),
     type: 'load-cancelled',
-    title: `Load Cancelled: ${payload.loadId || 'Load'}`,
-    body: 'Your assignment has been cancelled by dispatch',
+    title: reassigned
+      ? `Load Reassigned: ${payload.loadId || 'Load'}`
+      : `Load Cancelled: ${payload.loadId || 'Load'}`,
+    body: reassigned
+      ? 'This load is no longer assigned to you'
+      : 'Your assignment has been cancelled by dispatch',
     metadata: JSON.stringify(payload),
     read: 0,
     createdAt: new Date().toISOString(),
   })
+  // Optimistically remove the load from local state so the driver doesn't
+  // see a ghost row for 1-5s while the refetch round-trips. Match by
+  // rowIndex first (precise) then by loadId (falls back if rowIndex shifts).
+  if (payload.rowIndex || payload.loadId) {
+    const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
+    driverStore.loads = driverStore.loads.filter(l => {
+      if (payload.rowIndex && l._rowIndex === payload.rowIndex) return false
+      if (payload.loadId && loadIdCol && l[loadIdCol] === payload.loadId) return false
+      return true
+    })
+    if (detailRowIndex.value === payload.rowIndex) detailRowIndex.value = null
+  }
   driverStore.loadData()
 }
 
@@ -1123,6 +1172,32 @@ watch(
     }
   },
   { immediate: true }
+)
+
+// Re-gate the app if the browser/OS revokes location permission mid-session.
+// Without this, useGeolocation would keep silently failing and the driver
+// would have no idea why their position stopped flowing to dispatch.
+watch(
+  () => geo.permissionState.value,
+  (state, prev) => {
+    if (prev === 'granted' && state === 'denied' && !isOnboarding.value) {
+      locationPermission.value = 'denied'
+      locationReason.value = 'Permission blocked in browser settings'
+      geo.stop()
+    }
+  }
+)
+
+// On socket reconnect, refetch driver data to reconcile any events
+// (load-assigned, load-cancelled, geofence-trigger) that fired while the
+// socket was down. Without this, missed events stay missed.
+watch(
+  () => socket.isConnected.value,
+  (connected, prev) => {
+    if (connected && prev === false && isMounted) {
+      driverStore.loadData().catch(() => {})
+    }
+  }
 )
 
 async function verifyLocationPermission() {

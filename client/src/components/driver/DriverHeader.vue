@@ -3,6 +3,16 @@
     <div class="app-header-left">
       <img src="/logo.png" alt="LogisX" class="header-logo" />
       <span class="driver-name-label">{{ driverName }}</span>
+      <span
+        v-if="socketConnected === false"
+        class="status-chip warn"
+        title="Real-time connection lost — trying to reconnect"
+      >&#9888; Offline</span>
+      <span
+        v-else-if="gpsStatus === 'failing'"
+        class="status-chip warn"
+        title="Location not syncing to dispatch"
+      >&#128205; GPS sync</span>
     </div>
     <div class="app-header-right">
       <button class="header-btn" title="Change password" @click="showPwModal = true">Password</button>
@@ -18,6 +28,8 @@ import ChangePasswordModal from './ChangePasswordModal.vue'
 
 defineProps({
   driverName: { type: String, default: '' },
+  gpsStatus: { type: String, default: 'ok' },
+  socketConnected: { type: Boolean, default: true },
 })
 
 defineEmits(['logout'])
@@ -58,6 +70,19 @@ const showPwModal = ref(false)
   font-size: 0.85rem;
   color: var(--text-dim);
   font-weight: 500;
+}
+
+.status-chip {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.15rem 0.4rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.status-chip.warn {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
 }
 
 .app-header-right {
