@@ -1091,6 +1091,29 @@ async function routemateSyncTelemetry() {
 				});
 			}
 		}
+
+		// Geofence: auto-advance load status when an ELD ping enters the pickup
+		// or drop-off radius. Reuses the cached Job Tracking sheet loaded above;
+		// the predecessor-status guard inside the helper makes re-fires inside
+		// the radius a silent no-op until the load advances.
+		for (const t of rows) {
+			const driverName = driverByVehicle[t.routemate_vehicle_id];
+			if (!driverName) continue;
+			if (!Number.isFinite(t.latitude) || !Number.isFinite(t.longitude)) continue;
+			if (t.latitude === 0 && t.longitude === 0) continue;
+			const activeLoadId = loadIdByDriver[driverName.trim().toLowerCase()] || "";
+			if (!activeLoadId) continue;
+			try {
+				await tryGeofenceAdvance({
+					latitude: t.latitude,
+					longitude: t.longitude,
+					driverName,
+					loadId: activeLoadId,
+				});
+			} catch (geoErr) {
+				console.error("routemate geofence error:", geoErr.message);
+			}
+		}
 	} catch (err) {
 		routemateHealth.lastError = { at: new Date().toISOString(), source: "telemetry", message: err.message, status: err.status || null };
 		routemateHealth.errorsLast24h += 1;
@@ -10573,270 +10596,115 @@ function checkGeofence(lat, lng, loadData, headers) {
 	return triggers;
 }
 
-// POST /api/location — Driver reports location
-app.post("/api/location", requireAuth, locationLimiter, async (req, res) => {
+// Auto-advance a load's status when the truck enters a pickup/drop-off geofence.
+// Shared by any location source — currently only the Routemate telemetry sync.
+// Guards: never advances delivered/canceled rows, never auto-writes a completion
+// status, and only transitions from a valid predecessor status.
+async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId }) {
+	if (!latitude || !longitude || !driverName || !loadId) return null;
 	try {
-		const { latitude, longitude, accuracy, speed, heading, loadId } = req.body;
-		const driverName = req.session?.user?.driverName || req.session?.user?.username || "";
-		if (!latitude || !longitude) {
-			return res.status(400).json({ error: "latitude and longitude required" });
-		}
+		const jt = await getJobTrackingCached();
+		const headers = jt.headers;
+		const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
+		const statusCol = headers.find((h) => /status/i.test(h));
+		if (!loadIdCol || !statusCol) return null;
 
-		// SECURITY: if a Driver provides a loadId, silently strip it when the
-		// load isn't assigned to them. Don't 403 — frontend pings every 60s and
-		// blocking would surface as silent location loss; stripping the loadId
-		// keeps the GPS trail flowing without polluting another driver's
-		// geofence triggers.
-		let effectiveLoadId = loadId || "";
-		if (effectiveLoadId && req.session.user.role === "Driver") {
-			const owned = await loadBelongsToDriver(effectiveLoadId, driverName);
-			if (!owned) effectiveLoadId = "";
-		}
+		for (const loadObj of jt.data) {
+			const rowStatus = (loadObj[statusCol] || "").trim().toLowerCase();
+			if (/^(delivered|completed|pod received|canceled|cancelled)$/i.test(rowStatus)) continue;
+			if (String(loadObj[loadIdCol] || "") !== String(loadId)) continue;
 
-		// SECURITY: a Driver can spoof lat/lng over the wire. The geofence path
-		// auto-writes "At Shipper" / "At Receiver" to the sheet, which dispatch
-		// notifications fan out from — so a driver could fake intermediate
-		// progress without physically being there. Defense: compare against
-		// the previous ping. If the implied speed exceeds ~150 mph (67 m/s)
-		// the new coordinate is implausible — still record it so we don't
-		// drop the trail, but skip the geofence auto-update.
-		let gpsImplausible = false;
-		try {
-			const prev = db.prepare(
-				`SELECT latitude, longitude, timestamp FROM driver_locations
-				 WHERE driver = ? ORDER BY id DESC LIMIT 1`
-			).get(driverName);
-			if (prev && prev.latitude != null && prev.longitude != null && prev.timestamp) {
-				const prevMs = new Date(prev.timestamp).getTime();
-				const deltaSec = (Date.now() - prevMs) / 1000;
-				if (deltaSec > 0 && deltaSec < 60 * 60) {
-					const deltaMeters = geolib.getDistance(
-						{ latitude: prev.latitude, longitude: prev.longitude },
-						{ latitude, longitude }
-					);
-					// 67 m/s ≈ 150 mph — well above any legal trucking speed but
-					// within margin for cellular ping clock skew on legitimate moves.
-					if ((deltaMeters / deltaSec) > 67) gpsImplausible = true;
-				}
-			}
-		} catch (plausErr) {
-			console.error("GPS plausibility check error:", plausErr.message);
-		}
+			const triggers = checkGeofence(latitude, longitude, loadObj, headers);
+			if (triggers.length === 0) return null;
+			const trigger = triggers[0];
 
-		const timestamp = new Date().toISOString();
-		db.prepare(
-			`INSERT INTO driver_locations (driver, latitude, longitude, accuracy, speed, heading, timestamp, load_id)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-		).run(driverName, latitude, longitude, accuracy || 0, speed || 0, heading || 0, timestamp, effectiveLoadId);
+			const isCompletionTrigger = /^(delivered|completed|pod received)$/i.test(trigger);
+			const canUpdate = !isCompletionTrigger && (
+				(trigger === "At Shipper" && /^(dispatched|assigned|heading to shipper)$/i.test(rowStatus)) ||
+				(trigger === "At Receiver" && /^(in transit)$/i.test(rowStatus))
+			);
+			if (!canUpdate) return null;
 
-		// Broadcast to dispatch
-		io.to("dispatch").emit("location-update", {
-			driver: driverName,
-			latitude, longitude,
-			speed: speed || 0,
-			loadId: effectiveLoadId,
-			timestamp,
-			source: "phone",
-		});
-		// Fan out to public tracker subscribers for this load. Sanitized
-		// payload — same whitelist the public HTTP endpoint enforces.
-		if (effectiveLoadId) {
-			publicTrack.to("load:" + effectiveLoadId).emit("tracker-update", {
-				lat: latitude,
-				lng: longitude,
-				speed: speed || 0,
-				timestamp,
+			const sheets = await getSheets();
+			const statusColIdx = headers.indexOf(statusCol);
+			const statusColLetter = colLetter(statusColIdx);
+			const sheetRow = loadObj._rowIndex; // 1-based, includes header row
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `Job Tracking!${statusColLetter}${sheetRow}`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: { values: [[trigger]] },
 			});
+			jtCacheInvalidate();
+
+			const geoMsg = trigger === "At Shipper"
+				? "You have arrived at the pickup location"
+				: "You have arrived at the delivery location";
+			const geoNotif = insertNotification.run(
+				driverName.trim().toLowerCase(), "geofence",
+				`${trigger} — Load ${loadId}`,
+				geoMsg,
+				JSON.stringify({ loadId, status: trigger })
+			);
+			io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
+				loadId, status: trigger,
+				notificationId: geoNotif.lastInsertRowid,
+			});
+			io.to("dispatch").emit("geofence-trigger", {
+				loadId, driver: driverName, status: trigger,
+			});
+			const dispatchMsg = trigger === "At Shipper"
+				? `${driverName} has arrived at the pickup location (Load ${loadId})`
+				: `${driverName} has arrived at the delivery location (Load ${loadId})`;
+			insertDispatchNotification.run(
+				"geofence",
+				`${driverName}: ${trigger}`,
+				dispatchMsg,
+				JSON.stringify({ loadId, driverName, status: trigger })
+			);
+			io.to("dispatch").emit("dispatch-notification", {
+				type: "geofence",
+				title: `${driverName}: ${trigger}`,
+				body: dispatchMsg,
+			});
+
+			return trigger;
 		}
-
-		// Geofence check if loadId is provided. Skipped when the ping looks
-		// spoofed (see plausibility check above) so a fake coordinate cannot
-		// auto-promote a load to "At Shipper" / "At Receiver".
-		let geofenceTriggered = null;
-		let distanceWarning = null;
-		if (effectiveLoadId && !gpsImplausible) {
-			try {
-				// Use the 60s Job Tracking cache instead of two raw Sheets reads
-				// per ping. A 20-driver fleet pinging every 60s used to do ~40
-				// Sheets reads/min just from this code path; with the cache it
-				// drops to ~1/min worst case.
-				const jt = await getJobTrackingCached();
-				const headers = jt.headers;
-				const sheets = await getSheets();
-				const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
-				const rowStatusCol = headers.find((h) => /status/i.test(h));
-				for (const loadObj of jt.data) {
-					const i = loadObj._rowIndex - 1; // legacy: range row = i + 1 below
-					const rowStatus = rowStatusCol ? (loadObj[rowStatusCol] || "").trim().toLowerCase() : "";
-					// Skip completed/delivered rows to avoid matching stale duplicates
-					if (/^(delivered|completed|pod received|canceled)$/i.test(rowStatus)) continue;
-					if (loadIdCol && loadObj[loadIdCol] === loadId) {
-						const triggers = checkGeofence(latitude, longitude, loadObj, headers);
-						if (triggers.length > 0) {
-							geofenceTriggered = triggers[0];
-							const statusCol = headers.find((h) => /status/i.test(h));
-							const currentStatus = statusCol ? (loadObj[statusCol] || "").toLowerCase() : "";
-
-							// Defense in depth: geofence must NEVER auto-write a completion status.
-							// CEO requirement (2026-05-05): completion requires manual driver confirmation + POD upload.
-							// checkGeofence only ever produces "At Shipper" or "At Receiver" today, but this guard
-							// makes the intent explicit and survives any future expansion of geofence triggers.
-							const isCompletionTrigger = /^(delivered|completed|pod received)$/i.test(geofenceTriggered);
-
-							// Guard: only auto-update if status is a valid predecessor.
-							// "Heading to Shipper" added 2026-05-05 so drivers en route auto-advance on arrival.
-							const canUpdate = !isCompletionTrigger && (
-								(geofenceTriggered === "At Shipper" && /^(dispatched|assigned|heading to shipper)$/i.test(currentStatus)) ||
-								(geofenceTriggered === "At Receiver" && /^(in transit)$/i.test(currentStatus))
-							);
-
-							if (canUpdate && statusCol) {
-								// Update status in sheet
-								const statusColIdx = headers.indexOf(statusCol);
-								const statusColLetter = colLetter(statusColIdx);
-								await sheets.spreadsheets.values.update({
-									spreadsheetId: SPREADSHEET_ID,
-									range: `Job Tracking!${statusColLetter}${i + 1}`,
-									valueInputOption: "USER_ENTERED",
-									requestBody: { values: [[geofenceTriggered]] },
-								});
-								jtCacheInvalidate();
-								const geoMsg = geofenceTriggered === "At Shipper"
-									? `You have arrived at the pickup location`
-									: `You have arrived at the delivery location`;
-								const geoNotif = insertNotification.run(
-									driverName.trim().toLowerCase(), 'geofence',
-									`${geofenceTriggered} — Load ${loadId}`,
-									geoMsg,
-									JSON.stringify({ loadId, status: geofenceTriggered })
-								);
-								io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
-									loadId,
-									status: geofenceTriggered,
-									notificationId: geoNotif.lastInsertRowid,
-								});
-								io.to("dispatch").emit("geofence-trigger", {
-									loadId,
-									driver: driverName,
-									status: geofenceTriggered,
-								});
-								const dispatchMsg = geofenceTriggered === "At Shipper"
-									? `${driverName} has arrived at the pickup location (Load ${loadId})`
-									: `${driverName} has arrived at the delivery location (Load ${loadId})`;
-								insertDispatchNotification.run(
-									'geofence',
-									`${driverName}: ${geofenceTriggered}`,
-									dispatchMsg,
-									JSON.stringify({ loadId, driverName, status: geofenceTriggered })
-								);
-								io.to("dispatch").emit("dispatch-notification", {
-									type: 'geofence',
-									title: `${driverName}: ${geofenceTriggered}`,
-									body: dispatchMsg,
-								});
-							}
-						}
-
-						// Distance warning — check if driver is far from relevant point
-						const warnStatusCol = headers.find((h) => /status/i.test(h));
-						const warnStatus = warnStatusCol ? (loadObj[warnStatusCol] || "").toLowerCase() : "";
-						const originLatCol = headers.find((h) => /origin.*lat|pickup.*lat|shipper.*lat/i.test(h));
-						const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
-						const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
-						const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
-						const originCityCol = headers.find((h) => /origin|pickup.*city|shipper.*city/i.test(h) && !/lat|lng|lon/i.test(h));
-						const destCityCol = headers.find((h) => (/dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h)) && !/lat|lng|lon/i.test(h));
-						const FAR_THRESHOLD = 500000; // 500 km
-
-						const notPickedUp = /^(dispatched|assigned|)$/i.test(warnStatus);
-						const inTransit = /^(in transit)$/i.test(warnStatus);
-
-						if (notPickedUp && originLatCol && originLngCol) {
-							const oLat = parseFloat(loadObj[originLatCol]);
-							const oLng = parseFloat(loadObj[originLngCol]);
-							if (!isNaN(oLat) && !isNaN(oLng)) {
-								const dist = geolib.getDistance({ latitude, longitude }, { latitude: oLat, longitude: oLng });
-								if (dist > FAR_THRESHOLD) {
-									const distMiles = Math.round(dist / 1609.34);
-									const pickupName = originCityCol ? (loadObj[originCityCol] || "") : "";
-									distanceWarning = {
-										type: "far-from-pickup",
-										distanceMiles: distMiles,
-										targetLat: oLat,
-										targetLng: oLng,
-										targetName: pickupName || "Pickup Location",
-										message: `You are ${distMiles.toLocaleString()} miles from pickup${pickupName ? " (" + pickupName + ")" : ""}. Please verify your route.`,
-									};
-								}
-							}
-						} else if (inTransit && destLatCol && destLngCol) {
-							const dLat = parseFloat(loadObj[destLatCol]);
-							const dLng = parseFloat(loadObj[destLngCol]);
-							if (!isNaN(dLat) && !isNaN(dLng)) {
-								const dist = geolib.getDistance({ latitude, longitude }, { latitude: dLat, longitude: dLng });
-								if (dist > FAR_THRESHOLD) {
-									const distMiles = Math.round(dist / 1609.34);
-									const deliveryName = destCityCol ? (loadObj[destCityCol] || "") : "";
-									distanceWarning = {
-										type: "far-from-delivery",
-										distanceMiles: distMiles,
-										targetLat: dLat,
-										targetLng: dLng,
-										targetName: deliveryName || "Delivery Location",
-										message: `You are ${distMiles.toLocaleString()} miles from delivery${deliveryName ? " (" + deliveryName + ")" : ""}. Please verify your route.`,
-									};
-								}
-							}
-						}
-
-						break;
-					}
-				}
-			} catch (geoErr) {
-				console.error("Geofence check error:", geoErr.message);
-			}
-		}
-
-		res.json({ success: true, geofenceTriggered, distanceWarning });
-	} catch (error) {
-		console.error("Error storing location:", error.message);
-		res.status(500).json({ error: error.message });
+		return null;
+	} catch (err) {
+		console.error("tryGeofenceAdvance error:", err.message);
+		return null;
 	}
+}
+
+// POST /api/location — Retired. Phone GPS was superseded by Routemate ELD
+// (see lib/routemate-client.js + routemateSyncTelemetry). Route kept so cached
+// driver clients on old phones receive a clear 410 instead of 404.
+app.post("/api/location", requireAuth, locationLimiter, (req, res) => {
+	res.status(410).json({
+		error: "Phone GPS is discontinued. Location is now sourced from Routemate ELD.",
+	});
 });
+
+// (Legacy phone-GPS POST /api/location body removed 2026-05-13. Geofence logic
+//  now lives in tryGeofenceAdvance() above and runs from the Routemate sync.)
 
 // GET /api/locations/latest — Latest position per active driver with ETA
 app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		// Get latest GPS position per driver (no time filter — show all)
-		const gpsLocations = db.prepare(
-			`SELECT dl.driver, dl.latitude, dl.longitude, dl.speed, dl.heading, dl.timestamp, dl.load_id AS loadId
-			 FROM driver_locations dl
-			 INNER JOIN (SELECT driver, MAX(id) AS max_id FROM driver_locations GROUP BY driver) latest
-			 ON dl.id = latest.max_id`
-		).all();
-
-		// Get all drivers from Carrier Database to include those who never reported GPS
+		// Phone GPS retired 2026-05-13 — locations come exclusively from Routemate
+		// telemetry. Start with one placeholder per carrier driver and let the
+		// overlay below fill in fresh ELD positions.
 		let allDriverNames = [];
 		try {
-			const sheets = await getSheets();
 			const dirDrivers = db.prepare("SELECT driver_name FROM drivers_directory").all();
 			for (const d of dirDrivers) {
 				if (d.driver_name) allDriverNames.push(d.driver_name);
 			}
 		} catch { /* silent */ }
 
-		// Merge: GPS drivers + carrier drivers with no GPS
-		const carrierSet = new Set(allDriverNames.map(n => n.toLowerCase()));
-		const gpsMap = {};
-		for (const loc of gpsLocations) gpsMap[loc.driver.toLowerCase()] = loc;
-
 		const locations = [];
 		const seen = new Set();
-		for (const loc of gpsLocations) {
-			if (!carrierSet.has(loc.driver.toLowerCase())) continue; // skip non-drivers (e.g. admin)
-			locations.push(loc);
-			seen.add(loc.driver.toLowerCase());
-		}
 		for (const name of allDriverNames) {
 			if (!seen.has(name.toLowerCase())) {
 				locations.push({
@@ -10853,12 +10721,11 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			}
 		}
 
-		// Source-priority overlay: when a driver's currently-assigned truck is
-		// linked to a Routemate device AND we have a fresh telemetry row
-		// (<5 min old), replace lat/lng/speed/timestamp with the ELD values
-		// and tag source: 'routemate'. Otherwise tag source: 'phone'.
-		// Phone GPS path is unchanged — drivers without a linked truck or with
-		// a stale ELD ping continue to show their phone-reported coordinates.
+		// Overlay Routemate telemetry. When a driver's currently-assigned truck
+		// is linked to a Routemate device AND we have a fresh telemetry row
+		// (<5 min old), fill in lat/lng/speed/timestamp from the ELD and tag
+		// source: 'routemate'. Drivers with no linked truck or stale ELD ping
+		// stay as noGps placeholders.
 		try {
 			const FRESH_MS = 5 * 60 * 1000;
 			const cutoff = Date.now() - FRESH_MS;
@@ -10928,8 +10795,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						);
 					}
 				} else {
-					loc.source = loc.noGps ? "none" : "phone";
-					loc.lastPingAge = loc.timestamp ? (now - new Date(loc.timestamp).getTime()) : null;
+					loc.source = "none";
+					loc.lastPingAge = null;
 				}
 			}
 		} catch (rmErr) {
@@ -11396,7 +11263,7 @@ async function getRoute(from, to, retries = 2) {
 	return null;
 }
 
-// GET /api/locations/trail — GPS trail for a specific driver/load
+// GET /api/locations/trail — ELD trail for a specific driver/load
 app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const { driver, loadId } = req.query;
@@ -11404,23 +11271,41 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 			return res.status(400).json({ error: "driver query param required" });
 		}
 
-		// Query location history
-		let rawPoints;
-		if (loadId) {
-			rawPoints = db.prepare(
-				`SELECT latitude, longitude, speed, timestamp
-				 FROM driver_locations
-				 WHERE driver = ? AND load_id = ?
-				 ORDER BY timestamp ASC`
-			).all(driver, loadId);
-		} else {
-			rawPoints = db.prepare(
-				`SELECT latitude, longitude, speed, timestamp
-				 FROM driver_locations
-				 WHERE driver = ? AND timestamp > datetime('now', '-24 hours')
-				 ORDER BY timestamp ASC`
-			).all(driver);
+		// Sourced from Routemate telemetry. Resolve the driver's currently-assigned
+		// truck, then pull the last 24h of telemetry for that vehicle. When a
+		// historical loadId is requested we still scope to the same truck — older
+		// trips off this truck aren't recoverable from ELD alone.
+		const assignment = db.prepare(
+			`SELECT ta.truck_id, t.routemate_vehicle_id
+			 FROM truck_assignments ta
+			 JOIN trucks t ON t.id = ta.truck_id
+			 WHERE LOWER(TRIM(ta.driver_name)) = LOWER(TRIM(?))
+			   AND COALESCE(t.routemate_vehicle_id, '') <> ''
+			 ORDER BY ta.end_date = '' DESC, ta.start_date DESC
+			 LIMIT 1`
+		).get(driver);
+
+		let rawPoints = [];
+		if (assignment && assignment.routemate_vehicle_id) {
+			const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+			const rows = db.prepare(
+				`SELECT latitude, longitude, speed, location_date_ms
+				 FROM routemate_telemetry
+				 WHERE routemate_vehicle_id = ?
+				   AND location_date_ms > ?
+				 ORDER BY location_date_ms ASC`
+			).all(assignment.routemate_vehicle_id, cutoffMs);
+			rawPoints = rows.map((r) => ({
+				latitude: r.latitude,
+				longitude: r.longitude,
+				speed: r.speed || 0,
+				timestamp: new Date(r.location_date_ms).toISOString(),
+			}));
 		}
+		// loadId is accepted for backward compatibility but not used as a filter —
+		// telemetry isn't tagged with loadId on the ELD side. Kept here to avoid
+		// breaking callers that still pass it.
+		void loadId;
 
 		// Simplify: skip consecutive points < 10m apart, always keep first and last
 		const simplified = [];

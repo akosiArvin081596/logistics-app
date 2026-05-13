@@ -270,7 +270,7 @@ Key directories:
 
 **Composable singletons**: `useApi()`, `useSocket()`, and `useToast()` are module-level singletons, not per-component instances. Each Pinia store instantiates `const api = useApi()` at module scope. `useSocket` maintains a single global socket connection.
 
-**useGeolocation**: GPS tracking via `watchPosition` + 60 s stationary heartbeat + 50 m movement threshold + 10 s minimum inter-report interval. Reports to `POST /api/location` with loadId. Silently swallows API errors to avoid disrupting the driver. Exposes a separate `requestPermission()` helper that DriverView uses to gate the app on mount: fully-onboarded drivers see a full-screen "Location Access Required" lock (with per-browser guidance for denied / OS-level-off / timeout states) until the browser returns `granted`. Onboarding-stage drivers skip the gate entirely.
+**useGeolocation**: Retired 2026-05-13. Phone GPS was replaced by Routemate ELD as the sole location source — the driver app no longer requests location permission, no longer reports pings, and the full-screen "Location Access Required" gate was removed from `DriverView`. The composable file is kept in source for one cycle as dead code; `POST /api/location` returns 410 Gone. See `routemateSyncTelemetry()` for the live-position pipeline.
 
 **useGoogleMaps**: Loads the Google Maps JS API via `@googlemaps/js-api-loader`, fetches the API key from `GET /api/config/maps-key`.
 
@@ -325,7 +325,7 @@ Original vanilla HTML/CSS/JS pages. Kept as fallback — Express serves `client/
 - **Column detection via regex**: Both backend and frontend match headers dynamically with regex patterns — `/driver/i` for driver columns, `/rate|amount|revenue|pay|charge|price|cost/i` for financial columns (hidden from Driver role), `/status/i` for status, `/load.?id|job.?id/i` for load IDs, `/origin.*lat|pickup.*lat/i` and `/dest.*lat|delivery.*lat/i` for coordinates. This makes the system flexible to different sheet column names.
 - **Driver fields**: Any column matching `/driver/i` renders as a `<select>` populated from the first driver-like column in "Carrier Database".
 - **Role-based routing**: Super Admin sees all, Dispatcher sees dashboard+data (no broker/financial info), Driver sees driver app (no sidebar), Investor sees financial view + truck fleet.
-- **Geofence logic**: `POST /api/location` uses `geolib.isPointWithinRadius()` with a **500m threshold**. Auto-advances status only when current status matches the expected predecessor (e.g., "Dispatched"/"Assigned" → "At Shipper", "In Transit" → "At Receiver"). Geofence errors are caught silently. Logs to "Status Logs" sheet.
+- **Geofence logic**: `tryGeofenceAdvance()` (called from `routemateSyncTelemetry()`) uses `geolib.isPointWithinRadius()` with a **500m threshold** against each ELD ping's lat/lng. Auto-advances status only when current status matches the expected predecessor (Dispatched/Assigned/Heading to Shipper → At Shipper, In Transit → At Receiver). Never auto-writes a completion status. Geofence errors are caught silently; emits `geofence-trigger` + `dispatch-notification`. The phone-GPS path (`POST /api/location`) is retired — see "useGeolocation" note above.
 - **ETA calculation**: Uses `geolib.getDistance()` to destination. Default speed: 24.587 m/s (~55 mph) when GPS speed is unreliable. Compares ETA vs scheduled delivery to flag "on-time" / "delayed".
 - **IFTA state matching**: Hardcoded bounding boxes for ~24 US states to classify driver GPS pings by state.
 - **Sheet ID caching**: Google Sheet tab GIDs are cached in a `Map` in memory to avoid repeated API lookups. Lazy-initialized via `getSheetId()`.
@@ -377,7 +377,7 @@ Replacement for phone-based driver GPS sharing. Routemate is FMCSA-certified ELD
 
 **`trucks` table** gains one additive column via the existing try/catch ALTER pattern: `routemate_vehicle_id TEXT DEFAULT ''`. Set by admins via the Trucks UI (Phase 2) to link a LogisX truck to a Routemate vehicle.
 
-**`driver_locations` is intentionally untouched.** Phase 2 adds source-priority logic in `GET /api/locations/latest` (Routemate first if a row <5 min old exists, else `driver_locations`); the response is tagged with `source: 'routemate' | 'phone'`. Old consumers that ignore `source` continue to work. `useGeolocation.js` and `POST /api/location` are unchanged — phone GPS stays as the fallback.
+**`driver_locations`** retains historical rows but is no longer written to and no longer read from any endpoint as of 2026-05-13. `GET /api/locations/latest` and `GET /api/locations/trail` now source exclusively from `routemate_telemetry`; responses tag `source: 'routemate'` when an ELD fix is available and `source: 'none'` otherwise. The 90-day purge job continues to age the legacy data out.
 
 **Phase 1 endpoints** (only ones live as of foundation):
 - `POST /api/admin/routemate/sync-now` — Super Admin only. Returns 503 when `ROUTEMATE_ENABLED=false` or key unset; otherwise calls `getCompany()` as a smoke test then paginates `listVehicles()` and upserts into `routemate_vehicles`. Logs to `audit_trail` with action `routemate_sync`.

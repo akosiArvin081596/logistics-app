@@ -75,62 +75,9 @@
       />
     </template>
 
-    <!-- LOCATION LOCK SCREEN — shown to fully-onboarded drivers until the
-         browser has granted geolocation permission. Replaces the normal UI
-         entirely so dispatch cannot have a driver active without GPS. -->
-    <template v-else-if="isLocationBlocked">
-      <DriverHeader :driver-name="driverName" @logout="handleLogout" />
-      <main class="app-content location-locked">
-        <div class="card loc-card">
-          <div class="loc-icon">&#128205;</div>
-          <div class="loc-title">Location Access Required</div>
-          <div class="loc-sub">
-            LogisX needs your location so dispatch can track your progress and
-            auto-update load status at pickup &amp; delivery. You can't receive
-            assignments without it.
-          </div>
-
-          <div v-if="locationPermission === 'checking'" class="loc-status">
-            Checking location access&hellip;
-          </div>
-          <div v-else-if="locationPermission === 'denied'" class="loc-guide">
-            <p><b>Location is blocked for this site.</b> Re-enable it:</p>
-            <ul>
-              <li><b>iPhone Safari:</b> tap the "aA" icon in the address bar &rarr; Website Settings &rarr; Location &rarr; Allow.</li>
-              <li><b>Android Chrome:</b> tap the lock icon in the address bar &rarr; Permissions &rarr; Location &rarr; Allow.</li>
-              <li><b>Desktop:</b> click the lock in the address bar &rarr; Site Settings &rarr; Location &rarr; Allow, then reload.</li>
-            </ul>
-          </div>
-          <div v-else-if="locationPermission === 'unavailable'" class="loc-guide">
-            <p><b>Your device isn't returning a location.</b></p>
-            <ul>
-              <li><b>iPhone:</b> Settings &rarr; Privacy &amp; Security &rarr; Location Services &rarr; On.</li>
-              <li><b>Android:</b> Quick Settings &rarr; tap the Location tile to turn it on.</li>
-              <li>Move somewhere with a clearer view of the sky &mdash; parking garages and basements block GPS.</li>
-            </ul>
-          </div>
-          <div v-else-if="locationPermission === 'timeout'" class="loc-guide">
-            <p>Location request timed out. Try again from a spot with a better GPS signal.</p>
-          </div>
-          <div v-else-if="locationPermission === 'unsupported'" class="loc-guide">
-            <p>This browser doesn't support location services. Try Chrome or Safari.</p>
-          </div>
-          <div v-else-if="locationPermission === 'error'" class="loc-guide">
-            <p>{{ locationReason || 'Something went wrong while checking location.' }}</p>
-          </div>
-
-          <button class="loc-btn" :disabled="checkingPermission" @click="retryLocation">
-            {{ checkingPermission ? 'Requesting&hellip;' : 'Turn on Location' }}
-          </button>
-          <button class="loc-btn-sub" @click="handleLogout">Log Out</button>
-        </div>
-      </main>
-    </template>
-
     <!-- ACCOUNT-LOAD FAILURE — defensive guard so a transient loadData error
-         doesn't drop an in-progress driver onto the regular driver UI by
-         falling through verifyLocationPermission(). Shown when the FIRST
-         loadData() call throws; cleared on a successful Retry. -->
+         doesn't drop an in-progress driver onto the regular driver UI. Shown
+         when the FIRST loadData() call throws; cleared on a successful Retry. -->
     <template v-else-if="initialLoadFailed">
       <DriverHeader :driver-name="driverName" @logout="handleLogout" />
       <main class="app-content location-locked">
@@ -175,22 +122,10 @@
       @view-load="viewAssignedLoad"
     />
 
-    <!-- Distance Warning Banner -->
-    <div v-if="activeDistanceWarning && detailLoad" class="distance-warning">
-      <div class="warning-icon">&#9888;</div>
-      <div class="warning-content">
-        <div class="warning-title">
-          {{ activeDistanceWarning.type === 'far-from-pickup' ? 'Far from Pickup' : 'Far from Delivery' }}
-        </div>
-        <div class="warning-message">{{ activeDistanceWarning.message }}</div>
-      </div>
-      <button class="warning-dismiss" @click="distanceWarningDismissed = true">&times;</button>
-    </div>
 
     <!-- Header -->
     <DriverHeader
       :driver-name="driverName"
-      :gps-status="geo.syncStatus.value"
       :socket-connected="socket.isConnected.value"
       @logout="handleLogout"
     />
@@ -206,7 +141,6 @@
           :headers="driverMapHeaders"
           :driver-name="driverName"
           :has-active-job="driverStore.hasActiveJob"
-          :driver-position="geo.lastPosition.value"
           :truck="driverStore.truck"
           :load-expenses="detailLoadExpenses"
           :responding="isResponding(detailLoad)"
@@ -498,7 +432,6 @@ import { useAuthStore } from '../stores/auth'
 import { useDriverStore } from '../stores/driver'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
-import { useGeolocation } from '../composables/useGeolocation'
 import { useApi } from '../composables/useApi'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
@@ -526,7 +459,6 @@ const socket = useSocket()
 const toast = useToast()
 const router = useRouter()
 const api = useApi()
-const geo = useGeolocation(api)
 
 // Onboarding lock screen
 const showSignModal = ref(false)
@@ -548,11 +480,6 @@ const isOnboarding = computed(() => {
   // the document-signing screen until they refreshed.
   return !!ob?.status && ob.status !== 'fully_onboarded'
 })
-// True while we haven't confirmed browser geolocation permission. Drives the
-// full-screen "Location Access Required" gate below, but only for drivers who
-// are already through onboarding — unsigned-docs drivers still see their
-// paperwork flow first.
-const isLocationBlocked = computed(() => !isOnboarding.value && locationPermission.value !== 'granted')
 const onboardingDocs = computed(() => driverStore.onboarding?.documents || [])
 const totalDocs = computed(() => driverStore.onboarding?.totalDocs || 6)
 const signedCount = computed(() => onboardingDocs.value.filter(d => d.signed).length)
@@ -578,17 +505,10 @@ function isResponding(load) {
   return lid ? respondingLoadIds.has(lid) : false
 }
 
-// Location permission gate state. Blocks the full driver UI until the
-// browser geolocation permission is granted. See requestPermission() in
-// useGeolocation for the state enum.
-const locationPermission = ref('checking')
-const locationReason = ref('')
-const checkingPermission = ref(false)
 // True when the FIRST loadData() throws on mount. The UI shows a retry
-// screen instead of falling through to verifyLocationPermission() (which
-// would otherwise grant permission and land an in-progress driver on the
-// regular driver UI — the bug the CEO observed as "took him to the
-// regular page... had to refresh every time he logs in").
+// screen instead of falling through to the regular driver UI — guards against
+// the "took him to the regular page... had to refresh every time he logs in"
+// bug the CEO previously reported.
 const initialLoadFailed = ref(false)
 const retryingInitialLoad = ref(false)
 let socketSetupDone = false
@@ -774,61 +694,6 @@ watch(() => driverStore.workingLoads, (loads) => {
   if (!stillActive) setStatusLoad('')
 })
 
-// Client-side distance warning — computed from GPS position and the currently viewed load
-const FAR_THRESHOLD_KM = 500
-const clientDistanceWarning = computed(() => {
-  const pos = geo.lastPosition.value
-  const load = detailLoad.value
-  if (!pos || !load) return null
-  const headers = driverStore.headers.jobTracking
-  const statusCol = findCol(headers, /status/i)
-  const status = statusCol ? (load[statusCol] || '').trim().toLowerCase() : ''
-  const notPickedUp = /^(dispatched|assigned)$/i.test(status)
-  const inTransit = /^(in transit)$/i.test(status)
-  if (!notPickedUp && !inTransit) return null
-
-  const oLatCol = findCol(headers, /origin.*lat|pickup.*lat/i)
-  const oLngCol = findCol(headers, /origin.*l(on|ng)|pickup.*l(on|ng)/i)
-  const dLatCol = findCol(headers, /dest.*lat|drop.*lat|delivery.*lat/i)
-  const dLngCol = findCol(headers, /dest.*l(on|ng)|drop.*l(on|ng)|delivery.*l(on|ng)/i)
-  const loadIdCol = findCol(headers, /load.?id|job.?id/i)
-
-  let targetLat, targetLng, type
-  if (notPickedUp && oLatCol && oLngCol) {
-    targetLat = parseFloat(load[oLatCol])
-    targetLng = parseFloat(load[oLngCol])
-    type = 'far-from-pickup'
-  } else if (inTransit && dLatCol && dLngCol) {
-    targetLat = parseFloat(load[dLatCol])
-    targetLng = parseFloat(load[dLngCol])
-    type = 'far-from-delivery'
-  }
-  if (!targetLat || !targetLng || isNaN(targetLat) || isNaN(targetLng)) return null
-
-  // Haversine distance
-  const R = 6371
-  const toRad = d => d * Math.PI / 180
-  const dLat = toRad(targetLat - pos.latitude)
-  const dLng = toRad(targetLng - pos.longitude)
-  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(pos.latitude)) * Math.cos(toRad(targetLat)) * Math.sin(dLng/2)**2
-  const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
-
-  if (distKm < FAR_THRESHOLD_KM) return null
-  const distMiles = Math.round(distKm * 0.621371)
-  const loadId = loadIdCol ? load[loadIdCol] || '' : ''
-  return {
-    type,
-    distanceMiles: distMiles,
-    message: `You are ${distMiles.toLocaleString()} miles from ${type === 'far-from-pickup' ? 'pickup' : 'delivery'} (Load ${loadId}). Please verify your route.`,
-  }
-})
-
-const distanceWarningDismissed = ref(false)
-const activeDistanceWarning = computed(() => {
-  if (distanceWarningDismissed.value) return null
-  return clientDistanceWarning.value || geo.distanceWarning.value
-})
-
 const statusDocListRef = ref(null)
 
 function onStatusDocUploaded() {
@@ -974,7 +839,6 @@ async function confirmDecline() {
 
 function handleLoadSelect(load) {
   detailRowIndex.value = load._rowIndex
-  distanceWarningDismissed.value = false
 }
 
 function handleLoadChat({ loadId }) {
@@ -1164,29 +1028,6 @@ function onNewMessage(msg) {
   }
 }
 
-// Start GPS tracking when driver app loads, update loadId based on working loads
-watch(
-  () => driverStore.workingLoads,
-  (working) => {
-    if (working.length > 0) {
-      const firstLoadId = getLoadId(working[0])
-      if (!geo.tracking.value) {
-        geo.start(firstLoadId)
-      } else {
-        geo.updateLoadId(firstLoadId)
-      }
-    } else {
-      // No active loads — keep tracking but clear loadId
-      if (!geo.tracking.value) {
-        geo.start('')
-      } else {
-        geo.updateLoadId('')
-      }
-    }
-  },
-  { immediate: true }
-)
-
 // Keep selected status load in sync
 watch(
   () => driverStore.activeLoads,
@@ -1204,20 +1045,6 @@ watch(
   { immediate: true }
 )
 
-// Re-gate the app if the browser/OS revokes location permission mid-session.
-// Without this, useGeolocation would keep silently failing and the driver
-// would have no idea why their position stopped flowing to dispatch.
-watch(
-  () => geo.permissionState.value,
-  (state, prev) => {
-    if (prev === 'granted' && state === 'denied' && !isOnboarding.value) {
-      locationPermission.value = 'denied'
-      locationReason.value = 'Permission blocked in browser settings'
-      geo.stop()
-    }
-  }
-)
-
 // On socket reconnect, refetch driver data to reconcile any events
 // (load-assigned, load-cancelled, geofence-trigger) that fired while the
 // socket was down. Without this, missed events stay missed.
@@ -1230,21 +1057,6 @@ watch(
   }
 )
 
-async function verifyLocationPermission() {
-  checkingPermission.value = true
-  try {
-    const r = await geo.requestPermission()
-    locationPermission.value = r.state
-    locationReason.value = r.reason || ''
-  } finally {
-    checkingPermission.value = false
-  }
-}
-
-async function retryLocation() {
-  await verifyLocationPermission()
-}
-
 async function attemptInitialLoad() {
   try {
     await driverStore.loadData()
@@ -1254,12 +1066,6 @@ async function attemptInitialLoad() {
     initialLoadFailed.value = true
     toast.show('Failed to load data', 'error')
     return
-  }
-  // Enforce geolocation permission once per session for fully-onboarded
-  // drivers. Paperwork-stage drivers stay on the onboarding lock and don't
-  // need GPS yet.
-  if (!isOnboarding.value) {
-    await verifyLocationPermission()
   }
   // Socket.IO — only after the first successful load so we don't register
   // handlers that act on inconsistent state. Idempotent flag so retries
@@ -1297,7 +1103,6 @@ onUnmounted(() => {
   socket.off('load-assigned', onLoadAssigned)
   socket.off('load-cancelled', onLoadCancelled)
   socket.off('geofence-trigger', onGeofenceTrigger)
-  geo.stop()
   socket.disconnect()
 })
 </script>

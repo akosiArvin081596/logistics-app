@@ -1,3 +1,5 @@
+// Unused as of 2026-05-13 — phone GPS retired in favor of Routemate ELD.
+// Kept in source for one cycle in case a future map feature wants it.
 import { ref, onUnmounted } from 'vue'
 
 export function useGeolocation(api) {
