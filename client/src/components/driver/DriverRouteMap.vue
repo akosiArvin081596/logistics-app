@@ -224,13 +224,11 @@ function buildRoutePath(driverOverride = null) {
       bestT = t
     }
   }
-  const a = points[bestIdx]
-  const b = points[bestIdx + 1]
-  const splitPt = {
-    lat: a.latitude + bestT * (b.latitude - a.latitude),
-    lng: a.longitude + bestT * (b.longitude - a.longitude),
-  }
-  const path = [dp, splitPt]
+  // Skip the projected split-point — including it caused an L-shape whenever
+  // the driver pin sat laterally off the route line (GPS drift, road
+  // shoulder). Going driver → next-waypoint draws a single smooth diagonal
+  // instead of a 90° elbow back to the road.
+  const path = [dp]
   for (let i = bestIdx + 1; i < points.length; i++) {
     path.push({ lat: points[i].latitude, lng: points[i].longitude })
   }
@@ -339,7 +337,21 @@ async function fetchRoute(doFit = false) {
     if (data.route && data.route.length >= 2) routePoints.value = data.route
     distanceMiles.value = data.distanceMiles
     etaMinutes.value = data.etaMinutes
-    renderMarkers()
+    // Update the polyline paths in place instead of recreating them. Calling
+    // renderMarkers() here would destroy and rebuild routeLine + exRouteLine,
+    // restarting the dashed animation from offset 0 — the visual "refresh"
+    // the user saw every minute. Markers (origin/dest/driver) don't change
+    // between refetches so they don't need re-render either.
+    if (routeLine || exRouteLine) {
+      const newPath = buildRoutePath()
+      if (newPath) {
+        if (routeLine) routeLine.setPath(newPath)
+        if (exRouteLine) exRouteLine.setPath(newPath)
+      }
+    } else {
+      // Initial render — no existing polyline yet.
+      renderMarkers()
+    }
   } catch { /* silent */ }
 }
 

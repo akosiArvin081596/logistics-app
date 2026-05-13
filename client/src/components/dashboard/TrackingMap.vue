@@ -358,13 +358,11 @@ function buildSingleLoadPath(driverOverride = null) {
       bestT = t
     }
   }
-  const a = points[bestIdx]
-  const b = points[bestIdx + 1]
-  const splitPt = {
-    lat: a[0] + bestT * (b[0] - a[0]),
-    lng: a[1] + bestT * (b[1] - a[1]),
-  }
-  const path = [driverPos, splitPt]
+  // Skip the projected split-point — including it caused an L-shape whenever
+  // the driver pin sat laterally off the route line (GPS drift, road
+  // shoulder, parking lot edge). Going driver → next-waypoint draws a
+  // single smooth diagonal instead of a 90° elbow back to the road.
+  const path = [driverPos]
   for (let i = bestIdx + 1; i < points.length; i++) {
     path.push({ lat: points[i][0], lng: points[i][1] })
   }
