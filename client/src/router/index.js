@@ -161,6 +161,12 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    path: '/account/change-password',
+    name: 'change-password',
+    component: () => import('../views/ChangePasswordView.vue'),
+    meta: { noSidebar: true, forcedPasswordChange: true },
+  },
+  {
     path: '/',
     redirect: '/login',
   },
@@ -193,6 +199,16 @@ router.beforeEach(async (to) => {
   // Not authenticated
   if (!auth.isAuthenticated) {
     return { name: 'login' }
+  }
+
+  // Forced password change — drivers provisioned via /applications acceptance
+  // land here on first login. Everything else is blocked until they rotate
+  // the temp credential they got by email.
+  if (auth.user?.mustChangePassword && !to.meta.forcedPasswordChange) {
+    return { name: 'change-password' }
+  }
+  if (!auth.user?.mustChangePassword && to.meta.forcedPasswordChange) {
+    return { path: auth.roleHome }
   }
 
   // Role check

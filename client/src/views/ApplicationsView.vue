@@ -69,7 +69,13 @@
                   <Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8" @click="openDetail(app)">View</Button>
                   <a :href="'/api/applications/' + app.id + '/pdf'" target="_blank"><Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8">PDF</Button></a>
                   <Button v-if="app.status === 'Accepted' && app.onboarding_user_id && app.drug_test_result !== 'pass'" size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8 text-amber-600 border-amber-200 hover:bg-amber-50" @click="openDrugTest(app)">Drug Test</Button>
-                  <select class="text-[12px] border border-[#e2e4ea] rounded-md px-2 py-1 bg-white" :value="app.status" @change="updateStatus(app.id, $event.target.value)">
+                  <Badge v-if="app.onboarding_user_id" :class="statusBadge(app.status)" title="Locked — driver account already created">{{ app.status }}</Badge>
+                  <select
+                    v-else
+                    class="text-[12px] border border-[#e2e4ea] rounded-md px-2 py-1 bg-white"
+                    :value="app.status"
+                    @change="requestStatusChange(app, $event)"
+                  >
                     <option v-for="s in statuses" :key="s" :value="s">{{ s }}</option>
                   </select>
                   <button
@@ -118,12 +124,50 @@
       </DialogContent>
     </Dialog>
 
+    <!-- Status Confirm Dialog (gates Accepted / Rejected status changes) -->
+    <Dialog v-model:open="showStatusConfirm">
+      <DialogContent class="sm:max-w-[420px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden">
+        <DialogHeader
+          class="px-6 pt-5 pb-4 border-b border-[#e8edf2]"
+          :class="pendingStatus === 'Accepted' ? 'bg-gradient-to-b from-emerald-50/80 to-white' : 'bg-gradient-to-b from-amber-50/80 to-white'"
+        >
+          <DialogTitle class="text-[1.1rem] font-bold text-gray-900">
+            {{ pendingStatus === 'Accepted' ? 'Accept this applicant?' : 'Reject this applicant?' }}
+          </DialogTitle>
+          <DialogDescription class="text-[13px] text-gray-500">
+            {{
+              pendingStatus === 'Accepted'
+                ? 'A driver account will be created and a welcome email with login credentials will be sent.'
+                : 'The applicant will stay on file (you can still restore them later) but no email is sent automatically.'
+            }}
+          </DialogDescription>
+        </DialogHeader>
+        <div v-if="pendingApp" class="px-6 py-4">
+          <div class="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg">
+            <span class="text-[12px] text-gray-500 font-medium">Applicant</span>
+            <span class="text-[14px] font-semibold text-gray-900">{{ pendingApp.full_name }}</span>
+          </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 px-6 py-4 border-t border-[#e8edf2] bg-gray-50/40">
+          <Button variant="outline" class="rounded-md text-[13px] h-9" :disabled="statusSaving" @click="cancelStatusChange">Cancel</Button>
+          <Button
+            class="rounded-md text-[13px] h-9 text-white"
+            :class="pendingStatus === 'Accepted' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-amber-600 hover:bg-amber-700'"
+            :disabled="statusSaving"
+            @click="confirmStatusChange"
+          >
+            {{ statusSaving ? 'Saving...' : (pendingStatus === 'Accepted' ? 'Accept driver' : 'Reject') }}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+
     <!-- Credentials Dialog (shown after accepting an application) -->
-    <Dialog v-model:open="showCredentials">
+    <Dialog :open="showCredentials" @update:open="onCredentialsOpenChange">
       <DialogContent class="sm:max-w-[420px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden">
         <DialogHeader class="px-6 pt-5 pb-4 border-b border-[#e8edf2] bg-gradient-to-b from-emerald-50/80 to-white">
           <DialogTitle class="text-[1.1rem] font-bold text-gray-900">Driver Account Created</DialogTitle>
-          <DialogDescription class="text-[13px] text-gray-500">Share these credentials with the driver so they can log in and complete onboarding.</DialogDescription>
+          <DialogDescription class="text-[13px] text-gray-500">Copy these credentials and share them with the driver. The driver must change the password on first login.</DialogDescription>
         </DialogHeader>
         <div v-if="createdCredentials" class="px-6 py-5">
           <div class="space-y-3">
@@ -131,16 +175,29 @@
               <span class="text-[12px] text-gray-500 font-medium">Driver</span>
               <span class="text-[14px] font-bold text-gray-900">{{ createdCredentials.driverName }}</span>
             </div>
-            <div class="flex justify-between items-center py-2 px-3 bg-gray-50 rounded-lg">
+            <div class="flex justify-between items-center py-2 px-3 bg-gray-50 rounded-lg gap-2">
               <span class="text-[12px] text-gray-500 font-medium">Username</span>
-              <span class="text-[14px] font-mono font-bold text-blue-700">{{ createdCredentials.username }}</span>
+              <div class="flex items-center gap-2">
+                <span class="text-[14px] font-mono font-bold text-blue-700">{{ createdCredentials.username }}</span>
+                <Button size="sm" variant="outline" class="h-7 px-2 text-[11px] rounded-md" @click="copyCred('username')">
+                  {{ usernameCopied ? 'Copied' : 'Copy' }}
+                </Button>
+              </div>
             </div>
-            <div class="flex justify-between items-center py-2 px-3 bg-amber-50 rounded-lg border border-amber-100">
+            <div class="flex justify-between items-center py-2 px-3 bg-amber-50 rounded-lg border border-amber-100 gap-2">
               <span class="text-[12px] text-gray-500 font-medium">Temp Password</span>
-              <span class="text-[14px] font-mono font-bold text-amber-700">{{ createdCredentials.tempPassword }}</span>
+              <div class="flex items-center gap-2">
+                <span class="text-[14px] font-mono font-bold text-amber-700">{{ passwordCopied ? '••••••••' : createdCredentials.tempPassword }}</span>
+                <Button size="sm" variant="outline" class="h-7 px-2 text-[11px] rounded-md" :disabled="passwordCopied" @click="copyCred('password')">
+                  {{ passwordCopied ? 'Copied' : 'Copy' }}
+                </Button>
+              </div>
             </div>
           </div>
-          <p class="text-[11px] text-gray-400 mt-4 text-center">The driver can now log in to sign onboarding documents.</p>
+          <p class="text-[11px] text-gray-400 mt-4 text-center">The password is hidden after copying. Close this dialog when you're done.</p>
+        </div>
+        <div class="flex justify-end gap-2 px-6 py-4 border-t border-[#e8edf2] bg-gray-50/40">
+          <Button variant="outline" class="rounded-md text-[13px] h-9" @click="closeCredentials">Done</Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -282,17 +339,64 @@ async function load() {
 
 const showCredentials = ref(false)
 const createdCredentials = ref(null)
+const usernameCopied = ref(false)
+const passwordCopied = ref(false)
 const showDeleteConfirm = ref(false)
 const deleteTarget = ref(null)
 const deleting = ref(false)
+const showStatusConfirm = ref(false)
+const pendingApp = ref(null)
+const pendingStatus = ref('')
+const statusSaving = ref(false)
+
+// Bounce the <select> back to the row's current status when the user picks
+// Accepted/Rejected; we only persist after the confirm dialog. New/Reviewed
+// transitions are non-destructive and go straight through.
+function requestStatusChange(app, event) {
+  const next = event.target.value
+  if (next === app.status) return
+  if (next === 'Accepted' || next === 'Rejected') {
+    pendingApp.value = app
+    pendingStatus.value = next
+    showStatusConfirm.value = true
+    event.target.value = app.status
+    return
+  }
+  updateStatus(app.id, next)
+}
+
+function cancelStatusChange() {
+  showStatusConfirm.value = false
+  pendingApp.value = null
+  pendingStatus.value = ''
+}
+
+async function confirmStatusChange() {
+  if (!pendingApp.value || !pendingStatus.value) return
+  statusSaving.value = true
+  try {
+    await updateStatus(pendingApp.value.id, pendingStatus.value)
+  } finally {
+    statusSaving.value = false
+    showStatusConfirm.value = false
+    pendingApp.value = null
+    pendingStatus.value = ''
+  }
+}
 
 async function updateStatus(id, status) {
   try {
     const result = await api.put(`/api/applications/${id}/status`, { status })
     if (result.accountCreated && result.credentials) {
       createdCredentials.value = result.credentials
+      usernameCopied.value = false
+      passwordCopied.value = false
       showCredentials.value = true
       toast('Application accepted — driver account created', 'success')
+      // Reflect the new account link so the row locks immediately and the
+      // dropdown becomes a static badge without waiting for the next refresh.
+      const row = applications.value.find(a => a.id === id)
+      if (row) row.onboarding_user_id = result.credentials.userId
     } else {
       toast(`Status updated to ${status}`, 'success')
     }
@@ -300,6 +404,38 @@ async function updateStatus(id, status) {
     if (row) row.status = status
   } catch (err) {
     toast(err.message, 'error')
+  }
+}
+
+async function copyCred(kind) {
+  if (!createdCredentials.value) return
+  const value = kind === 'password' ? createdCredentials.value.tempPassword : createdCredentials.value.username
+  try {
+    await navigator.clipboard.writeText(value)
+    if (kind === 'password') {
+      passwordCopied.value = true
+      toast('Password copied to clipboard', 'success')
+    } else {
+      usernameCopied.value = true
+      toast('Username copied to clipboard', 'success')
+    }
+  } catch {
+    toast('Could not copy to clipboard', 'error')
+  }
+}
+
+function closeCredentials() {
+  showCredentials.value = false
+}
+
+// Wipe the credentials ref once the dialog has fully closed so the temp
+// password does not linger in component state between accepts.
+function onCredentialsOpenChange(open) {
+  showCredentials.value = open
+  if (!open) {
+    createdCredentials.value = null
+    usernameCopied.value = false
+    passwordCopied.value = false
   }
 }
 

@@ -405,6 +405,7 @@ function goToStep(i) {
 function validate(s) {
   if (s === 0) {
     if (!form.first_name || !form.last_name || !form.email || !form.phone || !form.dob || !form.address || !form.city || !form.state || !form.zip || !form.ssn || !form.drivers_license || !form.position || !form.hazmat) return 'Please fill in all required fields in this section.'
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) return 'Please enter a valid email address.'
     if (!form.cdl_front || !form.cdl_back || !form.medical_card) return 'Please upload CDL (front and back) and medical card images.'
   }
   if (s === 1) {

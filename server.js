@@ -407,6 +407,11 @@ try { db.exec("ALTER TABLE messages ADD COLUMN asset_ref TEXT DEFAULT ''"); } ca
 // Migration: add rating to users (0-5 stars, Super Admin rates drivers)
 try { db.exec("ALTER TABLE users ADD COLUMN rating REAL DEFAULT 0"); } catch {}
 
+// Migration: force first-login password change for auto-provisioned driver accounts.
+// Set to 1 when a Super Admin accepts a driver application; auth flow blocks
+// every other route until the driver rotates the temp password.
+try { db.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0"); } catch {}
+
 // Per-load driver ratings (1-5 stars, one rating per load)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS load_ratings (
@@ -444,6 +449,19 @@ function logAudit(req, action, entity, entityId, details) {
 		db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
 			.run(new Date().toISOString(), user.id || 0, user.username || 'system', user.role || 'system', action, entity, String(entityId || ''), details || '');
 	} catch (err) { console.error("Audit log error:", err.message); }
+}
+
+// Escape applicant-controlled text before interpolating into HTML email bodies.
+// Submission and acceptance emails embed full_name, address, phone, etc.; without
+// this, a name like `<img src=x onerror=...>` would render in the admin's mail
+// client. Used by the /api/public/apply and /api/applications/:id/status flows.
+function escapeHtml(s) {
+	return String(s ?? "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
 }
 
 // Investors table (links investor name to a carrier in the Google Sheet)
@@ -2542,11 +2560,21 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 		if (!full_name || !email || !phone || !dob || !address || !ssn || !drivers_license || !position || !experience || !has_cdl || !work_authorized || !felony_convicted || !accident_history || !signature) {
 			return res.status(400).json({ error: "Please fill in all required fields." });
 		}
+		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email))) {
+			return res.status(400).json({ error: "Please provide a valid email address." });
+		}
+		const duplicate = db.prepare(
+			"SELECT id FROM job_applications WHERE LOWER(email) = LOWER(?) AND deleted_at IS NULL"
+		).get(email);
+		if (duplicate) {
+			return res.status(409).json({ error: "An application with this email is already on file. Contact info@logisx.com if you need to update it." });
+		}
 		const result = db.prepare(`
 			INSERT INTO job_applications (full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation, accident_history, accident_description, traffic_citations, certifications, availability, skills, reference_info, additional_info, signature, signature_date, cdl_front, cdl_back, medical_card, city, state, zip, cell, dot, mc, hazmat)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(full_name, email, phone, dob, address, ssn, drivers_license, position, experience, has_cdl, work_authorized, felony_convicted, felony_explanation || '', accident_history, accident_description || '', traffic_citations || '', certifications || '', JSON.stringify(availability || []), skills, typeof reference_info === 'string' ? reference_info : JSON.stringify(reference_info || ''), additional_info || '', signature, signature_date || new Date().toLocaleDateString('en-US'), cdl_front || '', cdl_back || '', medical_card || '', city || '', state || '', zip || '', cell || '', dot || '', mc || '', hazmat || '');
 		res.json({ success: true, id: result.lastInsertRowid });
+		logAudit({ session: { user: { username: "public", role: "public" } } }, "submit_application", "application", result.lastInsertRowid, `Submitted by ${full_name} (${email})`);
 
 		// Send confirmation email to applicant (branded HTML)
 		const applicantDriverHtml = `
@@ -2556,7 +2584,7 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 			</div>
 			<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none">
 				<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Onboarding Status: Documents Received!</h2>
-				<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${full_name}</b>,</p>
+				<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${escapeHtml(full_name)}</b>,</p>
 				<p style="margin:0 0 20px;line-height:1.6;color:#334155">Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
 
 				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 24px">
@@ -2606,20 +2634,20 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 				<p style="margin:0 0 20px;line-height:1.6;color:#334155">A new driver application has been submitted and is ready for review.</p>
 				<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
 					<table style="width:100%;border-collapse:collapse;font-size:14px">
-						<tr><td style="padding:5px 0;color:#64748b;width:140px">Name</td><td style="padding:5px 0;font-weight:600">${full_name}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${email}">${email}</a></td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${phone}</td></tr>
-						${cell ? `<tr><td style="padding:5px 0;color:#64748b">Cell</td><td style="padding:5px 0">${cell}</td></tr>` : ''}
-						<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${position}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Experience</td><td style="padding:5px 0">${experience} years</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">CDL</td><td style="padding:5px 0">${has_cdl}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Hazmat</td><td style="padding:5px 0">${hazmat || 'No'}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Work Authorized</td><td style="padding:5px 0">${work_authorized}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Felony</td><td style="padding:5px 0">${felony_convicted}</td></tr>
-						<tr><td style="padding:5px 0;color:#64748b">Address</td><td style="padding:5px 0">${address}</td></tr>
-						${(city || state || zip) ? `<tr><td style="padding:5px 0;color:#64748b">City / State / ZIP</td><td style="padding:5px 0">${[city, state].filter(Boolean).join(', ')}${zip ? ' ' + zip : ''}</td></tr>` : ''}
-						${dot ? `<tr><td style="padding:5px 0;color:#64748b">DOT #</td><td style="padding:5px 0">${dot}</td></tr>` : ''}
-						${mc ? `<tr><td style="padding:5px 0;color:#64748b">MC #</td><td style="padding:5px 0">${mc}</td></tr>` : ''}
+						<tr><td style="padding:5px 0;color:#64748b;width:140px">Name</td><td style="padding:5px 0;font-weight:600">${escapeHtml(full_name)}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${escapeHtml(phone)}</td></tr>
+						${cell ? `<tr><td style="padding:5px 0;color:#64748b">Cell</td><td style="padding:5px 0">${escapeHtml(cell)}</td></tr>` : ''}
+						<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${escapeHtml(position)}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Experience</td><td style="padding:5px 0">${escapeHtml(experience)} years</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">CDL</td><td style="padding:5px 0">${escapeHtml(has_cdl)}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Hazmat</td><td style="padding:5px 0">${escapeHtml(hazmat || 'No')}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Work Authorized</td><td style="padding:5px 0">${escapeHtml(work_authorized)}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Felony</td><td style="padding:5px 0">${escapeHtml(felony_convicted)}</td></tr>
+						<tr><td style="padding:5px 0;color:#64748b">Address</td><td style="padding:5px 0">${escapeHtml(address)}</td></tr>
+						${(city || state || zip) ? `<tr><td style="padding:5px 0;color:#64748b">City / State / ZIP</td><td style="padding:5px 0">${escapeHtml([city, state].filter(Boolean).join(', '))}${zip ? ' ' + escapeHtml(zip) : ''}</td></tr>` : ''}
+						${dot ? `<tr><td style="padding:5px 0;color:#64748b">DOT #</td><td style="padding:5px 0">${escapeHtml(dot)}</td></tr>` : ''}
+						${mc ? `<tr><td style="padding:5px 0;color:#64748b">MC #</td><td style="padding:5px 0">${escapeHtml(mc)}</td></tr>` : ''}
 					</table>
 				</div>
 				<div style="text-align:center;margin:24px 0">
@@ -2632,7 +2660,8 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 		</div>`;
 		sendEmail("info@logisx.com", `New Driver Application: ${full_name}`, adminDriverHtml);
 	} catch (err) {
-		res.status(500).json({ error: err.message });
+		console.error("apply submission failed:", err);
+		res.status(500).json({ error: "Submission failed. Please try again." });
 	}
 });
 
@@ -2669,15 +2698,18 @@ app.delete("/api/applications/:id", requireRole("Super Admin"), (req, res) => {
 		if (!Number.isInteger(id) || id <= 0) {
 			return res.status(400).json({ error: "Invalid application id" });
 		}
+		const row = db.prepare("SELECT full_name FROM job_applications WHERE id = ?").get(id);
 		const result = db.prepare(
 			"UPDATE job_applications SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
 		).run(id);
 		if (result.changes === 0) {
 			return res.status(404).json({ error: "Application not found or already deleted" });
 		}
+		logAudit(req, "soft_delete_application", "application", id, `Removed ${row?.full_name || id} from list`);
 		res.json({ success: true });
 	} catch (err) {
-		res.status(500).json({ error: err.message });
+		console.error("application soft-delete failed:", err);
+		res.status(500).json({ error: "Delete failed. Please try again." });
 	}
 });
 
@@ -2688,15 +2720,18 @@ app.post("/api/applications/:id/restore", requireRole("Super Admin"), (req, res)
 		if (!Number.isInteger(id) || id <= 0) {
 			return res.status(400).json({ error: "Invalid application id" });
 		}
+		const row = db.prepare("SELECT full_name FROM job_applications WHERE id = ?").get(id);
 		const result = db.prepare(
 			"UPDATE job_applications SET deleted_at = NULL WHERE id = ?"
 		).run(id);
 		if (result.changes === 0) {
 			return res.status(404).json({ error: "Application not found" });
 		}
+		logAudit(req, "restore_application", "application", id, `Restored ${row?.full_name || id} from soft-delete`);
 		res.json({ success: true });
 	} catch (err) {
-		res.status(500).json({ error: err.message });
+		console.error("application restore failed:", err);
+		res.status(500).json({ error: "Restore failed. Please try again." });
 	}
 });
 
@@ -2752,9 +2787,11 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			const tempPassword = crypto.randomBytes(4).toString("hex"); // 8 char hex string
 			const hash = await bcrypt.hash(tempPassword, 10);
 
-			// Create user (do NOT sync to Carrier Database yet — that happens at full onboarding)
+			// Create user (do NOT sync to Carrier Database yet — that happens at full onboarding).
+			// must_change_password = 1 forces the driver onto the change-password screen
+			// at first login; the existing /api/auth/change-password endpoint clears it.
 			const userResult = db.prepare(
-				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, 'Driver', ?, ?, ?, '')"
+				"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Driver', ?, ?, ?, '', 1)"
 			).run(username, hash, fullName, application.email || "", fullName);
 			const userId = userResult.lastInsertRowid;
 
@@ -2788,14 +2825,14 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 				</div>
 				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none">
 					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Welcome to LogisX!</h2>
-					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${fullName}</b>,</p>
+					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Hi <b>${escapeHtml(fullName)}</b>,</p>
 					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Congratulations! Your driver application has been <b style="color:#16a34a">approved</b>. Your account is ready — please log in and complete your onboarding documents to get on the road.</p>
 
 					<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px;margin:0 0 20px">
 						<div style="font-size:12px;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Your Login Credentials</div>
 						<table style="width:100%;border-collapse:collapse;font-size:14px">
-							<tr><td style="padding:6px 0;color:#64748b;width:130px">Username</td><td style="padding:6px 0;font-weight:700;color:#0f172a;font-family:monospace">${username}</td></tr>
-							<tr><td style="padding:6px 0;color:#64748b">Temporary Password</td><td style="padding:6px 0;font-weight:700;color:#d97706;font-family:monospace">${tempPassword}</td></tr>
+							<tr><td style="padding:6px 0;color:#64748b;width:130px">Username</td><td style="padding:6px 0;font-weight:700;color:#0f172a;font-family:monospace">${escapeHtml(username)}</td></tr>
+							<tr><td style="padding:6px 0;color:#64748b">Temporary Password</td><td style="padding:6px 0;font-weight:700;color:#d97706;font-family:monospace">${escapeHtml(tempPassword)}</td></tr>
 						</table>
 					</div>
 
@@ -2832,17 +2869,17 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 				</div>
 				<div style="padding:32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
 					<h2 style="margin:0 0 16px;font-size:20px;color:#0f172a">Driver Application Accepted</h2>
-					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Driver <b>${fullName}</b> has been accepted and their account has been created. They will now proceed to the onboarding phase.</p>
+					<p style="margin:0 0 20px;line-height:1.6;color:#334155">Driver <b>${escapeHtml(fullName)}</b> has been accepted and their account has been created. They will now proceed to the onboarding phase.</p>
 
 					<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:0 0 20px">
 						<table style="width:100%;border-collapse:collapse;font-size:14px">
-							<tr><td style="padding:5px 0;color:#64748b;width:140px">Driver Name</td><td style="padding:5px 0;font-weight:600">${fullName}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${username}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${application.email}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${application.phone}</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${application.position}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b;width:140px">Driver Name</td><td style="padding:5px 0;font-weight:600">${escapeHtml(fullName)}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Username</td><td style="padding:5px 0;font-weight:600;font-family:monospace">${escapeHtml(username)}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0">${escapeHtml(application.email)}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${escapeHtml(application.phone)}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Position</td><td style="padding:5px 0">${escapeHtml(application.position)}</td></tr>
 							<tr><td style="padding:5px 0;color:#64748b">Onboarding Status</td><td style="padding:5px 0;font-weight:600;color:#d97706">Documents Pending (5 docs)</td></tr>
-							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${req.session.user.username}</td></tr>
+							<tr><td style="padding:5px 0;color:#64748b">Accepted By</td><td style="padding:5px 0">${escapeHtml(req.session.user.username)}</td></tr>
 						</table>
 					</div>
 
@@ -2858,9 +2895,14 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			return;
 		}
 
+		// Non-Accepted transitions (Reviewed, Rejected, or back to New) also deserve
+		// an audit row. The Accepted branch above already logs and returns.
+		logAudit(req, `status_${String(status).toLowerCase()}_application`, "application", appId, `Set status to ${status}`);
+		notifyChange("applications");
 		res.json({ success: true });
 	} catch (err) {
-		res.status(500).json({ error: err.message });
+		console.error("application status update failed:", err);
+		res.status(500).json({ error: "Status update failed. Please try again." });
 	}
 });
 
@@ -5426,6 +5468,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			email: user.email || "",
 			fullName: user.full_name || "",
 			companyName: user.company_name || "",
+			mustChangePassword: !!user.must_change_password,
 		};
 
 		res.json({
@@ -5437,6 +5480,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 				driverName: user.driver_name || "",
 				companyName: user.company_name || "",
 				fullName: user.full_name || "",
+				mustChangePassword: !!user.must_change_password,
 			},
 		});
 	} catch (error) {
@@ -5507,7 +5551,8 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		const valid = await bcrypt.compare(currentPassword, row.password_hash);
 		if (!valid) return res.status(401).json({ error: "Current password is incorrect" });
 		const hash = await bcrypt.hash(newPassword, 10);
-		db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hash, userId);
+		db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?").run(hash, userId);
+		if (req.session.user) req.session.user.mustChangePassword = false;
 
 		// Invalidate every other session for this user. Connect-style session
 		// stores serialize the session as JSON in the `sess` column, so we use
