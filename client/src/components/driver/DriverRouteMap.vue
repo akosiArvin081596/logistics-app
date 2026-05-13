@@ -359,12 +359,13 @@ let lastRoutePos = null
 let lastRouteTime = 0
 let prevDriverPos = null
 
-// Smooth marker tween via requestAnimationFrame. The pin slides smoothly
-// while a SINGLE mapObj.panTo(to) at the start kicks Google's built-in
-// pan animation in parallel — pin glides, camera slides, both finish
-// around the same time. That's the Google-Maps-Navigation camera-follow
-// feel. The previous "map refreshing" effect came from calling panTo per
-// frame (~60×/s); one call per ping is smooth.
+// Smooth marker tween via requestAnimationFrame. The pin slides across a
+// *static* map; the polyline first-point follows the pin frame-by-frame
+// so the route stays glued to it without a visible gap during the tween.
+// We do NOT call mapObj.panTo() — running it in parallel with the
+// per-frame setPath causes the polyline to visually disappear (Google
+// batches overlay rendering during camera animations). mapObj kept in the
+// signature for call-site compatibility; pin-click still re-centers.
 function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000) {
   if (!marker || !from || !to) return
   // No-op when the polled position matches what we last drew (within ~1 m).
@@ -372,7 +373,7 @@ function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000)
   const dLat = (to.lat - from.lat)
   const dLng = (to.lng - from.lng)
   if ((dLat * dLat + dLng * dLng) < 1e-10) return
-  if (mapObj) mapObj.panTo(to)
+  void mapObj
   const start = performance.now()
   function step(now) {
     const t = Math.min((now - start) / duration, 1)
