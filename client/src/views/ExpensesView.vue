@@ -4,18 +4,16 @@
       <h2>Expenses</h2>
     </div>
     <div class="expenses-fill">
-      <ExpensesTab :key="refreshKey" />
+      <ExpensesTab />
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+// Socket refresh lives inside ExpensesTab itself — keying this child on a
+// counter would unmount + remount on every `expenses:changed` event,
+// destroying the open detail modal mid-review.
 import ExpensesTab from '../components/dashboard/ExpensesTab.vue'
-import { useSocketRefresh } from '../composables/useSocketRefresh'
-
-const refreshKey = ref(0)
-useSocketRefresh('expenses:changed', () => { refreshKey.value++ })
 </script>
 
 <style scoped>

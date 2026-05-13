@@ -529,6 +529,7 @@ import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useAuthStore } from '../../stores/auth'
 import { useViewport } from '../../composables/useViewport'
+import { useSocketRefresh } from '../../composables/useSocketRefresh'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -831,6 +832,23 @@ async function loadAll() {
   allLoading.value = false
 }
 
+// Socket-driven background refresh. Mirrors loadAll's data fetch but skips
+// the allLoading skeleton flash — used when the server emits expenses:changed
+// (own actions or another tab). The detail modal stays open because
+// selectedExpense resolves by id against the freshly-swapped array.
+async function quietReload() {
+  try {
+    const params = new URLSearchParams()
+    if (allFilter.driver) params.set('driver', allFilter.driver)
+    if (allFilter.type) params.set('type', allFilter.type)
+    if (allFilter.status) params.set('status', allFilter.status)
+    if (allFilter.truck) params.set('truck', allFilter.truck)
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    const data = await api.get(`/api/expenses/all${qs}`)
+    allExpenses.value = data.expenses || []
+  } catch { /* empty — leave existing data in place */ }
+}
+
 async function setStatus(id, status) {
   try {
     await api.put(`/api/expenses/${id}/status`, { status })
@@ -956,6 +974,11 @@ async function markFeePaid(id) {
     toast('Failed to update fee', 'error')
   }
 }
+
+// Refresh data quietly when the server emits expenses:changed (this tab's
+// own approvals, or another admin's actions). NOT a key-remount — the open
+// detail modal must survive.
+useSocketRefresh('expenses:changed', quietReload)
 
 onMounted(() => {
   loadAll()
