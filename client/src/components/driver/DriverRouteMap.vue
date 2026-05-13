@@ -251,12 +251,30 @@ function renderMarkers() {
     destMarker = new google.maps.marker.AdvancedMarkerElement({ position: destLatLng.value, map, content: createDotPin('#dc2626', 14), title: 'Drop-off' })
   }
   if (driverLatLng.value) {
-    driverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map, content: createDotPin('#2563eb', 16), title: props.publicMode ? 'Driver' : (driverName.value || 'Driver') })
-    // Click the pin → snap to max zoom centered on the truck.
-    driverMarker.addEventListener('gmp-click', () => {
-      const pos = driverMarker.position
-      if (map && pos) { map.setCenter(pos); map.setZoom(20) }
+    const content = createDotPin('#2563eb', 16)
+    driverMarker = new google.maps.marker.AdvancedMarkerElement({
+      position: driverLatLng.value,
+      map,
+      content,
+      title: props.publicMode ? 'Driver' : (driverName.value || 'Driver'),
+      gmpClickable: true,
     })
+    // Click the pin → snap to max zoom centered on the truck. Attach to both
+    // the marker (gmp-click) and the underlying DOM element (click) — the
+    // marker-level event needs gmpClickable, and the DOM-level event fires
+    // even when the polyline above intercepts the marker event.
+    const zoomToDriver = () => {
+      if (!map) return
+      const pos = driverMarker.position
+      if (!pos) return
+      const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat
+      const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng
+      if (!isFinite(lat) || !isFinite(lng)) return
+      map.setCenter({ lat, lng })
+      map.setZoom(20)
+    }
+    driverMarker.addEventListener('gmp-click', zoomToDriver)
+    content.addEventListener('click', (e) => { e.stopPropagation(); zoomToDriver() })
   }
 
   const path = buildRoutePath()
@@ -265,6 +283,7 @@ function renderMarkers() {
       path,
       strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 5,
       map,
+      clickable: false,
       icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
     })
     routeAnim = animatePolyline(routeLine)
@@ -390,11 +409,26 @@ function renderExpandedMap() {
     exDestMarker = new google.maps.marker.AdvancedMarkerElement({ position: destLatLng.value, map: expandedMap, content: createDotPin('#dc2626', 14), title: 'Drop-off' })
   }
   if (driverLatLng.value) {
-    exDriverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map: expandedMap, content: createDotPin('#2563eb', 16), title: props.publicMode ? 'Driver' : (driverName.value || 'Driver') })
-    exDriverMarker.addEventListener('gmp-click', () => {
-      const pos = exDriverMarker.position
-      if (expandedMap && pos) { expandedMap.setCenter(pos); expandedMap.setZoom(20) }
+    const exContent = createDotPin('#2563eb', 16)
+    exDriverMarker = new google.maps.marker.AdvancedMarkerElement({
+      position: driverLatLng.value,
+      map: expandedMap,
+      content: exContent,
+      title: props.publicMode ? 'Driver' : (driverName.value || 'Driver'),
+      gmpClickable: true,
     })
+    const zoomToExDriver = () => {
+      if (!expandedMap) return
+      const pos = exDriverMarker.position
+      if (!pos) return
+      const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat
+      const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng
+      if (!isFinite(lat) || !isFinite(lng)) return
+      expandedMap.setCenter({ lat, lng })
+      expandedMap.setZoom(20)
+    }
+    exDriverMarker.addEventListener('gmp-click', zoomToExDriver)
+    exContent.addEventListener('click', (e) => { e.stopPropagation(); zoomToExDriver() })
   }
   const exPath = buildRoutePath()
   if (exPath && exPath.length >= 2) {
@@ -402,6 +436,7 @@ function renderExpandedMap() {
       path: exPath,
       strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 5,
       map: expandedMap,
+      clickable: false,
       icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
     })
     exRouteAnim = animatePolyline(exRouteLine)

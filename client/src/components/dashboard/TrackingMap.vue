@@ -390,6 +390,7 @@ function renderSingleLoadRoute() {
       strokeColor: '#ffffff',
       strokeOpacity: 0.9,
       strokeWeight: 5,
+      clickable: false,
       icons: [{
         icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 },
         offset: '0',
@@ -511,6 +512,7 @@ function syncDriverMarkers() {
         content: createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving }),
         title: loc.driver,
         zIndex: 1000,
+        gmpClickable: true,
       })
       // InfoWindow for the driver marker. Clicking also snaps the map to a
       // close zoom centered on the pin so the user can inspect what the
