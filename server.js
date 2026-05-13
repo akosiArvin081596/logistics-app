@@ -13467,9 +13467,9 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 	}
 });
 
-// GET /api/compliance/ifta — Calculate miles per state.
-// Source priority per driver: Routemate ELD telemetry (when their truck is linked
-// and has points in window), else fall back to phone-GPS from driver_locations.
+// GET /api/compliance/ifta — Calculate miles per state from Routemate ELD telemetry only.
+// Drivers are attributed via truck_assignments active at each point's timestamp.
+// Phone-GPS is discontinued as a source.
 app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { start, end } = req.query;
@@ -13482,81 +13482,58 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 		const MAX_HOP_MILES = 50;
 		const M_TO_MI = 0.000621371;
 
-		// 1) ELD points — telemetry joined to linked trucks; resolve driver via truck_assignments active at point time
-		let eldPoints = [];
-		try {
-			const eldRows = db.prepare(
-				`SELECT rt.latitude, rt.longitude, rt.location_date_ms, t.id AS truck_id
-				 FROM routemate_telemetry rt
-				 JOIN trucks t ON t.routemate_vehicle_id = rt.routemate_vehicle_id
-				 WHERE rt.location_date_ms >= ? AND rt.location_date_ms <= ?
-				   AND t.routemate_vehicle_id != ''
-				 ORDER BY t.id, rt.location_date_ms ASC`
-			).all(startMs, endMs);
+		const eldRows = db.prepare(
+			`SELECT rt.latitude, rt.longitude, rt.location_date_ms, t.id AS truck_id
+			 FROM routemate_telemetry rt
+			 JOIN trucks t ON t.routemate_vehicle_id = rt.routemate_vehicle_id
+			 WHERE rt.location_date_ms >= ? AND rt.location_date_ms <= ?
+			   AND t.routemate_vehicle_id != ''
+			 ORDER BY t.id, rt.location_date_ms ASC`
+		).all(startMs, endMs);
 
-			if (eldRows.length > 0) {
-				const truckIds = [...new Set(eldRows.map((r) => r.truck_id))];
-				const placeholders = truckIds.map(() => "?").join(",");
-				const assignmentRows = db.prepare(
-					`SELECT truck_id, driver_name, start_date, end_date
-					 FROM truck_assignments
-					 WHERE truck_id IN (${placeholders})
-					 ORDER BY truck_id, start_date ASC`
-				).all(...truckIds);
-				const assignmentsByTruck = {};
-				for (const a of assignmentRows) {
-					if (!assignmentsByTruck[a.truck_id]) assignmentsByTruck[a.truck_id] = [];
-					assignmentsByTruck[a.truck_id].push(a);
-				}
-				const driverAt = (truckId, isoTs) => {
-					const list = assignmentsByTruck[truckId] || [];
-					for (const a of list) {
-						const startOk = a.start_date && a.start_date <= isoTs;
-						const endOk = !a.end_date || a.end_date === "" || a.end_date >= isoTs;
-						if (startOk && endOk) return a.driver_name;
-					}
-					return null;
-				};
-
-				for (const r of eldRows) {
-					const isoTs = new Date(r.location_date_ms).toISOString();
-					const driver = driverAt(r.truck_id, isoTs);
-					if (!driver) continue;
-					eldPoints.push({ driver, latitude: r.latitude, longitude: r.longitude, ts: r.location_date_ms, source: "eld" });
-				}
+		const eldPoints = [];
+		if (eldRows.length > 0) {
+			const truckIds = [...new Set(eldRows.map((r) => r.truck_id))];
+			const placeholders = truckIds.map(() => "?").join(",");
+			const assignmentRows = db.prepare(
+				`SELECT truck_id, driver_name, start_date, end_date
+				 FROM truck_assignments
+				 WHERE truck_id IN (${placeholders})
+				 ORDER BY truck_id, start_date ASC`
+			).all(...truckIds);
+			const assignmentsByTruck = {};
+			for (const a of assignmentRows) {
+				if (!assignmentsByTruck[a.truck_id]) assignmentsByTruck[a.truck_id] = [];
+				assignmentsByTruck[a.truck_id].push(a);
 			}
-		} catch (eldErr) {
-			console.error("IFTA: Routemate query failed, continuing with phone-GPS only:", eldErr.message);
-			eldPoints = [];
+			const driverAt = (truckId, isoTs) => {
+				const list = assignmentsByTruck[truckId] || [];
+				for (const a of list) {
+					const startOk = a.start_date && a.start_date <= isoTs;
+					const endOk = !a.end_date || a.end_date === "" || a.end_date >= isoTs;
+					if (startOk && endOk) return a.driver_name;
+				}
+				return null;
+			};
+
+			for (const r of eldRows) {
+				const isoTs = new Date(r.location_date_ms).toISOString();
+				const driver = driverAt(r.truck_id, isoTs);
+				if (!driver) continue;
+				eldPoints.push({ driver, latitude: r.latitude, longitude: r.longitude, ts: r.location_date_ms });
+			}
 		}
 
-		// 2) Phone-GPS — only for drivers NOT covered by ELD in this window
-		const eldDrivers = new Set(eldPoints.map((p) => p.driver));
-		const phoneRows = db.prepare(
-			`SELECT driver, latitude, longitude, timestamp
-			 FROM driver_locations
-			 WHERE timestamp >= ? AND timestamp <= ?
-			 ORDER BY driver, timestamp ASC`
-		).all(startDate, endDate);
-		const phonePoints = phoneRows
-			.filter((p) => !eldDrivers.has(p.driver))
-			.map((p) => ({ driver: p.driver, latitude: p.latitude, longitude: p.longitude, ts: new Date(p.timestamp).getTime(), source: "phone" }));
-
-		// 3) Aggregate — same midpoint state classifier, same 30-min gap + 50-mile-hop filters
-		const allPoints = [...eldPoints, ...phonePoints];
 		const byDriver = {};
-		for (const p of allPoints) {
+		for (const p of eldPoints) {
 			if (!byDriver[p.driver]) byDriver[p.driver] = [];
 			byDriver[p.driver].push(p);
 		}
 
 		const stateMileage = {};
 		let totalMiles = 0;
-		const driverSource = {};
-
-		for (const [driver, pts] of Object.entries(byDriver)) {
+		for (const pts of Object.values(byDriver)) {
 			pts.sort((a, b) => a.ts - b.ts);
-			driverSource[driver] = pts[0].source;
 			for (let i = 1; i < pts.length; i++) {
 				const prev = pts[i - 1];
 				const curr = pts[i];
@@ -13570,10 +13547,9 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 				const midLat = (prev.latitude + curr.latitude) / 2;
 				const midLng = (prev.longitude + curr.longitude) / 2;
 				const state = getStateFromCoords(midLat, midLng);
-				if (!stateMileage[state]) stateMileage[state] = { miles: 0, drivers: new Set(), sources: new Set() };
+				if (!stateMileage[state]) stateMileage[state] = { miles: 0, drivers: new Set() };
 				stateMileage[state].miles += miles;
-				stateMileage[state].drivers.add(driver);
-				stateMileage[state].sources.add(curr.source);
+				stateMileage[state].drivers.add(pts[0].driver);
 				totalMiles += miles;
 			}
 		}
@@ -13584,15 +13560,8 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 				miles: Math.round(d.miles),
 				pct: totalMiles > 0 ? Math.round((d.miles / totalMiles) * 100) : 0,
 				drivers: [...d.drivers],
-				source: d.sources.size === 1 ? [...d.sources][0] : "mixed",
 			}))
 			.sort((a, b) => b.miles - a.miles);
-
-		const sources = { eld: 0, phone: 0 };
-		for (const s of Object.values(driverSource)) {
-			if (s === "eld") sources.eld += 1;
-			else if (s === "phone") sources.phone += 1;
-		}
 
 		res.json({
 			totalMiles: Math.round(totalMiles),
@@ -13600,7 +13569,6 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 			endDate,
 			states: stateData,
 			driverCount: Object.keys(byDriver).length,
-			sources,
 		});
 	} catch (error) {
 		console.error("Error calculating IFTA mileage:", error.message);

@@ -422,7 +422,7 @@
         <!-- IFTA Mileage -->
         <div class="metrics-grid">
           <div class="metric-card">
-            <div class="metric-label">Total Miles (ELD + GPS)</div>
+            <div class="metric-label">Total Miles (ELD)</div>
             <div class="metric-value">{{ ifta.totalMiles?.toLocaleString() || 0 }}</div>
           </div>
           <div class="metric-card">
@@ -432,9 +432,6 @@
           <div class="metric-card">
             <div class="metric-label">Active Drivers</div>
             <div class="metric-value">{{ ifta.driverCount || 0 }}</div>
-            <div v-if="ifta.sources" class="metric-sub">
-              ELD: {{ ifta.sources.eld || 0 }} · Phone: {{ ifta.sources.phone || 0 }}
-            </div>
           </div>
           <div class="metric-card">
             <div class="metric-label">Fees Pending</div>
@@ -451,7 +448,6 @@
                 <th>State</th>
                 <th>Miles</th>
                 <th>%</th>
-                <th>Source</th>
                 <th>Drivers</th>
               </tr>
             </thead>
@@ -460,11 +456,6 @@
                 <td class="mono bold">{{ s.state }}</td>
                 <td>{{ s.miles.toLocaleString() }}</td>
                 <td>{{ s.pct }}%</td>
-                <td>
-                  <span :class="['source-tag', s.source || 'phone']">
-                    {{ s.source === 'eld' ? 'ELD' : s.source === 'mixed' ? 'ELD + GPS' : 'GPS' }}
-                  </span>
-                </td>
                 <td>{{ s.drivers.join(', ') }}</td>
               </tr>
             </tbody>
@@ -472,7 +463,7 @@
         </div>
 
         <div v-if="!ifta.states?.length" class="empty-msg">
-          No mileage data yet. Miles come from the Routemate ELD when a truck is linked, with phone GPS as fallback.
+          No ELD mileage data yet. Link a truck to its Routemate vehicle on the Trucks page to start collecting telemetry.
         </div>
 
         <!-- Compliance Fees -->
@@ -1251,23 +1242,6 @@ tr:hover td { background: var(--surface-hover); }
 
 .status-pill.pending { background: var(--amber-dim); color: var(--amber); }
 .status-pill.paid { background: rgba(16,185,129,0.15); color: #059669; }
-
-.source-tag {
-  display: inline-block;
-  font-size: 0.68rem;
-  font-weight: 600;
-  padding: 0.15rem 0.5rem;
-  border-radius: 8px;
-}
-.source-tag.eld { background: rgba(16,185,129,0.15); color: #059669; }
-.source-tag.phone { background: var(--surface-hover); color: var(--text-dim); }
-.source-tag.mixed { background: var(--blue-dim); color: var(--blue); }
-
-.metric-sub {
-  font-size: 0.7rem;
-  color: var(--text-dim);
-  margin-top: 0.25rem;
-}
 
 .desc-cell {
   max-width: 200px;
