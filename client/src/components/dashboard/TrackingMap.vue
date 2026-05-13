@@ -362,6 +362,49 @@ function buildSingleLoadPath(driverOverride = null) {
   return path
 }
 
+// Bearing in degrees (0=north, clockwise) from `from` to `to`.
+function bearingDeg(from, to) {
+  const φ1 = from.lat * Math.PI / 180
+  const φ2 = to.lat * Math.PI / 180
+  const Δλ = (to.lng - from.lng) * Math.PI / 180
+  const y = Math.sin(Δλ) * Math.cos(φ2)
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ)
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360
+}
+
+// Project the driver onto the route and return the bearing along the segment
+// the driver is on. Used to align the truck arrow to the road direction so it
+// never looks tilted/off-axis (raw GPS heading drifts by a few degrees and
+// reads as "the arrow's facing the wrong way" even when it isn't).
+function routeHeadingAt(driverPos) {
+  const points = routePoints.value
+  if (!points || points.length < 2) return null
+  let minDistSq = Infinity
+  let bestIdx = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    const ax = a[1], ay = a[0]
+    const bx = b[1], by = b[0]
+    const px = driverPos.lng, py = driverPos.lat
+    const dx = bx - ax, dy = by - ay
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) continue
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = ax + t * dx
+    const projY = ay + t * dy
+    const distSq = (projX - px) ** 2 + (projY - py) ** 2
+    if (distSq < minDistSq) {
+      minDistSq = distSq
+      bestIdx = i
+    }
+  }
+  const a = points[bestIdx]
+  const b = points[bestIdx + 1]
+  return bearingDeg({ lat: a[0], lng: a[1] }, { lat: b[0], lng: b[1] })
+}
+
 function renderSingleLoadRoute() {
   clearSingleLoadOverlays()
   if (!map) return
@@ -484,6 +527,21 @@ function renderAllRoutes() {
   }
 }
 
+// Prefer the road's bearing at the driver's projected point over raw GPS
+// heading — GPS heading is rarely exactly cardinal and reads as the arrow
+// being "tilted" / "facing the wrong way" even on a straight highway. The
+// snap is only available when this driver is the selected one with a route
+// drawn; otherwise fall back to GPS heading.
+function headingForMarker(loc) {
+  const isSelected = selectedDriver.value
+    && selectedDriver.value.toLowerCase() === loc.driver.toLowerCase()
+  if (isSelected && expandedLoadId.value && routePoints.value.length >= 2) {
+    const h = routeHeadingAt({ lat: loc.latitude, lng: loc.longitude })
+    if (h != null) return h
+  }
+  return Number.isFinite(loc.heading) ? loc.heading : 0
+}
+
 // ---- Sync driver markers with locations data ----
 function syncDriverMarkers() {
   if (!map) return
@@ -496,7 +554,7 @@ function syncDriverMarkers() {
       // Create new marker for this driver
       const isOn = isOnline(loc)
       const moving = (loc.speed || 0) > 0.5  // ~1 mph
-      const heading = Number.isFinite(loc.heading) ? loc.heading : 0
+      const heading = headingForMarker(loc)
       marker = new google.maps.marker.AdvancedMarkerElement({
         position: { lat: loc.latitude, lng: loc.longitude },
         map,
@@ -535,7 +593,7 @@ function syncDriverMarkers() {
       // Update arrow rotation/state based on speed + heading + online status
       const isOn = isOnline(loc)
       const moving = (loc.speed || 0) > 0.5
-      const heading = Number.isFinite(loc.heading) ? loc.heading : 0
+      const heading = headingForMarker(loc)
       marker.content = createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving })
     }
   }
