@@ -674,12 +674,31 @@ function renderAllRoutes() {
 // heading drifts by a few degrees even when supplied. routeHeadingAt now
 // returns null if the truck is >80m off the polyline, so route bearing is
 // only applied to drivers actually on the focused route.
+//
+// Guard against a 180°-flipped polyline by requiring the route bearing to
+// agree with Routemate's reported bearing within HEADING_AGREE_DEG.
+// Without this, a reversed polyline (origin/dest swap, or backward route
+// fetch) silently forces the arrow to point against the truck's real
+// direction of travel.
+const HEADING_AGREE_DEG = 60
 function headingForMarker(loc) {
+  const gpsHeading = Number.isFinite(loc.heading) && loc.heading !== 0 ? loc.heading : null
   if (expandedLoadId.value && routePoints.value.length >= 2) {
-    const h = routeHeadingAt({ lat: loc.latitude, lng: loc.longitude })
-    if (h != null) return h
+    const routeH = routeHeadingAt({ lat: loc.latitude, lng: loc.longitude })
+    if (routeH != null) {
+      if (gpsHeading == null) return routeH
+      // Shortest-arc disagreement in [0, 180].
+      const diff = Math.abs((((routeH - gpsHeading) % 360) + 540) % 360 - 180)
+      if (diff <= HEADING_AGREE_DEG) return routeH
+      // Polyline-vs-Routemate disagree — trust the data source over the
+      // geometry. Logged below so a reversed route is visible in DevTools.
+      if (typeof window !== 'undefined' && window.__logisxHeadingDebug) {
+        // eslint-disable-next-line no-console
+        console.warn('[tracking] heading disagree', { driver: loc.driver, gpsHeading, routeH, diff })
+      }
+    }
   }
-  return Number.isFinite(loc.heading) && loc.heading !== 0 ? loc.heading : 0
+  return gpsHeading != null ? gpsHeading : 0
 }
 
 // ---- Sync driver markers with locations data ----
