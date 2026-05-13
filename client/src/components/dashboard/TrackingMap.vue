@@ -739,6 +739,10 @@ async function toggleLoad(al, loc) {
       if (gen !== focusGeneration) return
       if (data.route && data.route.length >= 2) {
         routePoints.value = data.route.map(p => [p.latitude, p.longitude])
+        // Seed the periodic-refetch gate so maybeRefetchRoute waits 60s+100m
+        // from this fetch (not from epoch 0).
+        lastRouteRefetchPos = { lat: fromLat, lng: fromLng }
+        lastRouteRefetchTime = Date.now()
       } else if (hasOrigin) {
         routePoints.value = [[oLat, oLng], [dLat, dLng]]
       }
@@ -757,36 +761,35 @@ async function toggleLoad(al, loc) {
   // Weather fetch disabled to reduce Google API costs
 }
 
-let lastRerouteTime = 0
+// Track the position/time of the last route fetch so we can refetch as the
+// truck progresses — matches DriverRouteMap.vue's 100m + 60s gate. Without
+// this, /tracking only refetched on off-route, so its routePoints stayed
+// stale relative to /track (which already refetches on movement). The stale
+// route caused the trim-at-driver projection to land on outdated road
+// segments, making /tracking's polyline diverge from /track's.
+let lastRouteRefetchPos = null
+let lastRouteRefetchTime = 0
 
-async function checkOffRoute(lat, lng) {
-  // Rate-limit: max once every 30 seconds
-  if (Date.now() - lastRerouteTime < 30000) return
-
-  // Find minimum distance from driver to any point on the route
-  let minDist = Infinity
-  for (const pt of routePoints.value) {
-    const d = haversineMeters(lat, lng, pt[0], pt[1])
-    if (d < minDist) minDist = d
-    if (d < 100) return // still on route, no need to check further
+async function maybeRefetchRoute(lat, lng) {
+  if (!destLatLng.value || !expandedLoadId.value) return
+  const now = Date.now()
+  if (lastRouteRefetchPos) {
+    const moved = haversineMeters(lat, lng, lastRouteRefetchPos.lat, lastRouteRefetchPos.lng)
+    if (moved < 100 || now - lastRouteRefetchTime < 60000) return
   }
-
-  // Off-route: recalculate from current position to destination
-  // Only update if new route succeeds -- never clear the existing route
-  if (minDist >= 100 && destLatLng.value) {
-    lastRerouteTime = Date.now()
-    try {
-      const [toLat, toLng] = destLatLng.value
-      const data = await api.get(`/api/route?fromLat=${lat}&fromLng=${lng}&toLat=${toLat}&toLng=${toLng}`)
-      if (data.route && data.route.length >= 2) {
-        routePoints.value = data.route.map(p => [p.latitude, p.longitude])
-        routeDistance.value = data.distanceMiles
-        routeEta.value = data.etaMinutes
-        renderSingleLoadRoute()
-      }
-    } catch {
-      // silent -- keep existing route
+  lastRouteRefetchPos = { lat, lng }
+  lastRouteRefetchTime = now
+  try {
+    const [toLat, toLng] = destLatLng.value
+    const data = await api.get(`/api/route?fromLat=${lat}&fromLng=${lng}&toLat=${toLat}&toLng=${toLng}`)
+    if (data.route && data.route.length >= 2) {
+      routePoints.value = data.route.map(p => [p.latitude, p.longitude])
+      routeDistance.value = data.distanceMiles
+      routeEta.value = data.etaMinutes
+      renderSingleLoadRoute()
     }
+  } catch {
+    // silent -- keep existing route
   }
 }
 
@@ -1029,10 +1032,11 @@ function onLocationUpdate(payload) {
   // marker animation. Don't update them separately here or they'd jump
   // ahead of the marker.
 
-  // Auto-reroute if driver is off the planned route. checkOffRoute calls
-  // renderSingleLoadRoute() itself when it successfully fetches a new path.
+  // Refresh the route as the truck progresses (100m moved + 60s elapsed),
+  // mirroring the public /track tracker so both views render the same
+  // road segments at the same intervals.
   if (isSelectedDriver && routePoints.value.length >= 2 && destLatLng.value) {
-    checkOffRoute(payload.latitude, payload.longitude)
+    maybeRefetchRoute(payload.latitude, payload.longitude)
   }
 }
 
