@@ -706,11 +706,12 @@ async function toggleLoad(al, loc) {
   if (map) {
     const hasDriverGps = loc.latitude != null && loc.longitude != null
     if (isPastPickup && hasDriverGps) {
-      // Snap to the truck pin so dispatchers immediately see what the truck
-      // is doing in its current area. fitBounds(origin, dest) here would zoom
-      // out to ~1000 mi on a long-haul load and bury the pin in the middle.
+      // Snap to the truck pin at max zoom — same level as clicking the pin
+      // directly — so dispatchers immediately see street-level detail of
+      // where the truck is. fitBounds(origin, dest) here would zoom out to
+      // ~1000 mi on a long-haul load and bury the pin in the middle.
       map.setCenter({ lat: loc.latitude, lng: loc.longitude })
-      map.setZoom(15)
+      map.setZoom(20)
     } else {
       const boundsPoints = []
       if (hasOrigin) boundsPoints.push([oLat, oLng])
