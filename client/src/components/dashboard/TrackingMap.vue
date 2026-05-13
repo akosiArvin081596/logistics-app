@@ -396,9 +396,9 @@ function bearingDeg(from, to) {
 }
 
 // Project the driver onto the route and return the bearing along the segment
-// the driver is on. Used to align the truck arrow to the road direction so it
-// never looks tilted/off-axis (raw GPS heading drifts by a few degrees and
-// reads as "the arrow's facing the wrong way" even when it isn't).
+// the driver is on. Returns null when the truck is genuinely off-route (>80m
+// from the nearest segment) so the caller can fall back to GPS heading
+// instead of forcing the arrow to face a route the truck isn't actually on.
 function routeHeadingAt(driverPos) {
   const points = routePoints.value
   if (!points || points.length < 2) return null
@@ -423,6 +423,8 @@ function routeHeadingAt(driverPos) {
       bestIdx = i
     }
   }
+  // ~80m threshold in deg² (matches snapToRoute). Off-route trucks fall back.
+  if (minDistSq > 5.2e-7) return null
   const a = points[bestIdx]
   const b = points[bestIdx + 1]
   return bearingDeg({ lat: a[0], lng: a[1] }, { lat: b[0], lng: b[1] })
@@ -586,18 +588,16 @@ function renderAllRoutes() {
 }
 
 // Prefer the road's bearing at the driver's projected point over raw GPS
-// heading — GPS heading is rarely exactly cardinal and reads as the arrow
-// being "tilted" / "facing the wrong way" even on a straight highway. The
-// snap is only available when this driver is the selected one with a route
-// drawn; otherwise fall back to GPS heading.
+// heading — Routemate emits don't always include a heading field, and GPS
+// heading drifts by a few degrees even when supplied. routeHeadingAt now
+// returns null if the truck is >80m off the polyline, so route bearing is
+// only applied to drivers actually on the focused route.
 function headingForMarker(loc) {
-  const isSelected = selectedDriver.value
-    && selectedDriver.value.toLowerCase() === loc.driver.toLowerCase()
-  if (isSelected && expandedLoadId.value && routePoints.value.length >= 2) {
+  if (expandedLoadId.value && routePoints.value.length >= 2) {
     const h = routeHeadingAt({ lat: loc.latitude, lng: loc.longitude })
     if (h != null) return h
   }
-  return Number.isFinite(loc.heading) ? loc.heading : 0
+  return Number.isFinite(loc.heading) && loc.heading !== 0 ? loc.heading : 0
 }
 
 // ---- Sync driver markers with locations data ----

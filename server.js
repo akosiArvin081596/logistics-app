@@ -1059,6 +1059,7 @@ async function routemateSyncTelemetry() {
 				latitude: t.latitude,
 				longitude: t.longitude,
 				speed: t.speed || 0,
+				heading: Number.isFinite(parseFloat(t.bearing)) ? parseFloat(t.bearing) : 0,
 				loadId: activeLoadId,
 				timestamp,
 				source: "routemate",
