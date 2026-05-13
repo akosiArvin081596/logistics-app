@@ -289,6 +289,29 @@ function clearAllRouteOverlays() {
 }
 
 // ---- Build/rebuild Google Maps overlays from reactive state ----
+
+// Build the polyline path for the focused single load. When past pickup, the
+// driver's live GPS is prepended so the visible line stays anchored to the
+// truck pin even when the driver leaves the planned route (e.g. pulls into a
+// truck-stop parking lot). Pass `driverOverride` from onLocationUpdate to use
+// the freshly-received GPS coords instead of waiting for animateMarker to
+// finish writing them back into locations[].
+function buildSingleLoadPath(driverOverride = null) {
+  if (routePoints.value.length < 2) return null
+  const path = routePoints.value.map(p => ({ lat: p[0], lng: p[1] }))
+  const loc = locations.value.find(l => l.driver === selectedDriver.value)
+  const al = loc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
+  const isPastPickup = al && PAST_PICKUP_RE.test(al.status)
+  if (isPastPickup) {
+    const driverPos = driverOverride
+      || (loc && loc.latitude != null && loc.longitude != null
+            ? { lat: loc.latitude, lng: loc.longitude }
+            : null)
+    if (driverPos) path.unshift(driverPos)
+  }
+  return path
+}
+
 function renderSingleLoadRoute() {
   clearSingleLoadOverlays()
   if (!map) return
@@ -296,12 +319,15 @@ function renderSingleLoadRoute() {
 
   // Route polyline — white base with animated blue dashed icons, matching the
   // public customer tracker (DriverRouteMap.vue) so dispatchers and customers
-  // see the same visual. The route already starts from the driver when past
-  // pickup (toggleLoad fetches /api/route from driver→dest in that case), so
-  // we don't draw a separate "already driven" segment.
-  if (routePoints.value.length >= 2) {
+  // see the same visual. The path is built via buildSingleLoadPath() which
+  // prepends the driver's live GPS when past pickup so the line always
+  // visually connects to the truck pin (without this the line ends at the
+  // route's static start point and looks disconnected once the driver pulls
+  // off the highway).
+  const path = buildSingleLoadPath()
+  if (path) {
     routePolyline = new google.maps.Polyline({
-      path: routePoints.value.map(p => ({ lat: p[0], lng: p[1] })),
+      path,
       strokeColor: '#ffffff',
       strokeOpacity: 0.9,
       strokeWeight: 5,
@@ -316,13 +342,13 @@ function renderSingleLoadRoute() {
 
     // Distance label at midpoint of the route.
     if (routeDistance.value != null) {
-      const mid = Math.floor(routePoints.value.length / 2)
-      const midPt = routePoints.value[mid]
+      const mid = Math.floor(path.length / 2)
+      const midPt = path[mid]
       const labelEl = document.createElement('div')
       labelEl.textContent = routeDistance.value + ' mi'
       labelEl.style.cssText = 'color:#333;font-size:11px;font-weight:700;font-family:JetBrains Mono,monospace;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px;white-space:nowrap;pointer-events:none;'
       distanceLabelMarker = new google.maps.marker.AdvancedMarkerElement({
-        position: { lat: midPt[0], lng: midPt[1] },
+        position: { lat: midPt.lat, lng: midPt.lng },
         map,
         content: labelEl,
         zIndex: 900,
@@ -911,10 +937,20 @@ function onLocationUpdate(payload) {
     trailPoints.value = [...trailPoints.value, [payload.latitude, payload.longitude]]
   }
 
+  // Keep the polyline anchored to the live driver position. setPath() updates
+  // the path in place so the dashed-blue animation keeps running on the same
+  // polyline (recreating it would reset the icon offset and visibly stutter).
+  if (
+    selectedDriver.value === payload.driver &&
+    expandedLoadId.value &&
+    routePolyline
+  ) {
+    const livePath = buildSingleLoadPath({ lat: payload.latitude, lng: payload.longitude })
+    if (livePath) routePolyline.setPath(livePath)
+  }
+
   // Auto-reroute if driver is off the planned route. checkOffRoute calls
-  // renderSingleLoadRoute() itself when it successfully fetches a new path,
-  // so we don't need a separate per-ping re-render here — the dashed-blue
-  // animation runs independently on the existing polyline.
+  // renderSingleLoadRoute() itself when it successfully fetches a new path.
   if (
     selectedDriver.value === payload.driver &&
     routePoints.value.length >= 2 &&
