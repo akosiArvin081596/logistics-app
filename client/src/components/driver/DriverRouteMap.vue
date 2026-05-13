@@ -60,7 +60,7 @@ const props = defineProps({
 })
 
 const api = useApi()
-const { createMap } = useGoogleMaps()
+const { load: loadGoogleMaps, createMap } = useGoogleMaps()
 const mapContainer = ref(null)
 const expandedMapContainer = ref(null)
 const expanded = ref(false)
@@ -438,6 +438,10 @@ defineExpose({ focusOn })
 
 async function initMap() {
   if (!mapContainer.value) return
+  // google.maps.* constants are referenced in the options below, so ensure
+  // the API is loaded before constructing them — otherwise we get a
+  // ReferenceError("google is not defined") and the map never renders.
+  await loadGoogleMaps()
   const center = originLatLng.value && destLatLng.value
     ? { lat: (originLatLng.value.lat + destLatLng.value.lat) / 2, lng: (originLatLng.value.lng + destLatLng.value.lng) / 2 }
     : originLatLng.value || destLatLng.value || driverLatLng.value || { lat: 0, lng: 0 }
