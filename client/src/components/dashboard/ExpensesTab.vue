@@ -499,6 +499,7 @@
                   <th>Miles</th>
                   <th>First ping</th>
                   <th>Last ping</th>
+                  <th>Load(s)</th>
                 </tr>
               </thead>
               <tbody>
@@ -507,6 +508,7 @@
                   <td>{{ d.miles.toLocaleString() }}</td>
                   <td class="mono">{{ fmtHM(d.firstPing) }}</td>
                   <td class="mono">{{ fmtHM(d.lastPing) }}</td>
+                  <td class="mono-sm">{{ d.loadIds && d.loadIds.length ? d.loadIds.join(', ') : '—' }}</td>
                 </tr>
               </tbody>
             </table>

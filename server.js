@@ -13600,7 +13600,8 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 
 // GET /api/compliance/ifta/state-detail — daily mileage breakdown for one truck × one state.
 // Mirrors the parent IFTA handler's algorithm so per-day rows reconcile with the parent state total.
-app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+// Each day is also matched against the Job Tracking sheet to attribute load IDs.
+app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const truckId = parseInt(req.query.truck_id, 10);
 		const state = String(req.query.state || "").trim();
@@ -13664,8 +13665,70 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 				miles: Math.round(d.miles),
 				firstPing: new Date(d.firstPing).toISOString(),
 				lastPing: new Date(d.lastPing).toISOString(),
+				loadIds: [],
 			}))
 			.sort((a, b) => a.date.localeCompare(b.date));
+
+		// Match each day to load IDs from the Job Tracking sheet — driver-aware via truck_assignments.
+		if (daysList.length > 0) {
+			try {
+				const truckAssigns = db.prepare(
+					"SELECT driver_name, start_date, end_date FROM truck_assignments WHERE truck_id = ?"
+				).all(truckId);
+				const nowIso = new Date().toISOString();
+				const driversOnTruck = new Set();
+				for (const a of truckAssigns) {
+					const aStart = a.start_date || "";
+					const aEnd = (a.end_date && a.end_date !== "") ? a.end_date : nowIso;
+					if (aStart && aStart <= endDate && aEnd >= startDate) {
+						driversOnTruck.add(String(a.driver_name || "").toLowerCase().trim());
+					}
+				}
+
+				if (driversOnTruck.size > 0) {
+					const jt = await getJobTrackingCached();
+					const jtData = excludeDroppedLoads(jt.data, jt.headers);
+					const jtDriverCol = findCol(jt.headers, /^driver$/i) || findCol(jt.headers, /driver/i);
+					const jtLoadIdCol = findCol(jt.headers, /load.?id|job.?id/i);
+					const jtAssignedCol = findCol(jt.headers, /assigned.*date|date.*assigned/i);
+					const jtDeliveredCol = findCol(jt.headers, /delivered.*date|date.*delivered|delivery.*date|completion.*date/i);
+
+					function sheetToIso(val) {
+						if (!val) return null;
+						const m = String(val).match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/);
+						if (!m) return null;
+						let yr = parseInt(m[3], 10);
+						if (yr < 100) yr += 2000;
+						return `${yr}-${String(m[1]).padStart(2, "0")}-${String(m[2]).padStart(2, "0")}`;
+					}
+
+					if (jtDriverCol && jtLoadIdCol && jtAssignedCol) {
+						const todayIso = new Date().toISOString().slice(0, 10);
+						const candidates = [];
+						for (const row of jtData) {
+							const drv = String(row[jtDriverCol] || "").toLowerCase().trim();
+							if (!driversOnTruck.has(drv)) continue;
+							const lid = String(row[jtLoadIdCol] || "").trim().replace(/^#/, "");
+							if (!lid) continue;
+							const sIso = sheetToIso(row[jtAssignedCol]);
+							if (!sIso) continue;
+							const eIso = jtDeliveredCol ? (sheetToIso(row[jtDeliveredCol]) || todayIso) : todayIso;
+							candidates.push({ loadId: lid, startIso: sIso, endIso: eIso });
+						}
+						for (const day of daysList) {
+							const ids = new Set();
+							for (const c of candidates) {
+								if (c.startIso <= day.date && c.endIso >= day.date) ids.add(c.loadId);
+							}
+							day.loadIds = [...ids];
+						}
+					}
+				}
+			} catch (matchErr) {
+				console.error("IFTA state-detail: load matching failed:", matchErr.message);
+				// Leave loadIds as the initialized empty arrays — don't fail the whole request.
+			}
+		}
 
 		res.json({
 			truckId,
