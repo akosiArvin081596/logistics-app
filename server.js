@@ -10975,9 +10975,10 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				const pickupAddrCol = headers.find((h) => /pickup.*addr|origin.*addr|shipper.*addr/i.test(h));
 				const dropoffAddrCol = headers.find((h) => /drop.*addr|dest.*addr|receiver.*addr|delivery.*addr/i.test(h));
 				const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
-				const workingRe = /^(assigned|at shipper|loading|in transit|at receiver)$/i;
+				// Matches /api/dashboard's activeStatuses so the Tracking panel and Dashboard KPI agree on what counts as active.
+				const workingRe = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
 				const driverActiveLoadMap = {};   // driver → first active loadId (for override, includes dispatched)
-				const driverActiveLoadsMap = {};  // driver → working loads for panel (matches driver app's Active tab)
+				const driverActiveLoadsMap = {};  // driver → working loads for panel (matches /api/dashboard activeStatuses)
 				if (statusCol && driverCol && loadIdCol) {
 					for (let i = 1; i < rows.length; i++) {
 						const obj = {};
