@@ -191,6 +191,11 @@ function renderMarkers() {
   }
   if (driverLatLng.value) {
     driverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map, content: createDotPin('#2563eb', 16), title: props.publicMode ? 'Driver' : (driverName.value || 'Driver') })
+    // Click the pin → snap to max zoom centered on the truck.
+    driverMarker.addEventListener('gmp-click', () => {
+      const pos = driverMarker.position
+      if (map && pos) { map.setCenter(pos); map.setZoom(20) }
+    })
   }
 
   if (routePoints.value.length >= 2) {
@@ -265,12 +270,42 @@ async function fetchRoute(doFit = false) {
 let lastRoutePos = null
 let lastRouteTime = 0
 let prevDriverPos = null
+
+// Animate the marker, the polyline first-point, and the map pan together so
+// the dashed line stays glued to the truck pin while it moves and the pin
+// stays centered on the map (auto-follow). Without this, the polyline path
+// only updates when fetchRoute fires (gated by 100m + 60s), so the line
+// visibly disconnects from the pin every time the truck nudges off the
+// route's static start point.
+function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000) {
+  if (!marker || !from || !to) return
+  const start = performance.now()
+  function step(now) {
+    const t = Math.min((now - start) / duration, 1)
+    const ease = t * (2 - t)
+    const lat = from.lat + (to.lat - from.lat) * ease
+    const lng = from.lng + (to.lng - from.lng) * ease
+    marker.position = { lat, lng }
+    if (lineObj && routePoints.value.length >= 2) {
+      const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+      const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))
+      if (pickedUp) path.unshift({ lat, lng })
+      else if (originLatLng.value && hasCoords.value) path.unshift(originLatLng.value)
+      if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
+      lineObj.setPath(path)
+    }
+    if (mapObj) mapObj.panTo({ lat, lng })
+    if (t < 1) requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step)
+}
+
 watch(() => props.driverPosition, (pos) => {
   if (!pos || !destLatLng.value) return
   const to = { lat: pos.latitude, lng: pos.longitude }
   const from = prevDriverPos || to
-  if (driverMarker && map) animateMarker(driverMarker, from, to)
-  if (exDriverMarker && expandedMap) animateMarker(exDriverMarker, from, to)
+  if (driverMarker && map) animateDriverMarker(driverMarker, map, routeLine, from, to)
+  if (exDriverMarker && expandedMap) animateDriverMarker(exDriverMarker, expandedMap, exRouteLine, from, to)
   prevDriverPos = to
   if (!lastRoutePos) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute(true); return }
   const dist = haversineMi({ lat: pos.latitude, lng: pos.longitude }, { lat: lastRoutePos.latitude, lng: lastRoutePos.longitude })
@@ -303,6 +338,10 @@ function renderExpandedMap() {
   }
   if (driverLatLng.value) {
     exDriverMarker = new google.maps.marker.AdvancedMarkerElement({ position: driverLatLng.value, map: expandedMap, content: createDotPin('#2563eb', 16), title: props.publicMode ? 'Driver' : (driverName.value || 'Driver') })
+    exDriverMarker.addEventListener('gmp-click', () => {
+      const pos = exDriverMarker.position
+      if (expandedMap && pos) { expandedMap.setCenter(pos); expandedMap.setZoom(20) }
+    })
   }
   if (routePoints.value.length >= 2) {
     const path = routePoints.value.map(p => ({ lat: p.latitude, lng: p.longitude }))

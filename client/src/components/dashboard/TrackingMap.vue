@@ -211,6 +211,15 @@ function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 800) {
   if (activeAnimations[driver]) cancelAnimationFrame(activeAnimations[driver])
   const markerObj = driverMarkers.get(driver)
   const start = performance.now()
+  // When the animated driver is the currently-selected one with a load
+  // expanded, the polyline and the map view need to follow the marker
+  // frame-by-frame so the line stays anchored to the truck pin and the pin
+  // stays centered on the map. Without this, the polyline jumps ahead while
+  // the marker animates (visible gap) or stays behind (line ends short of
+  // the pin).
+  const isSelected = selectedDriver.value
+    && selectedDriver.value.toLowerCase() === driver.toLowerCase()
+  const followAndUpdateLine = isSelected && !!expandedLoadId.value
 
   function frame(now) {
     const t = Math.min((now - start) / duration, 1)
@@ -226,6 +235,13 @@ function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 800) {
     if (loc) {
       loc.latitude = lat
       loc.longitude = lng
+    }
+    if (followAndUpdateLine) {
+      if (routePolyline) {
+        const livePath = buildSingleLoadPath({ lat, lng })
+        if (livePath) routePolyline.setPath(livePath)
+      }
+      if (map) map.panTo({ lat, lng })
     }
     if (t < 1) activeAnimations[driver] = requestAnimationFrame(frame)
     else delete activeAnimations[driver]
@@ -453,11 +469,18 @@ function syncDriverMarkers() {
         title: loc.driver,
         zIndex: 1000,
       })
-      // InfoWindow for the driver marker
+      // InfoWindow for the driver marker. Clicking also snaps the map to a
+      // close zoom centered on the pin so the user can inspect what the
+      // truck is parked next to / driving past.
       const iw = new google.maps.InfoWindow()
       marker.addEventListener('gmp-click', () => {
         iw.setContent(buildDriverPopupContent(loc))
         iw.open({ map, anchor: marker })
+        const pos = marker.position
+        if (map && pos) {
+          map.setCenter(pos)
+          map.setZoom(20)
+        }
       })
       driverInfoWindows.set(loc.driver, iw)
       driverMarkers.set(loc.driver, marker)
@@ -955,13 +978,10 @@ function onLocationUpdate(payload) {
     trailPoints.value = [...trailPoints.value, [payload.latitude, payload.longitude]]
   }
 
-  // Keep the polyline anchored to the live driver position. setPath() updates
-  // the path in place so the dashed-blue animation keeps running on the same
-  // polyline (recreating it would reset the icon offset and visibly stutter).
-  if (isSelectedDriver && expandedLoadId.value && routePolyline) {
-    const livePath = buildSingleLoadPath({ lat: payload.latitude, lng: payload.longitude })
-    if (livePath) routePolyline.setPath(livePath)
-  }
+  // Note: polyline first-point follow + map panTo are handled inside
+  // animateMarker's per-frame callback so they stay in lock-step with the
+  // marker animation. Don't update them separately here or they'd jump
+  // ahead of the marker.
 
   // Auto-reroute if driver is off the planned route. checkOffRoute calls
   // renderSingleLoadRoute() itself when it successfully fetches a new path.
