@@ -250,8 +250,11 @@ function renderMarkers() {
   }
   if (driverLatLng.value) {
     const content = createDotPin('#2563eb', 16)
+    // Snap the initial marker position onto the route polyline (if close)
+    // so the pin sits ON the dashed line from first render.
+    const snapped = snapToRoute(driverLatLng.value.lat, driverLatLng.value.lng)
     driverMarker = new google.maps.marker.AdvancedMarkerElement({
-      position: driverLatLng.value,
+      position: snapped,
       map,
       content,
       title: props.publicMode ? 'Driver' : (driverName.value || 'Driver'),
@@ -366,6 +369,42 @@ let prevDriverPos = null
 // per-frame setPath causes the polyline to visually disappear (Google
 // batches overlay rendering during camera animations). mapObj kept in the
 // signature for call-site compatibility; pin-click still re-centers.
+// Snap a raw GPS coord onto the route polyline if close enough. Returns
+// the projected lat/lng when the truck is within ~80 m of the line;
+// otherwise returns the raw coord so genuinely off-route trucks still
+// show their real position. Eliminates the visual gap caused by GPS
+// landing on a parallel road (tollway vs frontage) when the route uses
+// the other one.
+function snapToRoute(lat, lng) {
+  const points = routePoints.value
+  if (!points || points.length < 2) return { lat, lng }
+  let minDistSq = Infinity
+  let bestLat = null
+  let bestLng = null
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    const ax = a.longitude, ay = a.latitude
+    const bx = b.longitude, by = b.latitude
+    const px = lng, py = lat
+    const dx = bx - ax, dy = by - ay
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) continue
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = ax + t * dx
+    const projY = ay + t * dy
+    const distSq = (projX - px) ** 2 + (projY - py) ** 2
+    if (distSq < minDistSq) {
+      minDistSq = distSq
+      bestLat = projY
+      bestLng = projX
+    }
+  }
+  if (minDistSq > 5.2e-7) return { lat, lng }
+  return { lat: bestLat, lng: bestLng }
+}
+
 function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000) {
   if (!marker || !from || !to) return
   // No-op when the polled position matches what we last drew (within ~1 m).
@@ -373,6 +412,9 @@ function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000)
   const dLat = (to.lat - from.lat)
   const dLng = (to.lng - from.lng)
   if ((dLat * dLat + dLng * dLng) < 1e-10) return
+  // Snap the target onto the route polyline so the pin sits on the line.
+  const snapped = snapToRoute(to.lat, to.lng)
+  to = { lat: snapped.lat, lng: snapped.lng }
   void mapObj
   const start = performance.now()
   function step(now) {
@@ -428,8 +470,9 @@ function renderExpandedMap() {
   }
   if (driverLatLng.value) {
     const exContent = createDotPin('#2563eb', 16)
+    const exSnapped = snapToRoute(driverLatLng.value.lat, driverLatLng.value.lng)
     exDriverMarker = new google.maps.marker.AdvancedMarkerElement({
-      position: driverLatLng.value,
+      position: exSnapped,
       map: expandedMap,
       content: exContent,
       title: props.publicMode ? 'Driver' : (driverName.value || 'Driver'),

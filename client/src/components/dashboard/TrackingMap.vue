@@ -220,6 +220,14 @@ function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000) 
   const isSelected = selectedDriver.value
     && selectedDriver.value.toLowerCase() === driver.toLowerCase()
   const followLine = isSelected && !!expandedLoadId.value
+  // When a load is in focus, snap the tween target onto the route polyline
+  // so the pin always sits ON the dashed line. Raw GPS often lands on a
+  // parallel road (tollway vs frontage); snapping eliminates that gap.
+  if (followLine) {
+    const s = snapToRoute(toLat, toLng)
+    toLat = s.lat
+    toLng = s.lng
+  }
 
   function frame(now) {
     const t = Math.min((now - start) / duration, 1)
@@ -405,6 +413,41 @@ function routeHeadingAt(driverPos) {
   return bearingDeg({ lat: a[0], lng: a[1] }, { lat: b[0], lng: b[1] })
 }
 
+// Snap a raw GPS coord onto the route polyline if close enough. Returns
+// {lat, lng} of the projected point on the nearest route segment when the
+// truck is within ~80 m of the line; otherwise returns the raw coord so
+// genuinely off-route trucks (deliveries, side trips) still show their
+// real position. ~80 m in deg² with the conservative 1°≈111km factor.
+function snapToRoute(lat, lng) {
+  const points = routePoints.value
+  if (!points || points.length < 2) return { lat, lng }
+  let minDistSq = Infinity
+  let bestLat = null
+  let bestLng = null
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    const ax = a[1], ay = a[0]
+    const bx = b[1], by = b[0]
+    const px = lng, py = lat
+    const dx = bx - ax, dy = by - ay
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) continue
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = ax + t * dx
+    const projY = ay + t * dy
+    const distSq = (projX - px) ** 2 + (projY - py) ** 2
+    if (distSq < minDistSq) {
+      minDistSq = distSq
+      bestLat = projY
+      bestLng = projX
+    }
+  }
+  if (minDistSq > 5.2e-7) return { lat, lng }
+  return { lat: bestLat, lng: bestLng }
+}
+
 function renderSingleLoadRoute() {
   clearSingleLoadOverlays()
   if (!map) return
@@ -555,8 +598,14 @@ function syncDriverMarkers() {
       const isOn = isOnline(loc)
       const moving = (loc.speed || 0) > 0.5  // ~1 mph
       const heading = headingForMarker(loc)
+      // Snap onto the route polyline if this driver's load is in focus.
+      const isSelectedDriver = selectedDriver.value
+        && selectedDriver.value.toLowerCase() === loc.driver.toLowerCase()
+      const initialPos = (isSelectedDriver && expandedLoadId.value)
+        ? snapToRoute(loc.latitude, loc.longitude)
+        : { lat: loc.latitude, lng: loc.longitude }
       marker = new google.maps.marker.AdvancedMarkerElement({
-        position: { lat: loc.latitude, lng: loc.longitude },
+        position: initialPos,
         map,
         content: createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving }),
         title: loc.driver,
