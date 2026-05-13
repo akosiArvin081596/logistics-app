@@ -898,6 +898,15 @@ function onLocationUpdate(payload) {
   const targetLat = payload.latitude
   const targetLng = payload.longitude
 
+  // Case-insensitive driver match. payload.driver comes from
+  // truck_assignments.driver_name (Routemate sync) or driver_locations.driver
+  // (phone GPS) and selectedDriver was set from the locations array; their
+  // casing can differ, which would otherwise silently skip the polyline /
+  // trail / off-route updates below.
+  const isSelectedDriver = selectedDriver.value
+    && payload.driver
+    && selectedDriver.value.toLowerCase() === payload.driver.toLowerCase()
+
   const idx = locations.value.findIndex(
     (l) => l.driver.toLowerCase() === payload.driver.toLowerCase()
   )
@@ -929,7 +938,7 @@ function onLocationUpdate(payload) {
 
   // Extend trail in real-time if this update is for the selected driver/load
   if (
-    selectedDriver.value === payload.driver &&
+    isSelectedDriver &&
     trailLoadId.value &&
     payload.loadId === trailLoadId.value &&
     trailPoints.value.length > 0
@@ -940,22 +949,14 @@ function onLocationUpdate(payload) {
   // Keep the polyline anchored to the live driver position. setPath() updates
   // the path in place so the dashed-blue animation keeps running on the same
   // polyline (recreating it would reset the icon offset and visibly stutter).
-  if (
-    selectedDriver.value === payload.driver &&
-    expandedLoadId.value &&
-    routePolyline
-  ) {
+  if (isSelectedDriver && expandedLoadId.value && routePolyline) {
     const livePath = buildSingleLoadPath({ lat: payload.latitude, lng: payload.longitude })
     if (livePath) routePolyline.setPath(livePath)
   }
 
   // Auto-reroute if driver is off the planned route. checkOffRoute calls
   // renderSingleLoadRoute() itself when it successfully fetches a new path.
-  if (
-    selectedDriver.value === payload.driver &&
-    routePoints.value.length >= 2 &&
-    destLatLng.value
-  ) {
+  if (isSelectedDriver && routePoints.value.length >= 2 && destLatLng.value) {
     checkOffRoute(payload.latitude, payload.longitude)
   }
 }
