@@ -207,7 +207,7 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 }
 
 // ---- Smooth marker animation via requestAnimationFrame ----
-function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 800) {
+function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000) {
   if (activeAnimations[driver]) cancelAnimationFrame(activeAnimations[driver])
   const markerObj = driverMarkers.get(driver)
   const start = performance.now()
@@ -786,7 +786,9 @@ async function maybeRefetchRoute(lat, lng) {
       routePoints.value = data.route.map(p => [p.latitude, p.longitude])
       routeDistance.value = data.distanceMiles
       routeEta.value = data.etaMinutes
-      renderSingleLoadRoute()
+      // The watch on routePoints handles updating the existing polyline
+      // path in place — no need to call renderSingleLoadRoute() here, which
+      // would destroy and recreate the polyline and restart the animation.
     }
   } catch {
     // silent -- keep existing route
@@ -934,9 +936,19 @@ watch(selectedDriver, () => {
   nextTick(updateMarkerVisibility)
 })
 
-// Watch for changes in reactive route data and re-render overlays
+// Watch for changes in reactive route data. When the polyline already
+// exists, update its path in place — recreating it would restart the
+// dashed animation from offset 0 every refetch (every 100m + 60s), which
+// looks like the map "refreshing". Only do the full render when there's
+// no existing polyline (initial load).
 watch(routePoints, () => {
-  if (expandedLoadId.value) renderSingleLoadRoute()
+  if (!expandedLoadId.value) return
+  if (routePolyline) {
+    const newPath = buildSingleLoadPath()
+    if (newPath) routePolyline.setPath(newPath)
+  } else {
+    renderSingleLoadRoute()
+  }
 })
 
 watch(allRoutes, () => {

@@ -355,6 +355,13 @@ let prevDriverPos = null
 // route's static start point.
 function animateDriverMarker(marker, mapObj, lineObj, from, to, duration = 1000) {
   if (!marker || !from || !to) return
+  // Skip the animation loop entirely when from ≈ to (within ~1.1 m). Polling
+  // every 30s often returns the same cached position, which would otherwise
+  // run a full no-op tween — visible as repeated setPath churn on the
+  // polyline and unnecessary panTo calls on the map.
+  const dLat = (to.lat - from.lat)
+  const dLng = (to.lng - from.lng)
+  if ((dLat * dLat + dLng * dLng) < 1e-10) return
   const start = performance.now()
   function step(now) {
     const t = Math.min((now - start) / duration, 1)
