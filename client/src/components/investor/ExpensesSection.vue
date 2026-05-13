@@ -28,7 +28,8 @@
 
     <div v-if="loading" class="skeleton skeleton-card"></div>
     <div v-else-if="expenses.length === 0" class="empty-msg">No expenses found for the selected filters.</div>
-    <table v-else class="data-table">
+    <template v-else>
+    <table class="data-table">
       <thead>
         <tr>
           <th>Date</th>
@@ -59,6 +60,16 @@
         </tr>
       </tbody>
     </table>
+    <div class="totals-footer">
+      <div class="totals-row">
+        <span class="totals-label">Total of displayed rows</span>
+        <span class="totals-value">${{ displayedTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
+      </div>
+      <div class="totals-disclaimer">
+        Raw expense entries against your trucks. The Cash Flow total above reflects bottom-line P&amp;L (completed-load expenses + maintenance + compliance) and may differ.
+      </div>
+    </div>
+    </template>
 
     <Teleport to="body">
       <div v-if="previewImg" class="preview-overlay" @click="previewImg = null">
@@ -91,6 +102,15 @@ const truckUnits = computed(() => {
     .filter(Boolean)
   return [...new Set(units)].sort()
 })
+
+// Sum of currently displayed rows. Surfaced as a footer so investors can
+// see what this list adds up to. NOTE: this will NOT match the Cash Flow
+// section's totalExpenses above — that figure is bottom-line P&L and
+// scopes to expenses on completed loads + maintenance + compliance fees.
+// The disclaimer below the footer calls this out.
+const displayedTotal = computed(() =>
+  expenses.value.reduce((sum, e) => sum + (Number(e.amount) || 0), 0)
+)
 
 async function loadExpenses() {
   loading.value = true
@@ -235,6 +255,39 @@ onMounted(loadExpenses)
   border: 1px solid #e2e8f0;
   cursor: zoom-in;
   display: block;
+}
+
+.totals-footer {
+  margin-top: 0.85rem;
+  padding: 0.85rem 1rem;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.totals-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.35rem;
+}
+.totals-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+}
+.totals-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+.totals-disclaimer {
+  font-size: 0.72rem;
+  color: #94a3b8;
+  line-height: 1.5;
+  font-style: italic;
 }
 
 .preview-overlay {

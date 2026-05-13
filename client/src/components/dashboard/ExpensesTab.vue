@@ -169,9 +169,13 @@
         <div v-if="selectedExpense" class="exp-overlay" @click.self="closeExpenseDetail">
           <div class="exp-dialog">
             <div class="exp-nav">
-              <button class="exp-nav-btn" :disabled="selectedIndex <= 0" @click="goPrev" aria-label="Previous expense" title="Previous (←)">&larr; Prev</button>
-              <span class="exp-nav-counter">{{ selectedIndex + 1 }} of {{ allExpenses.length }}</span>
-              <button class="exp-nav-btn" :disabled="selectedIndex >= allExpenses.length - 1" @click="goNext" aria-label="Next expense" title="Next (→)">Next &rarr;</button>
+              <button class="exp-nav-btn" :disabled="!canGoPrev" @click="goPrev" aria-label="Previous pending expense" title="Previous pending (←)">&larr; Prev</button>
+              <span class="exp-nav-counter">
+                <template v-if="isCurrentPending">Pending {{ pendingPos + 1 }} of {{ pendingIndices.length }}</template>
+                <template v-else-if="pendingIndices.length > 0">Viewing {{ (selectedExpense?.status || 'Pending').toLowerCase() }} · {{ pendingIndices.length }} pending remain</template>
+                <template v-else>No pending expenses</template>
+              </span>
+              <button class="exp-nav-btn" :disabled="!canGoNext" @click="goNext" aria-label="Next pending expense" title="Next pending (→)">Next &rarr;</button>
             </div>
             <div class="exp-header">
               <div>
@@ -549,35 +553,90 @@ const allExpenses = ref([])
 const allLoading = ref(true)
 const allDrivers = ref([])
 const previewImg = ref(null)
-// Detail modal: track by index so Prev/Next can cycle through the current
-// (already-filtered) list. -1 means closed.
-const selectedIndex = ref(-1)
+// Detail modal: track by expense id, not array index — robust if the list
+// refetches (socket event from another tab) while the modal is open. null
+// means closed.
+const selectedId = ref(null)
 const selectedExpense = computed(() =>
-  selectedIndex.value >= 0 && selectedIndex.value < allExpenses.value.length
-    ? allExpenses.value[selectedIndex.value]
-    : null
+  selectedId.value == null
+    ? null
+    : (allExpenses.value.find(e => e.id === selectedId.value) ?? null)
 )
+const selectedIndex = computed(() =>
+  selectedId.value == null
+    ? -1
+    : allExpenses.value.findIndex(e => e.id === selectedId.value)
+)
+// Indices in allExpenses whose status is Pending — Prev/Next walks this
+// list (not the raw array) so admin only cycles through pending approvals,
+// matching the CEO's wording.
+const pendingIndices = computed(() => {
+  const out = []
+  const list = allExpenses.value
+  for (let i = 0; i < list.length; i++) {
+    if ((list[i].status || 'Pending') === 'Pending') out.push(i)
+  }
+  return out
+})
+const isCurrentPending = computed(() =>
+  selectedExpense.value && (selectedExpense.value.status || 'Pending') === 'Pending'
+)
+const pendingPos = computed(() => {
+  const idx = selectedIndex.value
+  if (idx < 0) return -1
+  return pendingIndices.value.indexOf(idx)
+})
+const canGoPrev = computed(() => {
+  const idx = selectedIndex.value
+  const pis = pendingIndices.value
+  if (idx < 0 || pis.length === 0) return false
+  return pis[0] < idx
+})
+const canGoNext = computed(() => {
+  const idx = selectedIndex.value
+  const pis = pendingIndices.value
+  if (idx < 0 || pis.length === 0) return false
+  return pis[pis.length - 1] > idx
+})
 const approveLoading = ref(false)
 
 function openExpenseDetail(e) {
-  const idx = allExpenses.value.findIndex(x => x.id === e.id)
-  selectedIndex.value = idx >= 0 ? idx : -1
+  selectedId.value = e.id
 }
 function closeExpenseDetail() {
-  selectedIndex.value = -1
+  selectedId.value = null
 }
 function goPrev() {
-  if (selectedIndex.value > 0) selectedIndex.value -= 1
+  if (!canGoPrev.value) return
+  const idx = selectedIndex.value
+  const pis = pendingIndices.value
+  for (let i = pis.length - 1; i >= 0; i--) {
+    if (pis[i] < idx) {
+      selectedId.value = allExpenses.value[pis[i]].id
+      return
+    }
+  }
 }
 function goNext() {
-  if (selectedIndex.value < allExpenses.value.length - 1) selectedIndex.value += 1
+  if (!canGoNext.value) return
+  const idx = selectedIndex.value
+  const pis = pendingIndices.value
+  for (let i = 0; i < pis.length; i++) {
+    if (pis[i] > idx) {
+      selectedId.value = allExpenses.value[pis[i]].id
+      return
+    }
+  }
 }
-// Walk forward to the next Pending row; close the modal if none remain.
+// Jump to the first Pending row strictly after the current position.
+// Close the modal if none remain.
 function advanceToNextPending() {
+  const idx = selectedIndex.value
   const list = allExpenses.value
-  for (let i = selectedIndex.value + 1; i < list.length; i++) {
+  if (idx < 0) return closeExpenseDetail()
+  for (let i = idx + 1; i < list.length; i++) {
     if ((list[i].status || 'Pending') === 'Pending') {
-      selectedIndex.value = i
+      selectedId.value = list[i].id
       return
     }
   }

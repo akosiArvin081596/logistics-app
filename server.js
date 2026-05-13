@@ -12501,7 +12501,15 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 
 		if (truck) { conditions.push("LOWER(truck_unit) = ?"); params.push(String(truck).toLowerCase()); }
 		if (type) { conditions.push("LOWER(type) = ?"); params.push(String(type).toLowerCase()); }
-		if (status) { conditions.push("LOWER(status) = ?"); params.push(String(status).toLowerCase()); }
+		if (status) {
+			conditions.push("LOWER(status) = ?");
+			params.push(String(status).toLowerCase());
+		} else if (!isSuperAdmin) {
+			// Investors don't see Rejected by default — rejected rows never
+			// contribute to any total and only add noise to the audit view.
+			// They can still opt in via ?status=Rejected explicitly.
+			conditions.push("LOWER(status) != 'rejected'");
+		}
 		if (from) { conditions.push("date >= ?"); params.push(from); }
 		if (to) { conditions.push("date <= ?"); params.push(to); }
 
