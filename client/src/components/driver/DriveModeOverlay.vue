@@ -235,6 +235,9 @@ async function initMap() {
     tilt: 60,
     heading: 0,
     disableDefaultUI: true,
+    // Override the createMap default — Drive Mode auto-zooms with the camera,
+    // so the +/- buttons just clutter the bottom-right of the screen.
+    zoomControl: false,
     gestureHandling: 'greedy',
     keyboardShortcuts: false,
     clickableIcons: false,
