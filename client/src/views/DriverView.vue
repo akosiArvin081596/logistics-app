@@ -525,6 +525,10 @@ const POSITION_POLL_INTERVAL_MS = 30000
 
 async function fetchDriverPosition() {
   if (!driverName.value) return
+  // Phone GPS owns driverPosition while the temp test-load watcher is armed
+  // (see TEMP block below). Without this guard the 30 s ELD poll returns null
+  // for the unlinked truck and wipes out the phone fix between updates.
+  if (phoneGpsWatcherId !== null) return
   try {
     const data = await api.get('/api/locations/latest')
     const dn = driverName.value.toLowerCase()
@@ -1100,6 +1104,10 @@ function onGeofenceTrigger(payload) {
 // poll remains as a safety net for the initial load and socket-reconnect.
 function onLocationUpdate(payload) {
   if (!isMounted) return
+  // Phone GPS owns driverPosition while the temp test-load watcher is armed.
+  // Ignore Routemate fan-outs in that window so the phone fix isn't displaced
+  // by stale or off-truck telemetry.
+  if (phoneGpsWatcherId !== null) return
   if (!payload || payload.latitude == null || payload.longitude == null) return
   const me = (driverName.value || '').toLowerCase()
   const who = (payload.driver || '').toLowerCase()
