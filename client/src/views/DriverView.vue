@@ -1287,11 +1287,11 @@ onUnmounted(() => {
 .driver-app {
   min-height: 100vh;
   padding-top: calc(52px + env(safe-area-inset-top, 0px));
-  /* Tabbar is ~70-90px tall with the emoji icons + labels; the old 80px
-     clipped the last card on phones where the bar runs full-height. 120px
-     gives a comfortable buffer so the chat FAB on the bottom-most LoadCard
-     clears the bar with daylight to spare. */
-  padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px));
+  /* Tabbar runs ~95-110px tall on desktop / older Android Chrome because of
+     the larger emoji glyphs + label stack. A 120px buffer was still letting
+     the last LoadCard's chat FAB get clipped on some screens, so we go to
+     160px which leaves a clear gap under the deepest in-card element. */
+  padding-bottom: calc(160px + env(safe-area-inset-bottom, 0px));
   font-size: 0.95rem;
 }
 
