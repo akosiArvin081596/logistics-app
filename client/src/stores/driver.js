@@ -253,6 +253,11 @@ export const useDriverStore = defineStore('driver', {
       // caller surface the error.
       try {
         await this.loadData()
+        // After accept, the load's status moves from "Dispatched" to
+        // "Assigned" so it exits pendingLoads and enters workingLoads. Nudge
+        // the sub-tab so the driver sees where the load went without a
+        // refresh — otherwise filteredLoads stays empty on the Pending tab.
+        if (response === 'accepted') this.loadSubTab = 'active'
       } catch (err) {
         if (response === 'accepted') this.acceptedLoadIds.delete(loadId)
         throw err
