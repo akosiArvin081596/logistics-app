@@ -239,76 +239,11 @@
             />
           </div>
 
-          <!-- ============================================================
-               ACTIVE LOAD HERO — moved BELOW the load list per client
-               direction (2026-05-14). Houses the status stepper +
-               documents + expense form for the currently-active load,
-               so the driver can scroll down for action controls without
-               leaving the Loads tab.
-               ============================================================ -->
-          <div v-if="currentActiveLoad" class="hero-list-divider">
-            <span class="hero-list-divider-label">Update Active Load</span>
-          </div>
-
-          <div v-if="currentActiveLoad" class="active-hero">
-            <div class="active-hero-header">
-              <span class="active-hero-eyebrow">Your Active Load</span>
-              <span class="active-hero-headline">What's next?</span>
-            </div>
-
-            <!-- Multi-load picker. Auto-picks the highest-priority active load
-                 (In Transit > At Receiver > Unloading > At Shipper > Loading >
-                 Heading to Shipper > Assigned). Driver can override; selection
-                 persists to localStorage and is cleared automatically when the
-                 chosen load is no longer active. -->
-            <div v-if="driverStore.workingLoads.length > 1" class="status-load-picker">
-              <label class="picker-label">Active Load</label>
-              <select
-                class="picker-select"
-                :value="getLoadId(currentActiveLoad)"
-                @change="setStatusLoad($event.target.value)"
-              >
-                <option
-                  v-for="l in driverStore.workingLoads"
-                  :key="l._rowIndex"
-                  :value="getLoadId(l)"
-                >{{ getLoadId(l) }} &mdash; {{ getLoadStatus(l) || 'No status' }}</option>
-              </select>
-              <span class="picker-hint">
-                {{ isStatusLoadManual ? '(manual)' : '(auto-selected)' }}
-              </span>
-            </div>
-
-            <div class="status-load-header">
-              <span class="status-load-id">{{ getLoadId(currentActiveLoad) }}</span>
-              <StatusBadge :status="getLoadStatus(currentActiveLoad)" />
-            </div>
-
-            <StatusStepper
-              :load="currentActiveLoad"
-              :headers="driverStore.headers.jobTracking"
-              :current-status="getLoadStatus(currentActiveLoad)"
-              :driver-name="driverName"
-              @update="handleStatusUpdate"
-            />
-
-            <div class="status-section-divider">Documents</div>
-            <DocumentUpload
-              :load-id="getLoadId(currentActiveLoad)"
-              :driver-name="driverName"
-              :row-index="currentActiveLoad._rowIndex"
-              @uploaded="onStatusDocUploaded"
-            />
-            <DocumentList ref="statusDocListRef" :load-id="getLoadId(currentActiveLoad)" />
-
-            <div class="status-section-divider">Log Expense</div>
-            <ExpenseForm
-              :loads="[currentActiveLoad]"
-              :driver-name="driverName"
-              :headers="driverStore.headers.jobTracking"
-              @submit="handleExpenseSubmit"
-            />
-          </div>
+          <!-- Active-load action panel (status stepper + documents + expense
+               form) used to live here as an inline hero. It moved to
+               LoadDetail on 2026-05-14 per client direction: clicking a
+               load opens the detail page where the action controls live.
+               The list view stays clean. -->
         </div>
       </section>
 

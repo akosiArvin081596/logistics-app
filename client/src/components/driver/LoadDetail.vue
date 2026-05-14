@@ -13,6 +13,25 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
+    <!-- Status update block. Only renders for active/working loads (assigned,
+         dispatched, at shipper, loading, in transit, at receiver, unloading).
+         Pending acceptance loads show Accept/Reject buttons at the bottom of
+         the page instead. Completed loads (Delivered) get StatusStepper's
+         own "Load Delivered" disabled state, so this is safe to render. -->
+    <div v-if="isActiveLoad" class="detail-status-block">
+      <div class="detail-status-header">
+        <span class="detail-status-eyebrow">Update Status</span>
+        <span class="detail-status-headline">What's next?</span>
+      </div>
+      <StatusStepper
+        :load="load"
+        :headers="headers"
+        :current-status="status"
+        :driver-name="driverName"
+        @update="$emit('status-update', $event)"
+      />
+    </div>
+
     <!-- TEMP — phone-GPS banner for the test load. Goes away with the rest
          of the temp block in DriverView when testing wraps. -->
     <div v-if="phoneGpsModeActive && phoneGpsStatus !== 'active'" class="phone-gps-banner" :class="bannerClass">
@@ -184,6 +203,7 @@
 import { computed, ref } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
 import StatusBadge from '../shared/StatusBadge.vue'
+import StatusStepper from './StatusStepper.vue'
 import DocumentList from './DocumentList.vue'
 import DocumentUpload from './DocumentUpload.vue'
 import DriverRouteMap from './DriverRouteMap.vue'
@@ -388,6 +408,57 @@ const dropoffFields = computed(() => {
   background: var(--bg);
   border-radius: 8px;
   margin-bottom: 0.75rem;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Status update block. Sits at the top of the detail page (after the route
+   summary) so a 50s/60s-aged driver lands directly on the next action they
+   need to take. Same visual language as the Loads tab's old active-hero
+   (accent border, soft gradient) but scoped here now per 2026-05-14
+   client direction: load list lives on the tab; per-load action lives
+   on the detail page.
+   ──────────────────────────────────────────────────────────────────────── */
+.detail-status-block {
+  background: linear-gradient(180deg, var(--accent-dim, #ecfdf5) 0%, var(--surface) 100%);
+  border: 2px solid var(--accent);
+  border-radius: 14px;
+  padding: 1rem 0.85rem 1.15rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.10);
+}
+.detail-status-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-bottom: 0.85rem;
+  text-align: center;
+}
+.detail-status-eyebrow {
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+.detail-status-headline {
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.15;
+}
+/* StatusStepper's inner card sits on the panel surface — make sure it
+   doesn't look like a stranded island inside the bordered block. */
+.detail-status-block :deep(.card) {
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 0.85rem;
+}
+/* Bigger tap target on the primary action button — gloved hands, sun
+   glare, older eyes. */
+.detail-status-block :deep(.action-btn.primary) {
+  min-height: 64px;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
 }
 
 .route-icon {
