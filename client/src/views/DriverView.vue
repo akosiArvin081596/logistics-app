@@ -158,6 +158,78 @@
 
         <!-- Load List -->
         <div v-else>
+          <!-- ============================================================
+               ACTIVE LOAD HERO — moved here from the old Status tab.
+               Sits at the top of the Loads tab so a driver lands directly
+               on the next action they need to take ("Arrived at Shipper",
+               "Loaded", "Delivered") without having to switch tabs.
+               ============================================================ -->
+          <div v-if="currentActiveLoad" class="active-hero">
+            <div class="active-hero-header">
+              <span class="active-hero-eyebrow">Your Active Load</span>
+              <span class="active-hero-headline">What's next?</span>
+            </div>
+
+            <!-- Multi-load picker. Auto-picks the highest-priority active load
+                 (In Transit > At Receiver > Unloading > At Shipper > Loading >
+                 Heading to Shipper > Assigned). Driver can override; selection
+                 persists to localStorage and is cleared automatically when the
+                 chosen load is no longer active. -->
+            <div v-if="driverStore.workingLoads.length > 1" class="status-load-picker">
+              <label class="picker-label">Active Load</label>
+              <select
+                class="picker-select"
+                :value="getLoadId(currentActiveLoad)"
+                @change="setStatusLoad($event.target.value)"
+              >
+                <option
+                  v-for="l in driverStore.workingLoads"
+                  :key="l._rowIndex"
+                  :value="getLoadId(l)"
+                >{{ getLoadId(l) }} &mdash; {{ getLoadStatus(l) || 'No status' }}</option>
+              </select>
+              <span class="picker-hint">
+                {{ isStatusLoadManual ? '(manual)' : '(auto-selected)' }}
+              </span>
+            </div>
+
+            <div class="status-load-header">
+              <span class="status-load-id">{{ getLoadId(currentActiveLoad) }}</span>
+              <StatusBadge :status="getLoadStatus(currentActiveLoad)" />
+            </div>
+
+            <StatusStepper
+              :load="currentActiveLoad"
+              :headers="driverStore.headers.jobTracking"
+              :current-status="getLoadStatus(currentActiveLoad)"
+              :driver-name="driverName"
+              @update="handleStatusUpdate"
+            />
+
+            <div class="status-section-divider">Documents</div>
+            <DocumentUpload
+              :load-id="getLoadId(currentActiveLoad)"
+              :driver-name="driverName"
+              :row-index="currentActiveLoad._rowIndex"
+              @uploaded="onStatusDocUploaded"
+            />
+            <DocumentList ref="statusDocListRef" :load-id="getLoadId(currentActiveLoad)" />
+
+            <div class="status-section-divider">Log Expense</div>
+            <ExpenseForm
+              :loads="[currentActiveLoad]"
+              :driver-name="driverName"
+              :headers="driverStore.headers.jobTracking"
+              @submit="handleExpenseSubmit"
+            />
+          </div>
+
+          <!-- Visual separator before the load list. Older drivers like a
+               clear line between "what I'm doing now" and "everything else." -->
+          <div v-if="currentActiveLoad" class="hero-list-divider">
+            <span class="hero-list-divider-label">All Loads</span>
+          </div>
+
           <!-- Sub-tab bar -->
           <div class="load-sub-tabs">
             <button
@@ -234,71 +306,8 @@
         </div>
       </section>
 
-      <!-- STATUS TAB -->
-      <section v-if="currentTab === 'status'" class="tab-panel">
-        <div class="section-header">Status Update</div>
-        <div v-if="!currentActiveLoad">
-          <EmptyState>
-            <div class="empty-icon">&#128666;</div>
-            No active loads to update.
-          </EmptyState>
-        </div>
-        <div v-else>
-          <!-- Multi-load picker. Auto-picks the highest-priority active load
-               (In Transit > At Receiver > Unloading > At Shipper > Loading >
-               Heading to Shipper > Assigned). Driver can override; selection
-               persists to localStorage and is cleared automatically when the
-               chosen load is no longer active. -->
-          <div v-if="driverStore.workingLoads.length > 1" class="status-load-picker">
-            <label class="picker-label">Active Load</label>
-            <select
-              class="picker-select"
-              :value="getLoadId(currentActiveLoad)"
-              @change="setStatusLoad($event.target.value)"
-            >
-              <option
-                v-for="l in driverStore.workingLoads"
-                :key="l._rowIndex"
-                :value="getLoadId(l)"
-              >{{ getLoadId(l) }} &mdash; {{ getLoadStatus(l) || 'No status' }}</option>
-            </select>
-            <span class="picker-hint">
-              {{ isStatusLoadManual ? '(manual)' : '(auto-selected)' }}
-            </span>
-          </div>
-
-          <div class="status-load-header">
-            <span class="status-load-id">{{ getLoadId(currentActiveLoad) }}</span>
-            <StatusBadge :status="getLoadStatus(currentActiveLoad)" />
-          </div>
-
-          <StatusStepper
-            :load="currentActiveLoad"
-            :headers="driverStore.headers.jobTracking"
-            :current-status="getLoadStatus(currentActiveLoad)"
-            :driver-name="driverName"
-            @update="handleStatusUpdate"
-          />
-
-          <div class="status-section-divider">Documents</div>
-          <DocumentUpload
-            :load-id="getLoadId(currentActiveLoad)"
-            :driver-name="driverName"
-            :row-index="currentActiveLoad._rowIndex"
-            @uploaded="onStatusDocUploaded"
-          />
-          <DocumentList ref="statusDocListRef" :load-id="getLoadId(currentActiveLoad)" />
-
-          <div class="status-section-divider">Log Expense</div>
-          <ExpenseForm
-            v-if="currentActiveLoad"
-            :loads="[currentActiveLoad]"
-            :driver-name="driverName"
-            :headers="driverStore.headers.jobTracking"
-            @submit="handleExpenseSubmit"
-          />
-        </div>
-      </section>
+      <!-- STATUS TAB was merged into the top of the Loads tab on 2026-05-14.
+           See the active-hero block in the loads-tab section above. -->
 
       <!-- KIT TAB -->
       <section v-if="currentTab === 'kit'" class="tab-panel">
@@ -991,10 +1000,11 @@ async function handleStatusUpdate({ newStatus, load }) {
     toast.show(`Status updated to ${newStatus}`)
   } catch (err) {
     if (err && err.code === 'POD_REQUIRED') {
-      // POD gate: surface the server message and keep the driver on the Status tab
-      // so the Documents section directly below the stepper is one tap away.
+      // POD gate: surface the server message and keep the driver on the Loads
+      // tab — the Documents section sits directly below the stepper in the
+      // active-load hero, one tap away.
       toast.show(err.message || 'Upload a POD before marking Delivered', 'error')
-      currentTab.value = 'status'
+      currentTab.value = 'loads'
     } else if (err && err.code === 'ACTIVE_JOB_CONFLICT') {
       toast.show(err.message || 'Complete your current load before starting another', 'error')
     } else {
@@ -1245,6 +1255,12 @@ async function retryInitialLoad() {
 onMounted(async () => {
   isMounted = true
   driverStore.driverName = driverName.value
+  // The standalone Status tab was retired on 2026-05-14 (merged into the Loads
+  // tab as the active-load hero). If anything ever sets currentTab to 'status'
+  // (cached state, a stale link), coerce it to 'loads' so the driver doesn't
+  // land on an empty section.
+  if (currentTab.value === 'status') currentTab.value = 'loads'
+  if (driverStore.currentTab === 'status') driverStore.currentTab = 'loads'
   await attemptInitialLoad()
   // Begin polling the driver's own ELD position. First call is fire-and-forget
   // so the initial load isn't delayed by a Routemate query failure.
@@ -1562,6 +1578,79 @@ onUnmounted(() => {
   border: 1px solid var(--border);
   padding: 0.1rem 0.5rem;
   border-radius: 20px;
+  color: var(--text-dim);
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Active-load hero (top of Loads tab). The CEO flagged that a lot of
+   drivers are in their late 50s / early 60s and aren't comfortable
+   bouncing between tabs — this block puts the "what's next?" action in
+   their face the moment they open the app.
+   ──────────────────────────────────────────────────────────────────────── */
+.active-hero {
+  background: linear-gradient(180deg, var(--accent-dim, #ecfdf5) 0%, var(--surface) 100%);
+  border: 2px solid var(--accent);
+  border-radius: 14px;
+  padding: 1rem 0.85rem 1.15rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.10);
+}
+.active-hero-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-bottom: 0.85rem;
+  text-align: center;
+}
+.active-hero-eyebrow {
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+.active-hero-headline {
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.15;
+}
+
+/* Inside the hero, the status stepper sits on the panel surface — make sure
+   StatusStepper's inner .card doesn't look like a stranded island. */
+.active-hero :deep(.card) {
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 0.85rem;
+}
+
+/* Make the primary action button bigger and easier to hit. Older drivers,
+   gloved hands, sun glare — the tap target needs to be unmissable. */
+.active-hero :deep(.action-btn.primary) {
+  min-height: 64px;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+}
+
+/* Visual separator between the action hero and the rest of the load list. */
+.hero-list-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.25rem 0 0.85rem;
+}
+.hero-list-divider::before,
+.hero-list-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.hero-list-divider-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
   color: var(--text-dim);
 }
 
