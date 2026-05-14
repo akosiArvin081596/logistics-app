@@ -177,12 +177,15 @@ let destMarker = null
 let distanceLabelMarker = null
 let routePolyline = null
 let routeAnim = null              // setInterval handle for the dashed-blue polyline animation
+let approachPolyline = null       // pre-pickup driver→pickup leg (amber dashed)
+let approachAnim = null           // setInterval handle for the approach-leg animation
 let allRouteOverlays = []         // same shape, for "All Drivers" view
 let driverInfoWindows = new Map() // driver name -> google.maps.InfoWindow
 
 // Trail state (single driver)
 const trailPoints = ref([])
 const routePoints = ref([])
+const approachRoutePoints = ref([])  // driver→pickup polyline for pre-pickup loads
 const originLatLng = ref(null)
 const destLatLng = ref(null)
 const originAddress = ref('')
@@ -381,6 +384,8 @@ function safeFitBounds(points, options = {}) {
 function clearSingleLoadOverlays() {
   if (routeAnim) { clearInterval(routeAnim); routeAnim = null }
   if (routePolyline) { routePolyline.setMap(null); routePolyline = null }
+  if (approachAnim) { clearInterval(approachAnim); approachAnim = null }
+  if (approachPolyline) { approachPolyline.setMap(null); approachPolyline = null }
   if (originMarker) { originMarker.map = null; originMarker = null }
   if (destMarker) { destMarker.map = null; destMarker = null }
   if (distanceLabelMarker) { distanceLabelMarker.map = null; distanceLabelMarker = null }
@@ -627,6 +632,36 @@ function renderSingleLoadRoute() {
     const info = new google.maps.InfoWindow({ content: infoContent })
     destMarker.addEventListener('gmp-click', () => info.open({ map, anchor: destMarker }))
   }
+}
+
+// Approach polyline (driver→pickup) for pre-pickup loads. Amber dashed so it's
+// visually distinct from the blue haul polyline; sits at a lower z-index so
+// the two lines don't fight at the pickup junction.
+function renderApproachLeg() {
+  if (approachAnim) { clearInterval(approachAnim); approachAnim = null }
+  if (approachPolyline) { approachPolyline.setMap(null); approachPolyline = null }
+  if (!map) return
+  if (selectedDriver.value === '__all__' || !expandedLoadId.value) return
+
+  const pts = approachRoutePoints.value
+  if (!pts || pts.length < 2) return
+
+  const path = pts.map(p => ({ lat: p[0], lng: p[1] }))
+  approachPolyline = new google.maps.Polyline({
+    path,
+    strokeColor: '#ffffff',
+    strokeOpacity: 0.9,
+    strokeWeight: 5,
+    clickable: false,
+    icons: [{
+      icon: { path: 'M 0,-1 0,1', strokeColor: '#f59e0b', strokeOpacity: 1, scale: 3 },
+      offset: '0',
+      repeat: '20px',
+    }],
+    map,
+    zIndex: 50,
+  })
+  approachAnim = animatePolyline(approachPolyline)
 }
 
 function renderAllRoutes() {
@@ -887,6 +922,7 @@ async function toggleLoad(al, loc) {
     // Collapse
     expandedLoadId.value = ''
     routePoints.value = []
+    approachRoutePoints.value = []
     originLatLng.value = null
     destLatLng.value = null
     routeDistance.value = null
@@ -900,6 +936,7 @@ async function toggleLoad(al, loc) {
   // Expand: show origin/destination markers
   expandedLoadId.value = al.loadId
   routePoints.value = []
+  approachRoutePoints.value = []
   clearSingleLoadOverlays()
 
   const oLat = Number(al.originLat)
@@ -989,6 +1026,20 @@ async function toggleLoad(al, loc) {
     renderSingleLoadRoute()
   }
 
+  // Pre-pickup loads also draw a driver→pickup approach leg in amber so
+  // dispatchers can see the truck's path to the shipper alongside the
+  // planned blue haul. The haul polyline stays anchored at pickup→drop-off
+  // (see Step 1 in maybeRefetchRoute) while the approach leg refreshes as
+  // the truck moves toward pickup.
+  if (!isPastPickup && hasDriverGps && hasOrigin) {
+    const gen = focusGeneration
+    lastApproachRefetchPos = { lat: loc.latitude, lng: loc.longitude }
+    lastApproachRefetchTime = Date.now()
+    await fetchApproachLeg(loc.latitude, loc.longitude, oLat, oLng)
+    if (gen !== focusGeneration) return
+    renderApproachLeg()
+  }
+
   // Weather fetch disabled to reduce Google API costs
 }
 
@@ -1003,6 +1054,15 @@ let lastRouteRefetchTime = 0
 
 async function maybeRefetchRoute(lat, lng) {
   if (!destLatLng.value || !expandedLoadId.value) return
+  // Only refetch the haul polyline for post-pickup loads. Pre-pickup loads
+  // have a static pickup→drop-off haul; refreshing it with driver coords
+  // would silently shift the displayed line from pickup→dest to driver→dest
+  // while the load is still Assigned. The dynamic leg (driver→pickup) is
+  // refreshed via maybeRefetchApproachLeg() instead.
+  const focusLoc = locations.value.find(l => l.driver === selectedDriver.value)
+  const focusLoad = focusLoc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
+  if (!focusLoad || !PAST_PICKUP_RE.test(focusLoad.status)) return
+
   const now = Date.now()
   if (lastRouteRefetchPos) {
     const moved = haversineMeters(lat, lng, lastRouteRefetchPos.lat, lastRouteRefetchPos.lng)
@@ -1024,6 +1084,49 @@ async function maybeRefetchRoute(lat, lng) {
   } catch {
     // silent -- keep existing route
   }
+}
+
+// Approach leg (driver→pickup) for pre-pickup loads. Refetched on the same
+// 100m + 60s cadence as the haul leg, but the source/target are swapped:
+// origin is the truck's live GPS, destination is the load's pickup coord.
+// The 2000 km sanity threshold mirrors toggleLoad — if the truck is
+// implausibly far from the pickup, skip rendering rather than route across
+// the continent (mismatched data, dispatcher viewing the wrong driver, etc).
+let lastApproachRefetchPos = null
+let lastApproachRefetchTime = 0
+
+async function fetchApproachLeg(driverLat, driverLng, pickupLat, pickupLng) {
+  if (haversineMeters(driverLat, driverLng, pickupLat, pickupLng) > 2_000_000) {
+    approachRoutePoints.value = []
+    return
+  }
+  try {
+    const data = await api.get(`/api/route?fromLat=${driverLat}&fromLng=${driverLng}&toLat=${pickupLat}&toLng=${pickupLng}`)
+    if (data.route && data.route.length >= 2) {
+      approachRoutePoints.value = data.route.map(p => [p.latitude, p.longitude])
+    } else {
+      approachRoutePoints.value = [[driverLat, driverLng], [pickupLat, pickupLng]]
+    }
+  } catch {
+    // silent — keep last good approach polyline
+  }
+}
+
+async function maybeRefetchApproachLeg(driverLat, driverLng) {
+  if (!originLatLng.value || !expandedLoadId.value) return
+  const focusLoc = locations.value.find(l => l.driver === selectedDriver.value)
+  const focusLoad = focusLoc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
+  if (!focusLoad || PAST_PICKUP_RE.test(focusLoad.status)) return
+
+  const now = Date.now()
+  if (lastApproachRefetchPos) {
+    const moved = haversineMeters(driverLat, driverLng, lastApproachRefetchPos.lat, lastApproachRefetchPos.lng)
+    if (moved < 100 || now - lastApproachRefetchTime < 60000) return
+  }
+  lastApproachRefetchPos = { lat: driverLat, lng: driverLng }
+  lastApproachRefetchTime = now
+  const [pLat, pLng] = originLatLng.value
+  await fetchApproachLeg(driverLat, driverLng, pLat, pLng)
 }
 
 async function focusAll() {
@@ -1198,6 +1301,14 @@ watch(routePoints, () => {
   }
 })
 
+// Approach polyline re-renders on every refetch — the underlying points have
+// changed (driver moved 100m+), so just rebuild the path. renderApproachLeg
+// itself tears down + recreates so the dashed animation stays in sync.
+watch(approachRoutePoints, () => {
+  if (!expandedLoadId.value) return
+  renderApproachLeg()
+})
+
 watch(allRoutes, () => {
   renderAllRoutes()
 }, { deep: true })
@@ -1316,7 +1427,11 @@ function onLocationUpdate(payload) {
 
   // Refresh the route as the truck progresses (100m moved + 60s elapsed),
   // mirroring the public /track tracker so both views render the same
-  // road segments at the same intervals.
+  // road segments at the same intervals. Pre-pickup loads refresh the
+  // amber driver→pickup approach leg instead of the static blue haul.
+  if (isSelectedDriver && originLatLng.value && expandedLoadId.value) {
+    maybeRefetchApproachLeg(payload.latitude, payload.longitude)
+  }
   if (isSelectedDriver && routePoints.value.length >= 2 && destLatLng.value) {
     maybeRefetchRoute(payload.latitude, payload.longitude)
   }
@@ -1348,6 +1463,7 @@ function onStatusUpdated(payload) {
     selectedDriver.value === payload.driverName
   ) {
     routePoints.value = []
+    approachRoutePoints.value = []
     originLatLng.value = null
     destLatLng.value = null
     originAddress.value = ''
@@ -1357,6 +1473,19 @@ function onStatusUpdated(payload) {
     routeDistance.value = null
     routeEta.value = null
     clearSingleLoadOverlays()
+  }
+  // Pre→post-pickup transition (geofence auto-advance at shipper, or driver
+  // manual "Loaded / In Transit"): drop the amber approach leg. The blue haul
+  // polyline stays — next location-update will pass maybeRefetchRoute's new
+  // post-pickup gate and snap to the trimmed driver→drop-off geometry.
+  if (
+    payload.newStatus &&
+    PAST_PICKUP_RE.test(payload.newStatus) &&
+    selectedDriver.value === payload.driverName
+  ) {
+    approachRoutePoints.value = []
+    if (approachAnim) { clearInterval(approachAnim); approachAnim = null }
+    if (approachPolyline) { approachPolyline.setMap(null); approachPolyline = null }
   }
   // Refresh locations to get updated loadId
   fetchLocations()
