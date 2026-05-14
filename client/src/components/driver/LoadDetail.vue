@@ -13,7 +13,7 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
-    <!-- Route Map (separate collapse) -->
+    <!-- Route Map + smart guidance (alternatives + directions) -->
     <van-collapse v-model="openSections" class="detail-collapse" :border="false">
       <van-collapse-item title="Route Map" name="map">
         <DriverRouteMap
@@ -21,6 +21,31 @@
           :load="load"
           :headers="headers"
           :driver-position="driverPosition"
+          :selected-alt-idx="selectedAltIdx"
+          @update:selected-alt-idx="selectedAltIdx = $event"
+          @route-data="onRouteData"
+        />
+      </van-collapse-item>
+      <van-collapse-item
+        v-if="routeData && routeData.routes && routeData.routes.length > 1"
+        title="Route Options"
+        name="alternatives"
+      >
+        <RouteAlternatives
+          :alternatives="routeData.routes"
+          :recommended-idx="routeData.recommendedIdx"
+          :selected-idx="selectedAltIdx"
+          @select="selectedAltIdx = $event"
+        />
+      </van-collapse-item>
+      <van-collapse-item
+        v-if="activeRouteSteps && activeRouteSteps.length"
+        title="Directions"
+        name="directions"
+      >
+        <RouteDirections
+          :steps="activeRouteSteps"
+          :destination="routeData && routeData.navigationDestination"
         />
       </van-collapse-item>
     </van-collapse>
@@ -145,6 +170,8 @@ import StatusBadge from '../shared/StatusBadge.vue'
 import DocumentList from './DocumentList.vue'
 import DocumentUpload from './DocumentUpload.vue'
 import DriverRouteMap from './DriverRouteMap.vue'
+import RouteAlternatives from './RouteAlternatives.vue'
+import RouteDirections from './RouteDirections.vue'
 import ExpenseForm from './ExpenseForm.vue'
 import ExpenseCard from './ExpenseCard.vue'
 
@@ -165,6 +192,20 @@ const openSections = ref(['map'])
 const copiedField = ref(null)
 const routeMapRef = ref(null)
 const docListRef = ref(null)
+
+// Smart route guidance state — DriverRouteMap emits 'route-data' after every
+// successful /api/route?alternatives=true call. We store it here so the
+// sibling collapses (Route Options + Directions) render off the same payload
+// without each component refetching.
+const selectedAltIdx = ref(0)
+const routeData = ref(null)
+function onRouteData(payload) {
+  routeData.value = payload
+}
+const activeRouteSteps = computed(() => {
+  const r = routeData.value?.routes?.[selectedAltIdx.value]
+  return r?.steps || []
+})
 
 function onUploaded(payload) {
   // Refresh the document list so the new upload appears immediately.

@@ -11270,9 +11270,109 @@ const routeCache = new Map();
 const ROUTE_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
 const ROUTE_CACHE_MAX = 500;
 
-function routeCacheKey(from, to) {
-	// Round to 3 decimal places (~111m precision) to group nearby positions
-	return `${from.latitude.toFixed(3)},${from.longitude.toFixed(3)}>${to.latitude.toFixed(3)},${to.longitude.toFixed(3)}`;
+function routeCacheKey(from, to, alternatives = false) {
+	// Round to 3 decimal places (~111m precision) to group nearby positions.
+	// `|alt` suffix keeps the rich (alternatives + traffic + fuel + tolls)
+	// payload separate from the lean single-route payload — same waypoints
+	// produce different responses, so they must not collide in the cache.
+	const base = `${from.latitude.toFixed(3)},${from.longitude.toFixed(3)}>${to.latitude.toFixed(3)},${to.longitude.toFixed(3)}`;
+	return alternatives ? `${base}|alt` : base;
+}
+
+// Parse one Google Routes API v2 route into the LogisX rich-route shape.
+// Handles missing optional fields (no traffic data, toll-free roads, etc.)
+// by returning null for that field so the client can render gracefully.
+function parseRichRoute(googleRoute) {
+	if (!googleRoute || !googleRoute.legs || googleRoute.legs.length === 0) return null;
+	const leg = googleRoute.legs[0];
+	const durationSec = parseInt((leg.duration || "0s").replace("s", ""), 10);
+	const points = googleRoute.polyline?.encodedPolyline
+		? decodePolyline(googleRoute.polyline.encodedPolyline)
+		: [];
+	if (points.length < 2) return null;
+
+	const adv = googleRoute.travelAdvisory || {};
+	let fuelLiters = null;
+	if (adv.fuelConsumptionMicroliters) {
+		const microL = parseInt(adv.fuelConsumptionMicroliters, 10);
+		if (Number.isFinite(microL)) fuelLiters = microL / 1e6;
+	}
+	let tollPriceUsd = null;
+	if (adv.tollInfo?.estimatedPrice?.length) {
+		// Sum USD entries; non-USD currencies fall through as null so the UI
+		// doesn't pretend a Mexican-peso toll is dollars.
+		const usd = adv.tollInfo.estimatedPrice.find(p => p.currencyCode === "USD");
+		if (usd) {
+			const units = parseInt(usd.units || "0", 10) || 0;
+			const nanos = parseInt(usd.nanos || 0, 10) || 0;
+			tollPriceUsd = units + nanos / 1e9;
+		}
+	}
+	let trafficSegments = null;
+	if (Array.isArray(adv.speedReadingIntervals) && adv.speedReadingIntervals.length) {
+		trafficSegments = adv.speedReadingIntervals
+			.filter(s => s.speed)
+			.map(s => ({
+				startIdx: s.startPolylinePointIndex || 0,
+				endIdx: s.endPolylinePointIndex || 0,
+				congestion: s.speed, // NORMAL | SLOW | TRAFFIC_JAM
+			}));
+	}
+	let steps = null;
+	if (Array.isArray(leg.steps) && leg.steps.length) {
+		steps = leg.steps.map(s => ({
+			instruction: s.navigationInstruction?.instructions || "",
+			maneuver: s.navigationInstruction?.maneuver || "",
+			distanceMeters: s.distanceMeters || 0,
+			durationSec: parseInt((s.staticDuration || "0s").replace("s", ""), 10),
+			polyline: s.polyline?.encodedPolyline ? decodePolyline(s.polyline.encodedPolyline) : null,
+		}));
+	}
+
+	return {
+		points,
+		distanceMiles: Math.round(leg.distanceMeters / 160.934) / 10,
+		durationMin: Math.round(durationSec / 60),
+		fuelLiters,
+		tollPriceUsd,
+		trafficSegments,
+		steps,
+	};
+}
+
+// Pick the best route by weighted score of normalized time + fuel + tolls.
+// Lower score wins. If fuel or tolls are missing on any route, drop that
+// factor from the comparison (renormalize weights) — penalizing a route for
+// missing data would just pick whichever route Google happened to compute
+// the metric for, not the actually best one.
+function scoreRoutes(routes) {
+	if (!routes || routes.length === 0) return 0;
+	if (routes.length === 1) return 0;
+	const hasFuel = routes.every(r => typeof r.fuelLiters === "number" && isFinite(r.fuelLiters));
+	const hasTolls = routes.every(r => typeof r.tollPriceUsd === "number" && isFinite(r.tollPriceUsd));
+	const wTime = 0.5;
+	const wFuel = hasFuel ? 0.35 : 0;
+	const wTolls = hasTolls ? 0.15 : 0;
+	const wSum = wTime + wFuel + wTolls;
+	function norm(vals, v) {
+		const lo = Math.min(...vals);
+		const hi = Math.max(...vals);
+		if (hi === lo) return 0;
+		return (v - lo) / (hi - lo);
+	}
+	const times = routes.map(r => r.durationMin);
+	const fuels = hasFuel ? routes.map(r => r.fuelLiters) : null;
+	const tolls = hasTolls ? routes.map(r => r.tollPriceUsd) : null;
+	let bestIdx = 0;
+	let bestScore = Infinity;
+	for (let i = 0; i < routes.length; i++) {
+		const tn = norm(times, times[i]);
+		const fn = hasFuel ? norm(fuels, fuels[i]) : 0;
+		const ton = hasTolls ? norm(tolls, tolls[i]) : 0;
+		const score = (wTime * tn + wFuel * fn + wTolls * ton) / wSum;
+		if (score < bestScore) { bestScore = score; bestIdx = i; }
+	}
+	return bestIdx;
 }
 
 // Persist routeCache across pm2 restarts via a single SQLite row. Avoids the
@@ -11325,18 +11425,51 @@ function saveRouteCacheSnapshot() {
 }
 loadRouteCacheSnapshot();
 
-// Get driving route between two points using Google Routes API
-async function getRoute(from, to, retries = 2) {
+// Get driving route between two points using Google Routes API.
+// opts.alternatives:
+//   false (default) → single lean route, shape { points, distanceMiles, durationMin }
+//   true            → up to 3 alternatives with traffic/fuel/tolls + steps,
+//                     shape { routes: [...], recommendedIdx }
+// The two response shapes are cached separately (see routeCacheKey) so a
+// lean caller can't poison the rich cache and vice versa.
+async function getRoute(from, to, opts = {}, retries = 2) {
 	if (!from || !to) return null;
 	// Skip impossible routes (e.g. cross-ocean) — max ~5000 km straight-line
 	const distM = geolib.getDistance(from, to);
 	if (distM > 5000000) return null;
 
+	const alternatives = opts.alternatives === true;
 	// Check cache before calling API
-	const cacheKey = routeCacheKey(from, to);
+	const cacheKey = routeCacheKey(from, to, alternatives);
 	const cached = routeCache.get(cacheKey);
 	if (cached && Date.now() - cached.time < ROUTE_CACHE_TTL) {
 		return cached.result;
+	}
+
+	const reqBody = {
+		origin: { location: { latLng: { latitude: from.latitude, longitude: from.longitude } } },
+		destination: { location: { latLng: { latitude: to.latitude, longitude: to.longitude } } },
+		travelMode: "DRIVE",
+	};
+	let fieldMask = "routes.polyline,routes.legs.distanceMeters,routes.legs.duration";
+	if (alternatives) {
+		reqBody.computeAlternativeRoutes = true;
+		reqBody.routingPreference = "TRAFFIC_AWARE_OPTIMAL";
+		reqBody.extraComputations = ["FUEL_CONSUMPTION", "TOLLS", "TRAFFIC_ON_POLYLINE"];
+		reqBody.routeModifiers = { vehicleInfo: { emissionType: "DIESEL" } };
+		reqBody.polylineQuality = "HIGH_QUALITY";
+		fieldMask = [
+			"routes.polyline",
+			"routes.legs.distanceMeters",
+			"routes.legs.duration",
+			"routes.travelAdvisory.fuelConsumptionMicroliters",
+			"routes.travelAdvisory.tollInfo.estimatedPrice",
+			"routes.travelAdvisory.speedReadingIntervals",
+			"routes.legs.steps.navigationInstruction",
+			"routes.legs.steps.distanceMeters",
+			"routes.legs.steps.staticDuration",
+			"routes.legs.steps.polyline.encodedPolyline",
+		].join(",");
 	}
 
 	for (let attempt = 0; attempt <= retries; attempt++) {
@@ -11348,13 +11481,9 @@ async function getRoute(from, to, retries = 2) {
 				headers: {
 					"Content-Type": "application/json",
 					"X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
-					"X-Goog-FieldMask": "routes.polyline,routes.legs.distanceMeters,routes.legs.duration",
+					"X-Goog-FieldMask": fieldMask,
 				},
-				body: JSON.stringify({
-					origin: { location: { latLng: { latitude: from.latitude, longitude: from.longitude } } },
-					destination: { location: { latLng: { latitude: to.latitude, longitude: to.longitude } } },
-					travelMode: "DRIVE",
-				}),
+				body: JSON.stringify(reqBody),
 				signal: controller.signal,
 			});
 			clearTimeout(timeout);
@@ -11372,14 +11501,28 @@ async function getRoute(from, to, retries = 2) {
 				if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
 				return null;
 			}
-			const route = data.routes[0];
-			const leg = route.legs[0];
-			const durationSec = parseInt((leg.duration || "0s").replace("s", ""), 10);
-			const result = {
-				points: decodePolyline(route.polyline.encodedPolyline),
-				distanceMiles: Math.round(leg.distanceMeters / 160.934) / 10,
-				durationMin: Math.round(durationSec / 60),
-			};
+
+			let result;
+			if (alternatives) {
+				const richRoutes = data.routes
+					.map(r => parseRichRoute(r))
+					.filter(r => r !== null);
+				if (richRoutes.length === 0) {
+					routeCache.set(cacheKey, { result: null, time: Date.now() });
+					if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
+					return null;
+				}
+				result = { routes: richRoutes, recommendedIdx: scoreRoutes(richRoutes) };
+			} else {
+				const route = data.routes[0];
+				const leg = route.legs[0];
+				const durationSec = parseInt((leg.duration || "0s").replace("s", ""), 10);
+				result = {
+					points: decodePolyline(route.polyline.encodedPolyline),
+					distanceMiles: Math.round(leg.distanceMeters / 160.934) / 10,
+					durationMin: Math.round(durationSec / 60),
+				};
+			}
 			routeCache.set(cacheKey, { result, time: Date.now() });
 			if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
 			return result;
@@ -11554,7 +11697,12 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 	}
 });
 
-// GET /api/route — Lightweight rerouting: get driving route between two points
+// GET /api/route — Lightweight rerouting: get driving route between two points.
+// ?alternatives=true requests up to 3 alternatives with traffic-aware ETAs,
+// per-route fuel + toll estimates, traffic congestion segments, and turn-by-turn
+// steps. Used by the driver's smart route guidance UI. Existing callers
+// (admin tracking map, public customer tracker) omit the flag and receive the
+// lean single-route payload unchanged.
 app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async (req, res) => {
 	res.set('Cache-Control', 'private, max-age=300');
 	try {
@@ -11564,11 +11712,31 @@ app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async 
 		}
 		const from = { latitude: parseFloat(fromLat), longitude: parseFloat(fromLng) };
 		const to = { latitude: parseFloat(toLat), longitude: parseFloat(toLng) };
-		const route = await getRoute(from, to);
+		const alternatives = req.query.alternatives === "true";
+		const route = await getRoute(from, to, { alternatives });
 		if (!route) {
 			// Return empty route instead of 500 (e.g. cross-ocean routes OSRM can't compute)
 			const distMiles = Math.round(geolib.getDistance(from, to) / 160.934) / 10;
+			if (alternatives) {
+				return res.json({ routes: [], recommendedIdx: 0, distanceMiles: distMiles, fallback: true });
+			}
 			return res.json({ route: null, distanceMiles: distMiles, etaMinutes: null, fallback: true });
+		}
+		if (alternatives) {
+			// Translate internal shape (points / durationMin) → client shape
+			// (route / etaMinutes) to match the rest of the API surface.
+			return res.json({
+				routes: route.routes.map(r => ({
+					route: r.points,
+					distanceMiles: r.distanceMiles,
+					etaMinutes: r.durationMin,
+					fuelLiters: r.fuelLiters,
+					tollPriceUsd: r.tollPriceUsd,
+					trafficSegments: r.trafficSegments,
+					steps: r.steps,
+				})),
+				recommendedIdx: route.recommendedIdx,
+			});
 		}
 		res.json({
 			route: route.points,

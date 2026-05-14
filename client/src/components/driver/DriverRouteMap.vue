@@ -8,8 +8,11 @@
         <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
         <span v-if="etaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
         <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
-        <button class="expand-btn" @click="expanded = true" title="Expand map">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <button class="navmode-btn" @click="expanded = true" title="Navigation Mode">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polygon points="3 11 22 2 13 21 11 13 3 11" />
+          </svg>
+          <span>Navigate</span>
         </button>
       </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
@@ -18,7 +21,10 @@
       </div>
       <div ref="mapContainer" class="map-container"></div>
 
-      <!-- Expanded fullscreen overlay -->
+      <!-- Navigation Mode — fullscreen map + alternatives + directions, like
+           the in-cab views Foodpanda/Grab couriers use. The expand button
+           above triggers this; the standard van-collapse Route Map below
+           stays compact for quick glances. -->
       <Teleport to="body">
         <div v-if="expanded" class="map-fullscreen-overlay" @click.self="expanded = false" @pointerdown.stop>
           <div class="map-fullscreen-panel" @click.stop>
@@ -28,9 +34,33 @@
                 <span v-if="etaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
                 <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
               </div>
-              <button class="collapse-btn" @click="expanded = false" title="Close">✕</button>
+              <button class="collapse-btn" @click="expanded = false" title="Exit Navigation Mode">✕</button>
             </div>
             <div ref="expandedMapContainer" class="map-fullscreen-body"></div>
+            <div v-if="alternatives.length > 1" class="map-fullscreen-alts">
+              <RouteAlternatives
+                :alternatives="alternatives"
+                :recommended-idx="recommendedIdx"
+                :selected-idx="selectedAltIdx"
+                @select="onSelectAlt"
+              />
+            </div>
+            <details v-if="activeRoute && activeRoute.steps && activeRoute.steps.length" class="map-fullscreen-dirs" open>
+              <summary class="dirs-summary">
+                Directions
+                <span class="dirs-summary-count">{{ activeRoute.steps.length }} steps</span>
+              </summary>
+              <RouteDirections
+                :steps="activeRoute.steps"
+                :destination="navigationDestination"
+              />
+            </details>
+            <div v-else-if="activeRoute" class="map-fullscreen-dirs-empty">
+              <RouteDirections
+                :steps="[]"
+                :destination="navigationDestination"
+              />
+            </div>
           </div>
         </div>
       </Teleport>
@@ -42,6 +72,8 @@
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
+import RouteAlternatives from './RouteAlternatives.vue'
+import RouteDirections from './RouteDirections.vue'
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -52,7 +84,13 @@ const props = defineProps({
   // public /track/:loadId customer page — customers see the pin but not the
   // driver's name.
   publicMode: { type: Boolean, default: false },
+  // Which alternative is active. Parent (LoadDetail) owns this so the
+  // RouteAlternatives card list it renders inline stays in sync with the
+  // map. v-model-friendly: emit('update:selectedAltIdx', i).
+  selectedAltIdx: { type: Number, default: 0 },
 })
+
+const emit = defineEmits(['route-data', 'update:selectedAltIdx'])
 
 const api = useApi()
 const { load: loadGoogleMaps, createMap } = useGoogleMaps()
@@ -62,12 +100,22 @@ const expanded = ref(false)
 const routePoints = ref([])
 const distanceMiles = ref(null)
 const etaMinutes = ref(null)
+// Full rich-route payload from the server. Populated on every fetchRoute()
+// call. Stays empty when the lean (single-route) path is in use.
+const allRoutes = ref([])      // array of { route, distanceMiles, etaMinutes, fuelLiters, tollPriceUsd, trafficSegments, steps }
+const recommendedIdx = ref(0)
+const alternatives = computed(() => allRoutes.value || [])
+const activeRoute = computed(() => allRoutes.value[props.selectedAltIdx] || null)
 const etaFormatted = computed(() => {
   if (etaMinutes.value == null) return null
   const m = Math.round(etaMinutes.value)
   if (m < 60) return `${m}m`
   return `${Math.floor(m / 60)}h ${m % 60}m`
 })
+
+function onSelectAlt(i) {
+  emit('update:selectedAltIdx', i)
+}
 
 let map = null
 let expandedMap = null
@@ -76,11 +124,15 @@ let destMarker = null
 let driverMarker = null
 let routeLine = null
 let routeAnim = null
+let altPolylines = []          // gray dashed polylines for non-selected alts (inline map)
+let trafficOverlays = []       // segment polylines colored by congestion (inline map)
 let exOriginMarker = null
 let exDestMarker = null
 let exDriverMarker = null
 let exRouteLine = null
 let exRouteAnim = null
+let exAltPolylines = []        // gray dashed polylines for non-selected alts (fullscreen map)
+let exTrafficOverlays = []     // segment polylines colored by congestion (fullscreen map)
 
 function animatePolyline(line) {
   let offset = 0
@@ -164,12 +216,112 @@ const destAddr = computed(() => props.load && destAddrCol.value ? props.load[des
 const loadIdValue = computed(() => props.load && loadIdCol.value ? props.load[loadIdCol.value] || '' : '')
 const driverName = computed(() => props.load && driverColName.value ? props.load[driverColName.value] || '' : '')
 
+// Destination for the "Navigate in Maps" handoff in RouteDirections. Matches
+// the route fetch logic: pre-pickup the driver is heading to the shipper, so
+// the handoff opens that; post-pickup it's the receiver.
+const navigationDestination = computed(() => {
+  const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+  const target = pickedUp ? destLatLng.value : (originLatLng.value || destLatLng.value)
+  if (!target) return null
+  return {
+    lat: target.lat,
+    lng: target.lng,
+    address: pickedUp ? destAddr.value : originAddr.value,
+  }
+})
+
 function clearMapObjects() {
   if (routeAnim) { clearInterval(routeAnim); routeAnim = null }
   if (originMarker) { originMarker.map = null; originMarker = null }
   if (destMarker) { destMarker.map = null; destMarker = null }
   if (driverMarker) { driverMarker.map = null; driverMarker = null }
   if (routeLine) { routeLine.setMap(null); routeLine = null }
+  for (const p of altPolylines) { p.setMap(null) }
+  altPolylines = []
+  for (const p of trafficOverlays) { p.setMap(null) }
+  trafficOverlays = []
+}
+
+function clearExpandedMapObjects() {
+  if (exRouteAnim) { clearInterval(exRouteAnim); exRouteAnim = null }
+  if (exOriginMarker) { exOriginMarker.map = null; exOriginMarker = null }
+  if (exDestMarker) { exDestMarker.map = null; exDestMarker = null }
+  if (exDriverMarker) { exDriverMarker.map = null; exDriverMarker = null }
+  if (exRouteLine) { exRouteLine.setMap(null); exRouteLine = null }
+  for (const p of exAltPolylines) { p.setMap(null) }
+  exAltPolylines = []
+  for (const p of exTrafficOverlays) { p.setMap(null) }
+  exTrafficOverlays = []
+}
+
+// Map Google's congestion codes to overlay colors. NORMAL renders nothing —
+// the route's white base + animated blue dashes already show through, so we
+// only highlight the segments that actually need driver attention.
+const CONGESTION_COLOR = {
+  SLOW: '#f59e0b',          // amber
+  TRAFFIC_JAM: '#dc2626',   // red
+  // NORMAL → no overlay
+}
+
+// Render gray dashed polylines for the non-selected alternatives so the
+// driver sees what they're choosing between on the map itself, not just on
+// the cards. Returns an array of created Polyline objects so the caller can
+// stash them for later teardown.
+function renderAlternatives(mapObj, selectedIdx) {
+  const lines = []
+  for (let i = 0; i < allRoutes.value.length; i++) {
+    if (i === selectedIdx) continue
+    const r = allRoutes.value[i]
+    if (!r || !r.route || r.route.length < 2) continue
+    const path = r.route.map(p => ({ lat: p.latitude, lng: p.longitude }))
+    const line = new google.maps.Polyline({
+      path,
+      strokeColor: '#94a3b8',
+      strokeOpacity: 0,                   // no solid stroke — icons-only dashes
+      strokeWeight: 3,
+      map: mapObj,
+      clickable: false,
+      icons: [{
+        icon: { path: 'M 0,-1 0,1', strokeColor: '#94a3b8', strokeOpacity: 0.7, scale: 2 },
+        offset: '0',
+        repeat: '14px',
+      }],
+    })
+    lines.push(line)
+  }
+  return lines
+}
+
+// Render colored overlays per traffic segment (SLOW + TRAFFIC_JAM only).
+// Uses the original route geometry so segment indices line up with what
+// Google computed — drivers see the road condition baked into the polyline.
+function renderTrafficOverlays(mapObj, route) {
+  const overlays = []
+  if (!route || !route.trafficSegments || !route.route || route.route.length < 2) return overlays
+  const points = route.route
+  for (const seg of route.trafficSegments) {
+    const color = CONGESTION_COLOR[seg.congestion]
+    if (!color) continue
+    const startIdx = Math.max(0, seg.startIdx | 0)
+    const endIdx = Math.min(points.length - 1, seg.endIdx | 0)
+    if (endIdx <= startIdx) continue
+    const path = []
+    for (let i = startIdx; i <= endIdx; i++) {
+      path.push({ lat: points[i].latitude, lng: points[i].longitude })
+    }
+    if (path.length < 2) continue
+    const line = new google.maps.Polyline({
+      path,
+      strokeColor: color,
+      strokeOpacity: 0.85,
+      strokeWeight: 6,
+      map: mapObj,
+      clickable: false,
+      zIndex: 5,
+    })
+    overlays.push(line)
+  }
+  return overlays
 }
 
 // Build the polyline path: past pickup, trim the route at the driver's
@@ -238,6 +390,9 @@ function renderMarkers() {
   if (!map) return
   clearMapObjects()
 
+  // Alternatives first so they render BELOW the active route.
+  altPolylines = renderAlternatives(map, props.selectedAltIdx)
+
   const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
   // After pickup, hide origin marker — driver is now Point A
   if (originLatLng.value && hasCoords.value && !pickedUp) {
@@ -288,6 +443,11 @@ function renderMarkers() {
     routeAnim = animatePolyline(routeLine)
   }
 
+  // Traffic overlays render LAST so SLOW/JAM colors sit on top of the white
+  // base + dashes. NORMAL segments are skipped, so the dashed flow still
+  // shows where the road is clear.
+  trafficOverlays = renderTrafficOverlays(map, activeRoute.value)
+
   fitBounds()
 }
 
@@ -332,34 +492,49 @@ async function fetchRoute(doFit = false) {
   if (!from || !to) return
 
   try {
+    const url = (f, t) => `/api/route?fromLat=${f.lat}&fromLng=${f.lng}&toLat=${t.lat}&toLng=${t.lng}&alternatives=true`
     let data
     try {
-      data = await api.get(`/api/route?fromLat=${from.lat}&fromLng=${from.lng}&toLat=${to.lat}&toLng=${to.lng}`)
+      data = await api.get(url(from, to))
     } catch { /* silent */ }
-    if ((!data || !data.route) && originLatLng.value && from !== originLatLng.value) {
+    if ((!data || !data.routes || data.routes.length === 0) && originLatLng.value && from !== originLatLng.value) {
       try {
-        data = await api.get(`/api/route?fromLat=${originLatLng.value.lat}&fromLng=${originLatLng.value.lng}&toLat=${destLatLng.value.lat}&toLng=${destLatLng.value.lng}`)
+        data = await api.get(url(originLatLng.value, destLatLng.value))
       } catch { /* silent */ }
     }
-    if (!data) return
-    if (data.route && data.route.length >= 2) routePoints.value = data.route
-    distanceMiles.value = data.distanceMiles
-    etaMinutes.value = data.etaMinutes
-    // Update the polyline paths in place instead of recreating them. Calling
-    // renderMarkers() here would destroy and rebuild routeLine + exRouteLine,
-    // restarting the dashed animation from offset 0 — the visual "refresh"
-    // the user saw every minute. Markers (origin/dest/driver) don't change
-    // between refetches so they don't need re-render either.
-    if (routeLine || exRouteLine) {
-      const newPath = buildRoutePath()
-      if (newPath) {
-        if (routeLine) routeLine.setPath(newPath)
-        if (exRouteLine) exRouteLine.setPath(newPath)
-      }
-    } else {
-      // Initial render — no existing polyline yet.
-      renderMarkers()
+    if (!data || !data.routes || data.routes.length === 0) return
+
+    allRoutes.value = data.routes
+    recommendedIdx.value = typeof data.recommendedIdx === 'number' ? data.recommendedIdx : 0
+
+    // Clamp the parent-owned selectedAltIdx if the new alternatives list is
+    // shorter than the previous one, then default to the recommended choice
+    // if the previous selection was the default (0) — drivers expect the
+    // best route to surface after every refetch.
+    let idx = props.selectedAltIdx
+    if (idx >= allRoutes.value.length) idx = 0
+    if (idx === 0 && recommendedIdx.value !== 0) {
+      idx = recommendedIdx.value
+      emit('update:selectedAltIdx', idx)
     }
+
+    const active = allRoutes.value[idx] || allRoutes.value[0]
+    if (active && active.route && active.route.length >= 2) routePoints.value = active.route
+    distanceMiles.value = active?.distanceMiles ?? null
+    etaMinutes.value = active?.etaMinutes ?? null
+
+    emit('route-data', {
+      routes: allRoutes.value,
+      recommendedIdx: recommendedIdx.value,
+      navigationDestination: navigationDestination.value,
+    })
+
+    // Full re-render needed: the active route's polyline path changed AND
+    // the alternative overlays + traffic segments need to be redrawn. The
+    // animation reset is acceptable here because route swaps are rare
+    // (60s + 0.06 mi gate, or manual driver selection).
+    renderMarkers()
+    if (expandedMap) renderExpandedMap()
   } catch { /* silent */ }
 }
 
@@ -476,13 +651,27 @@ watch(loadStatus, (newStatus, oldStatus) => {
   }
 })
 
+// Driver swapped to a different alternative (or recommended changed). Re-sync
+// the active polyline + info strip + traffic overlay against the new pick
+// WITHOUT hitting the network — the alternatives payload already has every
+// route's geometry. fetchRoute() is only called when something physical
+// changes (truck moved, status flipped).
+watch(() => props.selectedAltIdx, (idx) => {
+  const active = allRoutes.value[idx]
+  if (!active || !active.route) return
+  routePoints.value = active.route
+  distanceMiles.value = active.distanceMiles ?? null
+  etaMinutes.value = active.etaMinutes ?? null
+  if (map) renderMarkers()
+  if (expandedMap) renderExpandedMap()
+})
+
 function renderExpandedMap() {
   if (!expandedMap) return
-  if (exRouteAnim) { clearInterval(exRouteAnim); exRouteAnim = null }
-  if (exOriginMarker) { exOriginMarker.map = null; exOriginMarker = null }
-  if (exDestMarker) { exDestMarker.map = null; exDestMarker = null }
-  if (exDriverMarker) { exDriverMarker.map = null; exDriverMarker = null }
-  if (exRouteLine) { exRouteLine.setMap(null); exRouteLine = null }
+  clearExpandedMapObjects()
+
+  // Alternatives first so they render BELOW the active route.
+  exAltPolylines = renderAlternatives(expandedMap, props.selectedAltIdx)
 
   const exPickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
   if (originLatLng.value && hasCoords.value && !exPickedUp) {
@@ -525,6 +714,9 @@ function renderExpandedMap() {
     })
     exRouteAnim = animatePolyline(exRouteLine)
   }
+
+  exTrafficOverlays = renderTrafficOverlays(expandedMap, activeRoute.value)
+
   const bounds = new google.maps.LatLngBounds()
   let count = 0
   if (originLatLng.value) { bounds.extend(originLatLng.value); count++ }
@@ -535,7 +727,11 @@ function renderExpandedMap() {
 }
 
 watch(expanded, async (val) => {
-  if (!val) { if (exRouteAnim) { clearInterval(exRouteAnim); exRouteAnim = null }; expandedMap = null; return }
+  if (!val) {
+    clearExpandedMapObjects()
+    expandedMap = null
+    return
+  }
   await nextTick()
   if (!expandedMapContainer.value) return
   const center = map ? map.getCenter().toJSON() : { lat: 0, lng: 0 }
@@ -612,14 +808,98 @@ onMounted(() => {
 .gps-spinner { width: 28px; height: 28px; border: 3px solid var(--border, #e5e7eb); border-top-color: var(--accent, #6366f1); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.expand-btn { margin-left: auto; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: none; background: var(--bg, #f5f6fa); color: var(--text-dim, #6b7280); cursor: pointer; transition: background 0.15s, color 0.15s; }
-.expand-btn:hover { background: var(--accent, #0ea5e9); color: #fff; }
+.navmode-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 6px;
+  border: none;
+  background: #2563eb;
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.navmode-btn:hover { background: #1d4ed8; }
+.navmode-btn:active { background: #1e40af; }
 
 .map-fullscreen-overlay { position: fixed; inset: 0; z-index: 99999; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; pointer-events: auto; }
-.map-fullscreen-panel { width: 92vw; height: 85vh; max-width: 1400px; background: #fff; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 25px 50px rgba(0,0,0,0.25); pointer-events: auto; }
+.map-fullscreen-panel {
+  width: 92vw;
+  height: 90vh;
+  max-width: 1400px;
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 25px 50px rgba(0,0,0,0.25);
+  pointer-events: auto;
+}
 .map-fullscreen-header { display: flex; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid #e5e7eb; }
-.map-fullscreen-info { display: flex; gap: 0.75rem; flex: 1; }
+.map-fullscreen-info { display: flex; gap: 0.75rem; flex: 1; flex-wrap: wrap; }
 .collapse-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; border: 1px solid #e5e7eb; background: #fff; font-size: 1rem; color: #6b7280; cursor: pointer; transition: background 0.15s, color 0.15s; }
 .collapse-btn:hover { background: #f3f4f6; color: #111; }
-.map-fullscreen-body { flex: 1; }
+.map-fullscreen-body {
+  /* Map takes the bulk of the panel; alts strip + directions split the rest. */
+  flex: 1 1 60%;
+  min-height: 280px;
+}
+.map-fullscreen-alts {
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid #e5e7eb;
+  background: #fafafa;
+  flex: 0 0 auto;
+}
+.map-fullscreen-dirs {
+  border-top: 1px solid #e5e7eb;
+  background: #fff;
+  flex: 1 1 35%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.map-fullscreen-dirs[open] { padding-bottom: 0.6rem; }
+.dirs-summary {
+  cursor: pointer;
+  padding: 0.6rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: #111;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f9fafb;
+}
+.dirs-summary::-webkit-details-marker { display: none; }
+.dirs-summary::after {
+  content: "▾";
+  margin-left: 0.5rem;
+  font-size: 0.7rem;
+  color: #6b7280;
+  transition: transform 0.15s;
+}
+.map-fullscreen-dirs[open] .dirs-summary::after { transform: rotate(180deg); }
+.dirs-summary-count {
+  font-size: 0.72rem;
+  color: #6b7280;
+  font-weight: 500;
+}
+.map-fullscreen-dirs > :not(.dirs-summary) {
+  padding: 0.5rem 0.9rem;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.map-fullscreen-dirs-empty {
+  padding: 0.5rem 0.9rem 0.8rem;
+  border-top: 1px solid #e5e7eb;
+  background: #fff;
+  flex: 0 0 auto;
+}
 </style>
