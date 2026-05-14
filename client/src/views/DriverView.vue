@@ -1287,12 +1287,9 @@ onUnmounted(() => {
 .driver-app {
   min-height: 100vh;
   padding-top: calc(52px + env(safe-area-inset-top, 0px));
-  /* The Vant tabbar, with its larger emoji icons + label stack, can render
-     anywhere from ~80px (mobile) to ~110px (desktop browser at default zoom).
-     A 160px buffer was still clipping the last LoadCard's chat FAB on
-     desktop, so we go to 200px which guarantees breathing room on every
-     viewport we ship to. */
-  padding-bottom: calc(200px + env(safe-area-inset-bottom, 0px));
+  /* Bottom buffer lives on .app-content (see comment there) — keep this
+     small so the flex math at the App-shell level doesn't double-pad. */
+  padding-bottom: 0;
   font-size: 0.95rem;
 }
 
@@ -1510,7 +1507,13 @@ onUnmounted(() => {
 
 .app-content {
   padding: 0.75rem 0.5rem;
-  padding-bottom: 1rem;
+  /* App.vue wraps every route in <main class="main"> which is itself a
+     100vh flex column scroll container. Padding on .driver-app gets
+     swallowed by that flex sizing on some browsers (Chrome desktop, in
+     particular) and the tabbar ends up overlapping the last card. Putting
+     the buffer directly on .app-content sidesteps the flex math — this is
+     a plain block-level padding and it always wins. */
+  padding-bottom: calc(180px + env(safe-area-inset-bottom, 0px));
 }
 
 .tab-panel {
