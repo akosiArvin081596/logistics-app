@@ -1,15 +1,7 @@
 <template>
   <div class="route-map-wrap">
-    <template v-if="!driverLatLng && !hasCoords">
+    <template v-if="!hasCoords && !driverLatLng">
       <div class="map-empty">No route coordinates available</div>
-    </template>
-    <template v-else-if="!driverLatLng && hasCoords && !dispatchMode">
-      <div class="map-container gps-waiting">
-        <div class="gps-overlay">
-          <div class="gps-spinner"></div>
-          <span>Locating your position...</span>
-        </div>
-      </div>
     </template>
     <template v-else>
       <div class="map-info" v-if="hasCoords && (distanceMiles != null || etaMinutes != null || driverDistanceInfo)">
@@ -21,6 +13,9 @@
         </button>
       </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
+      <div v-else-if="!driverLatLng && !dispatchMode" class="map-eld-hint">
+        Showing route only — truck position unavailable (ELD offline)
+      </div>
       <div ref="mapContainer" class="map-container"></div>
 
       <!-- Expanded fullscreen overlay -->
@@ -591,7 +586,12 @@ watch(() => [hasCoords.value, driverLatLng.value], () => {
 })
 
 onMounted(() => {
-  if ((hasCoords.value && (driverLatLng.value || props.dispatchMode)) || driverLatLng.value) {
+  // Init the map as soon as we have anything worth showing: a route (origin
+  // → destination), or a driver pin, or both. Previously the gate required a
+  // driver position (or dispatch mode), so trucks without an ELD never
+  // rendered the route — the driver was stuck on "Locating your position…"
+  // even though the route coordinates were available.
+  if (hasCoords.value || driverLatLng.value) {
     nextTick(() => initMap())
   }
 })
@@ -606,6 +606,7 @@ onMounted(() => {
 .info-danger { color: #dc2626; background: #fee2e2; }
 .map-empty { text-align: center; color: var(--text-dim); font-size: 0.8rem; padding: 1rem 0; }
 .map-label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); margin-bottom: 0.4rem; }
+.map-eld-hint { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.4rem; padding: 0.3rem 0.5rem; background: #fef3c7; color: #92400e; border-radius: 6px; font-weight: 500; }
 .gps-waiting { display: flex; align-items: center; justify-content: center; background: var(--bg, #f5f6fa); border: 1px solid var(--border, #e5e7eb); }
 .gps-overlay { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; color: var(--text-dim); font-size: 0.82rem; font-weight: 500; }
 .gps-spinner { width: 28px; height: 28px; border: 3px solid var(--border, #e5e7eb); border-top-color: var(--accent, #6366f1); border-radius: 50%; animation: spin 0.8s linear infinite; }

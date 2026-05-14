@@ -144,6 +144,7 @@
           :truck="driverStore.truck"
           :load-expenses="detailLoadExpenses"
           :responding="isResponding(detailLoad)"
+          :driver-position="driverPosition"
           @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
@@ -513,6 +514,36 @@ const initialLoadFailed = ref(false)
 const retryingInitialLoad = ref(false)
 let socketSetupDone = false
 let isMounted = false
+
+// Driver's own live position, sourced from the Routemate ELD telemetry feed
+// (/api/locations/latest). Phone-GPS was retired 2026-05-13, so this is now
+// the only thing that puts a truck pin on the driver's Load Route Map. Stays
+// null when the truck has no linked ELD or the ELD is offline — the map
+// component handles that case by rendering the route without a pin.
+const driverPosition = ref(null)
+let positionPollTimer = null
+const POSITION_POLL_INTERVAL_MS = 30000
+
+async function fetchDriverPosition() {
+  if (!driverName.value) return
+  try {
+    const data = await api.get('/api/locations/latest')
+    const dn = driverName.value.toLowerCase()
+    const l = (data?.locations || []).find(
+      (x) => (x.driver || '').toLowerCase() === dn && x.latitude != null,
+    )
+    driverPosition.value = l
+      ? {
+          latitude: l.latitude,
+          longitude: l.longitude,
+          source: l.source || '',
+          lastPingAge: l.lastPingAge != null ? l.lastPingAge : null,
+        }
+      : null
+  } catch {
+    // Silent — the map falls back to a no-pin state on its own.
+  }
+}
 
 // Welcome / activation modal — shows once per driver, first login after fully_onboarded
 function welcomeStorageKey() {
@@ -1110,10 +1141,18 @@ onMounted(async () => {
   isMounted = true
   driverStore.driverName = driverName.value
   await attemptInitialLoad()
+  // Begin polling the driver's own ELD position. First call is fire-and-forget
+  // so the initial load isn't delayed by a Routemate query failure.
+  fetchDriverPosition()
+  positionPollTimer = setInterval(fetchDriverPosition, POSITION_POLL_INTERVAL_MS)
 })
 
 onUnmounted(() => {
   isMounted = false
+  if (positionPollTimer) {
+    clearInterval(positionPollTimer)
+    positionPollTimer = null
+  }
   socket.off('new-message', onNewMessage)
   socket.off('load-assigned', onLoadAssigned)
   socket.off('load-cancelled', onLoadCancelled)
