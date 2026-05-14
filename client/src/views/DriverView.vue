@@ -1047,6 +1047,26 @@ function onGeofenceTrigger(payload) {
   scheduleDriverRefetch()
 }
 
+// Live ELD push from the Routemate telemetry sync loop. The server emits this
+// event to both the "dispatch" room and the driver's own room — Super Admins
+// previewing the driver page join "dispatch" and receive every driver's
+// updates, so we filter by driver name here to avoid a Super Admin's
+// driverPosition ref jumping between trucks. The 30s /api/locations/latest
+// poll remains as a safety net for the initial load and socket-reconnect.
+function onLocationUpdate(payload) {
+  if (!isMounted) return
+  if (!payload || payload.latitude == null || payload.longitude == null) return
+  const me = (driverName.value || '').toLowerCase()
+  const who = (payload.driver || '').toLowerCase()
+  if (!me || who !== me) return
+  driverPosition.value = {
+    latitude: payload.latitude,
+    longitude: payload.longitude,
+    source: payload.source || 'routemate',
+    lastPingAge: 0,
+  }
+}
+
 function onNewMessage(msg) {
   if (!isMounted) return
   const myName = driverName.value.toLowerCase()
@@ -1123,6 +1143,7 @@ async function attemptInitialLoad() {
     socket.on('load-assigned', onLoadAssigned)
     socket.on('load-cancelled', onLoadCancelled)
     socket.on('geofence-trigger', onGeofenceTrigger)
+    socket.on('location-update', onLocationUpdate)
     socketSetupDone = true
   }
 }
@@ -1157,6 +1178,7 @@ onUnmounted(() => {
   socket.off('load-assigned', onLoadAssigned)
   socket.off('load-cancelled', onLoadCancelled)
   socket.off('geofence-trigger', onGeofenceTrigger)
+  socket.off('location-update', onLocationUpdate)
   socket.disconnect()
 })
 </script>

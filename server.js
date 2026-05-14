@@ -1123,7 +1123,7 @@ async function routemateSyncTelemetry() {
 			const activeLoadId = loadIdByDriver[driverLower] || "";
 			const timestamp = new Date(t.location_date_ms || Date.now()).toISOString();
 			const headingDeg = parseRoutemateBearing(t.bearing);
-			io.to("dispatch").emit("location-update", {
+			const locationPayload = {
 				driver: driverName,
 				latitude: t.latitude,
 				longitude: t.longitude,
@@ -1132,7 +1132,14 @@ async function routemateSyncTelemetry() {
 				loadId: activeLoadId,
 				timestamp,
 				source: "routemate",
-			});
+			};
+			io.to("dispatch").emit("location-update", locationPayload);
+			// Also push to the driver's own socket room so the driver app's
+			// Load Route Map can update the truck pin live instead of waiting
+			// for the next /api/locations/latest poll cycle. Driver sockets
+			// join a room named after their lowercased driver name on
+			// `register` (see io.on("connection") handler).
+			if (driverLower) io.to(driverLower).emit("location-update", locationPayload);
 			if (activeLoadId) {
 				publicTrack.to("load:" + activeLoadId).emit("tracker-update", {
 					lat: t.latitude,
