@@ -544,6 +544,7 @@ async function fetchDriverPosition() {
   }
 }
 
+
 // Welcome / activation modal — shows once per driver, first login after fully_onboarded
 function welcomeStorageKey() {
   // Falling back to a literal 'anon' meant two test drivers in the same
@@ -636,6 +637,51 @@ watch(detailLoadRaw, async (load) => {
     }
   }
 }, { immediate: true })
+
+// ────────────────────────────────────────────────────────────────────────────
+// TEMP — Phone GPS fallback, scoped to one specific test load. Re-introduces
+// the path retired on 2026-05-13 (Routemate ELD became the sole position
+// source) so the CEO can validate the smart route guidance UI on a load
+// whose truck isn't ELD-linked yet. DELETE THIS BLOCK once testing is done.
+// No server round-trip — purely populates driverPosition locally for the map.
+const PHONE_GPS_TEST_LOAD_IDS = new Set(['LD-MP4W4LP1'])
+let phoneGpsWatcherId = null
+function extractLoadId(load) {
+  if (!load) return ''
+  for (const k of Object.keys(load)) {
+    if (/load.?id|job.?id/i.test(k)) return (load[k] || '').toString().trim()
+  }
+  return ''
+}
+function stopPhoneGpsWatch() {
+  if (phoneGpsWatcherId !== null && navigator?.geolocation) {
+    navigator.geolocation.clearWatch(phoneGpsWatcherId)
+  }
+  phoneGpsWatcherId = null
+}
+watch(
+  () => detailLoad.value,
+  (load) => {
+    stopPhoneGpsWatch()
+    if (!load) return
+    if (!PHONE_GPS_TEST_LOAD_IDS.has(extractLoadId(load))) return
+    if (!navigator?.geolocation) return
+    phoneGpsWatcherId = navigator.geolocation.watchPosition(
+      (pos) => {
+        driverPosition.value = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          source: 'phone-test',
+          lastPingAge: 0,
+        }
+      },
+      () => { /* permission denied or unavailable — silent, map falls back to no-pin */ },
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 },
+    )
+  },
+)
+onUnmounted(() => { stopPhoneGpsWatch() })
+// ────────────────────────────────────────────────────────────────────────────
 
 const driverMapHeaders = computed(() => {
   const h = [...(driverStore.headers.jobTracking || [])]
