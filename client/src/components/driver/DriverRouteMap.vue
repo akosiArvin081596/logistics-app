@@ -21,59 +21,26 @@
       </div>
       <div ref="mapContainer" class="map-container"></div>
 
-      <!-- Navigation Mode — fullscreen map + alternatives + directions, like
-           the in-cab views Foodpanda/Grab couriers use. The expand button
-           above triggers this; the standard van-collapse Route Map below
-           stays compact for quick glances. -->
-      <Teleport to="body">
-        <div v-if="expanded" class="map-fullscreen-overlay" @pointerdown.stop>
-          <div ref="fullscreenPanel" class="map-fullscreen-panel" @click.stop>
-            <div class="map-fullscreen-header">
-              <div class="map-fullscreen-info">
-                <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
-                <span v-if="etaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
-                <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
-              </div>
-              <button class="collapse-btn" @click="closeNavMode" title="Exit Navigation Mode">✕</button>
-            </div>
-            <div ref="expandedMapContainer" class="map-fullscreen-body"></div>
-            <div v-if="alternatives.length > 1" class="map-fullscreen-alts">
-              <RouteAlternatives
-                :alternatives="alternatives"
-                :recommended-idx="recommendedIdx"
-                :selected-idx="selectedAltIdx"
-                @select="onSelectAlt"
-              />
-            </div>
-            <details v-if="activeRoute && activeRoute.steps && activeRoute.steps.length" class="map-fullscreen-dirs" open>
-              <summary class="dirs-summary">
-                Directions
-                <span class="dirs-summary-count">{{ activeRoute.steps.length }} steps</span>
-              </summary>
-              <RouteDirections
-                :steps="activeRoute.steps"
-                :destination="navigationDestination"
-              />
-            </details>
-            <div v-else-if="activeRoute" class="map-fullscreen-dirs-empty">
-              <RouteDirections
-                :steps="[]"
-                :destination="navigationDestination"
-              />
-            </div>
-          </div>
-        </div>
-      </Teleport>
+      <!-- Drive Mode — live turn-by-turn navigation view. Replaces the static
+           fullscreen overview previously rendered here. Alternatives + the
+           full directions list still live in the inline LoadDetail collapses
+           below the Route Map (drivers pick before tapping Navigate). -->
+      <DriveModeOverlay
+        :open="expanded"
+        :active-route="activeRoute"
+        :driver-position="props.driverPosition"
+        :destination="navigationDestination"
+        @close="closeNavMode"
+      />
     </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
-import RouteAlternatives from './RouteAlternatives.vue'
-import RouteDirections from './RouteDirections.vue'
+import DriveModeOverlay from './DriveModeOverlay.vue'
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -95,8 +62,6 @@ const emit = defineEmits(['route-data', 'update:selectedAltIdx'])
 const api = useApi()
 const { load: loadGoogleMaps, createMap } = useGoogleMaps()
 const mapContainer = ref(null)
-const expandedMapContainer = ref(null)
-const fullscreenPanel = ref(null)
 const expanded = ref(false)
 const routePoints = ref([])
 const distanceMiles = ref(null)
@@ -119,7 +84,6 @@ function onSelectAlt(i) {
 }
 
 let map = null
-let expandedMap = null
 let originMarker = null
 let destMarker = null
 let driverMarker = null
@@ -127,13 +91,6 @@ let routeLine = null
 let routeAnim = null
 let altPolylines = []          // gray dashed polylines for non-selected alts (inline map)
 let trafficOverlays = []       // segment polylines colored by congestion (inline map)
-let exOriginMarker = null
-let exDestMarker = null
-let exDriverMarker = null
-let exRouteLine = null
-let exRouteAnim = null
-let exAltPolylines = []        // gray dashed polylines for non-selected alts (fullscreen map)
-let exTrafficOverlays = []     // segment polylines colored by congestion (fullscreen map)
 
 function animatePolyline(line) {
   let offset = 0
@@ -241,18 +198,6 @@ function clearMapObjects() {
   altPolylines = []
   for (const p of trafficOverlays) { p.setMap(null) }
   trafficOverlays = []
-}
-
-function clearExpandedMapObjects() {
-  if (exRouteAnim) { clearInterval(exRouteAnim); exRouteAnim = null }
-  if (exOriginMarker) { exOriginMarker.map = null; exOriginMarker = null }
-  if (exDestMarker) { exDestMarker.map = null; exDestMarker = null }
-  if (exDriverMarker) { exDriverMarker.map = null; exDriverMarker = null }
-  if (exRouteLine) { exRouteLine.setMap(null); exRouteLine = null }
-  for (const p of exAltPolylines) { p.setMap(null) }
-  exAltPolylines = []
-  for (const p of exTrafficOverlays) { p.setMap(null) }
-  exTrafficOverlays = []
 }
 
 // Map Google's congestion codes to overlay colors. NORMAL renders nothing —
@@ -542,7 +487,6 @@ async function fetchRoute(doFit = false) {
     // animation reset is acceptable here because route swaps are rare
     // (60s + 0.06 mi gate, or manual driver selection).
     renderMarkers()
-    if (expandedMap) renderExpandedMap()
   } catch { /* silent */ }
 }
 
@@ -643,7 +587,6 @@ watch(() => props.driverPosition, (pos) => {
     : POS_TWEEN_MIN_MS
   lastPosUpdateAt = nowMs
   if (driverMarker && map) animateDriverMarker(driverMarker, map, routeLine, from, to, tweenMs)
-  if (exDriverMarker && expandedMap) animateDriverMarker(exDriverMarker, expandedMap, exRouteLine, from, to, tweenMs)
   prevDriverPos = to
   if (!lastRoutePos) { lastRoutePos = pos; lastRouteTime = Date.now(); fetchRoute(true); return }
   const dist = haversineMi({ lat: pos.latitude, lng: pos.longitude }, { lat: lastRoutePos.latitude, lng: lastRoutePos.longitude })
@@ -671,132 +614,15 @@ watch(() => props.selectedAltIdx, (idx) => {
   distanceMiles.value = active.distanceMiles ?? null
   etaMinutes.value = active.etaMinutes ?? null
   if (map) renderMarkers()
-  if (expandedMap) renderExpandedMap()
 })
 
-function renderExpandedMap() {
-  if (!expandedMap) return
-  clearExpandedMapObjects()
-
-  // Alternatives first so they render BELOW the active route.
-  exAltPolylines = renderAlternatives(expandedMap, props.selectedAltIdx)
-
-  const exPickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
-  if (originLatLng.value && hasCoords.value && !exPickedUp) {
-    exOriginMarker = new google.maps.marker.AdvancedMarkerElement({ position: originLatLng.value, map: expandedMap, content: createDotPin('#16a34a', 14), title: 'Pickup' })
-  }
-  if (destLatLng.value && hasCoords.value) {
-    exDestMarker = new google.maps.marker.AdvancedMarkerElement({ position: destLatLng.value, map: expandedMap, content: createDotPin('#dc2626', 14), title: 'Drop-off' })
-  }
-  if (driverLatLng.value) {
-    const exContent = createDotPin('#2563eb', 16)
-    const exSnapped = snapToRoute(driverLatLng.value.lat, driverLatLng.value.lng)
-    exDriverMarker = new google.maps.marker.AdvancedMarkerElement({
-      position: exSnapped,
-      map: expandedMap,
-      content: exContent,
-      title: props.publicMode ? 'Driver' : (driverName.value || 'Driver'),
-      gmpClickable: true,
-    })
-    const zoomToExDriver = () => {
-      if (!expandedMap) return
-      const pos = exDriverMarker.position
-      if (!pos) return
-      const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat
-      const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng
-      if (!isFinite(lat) || !isFinite(lng)) return
-      expandedMap.setCenter({ lat, lng })
-      expandedMap.setZoom(20)
-    }
-    exDriverMarker.addEventListener('gmp-click', zoomToExDriver)
-    exContent.addEventListener('click', (e) => { e.stopPropagation(); zoomToExDriver() })
-  }
-  const exPath = buildRoutePath()
-  if (exPath && exPath.length >= 2) {
-    exRouteLine = new google.maps.Polyline({
-      path: exPath,
-      strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 5,
-      map: expandedMap,
-      clickable: false,
-      icons: [{ icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '20px' }],
-    })
-    exRouteAnim = animatePolyline(exRouteLine)
-  }
-
-  exTrafficOverlays = renderTrafficOverlays(expandedMap, activeRoute.value)
-
-  const bounds = new google.maps.LatLngBounds()
-  let count = 0
-  if (originLatLng.value) { bounds.extend(originLatLng.value); count++ }
-  if (destLatLng.value) { bounds.extend(destLatLng.value); count++ }
-  if (driverLatLng.value) { bounds.extend(driverLatLng.value); count++ }
-  if (count >= 2) expandedMap.fitBounds(bounds, 50)
-  else if (count === 1) { expandedMap.setCenter(bounds.getCenter()); expandedMap.setZoom(12) }
-}
-
-// Best-effort Fullscreen API. Works on Chrome desktop + Android Chrome; iOS
-// Safari ignores it on non-video elements, so the CSS layout below already
-// fills the viewport on its own as a baseline.
-async function requestPanelFullscreen() {
-  const el = fullscreenPanel.value
-  if (!el) return
-  const req = el.requestFullscreen
-    || el.webkitRequestFullscreen
-    || el.mozRequestFullScreen
-    || el.msRequestFullscreen
-  if (!req) return
-  try { await req.call(el) } catch { /* user gesture missing or unsupported — silent */ }
-}
-
-function exitDocumentFullscreen() {
-  const fsEl = document.fullscreenElement || document.webkitFullscreenElement
-  if (!fsEl) return
-  const exit = document.exitFullscreen
-    || document.webkitExitFullscreen
-    || document.mozCancelFullScreen
-    || document.msExitFullscreen
-  if (!exit) return
-  try { exit.call(document) } catch { /* silent */ }
-}
-
+// Drive Mode owns its own map instance, route polyline, traffic overlays, and
+// fullscreen lifecycle (see DriveModeOverlay.vue). closeNavMode just toggles
+// the prop — DriveModeOverlay's watch(open) tears down its map + exits the
+// browser fullscreen, and emits 'close' if the user hits ESC/back instead.
 function closeNavMode() {
-  exitDocumentFullscreen()
   expanded.value = false
 }
-
-// If the user exits fullscreen via the ESC key or Android back button, keep
-// the expanded ref in sync so the overlay doesn't sit there stale.
-function onFullscreenChange() {
-  const fsEl = document.fullscreenElement || document.webkitFullscreenElement
-  if (!fsEl && expanded.value) expanded.value = false
-}
-
-watch(expanded, async (val) => {
-  if (!val) {
-    exitDocumentFullscreen()
-    clearExpandedMapObjects()
-    expandedMap = null
-    return
-  }
-  await nextTick()
-  if (!expandedMapContainer.value) return
-  // Kick off the Fullscreen API request — the click on Navigate is the user
-  // gesture browsers require. If it fails the CSS still gives us a 100vw/100vh
-  // panel, so the user always gets edge-to-edge.
-  requestPanelFullscreen()
-  const center = map ? map.getCenter().toJSON() : { lat: 0, lng: 0 }
-  expandedMap = await createMap(expandedMapContainer.value, {
-    zoom: map ? map.getZoom() : 5, center, mapTypeId: 'hybrid',
-    zoomControl: true, gestureHandling: 'greedy',
-    mapTypeControl: true,
-    mapTypeControlOptions: {
-      style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
-      position: google.maps.ControlPosition.TOP_LEFT,
-      mapTypeIds: ['roadmap', 'hybrid'],
-    },
-  })
-  google.maps.event.addListenerOnce(expandedMap, 'idle', () => renderExpandedMap())
-})
 
 function focusOn(lat, lng) { if (map) { map.panTo({ lat, lng }); map.setZoom(15) } }
 defineExpose({ focusOn })
@@ -843,14 +669,6 @@ onMounted(() => {
   if (hasCoords.value || driverLatLng.value) {
     nextTick(() => initMap())
   }
-  document.addEventListener('fullscreenchange', onFullscreenChange)
-  document.addEventListener('webkitfullscreenchange', onFullscreenChange)
-})
-
-onBeforeUnmount(() => {
-  document.removeEventListener('fullscreenchange', onFullscreenChange)
-  document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
-  exitDocumentFullscreen()
 })
 </script>
 
@@ -887,94 +705,4 @@ onBeforeUnmount(() => {
 .navmode-btn:hover { background: #1d4ed8; }
 .navmode-btn:active { background: #1e40af; }
 
-.map-fullscreen-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 99999;
-  background: #000;
-  display: block;
-  pointer-events: auto;
-}
-.map-fullscreen-panel {
-  /* Edge-to-edge viewport fill. svh (small viewport height) keeps the
-     bottom-of-screen visible on mobile when the URL bar is showing; falls
-     back to vh on browsers without svh support. */
-  width: 100vw;
-  width: 100svw;
-  height: 100vh;
-  height: 100svh;
-  background: #fff;
-  border-radius: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  pointer-events: auto;
-}
-/* When the Fullscreen API is active the panel is the fullscreen element —
-   ensure it stretches to fill it. Some browsers add black margins otherwise. */
-.map-fullscreen-panel:fullscreen { width: 100vw; height: 100vh; }
-.map-fullscreen-panel:-webkit-full-screen { width: 100vw; height: 100vh; }
-.map-fullscreen-header { display: flex; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid #e5e7eb; }
-.map-fullscreen-info { display: flex; gap: 0.75rem; flex: 1; flex-wrap: wrap; }
-.collapse-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; border: 1px solid #e5e7eb; background: #fff; font-size: 1rem; color: #6b7280; cursor: pointer; transition: background 0.15s, color 0.15s; }
-.collapse-btn:hover { background: #f3f4f6; color: #111; }
-.map-fullscreen-body {
-  /* Map takes the bulk of the panel; alts strip + directions split the rest. */
-  flex: 1 1 60%;
-  min-height: 280px;
-}
-.map-fullscreen-alts {
-  padding: 0.5rem 0.75rem;
-  border-top: 1px solid #e5e7eb;
-  background: #fafafa;
-  flex: 0 0 auto;
-}
-.map-fullscreen-dirs {
-  border-top: 1px solid #e5e7eb;
-  background: #fff;
-  flex: 1 1 35%;
-  min-height: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-.map-fullscreen-dirs[open] { padding-bottom: 0.6rem; }
-.dirs-summary {
-  cursor: pointer;
-  padding: 0.6rem 0.9rem;
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: #111;
-  user-select: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: #f9fafb;
-}
-.dirs-summary::-webkit-details-marker { display: none; }
-.dirs-summary::after {
-  content: "▾";
-  margin-left: 0.5rem;
-  font-size: 0.7rem;
-  color: #6b7280;
-  transition: transform 0.15s;
-}
-.map-fullscreen-dirs[open] .dirs-summary::after { transform: rotate(180deg); }
-.dirs-summary-count {
-  font-size: 0.72rem;
-  color: #6b7280;
-  font-weight: 500;
-}
-.map-fullscreen-dirs > :not(.dirs-summary) {
-  padding: 0.5rem 0.9rem;
-  overflow-y: auto;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-.map-fullscreen-dirs-empty {
-  padding: 0.5rem 0.9rem 0.8rem;
-  border-top: 1px solid #e5e7eb;
-  background: #fff;
-  flex: 0 0 auto;
-}
 </style>

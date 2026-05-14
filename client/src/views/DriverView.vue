@@ -681,6 +681,11 @@ function enablePhoneGps() {
       driverPosition.value = {
         latitude: pos.coords.latitude,
         longitude: pos.coords.longitude,
+        // m/s and degrees-from-north; either may be null when stationary.
+        // DriveModeOverlay handles null gracefully (shows "--" for speed,
+        // holds last heading for camera rotation).
+        speed: Number.isFinite(pos.coords.speed) ? pos.coords.speed : null,
+        heading: Number.isFinite(pos.coords.heading) ? pos.coords.heading : null,
         source: 'phone-test',
         lastPingAge: 0,
       }
