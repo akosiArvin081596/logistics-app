@@ -13,25 +13,6 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
-    <!-- Status update block. Only renders for active/working loads (assigned,
-         dispatched, at shipper, loading, in transit, at receiver, unloading).
-         Pending acceptance loads show Accept/Reject buttons at the bottom of
-         the page instead. Completed loads (Delivered) get StatusStepper's
-         own "Load Delivered" disabled state, so this is safe to render. -->
-    <div v-if="isActiveLoad" class="detail-status-block">
-      <div class="detail-status-header">
-        <span class="detail-status-eyebrow">Update Status</span>
-        <span class="detail-status-headline">What's next?</span>
-      </div>
-      <StatusStepper
-        :load="load"
-        :headers="headers"
-        :current-status="status"
-        :driver-name="driverName"
-        @update="$emit('status-update', $event)"
-      />
-    </div>
-
     <!-- TEMP — phone-GPS banner for the test load. Goes away with the rest
          of the temp block in DriverView when testing wraps. -->
     <div v-if="phoneGpsModeActive && phoneGpsStatus !== 'active'" class="phone-gps-banner" :class="bannerClass">
@@ -49,8 +30,23 @@
       </button>
     </div>
 
-    <!-- Route Map + smart guidance (alternatives + directions) -->
+    <!-- Status update + Route Map + smart guidance.
+         Status only renders for active/working loads (assigned, dispatched,
+         at shipper, loading, in transit, at receiver, unloading). Pending
+         acceptance loads use Accept/Reject at the bottom of the page;
+         Delivered loads see StatusStepper's own "Load Delivered" state. -->
     <van-collapse v-model="openSections" class="detail-collapse" :border="false">
+      <van-collapse-item v-if="isActiveLoad" title="Update Status" name="status">
+        <div class="status-collapse-body">
+          <StatusStepper
+            :load="load"
+            :headers="headers"
+            :current-status="status"
+            :driver-name="driverName"
+            @update="$emit('status-update', $event)"
+          />
+        </div>
+      </van-collapse-item>
       <van-collapse-item title="Route Map" name="map">
         <DriverRouteMap
           ref="routeMapRef"
@@ -229,7 +225,10 @@ const props = defineProps({
 
 const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline', 'expense-submit', 'enable-phone-gps'])
 
-const openSections = ref(['map'])
+// Status + Map open by default. Status is the primary action driver came
+// here for; Map gives context. Everything else stays collapsed to keep
+// the page short for older drivers.
+const openSections = ref(['status', 'map'])
 const copiedField = ref(null)
 const routeMapRef = ref(null)
 const docListRef = ref(null)
@@ -410,54 +409,24 @@ const dropoffFields = computed(() => {
   margin-bottom: 0.75rem;
 }
 
-/* ────────────────────────────────────────────────────────────────────────
-   Status update block. Sits at the top of the detail page (after the route
-   summary) so a 50s/60s-aged driver lands directly on the next action they
-   need to take. Same visual language as the Loads tab's old active-hero
-   (accent border, soft gradient) but scoped here now per 2026-05-14
-   client direction: load list lives on the tab; per-load action lives
-   on the detail page.
-   ──────────────────────────────────────────────────────────────────────── */
-.detail-status-block {
-  background: linear-gradient(180deg, var(--accent-dim, #ecfdf5) 0%, var(--surface) 100%);
-  border: 2px solid var(--accent);
-  border-radius: 14px;
-  padding: 1rem 0.85rem 1.15rem;
-  margin-bottom: 1rem;
-  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.10);
+/* Status update lives inside a van-collapse-item now (toggleable like
+   the other detail sections, per 2026-05-14 client direction). Keep the
+   StatusStepper's inner card flat so it doesn't double-frame inside the
+   accordion, and keep the "next step" button at the larger size we used
+   on the old hero card — older drivers, gloved hands, sun glare. */
+.status-collapse-body {
+  padding: 0.5rem 0.5rem 0.75rem;
 }
-.detail-status-header {
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-  margin-bottom: 0.85rem;
-  text-align: center;
+.status-collapse-body :deep(.card) {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin-bottom: 0;
+  box-shadow: none;
 }
-.detail-status-eyebrow {
-  font-size: 0.7rem;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--accent);
-}
-.detail-status-headline {
-  font-size: 1.35rem;
-  font-weight: 800;
-  color: var(--text);
-  line-height: 1.15;
-}
-/* StatusStepper's inner card sits on the panel surface — make sure it
-   doesn't look like a stranded island inside the bordered block. */
-.detail-status-block :deep(.card) {
-  background: var(--surface);
-  border-radius: 10px;
-  padding: 0.85rem;
-}
-/* Bigger tap target on the primary action button — gloved hands, sun
-   glare, older eyes. */
-.detail-status-block :deep(.action-btn.primary) {
-  min-height: 64px;
-  font-size: 1.05rem;
+.status-collapse-body :deep(.action-btn.primary) {
+  min-height: 60px;
+  font-size: 1rem;
   letter-spacing: 0.01em;
 }
 
