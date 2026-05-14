@@ -7745,6 +7745,11 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 			});
 		}
 
+		// Both branches mutated the Job Tracking sheet — bust the 60s cache so the
+		// driver's immediate loadData() refetch sees the new status instead of
+		// the pre-accept "Dispatched"/pre-decline assignment.
+		jtCacheInvalidate();
+
 		res.json({ success: true, response });
 	} catch (error) {
 		console.error("Error responding to load:", error.message);
