@@ -817,6 +817,13 @@ db.exec(`
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_vid_date ON routemate_telemetry(routemate_vehicle_id, location_date_ms DESC)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_fetched ON routemate_telemetry(fetched_at)`); } catch {}
+// Additive 2026-05-15 (GPS accuracy plan, Tier 1). Telemetry rows that fail
+// quality gates (impossible-speed jumps, NULL/zero coords) are still
+// INSERTed so we keep a full audit trail, but tagged here so every read
+// path can filter them out. Empty string = clean; values like
+// 'speed_outlier' / 'invalid_coords' = forensics.
+try { db.exec(`ALTER TABLE routemate_telemetry ADD COLUMN dropped_reason TEXT DEFAULT ''`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_clean ON routemate_telemetry(routemate_vehicle_id, dropped_reason, id DESC)`); } catch {}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS routemate_fault_codes (
@@ -926,9 +933,35 @@ const routemateUpsertVehicleStmt = db.prepare(`
 
 const routemateInsertTelemetryStmt = db.prepare(`
 	INSERT INTO routemate_telemetry
-		(routemate_vehicle_id, latitude, longitude, speed, bearing, odometer, engine_hours, fuel_pct, geocoded_location, location_date_ms)
-	VALUES (@routemate_vehicle_id, @latitude, @longitude, @speed, @bearing, @odometer, @engine_hours, @fuel_pct, @geocoded_location, @location_date_ms)
+		(routemate_vehicle_id, latitude, longitude, speed, bearing, odometer, engine_hours, fuel_pct, geocoded_location, location_date_ms, dropped_reason)
+	VALUES (@routemate_vehicle_id, @latitude, @longitude, @speed, @bearing, @odometer, @engine_hours, @fuel_pct, @geocoded_location, @location_date_ms, @dropped_reason)
 `);
+
+// Last accepted (non-dropped, valid coords) fix for a vehicle. Used by the
+// ingest path to compute implied speed vs. the new ping, and by the geofence
+// dwell check (Tier 1 of the GPS-accuracy plan).
+const routemateLastCleanFixStmt = db.prepare(`
+	SELECT latitude, longitude, location_date_ms
+	FROM routemate_telemetry
+	WHERE routemate_vehicle_id = ?
+	  AND dropped_reason = ''
+	  AND latitude IS NOT NULL
+	  AND longitude IS NOT NULL
+	ORDER BY id DESC
+	LIMIT 1
+`);
+
+// 120 mph in m/s. Above this, the previous-to-current fix delta implies a
+// physical movement faster than any truck (or most highway car traffic), so
+// the new fix is almost certainly a GPS glitch — store it with a dropped
+// flag for audit, and skip it from socket emit + geofence + read paths.
+const SPEED_OUTLIER_MPS = 53.6;
+// Bracket the speed check to a plausible gap window. Below 5s, the
+// derivative is too noisy to be meaningful; above 10 min the truck was
+// almost certainly offline and the position legitimately jumped to wherever
+// it is now.
+const SPEED_CHECK_MIN_DT_MS = 5 * 1000;
+const SPEED_CHECK_MAX_DT_MS = 10 * 60 * 1000;
 
 // Minimal vehicle upsert used by the telemetry sync to keep routemate_vehicles
 // populated with at least the IDs even when the upstream vehicles-list endpoint
@@ -1064,6 +1097,33 @@ async function routemateSyncTelemetry() {
 		const txn = db.transaction((items) => {
 			for (const t of items) {
 				if (!t.routemate_vehicle_id) continue;
+				// Quality gates (Tier 1, 2026-05-15). Both gates still INSERT the
+				// row — we never silently lose data — but tag dropped_reason so
+				// every read path filters them out and the audit trail survives.
+				let droppedReason = '';
+				const hasValidCoords = Number.isFinite(t.latitude) && Number.isFinite(t.longitude)
+					&& (t.latitude !== 0 || t.longitude !== 0);
+				if (!hasValidCoords) {
+					droppedReason = 'invalid_coords';
+				} else {
+					const prev = routemateLastCleanFixStmt.get(t.routemate_vehicle_id);
+					if (prev && Number.isFinite(prev.location_date_ms)) {
+						const dtMs = (t.location_date_ms || Date.now()) - prev.location_date_ms;
+						if (dtMs >= SPEED_CHECK_MIN_DT_MS && dtMs <= SPEED_CHECK_MAX_DT_MS) {
+							const distM = geolib.getDistance(
+								{ latitude: prev.latitude, longitude: prev.longitude },
+								{ latitude: t.latitude, longitude: t.longitude },
+							);
+							const impliedMps = distM / (dtMs / 1000);
+							if (impliedMps > SPEED_OUTLIER_MPS) {
+								droppedReason = 'speed_outlier';
+							}
+						}
+					}
+				}
+				// Tag the in-memory item so the socket-emit + geofence loops
+				// downstream can skip dropped rows without re-querying.
+				t._droppedReason = droppedReason;
 				routemateInsertTelemetryStmt.run({
 					routemate_vehicle_id: t.routemate_vehicle_id,
 					latitude: t.latitude,
@@ -1075,6 +1135,7 @@ async function routemateSyncTelemetry() {
 					fuel_pct: t.fuel_pct,
 					geocoded_location: t.geocoded_location || "",
 					location_date_ms: t.location_date_ms || Date.now(),
+					dropped_reason: droppedReason,
 				});
 				// Also keep routemate_vehicles fresh with at least the IDs. This
 				// covers us when the upstream vehicles-list endpoint is broken.
@@ -1117,6 +1178,7 @@ async function routemateSyncTelemetry() {
 		// (TrackingMap onLocationUpdate) doesn't need to know the source.
 		// `source: 'routemate'` lets the client flip the badge to ELD live.
 		for (const t of rows) {
+			if (t._droppedReason) continue; // Tier 1: don't push outlier/invalid fixes to UI
 			const driverName = driverByVehicle[t.routemate_vehicle_id];
 			if (!driverName) continue;
 			const driverLower = driverName.trim().toLowerCase();
@@ -1155,6 +1217,7 @@ async function routemateSyncTelemetry() {
 		// the predecessor-status guard inside the helper makes re-fires inside
 		// the radius a silent no-op until the load advances.
 		for (const t of rows) {
+			if (t._droppedReason) continue; // Tier 1: outlier/invalid fixes never fire geofence
 			const driverName = driverByVehicle[t.routemate_vehicle_id];
 			if (!driverName) continue;
 			if (!Number.isFinite(t.latitude) || !Number.isFinite(t.longitude)) continue;
@@ -1167,6 +1230,7 @@ async function routemateSyncTelemetry() {
 					longitude: t.longitude,
 					driverName,
 					loadId: activeLoadId,
+					routemateVehicleId: t.routemate_vehicle_id,
 				});
 			} catch (geoErr) {
 				console.error("routemate geofence error:", geoErr.message);
@@ -1227,6 +1291,7 @@ function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 		WHERE routemate_vehicle_id = ?
 		  AND location_date_ms >= ?
 		  AND location_date_ms < ?
+		  AND dropped_reason = ''
 		ORDER BY location_date_ms ASC
 	`).all(routemateVehicleId, dayStartMs, dayEndMs);
 
@@ -4068,6 +4133,7 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 					  AND rt.id = (
 						SELECT MAX(rt2.id) FROM routemate_telemetry rt2
 						WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+						  AND rt2.dropped_reason = ''
 					  )
 					LIMIT 1
 				`).get(driverNameKey);
@@ -9036,6 +9102,7 @@ app.get("/api/admin/fleet-health", requireRole("Super Admin", "Dispatcher"), (re
 					SELECT routemate_vehicle_id, MAX(id) AS max_id
 					FROM routemate_telemetry
 					WHERE routemate_vehicle_id IN (${placeholders})
+					  AND dropped_reason = ''
 					GROUP BY routemate_vehicle_id
 				) latest ON rt.id = latest.max_id
 			`).all(...linkedIds);
@@ -9047,6 +9114,7 @@ app.get("/api/admin/fleet-health", requireRole("Super Admin", "Dispatcher"), (re
 				FROM routemate_telemetry
 				WHERE routemate_vehicle_id IN (${placeholders})
 				  AND speed > ?
+				  AND dropped_reason = ''
 				GROUP BY routemate_vehicle_id
 			`).all(...linkedIds, MOVING_MPH_M_PER_S);
 			for (const r of movingRows) lastMovingByVehicle[r.routemate_vehicle_id] = r.last_moving_ms;
@@ -10697,8 +10765,10 @@ function checkGeofence(lat, lng, loadData, headers) {
 // Auto-advance a load's status when the truck enters a pickup/drop-off geofence.
 // Shared by any location source — currently only the Routemate telemetry sync.
 // Guards: never advances delivered/canceled rows, never auto-writes a completion
-// status, and only transitions from a valid predecessor status.
-async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId }) {
+// status, only transitions from a valid predecessor status, AND requires the
+// previous (non-dropped) telemetry fix to also be inside the same geofence
+// trigger so a single noisy ping can't flip status mid-highway-pass.
+async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId }) {
 	if (!latitude || !longitude || !driverName || !loadId) return null;
 	try {
 		const jt = await getJobTrackingCached();
@@ -10722,6 +10792,30 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId }) {
 				(trigger === "At Receiver" && /^(in transit)$/i.test(rowStatus))
 			);
 			if (!canUpdate) return null;
+
+			// Dwell hysteresis (Tier 1, 2026-05-15). Require the *previous*
+			// non-dropped fix on this vehicle to ALSO be inside the same
+			// trigger zone. Single-ping noise on a highway pass-through can
+			// drop a fix 150m sideways into the 500m radius; demanding two
+			// consecutive fixes (≈30s at 15s polling) rules that out without
+			// adding meaningful latency to legitimate arrivals.
+			if (routemateVehicleId) {
+				const prevFix = db.prepare(`
+					SELECT latitude, longitude
+					FROM routemate_telemetry
+					WHERE routemate_vehicle_id = ?
+					  AND dropped_reason = ''
+					  AND latitude IS NOT NULL
+					  AND longitude IS NOT NULL
+					ORDER BY id DESC
+					LIMIT 1 OFFSET 1
+				`).get(routemateVehicleId);
+				// OFFSET 1 because the CURRENT ping was already INSERTed by
+				// the txn above us; OFFSET 0 would just hand back our own row.
+				if (!prevFix) return null;
+				const prevTriggers = checkGeofence(prevFix.latitude, prevFix.longitude, loadObj, headers);
+				if (!prevTriggers.includes(trigger)) return null;
+			}
 
 			const sheets = await getSheets();
 			const statusColIdx = headers.indexOf(statusCol);
@@ -10838,10 +10932,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					(SELECT rt2.latitude  FROM routemate_telemetry rt2
 					   WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
 					     AND rt2.id < rt.id
+					     AND rt2.dropped_reason = ''
 					   ORDER BY rt2.id DESC LIMIT 1) AS prev_lat,
 					(SELECT rt2.longitude FROM routemate_telemetry rt2
 					   WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
 					     AND rt2.id < rt.id
+					     AND rt2.dropped_reason = ''
 					   ORDER BY rt2.id DESC LIMIT 1) AS prev_lng
 				FROM truck_assignments ta
 				JOIN trucks t ON t.id = ta.truck_id
@@ -10852,6 +10948,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				  AND rt.id = (
 					SELECT MAX(rt2.id) FROM routemate_telemetry rt2
 					WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+					  AND rt2.dropped_reason = ''
 				  )
 				  AND rt.location_date_ms > ?
 			`).all(cutoff);
@@ -11565,6 +11662,7 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 				 FROM routemate_telemetry
 				 WHERE routemate_vehicle_id = ?
 				   AND location_date_ms > ?
+				   AND dropped_reason = ''
 				 ORDER BY location_date_ms ASC`
 			).all(assignment.routemate_vehicle_id, cutoffMs);
 			rawPoints = rows.map((r) => ({
@@ -13672,6 +13770,7 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 			 JOIN trucks t ON t.routemate_vehicle_id = rt.routemate_vehicle_id
 			 WHERE rt.location_date_ms >= ? AND rt.location_date_ms <= ?
 			   AND t.routemate_vehicle_id != ''
+			   AND rt.dropped_reason = ''
 			 ORDER BY t.id, rt.location_date_ms ASC`
 		).all(startMs, endMs);
 
@@ -13812,6 +13911,7 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 			 FROM routemate_telemetry
 			 WHERE routemate_vehicle_id = ?
 			   AND location_date_ms >= ? AND location_date_ms <= ?
+			   AND dropped_reason = ''
 			 ORDER BY location_date_ms ASC`
 		).all(truck.routemate_vehicle_id, startMs, endMs);
 
