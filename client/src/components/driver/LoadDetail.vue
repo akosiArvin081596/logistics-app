@@ -13,6 +13,23 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
+    <!-- TEMP — phone-GPS banner for the test load. Goes away with the rest
+         of the temp block in DriverView when testing wraps. -->
+    <div v-if="phoneGpsModeActive && phoneGpsStatus !== 'active'" class="phone-gps-banner" :class="bannerClass">
+      <div class="phone-gps-text">
+        <strong>{{ bannerTitle }}</strong>
+        <span>{{ bannerMessage }}</span>
+      </div>
+      <button
+        v-if="phoneGpsStatus !== 'unavailable'"
+        type="button"
+        class="phone-gps-btn"
+        @click="$emit('enable-phone-gps')"
+      >
+        {{ phoneGpsStatus === 'denied' || phoneGpsStatus === 'error' ? 'Try Again' : 'Enable GPS' }}
+      </button>
+    </div>
+
     <!-- Route Map + smart guidance (alternatives + directions) -->
     <van-collapse v-model="openSections" class="detail-collapse" :border="false">
       <van-collapse-item title="Route Map" name="map">
@@ -184,14 +201,43 @@ const props = defineProps({
   truck: { type: Object, default: null },
   loadExpenses: { type: Array, default: () => [] },
   responding: { type: Boolean, default: false },
+  // TEMP — phone-GPS-for-test-load wiring. Removed alongside the temp block
+  // in DriverView when CEO testing is done.
+  phoneGpsModeActive: { type: Boolean, default: false },
+  phoneGpsStatus: { type: String, default: '' },
 })
 
-const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline', 'expense-submit'])
+const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline', 'expense-submit', 'enable-phone-gps'])
 
 const openSections = ref(['map'])
 const copiedField = ref(null)
 const routeMapRef = ref(null)
 const docListRef = ref(null)
+
+// TEMP — banner text/styling for the phone-GPS-for-test-load flow.
+const bannerTitle = computed(() => {
+  switch (props.phoneGpsStatus) {
+    case 'requesting': return 'Requesting GPS permission…'
+    case 'denied': return 'GPS permission denied'
+    case 'error': return 'GPS error'
+    case 'unavailable': return 'GPS unavailable'
+    default: return 'This load uses phone GPS'
+  }
+})
+const bannerMessage = computed(() => {
+  switch (props.phoneGpsStatus) {
+    case 'requesting': return 'Allow location access in the browser prompt.'
+    case 'denied': return 'Re-enable location in Chrome site settings, then tap Try Again.'
+    case 'error': return 'Couldn’t get a fix. Check that location services are on.'
+    case 'unavailable': return 'This browser does not expose geolocation.'
+    default: return 'Tap Enable GPS to show your live truck pin and turn-by-turn guidance.'
+  }
+})
+const bannerClass = computed(() => {
+  if (props.phoneGpsStatus === 'denied' || props.phoneGpsStatus === 'error' || props.phoneGpsStatus === 'unavailable') return 'phone-gps-banner-error'
+  if (props.phoneGpsStatus === 'requesting') return 'phone-gps-banner-pending'
+  return 'phone-gps-banner-info'
+})
 
 // Smart route guidance state — DriverRouteMap emits 'route-data' after every
 // successful /api/route?alternatives=true call. We store it here so the
@@ -434,4 +480,49 @@ const dropoffFields = computed(() => {
 .expenses-section { padding: 0.5rem; background: var(--bg, #f8f9fa); border-radius: 8px; }
 .expense-history { margin-top: 0.75rem; }
 .expense-history-label { font-size: 0.72rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border, #e5e7eb); }
+
+/* TEMP — phone-GPS banner. Removed with the rest of the test-load wiring. */
+.phone-gps-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.9rem;
+  margin: 0.6rem 0;
+  border-radius: 10px;
+  font-size: 0.85rem;
+}
+.phone-gps-text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1; }
+.phone-gps-text strong { font-weight: 700; font-size: 0.88rem; }
+.phone-gps-text span { font-size: 0.78rem; line-height: 1.35; opacity: 0.85; }
+.phone-gps-btn {
+  flex: 0 0 auto;
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  border: none;
+  font-weight: 600;
+  font-size: 0.82rem;
+  cursor: pointer;
+  background: #fff;
+  color: #1f2937;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+}
+.phone-gps-btn:active { transform: scale(0.97); }
+.phone-gps-banner-info {
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+}
+.phone-gps-banner-info .phone-gps-btn { background: #2563eb; color: #fff; }
+.phone-gps-banner-pending {
+  background: #fefce8;
+  color: #854d0e;
+  border: 1px solid #fde68a;
+}
+.phone-gps-banner-error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+.phone-gps-banner-error .phone-gps-btn { background: #dc2626; color: #fff; }
 </style>

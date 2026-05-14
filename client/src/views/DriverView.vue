@@ -145,12 +145,15 @@
           :load-expenses="detailLoadExpenses"
           :responding="isResponding(detailLoad)"
           :driver-position="driverPosition"
+          :phone-gps-mode-active="phoneGpsModeActive"
+          :phone-gps-status="phoneGpsStatus"
           @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
           @accept="handleAcceptLoad"
           @decline="handleDeclineLoad"
           @expense-submit="handleExpenseSubmit"
+          @enable-phone-gps="enablePhoneGps"
         />
 
         <!-- Load List -->
@@ -650,6 +653,8 @@ watch(detailLoadRaw, async (load) => {
 // No server round-trip — purely populates driverPosition locally for the map.
 const PHONE_GPS_TEST_LOAD_IDS = new Set(['LD-MP4W4LP1'])
 let phoneGpsWatcherId = null
+const phoneGpsModeActive = ref(false)
+const phoneGpsStatus = ref('')  // '' | 'requesting' | 'active' | 'denied' | 'error' | 'unavailable'
 function extractLoadId(load) {
   if (!load) return ''
   for (const k of Object.keys(load)) {
@@ -663,25 +668,46 @@ function stopPhoneGpsWatch() {
   }
   phoneGpsWatcherId = null
 }
+function enablePhoneGps() {
+  if (!navigator?.geolocation) {
+    phoneGpsStatus.value = 'unavailable'
+    return
+  }
+  stopPhoneGpsWatch()
+  phoneGpsStatus.value = 'requesting'
+  phoneGpsWatcherId = navigator.geolocation.watchPosition(
+    (pos) => {
+      phoneGpsStatus.value = 'active'
+      driverPosition.value = {
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude,
+        source: 'phone-test',
+        lastPingAge: 0,
+      }
+    },
+    (err) => {
+      // err.code: 1=PERMISSION_DENIED, 2=POSITION_UNAVAILABLE, 3=TIMEOUT
+      phoneGpsStatus.value = err && err.code === 1 ? 'denied' : 'error'
+      stopPhoneGpsWatch()
+    },
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 },
+  )
+}
 watch(
   () => detailLoad.value,
   (load) => {
     stopPhoneGpsWatch()
+    phoneGpsStatus.value = ''
+    phoneGpsModeActive.value = false
     if (!load) return
     if (!PHONE_GPS_TEST_LOAD_IDS.has(extractLoadId(load))) return
-    if (!navigator?.geolocation) return
-    phoneGpsWatcherId = navigator.geolocation.watchPosition(
-      (pos) => {
-        driverPosition.value = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          source: 'phone-test',
-          lastPingAge: 0,
-        }
-      },
-      () => { /* permission denied or unavailable — silent, map falls back to no-pin */ },
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 },
-    )
+    phoneGpsModeActive.value = true
+    // Auto-attempt: if the browser already has permission (granted earlier
+    // in the session), watchPosition succeeds immediately and the banner
+    // hides. If it fails (incognito strict mode or prior denial), the
+    // banner stays visible with a button that re-arms inside a guaranteed
+    // user-gesture click.
+    enablePhoneGps()
   },
 )
 onUnmounted(() => { stopPhoneGpsWatch() })
