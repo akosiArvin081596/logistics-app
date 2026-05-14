@@ -26,15 +26,15 @@
            above triggers this; the standard van-collapse Route Map below
            stays compact for quick glances. -->
       <Teleport to="body">
-        <div v-if="expanded" class="map-fullscreen-overlay" @click.self="expanded = false" @pointerdown.stop>
-          <div class="map-fullscreen-panel" @click.stop>
+        <div v-if="expanded" class="map-fullscreen-overlay" @pointerdown.stop>
+          <div ref="fullscreenPanel" class="map-fullscreen-panel" @click.stop>
             <div class="map-fullscreen-header">
               <div class="map-fullscreen-info">
                 <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
                 <span v-if="etaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
                 <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
               </div>
-              <button class="collapse-btn" @click="expanded = false" title="Exit Navigation Mode">✕</button>
+              <button class="collapse-btn" @click="closeNavMode" title="Exit Navigation Mode">✕</button>
             </div>
             <div ref="expandedMapContainer" class="map-fullscreen-body"></div>
             <div v-if="alternatives.length > 1" class="map-fullscreen-alts">
@@ -69,7 +69,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
 import RouteAlternatives from './RouteAlternatives.vue'
@@ -96,6 +96,7 @@ const api = useApi()
 const { load: loadGoogleMaps, createMap } = useGoogleMaps()
 const mapContainer = ref(null)
 const expandedMapContainer = ref(null)
+const fullscreenPanel = ref(null)
 const expanded = ref(false)
 const routePoints = ref([])
 const distanceMiles = ref(null)
@@ -733,14 +734,56 @@ function renderExpandedMap() {
   else if (count === 1) { expandedMap.setCenter(bounds.getCenter()); expandedMap.setZoom(12) }
 }
 
+// Best-effort Fullscreen API. Works on Chrome desktop + Android Chrome; iOS
+// Safari ignores it on non-video elements, so the CSS layout below already
+// fills the viewport on its own as a baseline.
+async function requestPanelFullscreen() {
+  const el = fullscreenPanel.value
+  if (!el) return
+  const req = el.requestFullscreen
+    || el.webkitRequestFullscreen
+    || el.mozRequestFullScreen
+    || el.msRequestFullscreen
+  if (!req) return
+  try { await req.call(el) } catch { /* user gesture missing or unsupported — silent */ }
+}
+
+function exitDocumentFullscreen() {
+  const fsEl = document.fullscreenElement || document.webkitFullscreenElement
+  if (!fsEl) return
+  const exit = document.exitFullscreen
+    || document.webkitExitFullscreen
+    || document.mozCancelFullScreen
+    || document.msExitFullscreen
+  if (!exit) return
+  try { exit.call(document) } catch { /* silent */ }
+}
+
+function closeNavMode() {
+  exitDocumentFullscreen()
+  expanded.value = false
+}
+
+// If the user exits fullscreen via the ESC key or Android back button, keep
+// the expanded ref in sync so the overlay doesn't sit there stale.
+function onFullscreenChange() {
+  const fsEl = document.fullscreenElement || document.webkitFullscreenElement
+  if (!fsEl && expanded.value) expanded.value = false
+}
+
 watch(expanded, async (val) => {
   if (!val) {
+    exitDocumentFullscreen()
     clearExpandedMapObjects()
     expandedMap = null
     return
   }
   await nextTick()
   if (!expandedMapContainer.value) return
+  // Kick off the Fullscreen API request — the click on Navigate is the user
+  // gesture browsers require. If it fails the CSS still gives us a 100vw/100vh
+  // panel, so the user always gets edge-to-edge.
+  requestPanelFullscreen()
   const center = map ? map.getCenter().toJSON() : { lat: 0, lng: 0 }
   expandedMap = await createMap(expandedMapContainer.value, {
     zoom: map ? map.getZoom() : 5, center, mapTypeId: 'hybrid',
@@ -800,6 +843,14 @@ onMounted(() => {
   if (hasCoords.value || driverLatLng.value) {
     nextTick(() => initMap())
   }
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+  exitDocumentFullscreen()
 })
 </script>
 
@@ -836,19 +887,33 @@ onMounted(() => {
 .navmode-btn:hover { background: #1d4ed8; }
 .navmode-btn:active { background: #1e40af; }
 
-.map-fullscreen-overlay { position: fixed; inset: 0; z-index: 99999; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; pointer-events: auto; }
+.map-fullscreen-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background: #000;
+  display: block;
+  pointer-events: auto;
+}
 .map-fullscreen-panel {
-  width: 92vw;
-  height: 90vh;
-  max-width: 1400px;
+  /* Edge-to-edge viewport fill. svh (small viewport height) keeps the
+     bottom-of-screen visible on mobile when the URL bar is showing; falls
+     back to vh on browsers without svh support. */
+  width: 100vw;
+  width: 100svw;
+  height: 100vh;
+  height: 100svh;
   background: #fff;
-  border-radius: 12px;
+  border-radius: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 25px 50px rgba(0,0,0,0.25);
   pointer-events: auto;
 }
+/* When the Fullscreen API is active the panel is the fullscreen element —
+   ensure it stretches to fill it. Some browsers add black margins otherwise. */
+.map-fullscreen-panel:fullscreen { width: 100vw; height: 100vh; }
+.map-fullscreen-panel:-webkit-full-screen { width: 100vw; height: 100vh; }
 .map-fullscreen-header { display: flex; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid #e5e7eb; }
 .map-fullscreen-info { display: flex; gap: 0.75rem; flex: 1; flex-wrap: wrap; }
 .collapse-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; border: 1px solid #e5e7eb; background: #fff; font-size: 1rem; color: #6b7280; cursor: pointer; transition: background 0.15s, color 0.15s; }
