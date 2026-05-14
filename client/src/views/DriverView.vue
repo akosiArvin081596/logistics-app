@@ -902,6 +902,21 @@ function handleMarkRead(ids) {
   driverStore.markMessagesRead(ids)
 }
 
+// Coalesce socket-triggered refetches. Three different events
+// (load-assigned, load-cancelled, geofence-trigger) each used to call
+// driverStore.loadData() independently, so a burst of activity (assign +
+// reassign + geofence within a couple hundred ms) kicked off three stacked
+// full refetches. We debounce to a single refetch ~250ms after the burst
+// settles. Optimistic in-place mutations still keep the UI responsive.
+let refetchTimer = null
+function scheduleDriverRefetch() {
+  if (refetchTimer) return
+  refetchTimer = setTimeout(() => {
+    refetchTimer = null
+    driverStore.loadData()
+  }, 250)
+}
+
 async function handleExpenseSubmit(data) {
   try {
     await driverStore.submitExpense(data)
@@ -930,7 +945,7 @@ function onLoadAssigned(payload) {
     read: 0,
     createdAt: new Date().toISOString(),
   })
-  driverStore.loadData()
+  scheduleDriverRefetch()
 }
 
 function dismissAssignedBanner() {
@@ -979,7 +994,7 @@ function onLoadCancelled(payload) {
     })
     if (detailRowIndex.value === payload.rowIndex) detailRowIndex.value = null
   }
-  driverStore.loadData()
+  scheduleDriverRefetch()
 }
 
 function onGeofenceTrigger(payload) {
@@ -998,7 +1013,7 @@ function onGeofenceTrigger(payload) {
     createdAt: new Date().toISOString(),
   })
   // Reload data so load status updates and route recalculates from driver position
-  driverStore.loadData()
+  scheduleDriverRefetch()
 }
 
 function onNewMessage(msg) {

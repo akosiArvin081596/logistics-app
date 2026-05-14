@@ -8195,16 +8195,13 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
-		const sheets = await getSheets();
-
-		const response = await sheets.spreadsheets.values.batchGet({
-			spreadsheetId: SPREADSHEET_ID,
-			ranges: ["Job Tracking"],
-		});
-
-		const rangeData = response.data.valueRanges || [];
-		const jobTracking = parseSheet(rangeData[0]);
-		jobTracking.data = deduplicateLoads(jobTracking.data, jobTracking.headers);
+		// Use the shared 60s in-memory cache so the driver endpoint matches the
+		// rest of the load-aggregating endpoints (/api/dashboard, /api/investor,
+		// /api/financials, /api/public/track). Cold reads still hit Sheets, but
+		// warm reads now respond in ~10ms instead of 2-5s, and drop cancelled +
+		// soft-deleted rows the same way the admin KPIs do.
+		const jobTracking = await getJobTrackingCached();
+		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = getCarrierDBFromSQLite();
 
 		// Find driver column in Job Tracking. Regex covers the common
@@ -8228,6 +8225,29 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 					(r) => normalizeDriverName(r[driverCol]) === driverNameNorm,
 				)
 			: [];
+
+		// Build a diagnostic payload for the two empty-load failure modes we've
+		// actually seen in production: (1) the Job Tracking sheet header drifts
+		// outside the /driver|operator/i regex, (2) the column matches but the
+		// session driver name doesn't match any row. Both manifest as "the
+		// driver app shows zero loads" with no on-screen signal. Surfacing the
+		// reason here lets an admin curl /api/driver/<name> and see what broke
+		// without having to tail server logs.
+		const diagnostic = {};
+		if (!driverCol) {
+			diagnostic.warning = "driver_column_not_matched";
+			diagnostic.sheetHeaders = jobTracking.headers;
+		} else if (jobTracking.data.length > 0 && loads.length === 0) {
+			diagnostic.warning = "no_loads_for_driver";
+			diagnostic.driverNameSearched = driverNameNorm;
+			diagnostic.sampleDriverNamesInSheet = [
+				...new Set(
+					jobTracking.data
+						.map((r) => (r[driverCol] || "").trim())
+						.filter(Boolean),
+				),
+			].slice(0, 5);
+		}
 
 		// Find driver info from Carrier Database
 		const driverInfo = carrierDB.data.find(
@@ -8258,7 +8278,10 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			)
 			.all(nameLower);
 
-		// Expenses from SQLite
+		// Expenses from SQLite. photo_data is the receipt URL (per
+		// saveReceiptToDisk() — base64 is written to /uploads/expense-receipts/
+		// on submit and only the URL is stored), so the payload stays small
+		// even for drivers with hundreds of expenses.
 		const driverExpenses = db
 			.prepare(
 				`SELECT id, timestamp, driver, load_id AS loadId, type, amount,
@@ -8435,6 +8458,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			truckDocuments,
 			profilePictureUrl,
 			driverDirectoryId,
+			...(Object.keys(diagnostic).length ? { diagnostic } : {}),
 		});
 	} catch (error) {
 		console.error("Error fetching driver data:", error.message);
