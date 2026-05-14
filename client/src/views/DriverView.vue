@@ -1287,11 +1287,12 @@ onUnmounted(() => {
 .driver-app {
   min-height: 100vh;
   padding-top: calc(52px + env(safe-area-inset-top, 0px));
-  /* Tabbar runs ~95-110px tall on desktop / older Android Chrome because of
-     the larger emoji glyphs + label stack. A 120px buffer was still letting
-     the last LoadCard's chat FAB get clipped on some screens, so we go to
-     160px which leaves a clear gap under the deepest in-card element. */
-  padding-bottom: calc(160px + env(safe-area-inset-bottom, 0px));
+  /* The Vant tabbar, with its larger emoji icons + label stack, can render
+     anywhere from ~80px (mobile) to ~110px (desktop browser at default zoom).
+     A 160px buffer was still clipping the last LoadCard's chat FAB on
+     desktop, so we go to 200px which guarantees breathing room on every
+     viewport we ship to. */
+  padding-bottom: calc(200px + env(safe-area-inset-bottom, 0px));
   font-size: 0.95rem;
 }
 
