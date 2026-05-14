@@ -71,6 +71,7 @@ const mapHeading = ref(0)
 const followMode = ref(true)  // false briefly when user taps compass; auto-resumes on next fix
 
 let map = null
+let routeCasing = null  // wider white outline underneath routeLine for contrast against the map
 let routeLine = null
 let driverMarker = null
 let trafficOverlays = []
@@ -250,19 +251,34 @@ async function initMap() {
 
 function drawRoute() {
   if (!map || !props.activeRoute?.route?.length) return
+  if (routeCasing) { routeCasing.setMap(null); routeCasing = null }
   if (routeLine) { routeLine.setMap(null); routeLine = null }
   for (const o of trafficOverlays) { o.setMap(null) }
   trafficOverlays = []
 
   const path = props.activeRoute.route.map(p => ({ lat: p.latitude, lng: p.longitude }))
-  routeLine = new google.maps.Polyline({
+
+  // White casing underneath the route — gives the polyline a crisp outline
+  // against pale roadmap tiles so it reads as "the route" instead of just
+  // another street. This is how Google Maps' own nav UI renders it.
+  routeCasing = new google.maps.Polyline({
     path,
-    strokeColor: '#1d4ed8',
-    strokeOpacity: 0.95,
-    strokeWeight: 9,
+    strokeColor: '#ffffff',
+    strokeOpacity: 1,
+    strokeWeight: 18,
     map,
     clickable: false,
     zIndex: 1,
+  })
+
+  routeLine = new google.maps.Polyline({
+    path,
+    strokeColor: '#1d4ed8',
+    strokeOpacity: 1,
+    strokeWeight: 12,
+    map,
+    clickable: false,
+    zIndex: 2,
   })
 
   // Traffic overlays on top of the base route — same green/amber/red bands
@@ -282,11 +298,11 @@ function drawRoute() {
       const overlay = new google.maps.Polyline({
         path: segPath,
         strokeColor: color,
-        strokeOpacity: 0.9,
-        strokeWeight: 9,
+        strokeOpacity: 0.95,
+        strokeWeight: 12,
         map,
         clickable: false,
-        zIndex: 2,
+        zIndex: 3,
       })
       trafficOverlays.push(overlay)
     }
@@ -368,6 +384,7 @@ function onFullscreenChange() {
 
 // ─── Watchers & lifecycle ─────────────────────────────────────────────────────
 function tearDown() {
+  if (routeCasing) { routeCasing.setMap(null); routeCasing = null }
   if (routeLine) { routeLine.setMap(null); routeLine = null }
   if (driverMarker) { driverMarker.map = null; driverMarker = null }
   for (const o of trafficOverlays) { o.setMap(null) }
