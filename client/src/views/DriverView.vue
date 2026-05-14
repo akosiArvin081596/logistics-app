@@ -1513,7 +1513,7 @@ onUnmounted(() => {
      particular) and the tabbar ends up overlapping the last card. Putting
      the buffer directly on .app-content sidesteps the flex math — this is
      a plain block-level padding and it always wins. */
-  padding-bottom: calc(180px + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(100px + env(safe-area-inset-bottom, 0px));
 }
 
 .tab-panel {
