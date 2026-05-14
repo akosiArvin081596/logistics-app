@@ -1287,7 +1287,11 @@ onUnmounted(() => {
 .driver-app {
   min-height: 100vh;
   padding-top: calc(52px + env(safe-area-inset-top, 0px));
-  padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+  /* Tabbar is ~70-90px tall with the emoji icons + labels; the old 80px
+     clipped the last card on phones where the bar runs full-height. 120px
+     gives a comfortable buffer so the chat FAB on the bottom-most LoadCard
+     clears the bar with daylight to spare. */
+  padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px));
   font-size: 0.95rem;
 }
 
