@@ -480,15 +480,22 @@ async function fetchRoute(doFit = false) {
   etaMinutes.value = null
   if (!destLatLng.value) return
 
-  // The route should always reflect the truck's CURRENT trajectory so the
-  // polyline visually starts at the pin:
-  //   - Not picked up: truck is heading to PICKUP    → route TRUCK→ORIGIN
-  //   - Picked up:     truck is heading to DROP-OFF → route TRUCK→DEST
-  // Falling back to ORIGIN→DEST (the old default) showed the route for the
-  // wrong leg of the journey while the truck was en route to pickup.
+  // Pick the right leg to render:
+  //   - Has ELD + picked up:     truck→drop-off (current trajectory)
+  //   - Has ELD + not picked up: truck→pickup (current trajectory)
+  //   - No ELD pin:              origin→drop-off (planned full haul)
+  // The original logic fell back to `origin → origin` when ELD was offline
+  // and the load was pre-pickup, which produced no usable route — drivers
+  // saw markers but no polyline and the smart guidance UI never populated.
   const pickedUp = /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
-  const from = driverLatLng.value || originLatLng.value
-  const to = pickedUp ? destLatLng.value : (originLatLng.value || destLatLng.value)
+  let from, to
+  if (driverLatLng.value) {
+    from = driverLatLng.value
+    to = pickedUp ? destLatLng.value : (originLatLng.value || destLatLng.value)
+  } else {
+    from = originLatLng.value
+    to = destLatLng.value
+  }
   if (!from || !to) return
 
   try {
@@ -773,8 +780,11 @@ async function initMap() {
     },
   })
   renderMarkers()
-  if (props.dispatchMode && hasCoords.value) fetchRoute(true)
-  else if (hasCoords.value && driverLatLng.value) fetchRoute(true)
+  // Fetch the route as soon as we have a destination — drivers without an
+  // ELD link still need to see the planned haul, alternatives, and turn-by-
+  // turn directions. The old gate required a driver position, which silently
+  // hid the entire smart guidance UI for any truck that wasn't broadcasting.
+  if (hasCoords.value) fetchRoute(true)
 }
 
 watch(() => [hasCoords.value, driverLatLng.value], () => {
