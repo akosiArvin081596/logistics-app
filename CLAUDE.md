@@ -260,7 +260,7 @@ Vue 3 + Vite SPA with Vue Router, Pinia stores, Tailwind CSS v4, shadcn-vue comp
 
 Key directories:
 - `stores/` — auth, dashboard, sheets, driver, messages, investor, users, adminTools, dispatchNotifications, driversDb, investors, trucks, trailers, invoices, financials
-- `composables/` — useApi, useSocket, useToast, usePagination, useGeolocation, useGeocode, useGoogleMaps
+- `composables/` — useApi, useSocket, useToast, usePagination, useGeocode, useGoogleMaps
 - `components/ui/` — shadcn-vue primitives (badge, button, card, dialog, input, select, skeleton, table, tabs)
 - `components/` — feature-organized: layout, shared, dashboard, data-manager, driver, drivers-db, trucks, investors, investor, invest, apply, users
 - `views/` — 24 view components (includes the public `TrackLoadView.vue`)
@@ -270,7 +270,7 @@ Key directories:
 
 **Composable singletons**: `useApi()`, `useSocket()`, and `useToast()` are module-level singletons, not per-component instances. Each Pinia store instantiates `const api = useApi()` at module scope. `useSocket` maintains a single global socket connection.
 
-**useGeolocation**: Retired 2026-05-13. Phone GPS was replaced by Routemate ELD as the sole location source — the driver app no longer requests location permission, no longer reports pings, and the full-screen "Location Access Required" gate was removed from `DriverView`. The composable file is kept in source for one cycle as dead code; `POST /api/location` returns 410 Gone. See `routemateSyncTelemetry()` for the live-position pipeline.
+**Phone GPS retired**: As of 2026-05-13, Routemate ELD is the sole location source. The `useGeolocation` composable was deleted; the driver app no longer requests location permission, no longer reports pings, and the full-screen "Location Access Required" gate was removed from `DriverView`. `POST /api/location` (server.js) is a 410 Gone stub so cached clients on old phones get a clear error instead of 404. See `routemateSyncTelemetry()` for the live-position pipeline.
 
 **useGoogleMaps**: Loads the Google Maps JS API via `@googlemaps/js-api-loader`, fetches the API key from `GET /api/config/maps-key`.
 
