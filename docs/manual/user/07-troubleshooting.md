@@ -30,7 +30,7 @@ The map needs the Google Maps API to work. If it doesn't load, your network may 
 ## Driver-specific issues
 
 **"My GPS shows the wrong location."**
-First, make sure the driver tab is actively open in your browser (GPS pauses if you close the tab). If position is still wrong after a moment, your phone's GPS may need to acquire satellites — stand still outside for 30 seconds and check again.
+Your position is reported by the truck's Routemate ELD, not your phone or the browser. If the position is wrong or stale, message dispatch with the load ID — they can verify the ELD is reporting and reach out to Routemate support if the device is offline.
 
 **"My status didn't auto-update when I arrived."**
 The geofence is generous (~500 m) but it isn't perfect. Tap the next status in the stepper manually and give a brief reason. This is normal — auto-advance covers most cases but never claims 100%.

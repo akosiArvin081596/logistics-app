@@ -153,7 +153,7 @@ A flat list of every REST endpoint in `server.js`, grouped by domain. Each row s
 
 | Verb | Path | Role | Purpose |
 |---|---|---|---|
-| POST | `/api/location` | Driver | Report GPS position. |
+| POST | `/api/location` | Driver | **Retired 2026-05-13.** Returns 410 Gone; phone GPS replaced by Routemate ELD telemetry. |
 | GET | `/api/locations/latest` | Super Admin, Dispatcher | Latest position per active driver. |
 | GET | `/api/locations/trail` | Super Admin, Dispatcher | Historical GPS trail. |
 | GET | `/api/route` | any | Route directions. |

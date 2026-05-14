@@ -74,10 +74,10 @@ The Google Sheet is implicitly backed up by Google; you don't need to snapshot i
 
 **Cause to check, in order:**
 
-1. **Browser permission.** The driver's browser blocks geolocation. `DriverView` should be showing the "Location Access Required" gate — confirm the driver sees it.
-2. **Phone background.** iOS especially backgrounds the tab aggressively. The 60-second stationary heartbeat is the workaround; if a driver hasn't moved 50 m in 60 s, no report goes out. This is intentional but can look like "broken GPS" on the map.
-3. **Server-side dedup.** `POST /api/location` has a 10-second minimum inter-report interval per driver. Reports faster than that are ignored.
-4. **Routemate fallback path.** If `ROUTEMATE_ENABLED=true`, the GPS source for that driver may have switched to Routemate. The `source: 'routemate' | 'phone'` field on `/api/locations/latest` tells you which.
+1. **Truck not linked to a Routemate vehicle.** Confirm the driver's currently-assigned truck row has a non-empty `routemate_vehicle_id`. Without that link, no telemetry can attach to the driver. Set it in the Trucks UI.
+2. **Routemate disabled or key missing.** Check `GET /api/routemate/health` (Super Admin). If `enabled: false` or `hasKey: false`, the sync intervals are dormant — fix the env vars and restart.
+3. **Routemate API error.** The `errorsLast24h` field on the health endpoint plus the latest entry in `audit_trail` action `routemate_sync` show recent failures. Routemate cloud outages do happen; `lib/routemate-client.js` retries with backoff, but a sustained outage leaves all positions stale.
+4. **ELD device offline.** If the link is good and Routemate's API is healthy but a single truck is stuck, the ELD hardware itself may be unplugged or out of cell coverage. `/api/locations/latest` returns `source: 'none'` for that driver. Contact Routemate support.
 
 ### A load is stuck in the wrong status
 

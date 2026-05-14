@@ -30,7 +30,7 @@ client/
 │   │   ├── invest/     # public investor application wizard
 │   │   ├── apply/      # public driver application form
 │   │   ├── trucks/, trailers/, users/, drivers-db/, investors/, data-manager/
-│   ├── composables/    # useApi, useSocket, useToast, useGeolocation, …
+│   ├── composables/    # useApi, useSocket, useToast, useGoogleMaps, …
 │   ├── stores/         # Pinia stores
 │   ├── views/          # 25 route-level views
 │   ├── wizard/         # JSON-driven wizard engine (used by /invest)
@@ -85,7 +85,6 @@ Several composables behave as module-level singletons rather than per-component 
 
 Other composables are per-instance:
 
-- **`useGeolocation()`** — GPS tracking. Uses `watchPosition` with a 60 s stationary heartbeat, 50 m movement threshold, and 10 s minimum inter-report interval. Reports to `POST /api/location` with the current load ID. Errors are silently swallowed so a GPS failure never disrupts the driver. Exposes a separate `requestPermission()` helper used by `DriverView` to gate the app on mount — fully-onboarded drivers see a "Location Access Required" lock until the browser returns `granted`.
 - **`useGoogleMaps()`** — loads the Maps JS API via `@googlemaps/js-api-loader`. Fetches the API key from `GET /api/config/maps-key` so it doesn't have to ship to the client at build time.
 - **`useGeocode()`** — wrapper over the geocode-cache endpoints.
 - **`usePagination()`** — generic offset/limit pagination state.

@@ -20,17 +20,15 @@ Onboarding has these steps:
 
 Once every step shows green, the lock screen disappears and you have full access to the driver app.
 
-## Granting location access
+## How location works
 
-The first time you open the app on a phone after onboarding, you'll be asked to grant **location access**. Tap **Allow**. The driver app uses your phone's GPS to:
+You don't need to grant the driver app location permission. Your truck's **Routemate ELD** is the location source — it reports the truck's position to LogisX continuously, whether the driver app is open or not. That position powers:
 
-- Show your current position to the dispatcher.
-- Auto-advance load status when you arrive at the shipper or receiver (geofencing).
-- Give the customer a real-time tracking link they can share.
+- Your current position on the dispatcher's tracking map.
+- Auto-advance of load status when you arrive at the shipper or receiver (geofencing).
+- The real-time tracking link the customer can share.
 
-If you accidentally deny permission, the app shows a "Location Access Required" screen with instructions for re-enabling it. You won't be able to use the loads features until you do.
-
-> **Note.** The app reports your position only while the driver tab is open. If you close the browser, GPS stops. Keep the tab open while you're on a load.
+If your tracking position looks wrong, the issue is on the ELD side, not the app — let dispatch know and they can check the device.
 
 ## The five tabs
 
@@ -131,7 +129,7 @@ When you're reassigned to a different truck, the document list changes automatic
 
 **"I declined a load by accident."** Message dispatch right away — they can re-offer it to you if you both agree.
 
-**"My GPS shows the wrong location."** Force-refresh the driver tab. If the wrong position persists, your phone's GPS may need a moment to recover (especially after a long stretch indoors or in a tunnel).
+**"My GPS shows the wrong location."** Your position comes from the truck's Routemate ELD, not your phone. If the position is wrong or stuck, message dispatch with the load ID so they can check the ELD device.
 
 **"My status didn't auto-advance when I got to the shipper."** Tap the status manually. The geofence sometimes misses, especially in dense urban areas with poor GPS.
 

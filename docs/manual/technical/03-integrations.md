@@ -91,9 +91,9 @@ Routemate is FMCSA-certified ELD hardware in each truck. LogisX pulls live GPS, 
 
 **Linking trucks.** Each truck row in the `trucks` table has a `routemate_vehicle_id` column. Admins set this in the Trucks UI to link a LogisX truck to a Routemate vehicle.
 
-**Live GPS source priority.** `GET /api/locations/latest` prefers a Routemate telemetry row younger than 5 minutes over the phone-based `driver_locations` row. The response is tagged with `source: 'routemate' | 'phone'` so consumers can show provenance. Old consumers that ignore `source` continue to work because the response shape is otherwise unchanged.
+**Live GPS source.** `GET /api/locations/latest` and `GET /api/locations/trail` source exclusively from `routemate_telemetry` as of 2026-05-13. Responses tag `source: 'routemate'` when an ELD fix is available and `source: 'none'` otherwise.
 
-**Phone GPS as fallback.** `useGeolocation.js` and `POST /api/location` are untouched by Routemate — they remain the fallback path. If Routemate goes down, phone GPS takes over with no code change.
+**Phone GPS retired.** The `useGeolocation` composable was deleted and `POST /api/location` is now a 410 Gone stub (kept so cached clients on old phones get a clear error instead of 404). The legacy `driver_locations` table retains historical rows but is no longer written to or read from any endpoint; a 90-day purge job ages it out.
 
 ## Tesseract — legacy POD OCR
 
@@ -119,9 +119,8 @@ Broker email → n8n parses PDF → POST /api/n8n/job (x-webhook-secret)
                     └─► Dispatcher assigns driver in /dashboard
                             └─► Socket "load-assigned" → driver phone
                                     └─► Driver taps Accept
-                                            └─► Driver phone GPS → POST /api/location
-                                                    └─► (Routemate, if enabled, also reporting)
-                                                            └─► Geofence enters pickup → status auto-advances
+                                            └─► Routemate ELD telemetry sync → routemate_telemetry
+                                                    └─► Geofence enters pickup → status auto-advances
                                                                     └─► Driver uploads POD → Drive upload
                                                                             └─► Status: Delivered
                                                                                     └─► Super Admin generates invoice (pdf-lib/pdfkit)

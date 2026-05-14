@@ -107,7 +107,7 @@ Multi-step operations are not atomic. If a dispatch assignment writes to the she
 - Audit failures don't block the user.
 - Sheets-vs-SQLite drift is rare in practice and visible from the affected screen.
 
-The geofence handler inside `POST /api/location` is the canonical example: location persistence is the primary obligation, and geofence-triggered status updates are best-effort — any error inside the geofence block is caught and logged but never causes the location report to fail.
+The geofence handler inside `routemateSyncTelemetry()` is the canonical example: telemetry persistence is the primary obligation, and geofence-triggered status updates are best-effort — any error inside the geofence block is caught and logged but never causes the telemetry write to fail.
 
 ## Rate limiting
 
