@@ -8525,6 +8525,34 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			 FROM invoices WHERE LOWER(driver) = ? ORDER BY created_at DESC LIMIT 20`
 		).all(nameLower);
 
+		// Geocode enrichment from the local cache. Lets the driver-mobile-view
+		// pre-fill its navigation handoff and render static-map thumbnails
+		// without paying for re-geocoding. Lookup key is the lowercased,
+		// single-spaced address (same shape geocode_cache stores).
+		const pickupAddrCol = findCol(filteredHeaders, /pickup.*address/i);
+		const dropAddrCol = findCol(filteredHeaders, /drop.?off.*address|delivery.*address|receiver.*address/i);
+		if (filteredLoads.length && (pickupAddrCol || dropAddrCol)) {
+			const geoRows = db.prepare("SELECT address, lat, lng FROM geocode_cache").all();
+			const geoMap = new Map(
+				geoRows.map((r) => [(r.address || "").toLowerCase().replace(/\s+/g, " ").trim(), { lat: r.lat, lng: r.lng }]),
+			);
+			const lookupGeo = (addr) => {
+				if (!addr) return null;
+				const norm = String(addr).toLowerCase().replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+				return geoMap.get(norm) || null;
+			};
+			filteredLoads.forEach((load) => {
+				if (pickupAddrCol) {
+					const geo = lookupGeo(load[pickupAddrCol]);
+					if (geo) load._pickupGeo = geo;
+				}
+				if (dropAddrCol) {
+					const geo = lookupGeo(load[dropAddrCol]);
+					if (geo) load._dropGeo = geo;
+				}
+			});
+		}
+
 		// Shared documents — files Super Admin uploaded to this driver via /drivers detail modal.
 		// Lookup keyed on drivers_directory.id (resolved by driver_name). Guard against id=0 sentinel
 		// collision so drivers without a directory row return [] instead of every truck/investor doc.
