@@ -67,6 +67,30 @@ function isValidImageMagic(buf) {
 		(buf[4] === 0x37 || buf[4] === 0x39) && buf[5] === 0x61) return true;
 	return false;
 }
+// Cross-origin support for the driver-mobile-view client (separate Next.js
+// app at a different origin). Only the env-allowlisted origins get permissive
+// CORS headers; everything else falls through with no Access-Control-* headers
+// and the browser blocks the response — same as before this middleware existed.
+const DRIVER_MOBILE_ORIGINS = (process.env.DRIVER_MOBILE_ORIGINS ||
+	"https://localhost:3002,https://192.168.8.106:3002")
+	.split(",")
+	.map((s) => s.trim())
+	.filter(Boolean);
+app.use((req, res, next) => {
+	const origin = req.headers.origin;
+	if (origin && DRIVER_MOBILE_ORIGINS.includes(origin)) {
+		res.header("Access-Control-Allow-Origin", origin);
+		res.header("Access-Control-Allow-Credentials", "true");
+		res.header("Vary", "Origin");
+		if (req.method === "OPTIONS") {
+			res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+			res.header("Access-Control-Allow-Headers", "Content-Type, X-Requested-With");
+			res.header("Access-Control-Max-Age", "600");
+			return res.sendStatus(204);
+		}
+	}
+	next();
+});
 app.use(compression());
 // 50 MB body limit — covers driver application payloads that bundle
 // 3 high-res iPhone photos (CDL front + back + medical card) as base64.
@@ -1962,7 +1986,11 @@ const sessionMiddleware = session({
 		maxAge: 24 * 60 * 60 * 1000,
 		httpOnly: true,
 		secure: process.env.NODE_ENV === "production",
-		sameSite: "strict",
+		// "none" in production so the cookie survives the cross-origin login
+		// from the driver-mobile-view (requires secure=true, which is set above
+		// when NODE_ENV=production). "lax" in dev because secure=false would
+		// reject "none" cookies.
+		sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
 	},
 });
 app.use(sessionMiddleware);
