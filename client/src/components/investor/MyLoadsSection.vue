@@ -96,12 +96,18 @@
 <script setup>
 import { computed, ref } from 'vue'
 
-const expanded = ref(false)
-
 const props = defineProps({
   myLoads: { type: Object, default: () => ({ pending: [], active: [] }) },
   config: { type: Object, default: () => ({}) },
 })
+
+// Expand by default when the investor actually has loads to look at;
+// stay collapsed when there's nothing to show so the dashboard stays
+// scannable. User's manual toggle (after mount) is preserved on refresh
+// because we don't re-derive this — it's seeded once at setup time.
+const expanded = ref(
+  (props.myLoads?.pending?.length || 0) + (props.myLoads?.active?.length || 0) > 0
+)
 
 const pending = computed(() => props.myLoads?.pending || [])
 const active = computed(() => props.myLoads?.active || [])
