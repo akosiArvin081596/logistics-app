@@ -10294,7 +10294,15 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		const jtDateColR = findCol(jobTracking.headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(jobTracking.headers, /date/i);
 		const filteredJobData = (investorDriverSet
 			? jobTracking.data.filter(r => {
-				if (rptOwnerIdCol && parseInt(r[rptOwnerIdCol]) === reportOwnerId) return true;
+				// Same rule as /api/investor: an EXPLICIT Owner ID (including "0") is
+				// trusted; only an EMPTY cell falls back to driver-name matching.
+				if (rptOwnerIdCol) {
+					const raw = r[rptOwnerIdCol];
+					const hasOwnerIdValue = raw !== undefined && raw !== null && String(raw).trim() !== "";
+					if (hasOwnerIdValue) {
+						return (parseInt(raw) || 0) === reportOwnerId;
+					}
+				}
 				const d = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
 				return d && investorDriverSet.has(d);
 			}) : jobTracking.data
@@ -12165,17 +12173,22 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			investorConfig.forEach((r) => (config[r.key] = r.value)); // override globals
 		}
 
-		// Filter sheet data by Owner ID column (primary) or driver name (fallback for old data)
+		// Filter sheet data by Owner ID column (primary) or driver name (fallback for old data).
+		// An EMPTY Owner ID cell falls back to driver-name match (legacy rows from before
+		// the Owner ID column existed). An EXPLICIT value — including "0" — is trusted as-is
+		// and stops the fallback, so a company-truck load (Owner ID = 0) run by an investor's
+		// driver doesn't leak into that investor's view.
 		const driverCol = findCol(jobTracking.headers, /^driver$/i);
 		const ownerIdCol = findCol(jobTracking.headers, /^owner.?id$/i);
 		const filteredJobData = investorDriverSet
 			? jobTracking.data.filter(r => {
-				// Primary: match Owner ID column (stamped at dispatch)
 				if (ownerIdCol) {
-					const rowOwnerId = parseInt(r[ownerIdCol]) || 0;
-					if (rowOwnerId === investorOwnerId) return true;
+					const raw = r[ownerIdCol];
+					const hasOwnerIdValue = raw !== undefined && raw !== null && String(raw).trim() !== "";
+					if (hasOwnerIdValue) {
+						return (parseInt(raw) || 0) === investorOwnerId;
+					}
 				}
-				// Fallback: match driver name (for loads dispatched before Owner ID column existed)
 				const driver = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
 				return driver && investorDriverSet.has(driver);
 			})
