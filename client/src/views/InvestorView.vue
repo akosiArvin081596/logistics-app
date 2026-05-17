@@ -55,6 +55,7 @@
       </div>
       <AssetSection v-if="store.asset?.totalMiles > 0" :asset="store.asset" :config="store.config" />
       <MyTrucks :trucks="trucks" :production="store.production" @reload="loadData" />
+      <MyLoadsSection :my-loads="store.myLoads" :config="store.config" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <ExpensesSection :trucks="trucks" />
@@ -95,6 +96,7 @@ import InvestorChat from '../components/investor/InvestorChat.vue'
 import DocumentPortal from '../components/investor/DocumentPortal.vue'
 import LegalDocumentPortal from '../components/investor/LegalDocumentPortal.vue'
 import MyTrucks from '../components/investor/MyTrucks.vue'
+import MyLoadsSection from '../components/investor/MyLoadsSection.vue'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import AvatarPlaceholder from '../components/shared/AvatarPlaceholder.vue'

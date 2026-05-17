@@ -8398,29 +8398,47 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			)
 			.all(nameLower);
 
-		// Count uploaded documents per load (total + POD-specific)
+		// Count uploaded documents per load (total + per-kind breakdown). The
+		// driver-mobile-view's DocumentUpload needs per-kind counts so BOL /
+		// Receipt / Other show "N uploaded" accurately after a reload, not just
+		// POD. _otherCount is anything that isn't one of the three known kinds.
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const loadIds = loads
 			.map((l) => (loadIdCol ? l[loadIdCol] : ""))
 			.filter(Boolean);
 		const docCounts = {};
 		const podCounts = {};
+		const bolCounts = {};
+		const receiptCounts = {};
+		const otherCounts = {};
 		if (loadIds.length) {
 			const placeholders = loadIds.map(() => "?").join(",");
 			const docs = db
 				.prepare(
-					`SELECT load_id, COUNT(*) as count, SUM(CASE WHEN type = 'POD' THEN 1 ELSE 0 END) as pod_count FROM documents WHERE load_id IN (${placeholders}) GROUP BY load_id`,
+					`SELECT load_id,
+						COUNT(*) as count,
+						SUM(CASE WHEN type = 'POD' THEN 1 ELSE 0 END) as pod_count,
+						SUM(CASE WHEN type = 'BOL' THEN 1 ELSE 0 END) as bol_count,
+						SUM(CASE WHEN type = 'Receipt' THEN 1 ELSE 0 END) as receipt_count,
+						SUM(CASE WHEN type NOT IN ('POD', 'BOL', 'Receipt') THEN 1 ELSE 0 END) as other_count
+					FROM documents WHERE load_id IN (${placeholders}) GROUP BY load_id`,
 				)
 				.all(...loadIds);
 			docs.forEach((d) => {
 				docCounts[d.load_id] = d.count;
 				podCounts[d.load_id] = d.pod_count;
+				bolCounts[d.load_id] = d.bol_count;
+				receiptCounts[d.load_id] = d.receipt_count;
+				otherCounts[d.load_id] = d.other_count;
 			});
 		}
 		loads.forEach((load) => {
 			const lid = loadIdCol ? load[loadIdCol] : "";
 			load._docCount = docCounts[lid] || 0;
 			load._podCount = podCounts[lid] || 0;
+			load._bolCount = bolCounts[lid] || 0;
+			load._receiptCount = receiptCounts[lid] || 0;
+			load._otherCount = otherCounts[lid] || 0;
 		});
 
 		// Strip rate/revenue columns for Driver role
@@ -12738,6 +12756,40 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			}
 		}
 
+		// ---- My Loads (pending + active) — scoped to this investor's drivers/trucks ----
+		// filteredJobData is already investor-scoped (owner_id + driver-set fallback) and has
+		// canceled / soft-deleted rows stripped by excludeDroppedLoads() upstream.
+		const myPendingRe = /^(dispatched|assigned|heading to shipper)$/i;
+		const myActiveRe = /^(in transit|picked up|at shipper|at receiver|loading|unloading)$/i;
+		const investorSplit = (parseFloat(config.investor_split_pct) || 50) / 100;
+		const myLoadsOriginCol = jobTracking.headers.find(h =>
+			/origin|pickup|shipper/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const myLoadsDestCol = jobTracking.headers.find(h =>
+			/dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		function shapeMyLoad(r) {
+			const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
+			const gross = parseFloat(String(jtRateCol ? r[jtRateCol] : "0").replace(/[$,]/g, "")) || 0;
+			return {
+				loadId: lid,
+				status: statusCol ? (r[statusCol] || "").trim() : "",
+				pickup: resolveCityState(r, "pickup", lid, myLoadsOriginCol ? r[myLoadsOriginCol] : ""),
+				dropoff: resolveCityState(r, "drop", lid, myLoadsDestCol ? r[myLoadsDestCol] : ""),
+				truck: jtTruckCol ? (r[jtTruckCol] || "").trim() : "",
+				driver: jtDriverCol ? (r[jtDriverCol] || "").trim() : "",
+				pickupDate: pickupDateCol ? (r[pickupDateCol] || "") : "",
+				dropDate: dropoffDateCol ? (r[dropoffDateCol] || "") : "",
+				yourShare: Math.round(gross * investorSplit),
+			};
+		}
+		const myLoads = {
+			pending: filteredJobData
+				.filter(r => statusCol && myPendingRe.test((r[statusCol] || "").trim()))
+				.map(shapeMyLoad),
+			active: filteredJobData
+				.filter(r => statusCol && myActiveRe.test((r[statusCol] || "").trim()))
+				.map(shapeMyLoad),
+		};
+
 		res.json({
 			production: {
 				totalRevenue: Math.round(totalRevenue),
@@ -12784,6 +12836,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalJobs,
 				completedJobs: completedJobCount,
 			},
+			myLoads,
 			config,
 			investor: investorProfile ? {
 				id: investorProfile.id,

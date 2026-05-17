@@ -15,6 +15,7 @@ export const useInvestorStore = defineStore('investor', {
     taxShield: (s) => s.data?.taxShield || null,
     recessionProof: (s) => s.data?.recessionProof || null,
     config: (s) => s.data?.config || null,
+    myLoads: (s) => s.data?.myLoads || { pending: [], active: [] },
   },
 
   actions: {
