@@ -1,10 +1,33 @@
 <template>
   <div class="section-card">
-    <div class="section-header-row">
-      <h3 class="section-title">My Loads</h3>
-      <span class="section-count">{{ pending.length + active.length }}</span>
-    </div>
+    <button
+      type="button"
+      class="section-header-row section-toggle"
+      :aria-expanded="expanded"
+      aria-controls="my-loads-body"
+      @click="expanded = !expanded"
+    >
+      <span class="section-title-wrap">
+        <svg
+          class="chevron"
+          :class="{ 'chevron-open': expanded }"
+          width="14" height="14" viewBox="0 0 24 24"
+          fill="none" stroke="currentColor" stroke-width="2.5"
+          stroke-linecap="round" stroke-linejoin="round"
+        ><polyline points="9 18 15 12 9 6"/></svg>
+        <h3 class="section-title">My Loads</h3>
+      </span>
+      <span class="header-meta">
+        <span class="pill-summary pill-amber" :title="`${pending.length} pending`">
+          <strong>{{ pending.length }}</strong> pending
+        </span>
+        <span class="pill-summary pill-green" :title="`${active.length} active`">
+          <strong>{{ active.length }}</strong> active
+        </span>
+      </span>
+    </button>
 
+    <div v-show="expanded" id="my-loads-body" class="section-body">
     <!-- Pending -->
     <div class="bucket">
       <div class="bucket-header">
@@ -66,11 +89,14 @@
       (gross &times; {{ splitPct }}%). Final take-home is reconciled in the monthly
       earnings breakdown after driver pay and expenses are deducted.
     </p>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+
+const expanded = ref(false)
 
 const props = defineProps({
   myLoads: { type: Object, default: () => ({ pending: [], active: [] }) },
@@ -95,12 +121,34 @@ function fmtMoney(n) {
   background: var(--surface); border-radius: var(--radius); border: 1px solid var(--border);
   padding: 1.25rem; margin-bottom: 1.25rem;
 }
-.section-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
-.section-title { font-size: 1rem; font-weight: 700; }
-.section-count {
-  font-size: 0.72rem; font-weight: 700; background: var(--accent-dim); color: var(--accent);
-  padding: 0.15rem 0.5rem; border-radius: 99px;
+.section-header-row { display: flex; align-items: center; justify-content: space-between; }
+.section-toggle {
+  width: 100%; background: transparent; border: none; padding: 0;
+  font: inherit; color: inherit; cursor: pointer; text-align: left;
 }
+.section-toggle:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 6px;
+}
+.section-title-wrap {
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.section-title { font-size: 1rem; font-weight: 700; margin: 0; }
+.chevron {
+  color: var(--text-dim);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+.chevron-open { transform: rotate(90deg); }
+.header-meta {
+  display: flex; align-items: center; gap: 0.4rem;
+}
+.pill-summary {
+  font-size: 0.7rem; font-weight: 500;
+  padding: 0.2rem 0.55rem; border-radius: 99px;
+  white-space: nowrap;
+}
+.pill-summary strong { font-weight: 700; margin-right: 0.15rem; }
+.section-body { margin-top: 1rem; }
 .bucket { margin-bottom: 1.25rem; }
 .bucket:last-of-type { margin-bottom: 0.5rem; }
 .bucket-header {
