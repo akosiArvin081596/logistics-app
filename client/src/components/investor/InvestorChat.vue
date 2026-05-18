@@ -35,8 +35,8 @@
       </div>
     </div>
 
-    <!-- Composer -->
-    <div class="chat-composer">
+    <!-- Composer (hidden in preview mode — admins shouldn't message themselves as the investor) -->
+    <div v-if="!isPreview" class="chat-composer">
       <div class="composer-main">
         <textarea
           v-model="draft"
@@ -61,6 +61,9 @@
         </div>
       </div>
     </div>
+    <div v-else class="chat-readonly-hint">
+      Read-only preview &mdash; sending messages is disabled while viewing this investor's portal.
+    </div>
   </div>
 </template>
 
@@ -69,14 +72,20 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import { useAuthStore } from '../../stores/auth'
+import { useInvestorStore } from '../../stores/investor'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
+  // Super Admin previewing this investor's portal — when set we fetch the
+  // target investor's thread and hide the send composer.
+  previewUserId: { type: Number, default: null },
+  isPreview: { type: Boolean, default: false },
 })
 
 const api = useApi()
 const socket = useSocket()
 const auth = useAuthStore()
+const investorStore = useInvestorStore()
 
 const messages = ref([])
 const draft = ref('')
@@ -101,7 +110,15 @@ function clearAttach() {
   attachBase64.value = ''
 }
 
-const myName = computed(() => (auth.user?.username || '').toLowerCase())
+// In preview mode "me" is the target investor whose portal we're replicating,
+// not the admin viewing it — that way the chat bubbles mirror what the
+// investor actually sees (their own messages on the right).
+const myName = computed(() => {
+  if (props.isPreview) {
+    return (investorStore.data?.investor?.username || '').toLowerCase()
+  }
+  return (auth.user?.username || '').toLowerCase()
+})
 
 const unread = computed(() =>
   messages.value.filter(m => !isMine(m) && !m.read).length
@@ -122,7 +139,10 @@ function fmtTime(ts) {
 
 async function load() {
   try {
-    const res = await api.get('/api/investor/messages')
+    const url = props.isPreview && props.previewUserId
+      ? `/api/investor/messages?as_user_id=${props.previewUserId}`
+      : '/api/investor/messages'
+    const res = await api.get(url)
     messages.value = res.messages || []
     await nextTick()
     scrollBottom()
@@ -324,5 +344,15 @@ onUnmounted(() => {
   display: inline-flex; align-items: center; gap: 0.25rem;
   padding: 0.15rem 0.5rem; border-radius: 8px; font-size: 0.68rem; font-weight: 600;
   background: rgba(59,130,246,0.12); color: var(--blue, #3b82f6);
+}
+.chat-readonly-hint {
+  padding: 0.6rem 0.75rem;
+  background: #f8fafc;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  text-align: center;
+  font-style: italic;
 }
 </style>

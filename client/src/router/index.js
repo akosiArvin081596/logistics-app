@@ -113,6 +113,18 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    path: '/investor-portals',
+    name: 'investor-portals',
+    component: () => import('../views/InvestorPortalsView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/investor-portals/:userId',
+    name: 'investor-portal-preview',
+    component: () => import('../views/InvestorPortalPreviewView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/drivers',
     name: 'drivers-db',
     component: () => import('../views/DriversDbView.vue'),

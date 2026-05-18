@@ -693,6 +693,41 @@ function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColNa
 	return set;
 }
 
+// Resolve "Super Admin previewing an investor's portal" via ?as_user_id=.
+// When the session user is a Super Admin AND as_user_id points at a real
+// Investor user, we return the target's id/username so downstream endpoints
+// scope data as if the admin were logged in as that investor. Otherwise the
+// helper falls back to the session user — silently, no 403, to keep the
+// JSON contract identical for regular investors and to avoid leaking
+// information about which user IDs exist.
+//   - Returns { effectiveUserId, effectiveUsername, isPreview, sessionUser }
+//   - isPreview=true ONLY when conditions are met
+//   - Endpoints downstream should compute isAdminGlobal = sessionUser.role === 'Super Admin' && !isPreview
+//     and use effectiveUserId / effectiveUsername in place of user.id / user.username.
+// Distinct from the ?investor_id= param used by /api/investor/onboarding-documents
+// and /api/legal-documents, which keys on investors.id (this one keys on users.id).
+function resolvePreviewUser(req) {
+	const sessionUser = req.session.user;
+	const raw = req.query.as_user_id;
+	const fallback = {
+		effectiveUserId: sessionUser.id,
+		effectiveUsername: sessionUser.username,
+		isPreview: false,
+		sessionUser,
+	};
+	if (!raw || sessionUser.role !== "Super Admin") return fallback;
+	const targetId = parseInt(raw, 10);
+	if (!Number.isFinite(targetId) || targetId <= 0) return fallback;
+	const row = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(targetId);
+	if (!row || row.role !== "Investor") return fallback;
+	return {
+		effectiveUserId: row.id,
+		effectiveUsername: row.username,
+		isPreview: true,
+		sessionUser,
+	};
+}
+
 // Legal documents table (per-truck legal files)
 db.exec(`
 	CREATE TABLE IF NOT EXISTS legal_documents (
@@ -6169,8 +6204,13 @@ async function checkDriverActiveLoad(driverName) {
 // Truck Database: list all trucks (Investor sees only their own)
 app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	const user = req.session.user;
+	// Super Admin previewing an investor's portal: scope to the target's trucks.
+	// Outside preview mode the behavior is unchanged for all roles.
+	const preview = resolvePreviewUser(req);
 	let rows;
-	if (user.role === "Investor") {
+	if (preview.isPreview) {
+		rows = db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(preview.effectiveUserId);
+	} else if (user.role === "Investor") {
 		rows = db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(user.id);
 	} else {
 		rows = db.prepare("SELECT * FROM trucks ORDER BY unit_number ASC").all();
@@ -9535,16 +9575,21 @@ app.put("/api/dispatch-notifications/read", requireRole("Super Admin", "Dispatch
 // GET /api/investor/messages — Investor's own message thread with dispatch
 app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, res) => {
 	try {
-		const user = req.session.user;
-		const name = user.username.trim().toLowerCase();
+		// Super Admin previewing an investor's portal: scope by the target's username.
+		// Note: read receipts deliberately do NOT fire in preview mode — the admin
+		// is verifying what the investor sees, not consuming the investor's queue.
+		const preview = resolvePreviewUser(req);
+		const name = preview.effectiveUsername.trim().toLowerCase();
 		const messages = db.prepare(
 			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref
 			 FROM messages
 			 WHERE LOWER("from") = ? OR LOWER("to") = ?
 			 ORDER BY id ASC`
 		).all(name, name);
-		// Mark messages to this investor as read
-		db.prepare(`UPDATE messages SET read = 1 WHERE LOWER("to") = ? AND read = 0`).run(name);
+		if (!preview.isPreview) {
+			// Mark messages to this investor as read
+			db.prepare(`UPDATE messages SET read = 1 WHERE LOWER("to") = ? AND read = 0`).run(name);
+		}
 		res.json({ messages });
 	} catch (err) {
 		console.error("Error fetching investor messages:", err.message);
@@ -10118,8 +10163,9 @@ app.get("/api/investor/onboarding-documents", requireRole("Super Admin", "Invest
 // GET /api/investor/documents — All documents for the investor's drivers
 app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
-		const user = req.session.user;
-		const isSuperAdmin = user.role === "Super Admin";
+		const preview = resolvePreviewUser(req);
+		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		let docs;
 		if (isSuperAdmin) {
 			docs = db.prepare(
@@ -10150,8 +10196,9 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 // GET /api/investor/tax-csv — Download tax shield data as CSV
 app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
-		const user = req.session.user;
-		const isSuperAdmin = user.role === "Super Admin";
+		const preview = resolvePreviewUser(req);
+		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 
 		// Pull investor config for purchase price
 		const globalCfg = db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all();
@@ -10256,8 +10303,10 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		// Re-use the investor data by making an internal call
-		const user = req.session.user;
-		const isSuperAdmin = user.role === "Super Admin";
+		const preview = resolvePreviewUser(req);
+		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
+		if (preview.isPreview) logAudit(req, "investor_preview_report", "investor", preview.effectiveUserId, "");
 
 		// Fetch the same investor data inline (mirrors /api/investor logic summary)
 		const sheets = await getSheets();
@@ -12150,8 +12199,22 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = getCarrierDBFromSQLite();
 
-		const user = req.session.user;
-		const isSuperAdmin = user.role === "Super Admin";
+		// Super Admin can pass ?as_user_id=N to preview a specific investor's
+		// portal (read-only admin "view as" flow). When in preview mode the
+		// endpoint takes the investor-scoped branch using the target's user_id;
+		// `user` and `isSuperAdmin` shadow the session values so the rest of
+		// the endpoint scopes data as if the admin were logged in as that
+		// investor. Outside preview mode the values match the session user.
+		const preview = resolvePreviewUser(req);
+		const user = {
+			...preview.sessionUser,
+			id: preview.effectiveUserId,
+			username: preview.effectiveUsername,
+		};
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
+		if (preview.isPreview) {
+			logAudit(req, "investor_preview_view", "investor", preview.effectiveUserId, "");
+		}
 
 		// Resolve carrier DB columns (history sync moved to POST/PUT /api/drivers-directory)
 		const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
@@ -12713,10 +12776,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const revenuePerMile = fleetTotalMiles > 0 ? Math.round((totalRevenue / fleetTotalMiles) * 100) / 100 : 0;
 		const costPerMile = fleetTotalMiles > 0 ? Math.round((totalExpenses / fleetTotalMiles) * 100) / 100 : 0;
 
-		// Resolve the investor's own record so the dashboard can display (and upload) their profile picture
+		// Resolve the investor's own record so the dashboard can display (and upload) their profile picture.
+		// In preview mode we also surface full_name + username so the admin's banner / chat
+		// can label the target investor accurately.
 		let investorProfile = null;
 		if (!isSuperAdmin) {
-			investorProfile = db.prepare("SELECT id, profile_picture_url FROM investors WHERE user_id = ?").get(user.id);
+			investorProfile = db.prepare(
+				"SELECT id, profile_picture_url, full_name, carrier_name FROM investors WHERE user_id = ?"
+			).get(user.id);
 		}
 
 		// ---- Investor-centric aggregates (P0-4/5/6 from 2026-04-12 meeting) ----
@@ -12854,6 +12921,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			investor: investorProfile ? {
 				id: investorProfile.id,
 				profilePictureUrl: investorProfile.profile_picture_url || "",
+				fullName: investorProfile.full_name || "",
+				carrierName: investorProfile.carrier_name || "",
+				username: user.username || "",
 			} : null,
 		});
 	} catch (error) {
@@ -12870,8 +12940,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 // the pattern in /api/investor itself.
 app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
-		const user = req.session.user;
-		const isSuperAdmin = user.role === "Super Admin";
+		const preview = resolvePreviewUser(req);
+		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
 		const { truck, type, status, from, to } = req.query;
 
 		// Date range sanity check (matches receipts-download convention)

@@ -54,14 +54,18 @@
         <TrendSection :production="store.production" />
       </div>
       <AssetSection v-if="store.asset?.totalMiles > 0" :asset="store.asset" :config="store.config" />
-      <MyTrucks :trucks="trucks" :production="store.production" @reload="loadData" />
+      <MyTrucks :trucks="trucks" :production="store.production" :is-preview="store.isPreview" @reload="loadData" />
       <MyLoadsSection :my-loads="store.myLoads" :config="store.config" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
-      <ExpensesSection :trucks="trucks" />
+      <ExpensesSection :trucks="trucks" :preview-user-id="store.previewUserId" />
       <!-- <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" /> -->
-      <InvestorChat :trucks="trucks" />
-      <LegalDocumentPortal :trucks="trucks" />
+      <InvestorChat :trucks="trucks" :preview-user-id="store.previewUserId" :is-preview="store.isPreview" />
+      <LegalDocumentPortal
+        :trucks="trucks"
+        :investor-id="store.isPreview ? (store.data?.investor?.id || null) : null"
+        :read-only="store.isPreview"
+      />
       <!-- Business Configuration hidden from investor view; admin manages via Admin Tools -->
       <!--
       <ConfigPanel
@@ -115,7 +119,8 @@ const picUploading = ref(false)
 
 const investorRecord = computed(() => store.data?.investor || null)
 const investorPicture = computed(() => investorRecord.value?.profilePictureUrl || '')
-const canEditPicture = computed(() => authStore.user?.role === 'Investor' && !!investorRecord.value?.id)
+// In preview mode the admin is read-only — never let the avatar overlay show.
+const canEditPicture = computed(() => !store.isPreview && authStore.user?.role === 'Investor' && !!investorRecord.value?.id)
 
 async function onPicChange(event) {
   const file = event.target.files?.[0]
@@ -165,6 +170,15 @@ function titleCase(s) {
 }
 
 const dashboardTitle = computed(() => {
+  // In preview mode, the admin should see the target investor's name in the
+  // hero — matches what that investor sees when they log in themselves.
+  if (store.isPreview) {
+    const targetName = investorRecord.value?.fullName
+      || investorRecord.value?.username
+      || store.data?.investor?.companyName
+      || ''
+    return targetName ? `${titleCase(targetName)} - Asset Dashboard` : 'Asset Dashboard'
+  }
   if (authStore.user?.role === 'Super Admin') return 'Asset Dashboard'
   const name = authStore.user?.companyName || authStore.user?.fullName || authStore.user?.username || ''
   return name ? `${titleCase(name)} - Asset Dashboard` : 'Asset Dashboard'
@@ -191,7 +205,10 @@ async function loadData() {
   try {
     await store.load()
     try {
-      const data = await api.get('/api/trucks')
+      const trucksUrl = store.isPreview
+        ? `/api/trucks?as_user_id=${store.previewUserId}`
+        : '/api/trucks'
+      const data = await api.get(trucksUrl)
       trucks.value = data.trucks || []
     } catch { /* silent */ }
   } catch {
@@ -205,6 +222,7 @@ async function downloadReport() {
     const params = new URLSearchParams()
     if (reportStart.value) params.set('start', reportStart.value)
     if (reportEnd.value) params.set('end', reportEnd.value)
+    if (store.isPreview) params.set('as_user_id', String(store.previewUserId))
     const qs = params.toString() ? `?${params.toString()}` : ''
     const res = await fetch(`/api/investor/report${qs}`, { credentials: 'include' })
     if (!res.ok) throw new Error('Failed')

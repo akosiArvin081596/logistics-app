@@ -5,8 +5,8 @@
       <span class="section-count">{{ trucks.length }}</span>
     </div>
 
-    <!-- Add Truck Accordion -->
-    <details class="form-accordion" style="margin-bottom:1rem;">
+    <!-- Add Truck Accordion — hidden in admin "view as investor" preview mode -->
+    <details v-if="!isPreview" class="form-accordion" style="margin-bottom:1rem;">
       <summary class="form-toggle">+ Add Truck</summary>
       <div style="padding:1rem;">
         <div class="form-grid">
@@ -74,6 +74,9 @@ import { useToast } from '../../composables/useToast'
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
   production: { type: Object, default: () => ({}) },
+  // When true the admin is previewing this investor's portal — hide
+  // the Add Truck affordance so it can't be triggered by accident.
+  isPreview: { type: Boolean, default: false },
 })
 const emit = defineEmits(['reload'])
 
