@@ -36,12 +36,13 @@
         <div class="breakdown-row deduct clickable" @click="openDetail('driverPay')">
           <span class="breakdown-label">- Driver Pay</span>
           <span class="breakdown-value">{{ fmt(-selected.driverPay) }}</span>
-          <span class="breakdown-formula">= $250 x active days this month</span>
+          <span class="breakdown-formula">{{ driverPayFormula }}</span>
         </div>
         <div class="breakdown-row deduct clickable" @click="openDetail('fixedCosts')">
           <span class="breakdown-label">- Fixed Costs</span>
           <span class="breakdown-value">{{ fmt(-selected.fixedCosts) }}</span>
-          <span class="breakdown-formula">= insurance + ELD + IRP/12 + HVUT/12 + maint fund</span>
+          <span class="breakdown-formula" v-if="selected.fixedCostsDeferred">not charged — truck inactive this month</span>
+          <span class="breakdown-formula" v-else>= insurance + ELD + IRP/12 + HVUT/12</span>
         </div>
         <div class="breakdown-row deduct clickable" @click="openDetail('tripExpenses')">
           <span class="breakdown-label">- Trip Expenses</span>
@@ -127,12 +128,13 @@
               <span>Driver Pay</span>
               <span class="val danger">-{{ fmt(selected.driverPay) }}</span>
             </div>
-            <div class="modal-hint">Your driver earns $250 for each day they are actively hauling a load.</div>
+            <div class="modal-hint">{{ driverPayFormula }}.</div>
             <div class="modal-row deduct">
               <span>Fixed Costs</span>
               <span class="val danger">-{{ fmt(selected.fixedCosts) }}</span>
             </div>
-            <div class="modal-hint">Monthly insurance, ELD tracking, registration (IRP), road tax (HVUT), and maintenance reserve.</div>
+            <div class="modal-hint" v-if="selected.fixedCostsDeferred">Truck was inactive this month — fixed costs deferred.</div>
+            <div class="modal-hint" v-else>Monthly insurance, ELD tracking, registration (IRP), and road tax (HVUT).</div>
             <div class="modal-row deduct">
               <span>Trip Expenses</span>
               <span class="val danger">-{{ fmt(selected.tripExpenses) }}</span>
@@ -190,24 +192,26 @@
         <template v-if="detailType === 'driverPay' && selected">
           <div class="modal-breakdown">
             <div class="modal-explain">
-              Your driver is compensated at a flat rate of <strong>$250 per active day</strong>. An "active day" is any calendar day where the driver is working on a load &mdash; from the pickup date through the delivery date.
-            </div>
-            <div class="modal-explain-sm">
-              If a driver has overlapping loads (e.g., picked up a new load the same day they delivered the last one), those days are only counted once to avoid double-charging.
+              Driver compensation depends on each driver's pay structure. Fixed-rate drivers earn a flat amount per active day; percentage drivers earn a share of revenue after deductible trip expenses.
             </div>
 
             <template v-if="selected.driverDetails && Object.keys(selected.driverDetails).length">
               <div class="step-label">Driver Breakdown — {{ monthLabel(selected.month) }}</div>
               <div v-for="(d, name) in selected.driverDetails" :key="name">
                 <div class="modal-row">
-                  <span>{{ name }}</span>
+                  <span>{{ name }}<span v-if="d.payType === 'percentage'" class="modal-tag">{{ d.payPercentage }}%</span></span>
                   <span class="val danger">{{ fmt(d.totalPay) }}</span>
                 </div>
-                <div class="modal-hint">{{ d.activeDays }} active day{{ d.activeDays !== 1 ? 's' : '' }} x ${{ d.dailyRate || 250 }}/day</div>
+                <div class="modal-hint" v-if="d.payType === 'percentage'">
+                  {{ d.payPercentage }}% × max(0, {{ fmt(d.monthRevenue || 0) }} revenue − {{ fmt(d.monthDeductible || 0) }} deductibles) = {{ fmt(d.totalPay) }}
+                </div>
+                <div class="modal-hint" v-else>
+                  {{ d.activeDays }} active day{{ d.activeDays !== 1 ? 's' : '' }} × ${{ d.dailyRate || 250 }}/day
+                </div>
               </div>
             </template>
             <div v-else class="modal-explain-sm" style="font-style:italic;">
-              No active driver days in {{ monthLabel(selected.month) }}.
+              No driver activity recorded in {{ monthLabel(selected.month) }}.
             </div>
 
             <div class="modal-divider"></div>
@@ -223,43 +227,53 @@
         <!-- ======================== -->
         <template v-if="detailType === 'fixedCosts' && selected">
           <div class="modal-breakdown">
-            <div class="modal-explain">
-              These are the recurring monthly costs to keep your {{ fcb.truckCount > 1 ? fcb.truckCount + ' trucks' : 'truck' }} legally compliant and road-ready. They are charged every month regardless of how many loads are completed.
-            </div>
+            <template v-if="selected.fixedCostsDeferred">
+              <div class="modal-explain">
+                Your {{ fcb.truckCount > 1 ? 'trucks were' : 'truck was' }} inactive in {{ monthLabel(selected.month) }} — no loads, no driver activity, no trip expenses. We deferred the fixed costs for this month so an idle month doesn't appear as a loss.
+              </div>
+              <div class="modal-explain-sm">
+                Once your truck is dispatched even one load in a month, the full monthly fixed costs apply normally.
+              </div>
+              <div class="modal-divider"></div>
+              <div class="modal-row bold result">
+                <span>Total Fixed Costs ({{ monthLabel(selected.month) }})</span>
+                <span class="val">{{ fmt(0) }}</span>
+              </div>
+            </template>
+            <template v-else>
+              <div class="modal-explain">
+                These are the recurring monthly costs to keep your {{ fcb.truckCount > 1 ? fcb.truckCount + ' trucks' : 'truck' }} legally compliant and road-ready. They are charged every month regardless of how many loads are completed.
+              </div>
 
-            <div class="step-label">Cost Breakdown (Monthly Total)</div>
-            <div class="modal-row">
-              <span>Insurance</span>
-              <span class="val danger">{{ fmt(fcb.insurance) }}</span>
-            </div>
-            <div class="modal-hint">Commercial liability insurance required to operate.</div>
-            <div class="modal-row">
-              <span>ELD Device</span>
-              <span class="val danger">{{ fmt(fcb.eld) }}</span>
-            </div>
-            <div class="modal-hint">Electronic Logging Device &mdash; federally required to track driver hours.</div>
-            <div class="modal-row">
-              <span>IRP Registration</span>
-              <span class="val danger">{{ fmt(fcb.irp) }}</span>
-            </div>
-            <div class="modal-hint">International Registration Plan &mdash; annual fee divided by 12 months.</div>
-            <div class="modal-row">
-              <span>HVUT Road Tax</span>
-              <span class="val danger">{{ fmt(fcb.hvut) }}</span>
-            </div>
-            <div class="modal-hint">Heavy Vehicle Use Tax (Form 2290) &mdash; annual fee divided by 12 months.</div>
-            <div class="modal-row">
-              <span>Maintenance Reserve</span>
-              <span class="val danger">{{ fmt(fcb.maintReserve) }}</span>
-            </div>
-            <div class="modal-hint">Monthly reserve set aside for preventive maintenance, tire replacements, and unexpected repairs.</div>
+              <div class="step-label">Cost Breakdown (Monthly Total)</div>
+              <div class="modal-row">
+                <span>Insurance</span>
+                <span class="val danger">{{ fmt(fcb.insurance) }}</span>
+              </div>
+              <div class="modal-hint">Commercial liability insurance required to operate.</div>
+              <div class="modal-row">
+                <span>ELD Device</span>
+                <span class="val danger">{{ fmt(fcb.eld) }}</span>
+              </div>
+              <div class="modal-hint">Electronic Logging Device &mdash; federally required to track driver hours.</div>
+              <div class="modal-row">
+                <span>IRP Registration</span>
+                <span class="val danger">{{ fmt(fcb.irp) }}</span>
+              </div>
+              <div class="modal-hint">International Registration Plan &mdash; annual fee divided by 12 months.</div>
+              <div class="modal-row">
+                <span>HVUT Road Tax</span>
+                <span class="val danger">{{ fmt(fcb.hvut) }}</span>
+              </div>
+              <div class="modal-hint">Heavy Vehicle Use Tax (Form 2290) &mdash; annual fee divided by 12 months.</div>
 
-            <div class="modal-divider"></div>
-            <div class="modal-row bold result">
-              <span>Total Fixed Costs</span>
-              <span class="val danger">{{ fmt(selected.fixedCosts) }}</span>
-            </div>
-            <div class="modal-math">{{ fmt(fcb.insurance) }} + {{ fmt(fcb.eld) }} + {{ fmt(fcb.irp) }} + {{ fmt(fcb.hvut) }} + {{ fmt(fcb.maintReserve) }} = {{ fmt(selected.fixedCosts) }}/mo</div>
+              <div class="modal-divider"></div>
+              <div class="modal-row bold result">
+                <span>Total Fixed Costs</span>
+                <span class="val danger">{{ fmt(selected.fixedCosts) }}</span>
+              </div>
+              <div class="modal-math">{{ fmt(fcb.insurance) }} + {{ fmt(fcb.eld) }} + {{ fmt(fcb.irp) }} + {{ fmt(fcb.hvut) }} = {{ fmt(selected.fixedCosts) }}/mo</div>
+            </template>
           </div>
         </template>
 
@@ -369,14 +383,14 @@
             </div>
 
             <div class="step-label">1. Driver Pay</div>
-            <div class="modal-explain-sm">Total compensation paid to your driver(s) at $250/active day.</div>
+            <div class="modal-explain-sm">Total compensation paid to your driver(s) — fixed-rate drivers earn per active day, percentage drivers earn a share of revenue after deductible trip expenses.</div>
             <div class="modal-row">
               <span>Driver Pay</span>
               <span class="val danger">{{ fmt(allTimeDriverPay) }}</span>
             </div>
 
             <div class="step-label">2. Fixed Costs</div>
-            <div class="modal-explain-sm">Recurring monthly costs: insurance, ELD, registration (IRP), road tax (HVUT), and maintenance reserve.</div>
+            <div class="modal-explain-sm">Recurring monthly costs: insurance, ELD, registration (IRP), and road tax (HVUT).</div>
             <div class="modal-row">
               <span>Fixed Costs</span>
               <span class="val danger">{{ fmt(allTimeFixedCosts) }}</span>
@@ -517,6 +531,29 @@ const allTimeTripExpenses = computed(() => months.value.reduce((s, m) => s + (m.
 const allTimeExpenses = computed(() => allTimeDriverPay.value + allTimeFixedCosts.value + allTimeTripExpenses.value)
 const allTimeNet = computed(() => allTimeRevenue.value - allTimeExpenses.value)
 const allTimeEarnings = computed(() => Math.round(allTimeNet.value / 2))
+
+// Render the right formula label for the selected month's Driver Pay row.
+// Server returns payType / payPercentage per driver in driverDetails — branch
+// on those so percentage drivers (e.g. Rodney @ 30%) don't get mislabeled as
+// "$250 × active days".
+const driverPayFormula = computed(() => {
+  const details = selected.value && selected.value.driverDetails
+  if (!details || !Object.keys(details).length) return '= $250 × active days this month'
+  const drivers = Object.values(details)
+  const allFixed = drivers.every(d => d.payType !== 'percentage')
+  const allPct = drivers.every(d => d.payType === 'percentage')
+  if (allFixed) {
+    const rates = [...new Set(drivers.map(d => d.dailyRate || 250))]
+    const rateStr = rates.length === 1 ? `$${rates[0]}` : '$rate'
+    return `= ${rateStr} × active days this month`
+  }
+  if (allPct) {
+    const pcts = [...new Set(drivers.map(d => d.payPercentage || 0))]
+    const pctStr = pcts.length === 1 ? `${pcts[0]}%` : 'driver %'
+    return `= ${pctStr} × (revenue − deductible trip expenses)`
+  }
+  return '= per-driver pay structure (see detail)'
+})
 
 const MODAL_CONFIG = {
   earnings:     { title: 'How Your Earnings Are Calculated', subtitle: 'Step-by-step breakdown of your monthly earnings' },
@@ -710,6 +747,11 @@ const modalSubtitle = computed(() => {
 .modal-hint {
   font-size: 0.68rem; color: var(--text-dim); padding: 0 0.75rem 0.3rem;
   line-height: 1.3; font-style: italic;
+}
+.modal-tag {
+  display: inline-block; margin-left: 0.4rem; padding: 0 0.4rem;
+  font-size: 0.65rem; font-weight: 600; color: var(--accent);
+  background: var(--accent-dim); border-radius: 999px; vertical-align: middle;
 }
 
 /* Math formula */

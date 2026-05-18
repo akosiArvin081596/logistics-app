@@ -1992,6 +1992,32 @@ function assignDriverToTruck(truckId, driverName) {
 	// Sync trucks.assigned_driver for backward compat
 	db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ? AND id != ?").run(nameLower, truckId);
 	db.prepare("UPDATE trucks SET assigned_driver = ? WHERE id = ?").run(driverName.trim(), truckId);
+	// Mirror the (driver, carrier) pairing into carrier_driver_history so the
+	// investor-driver-set resolver has a safety net when assignments change.
+	// Without this, swapping a driver mid-year drops the previous driver's
+	// historical loads from the investor view (only path: trucks.assigned_driver).
+	if (driverName.trim()) {
+		const truckRow = db.prepare("SELECT owner_id FROM trucks WHERE id = ?").get(truckId);
+		if (truckRow && truckRow.owner_id) {
+			const owner = db.prepare("SELECT company_name FROM users WHERE id = ?").get(truckRow.owner_id);
+			const carrierName = owner && owner.company_name ? owner.company_name.trim() : "";
+			if (carrierName) {
+				const current = db.prepare(
+					"SELECT id, carrier_name FROM carrier_driver_history WHERE LOWER(driver_name) = ? AND ended_at IS NULL"
+				).get(nameLower);
+				if (!current) {
+					db.prepare(
+						"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
+					).run(carrierName, driverName.trim(), now);
+				} else if (current.carrier_name.toLowerCase() !== carrierName.toLowerCase()) {
+					db.prepare("UPDATE carrier_driver_history SET ended_at = ? WHERE id = ?").run(now, current.id);
+					db.prepare(
+						"INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES (?, ?, ?)"
+					).run(carrierName, driverName.trim(), now);
+				}
+			}
+		}
+	}
 }
 
 const INVESTOR_ONBOARDING_DOCS = [
@@ -7238,6 +7264,36 @@ function getSheetName(req) {
 	return req.query.sheet || DEFAULT_SHEET;
 }
 
+// Job Tracking has an "Owner ID" column that should only ever hold a real
+// users.id (whose role = 'Investor') or 0 (company-owned). Dispatchers
+// sometimes type the investors.id by mistake (e.g. "3" for ABC Inc whose
+// users.id is actually 42), which silently strands the load — neither the
+// company nor any investor sees it in their dashboards. Block those writes
+// here and surface a hint so the user fixes the typo immediately.
+function validateOwnerIdCell(sheetName, headers, values) {
+	if (sheetName !== "Job Tracking" || !Array.isArray(headers) || !Array.isArray(values)) return null;
+	const idx = headers.findIndex(h => /^owner.?id$/i.test(String(h)));
+	if (idx < 0) return null;
+	const raw = values[idx];
+	if (raw === undefined || raw === null) return null;
+	const trimmed = String(raw).trim();
+	if (trimmed === "" || trimmed === "0") return null;
+	if (!/^\d+$/.test(trimmed)) {
+		return { error: `Owner ID must be blank, 0, or a numeric users.id (got "${trimmed}").` };
+	}
+	const candidate = parseInt(trimmed, 10);
+	const userRow = db.prepare("SELECT id, role FROM users WHERE id = ?").get(candidate);
+	if (userRow && userRow.role === "Investor") return null;
+	// Common typo: dispatcher used investors.id instead of users.id.
+	const investorRow = db.prepare("SELECT user_id, full_name FROM investors WHERE id = ?").get(candidate);
+	if (investorRow && investorRow.user_id) {
+		return {
+			error: `Owner ID ${candidate} is an investors.id, not a users.id. Did you mean ${investorRow.user_id} (${investorRow.full_name})? Use the user's account ID, not the investor record's row ID.`,
+		};
+	}
+	return { error: `Owner ID ${candidate} does not map to an Investor user. Use 0 for company loads or a valid Investor users.id.` };
+}
+
 // LIST TABS — Get all sheet tab names
 app.get("/api/tabs", requireAuth, async (req, res) => {
 	try {
@@ -7325,15 +7381,20 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 
 		const sheets = await getSheets();
 
-		// Check for duplicate Load ID in Job Tracking
+		// Validate Owner ID + check for duplicate Load ID in Job Tracking
 		let warning = "";
 		if (sheetName === "Job Tracking") {
+			let hdrs = [];
 			try {
 				const headerResp = await sheets.spreadsheets.values.get({
 					spreadsheetId: SPREADSHEET_ID,
 					range: "Job Tracking!1:1",
 				});
-				const hdrs = (headerResp.data.values || [[]])[0];
+				hdrs = (headerResp.data.values || [[]])[0];
+			} catch { /* header fetch failed — skip both checks */ }
+			const ownerErr = validateOwnerIdCell(sheetName, hdrs, values);
+			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
+			try {
 				const lidIdx = hdrs.findIndex((h) => /load.?id|job.?id/i.test(h));
 				if (lidIdx >= 0 && values[lidIdx]) {
 					const newLid = values[lidIdx].trim().toLowerCase().replace(/^#/, "");
@@ -7352,7 +7413,7 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 						}
 					}
 				}
-			} catch { /* non-critical */ }
+			} catch { /* non-critical: dup-check is best-effort */ }
 		}
 
 		const response = await sheets.spreadsheets.values.append({
@@ -7392,6 +7453,21 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		const { values } = req.body;
 
 		const sheets = await getSheets();
+
+		// Validate Job Tracking Owner ID early — reject investors.id typos
+		// before any writes happen.
+		if (sheetName === "Job Tracking") {
+			let hdrs = [];
+			try {
+				const headerResp = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: "Job Tracking!1:1",
+				});
+				hdrs = (headerResp.data.values || [[]])[0];
+			} catch { /* header fetch failed — skip */ }
+			const ownerErr = validateOwnerIdCell(sheetName, hdrs, values);
+			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
+		}
 
 		// For non-Admin users, preserve original broker/phone column values
 		// so sanitized data doesn't overwrite the full JSON
@@ -12568,17 +12644,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// both its revenue AND its driver pay in April.
 			// Branches on pay_type: percentage drivers use (monthRevenue − monthDeductible) × pct.
 			const monthlyDriverPay = {};
-			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay, payType, payPercentage, source } } }
+			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay, payType, payPercentage, monthRevenue, monthDeductible, netForPercentage, source } } }
 			for (const [driver, monthsMap] of Object.entries(driverMonthlyDays)) {
 				const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
 				const fixedRate = (driverPayDetails[driver] && driverPayDetails[driver].dailyRate) || 250;
 				for (const [mk, daySet] of Object.entries(monthsMap)) {
 					const activeDays = daySet.size;
+					const monthRev = (driverMonthlyRevenue[driver] || {})[mk] || 0;
+					const monthExp = (expensesByDriverMonth[driver] || {})[mk] || 0;
+					const net = Math.max(0, monthRev - monthExp);
 					let pay, dailyRate;
 					if (struct.payType === "percentage") {
-						const monthRev = (driverMonthlyRevenue[driver] || {})[mk] || 0;
-						const monthExp = (expensesByDriverMonth[driver] || {})[mk] || 0;
-						const net = Math.max(0, monthRev - monthExp);
 						pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
 						dailyRate = 0;
 					} else {
@@ -12591,6 +12667,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						activeDays, dailyRate, totalPay: pay,
 						payType: struct.payType,
 						payPercentage: struct.payType === "percentage" ? struct.payPercentage : 0,
+						monthRevenue: Math.round(monthRev),
+						monthDeductible: Math.round(monthExp),
+						netForPercentage: Math.round(net),
 						source: "estimate",
 					};
 				}
@@ -12648,12 +12727,21 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				: currentMonthKey;
 			let cursor = new Date(parseInt(startMonth.slice(0, 4)), parseInt(startMonth.slice(5, 7)) - 1, 1);
 			const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
+			let deferredAccrual = 0;
 			while (cursor <= endDate) {
 				const mk = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`;
 				const revenue = monthlyRevenue[mk] || 0;
 				const driverPay = monthlyDriverPay[mk] || 0;
-				const fixedCosts = getMonthlyFixedCosts(mk);
+				const rawFixedCosts = getMonthlyFixedCosts(mk);
 				const tripExpenses = monthlyTripExp[mk] || 0;
+				// Investor-facing grace: if the truck did nothing this month
+				// (no revenue, no driver-day records, no trip expenses), defer
+				// the fixed costs so onboarding months don't appear as losses.
+				// /admin/financials still accrues these normally.
+				const driverCount = Object.keys(monthlyDriverDetails[mk] || {}).length;
+				const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && driverCount === 0;
+				const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
+				if (isZeroActivity && rawFixedCosts > 0) deferredAccrual += rawFixedCosts;
 				const netProfit = revenue - driverPay - fixedCosts - tripExpenses;
 				monthlyEarnings.push({
 					month: mk,
@@ -12661,6 +12749,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					driverPay: Math.round(driverPay),
 					driverDetails: monthlyDriverDetails[mk] || {},
 					fixedCosts,
+					fixedCostsDeferred: isZeroActivity && rawFixedCosts > 0,
 					tripExpenses: Math.round(tripExpenses),
 					tripExpCategories: tripExpByCategory[mk] || {},
 					netProfit: Math.round(netProfit),
@@ -12670,6 +12759,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				});
 				cursor.setMonth(cursor.getMonth() + 1);
 			}
+			// Reconcile aggregate totalExpenses with the per-month deferral
+			// applied above. The truck-fixed-costs accrual earlier in this
+			// handler charges every month from truck.created_at; subtract the
+			// months we deferred so netRevenueToDate matches the monthly view.
+			totalExpenses = Math.max(0, totalExpenses - deferredAccrual);
 		}
 
 		// ---- Asset Security (S4, S5) — now per-truck ----
