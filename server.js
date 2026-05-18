@@ -9289,10 +9289,15 @@ app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", 
 		const days = Math.max(1, Math.min(parseInt(req.query.days, 10) || 7, 30));
 		const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 		const user = req.session.user;
+		// Super Admin previewing an investor's portal: scope to that investor's
+		// trucks so MPG matches what the investor sees on their own dashboard.
+		const preview = resolvePreviewUser(req);
 
-		const trucks = (user.role === "Investor")
-			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
-			: db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks").all();
+		const trucks = preview.isPreview
+			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
+			: (user.role === "Investor")
+				? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
+				: db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks").all();
 
 		const fuelStmt = db.prepare(`
 			SELECT
@@ -9376,9 +9381,12 @@ app.get("/api/routemate/fault-codes", requireRole("Super Admin", "Dispatcher", "
 app.get("/api/routemate/fault-codes/summary", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
 	try {
 		const user = req.session.user;
-		const trucks = (user.role === "Investor")
-			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
-			: db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks").all();
+		const preview = resolvePreviewUser(req);
+		const trucks = preview.isPreview
+			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
+			: (user.role === "Investor")
+				? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
+				: db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks").all();
 		const countStmt = db.prepare(`
 			SELECT COUNT(*) AS n FROM routemate_fault_codes
 			WHERE routemate_vehicle_id = ?

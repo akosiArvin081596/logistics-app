@@ -70,6 +70,7 @@
 import { reactive, ref, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
+import { useInvestorStore } from '../../stores/investor'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -79,6 +80,14 @@ const props = defineProps({
   isPreview: { type: Boolean, default: false },
 })
 const emit = defineEmits(['reload'])
+
+// Read preview userId off the investor store so Routemate fuel/fault calls
+// can be scoped to the previewed investor's trucks — true replica.
+const investorStore = useInvestorStore()
+function previewQs(prefix) {
+  if (!investorStore.isPreview) return ''
+  return `${prefix}as_user_id=${investorStore.previewUserId}`
+}
 
 function loadCountFor(t) {
   const unitKey = t.UnitNumber || t.unit_number || ''
@@ -92,7 +101,7 @@ const fuelByTruck = ref({})
 const faultCountByTruck = ref({})
 async function loadFuel() {
   try {
-    const r = await useApi().get('/api/routemate/fuel/summary?days=7')
+    const r = await useApi().get(`/api/routemate/fuel/summary?days=7${previewQs('&')}`)
     const map = {}
     for (const f of (r.trucks || [])) map[f.truckId] = f
     fuelByTruck.value = map
@@ -102,7 +111,7 @@ async function loadFuel() {
 }
 async function loadFaults() {
   try {
-    const r = await useApi().get('/api/routemate/fault-codes/summary')
+    const r = await useApi().get(`/api/routemate/fault-codes/summary${previewQs('?')}`)
     const map = {}
     for (const t of (r.trucks || [])) map[t.truckId] = t.openFaults || 0
     faultCountByTruck.value = map
