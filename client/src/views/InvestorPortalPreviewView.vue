@@ -12,12 +12,16 @@
       </div>
       <button class="banner-exit" @click="exit">&larr; Exit Preview</button>
     </div>
-    <InvestorView />
+    <!-- :key forces a fresh mount of InvestorView when the previewed userId
+         changes, so its onMounted loadData() fires for every investor.
+         Without this, switching from /investor-portals/1 to /investor-portals/2
+         would leave the dashboard stuck on the first investor's trucks. -->
+    <InvestorView :key="route.params.userId" />
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
+import { computed, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { useInvestorStore } from '../stores/investor'
 import InvestorView from './InvestorView.vue'
@@ -39,9 +43,15 @@ function exit() {
   router.push({ name: 'investor-portals' })
 }
 
-onMounted(activate)
-// Re-activate when the userId param changes (e.g. user manually edits the URL
-// or navigates between two preview routes without unmounting).
+// Activate IMMEDIATELY at script-setup time (before InvestorView mounts).
+// Children mount before parents in Vue, so if we deferred to onMounted the
+// child's loadData() would fire first with previewUserId=null and request
+// the admin's own /investor data instead of the previewed investor's.
+activate()
+
+// Re-activate when the userId param changes (user edits the URL or navigates
+// between two preview routes). InvestorView is given a :key on userId in the
+// template so it fully remounts and re-runs onMounted's loadData().
 watch(() => route.params.userId, (next, prev) => {
   if (next !== prev) activate()
 })
