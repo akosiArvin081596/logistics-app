@@ -85,6 +85,9 @@ import { useApi } from '../../composables/useApi'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
+  // Super Admin previewing an investor's portal — appended to the expenses
+  // fetch so the backend scopes to that investor's trucks.
+  previewUserId: { type: Number, default: null },
 })
 
 const api = useApi()
@@ -121,6 +124,7 @@ async function loadExpenses() {
     if (filter.status) params.set('status', filter.status)
     if (filter.from) params.set('from', filter.from)
     if (filter.to) params.set('to', filter.to)
+    if (props.previewUserId) params.set('as_user_id', String(props.previewUserId))
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await api.get(`/api/investor/expenses${qs}`)
     expenses.value = data.expenses || []

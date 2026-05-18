@@ -127,6 +127,7 @@ const navConfig = {
     { divider: true, label: 'Administration' },
     { to: '/users', icon: '&#9881;', label: 'User Management' },
     { to: '/investors', icon: '&#128188;', label: 'Investor Database' },
+    { to: '/investor-portals', icon: '&#128065;', label: 'Investor Portals' },
     { to: '/drivers', icon: '&#128100;', label: 'Driver Database' },
     { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
     { to: '/trailers', icon: '&#128718;', label: 'Trailer Database' },

@@ -148,6 +148,8 @@ REST endpoints (grouped by domain):
 - `/api/investor-outreach/send`, `/api/investor-outreach/log` — email outreach
 - `/api/legal-documents` — manage legal documents for investor portal
 
+**Super Admin "View as investor" preview**: every `/api/investor/*` GET (plus `/api/trucks`) honors a `?as_user_id=N` query param **only when the session user is a Super Admin and N is a real Investor's `users.id`**. The `resolvePreviewUser(req)` helper (server.js, just below `getInvestorDriverSet`) does the validation and silently falls back to the session user otherwise — no 403, no info leak. Endpoints then shadow `user.id` / `user.username` / `isSuperAdmin` with the target's values so the rest of the handler runs the investor-scoped branch unchanged. Each preview is audit-logged (`audit_trail.action = 'investor_preview_view'`). Two distinct conventions coexist: `?as_user_id=` keys on `users.id` (this feature); `?investor_id=` keys on `investors.id` (only `/api/investor/onboarding-documents` and `/api/legal-documents`). Frontend entry point is `/investor-portals` (Super Admin sidebar), which lists every investor as a card; clicking through opens `/investor-portals/:userId` — a thin wrapper around `InvestorView.vue` that calls `investorStore.setPreview(userId)` and stamps a yellow read-only banner on top. Read-only UI: hides chat composer, "Add Truck" button, and legal-doc upload/delete. The store's `setPreview` resets `data` + `isLoading` to prevent stale-data flash when switching between previews (Pinia singleton gotcha).
+
 **Messaging**:
 - `POST /api/messages`, `GET /api/messages`, `GET /api/messages/:driverName` — driver messaging
 - `PUT /api/messages/read`, `PUT /api/notifications/read` — mark as read
@@ -302,6 +304,8 @@ Key directories:
 | `/users` | Super Admin | |
 | `/trucks` | Super Admin, Dispatcher, Investor | |
 | `/investors` | Super Admin | Investor records management |
+| `/investor-portals` | Super Admin | Index of investors — opens a read-only replica of each one's portal |
+| `/investor-portals/:userId` | Super Admin | Read-only preview of a single investor's `/investor` view (banner + same components, scoped via `?as_user_id=`) |
 | `/drivers` | Super Admin | Drivers directory |
 | `/trailers` | Super Admin, Dispatcher | |
 | `/applications` | Super Admin | Driver applications review |
