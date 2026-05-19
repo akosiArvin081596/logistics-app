@@ -12734,14 +12734,29 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const driverPay = monthlyDriverPay[mk] || 0;
 				const rawFixedCosts = getMonthlyFixedCosts(mk);
 				const tripExpenses = monthlyTripExp[mk] || 0;
+				// Pro-rate fixed costs for the current (in-progress) month so the
+				// investor's month-to-date P&L isn't dragged negative by a full
+				// month of insurance/ELD/IRP/HVUT applied against partial revenue.
+				// Past months keep the full monthly accrual.
+				const isInProgress = mk === currentMonthKey;
+				const daysInCurrentMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+				const daysElapsedInCurrent = now.getDate();
+				const proratedFactor = isInProgress ? daysElapsedInCurrent / daysInCurrentMonth : 1;
+				const proratedFixedCosts = Math.round(rawFixedCosts * proratedFactor);
 				// Investor-facing grace: if the truck did nothing this month
 				// (no revenue, no driver-day records, no trip expenses), defer
 				// the fixed costs so onboarding months don't appear as losses.
 				// /admin/financials still accrues these normally.
 				const driverCount = Object.keys(monthlyDriverDetails[mk] || {}).length;
 				const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && driverCount === 0;
-				const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
-				if (isZeroActivity && rawFixedCosts > 0) deferredAccrual += rawFixedCosts;
+				const fixedCosts = isZeroActivity ? 0 : proratedFixedCosts;
+				// Track every dollar of fixed cost we didn't charge in this view
+				// so the totalExpenses reconciliation below subtracts the same
+				// amount and netRevenueToDate stays aligned.
+				const unbilledFixed = isZeroActivity
+					? rawFixedCosts
+					: (rawFixedCosts - proratedFixedCosts);
+				if (unbilledFixed > 0) deferredAccrual += unbilledFixed;
 				const netProfit = revenue - driverPay - fixedCosts - tripExpenses;
 				monthlyEarnings.push({
 					month: mk,
@@ -12749,13 +12764,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					driverPay: Math.round(driverPay),
 					driverDetails: monthlyDriverDetails[mk] || {},
 					fixedCosts,
+					fixedCostsRaw: rawFixedCosts,
 					fixedCostsDeferred: isZeroActivity && rawFixedCosts > 0,
+					fixedCostsProrated: isInProgress && !isZeroActivity && proratedFactor < 1,
+					proratedDaysElapsed: isInProgress ? daysElapsedInCurrent : null,
+					proratedDaysInMonth: isInProgress ? daysInCurrentMonth : null,
 					tripExpenses: Math.round(tripExpenses),
 					tripExpCategories: tripExpByCategory[mk] || {},
 					netProfit: Math.round(netProfit),
 					investorEarnings: Math.round(netProfit / 2),
 					companyEarnings: Math.round(netProfit / 2),
-					isCurrentMonth: mk === currentMonthKey,
+					isCurrentMonth: isInProgress,
 				});
 				cursor.setMonth(cursor.getMonth() + 1);
 			}

@@ -42,6 +42,7 @@
           <span class="breakdown-label">- Fixed Costs</span>
           <span class="breakdown-value">{{ fmt(-selected.fixedCosts) }}</span>
           <span class="breakdown-formula" v-if="selected.fixedCostsDeferred">not charged — truck inactive this month</span>
+          <span class="breakdown-formula" v-else-if="selected.fixedCostsProrated">= ({{ fmt(selected.fixedCostsRaw) }}/mo) × {{ selected.proratedDaysElapsed }}/{{ selected.proratedDaysInMonth }} days</span>
           <span class="breakdown-formula" v-else>= insurance + ELD + IRP/12 + HVUT/12</span>
         </div>
         <div class="breakdown-row deduct clickable" @click="openDetail('tripExpenses')">
@@ -67,7 +68,10 @@
         </div>
       </div>
 
-      <div v-if="selected.isCurrentMonth" class="month-note">* {{ monthLabel(selected.month) }} &mdash; Month in progress</div>
+      <div v-if="selected.isCurrentMonth" class="month-note">
+        * {{ monthLabel(selected.month) }} &mdash; Month in progress.
+        <span v-if="selected.fixedCostsProrated">Fixed costs shown are pro-rated through day {{ selected.proratedDaysElapsed }} of {{ selected.proratedDaysInMonth }}.</span>
+      </div>
 
       <!-- All-Time Summary -->
       <div class="alltime">
@@ -238,6 +242,39 @@
               <div class="modal-row bold result">
                 <span>Total Fixed Costs ({{ monthLabel(selected.month) }})</span>
                 <span class="val">{{ fmt(0) }}</span>
+              </div>
+            </template>
+            <template v-else-if="selected.fixedCostsProrated">
+              <div class="modal-explain">
+                {{ monthLabel(selected.month) }} is still in progress — {{ selected.proratedDaysElapsed }} of {{ selected.proratedDaysInMonth }} days elapsed. To keep your month-to-date P&amp;L fair, only the elapsed share of this month's recurring fixed costs is charged so far. The remainder will accrue automatically as the month continues.
+              </div>
+
+              <div class="step-label">Full Monthly Cost Breakdown</div>
+              <div class="modal-row">
+                <span>Insurance</span>
+                <span class="val danger">{{ fmt(fcb.insurance) }}</span>
+              </div>
+              <div class="modal-row">
+                <span>ELD Device</span>
+                <span class="val danger">{{ fmt(fcb.eld) }}</span>
+              </div>
+              <div class="modal-row">
+                <span>IRP Registration</span>
+                <span class="val danger">{{ fmt(fcb.irp) }}</span>
+              </div>
+              <div class="modal-row">
+                <span>HVUT Road Tax</span>
+                <span class="val danger">{{ fmt(fcb.hvut) }}</span>
+              </div>
+              <div class="modal-divider"></div>
+              <div class="modal-row">
+                <span>Full Monthly Total</span>
+                <span class="val danger">{{ fmt(selected.fixedCostsRaw) }}/mo</span>
+              </div>
+              <div class="modal-math">× {{ selected.proratedDaysElapsed }} / {{ selected.proratedDaysInMonth }} days elapsed</div>
+              <div class="modal-row bold result">
+                <span>Charged So Far ({{ monthLabel(selected.month) }})</span>
+                <span class="val danger">{{ fmt(selected.fixedCosts) }}</span>
               </div>
             </template>
             <template v-else>
