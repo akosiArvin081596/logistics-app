@@ -5,6 +5,7 @@ let socket = null
 let registeredName = null
 
 const isConnected = ref(false)
+const hasEverConnected = ref(false)
 
 export function useSocket() {
   function connect() {
@@ -12,6 +13,7 @@ export function useSocket() {
     socket = io({ transports: ['websocket', 'polling'] })
     socket.on('connect', () => {
       isConnected.value = true
+      hasEverConnected.value = true
       if (registeredName) socket.emit('register', registeredName)
     })
     socket.on('disconnect', () => (isConnected.value = false))
@@ -40,5 +42,5 @@ export function useSocket() {
     isConnected.value = false
   }
 
-  return { isConnected, connect, register, emit, on, off, disconnect }
+  return { isConnected, hasEverConnected, connect, register, emit, on, off, disconnect }
 }

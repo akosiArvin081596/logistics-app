@@ -4,7 +4,7 @@
       <img src="/logo.png" alt="LogisX" class="header-logo" />
       <span class="driver-name-label">{{ driverName }}</span>
       <span
-        v-if="socketConnected === false"
+        v-if="socketConnected === false && hasEverConnected"
         class="status-chip warn"
         title="Real-time connection lost — trying to reconnect"
       >&#9888; Offline</span>
@@ -30,6 +30,7 @@ defineProps({
   driverName: { type: String, default: '' },
   gpsStatus: { type: String, default: 'ok' },
   socketConnected: { type: Boolean, default: true },
+  hasEverConnected: { type: Boolean, default: false },
 })
 
 defineEmits(['logout'])

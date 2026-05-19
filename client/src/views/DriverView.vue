@@ -127,6 +127,7 @@
     <DriverHeader
       :driver-name="driverName"
       :socket-connected="socket.isConnected.value"
+      :has-ever-connected="socket.hasEverConnected.value"
       @logout="handleLogout"
     />
 
@@ -1159,6 +1160,14 @@ watch(
 )
 
 async function attemptInitialLoad() {
+  // Kick off the socket handshake in parallel with the data fetch so the
+  // "Offline" chip clears as soon as the WebSocket is up, instead of waiting
+  // for the HTTP fetch to finish first. Handler registration still waits for
+  // loadData() so store mutations can't fire on an empty store.
+  if (!socketSetupDone && driverName.value) {
+    socket.connect()
+    socket.register(driverName.value)
+  }
   try {
     await driverStore.loadData()
     initialLoadFailed.value = false
@@ -1168,12 +1177,7 @@ async function attemptInitialLoad() {
     toast.show('Failed to load data', 'error')
     return
   }
-  // Socket.IO — only after the first successful load so we don't register
-  // handlers that act on inconsistent state. Idempotent flag so retries
-  // don't double-register.
   if (!socketSetupDone) {
-    socket.connect()
-    socket.register(driverName.value)
     socket.on('new-message', onNewMessage)
     socket.on('load-assigned', onLoadAssigned)
     socket.on('load-cancelled', onLoadCancelled)
