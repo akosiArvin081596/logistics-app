@@ -674,6 +674,15 @@ function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColNa
 		"SELECT DISTINCT assigned_driver FROM trucks WHERE owner_id = ? AND assigned_driver IS NOT NULL AND assigned_driver != ''"
 	).all(userId);
 	truckDrivers.forEach(t => set.add(t.assigned_driver.trim().toLowerCase()));
+	// 1b. From active truck_assignments rows on this investor's trucks. Defends
+	//     against trucks.assigned_driver drifting out of sync with the assignment
+	//     history (which is the actual source of truth for current pairings).
+	const activeAssignmentDrivers = db.prepare(
+		"SELECT DISTINCT LOWER(ta.driver_name) AS d FROM truck_assignments ta " +
+		"JOIN trucks t ON t.id = ta.truck_id " +
+		"WHERE t.owner_id = ? AND ta.end_date = '' AND ta.driver_name != ''"
+	).all(userId);
+	activeAssignmentDrivers.forEach(r => { if (r.d) set.add(r.d); });
 	// 2. From live Carrier Database (drivers_directory) matching carrier name
 	if (carrierName && carrierDBData && driverColName && carrierColName) {
 		const carrierLower = carrierName.toLowerCase();
@@ -7554,8 +7563,21 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			return res.status(400).json({ error: "Driver column not found" });
 		}
 
-		// Look up truck and owner for this driver
-		const truckForDriver = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
+		// Look up truck and owner for this driver. Primary source is the
+		// trucks.assigned_driver single-slot column, which assignDriverToTruck()
+		// keeps in sync; if that's drifted (legacy admin edits, name casing,
+		// etc.) we fall back to the active truck_assignments row. Without this
+		// fallback a missed lookup stamps Owner ID = 0 on the load, which then
+		// blocks the driver-name fallback in /api/investor (see commit 656f1b1).
+		let truckForDriver = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
+		if (!truckForDriver) {
+			truckForDriver = db.prepare(
+				"SELECT t.unit_number AS unit_number, t.owner_id AS owner_id " +
+				"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
+				"WHERE LOWER(ta.driver_name) = LOWER(?) AND ta.end_date = '' " +
+				"ORDER BY ta.start_date DESC LIMIT 1"
+			).get(driver.trim());
+		}
 		const truckUnit = truckForDriver ? truckForDriver.unit_number : '';
 		const ownerId = truckForDriver ? truckForDriver.owner_id : 0;
 
@@ -7631,10 +7653,14 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 // POST /api/dispatch/reassign — Reassign a load to a different driver
 app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex, newDriver, loadId, oldDriver } = req.body;
-		if (!rowIndex || !newDriver) {
+		const { rowIndex, newDriver: rawNewDriver, loadId, oldDriver } = req.body;
+		if (!rowIndex || !rawNewDriver) {
 			return res.status(400).json({ error: "rowIndex and newDriver required" });
 		}
+
+		// Normalize against users table (same pattern as /api/dispatch).
+		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawNewDriver.trim());
+		const newDriver = userMatch ? userMatch.driver_name : rawNewDriver.trim();
 
 		const sheets = await getSheets();
 		const headerResp = await sheets.spreadsheets.values.get({
@@ -7647,13 +7673,51 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			return res.status(400).json({ error: "Driver column not found" });
 		}
 
-		// Update driver cell
-		const driverColLetter = colLetter(driverCol);
-		await sheets.spreadsheets.values.update({
+		// Look up new driver's truck + owner so we can re-stamp Truck and
+		// Owner ID alongside the Driver cell. Without this, a load reassigned
+		// from a company-truck driver (Owner ID = 0) to an investor's driver
+		// keeps the stale 0, which blocks the driver-name fallback in
+		// /api/investor (commit 656f1b1) and the load never appears in their
+		// My Loads section. Same hardened lookup as /api/dispatch.
+		let truckForDriver = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(newDriver.trim());
+		if (!truckForDriver) {
+			truckForDriver = db.prepare(
+				"SELECT t.unit_number AS unit_number, t.owner_id AS owner_id " +
+				"FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id " +
+				"WHERE LOWER(ta.driver_name) = LOWER(?) AND ta.end_date = '' " +
+				"ORDER BY ta.start_date DESC LIMIT 1"
+			).get(newDriver.trim());
+		}
+		const truckUnit = truckForDriver ? truckForDriver.unit_number : '';
+		const ownerId = truckForDriver ? truckForDriver.owner_id : 0;
+
+		// Ensure Truck and Owner ID columns exist (same approach as /api/dispatch).
+		let truckColIdx = headers.findIndex(h => /^truck$/i.test(h));
+		let ownerColIdx = headers.findIndex(h => /^owner.?id$/i.test(h));
+		if (truckColIdx === -1 || ownerColIdx === -1) {
+			const newHeaders = [];
+			if (truckColIdx === -1) { newHeaders.push('Truck'); truckColIdx = headers.length + newHeaders.length - 1; }
+			if (ownerColIdx === -1) { newHeaders.push('Owner ID'); ownerColIdx = headers.length + newHeaders.length - 1; }
+			if (newHeaders.length) {
+				await sheets.spreadsheets.values.update({
+					spreadsheetId: SPREADSHEET_ID,
+					range: `Job Tracking!${colLetter(headers.length)}1`,
+					valueInputOption: "USER_ENTERED",
+					requestBody: { values: [newHeaders] },
+				});
+				headers.push(...newHeaders);
+			}
+		}
+
+		// Batch update: driver + truck + owner ID
+		const updates = [
+			{ range: `Job Tracking!${colLetter(driverCol)}${rowIndex}`, values: [[newDriver]] },
+		];
+		if (truckColIdx !== -1) updates.push({ range: `Job Tracking!${colLetter(truckColIdx)}${rowIndex}`, values: [[truckUnit]] });
+		if (ownerColIdx !== -1) updates.push({ range: `Job Tracking!${colLetter(ownerColIdx)}${rowIndex}`, values: [[String(ownerId)]] });
+		await sheets.spreadsheets.values.batchUpdate({
 			spreadsheetId: SPREADSHEET_ID,
-			range: `Job Tracking!${driverColLetter}${rowIndex}`,
-			valueInputOption: "USER_ENTERED",
-			requestBody: { values: [[newDriver]] },
+			requestBody: { valueInputOption: "USER_ENTERED", data: updates },
 		});
 
 		// Notify new driver
