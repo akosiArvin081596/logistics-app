@@ -47,11 +47,40 @@
           </select>
           <input v-model="addForm.amount" type="number" step="0.01" min="0" placeholder="Amount *" class="add-input" style="max-width:120px" />
           <input v-model="addForm.date" type="date" class="add-input" style="max-width:150px" />
-          <button class="btn btn-primary add-btn" :disabled="addLoading" @click="submitExpense">{{ addLoading ? '...' : 'Add' }}</button>
+          <button class="btn btn-primary add-btn" :disabled="addLoading || photoProcessing" @click="submitExpense">{{ addLoading ? '...' : 'Add' }}</button>
         </div>
         <div class="add-expense-row">
           <input v-model="addForm.loadId" type="text" placeholder="Load ID (optional)" class="add-input" style="max-width:180px" />
           <input v-model="addForm.description" type="text" placeholder="Description (e.g., Tire repair paid via phone)" class="add-input" style="flex:1" />
+        </div>
+        <div class="add-expense-row add-expense-photo-row">
+          <label class="add-photo-label">
+            Receipt
+            <input
+              ref="fileInputRef"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              class="add-photo-input"
+              :disabled="addLoading || photoProcessing"
+              @change="handleFileInput"
+            />
+          </label>
+          <span v-if="photoProcessing" class="add-photo-hint">Processing image…</span>
+          <img
+            v-else-if="photoBase64"
+            :src="photoBase64"
+            class="receipt-thumb add-photo-preview"
+            alt="Receipt preview"
+            @click="previewImg = photoBase64"
+          />
+          <button
+            v-if="photoBase64 && !photoProcessing"
+            type="button"
+            class="add-photo-clear"
+            :disabled="addLoading"
+            @click="clearPhoto"
+          >Remove</button>
         </div>
       </div>
 
@@ -764,6 +793,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
 const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
 const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toISOString().slice(0, 10), loadId: '', description: '' })
 const addLoading = ref(false)
+const fileInputRef = ref(null)
+const photoBase64 = ref('')
+const photoProcessing = ref(false)
 
 // Download Receipts (Super Admin only) — ZIP bundle endpoint
 const truckList = ref([])
@@ -828,6 +860,45 @@ async function downloadReceipts() {
   }
 }
 
+async function handleFileInput(event) {
+  const blob = event.target.files && event.target.files[0]
+  if (!blob) return
+  photoProcessing.value = true
+  const MAX = 1024
+  try {
+    // Decode + downscale in one pass via createImageBitmap so a 12MP photo
+    // never materializes ~48MB of raw RGBA — same OOM defense as the driver
+    // form (see ExpenseForm.vue:188).
+    const probe = await createImageBitmap(blob)
+    let w = probe.width, h = probe.height
+    probe.close()
+    if (w > MAX || h > MAX) {
+      if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
+      else       { w = Math.round((w * MAX) / h); h = MAX }
+    }
+    const bitmap = await createImageBitmap(blob, {
+      resizeWidth: w, resizeHeight: h, resizeQuality: 'medium',
+    })
+    const canvas = document.createElement('canvas')
+    canvas.width = w; canvas.height = h
+    canvas.getContext('2d').drawImage(bitmap, 0, 0)
+    bitmap.close()
+    photoBase64.value = canvas.toDataURL('image/jpeg', 0.8)
+    canvas.width = 0; canvas.height = 0
+  } catch {
+    photoBase64.value = ''
+    if (fileInputRef.value) fileInputRef.value.value = ''
+    toast("Couldn't process the photo — try a different image", 'error')
+  } finally {
+    photoProcessing.value = false
+  }
+}
+
+function clearPhoto() {
+  photoBase64.value = ''
+  if (fileInputRef.value) fileInputRef.value.value = ''
+}
+
 async function submitExpense() {
   if (!addForm.driver || !addForm.type || !addForm.amount || !addForm.date) {
     toast('Fill in Driver, Type, Amount, and Date', 'error'); return
@@ -845,12 +916,14 @@ async function submitExpense() {
       date: addForm.date,
       loadId: addForm.loadId || '',
       description: addForm.description || '',
-      photoData: '',
+      photoData: photoBase64.value,
       gallons: 0,
       odometer: 0,
     })
     toast('Expense logged')
     addForm.driver = ''; addForm.amount = ''; addForm.loadId = ''; addForm.description = ''
+    photoBase64.value = ''
+    if (fileInputRef.value) fileInputRef.value.value = ''
     await loadAll()
   } catch (err) {
     toast(err.message || 'Failed to log expense', 'error')
@@ -1649,6 +1722,21 @@ tr:hover td { background: var(--surface-hover); }
 }
 .add-btn:hover { opacity: 0.9; }
 .add-btn:disabled { opacity: 0.5; cursor: default; }
+.add-photo-label {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  font-size: 0.8rem; color: var(--text-dim);
+}
+.add-photo-input { font-size: 0.78rem; }
+.add-photo-input:disabled { opacity: 0.5; cursor: default; }
+.add-photo-preview { width: 64px; height: 48px; }
+.add-photo-hint { font-size: 0.75rem; color: var(--text-dim); }
+.add-photo-clear {
+  padding: 0.25rem 0.55rem; font-size: 0.72rem;
+  background: transparent; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-dim); cursor: pointer; font-family: inherit;
+}
+.add-photo-clear:hover { opacity: 0.75; }
+.add-photo-clear:disabled { opacity: 0.5; cursor: default; }
 
 /* Download Receipts (Super Admin) */
 .download-receipts-card {
