@@ -6377,14 +6377,11 @@ app.delete("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 // Check if a driver has an active load (returns error message or null).
 // "Active" here means Assigned (driver accepted, ready to start) or any
 // in-progression status (heading to shipper → unloading). Dispatched is
-// deliberately NOT in the regex: a Dispatched load is QUEUED behind the
-// driver's current work — they haven't accepted it yet — so it should not
-// block dispatchers from queueing more loads to the same driver, nor block
-// the driver from accepting their own dispatched load once they're free.
-// The "one accept at a time" rule for drivers is enforced at
-// POST /api/driver/respond, which calls this function with the load_id being
-// accepted in `excludeLoadId` so the driver can finish each queued load
-// serially.
+// deliberately NOT in the regex (a Dispatched load is just an open offer).
+// Drivers may now hold multiple accepted loads at once, so load acceptance
+// (POST /api/driver/respond) no longer calls this. It remains the guard for
+// the truck-assignment endpoints, which still block linking a driver to a
+// truck while they have an active load elsewhere.
 async function checkDriverActiveLoad(driverName, excludeLoadId = null) {
 	try {
 		const sheets = await getSheets();
@@ -7814,23 +7811,10 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			route,
 			JSON.stringify({ loadId, rowIndex, origin: origin || '', destination: destination || '' })
 		);
-		// Suppress the per-driver real-time banner when the driver is already
-		// busy (queued load — they'll see it on the Notifications tab and in
-		// the Pending sub-tab once they deliver their current load). Reuses
-		// checkDriverActiveLoad which now treats only Assigned + in-progression
-		// rows as "busy" — the just-written "Dispatched" row doesn't count.
-		// Wrap in try so a Sheets blip degrades to "emit anyway" instead of
-		// breaking the dispatch flow (the notification row above is still
-		// persisted regardless).
-		let driverBusy = false;
-		try {
-			driverBusy = !!(await checkDriverActiveLoad(driver, loadId));
-		} catch {
-			driverBusy = false;
-		}
-		if (!driverBusy) {
-			io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
-		}
+		// Always notify the driver in real time. Drivers can hold multiple
+		// accepted loads at once (dispatcher pre-planning), so there's no
+		// busy-suppression — every assignment surfaces immediately.
+		io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
 
 		// Notify dispatch team
 		insertDispatchNotification.run(
@@ -7941,19 +7925,8 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			`Previously assigned to ${oldDriver || 'another driver'}`,
 			JSON.stringify({ loadId, rowIndex })
 		);
-		// Suppress the real-time banner when the new driver is already busy —
-		// same rationale as POST /api/dispatch above. The notification record
-		// is still persisted; the load will surface in the driver's Pending
-		// sub-tab once they deliver their current load.
-		let newDriverBusy = false;
-		try {
-			newDriverBusy = !!(await checkDriverActiveLoad(newDriver, loadId));
-		} catch {
-			newDriverBusy = false;
-		}
-		if (!newDriverBusy) {
-			io.to(newDriver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex });
-		}
+		// Always notify the new driver in real time (multi-load acceptance).
+		io.to(newDriver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex });
 
 		// Notify old driver — also emit a socket event so their app
 		// optimistically removes the ghost load instead of waiting for the
@@ -8220,18 +8193,6 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 		).get(loadId, driverName.trim().toLowerCase(), rowIndex);
 		if (existing && existing.response === response && response === "accepted") {
 			return res.status(409).json({ error: "You have already accepted this load" });
-		}
-
-		// Golden rule — one load at a time. Block accepting a new load while
-		// another of the driver's loads is still active. Exclude THIS load (it's
-		// already assigned to them) so accepting their own load isn't self-blocked.
-		// Runs before we record the response or touch the sheet, so a rejected
-		// accept leaves no trace. Fails closed via checkDriverActiveLoad on a Sheets blip.
-		if (response === "accepted") {
-			const activeLoadConflict = await checkDriverActiveLoad(driverName, loadId);
-			if (activeLoadConflict) {
-				return res.status(409).json({ code: "ACTIVE_JOB_CONFLICT", error: activeLoadConflict });
-			}
 		}
 
 		// Insert response
