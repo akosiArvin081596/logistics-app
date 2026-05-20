@@ -1,16 +1,11 @@
 <template>
-  <div class="flex flex-col overflow-hidden h-full">
+  <div class="flex flex-col">
     <div class="dash-header">
       <div>
         <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Operations Dashboard</h2>
         <p class="text-[13px] text-gray-400 mt-0.5">Real-time logistics overview</p>
       </div>
-      <div class="flex items-center gap-3">
-        <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ lastUpdated }}</span>
-        <button class="px-4 py-2 text-sm font-semibold bg-white text-gray-700 border border-gray-200 rounded-lg hover:border-gray-300 hover:shadow-sm active:scale-[0.97] transition-all duration-150" @click="refresh">
-          &#8635; Refresh
-        </button>
-      </div>
+      <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ lastUpdated }}</span>
     </div>
 
     <template v-if="store.kpis">
@@ -27,22 +22,22 @@
       </div>
     </template>
 
-    <Card class="flex-1 flex flex-col min-h-0 overflow-hidden" style="margin-top:1.25rem;border-radius:14px;border:1px solid #e8edf2;box-shadow:0 1px 4px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04);">
-      <Tabs class="flex-1 flex flex-col min-h-0" :model-value="activeTab" @update:model-value="v => activeTab = v">
-        <TabsList class="w-full justify-start rounded-none bg-muted/50 h-auto" style="padding:0 0.75rem;border-bottom:1px solid #e8edf2;">
+    <Card class="flex flex-col dash-tabs-card" style="margin-top:1.25rem;border-radius:14px;border:1px solid #e8edf2;box-shadow:0 1px 4px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04);">
+      <Tabs class="flex flex-col" :model-value="activeTab" @update:model-value="v => activeTab = v">
+        <TabsList class="w-full justify-start rounded-none bg-muted/50 h-auto dash-tabs-list" style="padding:0 0.75rem;border-bottom:1px solid #e8edf2;">
           <TabsTrigger v-for="tab in tabs" :key="tab.key" :value="tab.key"
-            class="rounded-none data-[state=active]:shadow-none data-[state=active]:bg-transparent"
+            class="rounded-none data-[state=active]:shadow-none data-[state=active]:bg-transparent dash-tab-trigger"
             style="padding:1rem 1.25rem;">
             <span :style="{ paddingBottom: '2px', borderBottom: activeTab === tab.key ? '2px solid hsl(199 89% 48%)' : '2px solid transparent' }">{{ tab.label }}</span>
             <Badge variant="secondary" class="font-mono" style="margin-left:0.5rem;">{{ tab.count }}</Badge>
           </TabsTrigger>
         </TabsList>
-        <CardContent class="flex-1 overflow-y-auto" style="padding:0;">
+        <CardContent style="padding:0;">
           <TabsContent value="jobBoard" style="margin-top:0;">
-            <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" />
+            <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="driverOptions" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" @cancel="handleCancel" @deleted="handleDeleted" />
           </TabsContent>
           <TabsContent value="activeLoads" style="margin-top:0;">
-            <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" />
+            <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" :busy-drivers="busyDrivers" :focus-load-id="focusLoadId" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" @deleted="handleDeleted" @focus-consumed="onFocusConsumed" />
           </TabsContent>
           <TabsContent value="completed" style="margin-top:0;">
             <CompletedLoadsTab :active="activeTab === 'completed'" :jobs="store.completedJobs" :headers="store.completedHeaders" />
@@ -57,10 +52,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useDashboardStore } from '../stores/dashboard'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
+import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
@@ -76,8 +73,28 @@ const store = useDashboardStore()
 const auth = useAuthStore()
 const { show: toast } = useToast()
 const socket = useSocket()
+const route = useRoute()
+const router = useRouter()
 const activeTab = ref('jobBoard')
-let refreshInterval = null
+// Notification click targets: /dashboard?load=LD-1234 → focusLoadId flows
+// into ActiveLoadsTab which auto-opens that load's detail modal. We switch
+// to the Active Loads tab so the modal is visible.
+const focusLoadId = ref('')
+function applyRouteFocus() {
+  const v = (route.query.load || '').toString().trim()
+  if (v) {
+    focusLoadId.value = v
+    activeTab.value = 'activeLoads'
+  }
+}
+function onFocusConsumed() {
+  focusLoadId.value = ''
+  if (route.query.load) {
+    // Clear the query param so refreshes don't re-open the same modal.
+    router.replace({ path: route.path, query: { ...route.query, load: undefined } })
+  }
+}
+useSocketRefresh('dashboard:changed', () => refresh())
 
 const tabs = computed(() => [
   { key: 'jobBoard', label: 'Job Board', count: store.unassignedJobs.length },
@@ -86,6 +103,38 @@ const tabs = computed(() => [
   { key: 'fleet', label: 'Fleet & Drivers', count: store.fleet.length },
 ])
 
+// Drivers currently on an active load. ActiveLoadsTab reads this list to
+// flag busy drivers in the reassign dropdown. The Job Board's queue feature
+// (see driverOptions below) supersedes the one-load-at-a-time block in that
+// surface — a busy driver can be queued behind their current load.
+const busyDrivers = computed(() => {
+  const dc = store.headers.find(h => /driver/i.test(h))
+  if (!dc) return []
+  const seen = new Set()
+  for (const j of store.activeJobs) {
+    const n = (j[dc] || '').trim().toLowerCase().replace(/\s+/g, ' ')
+    if (n) seen.add(n)
+  }
+  return [...seen]
+})
+
+// Enriched driver options for the Job Board assign dropdown. The new shape
+// lets the dropdown render '— On Load' / '(Queue: N)' suffixes and lets the
+// confirmation modal explain the queue position before posting. Other tabs
+// (ActiveLoadsTab reassign) still consume the plain string array + busyDrivers.
+const driverOptions = computed(() => {
+  const fleetByName = new Map((store.fleet || []).map((f) => [f.Driver, f]))
+  return (store.drivers || []).map((name) => {
+    const f = fleetByName.get(name) || {}
+    return {
+      name,
+      activeCount: f.Status === 'On Load' ? 1 : 0,
+      queueCount: f.QueueCount || 0,
+      activeLoadId: f.CurrentLoad || '',
+    }
+  })
+})
+
 const lastUpdated = computed(() => {
   if (!store.timestamp) return 'Loading...'
   return 'Updated ' + new Date(store.timestamp).toLocaleTimeString()
@@ -93,13 +142,40 @@ const lastUpdated = computed(() => {
 
 function handleKpiClick(key) { const m = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }; activeTab.value = m[key] || activeTab.value }
 async function refresh() { try { await store.refresh() } catch { toast('Failed to load dashboard', 'error') } }
-async function handleAssign({ rowIndex, driver, job }) { try { await store.assignDriver(rowIndex, driver, job, store.headers); const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); toast(`${driver} assigned to ${lc ? job[lc] : 'load'}`, 'success'); refresh() } catch { toast('Failed to assign', 'error') } }
-async function handleReassign({ rowIndex, newDriver, job }) { try { await store.reassignDriver(rowIndex, newDriver, job, store.headers); toast(`Reassigned to ${newDriver}`, 'success'); refresh() } catch { toast('Failed to reassign', 'error') } }
+async function handleAssign({ rowIndex, driver, job }) { try { await store.assignDriver(rowIndex, driver, job, store.headers); const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); toast(`${driver} assigned to ${lc ? job[lc] : 'load'}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to assign', 'error') } }
+async function handleReassign({ rowIndex, newDriver, job }) { try { await store.reassignDriver(rowIndex, newDriver, job, store.headers); toast(`Reassigned to ${newDriver}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to reassign', 'error') } }
 async function handleCancel({ rowIndex, job }) { try { await store.cancelLoad(rowIndex, job, store.headers); toast('Assignment cancelled', 'success'); refresh() } catch { toast('Failed to cancel', 'error') } }
-async function handleStatusUpdate({ rowIndex, newStatus, job }) { try { const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); const dc = store.headers.find(h => /driver/i.test(h)); await store.updateStatus(rowIndex, dc ? job[dc] || '' : '', lc ? job[lc] || '' : '', newStatus); toast(`Status: ${newStatus}`, 'success'); refresh() } catch { toast('Failed to update', 'error') } }
+function handleDeleted({ loadId }) { toast(`Load ${loadId} deleted`, 'success'); refresh() }
+async function handleStatusUpdate({ rowIndex, newStatus, job, _override }) { if (_override) { toast(`Status overridden: ${newStatus}`, 'success'); refresh(); return } try { const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); const dc = store.headers.find(h => /driver/i.test(h)); await store.updateStatus(rowIndex, dc ? job[dc] || '' : '', lc ? job[lc] || '' : '', newStatus, job); toast(`Status: ${newStatus}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to update', 'error') } }
 function onStatusUpdated(p) { toast(`${p.driverName}: ${p.newStatus}`, 'info'); refresh() }
 function onPodUploaded(p) { toast(`POD uploaded: ${p.loadId}`, 'success'); refresh() }
+function onNewLoad() { toast('New load received', 'info'); refresh() }
 
-onMounted(() => { refresh(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); refreshInterval = setInterval(refresh, 60000) })
-onUnmounted(() => { clearInterval(refreshInterval); socket.off('status-updated', onStatusUpdated); socket.off('pod-uploaded', onPodUploaded) })
+onMounted(() => { applyRouteFocus(); refresh(); socket.connect(); socket.register('dispatch'); socket.on('status-updated', onStatusUpdated); socket.on('pod-uploaded', onPodUploaded); socket.on('new-load', onNewLoad) })
+// Reapply when navigated into with a new ?load= while already on the page.
+watch(() => route.query.load, () => applyRouteFocus())
+onUnmounted(() => { socket.off('status-updated', onStatusUpdated); socket.off('pod-uploaded', onPodUploaded); socket.off('new-load', onNewLoad) })
 </script>
+
+<style>
+/* Mobile: make the tab row swipe horizontally instead of squishing. Each
+   trigger stays its natural width, the strip scrolls under the thumb. */
+@media (max-width: 767px) {
+  .dash-tabs-list {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+  .dash-tabs-list::-webkit-scrollbar { display: none; }
+  .dash-tabs-list { scrollbar-width: none; }
+  .dash-tab-trigger {
+    flex-shrink: 0;
+    scroll-snap-align: start;
+    padding: 0.75rem 1rem !important;
+    font-size: 0.85rem;
+  }
+  /* KPI card padding tightens so 4 cards on a 375px phone don't squish. */
+  .dash-header { flex-wrap: wrap; }
+}
+</style>

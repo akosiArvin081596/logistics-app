@@ -14,38 +14,121 @@
           <th>Unit</th>
           <th>Make / Model</th>
           <th>Status</th>
-          <th>Driver</th>
-          <th>Miles</th>
-          <th>Est. Revenue</th>
-          <th>ROI</th>
+          <th>Current Driver</th>
+          <th
+            class="clickable-header"
+            role="button" tabindex="0"
+            title="Click for explanation of how Loads is counted"
+            @click="openDetail('loads')"
+            @keyup.enter="openDetail('loads')"
+            @keyup.space.prevent="openDetail('loads')"
+          >Loads <span class="info-marker" aria-hidden="true">i</span></th>
+          <th
+            class="clickable-header"
+            role="button" tabindex="0"
+            title="Click for explanation of how Miles is derived"
+            @click="openDetail('miles')"
+            @keyup.enter="openDetail('miles')"
+            @keyup.space.prevent="openDetail('miles')"
+          >Miles <span class="info-marker" aria-hidden="true">i</span></th>
+          <th
+            class="clickable-header"
+            role="button" tabindex="0"
+            title="Click for explanation of Est. Your Revenue"
+            @click="openDetail('estRevenue')"
+            @keyup.enter="openDetail('estRevenue')"
+            @keyup.space.prevent="openDetail('estRevenue')"
+          >Est. Your Revenue <span class="info-marker" aria-hidden="true">i</span></th>
+          <th
+            class="clickable-header"
+            role="button" tabindex="0"
+            title="Click for explanation of how ROI is calculated"
+            @click="openDetail('roi')"
+            @keyup.enter="openDetail('roi')"
+            @keyup.space.prevent="openDetail('roi')"
+          >ROI <span class="info-marker" aria-hidden="true">i</span></th>
         </tr>
       </thead>
       <tbody>
-        <tr v-for="t in trucksWithROI" :key="t.id">
-          <td class="photo-cell">
-            <img v-if="t.Photo" :src="t.Photo" class="truck-thumb" :alt="t.UnitNumber" />
-            <div v-else class="truck-thumb-placeholder">&#128665;</div>
-          </td>
-          <td class="unit-num">{{ t.UnitNumber }}</td>
-          <td>{{ [t.Make, t.Model].filter(Boolean).join(' ') || '\u2014' }}</td>
-          <td>
-            <span :class="['status-badge', statusClass(t.Status)]">{{ t.Status }}</span>
-          </td>
-          <td :style="{ color: t.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ t.AssignedDriver || '\u2014' }}
-          </td>
-          <td class="mono">{{ (t.totalMiles || 0).toLocaleString() }}</td>
-          <td class="mono">{{ fmt(t.estRevenue) }}</td>
-          <td>
-            <span :class="['roi-badge', t.roi >= 0 ? 'positive' : 'negative']">
-              {{ t.roi >= 0 ? '+' : '' }}{{ t.roi.toFixed(1) }}%
-            </span>
-          </td>
-        </tr>
+        <template v-for="t in trucksWithROI" :key="t.id">
+          <tr class="clickable-row" @click="toggleDetail(t.UnitNumber || t.unit_number)">
+            <td class="photo-cell">
+              <img v-if="t.Photo" :src="t.Photo" class="truck-thumb" :alt="t.UnitNumber" />
+              <div v-else class="truck-thumb-placeholder">&#128665;</div>
+            </td>
+            <td class="unit-num">{{ t.UnitNumber }}</td>
+            <td>{{ [t.Make, t.Model].filter(Boolean).join(' ') || '\u2014' }}</td>
+            <td>
+              <span :class="['status-badge', statusClass(t.Status)]">{{ t.Status }}</span>
+            </td>
+            <td :style="{ color: t.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
+              {{ t.AssignedDriver || '\u2014' }}
+            </td>
+            <td class="mono">{{ t.loadCount || 0 }}</td>
+            <td class="mono">{{ (t.totalMiles || 0).toLocaleString() }}</td>
+            <td class="mono">{{ fmt(t.estRevenue) }}</td>
+            <td>
+              <span :class="['roi-badge', t.roi >= 0 ? 'positive' : 'negative']">
+                {{ t.roi >= 0 ? '+' : '' }}{{ t.roi.toFixed(1) }}%
+              </span>
+            </td>
+          </tr>
+          <!-- Expandable P&L breakdown -->
+          <tr v-if="expandedUnit === (t.UnitNumber || t.unit_number)" class="detail-row">
+            <td colspan="9">
+              <div class="truck-detail">
+                <div class="detail-header">{{ t.UnitNumber }} &middot; {{ [t.Make, t.Model].filter(Boolean).join(' ') }} &middot; {{ t.AssignedDriver || 'Unassigned' }}</div>
+                <div class="detail-sub">{{ t.loadCount || 0 }} completed load{{ t.loadCount !== 1 ? 's' : '' }} &middot; Monthly avg based on {{ truckMonths(t) }} month{{ truckMonths(t) !== 1 ? 's' : '' }}</div>
+                <div class="detail-breakdown">
+                  <div class="bd-row">
+                    <span>Revenue ({{ t.loadCount || 0 }} load{{ t.loadCount !== 1 ? 's' : '' }})</span>
+                    <span class="bd-val" style="color:var(--accent)">{{ fmt(perUnit(t)?.unitMonthlyGross) }}</span>
+                  </div>
+                  <div class="bd-row deduct">
+                    <span>- Driver Pay</span>
+                    <span class="bd-val">{{ fmt(-(driverPay(t))) }}<span class="bd-hint"> ({{ driverDays(t) }} days x ${{ driverRate(t) }})</span></span>
+                  </div>
+                  <div class="bd-row deduct">
+                    <span>- Fixed Costs</span>
+                    <span class="bd-val">{{ fmt(-(fixedCosts(t))) }}</span>
+                  </div>
+                  <div class="bd-row deduct">
+                    <span>- Trip Expenses</span>
+                    <span class="bd-val">{{ fmt(-(tripExp(t))) }}</span>
+                  </div>
+                  <div class="bd-divider"></div>
+                  <div class="bd-row total">
+                    <span>Monthly Net</span>
+                    <span class="bd-val" :style="{color: monthlyNet(t) >= 0 ? 'var(--accent)' : 'var(--danger)'}">{{ fmt(monthlyNet(t)) }}</span>
+                  </div>
+                  <div class="bd-row">
+                    <span>&times; 12 months</span>
+                    <span class="bd-val"></span>
+                  </div>
+                  <div class="bd-row total">
+                    <span>Est. Your Annual Take-Home</span>
+                    <span class="bd-val" style="color:var(--blue)">{{ fmt(t.estRevenue) }}</span>
+                  </div>
+                  <div class="bd-divider"></div>
+                  <div class="bd-row">
+                    <span>ROI ({{ fmt(t.estRevenue) }} / {{ fmt(truckPrice(t)) }})</span>
+                    <span class="bd-val" :style="{color: t.roi >= 0 ? 'var(--accent)' : 'var(--danger)'}">{{ t.roi >= 0 ? '+' : '' }}{{ t.roi.toFixed(1) }}%</span>
+                  </div>
+                  <div v-if="t.breakEvenMonths" class="bd-row">
+                    <span>Break-even</span>
+                    <span class="bd-val">{{ t.breakEvenMonths }} months</span>
+                  </div>
+                </div>
+              </div>
+            </td>
+          </tr>
+        </template>
       </tbody>
       <tfoot>
         <tr>
-          <td colspan="6" class="total-label">Fleet Total</td>
+          <td colspan="5" class="total-label">Fleet Total</td>
+          <td class="mono total-val">{{ totalLoads }}</td>
+          <td></td>
           <td class="mono total-val">{{ fmt(totalEstRevenue) }}</td>
           <td>
             <span :class="['roi-badge', fleetROI >= 0 ? 'positive' : 'negative']">
@@ -55,11 +138,110 @@
         </tr>
       </tfoot>
     </table>
+    <div class="fleet-note">
+      Est. Your Revenue = trailing 3-month investor take-home × 12 (your 50% share of net profit). ROI = Est. Your Revenue / Purchase Price × 100. Based on {{ monthsLabel }} of data — projections become more accurate over time.
+    </div>
+
+    <!-- Detail modal -->
+    <MetricInfoDialog
+      :open="!!detailType"
+      :title="modalTitle"
+      :subtitle="modalSubtitle"
+      @update:open="v => { if (!v) detailType = '' }"
+    >
+      <!-- Loads -->
+      <template v-if="detailType === 'loads'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            For each truck in the table, this is the number of completed loads that truck has hauled since being added to your fleet.
+          </div>
+          <div class="step-label">What Counts</div>
+          <div class="modal-explain-sm">
+            Only loads that <strong>completed delivery</strong>. Cancelled or soft-deleted loads are excluded by the standard load-exclusion filter, so the count matches every other live-loads number on this page.
+          </div>
+          <div class="modal-divider"></div>
+          <div class="modal-row bold result">
+            <span>Fleet Total Loads</span>
+            <span class="val accent">{{ totalLoads }}</span>
+          </div>
+        </div>
+      </template>
+
+      <!-- Miles -->
+      <template v-if="detailType === 'miles'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            Total miles each truck has driven since odometer data started being captured. Sourced from Routemate ELD telemetry.
+          </div>
+          <div class="step-label">How It's Computed</div>
+          <div class="modal-explain-sm">
+            For each truck: <code>MAX(odometer) - MIN(odometer)</code> across all telemetry pings. Trucks without ELD data show 0.
+          </div>
+          <div class="modal-callout info">
+            Miles can lag the actual odometer by a few hours while telemetry catches up. The most recent trip may not yet be reflected.
+          </div>
+        </div>
+      </template>
+
+      <!-- Est. Your Revenue -->
+      <template v-if="detailType === 'estRevenue'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            <strong>Est. Your Revenue</strong> is a forward-looking projection of how much take-home each truck will generate for you over the next 12 months. It is your 50% share of net profit, annualised from the trailing 3-month average.
+          </div>
+          <div class="step-label">The Calculation (per truck)</div>
+          <div class="modal-explain-sm">
+            1. Take that truck's last 3 months of investor take-home (after driver pay, fixed costs, trip expenses, and the 50/50 split).<br>
+            2. Multiply by 12 to annualise.
+          </div>
+          <div class="modal-divider"></div>
+          <div class="modal-row bold result">
+            <span>Fleet Total (Est. Your Revenue)</span>
+            <span class="val accent">{{ fmt(totalEstRevenue) }}</span>
+          </div>
+          <div class="modal-callout warning">
+            This is an estimate, not a guarantee. Freight market swings, maintenance, or a driver change can shift it quickly.
+          </div>
+        </div>
+      </template>
+
+      <!-- ROI -->
+      <template v-if="detailType === 'roi'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            Per-truck Return on Investment. Compares each truck's estimated annual take-home to its purchase price &mdash; how much of the original outlay you'd earn back in a year.
+          </div>
+          <div class="step-label">The Calculation (per truck)</div>
+          <div class="modal-row">
+            <span>Est. Annual Take-Home</span>
+            <span class="val accent">e.g. {{ fmt(trucksWithROI[0]?.estRevenue || 0) }}</span>
+          </div>
+          <div class="modal-row deduct">
+            <span>&divide; Truck Purchase Price</span>
+            <span class="val">e.g. {{ fmt(truckPrice(trucksWithROI[0] || {})) }}</span>
+          </div>
+          <div class="modal-row split-row">
+            <span>&times; 100 (percent)</span>
+            <span></span>
+          </div>
+          <div class="modal-divider"></div>
+          <div class="modal-row bold result">
+            <span>Fleet ROI</span>
+            <span class="val" :class="fleetROI >= 0 ? 'accent' : 'danger'">{{ fleetROI >= 0 ? '+' : '' }}{{ fleetROI.toFixed(1) }}%</span>
+          </div>
+          <div class="modal-callout info">
+            A 30% ROI means the truck would generate take-home equivalent to about 30% of its purchase price in a year &mdash; or stated differently, it would pay for itself in roughly {{ fleetROI > 0 ? (100 / fleetROI).toFixed(1) : 'N/A' }} years at the current run rate.
+          </div>
+        </div>
+      </template>
+    </MetricInfoDialog>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
+import { formatCurrency as fmt } from '../../utils/format'
+import MetricInfoDialog from './MetricInfoDialog.vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -67,40 +249,98 @@ const props = defineProps({
   production: { type: Object, default: () => ({}) },
 })
 
+const expandedUnit = ref(null)
+function toggleDetail(unit) { expandedUnit.value = expandedUnit.value === unit ? null : unit }
+
+function perUnit(t) {
+  const key = t.UnitNumber || t.unit_number || ''
+  return (props.production?.perTruckData || {})[key] || {}
+}
+function truckPrice(t) { return t.PurchasePrice || t.purchase_price || props.asset?.purchasePrice || 0 }
+function truckMonths(t) { return props.production?.monthsOfOperation || 1 }
+function driverPay(t) {
+  const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
+  return (props.production?.driverPayDetails || {})[driver]?.totalPay || 0
+}
+function driverDays(t) {
+  const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
+  return (props.production?.driverPayDetails || {})[driver]?.activeDays || 0
+}
+function driverRate(t) {
+  const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
+  return (props.production?.driverPayDetails || {})[driver]?.dailyRate || 250
+}
+function fixedCosts(t) {
+  const pu = perUnit(t)
+  return (pu.unitMonthlyExpenses || 0) - (driverPay(t) / (truckMonths(t) || 1)) - tripExp(t)
+}
+function tripExp(t) {
+  // tripExp = unitMonthlyExpenses - fixedCosts - driverPay/months
+  // We don't have tripExp separately, so derive: total expenses - driverPay - (monthlyGross - monthlyNet - driverPay)
+  // Simpler: just show unitMonthlyExpenses breakdown note
+  return 0 // TODO: backend doesn't send per-truck trip expenses separately yet
+}
+function monthlyNet(t) {
+  const pu = perUnit(t)
+  return (pu.unitMonthlyGross || 0) - (pu.unitMonthlyExpenses || 0)
+}
+
 const trucksWithROI = computed(() => {
   const perTruckData = props.production?.perTruckData || {}
   const grossRevenue = props.production?.totalRevenue || 0
-  const purchasePrice = props.asset?.purchasePrice || 58000
+  const purchasePrice = props.asset?.purchasePrice || 0
 
   return props.trucks.map(t => {
     const unitKey = t.UnitNumber || t.unit_number || ''
     const perUnit = perTruckData[unitKey]
-    const estRevenue = perUnit?.estAnnualRevenue ?? 0
-    const roi = purchasePrice > 0 && grossRevenue > 0
-      ? (estRevenue / grossRevenue) * 100
-      : 0
+    // Investor take-home (50% share), NOT gross. Per the 2026-04-12 meeting:
+    // "all these metrics has to be based on what the investor is actually
+    // taking home". The backend now computes estAnnualInvestorRevenue from
+    // the trailing 3-month investor earnings × 12.
+    const estRevenue = perUnit?.estAnnualInvestorRevenue ?? 0
+    const truckPrice = t.PurchasePrice || t.purchase_price || purchasePrice
+    // ROI = estimated annual investor take-home / truck investment cost
+    const roi = truckPrice > 0 ? (estRevenue / truckPrice) * 100 : 0
     const totalMiles = perUnit?.totalMiles ?? 0
-    return { ...t, estRevenue, roi, totalMiles }
+    const loadCount = perUnit?.loadCount ?? 0
+    const breakEvenMonths = perUnit?.breakEvenMonths ?? null
+    return { ...t, estRevenue, roi, totalMiles, loadCount, breakEvenMonths }
   })
 })
 
 const totalEstRevenue = computed(() => trucksWithROI.value.reduce((s, t) => s + t.estRevenue, 0))
-// RFD-14: Fleet Total ROI = sum(estAnnualRevenue) / totalGrossRevenue
+const totalLoads = computed(() => trucksWithROI.value.reduce((s, t) => s + (t.loadCount || 0), 0))
+// Fleet ROI = total est annual net / total fleet purchase price
 const fleetROI = computed(() => {
-  const grossRevenue = props.production?.totalRevenue || 0
-  if (grossRevenue === 0) return 0
-  return (totalEstRevenue.value / grossRevenue) * 100
+  const totalPrice = props.production?.totalPurchasePrice || props.asset?.purchasePrice || 0
+  if (totalPrice === 0) return 0
+  return (totalEstRevenue.value / totalPrice) * 100
 })
 
-function fmt(n) {
-  return '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })
-}
+const monthsLabel = computed(() => {
+  const m = props.production?.monthsOfOperation || 1
+  return m + ' month' + (m !== 1 ? 's' : '')
+})
 
 function statusClass(status) {
   if (status === 'Active') return 'status-active'
   if (status === 'Inactive') return 'status-inactive'
   return 'status-maintenance'
 }
+
+// --- Detail modal ---
+const detailType = ref('')
+function openDetail(type) { detailType.value = type }
+
+const MODAL_CONFIG = {
+  loads: { title: 'Loads (per truck)', subtitle: 'How completed loads are counted' },
+  miles: { title: 'Miles (per truck)', subtitle: 'How miles are derived from ELD telemetry' },
+  estRevenue: { title: 'Est. Your Revenue', subtitle: 'Projected 12-month take-home, per truck' },
+  roi: { title: 'ROI', subtitle: 'Annual take-home as % of purchase price' },
+}
+
+const modalTitle = computed(() => MODAL_CONFIG[detailType.value]?.title || '')
+const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle || '')
 </script>
 
 <style scoped>
@@ -126,6 +366,20 @@ function statusClass(status) {
   text-align: left; padding: 0.6rem 0.5rem; font-weight: 600;
   color: var(--text-dim); border-bottom: 2px solid var(--border);
   font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
+}
+.fleet-table th.clickable-header {
+  cursor: pointer; user-select: none; transition: color 0.15s ease;
+}
+.fleet-table th.clickable-header:hover { color: var(--accent); }
+.fleet-table th.clickable-header:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; color: var(--accent);
+}
+.info-marker {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--accent-dim); color: var(--accent);
+  font-size: 0.6rem; font-weight: 800; font-style: normal;
+  margin-left: 0.25rem; text-transform: lowercase;
 }
 .fleet-table td {
   padding: 0.65rem 0.5rem; border-bottom: 1px solid var(--bg); vertical-align: middle;
@@ -165,4 +419,9 @@ function statusClass(status) {
 }
 .roi-badge.positive { background: var(--accent-dim); color: var(--accent); }
 .roi-badge.negative { background: var(--danger-dim); color: var(--danger); }
+.fleet-note {
+  font-size: 0.68rem; color: var(--text-dim); font-style: italic;
+  margin-top: 0.75rem; padding: 0.5rem 0; border-top: 1px solid var(--bg);
+  line-height: 1.5;
+}
 </style>

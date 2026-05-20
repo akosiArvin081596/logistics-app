@@ -150,6 +150,15 @@ body {
   flex-direction: column;
   transition: margin-left 0.25s ease, width 0.25s ease;
 }
+
+/* Mobile: leave room at the top for the hamburger button (fixed top-left
+   ~0.6rem + 44px). 3rem top padding gives content air to breathe without
+   sitting under the menu icon. Desktop behaviour above is untouched. */
+@media (max-width: 767px) {
+  .main {
+    padding: 3rem 0.75rem 1.25rem;
+  }
+}
 .page-header {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 1.5rem; flex-wrap: wrap; gap: 0.5rem;
@@ -162,12 +171,40 @@ body {
 
 /* ---- Admin Page Layout ---- */
 .admin-page {
-  flex: 1;
-  min-height: 0;
+  flex: 1 0 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
   overflow-x: hidden;
+}
+.form-accordion {
+  margin-bottom: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.form-accordion[open] { box-shadow: var(--shadow-card); }
+.form-toggle {
+  padding: 0.65rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--accent);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.form-toggle::-webkit-details-marker { display: none; }
+.form-toggle::marker { display: none; content: ''; }
+.form-accordion[open] .form-toggle {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-hover);
+}
+.form-toggle-note {
+  font-weight: 400;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  font-style: italic;
 }
 .status-bar {
   display: flex;
@@ -327,6 +364,25 @@ body {
 }
 @media (max-width: 900px) {
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+}
+/* RevenueGrid uses 3 columns by default (its own variant). */
+.kpi-grid.revenue-grid { grid-template-columns: repeat(3, 1fr); }
+/* Below 900 px the 3 revenue cards get too cramped to fit the $##,###
+   values, so we drop to a single column straight away. The third card
+   dangling alone in a 2-col grid also reads awkwardly. */
+@media (max-width: 900px) {
+  .kpi-grid.revenue-grid {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+}
+/* Mobile: stack everything to 1 column. */
+@media (max-width: 480px) {
+  .kpi-grid,
+  .kpi-grid.revenue-grid {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
 }
 
 /* KPI Cards */
@@ -601,6 +657,15 @@ body {
 }
 .fleet-status-active   { background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; }
 .fleet-status-available{ background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+.fleet-status-queued   { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+.fleet-queue-pill {
+  display: inline-flex; align-items: center;
+  font-size: 0.625rem; font-weight: 600;
+  padding: 2px 8px; border-radius: 9999px;
+  background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  letter-spacing: 0;
+}
 
 /* Status Badges */
 .status-badge-pill {
@@ -637,3 +702,96 @@ body {
 /* Utility */
 .hidden { display: none !important; }
 .section-divider { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
+
+/* Google Places Autocomplete dropdown — always on top of modals/dialogs */
+.pac-container {
+  z-index: 10001 !important;
+  border-radius: 8px;
+  border: 1px solid #e2e4ea;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  font-family: inherit;
+}
+.pac-item { padding: 0.5rem 0.75rem; font-size: 0.82rem; cursor: pointer; }
+.pac-item:hover { background: #f0f9ff; }
+
+/* ============================================================
+   METRIC INFO MODAL — shared chrome for click-to-explain dialogs
+   Used by EarningsSection and every other investor portal section
+   that opens a step-by-step explanation when a number is clicked.
+   ============================================================ */
+
+.metric-info-modal,
+.detail-modal { max-width: 520px; }
+
+.modal-breakdown { padding: 0.25rem 0; }
+.modal-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.5rem 0.75rem; font-size: 0.85rem;
+}
+.modal-row .val {
+  font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 0.88rem;
+}
+.modal-row .val.accent { color: var(--accent); }
+.modal-row .val.danger { color: var(--danger); }
+.modal-row.highlight { background: rgba(16, 185, 129, 0.06); border-radius: 6px; }
+.modal-row.deduct { color: var(--text-dim); }
+.modal-row.bold { font-weight: 700; }
+.modal-row.result { background: var(--bg); border-radius: 6px; font-size: 0.92rem; }
+.modal-row.split-row { color: var(--text-dim); font-size: 0.78rem; }
+.modal-divider { border-top: 1px dashed var(--border); margin: 0.4rem 0.75rem; }
+
+.step-label {
+  font-size: 0.72rem; font-weight: 700; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.03em;
+  padding: 0.6rem 0.75rem 0.2rem; margin-top: 0.25rem;
+}
+
+.modal-explain {
+  font-size: 0.82rem; color: var(--text); padding: 0.25rem 0.75rem 0.5rem;
+  line-height: 1.5;
+}
+.modal-explain-sm {
+  font-size: 0.75rem; color: var(--text-dim); padding: 0 0.75rem 0.4rem;
+  line-height: 1.4;
+}
+.modal-hint {
+  font-size: 0.68rem; color: var(--text-dim); padding: 0 0.75rem 0.3rem;
+  line-height: 1.3; font-style: italic;
+}
+
+.modal-math {
+  font-size: 0.68rem; font-family: 'JetBrains Mono', monospace;
+  color: var(--text-dim); opacity: 0.7;
+  padding: 0.15rem 0.75rem 0.25rem; text-align: center;
+}
+
+.modal-callout {
+  font-size: 0.75rem; padding: 0.6rem 0.75rem; border-radius: 6px;
+  margin: 0.5rem 0.75rem 0; line-height: 1.4;
+}
+.modal-callout.warning {
+  background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.25);
+  color: var(--text);
+}
+.modal-callout.info {
+  background: rgba(56, 189, 248, 0.06); border: 1px solid rgba(56, 189, 248, 0.2);
+  color: var(--text);
+}
+
+.modal-monthly-list { max-height: 300px; overflow-y: auto; }
+.modal-monthly-list .modal-row { font-size: 0.8rem; padding: 0.35rem 0.75rem; }
+.modal-monthly-list .modal-row:nth-child(even) { background: var(--bg); border-radius: 4px; }
+
+/* Generic click-to-explain affordance — used by KPI cards, rows, etc. */
+.click-hint {
+  font-size: 0.58rem; color: var(--text-dim); opacity: 0;
+  margin-top: 0.3rem; transition: opacity 0.15s ease;
+  text-transform: uppercase; letter-spacing: 0.04em; font-style: italic;
+}
+.clickable:hover .click-hint,
+.clickable:focus-visible .click-hint { opacity: 0.6; }
+
+@media (max-width: 600px) {
+  .metric-info-modal,
+  .detail-modal { max-width: 95vw; }
+}

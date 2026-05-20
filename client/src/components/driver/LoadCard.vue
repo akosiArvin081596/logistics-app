@@ -28,8 +28,20 @@
 
     <!-- Accept/Decline actions for pending loads -->
     <div v-if="pending && !accepted" class="card-actions">
-      <button class="action-btn decline" @click.stop="$emit('decline', load)">Decline</button>
-      <button class="action-btn accept" @click.stop="$emit('accept', load)">Accept</button>
+      <button
+        class="action-btn decline"
+        :disabled="responding"
+        @click.stop="responding ? null : $emit('decline', load)"
+      >
+        {{ responding ? 'Working...' : 'Decline' }}
+      </button>
+      <button
+        class="action-btn accept"
+        :disabled="responding"
+        @click.stop="responding ? null : $emit('accept', load)"
+      >
+        {{ responding ? 'Working...' : 'Accept' }}
+      </button>
     </div>
     <div v-else-if="pending && accepted" class="accepted-badge">
       Accepted
@@ -52,6 +64,7 @@ const props = defineProps({
   headers: { type: Array, default: () => [] },
   pending: { type: Boolean, default: false },
   accepted: { type: Boolean, default: false },
+  responding: { type: Boolean, default: false },
 })
 
 defineEmits(['select', 'chat', 'accept', 'decline'])
@@ -174,6 +187,7 @@ function formatDate(str) {
   transition: opacity 0.15s;
 }
 .action-btn:active { opacity: 0.8; }
+.action-btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .action-btn.accept {
   background: var(--accent, #6366f1);
   color: #fff;

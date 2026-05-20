@@ -16,7 +16,9 @@
           <th>VIN</th>
           <th>Plate</th>
           <th>Status</th>
-          <th>Driver</th>
+          <th>Current Driver</th>
+          <th>Loads</th>
+          <th>Routemate</th>
           <th v-if="showOwner">Owner</th>
           <th v-if="canEdit"></th>
         </tr>
@@ -34,18 +36,93 @@
           <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
             {{ truck.AssignedDriver || '\u2014' }}
           </td>
+          <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
+          <td>
+            <span
+              v-if="truck.RoutemateVehicleId"
+              class="rm-linked"
+              :title="`Routemate vehicle ID: ${truck.RoutemateVehicleId}`"
+            ><span class="rm-dot"></span>Linked</span>
+            <button
+              v-else-if="canEdit"
+              class="btn-link-rm"
+              @click.stop="openLinkModal(truck)"
+            >Link</button>
+            <span v-else class="rm-unlinked">&mdash;</span>
+            <button
+              v-if="truck.RoutemateVehicleId && canEdit"
+              class="btn-unlink-rm"
+              title="Clear the Routemate device link"
+              @click.stop="handleUnlink(truck)"
+            >&times;</button>
+          </td>
           <td v-if="showOwner" :style="{ color: truck.OwnerId ? 'var(--text)' : 'var(--text-dim)' }">
             {{ ownerName(truck.OwnerId) }}
           </td>
           <td v-if="canEdit" style="text-align: right;">
             <div class="action-btns">
-              <button class="btn-edit" @click="openEdit(truck)">Edit</button>
-              <button class="btn-remove" @click="confirmDelete(truck)">Remove</button>
+              <button class="btn-edit" @click.stop="openEdit(truck)">Edit</button>
+              <button class="btn-remove" @click.stop="confirmDelete(truck)">Remove</button>
             </div>
           </td>
         </tr>
       </tbody>
     </table>
+
+    <!-- Routemate link modal \u2014 picks an unlinked Routemate vehicle to bind
+         to a LogisX truck. Auto-match-by-VIN tries an exact VIN match first
+         and is the fast path when both records carry the same VIN. -->
+    <Teleport to="body">
+      <div v-if="showLinkRm" class="confirm-overlay" @click.self="closeLinkModal">
+        <div class="confirm-dialog" style="max-width:560px;">
+          <h3>Link Truck {{ linkTruck?.UnitNumber || '' }} to a Routemate device</h3>
+          <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.85rem;">
+            Pick a Routemate vehicle from the company inventory. After linking, live GPS,
+            fault codes, and fuel data flow against this truck.
+          </p>
+
+          <div v-if="linkTruck && linkTruck.VIN" style="margin-bottom:0.75rem;">
+            <button
+              class="btn btn-primary"
+              :disabled="linkBusy"
+              @click="handleAutoLink"
+            >Auto-match by VIN ({{ linkTruck.VIN }})</button>
+          </div>
+
+          <div v-if="linkLoading" class="rm-pick-empty">Loading Routemate vehicles...</div>
+          <div v-else-if="linkError" class="rm-pick-error">{{ linkError }}</div>
+          <div v-else-if="unlinkedVehicles.length === 0" class="rm-pick-empty">
+            No unlinked Routemate vehicles available. Run sync from Admin Tools to refresh.
+          </div>
+          <div v-else class="rm-pick-list">
+            <div
+              v-for="rv in unlinkedVehicles"
+              :key="rv.routemate_vehicle_id"
+              :class="['rm-pick-item', { selected: pickedRoutemateId === rv.routemate_vehicle_id }]"
+              @click="pickedRoutemateId = rv.routemate_vehicle_id"
+            >
+              <div class="rm-pick-line1">
+                <span class="rm-pick-id">{{ rv.vehicle_id || rv.routemate_vehicle_id }}</span>
+                <span v-if="rv.vin" class="rm-pick-vin">VIN {{ rv.vin }}</span>
+              </div>
+              <div class="rm-pick-line2">
+                {{ [rv.year, rv.make, rv.model].filter(Boolean).join(' ') || '\u2014' }}
+                <span v-if="rv.eld_id" class="rm-pick-eld">ELD {{ rv.eld_id }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="confirm-actions">
+            <button class="btn btn-secondary" :disabled="linkBusy" @click="closeLinkModal">Cancel</button>
+            <button
+              class="btn btn-primary"
+              :disabled="!pickedRoutemateId || linkBusy"
+              @click="handleLink"
+            >{{ linkBusy ? 'Linking...' : 'Link Selected' }}</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- Edit Modal -->
     <Teleport to="body">
@@ -141,7 +218,6 @@
                 <select v-model="editForm.titleStatus" style="width:100%;padding:0.4rem 0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.82rem;">
                   <option value="Clean">Clean</option>
                   <option value="Lien">Lien</option>
-                  <option value="Accident/Salvage">Accident/Salvage</option>
                 </select>
               </div>
             </div>
@@ -200,16 +276,18 @@
     />
 
     <!-- View Truck Detail Modal -->
-    <div v-if="viewTruck" class="confirm-overlay" @click.self="viewTruck = null">
-      <div class="confirm-box" style="max-width:700px;max-height:85vh;overflow-y:auto;">
+    <Teleport to="body">
+    <div v-if="viewTruck" style="position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:9999" @click.self="viewTruck = null">
+      <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:700px;width:90%;max-height:85vh;overflow-y:auto;box-shadow:0 25px 50px rgba(0,0,0,0.2)">
         <h3 style="margin-bottom:1rem;">{{ viewTruck.UnitNumber }} — {{ [viewTruck.Make, viewTruck.Model].filter(Boolean).join(' ') }}</h3>
         <div class="view-grid">
           <div class="view-row"><span class="view-label">Year</span><span>{{ viewTruck.Year || '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">VIN</span><span>{{ viewTruck.VIN || '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">License Plate</span><span>{{ viewTruck.LicensePlate || '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Status</span><span :class="['status-badge', statusClass(viewTruck.Status)]">{{ viewTruck.Status }}</span></div>
-          <div class="view-row"><span class="view-label">Assigned Driver</span><span>{{ viewTruck.AssignedDriver || '\u2014' }}</span></div>
-          <div class="view-row"><span class="view-label">Owner</span><span>{{ ownerName(viewTruck.OwnerId) }}</span></div>
+          <div class="view-row"><span class="view-label">Current Driver</span><span>{{ viewTruck.AssignedDriver || '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Completed Loads</span><span>{{ viewTruck.LoadCount ?? 0 }}</span></div>
+          <div v-if="showOwner" class="view-row"><span class="view-label">Owner</span><span>{{ ownerName(viewTruck.OwnerId) }}</span></div>
           <div class="view-row"><span class="view-label">Purchase Price</span><span>{{ viewTruck.PurchasePrice ? '$' + Number(viewTruck.PurchasePrice).toLocaleString() : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Title Status</span><span>{{ viewTruck.TitleStatus || '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Maintenance Fund</span><span>{{ viewTruck.MaintenanceFundMonthly ? '$' + viewTruck.MaintenanceFundMonthly + '/mo' : '\u2014' }}</span></div>
@@ -217,6 +295,10 @@
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '\u2014' }}</span></div>
         </div>
+        <!-- Driver-personal files (CDL, medical, signed contracts) intentionally
+             NOT shown here. They live with the driver, not the truck. Manage
+             them from the Drivers Database page. CEO requirement 2026-05-09:
+             keep the truck view focused on truck-scoped documents only. -->
         <div style="margin-top:1.25rem;border-top:1px solid #e5e7eb;padding-top:1rem;">
           <LegalDocumentPortal :truck-id="viewTruck.id" :unit-number="viewTruck.UnitNumber" />
         </div>
@@ -225,6 +307,7 @@
         </div>
       </div>
     </div>
+    </Teleport>
   </div>
 </template>
 
@@ -233,6 +316,9 @@ import { ref, reactive, computed } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
+import { useApi } from '../../composables/useApi'
+
+const api = useApi()
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
@@ -266,7 +352,7 @@ const props = defineProps({
   canEdit: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['delete', 'update'])
+const emit = defineEmits(['delete', 'update', 'linkage-changed'])
 
 const showConfirm = ref(false)
 const pendingTruck = ref(null)
@@ -366,6 +452,85 @@ function handleConfirmDelete() {
   if (pendingTruck.value) emit('delete', pendingTruck.value.id)
   showConfirm.value = false
   pendingTruck.value = null
+}
+
+// --- Routemate device linkage ---
+const showLinkRm = ref(false)
+const linkTruck = ref(null)
+const unlinkedVehicles = ref([])
+const pickedRoutemateId = ref('')
+const linkBusy = ref(false)
+const linkLoading = ref(false)
+const linkError = ref('')
+
+async function openLinkModal(truck) {
+  linkTruck.value = truck
+  pickedRoutemateId.value = ''
+  linkError.value = ''
+  showLinkRm.value = true
+  linkLoading.value = true
+  try {
+    const r = await api.get('/api/routemate/vehicles/unlinked')
+    unlinkedVehicles.value = r.vehicles || []
+  } catch (err) {
+    linkError.value = err?.message || 'Failed to load Routemate vehicles.'
+  } finally {
+    linkLoading.value = false
+  }
+}
+
+function closeLinkModal() {
+  if (linkBusy.value) return
+  showLinkRm.value = false
+  linkTruck.value = null
+  unlinkedVehicles.value = []
+  pickedRoutemateId.value = ''
+  linkError.value = ''
+}
+
+async function handleLink() {
+  if (!linkTruck.value || !pickedRoutemateId.value) return
+  linkBusy.value = true
+  linkError.value = ''
+  try {
+    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, {
+      routemateVehicleId: pickedRoutemateId.value,
+    })
+    showLinkRm.value = false
+    // Reload-only signal: the parent should refetch trucks so the row's
+    // RoutemateVehicleId flips to "Linked". Distinct from `update` (which
+    // sends a PUT to /api/trucks for actual field edits).
+    emit('linkage-changed', { id: linkTruck.value.id })
+  } catch (err) {
+    linkError.value = err?.message || 'Failed to link Routemate vehicle.'
+  } finally {
+    linkBusy.value = false
+  }
+}
+
+async function handleAutoLink() {
+  if (!linkTruck.value || !linkTruck.value.VIN) return
+  linkBusy.value = true
+  linkError.value = ''
+  try {
+    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, { auto: true })
+    showLinkRm.value = false
+    emit('linkage-changed', { id: linkTruck.value.id })
+  } catch (err) {
+    linkError.value = err?.message || 'No Routemate vehicle matches this VIN.'
+  } finally {
+    linkBusy.value = false
+  }
+}
+
+async function handleUnlink(truck) {
+  // No confirm modal — unlink is reversible (admin can re-link any time).
+  try {
+    await api.del(`/api/trucks/${truck.id}/link-routemate`)
+    emit('linkage-changed', { id: truck.id })
+  } catch (err) {
+    console.error('Routemate unlink failed:', err)
+  }
 }
 </script>
 
@@ -475,4 +640,61 @@ function handleConfirmDelete() {
 .view-grid { display: flex; flex-direction: column; gap: 0.4rem; }
 .view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
 .view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+
+/* Routemate column — minimal "Linked / Link / —" affordances. */
+.rm-linked {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 0.7rem; font-weight: 600;
+  padding: 0.15rem 0.5rem; border-radius: 10px;
+  background: #dcfce7; color: #166534;
+  border: 1px solid #bbf7d0;
+}
+.rm-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: #16a34a;
+}
+.rm-unlinked { color: var(--text-dim); }
+.btn-link-rm {
+  padding: 0.3rem 0.65rem; font-size: 0.7rem; border-radius: 6px;
+  border: 1px solid #bfdbfe; background: #eff6ff;
+  cursor: pointer; font-family: inherit; font-weight: 600;
+  color: #1e40af; transition: all 0.15s;
+}
+.btn-link-rm:hover { background: #dbeafe; border-color: #93c5fd; }
+.btn-unlink-rm {
+  margin-left: 0.35rem;
+  width: 18px; height: 18px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-dim); border-radius: 50%;
+  cursor: pointer; line-height: 1;
+  font-size: 0.85rem; padding: 0;
+}
+.btn-unlink-rm:hover { background: var(--danger-dim); color: var(--danger); border-color: var(--danger-dim); }
+
+/* Pick list inside the link modal */
+.rm-pick-list {
+  max-height: 320px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+.rm-pick-item {
+  padding: 0.6rem 0.75rem; cursor: pointer;
+  border-bottom: 1px solid var(--bg);
+  transition: background 0.1s;
+}
+.rm-pick-item:last-child { border-bottom: none; }
+.rm-pick-item:hover { background: var(--bg); }
+.rm-pick-item.selected { background: #eff6ff; border-left: 3px solid #3b82f6; padding-left: calc(0.75rem - 3px); }
+.rm-pick-line1 {
+  display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.15rem;
+}
+.rm-pick-id { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.78rem; }
+.rm-pick-vin { font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-dim); }
+.rm-pick-line2 { font-size: 0.72rem; color: var(--text-dim); display: flex; gap: 0.6rem; }
+.rm-pick-eld { font-family: 'JetBrains Mono', monospace; }
+.rm-pick-empty { padding: 1rem; font-size: 0.82rem; color: var(--text-dim); text-align: center; }
+.rm-pick-error {
+  padding: 0.6rem 0.75rem; font-size: 0.78rem;
+  background: #fef2f2; color: #991b1b;
+  border: 1px solid #fecaca; border-radius: 6px; margin-bottom: 0.75rem;
+}
 </style>

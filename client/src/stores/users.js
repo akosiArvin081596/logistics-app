@@ -7,6 +7,7 @@ export const useUsersStore = defineStore('users', {
   state: () => ({
     users: [],
     driverNames: [],
+    carrierNames: [],
     isLoading: false,
   }),
 
@@ -36,9 +37,7 @@ export const useUsersStore = defineStore('users', {
 
     async loadDriverNames() {
       try {
-        const json = await api.get(
-          `/api/data?sheet=${encodeURIComponent('Carrier Database')}&page=1&limit=200`
-        )
+        const json = await api.get('/api/drivers-directory')
         const headers = json.headers || []
         const driverCol = headers.find((h) => /driver/i.test(h)) || headers[0]
         if (driverCol) {
@@ -46,6 +45,13 @@ export const useUsersStore = defineStore('users', {
             .map((row) => (row[driverCol] || '').trim())
             .filter(Boolean)
           this.driverNames = [...new Set(names)].sort()
+        }
+        const carrierCol = headers.find((h) => /carrier.?name/i.test(h))
+        if (carrierCol) {
+          const names = (json.data || [])
+            .map((row) => (row[carrierCol] || '').trim())
+            .filter(Boolean)
+          this.carrierNames = [...new Set(names)].sort()
         }
       } catch {
         console.error('Failed to load driver names')

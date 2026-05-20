@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LogisX Inc. — Owner-Operator Weekly Invoice</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <style>
+    @page { size: letter; margin: 1in; }
+
+    :root {
+      --ink: #000;
+      --rule: #d0d0d0;
+      --table-border: #c4c4c4;
+      --paper: #ffffff;
+      --bg: #f5f5f5;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+    }
+
+    body {
+      font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .document {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 76px 80px 96px;
+      background: var(--paper);
+      box-shadow: 0 2px 14px rgba(0, 0, 0, 0.08);
+    }
+
+    h1 {
+      font-size: 42px;
+      font-weight: 700;
+      text-align: left;
+      margin: 0 0 26px;
+      letter-spacing: 0.2px;
+      line-height: 1.1;
+    }
+
+    h2 {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 28px 0 12px;
+      line-height: 1.3;
+    }
+
+    h3 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 18px 0 10px;
+    }
+
+    p { margin: 0 0 14px; }
+
+    .italic-note {
+      font-style: italic;
+      margin: 0 0 12px;
+    }
+
+    strong { font-weight: 700; }
+
+    ol, ul {
+      padding-left: 26px;
+      margin: 0 0 16px;
+    }
+    li { margin-bottom: 10px; }
+
+    hr {
+      border: 0;
+      border-top: 1px solid var(--rule);
+      margin: 26px 0 20px;
+    }
+
+    .block-label { font-weight: 700; margin: 0 0 8px; }
+
+    .field-row {
+      margin-bottom: 12px;
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .field-row .label { font-weight: 700; white-space: nowrap; }
+
+    .from-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    .from-cell { display: flex; align-items: baseline; gap: 10px; }
+    .from-cell .label { font-weight: 700; white-space: nowrap; min-width: 130px; }
+    .from-cell .blank { flex: 1 1 auto; width: auto; max-width: 340px; }
+
+    .blank {
+      display: inline-block;
+      border: 0;
+      border-bottom: 1px solid var(--ink);
+      background: transparent;
+      font: inherit;
+      color: inherit;
+      outline: none;
+      padding: 0 4px;
+      vertical-align: baseline;
+      border-radius: 0;
+    }
+    .blank-xs  { width:  90px; }
+    .blank-sm  { width: 180px; }
+    .blank-md  { width: 240px; }
+    .blank-lg  { width: 320px; }
+
+    .bill-to .addr-line { margin: 2px 0; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 18px;
+      font-size: 14px;
+    }
+    table th, table td {
+      border: 1px solid var(--table-border);
+      padding: 14px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    table th { font-weight: 700; background: transparent; }
+    table td .blank { border-bottom-color: var(--ink); }
+
+    .meta-table td { height: 70px; }
+    .meta-table .prefix { display: inline-block; }
+
+    /* Loads + expenses tables */
+    .data-table th, .data-table td { padding: 10px 12px; }
+    .data-table .num-cell { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .data-table tfoot td {
+      font-weight: 700;
+      background: #f7f7f7;
+    }
+    .data-table .empty-row td {
+      text-align: center;
+      color: #777;
+      font-style: italic;
+      padding: 18px 12px;
+    }
+
+    /* Pay calculation summary box */
+    .pay-summary {
+      border: 1px solid var(--ink);
+      padding: 18px 22px;
+      margin: 18px 0 24px;
+      background: #fafafa;
+    }
+    .pay-summary .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 6px 0;
+      font-size: 15px;
+    }
+    .pay-summary .row .label { font-weight: 600; }
+    .pay-summary .row .value {
+      font-variant-numeric: tabular-nums;
+      min-width: 140px;
+      text-align: right;
+    }
+    .pay-summary .divider { border-top: 1px solid #c4c4c4; margin: 6px 0; }
+    .pay-summary .total-row {
+      font-size: 17px;
+      font-weight: 700;
+      border-top: 2px solid var(--ink);
+      margin-top: 8px;
+      padding-top: 12px;
+    }
+    .pay-summary .total-row .value { font-size: 20px; }
+
+    /* Attachment checklist */
+    .checklist {
+      list-style: none;
+      padding-left: 0;
+      margin: 0 0 16px;
+      counter-reset: item;
+    }
+    .checklist li {
+      counter-increment: item;
+      margin-bottom: 14px;
+      padding-left: 44px;
+      position: relative;
+    }
+    .checklist li::before {
+      content: counter(item) ".";
+      position: absolute;
+      left: 0;
+      top: 0;
+      font-weight: 400;
+    }
+    .checklist input[type="checkbox"] {
+      position: absolute;
+      left: 22px;
+      top: 5px;
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: #000;
+    }
+
+    .payment-list { list-style: disc; padding-left: 26px; }
+    .payment-list li { margin-bottom: 10px; }
+    .payment-list .acct-choice {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-right: 10px;
+    }
+    .payment-list input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      accent-color: #000;
+      margin: 0;
+    }
+
+    @media print {
+      html, body { background: #fff; }
+      .document { box-shadow: none; margin: 0; padding: 0; max-width: none; }
+      .blank { border-bottom: 1px solid #000; }
+    }
+  </style>
+</head>
+<body>
+  <main class="document">
+    <h1>OWNER-OPERATOR WEEKLY INVOICE</h1>
+
+    <p class="block-label">FROM (Contracted Service Provider):</p>
+    <div class="from-grid">
+      <label class="from-cell">
+        <span class="label">Name:</span>
+        <input type="text" class="blank" aria-label="Provider name">
+      </label>
+      <label class="from-cell">
+        <span class="label">Business Name:</span>
+        <input type="text" class="blank" aria-label="Business name">
+      </label>
+      <label class="from-cell">
+        <span class="label">Address:</span>
+        <input type="text" class="blank" aria-label="Provider address">
+      </label>
+      <label class="from-cell">
+        <span class="label">Phone:</span>
+        <input type="text" class="blank" aria-label="Provider phone">
+      </label>
+    </div>
+
+    <p class="block-label" style="margin-top: 22px;">BILL TO:</p>
+    <div class="bill-to">
+      <div class="addr-line"><strong>LogisX Inc.</strong></div>
+      <div class="addr-line">4576 Research Forest Dr, Suite 200</div>
+      <div class="addr-line">The Woodlands, TX 77381</div>
+    </div>
+
+    <p style="margin-top: 18px;"><strong>USDOT# 4302683</strong></p>
+
+    <hr>
+
+    <table class="meta-table">
+      <thead>
+        <tr>
+          <th>Invoice Number</th>
+          <th>Submission Date</th>
+          <th>Submission Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <span class="prefix">INV-2026-</span><input type="text" class="blank" style="width: 70px;" aria-label="Invoice number suffix">
+          </td>
+          <td>
+            <strong>Friday,</strong> <input type="text" class="blank" style="width: 110px;" aria-label="Submission date">
+          </td>
+          <td>
+            <strong>MUST BE BEFORE 6:00 PM</strong>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>LOGISTICS SERVICE SUMMARY</h2>
+    <p class="italic-note">Billing Period: <span aria-label="Billing period start"></span> to <span aria-label="Billing period end"></span></p>
+
+    <h3>Loads Delivered</h3>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 22%;">Date</th>
+          <th>Load / BOL #</th>
+          <th class="num-cell" style="width: 22%;">Broker Rate</th>
+        </tr>
+      </thead>
+      <tbody id="loads-rows">
+        <tr>
+          <td><span class="cell-text"></span></td>
+          <td><span class="cell-text"></span></td>
+          <td class="num-cell"><span class="cell-text"></span></td>
+        </tr>
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="2"><strong>Total Load Revenue</strong></td>
+          <td class="num-cell">$&nbsp;<span aria-label="Gross revenue"></span></td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <h3>Deductible Expenses (Fuel &amp; Maintenance)</h3>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 18%;">Date</th>
+          <th style="width: 18%;">Type</th>
+          <th>Description</th>
+          <th class="num-cell" style="width: 18%;">Amount</th>
+        </tr>
+      </thead>
+      <tbody id="expenses-rows">
+        <tr>
+          <td><span class="cell-text"></span></td>
+          <td><span class="cell-text"></span></td>
+          <td><span class="cell-text"></span></td>
+          <td class="num-cell"><span class="cell-text"></span></td>
+        </tr>
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="3"><strong>Total Deductible Expenses</strong></td>
+          <td class="num-cell">$&nbsp;<span aria-label="Deductible expenses"></span></td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <h3>Pay Calculation</h3>
+    <div class="pay-summary">
+      <div class="row">
+        <span class="label">Gross Load Revenue</span>
+        <span class="value">$&nbsp;<span aria-label="Summary gross"></span></span>
+      </div>
+      <div class="row">
+        <span class="label">Less Fuel &amp; Maintenance</span>
+        <span class="value">($&nbsp;<span aria-label="Summary deductible"></span>)</span>
+      </div>
+      <div class="divider"></div>
+      <div class="row">
+        <span class="label">Net</span>
+        <span class="value">$&nbsp;<span aria-label="Summary net"></span></span>
+      </div>
+      <div class="row">
+        <span class="label">&times; Owner-Operator Share (<span aria-label="Pay percentage"></span>%)</span>
+        <span class="value"></span>
+      </div>
+      <div class="row total-row">
+        <span class="label">TOTAL DUE</span>
+        <span class="value">$&nbsp;<span aria-label="Total due"></span></span>
+      </div>
+    </div>
+
+    <h2>MANDATORY ATTACHMENTS FOR PAYMENT VERIFICATION</h2>
+    <p class="italic-note">Per Section 5.02 of the Service Agreement, this invoice will NOT be processed if any items are missing:</p>
+    <ol class="checklist">
+      <li><input type="checkbox" aria-label="Verified ELD Data"><strong>Verified ELD Data:</strong> Full logs for every 14-hour cycle claimed above.</li>
+      <li><input type="checkbox" aria-label="Signed Bills of Lading"><strong>Signed Bills of Lading (BOL):</strong> Proof of delivery for every load listed.</li>
+      <li><input type="checkbox" aria-label="Daily Vehicle Inspection Reports"><strong>Daily Vehicle Inspection Reports (DVIR):</strong> Post-trip inspections for the week.</li>
+      <li><input type="checkbox" aria-label="Fuel Receipts"><strong>Fuel Receipts:</strong> All original receipts for the billing period.</li>
+    </ol>
+
+    <hr>
+
+    <h2>PAYMENT INSTRUCTIONS</h2>
+    <p class="italic-note">Payment will be remitted within <strong>7 calendar days</strong> of Monday verification via the method on file.</p>
+    <ul class="payment-list">
+      <li><strong>Bank on File:</strong> <input type="text" class="blank blank-md" aria-label="Bank on file"></li>
+      <li>
+        <strong>Account Type:</strong>
+        <label class="acct-choice"><input type="checkbox" aria-label="Checking"> Checking</label>
+        /
+        <label class="acct-choice"><input type="checkbox" aria-label="Savings"> Savings</label>
+      </li>
+    </ul>
+
+    <p><strong>PROVIDER CERTIFICATION:</strong> I certify that the services listed above were performed personally or by my authorized agents in full compliance with <strong>USDOT HOS</strong> regulations and <strong>LogisX Inc.</strong> safety policies. I acknowledge that any equipment damage or fines incurred during this period may be offset against this settlement.</p>
+
+    <div class="field-row" style="margin-top: 18px;">
+      <span class="label">Signature:</span>
+      <input type="text" class="blank blank-md" aria-label="Provider signature">
+      <span class="label">Date:</span>
+      <input type="text" class="blank blank-xs" aria-label="Signature date">
+    </div>
+  </main>
+</body>
+</html>

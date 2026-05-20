@@ -1,5 +1,5 @@
 <template>
-  <div class="msg-layout">
+  <div :class="['msg-layout', { 'msg-has-active': !!store.selectedDriver }]">
     <!-- Sidebar: conversations grouped by driver + load -->
     <div class="msg-sidebar" style="position:relative;">
       <div class="msg-sidebar-header">
@@ -10,14 +10,14 @@
       </div>
       <div v-if="showNewMsg" class="new-msg-form">
         <select v-model="newDriver" class="new-msg-select" @change="newLoadId = ''">
-          <option value="" disabled>Select driver</option>
+          <option value="" disabled>Select recipient</option>
           <option v-for="d in props.driverNames" :key="d" :value="d">{{ d }}</option>
         </select>
-        <select v-model="newLoadId" class="new-msg-select" :disabled="!newDriver || loadsForDriver.length === 0">
-          <option value="" disabled>{{ !newDriver ? 'Pick driver first' : loadsForDriver.length === 0 ? 'No active loads' : 'Select load' }}</option>
+        <select v-model="newLoadId" class="new-msg-select" :disabled="!newDriver">
+          <option value="">General</option>
           <option v-for="id in loadsForDriver" :key="id" :value="id">Load {{ id }}</option>
         </select>
-        <button class="new-msg-start" :disabled="!newDriver || !newLoadId" @click="startConversation">Open Chat</button>
+        <button class="new-msg-start" :disabled="!newDriver" @click="startConversation">Open Chat</button>
       </div>
       <div class="msg-driver-list">
         <div
@@ -41,6 +41,14 @@
     <!-- Chat area -->
     <div class="msg-chat">
       <div class="msg-chat-header">
+        <!-- Mobile back arrow — returns to the conversation list. Hidden on
+             desktop via CSS; the two-pane grid means both are visible. -->
+        <button
+          v-if="store.selectedDriver"
+          class="msg-back-btn"
+          aria-label="Back to conversations"
+          @click="deselectConversation"
+        >&#8592;</button>
         <template v-if="store.selectedDriver">
           {{ store.selectedDriver }}
           <span v-if="store.selectedLoadId" class="msg-header-load">— Load {{ store.selectedLoadId }}</span>
@@ -146,6 +154,13 @@ function isActive(c) {
   return store.selectedDriver &&
     c.driver.toLowerCase() === store.selectedDriver.toLowerCase() &&
     c.loadId === store.selectedLoadId
+}
+
+function deselectConversation() {
+  // Clears the active conversation so the mobile view returns to the
+  // conversation list. Desktop doesn't use this — both panes are always
+  // visible there.
+  if (store.selectConversation) store.selectConversation('', '')
 }
 
 function selectConversation(c) {

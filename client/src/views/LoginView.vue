@@ -1,44 +1,94 @@
 <template>
-  <div class="login-container">
-    <div class="login-header">
-      <img src="/logo.avif" alt="LogisX" class="login-logo-img" />
-      <p class="login-subtitle">Logistics Management</p>
+  <div class="login-split">
+    <!-- Left Panel: Branding -->
+    <div class="login-brand">
+      <div class="brand-center">
+        <img src="/logo.png" alt="LogisX" class="brand-logo" />
+        <div class="brand-divider"></div>
+        <p class="brand-tagline">Dispatch &amp; Fleet Management<br />Operations Platform</p>
+        <div class="brand-features">
+          <div class="feature-pill">&#128666; Real-time Tracking</div>
+          <div class="feature-pill">&#128203; Automated Dispatch</div>
+          <div class="feature-pill">&#128200; Fleet Analytics</div>
+        </div>
+      </div>
     </div>
 
-    <!-- SETUP FORM (first-time) -->
-    <div v-if="showSetup" class="card">
-      <h2>First-Time Setup</h2>
-      <p class="card-desc">Create your super admin account to get started.</p>
-      <div class="form-group">
-        <label class="form-label">Username</label>
-        <input v-model="setupForm.username" class="form-input" type="text" placeholder="Choose a username" autocomplete="username" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">Password</label>
-        <input v-model="setupForm.password" class="form-input" type="password" placeholder="Min. 4 characters" autocomplete="new-password" @keydown.enter="doSetup" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">Email (optional)</label>
-        <input v-model="setupForm.email" class="form-input" type="email" placeholder="you@company.com" />
-      </div>
-      <button class="btn btn-primary" :disabled="setupLoading" @click="doSetup">Create Super Admin Account</button>
-      <div class="error-msg">{{ setupError }}</div>
-    </div>
+    <!-- Right Panel: Form -->
+    <div class="login-form-panel">
+      <div class="form-wrapper">
+        <!-- Mobile logo -->
+        <div class="mobile-logo">
+          <img src="/logo.png" alt="LogisX" />
+        </div>
 
-    <!-- LOGIN FORM -->
-    <div v-if="showLogin" class="card">
-      <h2>Welcome back</h2>
-      <p class="card-desc">Sign in to your account to continue.</p>
-      <div class="form-group">
-        <label class="form-label">Username</label>
-        <input v-model="loginForm.username" class="form-input" type="text" placeholder="Enter your username" autocomplete="username" />
+        <!-- SETUP FORM -->
+        <template v-if="showSetup">
+          <div class="form-header">
+            <h2 class="form-title">Get Started</h2>
+            <p class="form-desc">Create your admin account to begin.</p>
+          </div>
+          <form @submit.prevent="doSetup" class="login-form">
+            <div class="field">
+              <label class="field-label">USERNAME</label>
+              <div class="input-wrap">
+                <span class="input-icon">&#128100;</span>
+                <input v-model="setupForm.username" type="text" placeholder="Choose a username" autocomplete="username" />
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label">PASSWORD</label>
+              <div class="input-wrap">
+                <span class="input-icon">&#128274;</span>
+                <input v-model="setupForm.password" type="password" placeholder="Min. 4 characters" autocomplete="new-password" @keydown.enter="doSetup" />
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label">EMAIL <span class="optional">(optional)</span></label>
+              <div class="input-wrap">
+                <span class="input-icon">&#9993;</span>
+                <input v-model="setupForm.email" type="email" placeholder="you@company.com" />
+              </div>
+            </div>
+            <button type="submit" class="submit-btn" :disabled="setupLoading">
+              {{ setupLoading ? 'CREATING...' : 'CREATE ACCOUNT' }}
+            </button>
+            <p v-if="setupError" class="error-text">{{ setupError }}</p>
+          </form>
+        </template>
+
+        <!-- LOGIN FORM -->
+        <template v-if="showLogin">
+          <div class="form-header">
+            <h2 class="form-title">Welcome back</h2>
+            <p class="form-desc">Sign in to your account to continue</p>
+          </div>
+          <form @submit.prevent="doLogin" class="login-form">
+            <div class="field">
+              <label class="field-label">USERNAME</label>
+              <div class="input-wrap">
+                <span class="input-icon">&#128100;</span>
+                <input v-model="loginForm.username" type="text" placeholder="Enter your username" autocomplete="username" />
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label">PASSWORD</label>
+              <div class="input-wrap">
+                <span class="input-icon">&#128274;</span>
+                <input v-model="loginForm.password" type="password" placeholder="Enter your password" autocomplete="current-password" @keydown.enter="doLogin" />
+              </div>
+            </div>
+            <button type="submit" class="submit-btn" :disabled="loginLoading">
+              {{ loginLoading ? 'SIGNING IN...' : 'SIGN IN' }}
+            </button>
+            <p v-if="loginError" class="error-text">{{ loginError }}</p>
+          </form>
+        </template>
+
+        <div class="form-footer">
+          <p>&copy; 2026 LogisX. All rights reserved.</p>
+        </div>
       </div>
-      <div class="form-group">
-        <label class="form-label">Password</label>
-        <input v-model="loginForm.password" class="form-input" type="password" placeholder="Enter your password" autocomplete="current-password" @keydown.enter="doLogin" />
-      </div>
-      <button class="btn btn-primary" :disabled="loginLoading" @click="doLogin">Sign In</button>
-      <div class="error-msg">{{ loginError }}</div>
     </div>
   </div>
 </template>
@@ -84,7 +134,6 @@ async function doSetup() {
     setupError.value = 'Password must be at least 4 characters.'
     return
   }
-
   setupLoading.value = true
   try {
     await auth.setup(setupForm.username, setupForm.password, setupForm.email)
@@ -102,7 +151,6 @@ async function doLogin() {
     loginError.value = 'Enter username and password.'
     return
   }
-
   loginLoading.value = true
   try {
     await auth.login(loginForm.username, loginForm.password)
@@ -116,60 +164,260 @@ async function doLogin() {
 </script>
 
 <style scoped>
-.login-container {
-  width: 100%;
-  max-width: 520px;
-  padding: 1.5rem;
-  margin: 0 auto;
+.login-split {
+  display: flex;
   min-height: 100vh;
+  width: 100%;
+}
+
+/* Left brand panel */
+.login-brand {
+  flex: 0 0 45%;
+  background: #0f2137;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+
+/* removed radial gradient overlay — caused visible color seam */
+
+.brand-center {
+  text-align: center;
+  position: relative;
+  z-index: 1;
+}
+
+.brand-logo {
+  width: 220px;
+  height: auto;
+  margin-bottom: 1.5rem;
+}
+
+.brand-divider {
+  width: 60px;
+  height: 3px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.3), rgba(56, 189, 248, 0.8), rgba(56, 189, 248, 0.3));
+  margin: 0 auto 1.5rem;
+  border-radius: 2px;
+}
+
+.brand-tagline {
+  font-size: 1.15rem;
+  line-height: 1.7;
+  font-weight: 300;
+  letter-spacing: 0.03em;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.3);
+  margin-bottom: 2.5rem;
+}
+
+.brand-features {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  gap: 0.65rem;
 }
-.login-header {
+
+.feature-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1.25rem;
+  border-radius: 50px;
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  background: rgba(56, 189, 248, 0.08);
+  backdrop-filter: blur(4px);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  transition: all 0.3s;
+}
+
+.feature-pill:hover {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: rgba(56, 189, 248, 0.4);
+  color: rgba(255, 255, 255, 0.95);
+  transform: translateX(4px);
+}
+
+/* Right form panel */
+.login-form-panel {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  background: #ffffff;
+  position: relative;
+}
+
+.form-wrapper {
+  width: 100%;
+  max-width: 420px;
+}
+
+.mobile-logo {
+  display: none;
   text-align: center;
   margin-bottom: 2rem;
 }
-.login-logo-img {
-  max-width: 180px;
+
+.mobile-logo img {
+  width: 140px;
   height: auto;
-  margin-bottom: 0.5rem;
 }
-.login-subtitle {
-  color: var(--text-dim);
-  font-size: 0.82rem;
+
+.form-header {
+  margin-bottom: 2rem;
 }
-.card {
-  width: 100%;
-  padding: 1.75rem;
-  margin-bottom: 1rem;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.03);
-}
-.card h2 {
-  font-size: 1.1rem;
+
+.form-title {
+  font-size: 1.6rem;
   font-weight: 700;
-  margin-bottom: 0.35rem;
+  color: #111827;
+  margin-bottom: 0.4rem;
 }
-.card-desc {
-  font-size: 0.82rem;
-  color: var(--text-dim);
-  margin-bottom: 1.25rem;
+
+.form-desc {
+  font-size: 0.9rem;
+  color: #9ca3af;
 }
-.error-msg {
-  color: var(--danger);
-  font-size: 0.78rem;
-  margin-top: 0.5rem;
-  min-height: 1.1em;
+
+/* Form fields */
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
 }
-.btn-primary {
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.field-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #374151;
+}
+
+.field-label .optional {
+  font-weight: 400;
+  color: #9ca3af;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.input-wrap {
+  display: flex;
+  align-items: center;
+  border: 1.5px solid #e2e4ea;
+  border-radius: 10px;
+  background: #f9fafb;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  overflow: hidden;
+}
+
+.input-wrap:focus-within {
+  border-color: hsl(199, 89%, 48%);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1);
+  background: #fff;
+}
+
+.input-icon {
+  padding: 0 0 0 0.85rem;
+  font-size: 1rem;
+  color: #9ca3af;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.input-wrap input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 0.8rem 0.85rem;
+  font-size: 0.9rem;
+  font-family: inherit;
+  color: #111827;
+}
+
+.input-wrap input::placeholder {
+  color: #c4c8d0;
+}
+
+/* Submit button */
+.submit-btn {
   width: 100%;
-  padding: 0.75rem;
+  padding: 0.85rem;
+  margin-top: 0.5rem;
+  border: none;
+  border-radius: 10px;
+  background: hsl(199, 89%, 48%);
+  color: white;
   font-size: 0.88rem;
-  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.25);
+  font-weight: 700;
+  font-family: inherit;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: all 0.15s;
 }
-.btn-primary:hover {
+
+.submit-btn:hover:not(:disabled) {
+  background: hsl(199, 89%, 42%);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  box-shadow: 0 4px 14px rgba(56, 189, 248, 0.35);
+}
+
+.submit-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error-text {
+  font-size: 0.82rem;
+  color: #dc2626;
+  text-align: center;
+}
+
+.form-footer {
+  position: absolute;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.form-footer p {
+  font-size: 0.72rem;
+  color: #d1d5db;
+  letter-spacing: 0.02em;
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+  .login-split {
+    flex-direction: column;
+  }
+  .login-brand {
+    display: none;
+  }
+  .mobile-logo {
+    display: block;
+  }
+  .login-form-panel {
+    min-height: 100vh;
+  }
+  .form-footer {
+    position: static;
+    transform: none;
+    text-align: center;
+    margin-top: 3rem;
+  }
 }
 </style>

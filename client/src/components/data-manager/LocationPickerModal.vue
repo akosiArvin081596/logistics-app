@@ -14,6 +14,10 @@
               placeholder="Search address..."
               @input="onSearchInput"
             />
+            <button type="button" class="locate-btn" :disabled="locating" @click="goToMyLocation" title="Use my current location">
+              <svg v-if="!locating" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+              <span v-else class="spin-icon">&#8635;</span>
+            </button>
             <div v-if="suggestions.length" class="suggestions-dropdown">
               <div
                 v-for="(s, i) in suggestions"
@@ -43,7 +47,7 @@
 
 <script setup>
 import { ref, watch, nextTick } from 'vue'
-import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
+import { useGoogleMaps } from '../../composables/useGoogleMaps'
 import { useGeocode } from '../../composables/useGeocode'
 
 const props = defineProps({
@@ -62,12 +66,20 @@ const markerPos = ref(null)
 const selectedAddress = ref('')
 const searchQuery = ref('')
 const suggestions = ref([])
+const locating = ref(false)
 let searchTimer = null
 let map = null
 let marker = null
 
 function clearMarker() {
   if (marker) { marker.map = null; marker = null }
+}
+
+function createPinEl() {
+  const el = document.createElement('div')
+  el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="42" viewBox="0 0 24 32" fill="#e53935" stroke="#b71c1c" stroke-width="0.5"><path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0zm0 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/><circle cx="12" cy="12" r="3" fill="white"/></svg>`
+  el.style.cssText = 'cursor:pointer;transform:translate(0,-50%);'
+  return el
 }
 
 function placeMarker(pos) {
@@ -77,7 +89,7 @@ function placeMarker(pos) {
     marker = new google.maps.marker.AdvancedMarkerElement({
       position: pos,
       map,
-      content: createDotPin('#6366f1', 16),
+      content: createPinEl(),
     })
   }
 }
@@ -135,7 +147,13 @@ watch(() => props.open, async (isOpen) => {
   if (!hasInitial && navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        if (map) { map.panTo({ lat: pos.coords.latitude, lng: pos.coords.longitude }); map.setZoom(15) }
+        const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+        if (map) { map.panTo(loc); map.setZoom(15) }
+        placeMarker(loc)
+        markerPos.value = loc
+        geocode.reverseGeocode(loc.lat, loc.lng).then(r => {
+          if (r) selectedAddress.value = r.displayName
+        })
       },
       () => {},
       { timeout: 8000, enableHighAccuracy: false }
@@ -158,6 +176,26 @@ function selectSuggestion(s) {
   searchQuery.value = ''
   suggestions.value = []
   if (map) { map.panTo(pos); map.setZoom(15) }
+}
+
+function goToMyLocation() {
+  if (!navigator.geolocation) return
+  locating.value = true
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+      placeMarker(loc)
+      markerPos.value = loc
+      selectedAddress.value = ''
+      if (map) { map.panTo(loc); map.setZoom(15) }
+      geocode.reverseGeocode(loc.lat, loc.lng).then(r => {
+        if (r) selectedAddress.value = r.displayName
+      })
+      locating.value = false
+    },
+    () => { locating.value = false },
+    { timeout: 8000, enableHighAccuracy: false }
+  )
 }
 
 function handleConfirm() {
@@ -200,12 +238,22 @@ function handleConfirm() {
 .picker-body { padding: 1rem 1.25rem; }
 .search-wrap { position: relative; margin-bottom: 0.75rem; }
 .search-input {
-  width: 100%; padding: 0.55rem 0.75rem; background: var(--bg);
+  width: 100%; padding: 0.55rem 2.25rem 0.55rem 0.75rem; background: var(--bg);
   border: 1px solid var(--border); border-radius: 6px;
   color: var(--text); font-family: 'DM Sans', sans-serif;
   font-size: 0.88rem; outline: none;
 }
 .search-input:focus { border-color: var(--accent); }
+.locate-btn {
+  position: absolute; right: 6px; top: 6px;
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--surface);
+  color: var(--text-dim); cursor: pointer; z-index: 1;
+}
+.locate-btn:hover { background: var(--surface-hover); color: var(--text); }
+.locate-btn:disabled { cursor: wait; opacity: 0.5; }
+.spin-icon { display: inline-block; animation: locateSpin 0.8s linear infinite; font-size: 1rem; }
+@keyframes locateSpin { to { transform: rotate(360deg); } }
 .suggestions-dropdown {
   position: absolute; top: 100%; left: 0; right: 0;
   background: var(--surface); border: 1px solid var(--border);

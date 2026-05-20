@@ -7,10 +7,11 @@
         <div class="expense-desc">{{ expense.description || expense.date || '' }}</div>
       </div>
       <img
-        v-if="expense.photoData && expense.photoData.startsWith('data:')"
+        v-if="expense.photoData"
         class="expense-thumb"
         :src="expense.photoData"
         alt="Receipt"
+        @click.stop="$emit('preview', expense.photoData)"
       />
       <div>
         <div class="expense-amount">{{ formatCurrency(expense.amount) }}</div>
@@ -26,6 +27,8 @@ import { computed } from 'vue'
 const props = defineProps({
   expense: { type: Object, required: true },
 })
+
+defineEmits(['preview'])
 
 const typeIcons = {
   Fuel: '&#9981;',

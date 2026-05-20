@@ -8,23 +8,32 @@
     "dev": "nodemon --ext js server.js",
     "dev:client": "cd client && npm run dev",
     "build:client": "cd client && npm run build",
+    "docs:build": "node scripts/docs/generate-docs.js",
+    "docs:screenshots": "node scripts/docs/capture-screenshots.js",
     "postinstall": "cd client && npm install"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.8.0",
     "better-sqlite3-session-store": "^0.1.0",
+    "cheerio": "^1.2.0",
     "compression": "^1.8.1",
     "dotenv": "^17.3.1",
     "express": "^4.18.2",
+    "express-rate-limit": "^8.3.2",
     "express-session": "^1.19.0",
     "geolib": "^3.3.4",
     "googleapis": "^128.0.0",
+    "nodemailer": "^8.0.5",
+    "pdf-lib": "^1.17.1",
     "pdfkit": "^0.18.0",
+    "puppeteer": "^24.40.0",
     "socket.io": "^4.8.3",
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
+    "marked": "^18.0.3",
     "nodemon": "^3.1.14"
   }
 }

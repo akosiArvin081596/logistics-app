@@ -11,12 +11,11 @@
       <thead>
         <tr>
           <th>User</th>
+          <th>Username</th>
           <th>Role</th>
           <th>Full Name</th>
-          <th>Company</th>
-          <th>Linked Driver</th>
+          <th>Details</th>
           <th>Email</th>
-          <th>Rating</th>
           <th>Created</th>
           <th></th>
         </tr>
@@ -24,29 +23,22 @@
       <tbody>
         <tr v-for="user in users" :key="user.id">
           <td>
-            <span :class="['user-avatar', avatarClass(user.Role)]">{{ initials(user.Username) }}</span>
-            {{ user.Username || '' }}
+            <span :class="['user-avatar', avatarClass(user.Role)]">{{ initials(user.FullName || user.Username) }}</span>
+            {{ user.FullName || user.Username || '' }}
           </td>
+          <td class="mono" style="font-size:0.8rem;color:var(--text-dim);">{{ user.Username || '' }}</td>
           <td>
             <span :class="['role-badge', roleClass(user.Role)]">{{ user.Role || '' }}</span>
+            <span v-if="user.OnboardingStatus && user.OnboardingStatus !== 'fully_onboarded'" class="onboarding-badge">Onboarding</span>
           </td>
           <td :style="{ color: user.FullName ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.FullName || '\u2014' }}
           </td>
-          <td :style="{ color: user.CompanyName ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ user.CompanyName || '\u2014' }}
-          </td>
-          <td :style="{ color: user.DriverName ? 'var(--text)' : 'var(--text-dim)' }">
-            {{ user.DriverName || '\u2014' }}
+          <td :style="{ color: userDetail(user) !== '\u2014' ? 'var(--text)' : 'var(--text-dim)' }">
+            {{ userDetail(user) }}
           </td>
           <td :style="{ color: user.Email ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.Email || '\u2014' }}
-          </td>
-          <td>
-            <div v-if="user.Role === 'Driver'" class="star-rating">
-              <span v-for="s in 5" :key="s" class="star" :class="{ filled: s <= (user.Rating || 0), clickable: true }" @click="$emit('rate', user.id, s)">&#9733;</span>
-            </div>
-            <span v-else style="color:var(--text-dim);">&mdash;</span>
           </td>
           <td class="created-at">
             {{ formatDate(user.CreatedAt) }}
@@ -91,8 +83,11 @@
           </div>
 
           <div class="edit-field">
-            <label>Company Name</label>
-            <input v-model="editForm.companyName" type="text" placeholder="e.g. Smith Trucking LLC" />
+            <label>Company Name (Carrier)</label>
+            <select v-model="editForm.companyName">
+              <option value="">-- Select carrier --</option>
+              <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
+            </select>
           </div>
 
           <div class="edit-field">
@@ -133,6 +128,7 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 defineProps({
   users: { type: Array, default: () => [] },
   driverNames: { type: Array, default: () => [] },
+  carrierNames: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits(['delete', 'update', 'rate'])
@@ -166,6 +162,12 @@ function handleSaveEdit() {
   if (editForm.password) data.password = editForm.password
   emit('update', { id: editForm.id, data })
   showEdit.value = false
+}
+
+function userDetail(user) {
+  if (user.Role === 'Investor' && user.CompanyName) return user.CompanyName
+  if (user.Role === 'Driver' && user.DriverName) return user.DriverName
+  return '\u2014'
 }
 
 function initials(name) {
@@ -314,6 +316,18 @@ function handleConfirmDelete() {
   color: var(--amber);
 }
 
+.onboarding-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: 12px;
+  font-size: 0.62rem;
+  font-weight: 600;
+  background: #fef3c7;
+  color: #92400e;
+  margin-left: 0.3rem;
+  white-space: nowrap;
+}
 .role-badge {
   display: inline-flex;
   align-items: center;

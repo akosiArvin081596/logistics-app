@@ -85,9 +85,20 @@
             :after-read="handlePhoto"
             accept="image/*"
             capture="camera"
+            result-type="file"
           />
         </template>
       </van-field>
+
+      <div v-if="ocrLoading" class="ocr-status ocr-status-loading">
+        <span class="ocr-spinner"></span>
+        Reading receipt&hellip;
+      </div>
+      <div v-else-if="ocrApplied" class="ocr-status ocr-status-applied" :class="`ocr-conf-${ocrConfidence || 'medium'}`">
+        <span class="ocr-dot"></span>
+        Parsed from receipt &middot; please verify the amount
+        <button type="button" class="ocr-undo" @click="undoAutofill">Undo autofill</button>
+      </div>
     </van-cell-group>
 
     <div class="form-submit">
@@ -121,7 +132,7 @@ const showLoadPicker = ref(false)
 const form = reactive({
   type: 'Fuel',
   amount: '',
-  date: new Date().toISOString().split('T')[0],
+  date: new Date().toLocaleDateString('en-CA'),
   loadId: '',
   description: '',
   gallons: '',
@@ -167,25 +178,110 @@ function onLoadPick({ selectedOptions }) {
   showLoadPicker.value = false
 }
 
-function handlePhoto(file) {
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    const img = new Image()
-    img.onload = () => {
-      const canvas = document.createElement('canvas')
-      const MAX = 200
-      let w = img.width
-      let h = img.height
+// Snapshot of the form values before OCR prefill so "Undo autofill" can
+// restore what the driver had typed.
+const preOcrSnapshot = ref(null)
+const ocrLoading = ref(false)
+const ocrApplied = ref(false)
+const ocrConfidence = ref('')
+
+async function handlePhoto(file) {
+  const blob = file && file.file
+  if (!blob) return
+  const MAX = 1024
+  try {
+    // Decode + downscale in one pass via createImageBitmap. Without resize
+    // options, a 12MP phone photo would materialize ~48MB of raw RGBA in
+    // memory before we touch the canvas — that's what was OOM-killing the
+    // tab on low-RAM phones and bouncing the driver to /login.
+    const probe = await createImageBitmap(blob)
+    let w = probe.width
+    let h = probe.height
+    probe.close()
+    if (w > MAX || h > MAX) {
       if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
       else { w = Math.round((w * MAX) / h); h = MAX }
-      canvas.width = w
-      canvas.height = h
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h)
-      photoBase64.value = canvas.toDataURL('image/jpeg', 0.6)
     }
-    img.src = e.target.result
+    const bitmap = await createImageBitmap(blob, {
+      resizeWidth: w,
+      resizeHeight: h,
+      resizeQuality: 'medium',
+    })
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    canvas.getContext('2d').drawImage(bitmap, 0, 0)
+    bitmap.close()
+    photoBase64.value = canvas.toDataURL('image/jpeg', 0.8)
+    // Release the canvas backing store now that the encoded string is captured.
+    canvas.width = 0
+    canvas.height = 0
+  } catch {
+    photoBase64.value = ''
+    toast.show("Couldn't process the photo — please retake", 'error')
+    return
   }
-  reader.readAsDataURL(file.file)
+  await runReceiptOcr()
+}
+
+async function runReceiptOcr() {
+  if (!photoBase64.value) return
+  ocrLoading.value = true
+  ocrApplied.value = false
+  ocrConfidence.value = ''
+  // Snapshot what the driver had entered so we can offer Undo.
+  preOcrSnapshot.value = {
+    amount: form.amount,
+    date: form.date,
+    type: form.type,
+    description: form.description,
+    gallons: form.gallons,
+    odometer: form.odometer,
+  }
+  try {
+    const res = await fetch('/api/expenses/ocr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photoData: photoBase64.value }),
+    })
+    if (res.status === 503) {
+      // API key not configured — silent fallback to manual entry.
+      preOcrSnapshot.value = null
+      return
+    }
+    if (!res.ok) {
+      toast.show('Couldn\'t read receipt — please fill in the fields', 'error')
+      preOcrSnapshot.value = null
+      return
+    }
+    const data = await res.json()
+    // Prefill non-null fields only. Never override type if the driver already
+    // picked something other than the default Fuel.
+    if (data.amount != null) form.amount = String(data.amount)
+    if (data.date) form.date = data.date
+    if (data.vendor && !form.description) form.description = data.vendor
+    if (data.gallons != null) form.gallons = String(data.gallons)
+    if (data.odometer != null) form.odometer = String(data.odometer)
+    if (data.suggestedType && form.type === 'Fuel') form.type = data.suggestedType
+    ocrApplied.value = true
+    ocrConfidence.value = data.confidence || ''
+  } catch {
+    toast.show('Couldn\'t read receipt — please fill in the fields', 'error')
+    preOcrSnapshot.value = null
+  } finally {
+    ocrLoading.value = false
+  }
+}
+
+function undoAutofill() {
+  if (!preOcrSnapshot.value) return
+  form.amount = preOcrSnapshot.value.amount
+  form.date = preOcrSnapshot.value.date
+  form.type = preOcrSnapshot.value.type
+  form.description = preOcrSnapshot.value.description
+  form.gallons = preOcrSnapshot.value.gallons
+  form.odometer = preOcrSnapshot.value.odometer
+  ocrApplied.value = false
 }
 
 function handleSubmit() {
@@ -219,6 +315,9 @@ function handleSubmit() {
     form.odometer = ''
     photoBase64.value = ''
     fileList.value = []
+    ocrApplied.value = false
+    ocrConfidence.value = ''
+    preOcrSnapshot.value = null
     // Keep loadId if only one load (inside load detail)
     if (props.loads.length > 1) form.loadId = ''
   } finally {
@@ -248,5 +347,63 @@ function handleSubmit() {
 .no-loads-msg .empty-icon {
   font-size: 2rem;
   margin-bottom: 0.5rem;
+}
+
+.ocr-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0.85rem 0.25rem;
+  padding: 0.55rem 0.8rem;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+.ocr-status-loading {
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #dbeafe;
+}
+.ocr-status-applied {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+.ocr-conf-low {
+  background: #fffbeb;
+  color: #92400e;
+  border-color: #fde68a;
+}
+.ocr-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.ocr-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(30, 64, 175, 0.25);
+  border-top-color: #1e40af;
+  border-radius: 50%;
+  animation: ocr-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes ocr-spin { to { transform: rotate(360deg); } }
+.ocr-undo {
+  margin-left: auto;
+  padding: 0.2rem 0.55rem;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  color: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.ocr-undo:hover {
+  opacity: 0.75;
 }
 </style>

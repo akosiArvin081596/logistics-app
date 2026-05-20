@@ -12,6 +12,78 @@
 
     <!-- ALL EXPENSES -->
     <div v-show="activeSubTab === 'all'" class="sub-panel">
+      <!-- Download Receipts — Super Admin only.
+           Streams a ZIP of every receipt file for a specific truck in a
+           date range, plus a manifest.csv for accounting review. -->
+      <div v-if="auth.isSuperAdmin" class="download-receipts-card">
+        <div class="download-receipts-title">
+          <span>Download Receipts (ZIP)</span>
+          <span class="download-receipts-hint">Bundle all receipts for a truck &amp; date range</span>
+        </div>
+        <div class="download-receipts-row">
+          <select v-model="downloadForm.truck" class="add-input" style="max-width:180px" aria-label="Truck unit">
+            <option value="">Select Truck *</option>
+            <option v-for="t in truckList" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <input v-model="downloadForm.from" type="date" class="add-input" style="max-width:160px" :max="downloadForm.to || todayIso" aria-label="From date" />
+          <input v-model="downloadForm.to" type="date" class="add-input" style="max-width:160px" :min="downloadForm.from" :max="todayIso" aria-label="To date" />
+          <button class="btn btn-primary" :disabled="!canDownload || downloadLoading" @click="downloadReceipts">
+            {{ downloadLoading ? 'Preparing...' : 'Download ZIP' }}
+          </button>
+        </div>
+        <div v-if="downloadError" class="download-receipts-error">{{ downloadError }}</div>
+      </div>
+
+      <!-- Add Expense form — Super Admin / Dispatcher only -->
+      <div v-if="canAddExpense" class="add-expense-card">
+        <div class="add-expense-title">Log Expense</div>
+        <div class="add-expense-row">
+          <select v-model="addForm.driver" class="add-input">
+            <option value="">Select Driver *</option>
+            <option v-for="d in allDrivers" :key="d" :value="d">{{ d }}</option>
+          </select>
+          <select v-model="addForm.type" class="add-input">
+            <option v-for="t in expenseTypes" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <input v-model="addForm.amount" type="number" step="0.01" min="0" placeholder="Amount *" class="add-input" style="max-width:120px" />
+          <input v-model="addForm.date" type="date" class="add-input" style="max-width:150px" />
+          <button class="btn btn-primary add-btn" :disabled="addLoading || photoProcessing" @click="submitExpense">{{ addLoading ? '...' : 'Add' }}</button>
+        </div>
+        <div class="add-expense-row">
+          <input v-model="addForm.loadId" type="text" placeholder="Load ID (optional)" class="add-input" style="max-width:180px" />
+          <input v-model="addForm.description" type="text" placeholder="Description (e.g., Tire repair paid via phone)" class="add-input" style="flex:1" />
+        </div>
+        <div class="add-expense-row add-expense-photo-row">
+          <label class="add-photo-label">
+            Receipt
+            <input
+              ref="fileInputRef"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              class="add-photo-input"
+              :disabled="addLoading || photoProcessing"
+              @change="handleFileInput"
+            />
+          </label>
+          <span v-if="photoProcessing" class="add-photo-hint">Processing image…</span>
+          <img
+            v-else-if="photoBase64"
+            :src="photoBase64"
+            class="receipt-thumb add-photo-preview"
+            alt="Receipt preview"
+            @click="previewImg = photoBase64"
+          />
+          <button
+            v-if="photoBase64 && !photoProcessing"
+            type="button"
+            class="add-photo-clear"
+            :disabled="addLoading"
+            @click="clearPhoto"
+          >Remove</button>
+        </div>
+      </div>
+
       <template v-if="allLoading">
         <div class="skeleton skeleton-card"></div>
       </template>
@@ -20,6 +92,10 @@
           <select v-model="allFilter.driver" class="filter-select" @change="loadAll">
             <option value="">All Drivers</option>
             <option v-for="d in allDrivers" :key="d" :value="d">{{ d }}</option>
+          </select>
+          <select v-model="allFilter.truck" class="filter-select" @change="loadAll">
+            <option value="">All Trucks</option>
+            <option v-for="t in truckList" :key="t" :value="t">{{ t }}</option>
           </select>
           <select v-model="allFilter.type" class="filter-select" @change="loadAll">
             <option value="">All Types</option>
@@ -35,11 +111,42 @@
         </div>
 
         <div v-if="allExpenses.length === 0" class="empty-msg">No expenses found.</div>
+        <!-- Mobile: card list. Tap the card → detail modal (shipped
+             2026-04-20, already mobile-friendly). Approve / Reject full
+             width in the card footer. -->
+        <div v-else-if="isMobile" class="mobile-exp-list">
+          <div v-for="e in allExpenses" :key="e.id" class="mobile-exp-card" @click="openExpenseDetail(e)">
+            <div class="mobile-exp-top">
+              <div class="mobile-exp-top-left">
+                <div class="mobile-exp-date">{{ fmtDate(e.date) }}</div>
+                <div class="mobile-exp-driver">{{ e.driver }}<span v-if="e.truck_unit" class="mobile-exp-truck"> · #{{ e.truck_unit }}</span></div>
+              </div>
+              <span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span>
+            </div>
+            <div v-if="e.description" class="mobile-exp-desc">{{ e.description }}</div>
+            <div class="mobile-exp-bottom">
+              <div class="mobile-exp-amount">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
+              <div class="mobile-exp-bottom-right">
+                <img v-if="e.photo_data" :src="e.photo_data" class="receipt-thumb mobile-exp-thumb" @click.stop="previewImg = e.photo_data" alt="Receipt" />
+                <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
+              </div>
+            </div>
+            <div class="mobile-exp-actions" @click.stop>
+              <template v-if="(e.status || 'Pending') === 'Pending'">
+                <button class="btn-approve mobile-exp-btn" @click="setStatus(e.id, 'Approved')">Approve</button>
+                <button class="btn-reject mobile-exp-btn" @click="setStatus(e.id, 'Rejected')">Reject</button>
+              </template>
+              <button v-else-if="e.status !== 'Pending'" class="btn-undo mobile-exp-btn" @click="setStatus(e.id, 'Pending')">Undo</button>
+            </div>
+          </div>
+        </div>
+        <!-- Desktop: existing table with new Truck column -->
         <table v-else class="data-table">
           <thead>
             <tr>
               <th>Date</th>
               <th>Driver</th>
+              <th>Truck</th>
               <th>Type</th>
               <th>Description</th>
               <th>Amount</th>
@@ -49,20 +156,21 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="e in allExpenses" :key="e.id">
+            <tr v-for="e in allExpenses" :key="e.id" class="expense-row" @click="openExpenseDetail(e)">
               <td class="mono-sm">{{ fmtDate(e.date) }}</td>
               <td>{{ e.driver }}</td>
+              <td class="mono-sm">{{ e.truck_unit ? '#' + e.truck_unit : '\u2014' }}</td>
               <td><span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span></td>
               <td class="desc-cell">{{ e.description || '\u2014' }}</td>
               <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
-              <td>
+              <td @click.stop>
                 <img v-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
                 <span v-else class="dim">\u2014</span>
               </td>
               <td>
                 <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
               </td>
-              <td class="action-cell">
+              <td class="action-cell" @click.stop>
                 <template v-if="(e.status || 'Pending') === 'Pending'">
                   <button class="btn-approve" @click="setStatus(e.id, 'Approved')">Approve</button>
                   <button class="btn-reject" @click="setStatus(e.id, 'Rejected')">Reject</button>
@@ -78,6 +186,81 @@
       <Teleport to="body">
         <div v-if="previewImg" class="preview-overlay" @click="previewImg = null">
           <img :src="previewImg" class="preview-img" />
+        </div>
+      </Teleport>
+
+      <!-- Expense breakdown modal. Opens on row click. Shows the same fields
+           that live in the DB but aren't in the list (gallons, odometer,
+           derived price-per-gallon) plus a bigger receipt preview.
+           Prev/Next cycles through the current filtered list; Approve/Reject
+           inside the modal auto-advance to the next Pending row. -->
+      <Teleport to="body">
+        <div v-if="selectedExpense" class="exp-overlay" @click.self="closeExpenseDetail">
+          <div class="exp-dialog">
+            <div class="exp-nav">
+              <button class="exp-nav-btn" :disabled="!canGoPrev" @click="goPrev" aria-label="Previous pending expense" title="Previous pending (←)">&larr; Prev</button>
+              <span class="exp-nav-counter">
+                <template v-if="isCurrentPending">Pending {{ pendingPos + 1 }} of {{ pendingIndices.length }}</template>
+                <template v-else-if="pendingIndices.length > 0">Viewing {{ (selectedExpense?.status || 'Pending').toLowerCase() }} · {{ pendingIndices.length }} pending remain</template>
+                <template v-else>No pending expenses</template>
+              </span>
+              <button class="exp-nav-btn" :disabled="!canGoNext" @click="goNext" aria-label="Next pending expense" title="Next pending (→)">Next &rarr;</button>
+            </div>
+            <div class="exp-header">
+              <div>
+                <div class="exp-type" :class="'type-' + (selectedExpense.type || 'other').toLowerCase()">{{ selectedExpense.type || 'Other' }}</div>
+                <div class="exp-amount">${{ Number(selectedExpense.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
+                <div class="exp-sub">{{ fmtDate(selectedExpense.date) }} &middot; {{ selectedExpense.driver }}</div>
+              </div>
+              <button class="exp-close" @click="closeExpenseDetail" aria-label="Close (Esc)">&times;</button>
+            </div>
+            <div class="exp-grid">
+              <template v-if="isFuelExpense(selectedExpense)">
+                <div class="exp-stat">
+                  <span class="exp-stat-label">Gallons</span>
+                  <span class="exp-stat-value">{{ Number(selectedExpense.gallons || 0).toFixed(2) }}</span>
+                </div>
+                <div class="exp-stat">
+                  <span class="exp-stat-label">Price / Gallon</span>
+                  <span class="exp-stat-value">${{ pricePerGallon(selectedExpense) }}</span>
+                </div>
+                <div class="exp-stat">
+                  <span class="exp-stat-label">Odometer</span>
+                  <span class="exp-stat-value">{{ selectedExpense.odometer ? Number(selectedExpense.odometer).toLocaleString() : '\u2014' }}</span>
+                </div>
+              </template>
+              <div class="exp-stat">
+                <span class="exp-stat-label">Status</span>
+                <span class="exp-stat-value">
+                  <span :class="['status-pill', 'st-' + (selectedExpense.status || 'Pending').toLowerCase()]">{{ selectedExpense.status || 'Pending' }}</span>
+                </span>
+              </div>
+              <div v-if="selectedExpense.load_id" class="exp-stat">
+                <span class="exp-stat-label">Load</span>
+                <span class="exp-stat-value mono-sm">{{ selectedExpense.load_id }}</span>
+              </div>
+              <div v-if="selectedExpense.truck_unit" class="exp-stat">
+                <span class="exp-stat-label">Truck</span>
+                <span class="exp-stat-value">#{{ selectedExpense.truck_unit }}</span>
+              </div>
+            </div>
+            <div v-if="selectedExpense.description" class="exp-desc">
+              <div class="exp-desc-label">Description</div>
+              <div>{{ selectedExpense.description }}</div>
+            </div>
+            <div v-if="selectedExpense.photo_data" class="exp-receipt">
+              <div class="exp-desc-label">Receipt</div>
+              <img :src="selectedExpense.photo_data" class="exp-receipt-img" @click="previewImg = selectedExpense.photo_data" />
+              <div class="exp-receipt-hint">Click to enlarge</div>
+            </div>
+            <div class="exp-actions">
+              <template v-if="(selectedExpense.status || 'Pending') === 'Pending'">
+                <button class="exp-btn-approve" :disabled="approveLoading" @click="approveCurrent">{{ approveLoading ? '…' : 'Approve' }}</button>
+                <button class="exp-btn-reject" :disabled="approveLoading" @click="rejectCurrent">{{ approveLoading ? '…' : 'Reject' }}</button>
+              </template>
+              <button v-else class="exp-btn-undo" :disabled="approveLoading" @click="undoCurrent">{{ approveLoading ? '…' : 'Undo' }}</button>
+            </div>
+          </div>
         </div>
       </Teleport>
     </div>
@@ -265,19 +448,32 @@
         <div class="skeleton skeleton-card"></div>
       </template>
       <template v-else>
+        <!-- Date filter -->
+        <div class="section-card">
+          <div class="inline-form">
+            <label class="filter-label">From
+              <input v-model="iftaStart" type="date" class="form-input" />
+            </label>
+            <label class="filter-label">To
+              <input v-model="iftaEnd" type="date" class="form-input" />
+            </label>
+            <button class="btn btn-primary" :disabled="iftaLoading" @click="loadIfta">Apply</button>
+          </div>
+        </div>
+
         <!-- IFTA Mileage -->
         <div class="metrics-grid">
           <div class="metric-card">
-            <div class="metric-label">Total Miles (GPS)</div>
+            <div class="metric-label">Total Miles (ELD)</div>
             <div class="metric-value">{{ ifta.totalMiles?.toLocaleString() || 0 }}</div>
           </div>
           <div class="metric-card">
             <div class="metric-label">States Tracked</div>
-            <div class="metric-value">{{ ifta.states?.length || 0 }}</div>
+            <div class="metric-value">{{ iftaStatesTracked }}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">Active Drivers</div>
-            <div class="metric-value">{{ ifta.driverCount || 0 }}</div>
+            <div class="metric-label">Trucks Tracked</div>
+            <div class="metric-value">{{ ifta.truckCount || 0 }}</div>
           </div>
           <div class="metric-card">
             <div class="metric-label">Fees Pending</div>
@@ -285,31 +481,72 @@
           </div>
         </div>
 
-        <!-- State mileage table -->
-        <div v-if="ifta.states?.length" class="section-card">
-          <div class="section-title">Miles by State (IFTA)</div>
-          <table>
+        <!-- Per-truck breakdown -->
+        <div v-for="t in ifta.trucks" :key="t.truckId" class="section-card">
+          <div class="truck-header">
+            <div class="truck-title">{{ t.unitNumber || ('Truck #' + t.truckId) }}</div>
+            <div class="truck-sub">
+              Driver: {{ t.drivers.length ? t.drivers.join(', ') : '—' }}
+              · {{ t.totalMiles.toLocaleString() }} mi
+              · {{ t.states.length }} states
+            </div>
+          </div>
+          <table v-if="t.states.length">
             <thead>
               <tr>
                 <th>State</th>
                 <th>Miles</th>
                 <th>%</th>
-                <th>Drivers</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="s in ifta.states" :key="s.state">
+              <tr v-for="s in t.states" :key="s.state" class="state-row" @click="openStateDetail(t, s)">
                 <td class="mono bold">{{ s.state }}</td>
                 <td>{{ s.miles.toLocaleString() }}</td>
                 <td>{{ s.pct }}%</td>
-                <td>{{ s.drivers.join(', ') }}</td>
               </tr>
             </tbody>
           </table>
         </div>
 
-        <div v-if="!ifta.states?.length" class="empty-msg">
-          No GPS mileage data yet. Miles are calculated from driver location reports.
+        <!-- State daily breakdown modal -->
+        <div v-if="stateDetail" class="exp-overlay" @click.self="closeStateDetail">
+          <div class="exp-dialog">
+            <div class="exp-header">
+              <div>
+                <div class="exp-type">{{ stateDetail.state }}</div>
+                <div class="exp-amount">{{ (stateDetail.totalMiles || 0).toLocaleString() }} mi</div>
+                <div class="exp-sub">{{ stateDetail.unitNumber || ('Truck #' + stateDetail.truckId) }}</div>
+              </div>
+              <button class="exp-close" @click="closeStateDetail" aria-label="Close">&times;</button>
+            </div>
+            <div v-if="stateDetail.loading" class="skeleton skeleton-card"></div>
+            <table v-else-if="stateDetail.days && stateDetail.days.length">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Miles</th>
+                  <th>First ping</th>
+                  <th>Last ping</th>
+                  <th>Load(s)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="d in stateDetail.days" :key="d.date">
+                  <td class="mono">{{ d.date }}</td>
+                  <td>{{ d.miles.toLocaleString() }}</td>
+                  <td class="mono">{{ fmtHM(d.firstPing) }}</td>
+                  <td class="mono">{{ fmtHM(d.lastPing) }}</td>
+                  <td class="mono-sm">{{ d.loadIds && d.loadIds.length ? d.loadIds.join(', ') : '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else class="empty-msg">No telemetry recorded in this window.</div>
+          </div>
+        </div>
+
+        <div v-if="!ifta.trucks?.length" class="empty-msg">
+          No ELD mileage in this window. Try widening the date range, or link a truck to its Routemate vehicle on the Trucks page.
         </div>
 
         <!-- Compliance Fees -->
@@ -370,14 +607,17 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useAuthStore } from '../../stores/auth'
+import { useViewport } from '../../composables/useViewport'
+import { useSocketRefresh } from '../../composables/useSocketRefresh'
 
 const api = useApi()
 const { show: toast } = useToast()
 const auth = useAuthStore()
+const { isMobile } = useViewport()
 
 const allSubTabs = [
   { key: 'all', label: 'All Expenses' },
@@ -397,8 +637,300 @@ const allExpenses = ref([])
 const allLoading = ref(true)
 const allDrivers = ref([])
 const previewImg = ref(null)
-const expenseTypes = ['Fuel', 'Toll', 'Repair', 'Food', 'Other']
-const allFilter = reactive({ driver: '', type: '', status: '' })
+// Detail modal: track by expense id, not array index — robust if the list
+// refetches (socket event from another tab) while the modal is open. null
+// means closed.
+const selectedId = ref(null)
+const selectedExpense = computed(() =>
+  selectedId.value == null
+    ? null
+    : (allExpenses.value.find(e => e.id === selectedId.value) ?? null)
+)
+const selectedIndex = computed(() =>
+  selectedId.value == null
+    ? -1
+    : allExpenses.value.findIndex(e => e.id === selectedId.value)
+)
+// Indices in allExpenses whose status is Pending — Prev/Next walks this
+// list (not the raw array) so admin only cycles through pending approvals,
+// matching the CEO's wording.
+const pendingIndices = computed(() => {
+  const out = []
+  const list = allExpenses.value
+  for (let i = 0; i < list.length; i++) {
+    if ((list[i].status || 'Pending') === 'Pending') out.push(i)
+  }
+  return out
+})
+const isCurrentPending = computed(() =>
+  selectedExpense.value && (selectedExpense.value.status || 'Pending') === 'Pending'
+)
+const pendingPos = computed(() => {
+  const idx = selectedIndex.value
+  if (idx < 0) return -1
+  return pendingIndices.value.indexOf(idx)
+})
+const canGoPrev = computed(() => {
+  const idx = selectedIndex.value
+  const pis = pendingIndices.value
+  if (idx < 0 || pis.length === 0) return false
+  return pis[0] < idx
+})
+const canGoNext = computed(() => {
+  const idx = selectedIndex.value
+  const pis = pendingIndices.value
+  if (idx < 0 || pis.length === 0) return false
+  return pis[pis.length - 1] > idx
+})
+const approveLoading = ref(false)
+
+function openExpenseDetail(e) {
+  selectedId.value = e.id
+}
+function closeExpenseDetail() {
+  selectedId.value = null
+}
+function goPrev() {
+  if (!canGoPrev.value) return
+  const idx = selectedIndex.value
+  const pis = pendingIndices.value
+  for (let i = pis.length - 1; i >= 0; i--) {
+    if (pis[i] < idx) {
+      selectedId.value = allExpenses.value[pis[i]].id
+      return
+    }
+  }
+}
+function goNext() {
+  if (!canGoNext.value) return
+  const idx = selectedIndex.value
+  const pis = pendingIndices.value
+  for (let i = 0; i < pis.length; i++) {
+    if (pis[i] > idx) {
+      selectedId.value = allExpenses.value[pis[i]].id
+      return
+    }
+  }
+}
+// After Approve/Reject, hop to the next Pending row so the admin can clear
+// the queue in one sitting. Forward first, then wrap to the start of the
+// list. If literally no Pending row exists anywhere, stay on the current
+// row — the modal does NOT auto-close, the counter just reads "0 pending
+// remain" and the action buttons flip to Undo.
+function advanceToNextPending() {
+  const list = allExpenses.value
+  const idx = selectedIndex.value
+  if (idx < 0) return
+  for (let i = idx + 1; i < list.length; i++) {
+    if ((list[i].status || 'Pending') === 'Pending') {
+      selectedId.value = list[i].id
+      return
+    }
+  }
+  for (let i = 0; i < idx; i++) {
+    if ((list[i].status || 'Pending') === 'Pending') {
+      selectedId.value = list[i].id
+      return
+    }
+  }
+  // No other pending found — stay on the just-approved row.
+}
+async function approveCurrent() {
+  const exp = selectedExpense.value
+  if (!exp || approveLoading.value) return
+  approveLoading.value = true
+  try {
+    await setStatus(exp.id, 'Approved')
+    advanceToNextPending()
+  } catch { /* setStatus already toasted */ }
+  finally { approveLoading.value = false }
+}
+async function rejectCurrent() {
+  const exp = selectedExpense.value
+  if (!exp || approveLoading.value) return
+  approveLoading.value = true
+  try {
+    await setStatus(exp.id, 'Rejected')
+    advanceToNextPending()
+  } catch { /* setStatus already toasted */ }
+  finally { approveLoading.value = false }
+}
+async function undoCurrent() {
+  const exp = selectedExpense.value
+  if (!exp || approveLoading.value) return
+  approveLoading.value = true
+  try {
+    await setStatus(exp.id, 'Pending')
+  } catch { /* setStatus already toasted */ }
+  finally { approveLoading.value = false }
+}
+function isFuelExpense(e) {
+  return e && (e.type || '').toLowerCase() === 'fuel' && Number(e.gallons) > 0
+}
+function pricePerGallon(e) {
+  const amt = Number(e.amount) || 0
+  const g = Number(e.gallons) || 0
+  if (g <= 0) return '\u2014'
+  return (amt / g).toFixed(3)
+}
+const expenseTypes = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
+const allFilter = reactive({ driver: '', type: '', status: '', truck: '' })
+
+// Keyboard nav for the detail modal. Listener attaches only while the
+// modal is open so we don't leak global handlers.
+function onModalKeydown(ev) {
+  if (ev.key === 'ArrowLeft') { ev.preventDefault(); goPrev() }
+  else if (ev.key === 'ArrowRight') { ev.preventDefault(); goNext() }
+  else if (ev.key === 'Escape') { ev.preventDefault(); closeExpenseDetail() }
+}
+watch(selectedExpense, (cur, prev) => {
+  if (cur && !prev) window.addEventListener('keydown', onModalKeydown)
+  else if (!cur && prev) window.removeEventListener('keydown', onModalKeydown)
+})
+onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
+
+// Add Expense form (Super Admin / Dispatcher only)
+const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
+const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toISOString().slice(0, 10), loadId: '', description: '' })
+const addLoading = ref(false)
+const fileInputRef = ref(null)
+const photoBase64 = ref('')
+const photoProcessing = ref(false)
+
+// Download Receipts (Super Admin only) — ZIP bundle endpoint
+const truckList = ref([])
+// Computed so a long-lived tab that crosses midnight still clamps correctly.
+const todayIso = computed(() => new Date().toISOString().slice(0, 10))
+const downloadForm = reactive({ truck: '', from: '', to: '' })
+const downloadLoading = ref(false)
+const downloadError = ref('')
+const canDownload = computed(() =>
+  downloadForm.truck && downloadForm.from && downloadForm.to && downloadForm.to >= downloadForm.from
+)
+
+async function loadTruckList() {
+  try {
+    const res = await api.get('/api/trucks')
+    const rows = res.data || res.trucks || res || []
+    const units = rows.map(t => t.UnitNumber || t.unit_number || t.unit).filter(Boolean)
+    truckList.value = [...new Set(units)].sort()
+  } catch (err) {
+    console.error('loadTruckList failed:', err)
+    if (auth.isSuperAdmin) downloadError.value = 'Could not load truck list. Refresh to retry.'
+  }
+}
+
+async function downloadReceipts() {
+  downloadError.value = ''
+  if (!canDownload.value) {
+    downloadError.value = 'Pick a truck and a valid date range first.'
+    return
+  }
+  downloadLoading.value = true
+  try {
+    // HEAD-style probe via fetch so we can surface JSON errors (404/400)
+    // to the user instead of a broken file download.
+    const qs = new URLSearchParams({
+      truck: downloadForm.truck,
+      from: downloadForm.from,
+      to: downloadForm.to,
+    }).toString()
+    const url = `/api/expenses/receipts-download?${qs}`
+    const res = await fetch(url, { credentials: 'include' })
+    if (!res.ok) {
+      let msg = `Download failed (${res.status})`
+      try { const j = await res.json(); if (j?.error) msg = j.error } catch { /* not JSON */ }
+      downloadError.value = msg
+      return
+    }
+    const blob = await res.blob()
+    const filename = `${downloadForm.truck}-receipts-${downloadForm.from}-to-${downloadForm.to}.zip`
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(link.href)
+    toast('Receipt bundle downloaded', 'success')
+  } catch (err) {
+    downloadError.value = err?.message || 'Failed to download receipts'
+  } finally {
+    downloadLoading.value = false
+  }
+}
+
+async function handleFileInput(event) {
+  const blob = event.target.files && event.target.files[0]
+  if (!blob) return
+  photoProcessing.value = true
+  const MAX = 1024
+  try {
+    // Decode + downscale in one pass via createImageBitmap so a 12MP photo
+    // never materializes ~48MB of raw RGBA — same OOM defense as the driver
+    // form (see ExpenseForm.vue:188).
+    const probe = await createImageBitmap(blob)
+    let w = probe.width, h = probe.height
+    probe.close()
+    if (w > MAX || h > MAX) {
+      if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
+      else       { w = Math.round((w * MAX) / h); h = MAX }
+    }
+    const bitmap = await createImageBitmap(blob, {
+      resizeWidth: w, resizeHeight: h, resizeQuality: 'medium',
+    })
+    const canvas = document.createElement('canvas')
+    canvas.width = w; canvas.height = h
+    canvas.getContext('2d').drawImage(bitmap, 0, 0)
+    bitmap.close()
+    photoBase64.value = canvas.toDataURL('image/jpeg', 0.8)
+    canvas.width = 0; canvas.height = 0
+  } catch {
+    photoBase64.value = ''
+    if (fileInputRef.value) fileInputRef.value.value = ''
+    toast("Couldn't process the photo — try a different image", 'error')
+  } finally {
+    photoProcessing.value = false
+  }
+}
+
+function clearPhoto() {
+  photoBase64.value = ''
+  if (fileInputRef.value) fileInputRef.value.value = ''
+}
+
+async function submitExpense() {
+  if (!addForm.driver || !addForm.type || !addForm.amount || !addForm.date) {
+    toast('Fill in Driver, Type, Amount, and Date', 'error'); return
+  }
+  const parsedAmt = parseFloat(addForm.amount)
+  if (isNaN(parsedAmt) || parsedAmt <= 0) {
+    toast('Amount must be greater than zero', 'error'); return
+  }
+  addLoading.value = true
+  try {
+    await api.post('/api/expenses', {
+      driver: addForm.driver,
+      type: addForm.type,
+      amount: parseFloat(addForm.amount),
+      date: addForm.date,
+      loadId: addForm.loadId || '',
+      description: addForm.description || '',
+      photoData: photoBase64.value,
+      gallons: 0,
+      odometer: 0,
+    })
+    toast('Expense logged')
+    addForm.driver = ''; addForm.amount = ''; addForm.loadId = ''; addForm.description = ''
+    photoBase64.value = ''
+    if (fileInputRef.value) fileInputRef.value.value = ''
+    await loadAll()
+  } catch (err) {
+    toast(err.message || 'Failed to log expense', 'error')
+  } finally {
+    addLoading.value = false
+  }
+}
 
 async function loadAll() {
   allLoading.value = true
@@ -407,16 +939,41 @@ async function loadAll() {
     if (allFilter.driver) params.set('driver', allFilter.driver)
     if (allFilter.type) params.set('type', allFilter.type)
     if (allFilter.status) params.set('status', allFilter.status)
+    if (allFilter.truck) params.set('truck', allFilter.truck)
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await api.get(`/api/expenses/all${qs}`)
     allExpenses.value = data.expenses || []
-    // Build driver list from unfiltered data (only on first load)
+    // Build driver list from drivers directory (not from expenses — new drivers with no expenses would be missing)
     if (allDrivers.value.length === 0) {
-      const names = new Set(allExpenses.value.map(e => e.driver).filter(Boolean))
-      allDrivers.value = [...names].sort()
+      try {
+        const dd = await api.get('/api/drivers-directory')
+        const names = (dd.data || []).map(d => d.Driver || d.driver_name).filter(Boolean)
+        allDrivers.value = [...new Set(names)].sort()
+      } catch {
+        // Fallback: derive from existing expenses
+        const names = new Set(allExpenses.value.map(e => e.driver).filter(Boolean))
+        allDrivers.value = [...names].sort()
+      }
     }
   } catch { /* empty */ }
   allLoading.value = false
+}
+
+// Socket-driven background refresh. Mirrors loadAll's data fetch but skips
+// the allLoading skeleton flash — used when the server emits expenses:changed
+// (own actions or another tab). The detail modal stays open because
+// selectedExpense resolves by id against the freshly-swapped array.
+async function quietReload() {
+  try {
+    const params = new URLSearchParams()
+    if (allFilter.driver) params.set('driver', allFilter.driver)
+    if (allFilter.type) params.set('type', allFilter.type)
+    if (allFilter.status) params.set('status', allFilter.status)
+    if (allFilter.truck) params.set('truck', allFilter.truck)
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    const data = await api.get(`/api/expenses/all${qs}`)
+    allExpenses.value = data.expenses || []
+  } catch { /* empty — leave existing data in place */ }
 }
 
 async function setStatus(id, status) {
@@ -425,8 +982,9 @@ async function setStatus(id, status) {
     const exp = allExpenses.value.find(e => e.id === id)
     if (exp) exp.status = status
     toast(status === 'Approved' ? 'Expense approved' : status === 'Rejected' ? 'Expense rejected' : 'Status reset', 'success')
-  } catch {
+  } catch (err) {
     toast('Failed to update status', 'error')
+    throw err
   }
 }
 
@@ -454,6 +1012,8 @@ const maintForm = reactive({
 // IFTA / Compliance
 const ifta = ref({})
 const iftaLoading = ref(true)
+const iftaStart = ref('2026-01-01')
+const iftaEnd = ref(new Date().toISOString().slice(0, 10))
 const fees = ref({})
 const feeSubmitting = ref(false)
 const feeForm = reactive({
@@ -463,6 +1023,50 @@ const feeForm = reactive({
   dueDate: '',
   description: '',
 })
+
+const iftaStatesTracked = computed(() => {
+  const set = new Set()
+  for (const t of (ifta.value?.trucks || [])) {
+    for (const s of (t.states || [])) set.add(s.state)
+  }
+  return set.size
+})
+
+const stateDetail = ref(null)
+
+function fmtHM(iso) {
+  if (!iso) return '—'
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return '—'
+  }
+}
+
+async function openStateDetail(truck, stateRow) {
+  stateDetail.value = {
+    truckId: truck.truckId,
+    unitNumber: truck.unitNumber,
+    state: stateRow.state,
+    totalMiles: stateRow.miles,
+    days: [],
+    loading: true,
+  }
+  try {
+    const params = new URLSearchParams({
+      truck_id: truck.truckId,
+      state: stateRow.state,
+      start: new Date(iftaStart.value + 'T00:00:00').toISOString(),
+      end: new Date(iftaEnd.value + 'T23:59:59').toISOString(),
+    })
+    const data = await api.get('/api/compliance/ifta/state-detail?' + params.toString())
+    stateDetail.value = { ...stateDetail.value, ...data, loading: false }
+  } catch {
+    if (stateDetail.value) stateDetail.value.loading = false
+  }
+}
+
+function closeStateDetail() { stateDetail.value = null }
 
 async function loadFuel() {
   fuelLoading.value = true
@@ -483,8 +1087,12 @@ async function loadMaintenance() {
 async function loadIfta() {
   iftaLoading.value = true
   try {
+    const params = new URLSearchParams({
+      start: new Date(iftaStart.value + 'T00:00:00').toISOString(),
+      end: new Date(iftaEnd.value + 'T23:59:59').toISOString(),
+    })
     const [iftaData, feesData] = await Promise.all([
-      api.get('/api/compliance/ifta'),
+      api.get('/api/compliance/ifta?' + params.toString()),
       api.get('/api/compliance/fees'),
     ])
     ifta.value = iftaData
@@ -544,9 +1152,15 @@ async function markFeePaid(id) {
   }
 }
 
+// Refresh data quietly when the server emits expenses:changed (this tab's
+// own approvals, or another admin's actions). NOT a key-remount — the open
+// detail modal must survive.
+useSocketRefresh('expenses:changed', quietReload)
+
 onMounted(() => {
   loadAll()
   loadFuel()
+  loadTruckList()
   if (auth.isSuperAdmin) {
     loadMaintenance()
     loadIfta()
@@ -806,6 +1420,28 @@ tr:hover td { background: var(--surface-hover); }
 .status-pill.pending { background: var(--amber-dim); color: var(--amber); }
 .status-pill.paid { background: rgba(16,185,129,0.15); color: #059669; }
 
+.truck-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding-bottom: 0.6rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.truck-title { font-size: 0.95rem; font-weight: 700; }
+.truck-sub { font-size: 0.78rem; color: var(--text-dim); }
+
+.state-row { cursor: pointer; }
+.state-row:hover td { background: var(--surface-hover); }
+
+.filter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
 .desc-cell {
   max-width: 200px;
   white-space: nowrap;
@@ -870,8 +1506,10 @@ tr:hover td { background: var(--surface-hover); }
 .st-rejected { background: var(--danger-dim); color: var(--danger); }
 
 .receipt-thumb {
-  width: 36px; height: 28px; object-fit: cover; border-radius: 4px;
+  width: 80px; height: 60px; object-fit: cover; border-radius: 4px;
   cursor: pointer; transition: opacity 0.15s;
+  border: 1px solid var(--border);
+  background: #fafbfd;
 }
 .receipt-thumb:hover { opacity: 0.7; }
 
@@ -892,4 +1530,370 @@ tr:hover td { background: var(--surface-hover); }
   z-index: 300; cursor: pointer;
 }
 .preview-img { max-width: 90vw; max-height: 85vh; border-radius: 8px; }
+
+/* Row click affordance + detail modal */
+.expense-row { cursor: pointer; transition: background 0.12s; }
+.expense-row:hover { background: #f8fafc; }
+
+.exp-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 250;
+  padding: 1rem;
+}
+.exp-dialog {
+  background: #fff;
+  border-radius: 14px;
+  width: 100%;
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 1.5rem;
+  box-shadow: 0 25px 50px rgba(0, 0, 0, 0.25);
+}
+.exp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.25rem;
+}
+.exp-type {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.2rem 0.55rem;
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+  background: var(--border); color: var(--text-dim);
+}
+.exp-type.type-fuel { background: #dbeafe; color: #1e40af; }
+.exp-type.type-maintenance, .exp-type.type-repair { background: #fed7aa; color: #9a3412; }
+.exp-type.type-toll { background: #ddd6fe; color: #5b21b6; }
+.exp-type.type-food { background: #dcfce7; color: #166534; }
+.exp-amount { font-size: 1.75rem; font-weight: 800; color: #0f172a; }
+.exp-sub { font-size: 0.78rem; color: #64748b; margin-top: 0.25rem; }
+.exp-close {
+  background: transparent;
+  border: none;
+  font-size: 1.5rem;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.exp-close:hover { color: #0f172a; }
+.exp-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+.exp-stat {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.exp-stat-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+}
+.exp-stat-value { font-size: 0.95rem; font-weight: 600; color: #0f172a; }
+.exp-desc, .exp-receipt { margin-top: 0.75rem; }
+.exp-desc-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  margin-bottom: 0.4rem;
+}
+.exp-desc > div:last-child {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.75rem 0.9rem;
+  font-size: 0.85rem;
+  color: #0f172a;
+  line-height: 1.4;
+}
+.exp-receipt-img {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 8px;
+  cursor: zoom-in;
+  display: block;
+  border: 1px solid #e2e8f0;
+}
+.exp-receipt-hint {
+  font-size: 0.7rem;
+  color: #94a3b8;
+  margin-top: 0.35rem;
+  font-style: italic;
+}
+
+.exp-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.85rem;
+  margin-bottom: 0.85rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+.exp-nav-btn {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.exp-nav-btn:hover:not(:disabled) { background: #e2e8f0; color: #0f172a; }
+.exp-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.exp-nav-counter {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #64748b;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.exp-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e2e8f0;
+}
+.exp-btn-approve, .exp-btn-reject, .exp-btn-undo {
+  flex: 1;
+  padding: 0.7rem 1rem;
+  border-radius: 8px;
+  border: none;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.exp-btn-approve { background: var(--accent); color: #fff; }
+.exp-btn-approve:hover:not(:disabled) { opacity: 0.88; }
+.exp-btn-reject { background: var(--danger); color: #fff; }
+.exp-btn-reject:hover:not(:disabled) { opacity: 0.88; }
+.exp-btn-undo { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+.exp-btn-undo:hover:not(:disabled) { background: #e2e8f0; color: #0f172a; }
+.exp-btn-approve:disabled, .exp-btn-reject:disabled, .exp-btn-undo:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Add Expense form */
+.add-expense-card {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 1rem; margin-bottom: 1rem;
+}
+.add-expense-title {
+  font-size: 0.72rem; font-weight: 700; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.6rem;
+}
+.add-expense-row {
+  display: flex; gap: 0.5rem; margin-bottom: 0.5rem; flex-wrap: wrap; align-items: center;
+}
+.add-expense-row:last-child { margin-bottom: 0; }
+.add-input {
+  padding: 0.4rem 0.6rem; border: 1px solid var(--border); border-radius: 6px;
+  font-family: inherit; font-size: 0.8rem; background: var(--surface); color: var(--text);
+  min-width: 120px;
+}
+.add-input:focus { outline: none; border-color: var(--blue); }
+.add-btn {
+  padding: 0.4rem 1rem; font-size: 0.8rem; font-weight: 600; border-radius: 6px;
+  border: none; background: var(--blue); color: #fff; cursor: pointer;
+}
+.add-btn:hover { opacity: 0.9; }
+.add-btn:disabled { opacity: 0.5; cursor: default; }
+.add-photo-label {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  font-size: 0.8rem; color: var(--text-dim);
+}
+.add-photo-input { font-size: 0.78rem; }
+.add-photo-input:disabled { opacity: 0.5; cursor: default; }
+.add-photo-preview { width: 64px; height: 48px; }
+.add-photo-hint { font-size: 0.75rem; color: var(--text-dim); }
+.add-photo-clear {
+  padding: 0.25rem 0.55rem; font-size: 0.72rem;
+  background: transparent; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-dim); cursor: pointer; font-family: inherit;
+}
+.add-photo-clear:hover { opacity: 0.75; }
+.add-photo-clear:disabled { opacity: 0.5; cursor: default; }
+
+/* Download Receipts (Super Admin) */
+.download-receipts-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+.download-receipts-title {
+  display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap;
+  font-size: 0.72rem; font-weight: 700; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.6rem;
+}
+.download-receipts-hint {
+  font-size: 0.68rem; font-weight: 500; text-transform: none;
+  color: var(--text-dim); opacity: 0.7; letter-spacing: 0;
+}
+.download-receipts-row {
+  display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;
+}
+.download-receipts-error {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+}
+
+/* ---- Mobile (≤ 767 px) ------------------------------------------------
+ * Expense row gets a card layout. Download-ZIP + Log-Expense forms stack
+ * vertically so inputs don't squish. Sub-tab strip becomes scrollable.
+ * Detail modal (selectedExpense) already fits via the Teleport we shipped
+ * earlier — no change needed there.                                       */
+@media (max-width: 767px) {
+  /* Scrollable sub-tabs (All / Fuel / Maintenance / IFTA) */
+  .sub-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .sub-tabs::-webkit-scrollbar { display: none; }
+  .sub-tab { flex-shrink: 0; }
+
+  /* Download Receipts form — stack inputs */
+  .download-receipts-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+  .download-receipts-row .add-input,
+  .download-receipts-row .btn { max-width: none !important; width: 100%; }
+
+  /* Log Expense form — stack all inputs; both rows become columns */
+  .add-expense-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+  .add-expense-row .add-input,
+  .add-expense-row .add-btn { max-width: none !important; width: 100%; flex: 1 1 auto; }
+
+  /* Filter strip wraps instead of forcing a horizontal scroll */
+  .filter-row { flex-wrap: wrap; gap: 0.5rem; }
+  .filter-select { flex: 1; min-width: 120px; }
+  .filter-count { width: 100%; }
+
+  /* Mobile expense cards */
+  .mobile-exp-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    padding: 0.25rem 0;
+  }
+  .mobile-exp-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 0.85rem 0.95rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .mobile-exp-card:active { border-color: #0f3460; }
+  .mobile-exp-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+  .mobile-exp-top-left { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .mobile-exp-date {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.75rem;
+    color: #64748b;
+  }
+  .mobile-exp-driver {
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: #0f172a;
+  }
+  .mobile-exp-truck {
+    font-weight: 500;
+    color: #64748b;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+  }
+  .mobile-exp-desc {
+    font-size: 0.82rem;
+    color: #475569;
+    line-height: 1.35;
+    padding-top: 0.35rem;
+    border-top: 1px solid #f1f5f9;
+  }
+  .mobile-exp-bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid #f1f5f9;
+  }
+  .mobile-exp-bottom-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+  .mobile-exp-amount {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #0f172a;
+  }
+  .mobile-exp-thumb {
+    width: 48px;
+    height: 36px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid #e2e8f0;
+    cursor: pointer;
+  }
+  .mobile-exp-actions {
+    display: flex;
+    gap: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #f1f5f9;
+  }
+  .mobile-exp-btn {
+    flex: 1;
+    padding: 0.6rem 0.75rem !important;
+    font-size: 0.82rem !important;
+    font-weight: 600;
+  }
+}
 </style>

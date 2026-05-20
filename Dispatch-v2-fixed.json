@@ -1,0 +1,1859 @@
+{
+  "name": "Dispatch v2 (Fixed)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "labelIds": [
+            "Label_8836114819563300518",
+            "UNREAD",
+            "STARRED"
+          ],
+          "readStatus": "unread"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2416,
+        736
+      ],
+      "id": "376e57b4-fe22-4134-9c38-fbf1e767f168",
+      "name": "Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "oymS9U543xCU6JOB",
+          "name": "Gmail account 7"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "2e2228f5-9409-4a0b-b58a-737917ff0970",
+              "leftValue": "={{ $('Gmail Trigger').item.binary }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2272,
+        736
+      ],
+      "id": "b1cae06e-8084-44a1-b78f-74c62f3b374c",
+      "name": "Has Attachments?"
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $('Gmail Trigger').item.json.id }}"
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -2272,
+        980
+      ],
+      "id": "bb000001-0001-4000-8000-000000000001",
+      "name": "Mark Read (No Attachment)",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "oymS9U543xCU6JOB",
+          "name": "Gmail account 7"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "91fea6cf-6629-412d-9314-9abae7eb1245",
+              "name": "=attachments",
+              "value": "={{ $('Gmail Trigger').item.binary.keys() }}",
+              "type": "array"
+            },
+            {
+              "id": "656bf1f4-f1af-4226-8b9b-77744cb235bf",
+              "name": "=message_id",
+              "value": "={{ $json.id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "ignoreConversionErrors": true
+        }
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1984,
+        624
+      ],
+      "id": "58e04d51-34eb-41fb-aa41-b5dc30ef1ae0",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "attachments",
+        "include": "allOtherFields",
+        "options": {
+          "includeBinary": true
+        }
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        -1840,
+        624
+      ],
+      "id": "b43b5647-5b5d-419a-b337-da85c5ac5b5e",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "advanced": true,
+        "mergeByFields": {
+          "values": [
+            {
+              "field1": "message_id",
+              "field2": "id"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        -1696,
+        704
+      ],
+      "id": "b9c749ce-2157-4628-8ad4-9ec3cce437c0",
+      "name": "Merge",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "inputDataFieldName": "={{ $json.attachments }}",
+        "name": "={{ $('Gmail Trigger').item.json.headers.subject }}",
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive",
+          "cachedResultUrl": "https://drive.google.com/drive/my-drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL",
+          "mode": "list",
+          "cachedResultName": "Rate Confirmations",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -1568,
+        400
+      ],
+      "id": "2271fe2b-6c2e-40a4-9261-b1007d0eb267",
+      "name": "Google Drive",
+      "executeOnce": false,
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "LWs9Q4WpDRQzSqQp",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $('Gmail Trigger').item.json.id }}"
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -1440,
+        400
+      ],
+      "id": "5ce59369-a68d-4370-8639-9a3671b73f58",
+      "name": "Gmail1",
+      "webhookId": "d42bf46d-b551-4c14-b58e-eb76ebccb636",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "oymS9U543xCU6JOB",
+          "name": "Gmail account 7"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.cloud.llamaindex.ai/api/parsing/upload",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer llx-6hEWGFmhPRZiMk1hqJhrFSKAgZdtsyAJNEuOSMyD8fz8uO0P"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "={{ $json.attachments }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1264,
+        704
+      ],
+      "id": "47bd8970-36fd-44ba-a326-955dd3868f86",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.cloud.llamaindex.ai/api/parsing/job/{{ $json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer llx-6hEWGFmhPRZiMk1hqJhrFSKAgZdtsyAJNEuOSMyD8fz8uO0P"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1120,
+        704
+      ],
+      "id": "6a7f4d41-01f6-4730-b964-bcba40fd7b97",
+      "name": "HTTP Request1"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "SUCCESS",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "3f1eb78d-4fc1-424a-9b39-09bd76270be2"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "SUCCESS"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "dced6efa-30aa-4d2f-a5b4-e3c4f7a79b2a",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "SUCCESS",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEquals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "RETRY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -960,
+        704
+      ],
+      "id": "322e11e0-bbd0-4e93-aae0-5926280679bc",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "amount": 30
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -1024,
+        976
+      ],
+      "id": "9433b86f-611b-4a48-904d-68f2425b9dcd",
+      "name": "Wait",
+      "webhookId": "fa33a2f6-79bc-4ef0-8f39-5010d1b0c95c"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.cloud.llamaindex.ai/api/parsing/job/{{ $json.id }}/result/markdown",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer llx-6hEWGFmhPRZiMk1hqJhrFSKAgZdtsyAJNEuOSMyD8fz8uO0P"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -784,
+        704
+      ],
+      "id": "05acf1ee-e03c-4140-ad94-5132fa07c0f8",
+      "name": "HTTP Request2"
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.markdown }}",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"Load Number\": null,\n  \"Broker Name\": null,\n  \"Broker Phone\": null,\n  \"Broker Email\": null,\n  \"Driver Name\": null,\n  \"Pickup Company Information\": null,\n  \"Pickup Address\": null,\n  \"Pickup Appointment Time\": null,\n  \"P/U Reference Number\": null,\n  \"Pickup Notes/Instructions\": null,\n  \"Drop-off Company Information\": null,\n  \"Drop-off Address\": null,\n  \"Delivery Appointment Time\": null,\n  \"Delivery Reference Number\": null,\n  \"Delivery Notes/Instructions\": null,\n  \"Rate\": null,\n  \"BOL Number\": null,\n  \"Details\": null\n}",
+        "options": {
+          "systemPromptTemplate": "You are extracting data from a freight load confirmation PDF (typically from C.H. Robinson or similar brokers). Follow these rules carefully:\n\n**Load Number**: Extract any load number, order number, or reference number associated with the shipment. Look for 'Load #', 'Order #', 'Ref #', 'BOL #', 'Tracking #'.\n\n**Rate**: Look for 'Rate Detail', 'Rate Details', or 'Service for Load' sections. The rate is the Total dollar amount (e.g. $610.00, $703.60). It may appear on any page. Always extract the Total amount including all charges (line haul + accessorials like detention).\n\n**Broker Name**: Found in 'C.H. Robinson Communication' or similar sections, e.g. 'This load was booked with Danna Garcia'. Extract just the person's name.\n\n**Broker Phone**: Only extract if a direct broker phone is listed. Do NOT use shipper or receiver phone numbers.\n\n**Broker Email**: Found next to broker name, e.g. 'Danna.Garcia@chrobinson.com'.\n\n**Driver Name**: Extract the driver's name if listed. Look for 'Driver Name', 'Driver:', or similar fields. Example: 'Shorn King'.\n\n**Details**: Extract the commodity/cargo description from the shipment tables. Include commodity name, weight, unit count, and pallet count. Example: 'Beverages, 44,430 lbs, 1,808 pallets' or 'Tempered Pattern Solar Glass, 37,600 lbs, 8 pallets'.\n\n**Pickup Company Information**: Extract the name of the shipper company like Pepsi, Kohls, Walmart etc. Look for 'Shipper', 'Origin', 'Pickup Location', 'SHIPPER#1'.\n\n**Pickup Address**: Extract the full street address, city, state, and zip code of the pickup location. If there are multiple address lines, combine them.\n\n**Pickup Appointment Time**: Extract the scheduled pickup date and time from the SHIPPER section. Use the 'Pick Up Date:' and 'Pick Up Time:' fields that appear next to the shipper details. Do NOT use the 'Pick Date:' from Shipper Instructions. Format as: M/D/YYYY HH:MM. NEVER return 0:00 unless the document explicitly says midnight.\n\n**P/U Reference Number**: Extract ONLY the single number found next to 'Pick Up#:' or 'PU#:' in the SHIPPER section. Return this number exactly ONCE. Do NOT include Appointment numbers, Delivery numbers, Ref # from the commodity table, or any numbers from the RECEIVER section.\n\n**Pickup Notes/Instructions**: Extract any specific instructions or notes related to the pickup location or process.\n\n**Drop-off Company Information**: Extract ONLY the company or facility name from the RECEIVER#1 line. Do NOT use the commodity name or the shipper name. Do NOT include reference numbers, addresses, or any other codes. Only the receiver facility name exactly as it appears.\n\n**Drop-off Address**: Extract the full street address, city, state, and zip code of the drop-off location.\n\n**Delivery Appointment Time**: Extract the scheduled delivery date and time. Format as: M/D/YYYY HH:MM.\n\n**Delivery Reference Number**: Extract reference number from 'Delivery#:' in the receiver section. Only include if different from P/U Reference Number.\n\n**Delivery Notes/Instructions**: Extract any specific instructions or notes related to the delivery.\n\n**BOL Number**: If available, extract the Bill of Lading number.\n\nIMPORTANT RULES:\n1. Each field should contain ONLY the specific data requested. Do not combine multiple pieces of information into one field.\n2. Reference numbers, appointment numbers, and delivery numbers are SEPARATE — never combine them.\n3. For company names, use the name exactly as shown on the SHIPPER#1 or RECEIVER#1 line. Do not substitute commodity names.\n4. Rate should be the TOTAL amount from the 'Total:' line in Rate Details, not individual line items.\n5. Never repeat or duplicate a number within the same field. Each value should appear exactly once.\n6. Don't include carrier information (Chevine Transport, Logistics Exchange Inc., LogisX Inc.)."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1,
+      "position": [
+        -500,
+        608
+      ],
+      "id": "a804a9f1-e5de-4afd-bc51-d8e6823f822d",
+      "name": "Information Extractor",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-pro-latest",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        -540,
+        976
+      ],
+      "id": "e032765b-db6f-45c6-89b5-6c0eac8ca4a6",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "kzlHx6lePVcSV9B8",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "348d93a0-f0db-4f66-82a8-25f73042bb24",
+              "name": "output['Load Number']",
+              "value": "={{ $json.output['Load Number'] }}",
+              "type": "string"
+            },
+            {
+              "id": "e2bcb7b3-9b9c-428b-bb01-a8c0673939c5",
+              "name": "output['Broker Name']",
+              "value": "={{ $json.output['Broker Name'] }}",
+              "type": "string"
+            },
+            {
+              "id": "68324714-e347-47f6-b44c-fd8fc9afaca3",
+              "name": "output['Broker Phone']",
+              "value": "={{ $json.output['Broker Phone'] }}",
+              "type": "string"
+            },
+            {
+              "id": "f4121cfa-49dc-4946-ab50-4c658cff1144",
+              "name": "output['Broker Email']",
+              "value": "={{ $json.output['Broker Email'] }}",
+              "type": "string"
+            },
+            {
+              "id": "5df8e98d-b142-4039-bf09-c301cb5cf7bb",
+              "name": "output['Pickup Company Information']",
+              "value": "={{ $json.output['Pickup Company Information'] }}",
+              "type": "string"
+            },
+            {
+              "id": "ea09c754-a7a7-44cf-ab91-fe47aeec0a53",
+              "name": "output['Pickup Address']",
+              "value": "={{ $json.output['Pickup Address'] }}",
+              "type": "string"
+            },
+            {
+              "id": "df41c367-d900-42b9-bff0-fa0ba69385ae",
+              "name": "output['Pickup Appointment Time']",
+              "value": "={{ $json.output['Pickup Appointment Time'] }}",
+              "type": "string"
+            },
+            {
+              "id": "730077fa-7339-4229-897f-34db9ece8fb7",
+              "name": "output['P/U Reference Number']",
+              "value": "={{ $json.output['P/U Reference Number'] }}",
+              "type": "string"
+            },
+            {
+              "id": "833fe08e-943f-4d85-8c43-8df294e7eb1a",
+              "name": "output['Pickup Notes/Instructions']",
+              "value": "={{ $json.output['Pickup Notes/Instructions'] }}",
+              "type": "string"
+            },
+            {
+              "id": "15295fd8-d7c4-4366-bb31-70d409d051f9",
+              "name": "output['Drop*off Company Information']",
+              "value": "={{ $json.output['Drop-off Company Information'] }}",
+              "type": "string"
+            },
+            {
+              "id": "ea33aed5-fbf1-4a0e-861f-8c20961676e6",
+              "name": "output['Drop-off Address']",
+              "value": "={{ $json.output['Drop-off Address'] }}",
+              "type": "string"
+            },
+            {
+              "id": "c685b953-747b-4a70-b088-0fa6f5a78f19",
+              "name": "output['Delivery Appointment Time']",
+              "value": "={{ $json.output['Delivery Appointment Time'] }}",
+              "type": "string"
+            },
+            {
+              "id": "fd25cc95-b924-48d0-a5d7-d3fcdfe8568d",
+              "name": "output['Delivery Reference Number']",
+              "value": "={{ $json.output['Delivery Reference Number'] }}",
+              "type": "string"
+            },
+            {
+              "id": "0c8a7ce3-28b3-40d5-9d54-a0ae1d3e0e2b",
+              "name": "output['Delivery Notes/Instructions']",
+              "value": "={{ $json.output['Delivery Notes/Instructions'] }}",
+              "type": "string"
+            },
+            {
+              "id": "f933bef5-f220-4f67-a138-ea0ab135d7af",
+              "name": "output.Rate",
+              "value": "={{ $json.output.Rate }}",
+              "type": "string"
+            },
+            {
+              "id": "a074a73d-762c-4989-b9db-b79fdb2a38f5",
+              "name": "output['BOL Number']",
+              "value": "={{ $json.output['BOL Number'] }}",
+              "type": "string"
+            },
+            {
+              "id": "e7f30188-9197-451f-abbd-1e4b49a7ef34",
+              "name": "output['Driver Name']",
+              "value": "={{ $json.output['Driver Name'] }}",
+              "type": "string"
+            },
+            {
+              "id": "b1a2c3d4-e5f6-7890-abcd-ef1234567890",
+              "name": "output['Details']",
+              "value": "={{ $json.output['Details'] }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -200,
+        704
+      ],
+      "id": "d9b5926a-f55f-4189-83a4-4fa66c256a9a",
+      "name": "Edit Fields1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "val-load-id-001",
+              "leftValue": "={{ $json.output['Load Number'] }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        704
+      ],
+      "id": "c4a1b2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d",
+      "name": "Validate Load ID"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+          "mode": "list",
+          "cachedResultName": "Dispatch Management",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1912963382,
+          "mode": "list",
+          "cachedResultName": "Payments Table",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit#gid=1912963382"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            " Job ID": "={{ $json.output['Load Number'] }}",
+            "Contract ID": "={{ $json.output['Broker Name'] }}",
+            "Payment Amount": "={{ $json.output.Rate }}"
+          },
+          "matchingColumns": [
+            " Job ID"
+          ],
+          "schema": [
+            {
+              "id": "Contract ID",
+              "displayName": "Contract ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": " Job ID",
+              "displayName": " Job ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Invoice Number",
+              "displayName": "Invoice Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Payment Amount",
+              "displayName": "Payment Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Payment Date",
+              "displayName": "Payment Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Payment Status",
+              "displayName": "Payment Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Tender Fee",
+              "displayName": "Tender Fee",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Amount Due To Carrier",
+              "displayName": "Amount Due To Carrier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        200,
+        528
+      ],
+      "id": "6715dce2-7733-49a0-9883-6268c19db51a",
+      "name": "RATE UPDATE",
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "eIVapCT2iPkVAyWz",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+          "mode": "list",
+          "cachedResultName": "Dispatch Management",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1036643096,
+          "mode": "list",
+          "cachedResultName": "Job Tracking",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit#gid=1036643096"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Load ID": "={{ $('Edit Fields1').item.json.output['Load Number'] }}",
+            "Details": "={{ $('Edit Fields1').item.json.output['Details'] }}",
+            "Pickup Info": "={{ $('Edit Fields1').item.json.output['Pickup Company Information'] }} REF/PU#: {{ $('Edit Fields1').item.json.output['P/U Reference Number'] }}{{ $('Edit Fields1').item.json.output['Delivery Reference Number'] && $('Edit Fields1').item.json.output['Delivery Reference Number'] !== $('Edit Fields1').item.json.output['P/U Reference Number'] ? ', DEL#: ' + $('Edit Fields1').item.json.output['Delivery Reference Number'] : '' }}",
+            "Pickup Appointment": "={{ $('Edit Fields1').item.json.output['Pickup Appointment Time'] }}",
+            "Pickup Address": "={{ $('Edit Fields1').item.json.output['Pickup Address'] }}",
+            "Drop-off Info": "={{ $('Edit Fields1').item.json.output['Drop*off Company Information'] }}",
+            "Drop-off Appointment": "={{ $('Edit Fields1').item.json.output['Delivery Appointment Time'] }}",
+            "Drop-off Address": "={{ $('Edit Fields1').item.json.output['Drop-off Address'] }}",
+            " Payment ": "={{ $('Edit Fields1').item.json.output.Rate }}",
+            "Broker Contact Name": "={{ $('Edit Fields1').item.json.output['Broker Name'] }}",
+            "Phone Number": "={{ $('Edit Fields1').item.json.output['Broker Phone'] }}",
+            "Email": "={{ $('Edit Fields1').item.json.output['Broker Email'] }}",
+            "Assigned Date": "={{ new Date($('Gmail Trigger').item.json.date).toLocaleString('en-US') }}",
+            "Driver": "={{ $('Edit Fields1').item.json.output['Driver Name'] }}",
+            "Documents": "={{ $('Edit Fields1').item.json.output['BOL Number'] || $('Edit Fields1').item.json.output['Load Number'] }}"
+          },
+          "matchingColumns": [
+            "Load ID"
+          ],
+          "schema": [
+            {
+              "id": "Load ID",
+              "displayName": "Load ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Details",
+              "displayName": "Details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Trailer Number",
+              "displayName": "Trailer Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Driver",
+              "displayName": "Driver",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Pickup Info",
+              "displayName": "Pickup Info",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Pickup Appointment",
+              "displayName": "Pickup Appointment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Pickup Address",
+              "displayName": "Pickup Address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Drop-off Info",
+              "displayName": "Drop-off Info",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Drop-off Appointment",
+              "displayName": "Drop-off Appointment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Drop-off Address",
+              "displayName": "Drop-off Address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Job Status",
+              "displayName": "Job Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Phase of Progress",
+              "displayName": "Phase of Progress",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Carrier Stage",
+              "displayName": "Carrier Stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": " Payment ",
+              "displayName": " Payment ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Broker Contact Name",
+              "displayName": "Broker Contact Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Phone Number",
+              "displayName": "Phone Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Location Link",
+              "displayName": "Location Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Documents",
+              "displayName": "Documents",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Assigned Date",
+              "displayName": "Assigned Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status Update Date",
+              "displayName": "Status Update Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Completion Date",
+              "displayName": "Completion Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        400,
+        528
+      ],
+      "id": "f0aa2d8b-228d-408c-8da4-e1f66f386bf5",
+      "name": "JOB DETAILS ENTRY",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "eIVapCT2iPkVAyWz",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://maps.googleapis.com/maps/api/distancematrix/json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "origins",
+              "value": "={{ $('Edit Fields1').item.json.output['Pickup Address'] }}"
+            },
+            {
+              "name": "destinations",
+              "value": "={{ $('Edit Fields1').item.json.output['Drop-off Address'] }}"
+            },
+            {
+              "name": "units",
+              "value": "imperial"
+            },
+            {
+              "name": "key",
+              "value": "={{ $env.GOOGLE_MAPS_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        600,
+        528
+      ],
+      "id": "d1e2f3a4-b5c6-4d7e-8f90-a1b2c3d4e5f6",
+      "name": "Google Maps Distance",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.first().json.rows;\nconst element = rows && rows[0] && rows[0].elements && rows[0].elements[0];\n\nif (!element || element.status !== 'OK') {\n  return [{ json: {\n    distance_miles: 0,\n    distance_text: 'N/A',\n    payment: 0,\n    rate_per_mile: '0',\n    details: 'Distance unavailable'\n  }}];\n}\n\nconst distanceMiles = Math.round(element.distance.value / 1609.34);\nconst rateStr = $('Edit Fields1').first().json.output.Rate || '0';\nconst payment = parseFloat(rateStr.replace(/[\\$,]/g, ''));\nconst ratePerMile = distanceMiles > 0 ? (payment / distanceMiles).toFixed(2) : '0';\n\nconst pickup = $('Edit Fields1').first().json.output['Pickup Address'] || '';\nconst dropoff = $('Edit Fields1').first().json.output['Drop-off Address'] || '';\n\nfunction cityStateZip(addr) {\n  const match = addr.match(/([^,]+),\\s*([A-Z]{2})\\s*(\\d{5})/i);\n  if (match) return `${match[1].trim()}, ${match[2].toUpperCase()} ${match[3]}`;\n  const parts = addr.split(',');\n  return parts.length >= 2 ? parts.slice(-2).join(',').trim() : addr;\n}\n\nreturn [{ json: {\n  distance_miles: distanceMiles,\n  distance_text: element.distance.text,\n  payment: payment,\n  rate_per_mile: ratePerMile,\n  details: `${cityStateZip(pickup)} - ${cityStateZip(dropoff)}`\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        528
+      ],
+      "id": "a2b3c4d5-e6f7-4a8b-9c0d-1e2f3a4b5c6d",
+      "name": "Calculate Rate Per Mile"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+          "mode": "list",
+          "cachedResultName": "Dispatch Management",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1772996665,
+          "mode": "list",
+          "cachedResultName": "Job Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit#gid=1772996665"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Load ID": "={{ $('JOB DETAILS ENTRY').item.json['Load ID'] }}",
+            "Rate Per Mile": "=${{ $json.rate_per_mile }}",
+            "Distance": "={{ $json.distance_miles }} Miles",
+            "Details": "={{ $json.details }}",
+            "Payment": "={{ $json.payment }}"
+          },
+          "matchingColumns": [
+            "Load ID"
+          ],
+          "schema": [
+            {
+              "id": "Load ID",
+              "displayName": "Load ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Distance",
+              "displayName": "Distance",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Rate Per Mile",
+              "displayName": "Rate Per Mile",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Details",
+              "displayName": "Details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Driver",
+              "displayName": "Driver",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Pickup Address",
+              "displayName": "Pickup Address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Drop-off Address",
+              "displayName": "Drop-off Address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Payment",
+              "displayName": "Payment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Job Status",
+              "displayName": "Job Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Carrier Stage",
+              "displayName": "Carrier Stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Driver Name",
+              "displayName": "Driver Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Phone Number",
+              "displayName": "Phone Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Location Link",
+              "displayName": "Location Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Documents",
+              "displayName": "Documents",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Assigned Date",
+              "displayName": "Assigned Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Completion Date",
+              "displayName": "Completion Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": " Notes",
+              "displayName": " Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Notes to Driver",
+              "displayName": "Notes to Driver",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1000,
+        528
+      ],
+      "id": "a43af3d2-add2-4c93-b277-c39e6eff76ca",
+      "name": "Google Sheets2",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "eIVapCT2iPkVAyWz",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+          "mode": "list",
+          "cachedResultName": "Dispatch Management",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1036643096,
+          "mode": "list",
+          "cachedResultName": "Job Tracking",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit#gid=1036643096"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Details": "={{ $json.details }}",
+            "Load ID": "={{ $('JOB DETAILS ENTRY').item.json['Load ID'] }}"
+          },
+          "matchingColumns": [
+            "Load ID"
+          ],
+          "schema": [
+            {
+              "id": "Load ID",
+              "displayName": "Load ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Details",
+              "displayName": "Details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        528
+      ],
+      "id": "6f573fec-be63-4611-91cd-047dcfe263c3",
+      "name": "Google Sheets3",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "eIVapCT2iPkVAyWz",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst jobId = $input.first().json.id;\nconst key = `llamaparse_retry_${jobId}`;\nstaticData[key] = (staticData[key] || 0) + 1;\nconst count = staticData[key];\nconst exceeded = count > 10;\nif (exceeded) { delete staticData[key]; }\nreturn [{ json: { ...$input.first().json, retryCount: count, retryExceeded: exceeded } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        1100
+      ],
+      "id": "rc000001-0001-4000-8000-000000000001",
+      "name": "Retry Counter"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "retry-limit-001",
+              "leftValue": "={{ $json.retryExceeded }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -800,
+        1100
+      ],
+      "id": "rc000001-0002-4000-8000-000000000002",
+      "name": "Check Retry Limit"
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+          "mode": "list",
+          "cachedResultName": "Dispatch Management",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1036643096,
+          "mode": "list",
+          "cachedResultName": "Job Tracking",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit#gid=1036643096"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "Load ID",
+              "lookupValue": "={{ $json.output['Load Number'] }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        200,
+        704
+      ],
+      "id": "dd000001-0001-4000-8000-000000000001",
+      "name": "Check Existing Load",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "eIVapCT2iPkVAyWz",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "is-new-load-001",
+              "leftValue": "={{ $json['Load ID'] }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        704
+      ],
+      "id": "dd000001-0002-4000-8000-000000000002",
+      "name": "Is New Load?"
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $('Gmail Trigger').item.json.id }}"
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        400,
+        950
+      ],
+      "id": "dd000001-0003-4000-8000-000000000003",
+      "name": "Mark Read (Duplicate)",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "oymS9U543xCU6JOB",
+          "name": "Gmail account 7"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "info@logisx.com",
+        "subject": "=Dispatch v2 FAILED — {{ $('Gmail Trigger').item.json.headers?.subject || 'Unknown email' }}",
+        "message": "=The Dispatch v2 workflow failed while processing a rate confirmation.\n\nEmail Subject: {{ $('Gmail Trigger').item.json.headers?.subject || 'Unknown' }}\nEmail From: {{ $('Gmail Trigger').item.json.headers?.from || 'Unknown' }}\nDate: {{ $('Gmail Trigger').item.json.date || 'Unknown' }}\n\nPlease check the n8n execution logs and process this rate confirmation manually.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        800,
+        1200
+      ],
+      "id": "fa000001-0001-4000-8000-000000000001",
+      "name": "Send Failure Alert",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "oymS9U543xCU6JOB",
+          "name": "Gmail account 7"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $('Gmail Trigger').item.json.id }}"
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1050,
+        1200
+      ],
+      "id": "fa000001-0002-4000-8000-000000000002",
+      "name": "Mark Read (Failed)",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "oymS9U543xCU6JOB",
+          "name": "Gmail account 7"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Has Attachments?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Attachments?": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Mark Read (No Attachment)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Google Drive",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Drive": {
+      "main": [
+        [
+          {
+            "node": "Gmail1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry Counter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry Counter": {
+      "main": [
+        [
+          {
+            "node": "Check Retry Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Retry Limit": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request2": {
+      "main": [
+        [
+          {
+            "node": "Information Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Information Extractor": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields1": {
+      "main": [
+        [
+          {
+            "node": "Validate Load ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Load ID": {
+      "main": [
+        [
+          {
+            "node": "Check Existing Load",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing Load": {
+      "main": [
+        [
+          {
+            "node": "Is New Load?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is New Load?": {
+      "main": [
+        [
+          {
+            "node": "RATE UPDATE",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Read (Duplicate)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RATE UPDATE": {
+      "main": [
+        [
+          {
+            "node": "JOB DETAILS ENTRY",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JOB DETAILS ENTRY": {
+      "main": [
+        [
+          {
+            "node": "Google Maps Distance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Maps Distance": {
+      "main": [
+        [
+          {
+            "node": "Calculate Rate Per Mile",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Rate Per Mile": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets2": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Failure Alert": {
+      "main": [
+        [
+          {
+            "node": "Mark Read (Failed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Information Extractor",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 600,
+    "binaryMode": "separate"
+  },
+  "versionId": "f1x3d-v2-2026-04-06",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4592d470efc124c12030577125a69a0c1bc1b221012904315f942d64b680aaef"
+  },
+  "id": "7zbHWodrB5uP8OYY",
+  "tags": []
+}

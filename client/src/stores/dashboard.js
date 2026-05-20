@@ -18,6 +18,7 @@ export const useDashboardStore = defineStore('dashboard', {
     completedJobs: (s) => s.data?.completedJobs || [],
     fleet: (s) => s.data?.fleet || [],
     drivers: (s) => s.data?.drivers || [],
+    driverQueues: (s) => s.data?.driverQueues || {},
     headers: (s) => s.data?.jobTrackingHeaders || [],
     completedHeaders: (s) => s.data?.completedHeaders || s.data?.jobTrackingHeaders || [],
   },
@@ -72,8 +73,13 @@ export const useDashboardStore = defineStore('dashboard', {
       await api.post('/api/dispatch/cancel', { rowIndex, loadId, driver })
     },
 
-    async updateStatus(rowIndex, driverName, loadId, newStatus) {
-      await api.put('/api/driver/status', { rowIndex, driverName, loadId, newStatus })
+    async deleteLoad(loadId) {
+      if (!loadId) throw new Error('No load id')
+      await api.del(`/api/loads/${encodeURIComponent(loadId)}`)
+    },
+
+    async updateStatus(rowIndex, driverName, loadId, newStatus, rowData) {
+      await api.put('/api/driver/status', { rowIndex, driverName, loadId, newStatus, rowData })
     },
   },
 })

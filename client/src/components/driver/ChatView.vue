@@ -32,6 +32,11 @@
       </template>
     </div>
 
+    <!-- Send-failure chip — shown when last send failed; tap to retry -->
+    <div v-if="sendError" class="chat-send-error" @click="handleSend">
+      &#9888;&#65039; {{ sendError }} &mdash; tap to retry
+    </div>
+
     <!-- Input bar (always visible) -->
     <div class="chat-input-bar">
       <input
@@ -40,13 +45,14 @@
         type="text"
         placeholder="Message Dispatch..."
         maxlength="500"
+        :disabled="sending"
         @keydown.enter.prevent="handleSend"
       />
       <button
         class="send-btn"
         :disabled="!messageText.trim() || sending"
         @click="handleSend"
-      >&#10148;</button>
+      >{{ sending ? '&hellip;' : '&#10148;' }}</button>
     </div>
   </div>
 </template>
@@ -60,6 +66,7 @@ const props = defineProps({
   loads: { type: Array, default: () => [] },
   driverName: { type: String, required: true },
   loadId: { type: String, default: '' },
+  sendHandler: { type: Function, default: null },
 })
 
 const emit = defineEmits(['send', 'markRead'])
@@ -67,6 +74,7 @@ const emit = defineEmits(['send', 'markRead'])
 const chatMessagesEl = ref(null)
 const messageText = ref('')
 const sending = ref(false)
+const sendError = ref('')
 
 // Auto-detect current active load ID
 const currentLoadId = computed(() => {
@@ -102,15 +110,31 @@ async function handleSend() {
   if (!msg || sending.value) return
 
   sending.value = true
-  try {
-    emit('send', {
-      recipient: 'Dispatch',
-      message: msg,
-      loadId: currentLoadId.value,
-    })
-    messageText.value = ''
-  } finally {
-    sending.value = false
+  sendError.value = ''
+  const payload = {
+    recipient: 'Dispatch',
+    message: msg,
+    loadId: currentLoadId.value,
+  }
+
+  if (props.sendHandler) {
+    // Awaitable path: keep the input text on failure so driver can retry.
+    try {
+      await props.sendHandler(payload)
+      messageText.value = ''
+    } catch (err) {
+      sendError.value = err?.message || 'Failed to send'
+    } finally {
+      sending.value = false
+    }
+  } else {
+    // Legacy emit path — fire-and-forget; caller owns success/failure.
+    try {
+      emit('send', payload)
+      messageText.value = ''
+    } finally {
+      sending.value = false
+    }
   }
 }
 
@@ -262,6 +286,19 @@ watch(
   color: rgba(255, 255, 255, 0.8);
   background: rgba(255, 255, 255, 0.15);
 }
+
+.chat-send-error {
+  margin: 0.5rem 0 0;
+  padding: 0.55rem 0.75rem;
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  text-align: center;
+}
+.chat-send-error:active { opacity: 0.7; }
 
 .chat-input-bar {
   display: flex;

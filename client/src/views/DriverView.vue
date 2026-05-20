@@ -1,5 +1,120 @@
 <template>
   <div class="driver-app">
+    <!-- ONBOARDING LOCK SCREEN — shown when driver is not fully onboarded -->
+    <template v-if="isOnboarding">
+      <DriverHeader :driver-name="driverName" @logout="handleLogout" />
+      <main class="app-content onboarding-locked">
+        <div class="ob-welcome">
+          <div class="ob-welcome-icon">&#128075;</div>
+          <div class="ob-welcome-title">Welcome, {{ driverName }}</div>
+          <div class="ob-welcome-sub">Complete the steps below to get started with LogisX.</div>
+        </div>
+
+        <!-- Overall progress -->
+        <div class="card ob-progress-card">
+          <div class="ob-progress-header">
+            <span class="ob-progress-label">Onboarding Progress</span>
+            <span class="ob-progress-pct">{{ onboardingPct }}%</span>
+          </div>
+          <div class="ob-bar-track"><div class="ob-bar-fill" :style="{ width: onboardingPct + '%' }"></div></div>
+        </div>
+
+        <!-- Step 1: Sign documents -->
+        <div class="card ob-step">
+          <div class="ob-step-header">
+            <div :class="['ob-step-num', allDocsSigned ? 'ob-done' : 'ob-active']">1</div>
+            <div class="ob-step-info">
+              <div class="ob-step-title">Sign Onboarding Documents</div>
+              <div class="ob-step-sub">{{ signedCount }}/{{ totalDocs }} completed</div>
+            </div>
+          </div>
+          <div class="ob-doc-list">
+            <div v-for="doc in onboardingDocs" :key="doc.doc_key" class="ob-doc-item" @click="openOnboardingDoc(doc)">
+              <div class="ob-doc-icon" v-html="doc.signed ? '&#9989;' : '&#9723;'"></div>
+              <div class="ob-doc-name">{{ doc.doc_name }}</div>
+              <div class="ob-doc-action">{{ doc.signed ? 'View' : 'Sign' }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Next-steps alert when all docs are signed -->
+        <div v-if="allDocsSigned" class="card ob-step">
+          <div class="ob-next-steps">
+            <div class="ob-next-title">Onboarding Status: Documents Received!</div>
+            <p>Thanks for getting your paperwork squared away. Now that the legal stuff is signed and uploaded, you've officially cleared Phase 1. We are currently reviewing your file.</p>
+            <p><b>Here is what happens next:</b></p>
+            <ul>
+              <li><b>Pre-Employment Screening:</b> A member of our safety team will contact you shortly to schedule your pre-appointment screening. If you've already completed one recently for another carrier, let us know, but expect to be sent for a new one under the LogisX account.</li>
+              <li><b>FMCSA Clearinghouse: This is mandatory.</b> If you haven't already, make sure you are enrolled in the <b>FMCSA Clearinghouse</b> and have granted LogisX Inc. permission to run your full query. We cannot put you in a truck until this is cleared.</li>
+              <li><b>Driver Training:</b> While we finalize your background check, it's time to get in the right mindset. At LogisX, we pride ourselves on professional, elite operation.</li>
+            </ul>
+            <p>Stand by for a call from our safety coordinator.</p>
+            <p><b>The LogisX Safety Team</b></p>
+          </div>
+        </div>
+
+        <!-- Step 2: Complete -->
+        <div class="card ob-step">
+          <div class="ob-step-header">
+            <div :class="['ob-step-num', 'ob-pending']">2</div>
+            <div class="ob-step-info">
+              <div class="ob-step-title">Start Driving</div>
+              <div class="ob-step-sub">You'll be added to the fleet once all steps are complete</div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- Document sign modal -->
+      <DocumentSignModal
+        :show="showSignModal"
+        :doc="selectedDoc"
+        :driver-name="driverStore.driverName"
+        @close="showSignModal = false"
+        @signed="onDocSigned"
+      />
+    </template>
+
+    <!-- ACCOUNT-LOAD FAILURE — defensive guard so a transient loadData error
+         doesn't drop an in-progress driver onto the regular driver UI. Shown
+         when the FIRST loadData() call throws; cleared on a successful Retry. -->
+    <template v-else-if="initialLoadFailed">
+      <DriverHeader :driver-name="driverName" @logout="handleLogout" />
+      <main class="app-content location-locked">
+        <div class="card loc-card">
+          <div class="loc-icon">&#9888;&#65039;</div>
+          <div class="loc-title">Couldn't Load Your Account</div>
+          <div class="loc-sub">
+            We hit a snag fetching your data. This is usually a brief network
+            issue. Tap Retry &mdash; no need to refresh the page.
+          </div>
+          <button class="loc-btn" :disabled="retryingInitialLoad" @click="retryInitialLoad">
+            {{ retryingInitialLoad ? 'Retrying&hellip;' : 'Retry' }}
+          </button>
+          <button class="loc-btn-sub" @click="handleLogout">Log Out</button>
+        </div>
+      </main>
+    </template>
+
+    <!-- NORMAL DRIVER UI — shown when fully onboarded (or no onboarding record) -->
+    <template v-else>
+    <!-- Welcome / Activation Modal — shown once when a driver first lands here after becoming fully onboarded -->
+    <div v-if="showWelcomeModal" class="welcome-overlay" @click.self="dismissWelcome">
+      <div class="welcome-card">
+        <div class="welcome-icon">&#127881;</div>
+        <h2 class="welcome-title">Welcome to the Team!</h2>
+        <p class="welcome-sub">Hey <b>{{ driverName }}</b> — you're now an official LogisX driver.</p>
+        <div class="welcome-checklist">
+          <div class="welcome-check"><span class="wc-icon">&#9989;</span> Onboarding documents signed</div>
+          <div class="welcome-check"><span class="wc-icon">&#9989;</span> Pre-employment drug test passed</div>
+          <div class="welcome-check"><span class="wc-icon">&#9989;</span> Added to the active fleet</div>
+        </div>
+        <p class="welcome-msg">Your account is active. You can now receive load assignments from dispatch, report your status on the road, and get paid. Drive safe out there.</p>
+        <p class="welcome-signoff">&mdash; The LogisX Team</p>
+        <button class="welcome-btn" @click="dismissWelcome">Let's Get Started</button>
+      </div>
+    </div>
+
     <!-- Load Assigned Notification -->
     <LoadAssignedBanner
       :notification="assignedNotification"
@@ -7,21 +122,12 @@
       @view-load="viewAssignedLoad"
     />
 
-    <!-- Distance Warning Banner -->
-    <div v-if="activeDistanceWarning && detailLoad" class="distance-warning">
-      <div class="warning-icon">&#9888;</div>
-      <div class="warning-content">
-        <div class="warning-title">
-          {{ activeDistanceWarning.type === 'far-from-pickup' ? 'Far from Pickup' : 'Far from Delivery' }}
-        </div>
-        <div class="warning-message">{{ activeDistanceWarning.message }}</div>
-      </div>
-      <button class="warning-dismiss" @click="distanceWarningDismissed = true">&times;</button>
-    </div>
 
     <!-- Header -->
     <DriverHeader
       :driver-name="driverName"
+      :socket-connected="socket.isConnected.value"
+      :has-ever-connected="socket.hasEverConnected.value"
       @logout="handleLogout"
     />
 
@@ -33,22 +139,33 @@
         <LoadDetail
           v-if="detailLoad"
           :load="detailLoad"
-          :headers="driverStore.headers.jobTracking"
+          :headers="driverMapHeaders"
           :driver-name="driverName"
           :has-active-job="driverStore.hasActiveJob"
-          :driver-position="geo.lastPosition.value"
           :truck="driverStore.truck"
           :load-expenses="detailLoadExpenses"
+          :responding="isResponding(detailLoad)"
+          :driver-position="driverPosition"
+          :phone-gps-mode-active="phoneGpsModeActive"
+          :phone-gps-status="phoneGpsStatus"
           @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
           @accept="handleAcceptLoad"
           @decline="handleDeclineLoad"
           @expense-submit="handleExpenseSubmit"
+          @enable-phone-gps="enablePhoneGps"
         />
 
         <!-- Load List -->
         <div v-else>
+          <!-- ============================================================
+               LOAD LIST FIRST — per client direction 2026-05-14: drivers
+               want to land on their loads list, not a wall of action
+               controls. The active-load action hero (status stepper,
+               documents, expense form) lives BELOW the list.
+               ============================================================ -->
+
           <!-- Sub-tab bar -->
           <div class="load-sub-tabs">
             <button
@@ -108,6 +225,9 @@
             </EmptyState>
           </div>
           <div v-else class="load-cards">
+            <!-- Flat list of the driver's loads. Active sub-tab orders the
+                 in-progress load first, then accepted loads in backend queue
+                 order (filteredLoads handles the sort) — no queue labels. -->
             <LoadCard
               v-for="load in driverStore.filteredLoads"
               :key="load._rowIndex"
@@ -115,48 +235,24 @@
               :headers="driverStore.headers.jobTracking"
               :pending="driverStore.loadSubTab === 'pending'"
               :accepted="isLoadAccepted(load)"
+              :responding="isResponding(load)"
               @select="handleLoadSelect"
               @chat="handleLoadChat"
               @accept="handleAcceptLoad"
               @decline="handleDeclineLoad"
             />
           </div>
+
+          <!-- Active-load action panel (status stepper + documents + expense
+               form) used to live here as an inline hero. It moved to
+               LoadDetail on 2026-05-14 per client direction: clicking a
+               load opens the detail page where the action controls live.
+               The list view stays clean. -->
         </div>
       </section>
 
-      <!-- STATUS TAB -->
-      <section v-if="currentTab === 'status'" class="tab-panel">
-        <div class="section-header">Status Update</div>
-        <div v-if="!currentActiveLoad">
-          <EmptyState>
-            <div class="empty-icon">&#128666;</div>
-            No active loads to update.
-          </EmptyState>
-        </div>
-        <div v-else>
-          <div class="status-load-header">
-            <span class="status-load-id">{{ getLoadId(currentActiveLoad) }}</span>
-            <StatusBadge :status="getLoadStatus(currentActiveLoad)" />
-          </div>
-
-          <StatusStepper
-            :load="currentActiveLoad"
-            :headers="driverStore.headers.jobTracking"
-            :current-status="getLoadStatus(currentActiveLoad)"
-            :driver-name="driverName"
-            @update="handleStatusUpdate"
-          />
-
-          <div class="status-section-divider">Documents</div>
-          <DocumentUpload
-            :load-id="getLoadId(currentActiveLoad)"
-            :driver-name="driverName"
-            :row-index="currentActiveLoad._rowIndex"
-            @uploaded="onStatusDocUploaded"
-          />
-          <DocumentList ref="statusDocListRef" :load-id="getLoadId(currentActiveLoad)" />
-        </div>
-      </section>
+      <!-- STATUS TAB was merged into the top of the Loads tab on 2026-05-14.
+           See the active-hero block in the loads-tab section above. -->
 
       <!-- KIT TAB -->
       <section v-if="currentTab === 'kit'" class="tab-panel">
@@ -168,6 +264,12 @@
           v-else
           :driver-info="driverStore.driverInfo"
           :headers="driverStore.headers.carrierDB"
+          :shared-documents="driverStore.sharedDocuments"
+          :truck-documents="driverStore.truckDocuments"
+          :application="driverStore.application"
+          :onboarding-documents="driverStore.onboarding?.documents || []"
+          :profile-picture-url="driverStore.profilePictureUrl"
+          :driver-id="driverStore.driverDirectoryId"
         />
       </section>
 
@@ -186,7 +288,7 @@
           :messages="driverStore.messages"
           :loads="driverStore.loads"
           :driver-name="driverName"
-          @send="handleSendMessage"
+          :send-handler="handleSendMessage"
           @mark-read="handleMarkRead"
         />
       </section>
@@ -222,8 +324,22 @@
             v-for="(exp, i) in driverStore.expenses"
             :key="exp.id || i"
             :expense="exp"
+            @preview="receiptPreview = $event"
           />
         </div>
+      </section>
+
+      <!-- Receipt preview overlay (shared with any card in the expenses list) -->
+      <Teleport to="body">
+        <div v-if="receiptPreview" class="receipt-preview-overlay" @click="receiptPreview = ''">
+          <img :src="receiptPreview" class="receipt-preview-img" alt="Receipt preview" />
+        </div>
+      </Teleport>
+
+      <!-- INVOICES TAB -->
+      <section v-if="currentTab === 'invoices'" class="tab-panel">
+        <div class="section-header">Invoices</div>
+        <InvoiceTab />
       </section>
     </main>
 
@@ -246,6 +362,7 @@
         </div>
       </div>
     </div>
+    </template><!-- end normal driver UI -->
   </div>
 </template>
 
@@ -267,13 +384,12 @@ import 'vant/es/popup/style'
 import 'vant/es/nav-bar/style'
 import 'vant/es/steps/style'
 import 'vant/es/step/style'
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useDriverStore } from '../stores/driver'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
-import { useGeolocation } from '../composables/useGeolocation'
 import { useApi } from '../composables/useApi'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
@@ -289,6 +405,8 @@ import DocumentUpload from '../components/driver/DocumentUpload.vue'
 import DocumentList from '../components/driver/DocumentList.vue'
 import LoadAssignedBanner from '../components/driver/LoadAssignedBanner.vue'
 import NotificationList from '../components/driver/NotificationList.vue'
+import DocumentSignModal from '../components/driver/DocumentSignModal.vue'
+import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
 
@@ -297,7 +415,37 @@ const driverStore = useDriverStore()
 const socket = useSocket()
 const toast = useToast()
 const router = useRouter()
-const geo = useGeolocation(useApi())
+const api = useApi()
+
+// Onboarding lock screen
+const showSignModal = ref(false)
+const selectedDoc = ref(null)
+function openOnboardingDoc(doc) {
+  selectedDoc.value = doc
+  showSignModal.value = true
+}
+function onDocSigned(docKey) {
+  // Update selectedDoc to the fresh signed version so modal shows signed state + PDF
+  const fresh = driverStore.onboarding?.documents?.find(d => d.doc_key === docKey)
+  if (fresh) selectedDoc.value = fresh
+}
+const isOnboarding = computed(() => {
+  const ob = driverStore.onboarding
+  // ob.status can briefly be null/undefined while the first /api/driver/* fetch
+  // is in flight, or if the backend ever serves a partial record. Treating
+  // that as "needs onboarding" used to lock fully-onboarded drivers behind
+  // the document-signing screen until they refreshed.
+  return !!ob?.status && ob.status !== 'fully_onboarded'
+})
+const onboardingDocs = computed(() => driverStore.onboarding?.documents || [])
+const totalDocs = computed(() => driverStore.onboarding?.totalDocs || 6)
+const signedCount = computed(() => onboardingDocs.value.filter(d => d.signed).length)
+const allDocsSigned = computed(() => signedCount.value === totalDocs.value)
+// Drug test progress is intentionally NOT shown to drivers (legal requirement).
+// Progress reflects document signing only; admin handles the final activation.
+const onboardingPct = computed(() =>
+  Math.round((signedCount.value / totalDocs.value) * 100)
+)
 
 const currentTab = ref('loads')
 const selectedStatusRowIndex = ref(null)
@@ -305,7 +453,98 @@ const chatLoadId = ref('')
 const showFilters = ref(false)
 const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
+const showWelcomeModal = ref(false)
+const receiptPreview = ref('')
+const respondingLoadIds = reactive(new Set())
+function isResponding(load) {
+  const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
+  const lid = loadIdCol ? (load?.[loadIdCol] || '') : ''
+  return lid ? respondingLoadIds.has(lid) : false
+}
+
+// True when the FIRST loadData() throws on mount. The UI shows a retry
+// screen instead of falling through to the regular driver UI — guards against
+// the "took him to the regular page... had to refresh every time he logs in"
+// bug the CEO previously reported.
+const initialLoadFailed = ref(false)
+const retryingInitialLoad = ref(false)
+let socketSetupDone = false
 let isMounted = false
+
+// Driver's own live position, sourced from the Routemate ELD telemetry feed
+// (/api/locations/latest). Phone-GPS was retired 2026-05-13, so this is now
+// the only thing that puts a truck pin on the driver's Load Route Map. Stays
+// null when the truck has no linked ELD or the ELD is offline — the map
+// component handles that case by rendering the route without a pin.
+const driverPosition = ref(null)
+let positionPollTimer = null
+const POSITION_POLL_INTERVAL_MS = 30000
+
+async function fetchDriverPosition() {
+  if (!driverName.value) return
+  // Phone GPS owns driverPosition while the temp test-load watcher is armed
+  // (see TEMP block below). Without this guard the 30 s ELD poll returns null
+  // for the unlinked truck and wipes out the phone fix between updates.
+  if (phoneGpsWatcherId !== null) return
+  try {
+    const data = await api.get('/api/locations/latest')
+    const dn = driverName.value.toLowerCase()
+    const l = (data?.locations || []).find(
+      (x) => (x.driver || '').toLowerCase() === dn && x.latitude != null,
+    )
+    driverPosition.value = l
+      ? {
+          latitude: l.latitude,
+          longitude: l.longitude,
+          source: l.source || '',
+          lastPingAge: l.lastPingAge != null ? l.lastPingAge : null,
+        }
+      : null
+  } catch {
+    // Silent — the map falls back to a no-pin state on its own.
+  }
+}
+
+
+// Welcome / activation modal — shows once per driver, first login after fully_onboarded
+function welcomeStorageKey() {
+  // Falling back to a literal 'anon' meant two test drivers in the same
+  // browser would share a flag and only one would see the celebration.
+  // Prefer any stable identity; if none exists, return null so callers skip
+  // the localStorage round-trip entirely.
+  const uid = auth.user?.id
+    || driverStore.onboarding?.user_id
+    || auth.user?.driverName
+    || auth.user?.username
+  if (!uid) return null
+  return `logisx_welcome_seen_${uid}`
+}
+function maybeShowWelcome() {
+  const ob = driverStore.onboarding
+  if (!ob || ob.status !== 'fully_onboarded') return
+  if (!ob.onboarded_at) return
+  // Only celebrate if onboarding happened recently (guards against existing drivers seeing this on every new deploy)
+  const onboardedMs = new Date(ob.onboarded_at).getTime()
+  if (isNaN(onboardedMs)) return
+  const daysSince = (Date.now() - onboardedMs) / (1000 * 60 * 60 * 24)
+  if (daysSince > 14) return
+  const key = welcomeStorageKey()
+  try {
+    if (key && localStorage.getItem(key)) return
+  } catch { /* private mode */ }
+  showWelcomeModal.value = true
+}
+function dismissWelcome() {
+  showWelcomeModal.value = false
+  const key = welcomeStorageKey()
+  if (!key) return
+  try { localStorage.setItem(key, new Date().toISOString()) } catch { /* ignore */ }
+}
+// If a driver is on the onboarding lock screen when the admin uploads their drug test,
+// the store refreshes, isOnboarding flips to false — surface the celebration at that moment too.
+watch(isOnboarding, (v, old) => {
+  if (old === true && v === false) maybeShowWelcome()
+})
 
 const subTabs = [
   { label: 'Active', value: 'active' },
@@ -335,9 +574,110 @@ function clearFilters() {
 const driverName = computed(() => auth.user?.driverName || auth.user?.username || '')
 
 // Load detail page (shown when a load card is tapped)
-const detailLoad = computed(() => {
+const detailLoadRaw = computed(() => {
   if (!detailRowIndex.value) return null
   return driverStore.loads.find(l => l._rowIndex === detailRowIndex.value) || null
+})
+const detailLoad = ref(null)
+watch(detailLoadRaw, async (load) => {
+  if (!load) { detailLoad.value = null; return }
+  detailLoad.value = { ...load }
+  const hdrs = driverStore.headers.jobTracking || []
+  const hasLatCol = hdrs.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
+  if (!hasLatCol) {
+    const lc = hdrs.find(h => /load.?id|job.?id/i.test(h))
+    const lid = lc ? (load[lc] || '').toString().trim() : ''
+    if (lid) {
+      try {
+        const g = await api.get(`/api/geocode/load/${encodeURIComponent(lid)}`)
+        const enriched = { ...detailLoad.value }
+        if (g.originLat) { enriched['Origin Lat'] = g.originLat; enriched['Origin Lng'] = g.originLng }
+        if (g.destLat) { enriched['Dest Lat'] = g.destLat; enriched['Dest Lng'] = g.destLng }
+        detailLoad.value = enriched
+      } catch { /* silent */ }
+    }
+  }
+}, { immediate: true })
+
+// ────────────────────────────────────────────────────────────────────────────
+// TEMP — Phone GPS fallback, scoped to one specific test load. Re-introduces
+// the path retired on 2026-05-13 (Routemate ELD became the sole position
+// source) so the CEO can validate the smart route guidance UI on a load
+// whose truck isn't ELD-linked yet. DELETE THIS BLOCK once testing is done.
+// No server round-trip — purely populates driverPosition locally for the map.
+const PHONE_GPS_TEST_LOAD_IDS = new Set(['LD-MP4W4LP1'])
+let phoneGpsWatcherId = null
+const phoneGpsModeActive = ref(false)
+const phoneGpsStatus = ref('')  // '' | 'requesting' | 'active' | 'denied' | 'error' | 'unavailable'
+function extractLoadId(load) {
+  if (!load) return ''
+  for (const k of Object.keys(load)) {
+    if (/load.?id|job.?id/i.test(k)) return (load[k] || '').toString().trim()
+  }
+  return ''
+}
+function stopPhoneGpsWatch() {
+  if (phoneGpsWatcherId !== null && navigator?.geolocation) {
+    navigator.geolocation.clearWatch(phoneGpsWatcherId)
+  }
+  phoneGpsWatcherId = null
+}
+function enablePhoneGps() {
+  if (!navigator?.geolocation) {
+    phoneGpsStatus.value = 'unavailable'
+    return
+  }
+  stopPhoneGpsWatch()
+  phoneGpsStatus.value = 'requesting'
+  phoneGpsWatcherId = navigator.geolocation.watchPosition(
+    (pos) => {
+      phoneGpsStatus.value = 'active'
+      driverPosition.value = {
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude,
+        // m/s and degrees-from-north; either may be null when stationary.
+        // DriveModeOverlay handles null gracefully (shows "--" for speed,
+        // holds last heading for camera rotation).
+        speed: Number.isFinite(pos.coords.speed) ? pos.coords.speed : null,
+        heading: Number.isFinite(pos.coords.heading) ? pos.coords.heading : null,
+        source: 'phone-test',
+        lastPingAge: 0,
+      }
+    },
+    (err) => {
+      // err.code: 1=PERMISSION_DENIED, 2=POSITION_UNAVAILABLE, 3=TIMEOUT
+      phoneGpsStatus.value = err && err.code === 1 ? 'denied' : 'error'
+      stopPhoneGpsWatch()
+    },
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 },
+  )
+}
+watch(
+  () => detailLoad.value,
+  (load) => {
+    stopPhoneGpsWatch()
+    phoneGpsStatus.value = ''
+    phoneGpsModeActive.value = false
+    if (!load) return
+    if (!PHONE_GPS_TEST_LOAD_IDS.has(extractLoadId(load))) return
+    phoneGpsModeActive.value = true
+    // Auto-attempt: if the browser already has permission (granted earlier
+    // in the session), watchPosition succeeds immediately and the banner
+    // hides. If it fails (incognito strict mode or prior denial), the
+    // banner stays visible with a button that re-arms inside a guaranteed
+    // user-gesture click.
+    enablePhoneGps()
+  },
+)
+onUnmounted(() => { stopPhoneGpsWatch() })
+// ────────────────────────────────────────────────────────────────────────────
+
+const driverMapHeaders = computed(() => {
+  const h = [...(driverStore.headers.jobTracking || [])]
+  if (detailLoad.value && detailLoad.value['Origin Lat'] && !h.some(c => /origin.*lat/i.test(c))) {
+    h.push('Origin Lat', 'Origin Lng', 'Dest Lat', 'Dest Lng')
+  }
+  return h
 })
 
 const detailLoadExpenses = computed(() => {
@@ -349,64 +689,74 @@ const detailLoadExpenses = computed(() => {
   return driverStore.expenses.filter(e => (e.load_id || '').toString().trim() === lid)
 })
 
-// Current active load for status tab (only working loads — not pending/delivered)
+// Current active load for status tab.
+// Priority order matches real-world dispatch: drivers should land on the
+// load they're physically moving with, not the most recently sheet-rowed one.
+// A manual override (persisted per-driver) wins when the chosen load is
+// still in workingLoads; otherwise we fall back to priority-based pick.
+const STATUS_PRIORITY = [
+  /^in transit$/i,
+  /^at receiver$/i,
+  /^unloading$/i,
+  /^at shipper$/i,
+  /^loading$/i,
+  /^heading to shipper$/i,
+  /^assigned$/i,
+]
+
+function statusPriorityScore(status) {
+  const s = (status || '').trim()
+  for (let i = 0; i < STATUS_PRIORITY.length; i++) {
+    if (STATUS_PRIORITY[i].test(s)) return i
+  }
+  return STATUS_PRIORITY.length
+}
+
+function statusLoadStorageKey() {
+  return `logisx_driver_status_load_${(driverName.value || 'anon').toLowerCase()}`
+}
+
+const manualStatusLoadId = ref('')
+try { manualStatusLoadId.value = localStorage.getItem(statusLoadStorageKey()) || '' } catch { /* private mode */ }
+
 const currentActiveLoad = computed(() => {
-  return driverStore.workingLoads[0] || null
+  const loads = driverStore.workingLoads
+  if (loads.length === 0) return null
+
+  // Manual override: use it only if the load is still active.
+  if (manualStatusLoadId.value) {
+    const match = loads.find((l) => getLoadId(l) === manualStatusLoadId.value)
+    if (match) return match
+  }
+
+  // Priority-based pick. Tie-breaker = highest _rowIndex (matches today's behavior).
+  return [...loads].sort((a, b) => {
+    const sa = statusPriorityScore(getLoadStatus(a))
+    const sb = statusPriorityScore(getLoadStatus(b))
+    if (sa !== sb) return sa - sb
+    return (b._rowIndex || 0) - (a._rowIndex || 0)
+  })[0] || null
 })
 
-// Client-side distance warning — computed from GPS position and the currently viewed load
-const FAR_THRESHOLD_KM = 500
-const clientDistanceWarning = computed(() => {
-  const pos = geo.lastPosition.value
-  const load = detailLoad.value
-  if (!pos || !load) return null
-  const headers = driverStore.headers.jobTracking
-  const statusCol = findCol(headers, /status/i)
-  const status = statusCol ? (load[statusCol] || '').trim().toLowerCase() : ''
-  const notPickedUp = /^(dispatched|assigned)$/i.test(status)
-  const inTransit = /^(in transit)$/i.test(status)
-  if (!notPickedUp && !inTransit) return null
-
-  const oLatCol = findCol(headers, /origin.*lat|pickup.*lat/i)
-  const oLngCol = findCol(headers, /origin.*l(on|ng)|pickup.*l(on|ng)/i)
-  const dLatCol = findCol(headers, /dest.*lat|drop.*lat|delivery.*lat/i)
-  const dLngCol = findCol(headers, /dest.*l(on|ng)|drop.*l(on|ng)|delivery.*l(on|ng)/i)
-  const loadIdCol = findCol(headers, /load.?id|job.?id/i)
-
-  let targetLat, targetLng, type
-  if (notPickedUp && oLatCol && oLngCol) {
-    targetLat = parseFloat(load[oLatCol])
-    targetLng = parseFloat(load[oLngCol])
-    type = 'far-from-pickup'
-  } else if (inTransit && dLatCol && dLngCol) {
-    targetLat = parseFloat(load[dLatCol])
-    targetLng = parseFloat(load[dLngCol])
-    type = 'far-from-delivery'
-  }
-  if (!targetLat || !targetLng || isNaN(targetLat) || isNaN(targetLng)) return null
-
-  // Haversine distance
-  const R = 6371
-  const toRad = d => d * Math.PI / 180
-  const dLat = toRad(targetLat - pos.latitude)
-  const dLng = toRad(targetLng - pos.longitude)
-  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(pos.latitude)) * Math.cos(toRad(targetLat)) * Math.sin(dLng/2)**2
-  const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
-
-  if (distKm < FAR_THRESHOLD_KM) return null
-  const distMiles = Math.round(distKm * 0.621371)
-  const loadId = loadIdCol ? load[loadIdCol] || '' : ''
-  return {
-    type,
-    distanceMiles: distMiles,
-    message: `You are ${distMiles.toLocaleString()} miles from ${type === 'far-from-pickup' ? 'pickup' : 'delivery'} (Load ${loadId}). Please verify your route.`,
-  }
+const isStatusLoadManual = computed(() => {
+  if (!manualStatusLoadId.value || !currentActiveLoad.value) return false
+  return getLoadId(currentActiveLoad.value) === manualStatusLoadId.value
 })
 
-const distanceWarningDismissed = ref(false)
-const activeDistanceWarning = computed(() => {
-  if (distanceWarningDismissed.value) return null
-  return clientDistanceWarning.value || geo.distanceWarning.value
+function setStatusLoad(loadId) {
+  manualStatusLoadId.value = loadId || ''
+  try {
+    if (loadId) localStorage.setItem(statusLoadStorageKey(), loadId)
+    else localStorage.removeItem(statusLoadStorageKey())
+  } catch { /* private mode */ }
+}
+
+// If the manually-selected load is no longer active (delivered, reassigned,
+// etc.), clear the override so the priority pick takes over on next render.
+watch(() => driverStore.workingLoads, (loads) => {
+  if (!manualStatusLoadId.value) return
+  const stillActive = loads.some((l) => getLoadId(l) === manualStatusLoadId.value)
+  if (!stillActive) setStatusLoad('')
 })
 
 const statusDocListRef = ref(null)
@@ -502,11 +852,20 @@ function isLoadAccepted(load) {
 async function handleAcceptLoad(load) {
   const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
   const lid = loadIdCol ? (load[loadIdCol] || '') : ''
+  if (lid && respondingLoadIds.has(lid)) return
+  if (lid) respondingLoadIds.add(lid)
   try {
     await driverStore.respondToLoad(lid, load._rowIndex, 'accepted')
     toast.show('Load accepted')
-  } catch {
-    toast.show('Failed to accept load', 'error')
+  } catch (err) {
+    const msg = err?.status === 403
+      ? 'This load is no longer assigned to you'
+      : err?.status === 409
+      ? (err?.message || 'Already responded to this load')
+      : 'Failed to accept load'
+    toast.show(msg, 'error')
+  } finally {
+    if (lid) respondingLoadIds.delete(lid)
   }
 }
 
@@ -524,18 +883,27 @@ async function confirmDecline() {
   if (!load) return
   const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
   const lid = loadIdCol ? (load[loadIdCol] || '') : ''
+  if (lid && respondingLoadIds.has(lid)) {
+    declineTarget.value = null
+    return
+  }
+  if (lid) respondingLoadIds.add(lid)
   try {
     await driverStore.respondToLoad(lid, load._rowIndex, 'declined')
     toast.show('Load declined')
-  } catch {
-    toast.show('Failed to decline load', 'error')
+  } catch (err) {
+    const msg = err?.status === 403
+      ? 'This load is no longer assigned to you'
+      : (err?.message || 'Failed to decline load')
+    toast.show(msg, 'error')
+  } finally {
+    if (lid) respondingLoadIds.delete(lid)
+    declineTarget.value = null
   }
-  declineTarget.value = null
 }
 
 function handleLoadSelect(load) {
   detailRowIndex.value = load._rowIndex
-  distanceWarningDismissed.value = false
 }
 
 function handleLoadChat({ loadId }) {
@@ -573,23 +941,46 @@ async function handleStatusUpdate({ newStatus, load }) {
   const loadId = loadIdCol ? load[loadIdCol] : ''
 
   try {
-    await driverStore.updateStatus(loadId, newStatus, load._rowIndex)
+    await driverStore.updateStatus(loadId, newStatus, load._rowIndex, load)
     toast.show(`Status updated to ${newStatus}`)
-  } catch {
-    toast.show('Failed to update status', 'error')
+  } catch (err) {
+    if (err && err.code === 'POD_REQUIRED') {
+      // POD gate: surface the server message and keep the driver on the Loads
+      // tab — the Documents section sits directly below the stepper in the
+      // active-load hero, one tap away.
+      toast.show(err.message || 'Upload a POD before marking Delivered', 'error')
+      currentTab.value = 'loads'
+    } else if (err && err.code === 'ACTIVE_JOB_CONFLICT') {
+      toast.show(err.message || 'Complete your current load before starting another', 'error')
+    } else {
+      toast.show((err && err.message) || 'Failed to update status', 'error')
+    }
   }
 }
 
 async function handleSendMessage({ recipient, message, loadId }) {
-  try {
-    await driverStore.sendMessage(recipient, message, loadId)
-  } catch {
-    toast.show('Failed to send message', 'error')
-  }
+  // Let errors propagate so ChatView keeps the input text + shows the
+  // retry chip. Toast would be duplicate and harder to act on.
+  await driverStore.sendMessage(recipient, message, loadId)
 }
 
 function handleMarkRead(ids) {
   driverStore.markMessagesRead(ids)
+}
+
+// Coalesce socket-triggered refetches. Three different events
+// (load-assigned, load-cancelled, geofence-trigger) each used to call
+// driverStore.loadData() independently, so a burst of activity (assign +
+// reassign + geofence within a couple hundred ms) kicked off three stacked
+// full refetches. We debounce to a single refetch ~250ms after the burst
+// settles. Optimistic in-place mutations still keep the UI responsive.
+let refetchTimer = null
+function scheduleDriverRefetch() {
+  if (refetchTimer) return
+  refetchTimer = setTimeout(() => {
+    refetchTimer = null
+    driverStore.loadData()
+  }, 250)
 }
 
 async function handleExpenseSubmit(data) {
@@ -604,13 +995,9 @@ async function handleExpenseSubmit(data) {
 // Socket.IO for real-time notifications
 function onLoadAssigned(payload) {
   if (!isMounted) return
-  assignedNotification.value = {
-    loadId: payload.loadId || 'Load',
-    origin: payload.origin || '',
-    destination: payload.destination || '',
-    rowIndex: payload.rowIndex
-  }
   const route = [payload.origin, payload.destination].filter(Boolean).join(' \u2192 ')
+  // Always record the notification (so it shows on the Notifications tab and
+  // the next loadData refresh picks up the new row).
   driverStore.addNotification({
     id: payload.notificationId || Date.now(),
     type: 'load-assigned',
@@ -620,7 +1007,15 @@ function onLoadAssigned(payload) {
     read: 0,
     createdAt: new Date().toISOString(),
   })
-  driverStore.loadData()
+  // Always surface the new-load banner \u2014 drivers can hold multiple accepted
+  // loads at once, so a banner arriving mid-trip is expected, not suppressed.
+  assignedNotification.value = {
+    loadId: payload.loadId || 'Load',
+    origin: payload.origin || '',
+    destination: payload.destination || '',
+    rowIndex: payload.rowIndex
+  }
+  scheduleDriverRefetch()
 }
 
 function dismissAssignedBanner() {
@@ -639,17 +1034,37 @@ function viewAssignedLoad() {
 
 function onLoadCancelled(payload) {
   if (!isMounted) return
-  toast.show(`Load ${payload.loadId || ''} has been cancelled by dispatch`)
+  const reassigned = payload.reason === 'reassigned'
+  const toastMsg = reassigned
+    ? `Load ${payload.loadId || ''} was reassigned to another driver`
+    : `Load ${payload.loadId || ''} has been cancelled by dispatch`
+  toast.show(toastMsg)
   driverStore.addNotification({
     id: payload.notificationId || Date.now(),
     type: 'load-cancelled',
-    title: `Load Cancelled: ${payload.loadId || 'Load'}`,
-    body: 'Your assignment has been cancelled by dispatch',
+    title: reassigned
+      ? `Load Reassigned: ${payload.loadId || 'Load'}`
+      : `Load Cancelled: ${payload.loadId || 'Load'}`,
+    body: reassigned
+      ? 'This load is no longer assigned to you'
+      : 'Your assignment has been cancelled by dispatch',
     metadata: JSON.stringify(payload),
     read: 0,
     createdAt: new Date().toISOString(),
   })
-  driverStore.loadData()
+  // Optimistically remove the load from local state so the driver doesn't
+  // see a ghost row for 1-5s while the refetch round-trips. Match by
+  // rowIndex first (precise) then by loadId (falls back if rowIndex shifts).
+  if (payload.rowIndex || payload.loadId) {
+    const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
+    driverStore.loads = driverStore.loads.filter(l => {
+      if (payload.rowIndex && l._rowIndex === payload.rowIndex) return false
+      if (payload.loadId && loadIdCol && l[loadIdCol] === payload.loadId) return false
+      return true
+    })
+    if (detailRowIndex.value === payload.rowIndex) detailRowIndex.value = null
+  }
+  scheduleDriverRefetch()
 }
 
 function onGeofenceTrigger(payload) {
@@ -668,7 +1083,31 @@ function onGeofenceTrigger(payload) {
     createdAt: new Date().toISOString(),
   })
   // Reload data so load status updates and route recalculates from driver position
-  driverStore.loadData()
+  scheduleDriverRefetch()
+}
+
+// Live ELD push from the Routemate telemetry sync loop. The server emits this
+// event to both the "dispatch" room and the driver's own room — Super Admins
+// previewing the driver page join "dispatch" and receive every driver's
+// updates, so we filter by driver name here to avoid a Super Admin's
+// driverPosition ref jumping between trucks. The 30s /api/locations/latest
+// poll remains as a safety net for the initial load and socket-reconnect.
+function onLocationUpdate(payload) {
+  if (!isMounted) return
+  // Phone GPS owns driverPosition while the temp test-load watcher is armed.
+  // Ignore Routemate fan-outs in that window so the phone fix isn't displaced
+  // by stale or off-truck telemetry.
+  if (phoneGpsWatcherId !== null) return
+  if (!payload || payload.latitude == null || payload.longitude == null) return
+  const me = (driverName.value || '').toLowerCase()
+  const who = (payload.driver || '').toLowerCase()
+  if (!me || who !== me) return
+  driverPosition.value = {
+    latitude: payload.latitude,
+    longitude: payload.longitude,
+    source: payload.source || 'routemate',
+    lastPingAge: 0,
+  }
 }
 
 function onNewMessage(msg) {
@@ -698,29 +1137,6 @@ function onNewMessage(msg) {
   }
 }
 
-// Start GPS tracking when driver app loads, update loadId based on working loads
-watch(
-  () => driverStore.workingLoads,
-  (working) => {
-    if (working.length > 0) {
-      const firstLoadId = getLoadId(working[0])
-      if (!geo.tracking.value) {
-        geo.start(firstLoadId)
-      } else {
-        geo.updateLoadId(firstLoadId)
-      }
-    } else {
-      // No active loads — keep tracking but clear loadId
-      if (!geo.tracking.value) {
-        geo.start('')
-      } else {
-        geo.updateLoadId('')
-      }
-    }
-  },
-  { immediate: true }
-)
-
 // Keep selected status load in sync
 watch(
   () => driverStore.activeLoads,
@@ -738,31 +1154,83 @@ watch(
   { immediate: true }
 )
 
+// On socket reconnect, refetch driver data to reconcile any events
+// (load-assigned, load-cancelled, geofence-trigger) that fired while the
+// socket was down. Without this, missed events stay missed.
+watch(
+  () => socket.isConnected.value,
+  (connected, prev) => {
+    if (connected && prev === false && isMounted) {
+      driverStore.loadData().catch(() => {})
+    }
+  }
+)
+
+async function attemptInitialLoad() {
+  // Kick off the socket handshake in parallel with the data fetch so the
+  // "Offline" chip clears as soon as the WebSocket is up, instead of waiting
+  // for the HTTP fetch to finish first. Handler registration still waits for
+  // loadData() so store mutations can't fire on an empty store.
+  if (!socketSetupDone && driverName.value) {
+    socket.connect()
+    socket.register(driverName.value)
+  }
+  try {
+    await driverStore.loadData()
+    initialLoadFailed.value = false
+    maybeShowWelcome()
+  } catch {
+    initialLoadFailed.value = true
+    toast.show('Failed to load data', 'error')
+    return
+  }
+  if (!socketSetupDone) {
+    socket.on('new-message', onNewMessage)
+    socket.on('load-assigned', onLoadAssigned)
+    socket.on('load-cancelled', onLoadCancelled)
+    socket.on('geofence-trigger', onGeofenceTrigger)
+    socket.on('location-update', onLocationUpdate)
+    socketSetupDone = true
+  }
+}
+
+async function retryInitialLoad() {
+  if (retryingInitialLoad.value) return
+  retryingInitialLoad.value = true
+  try {
+    await attemptInitialLoad()
+  } finally {
+    retryingInitialLoad.value = false
+  }
+}
+
 onMounted(async () => {
   isMounted = true
   driverStore.driverName = driverName.value
-  try {
-    await driverStore.loadData()
-  } catch {
-    toast.show('Failed to load data', 'error')
-  }
-
-  // Socket.IO
-  socket.connect()
-  socket.register(driverName.value)
-  socket.on('new-message', onNewMessage)
-  socket.on('load-assigned', onLoadAssigned)
-  socket.on('load-cancelled', onLoadCancelled)
-  socket.on('geofence-trigger', onGeofenceTrigger)
+  // The standalone Status tab was retired on 2026-05-14 (merged into the Loads
+  // tab as the active-load hero). If anything ever sets currentTab to 'status'
+  // (cached state, a stale link), coerce it to 'loads' so the driver doesn't
+  // land on an empty section.
+  if (currentTab.value === 'status') currentTab.value = 'loads'
+  if (driverStore.currentTab === 'status') driverStore.currentTab = 'loads'
+  await attemptInitialLoad()
+  // Begin polling the driver's own ELD position. First call is fire-and-forget
+  // so the initial load isn't delayed by a Routemate query failure.
+  fetchDriverPosition()
+  positionPollTimer = setInterval(fetchDriverPosition, POSITION_POLL_INTERVAL_MS)
 })
 
 onUnmounted(() => {
   isMounted = false
+  if (positionPollTimer) {
+    clearInterval(positionPollTimer)
+    positionPollTimer = null
+  }
   socket.off('new-message', onNewMessage)
   socket.off('load-assigned', onLoadAssigned)
   socket.off('load-cancelled', onLoadCancelled)
   socket.off('geofence-trigger', onGeofenceTrigger)
-  geo.stop()
+  socket.off('location-update', onLocationUpdate)
   socket.disconnect()
 })
 </script>
@@ -771,9 +1239,172 @@ onUnmounted(() => {
 .driver-app {
   min-height: 100vh;
   padding-top: calc(52px + env(safe-area-inset-top, 0px));
-  padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+  /* Bottom buffer lives on .app-content (see comment there) — keep this
+     small so the flex math at the App-shell level doesn't double-pad. */
+  padding-bottom: 0;
   font-size: 0.95rem;
 }
+
+/* Onboarding Lock Screen */
+.onboarding-locked {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.ob-welcome {
+  text-align: center;
+  padding: 1.5rem 1rem 0.5rem;
+}
+.ob-welcome-icon { font-size: 2.2rem; }
+.ob-welcome-title { font-size: 1.2rem; font-weight: 800; margin-top: 0.25rem; }
+.ob-welcome-sub { font-size: 0.82rem; color: var(--text-dim); margin-top: 0.2rem; }
+.ob-progress-card { padding: 1rem; }
+.ob-progress-header { display: flex; justify-content: space-between; margin-bottom: 0.4rem; }
+.ob-progress-label { font-weight: 700; font-size: 0.88rem; }
+.ob-progress-pct { font-weight: 700; font-size: 0.88rem; color: var(--accent); }
+.ob-bar-track { height: 10px; border-radius: 5px; background: var(--bg); overflow: hidden; }
+.ob-bar-fill { height: 100%; border-radius: 5px; background: var(--accent); transition: width 0.4s ease; }
+.ob-step { padding: 1rem; }
+.ob-step-header { display: flex; align-items: center; gap: 0.75rem; }
+.ob-step-num {
+  width: 32px; height: 32px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 0.85rem; flex-shrink: 0;
+}
+.ob-done { background: #d1fae5; color: #065f46; }
+.ob-active { background: #dbeafe; color: #1e40af; }
+.ob-pending { background: #f3f4f6; color: #9ca3af; }
+.ob-step-info { flex: 1; }
+.ob-step-title { font-weight: 700; font-size: 0.92rem; }
+.ob-step-sub { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.1rem; }
+.ob-doc-list { margin-top: 0.75rem; display: flex; flex-direction: column; gap: 0.25rem; }
+.ob-doc-item {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.55rem 0.5rem; border-radius: 8px; cursor: pointer;
+  transition: background 0.15s;
+}
+.ob-doc-item:active { background: var(--bg); }
+.ob-doc-icon { font-size: 1.1rem; flex-shrink: 0; }
+.ob-doc-name { flex: 1; font-size: 0.82rem; font-weight: 500; }
+.ob-doc-action {
+  font-size: 0.72rem; font-weight: 700; color: var(--accent);
+  padding: 0.2rem 0.6rem; border-radius: 99px; background: var(--accent-dim);
+}
+.ob-next-steps {
+  margin-top: 1rem; padding: 1rem; background: #f0fdf4; border-radius: 10px;
+  border: 1px solid #bbf7d0; font-size: 0.82rem; line-height: 1.6;
+}
+.ob-next-title {
+  font-weight: 800; font-size: 0.95rem; color: #065f46; margin-bottom: 0.5rem;
+}
+.ob-next-steps ul { margin: 0.5rem 0; padding-left: 1.2rem; }
+.ob-next-steps li { margin-bottom: 0.4rem; }
+.ob-next-steps p { margin-bottom: 0.4rem; }
+
+/* Welcome / Activation Modal */
+.welcome-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.78);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+  padding: 1rem;
+  animation: welcome-fade 0.3s ease-out;
+}
+@keyframes welcome-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.welcome-card {
+  background: linear-gradient(160deg, #ffffff 0%, #f0fdf4 100%);
+  border-radius: 20px;
+  padding: 2rem 1.75rem 1.75rem;
+  max-width: 380px;
+  width: 100%;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(16, 185, 129, 0.2);
+  text-align: center;
+  animation: welcome-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes welcome-pop {
+  from { transform: scale(0.85); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+.welcome-icon {
+  font-size: 3.5rem;
+  line-height: 1;
+  margin-bottom: 0.6rem;
+}
+.welcome-title {
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: #064e3b;
+  margin: 0 0 0.5rem;
+  letter-spacing: -0.01em;
+}
+.welcome-sub {
+  font-size: 0.95rem;
+  color: #374151;
+  margin: 0 0 1.25rem;
+}
+.welcome-sub b { color: #065f46; }
+.welcome-checklist {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1rem;
+  text-align: left;
+}
+.welcome-check {
+  font-size: 0.85rem;
+  color: #065f46;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.22rem 0;
+  font-weight: 600;
+}
+.wc-icon {
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+.welcome-msg {
+  font-size: 0.85rem;
+  color: #4b5563;
+  line-height: 1.55;
+  margin: 0 0 0.4rem;
+}
+.welcome-signoff {
+  font-size: 0.8rem;
+  color: #6b7280;
+  font-style: italic;
+  margin: 0 0 1.3rem;
+}
+.welcome-btn {
+  display: block;
+  width: 100%;
+  background: linear-gradient(135deg, #059669, #10b981);
+  color: #ffffff;
+  border: none;
+  border-radius: 10px;
+  padding: 0.9rem 1.25rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.12s;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
+  font-family: inherit;
+}
+.welcome-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(16, 185, 129, 0.5);
+}
+.welcome-btn:active { transform: translateY(0); }
 
 /* Distance Warning Banner */
 .distance-warning {
@@ -828,7 +1459,13 @@ onUnmounted(() => {
 
 .app-content {
   padding: 0.75rem 0.5rem;
-  padding-bottom: 1rem;
+  /* App.vue wraps every route in <main class="main"> which is itself a
+     100vh flex column scroll container. Padding on .driver-app gets
+     swallowed by that flex sizing on some browsers (Chrome desktop, in
+     particular) and the tabbar ends up overlapping the last card. Putting
+     the buffer directly on .app-content sidesteps the flex math — this is
+     a plain block-level padding and it always wins. */
+  padding-bottom: calc(100px + env(safe-area-inset-bottom, 0px));
 }
 
 .tab-panel {
@@ -902,6 +1539,117 @@ onUnmounted(() => {
   padding: 0.1rem 0.5rem;
   border-radius: 20px;
   color: var(--text-dim);
+}
+
+/* Sub-section labels inside the Active sub-tab card list. Splits the list
+   into "Active Load" (top) and "Up Next" (queued) when both kinds coexist. */
+/* ────────────────────────────────────────────────────────────────────────
+   Active-load hero (top of Loads tab). The CEO flagged that a lot of
+   drivers are in their late 50s / early 60s and aren't comfortable
+   bouncing between tabs — this block puts the "what's next?" action in
+   their face the moment they open the app.
+   ──────────────────────────────────────────────────────────────────────── */
+.active-hero {
+  background: linear-gradient(180deg, var(--accent-dim, #ecfdf5) 0%, var(--surface) 100%);
+  border: 2px solid var(--accent);
+  border-radius: 14px;
+  padding: 1rem 0.85rem 1.15rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.10);
+}
+.active-hero-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-bottom: 0.85rem;
+  text-align: center;
+}
+.active-hero-eyebrow {
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+.active-hero-headline {
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.15;
+}
+
+/* Inside the hero, the status stepper sits on the panel surface — make sure
+   StatusStepper's inner .card doesn't look like a stranded island. */
+.active-hero :deep(.card) {
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 0.85rem;
+}
+
+/* Make the primary action button bigger and easier to hit. Older drivers,
+   gloved hands, sun glare — the tap target needs to be unmissable. */
+.active-hero :deep(.action-btn.primary) {
+  min-height: 64px;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+}
+
+/* Visual separator between the action hero and the rest of the load list. */
+.hero-list-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.25rem 0 0.85rem;
+}
+.hero-list-divider::before,
+.hero-list-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.hero-list-divider-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+
+/* Multi-load picker (only renders when workingLoads.length > 1) */
+.status-load-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 0.65rem;
+  flex-wrap: wrap;
+}
+.picker-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.picker-select {
+  flex: 1;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.82rem;
+  background: var(--surface);
+  color: var(--text);
+}
+.picker-hint {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 /* Load selector */
@@ -1122,5 +1870,103 @@ onUnmounted(() => {
   background: var(--danger, #ef4444);
   color: #fff;
   border: none;
+}
+
+/* Location permission lock — mirrors the onboarding lock layout so the two
+   gate screens feel like siblings. */
+.location-locked {
+  max-width: 520px;
+  margin: 0 auto;
+  padding-bottom: 2rem;
+}
+.loc-card {
+  text-align: center;
+  padding: 1.5rem 1.25rem;
+}
+.loc-icon {
+  font-size: 2.6rem;
+  line-height: 1;
+  margin-bottom: 0.6rem;
+}
+.loc-title {
+  font-size: 1.15rem;
+  font-weight: 800;
+  margin-bottom: 0.4rem;
+}
+.loc-sub {
+  font-size: 0.88rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+  margin-bottom: 1rem;
+}
+.loc-status {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 0.75rem 0;
+}
+.loc-guide {
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  margin-bottom: 1rem;
+  line-height: 1.5;
+}
+.loc-guide p { margin: 0 0 0.5rem; }
+.loc-guide ul { margin: 0.25rem 0 0; padding-left: 1.1rem; }
+.loc-guide li { margin-bottom: 0.35rem; }
+.loc-btn {
+  display: block;
+  width: 100%;
+  padding: 0.85rem 1rem;
+  background: var(--accent, #10b981);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-bottom: 0.6rem;
+  transition: opacity 0.15s;
+  font-family: inherit;
+}
+.loc-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.loc-btn:hover:not(:disabled) { opacity: 0.9; }
+.loc-btn-sub {
+  display: block;
+  width: 100%;
+  padding: 0.65rem 1rem;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.loc-btn-sub:hover { background: var(--bg); }
+
+/* Full-screen receipt preview overlay — same pattern used on admin /expenses */
+.receipt-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+  cursor: zoom-out;
+  padding: 1rem;
+}
+.receipt-preview-img {
+  max-width: 95vw;
+  max-height: 90vh;
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
 }
 </style>

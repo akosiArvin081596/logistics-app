@@ -11,6 +11,30 @@ const routes = [
     meta: { public: true, noSidebar: true },
   },
   {
+    path: '/apply',
+    name: 'apply',
+    component: () => import('../views/ApplyView.vue'),
+    meta: { public: true, noSidebar: true },
+  },
+  {
+    path: '/invest',
+    name: 'invest',
+    component: () => import('../views/InvestorApplyView.vue'),
+    meta: { public: true, noSidebar: true },
+  },
+  {
+    path: '/track',
+    name: 'track-search',
+    component: () => import('../views/TrackLoadView.vue'),
+    meta: { public: true, noSidebar: true, alwaysPublic: true },
+  },
+  {
+    path: '/track/:loadId',
+    name: 'track-load',
+    component: () => import('../views/TrackLoadView.vue'),
+    meta: { public: true, noSidebar: true, alwaysPublic: true },
+  },
+  {
     path: '/dashboard',
     name: 'dashboard',
     component: () => import('../views/DashboardView.vue'),
@@ -33,6 +57,12 @@ const routes = [
     name: 'expenses',
     component: () => import('../views/ExpensesView.vue'),
     meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
+    path: '/invoices',
+    name: 'invoices',
+    component: () => import('../views/InvoicesView.vue'),
+    meta: { roles: ['Super Admin'] },
   },
   {
     path: '/messages',
@@ -77,9 +107,63 @@ const routes = [
     meta: { roles: ['Super Admin', 'Dispatcher', 'Investor'] },
   },
   {
+    path: '/investors',
+    name: 'investors',
+    component: () => import('../views/InvestorsView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/investor-portals',
+    name: 'investor-portals',
+    component: () => import('../views/InvestorPortalsView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/investor-portals/:userId',
+    name: 'investor-portal-preview',
+    component: () => import('../views/InvestorPortalPreviewView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/drivers',
+    name: 'drivers-db',
+    component: () => import('../views/DriversDbView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/trailers',
+    name: 'trailers',
+    component: () => import('../views/TrailersView.vue'),
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
+    path: '/applications',
+    name: 'applications',
+    component: () => import('../views/ApplicationsView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/investor-applications',
+    name: 'investor-applications',
+    component: () => import('../views/InvestorApplicationsView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/admin/tools',
     name: 'admin-tools',
     component: () => import('../views/AdminToolsView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/admin/fleet-health',
+    name: 'admin-fleet-health',
+    component: () => import('../views/FleetHealthView.vue'),
+    meta: { roles: ['Super Admin', 'Dispatcher'] },
+  },
+  {
+    path: '/admin/financials',
+    name: 'admin-financials',
+    component: () => import('../views/FinancialsView.vue'),
     meta: { roles: ['Super Admin'] },
   },
   {
@@ -87,6 +171,12 @@ const routes = [
     name: 'archive',
     component: () => import('../views/ArchiveView.vue'),
     meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/account/change-password',
+    name: 'change-password',
+    component: () => import('../views/ChangePasswordView.vue'),
+    meta: { noSidebar: true, forcedPasswordChange: true },
   },
   {
     path: '/',
@@ -110,15 +200,27 @@ router.beforeEach(async (to) => {
     await auth.checkSession()
   }
 
-  // Public pages
+  // Public pages. `alwaysPublic` routes (like /track) stay reachable even
+  // for logged-in admins — handy when a dispatcher wants to preview what a
+  // customer sees.
   if (to.meta.public) {
-    if (auth.isAuthenticated) return { path: auth.roleHome }
+    if (auth.isAuthenticated && !to.meta.alwaysPublic) return { path: auth.roleHome }
     return true
   }
 
   // Not authenticated
   if (!auth.isAuthenticated) {
     return { name: 'login' }
+  }
+
+  // Forced password change — drivers provisioned via /applications acceptance
+  // land here on first login. Everything else is blocked until they rotate
+  // the temp credential they got by email.
+  if (auth.user?.mustChangePassword && !to.meta.forcedPasswordChange) {
+    return { name: 'change-password' }
+  }
+  if (!auth.user?.mustChangePassword && to.meta.forcedPasswordChange) {
+    return { path: auth.roleHome }
   }
 
   // Role check

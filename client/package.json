@@ -12,6 +12,7 @@
     "@vueuse/core": "^14.2.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "jscanify": "^1.4.2",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^3.0.2",
     "radix-vue": "^1.9.17",

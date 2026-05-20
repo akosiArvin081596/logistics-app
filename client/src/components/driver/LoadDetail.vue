@@ -13,14 +13,71 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
-    <!-- Route Map (separate collapse) -->
+    <!-- TEMP — phone-GPS banner for the test load. Goes away with the rest
+         of the temp block in DriverView when testing wraps. -->
+    <div v-if="phoneGpsModeActive && phoneGpsStatus !== 'active'" class="phone-gps-banner" :class="bannerClass">
+      <div class="phone-gps-text">
+        <strong>{{ bannerTitle }}</strong>
+        <span>{{ bannerMessage }}</span>
+      </div>
+      <button
+        v-if="phoneGpsStatus !== 'unavailable'"
+        type="button"
+        class="phone-gps-btn"
+        @click="$emit('enable-phone-gps')"
+      >
+        {{ phoneGpsStatus === 'denied' || phoneGpsStatus === 'error' ? 'Try Again' : 'Enable GPS' }}
+      </button>
+    </div>
+
+    <!-- Status update + Route Map + smart guidance.
+         Status only renders for active/working loads (assigned, dispatched,
+         at shipper, loading, in transit, at receiver, unloading). Pending
+         acceptance loads use Accept/Reject at the bottom of the page;
+         Delivered loads see StatusStepper's own "Load Delivered" state. -->
     <van-collapse v-model="openSections" class="detail-collapse" :border="false">
+      <van-collapse-item v-if="isActiveLoad" title="Update Status" name="status">
+        <div class="status-collapse-body">
+          <StatusStepper
+            :load="load"
+            :headers="headers"
+            :current-status="status"
+            :driver-name="driverName"
+            @update="$emit('status-update', $event)"
+          />
+        </div>
+      </van-collapse-item>
       <van-collapse-item title="Route Map" name="map">
         <DriverRouteMap
           ref="routeMapRef"
           :load="load"
           :headers="headers"
           :driver-position="driverPosition"
+          :selected-alt-idx="selectedAltIdx"
+          @update:selected-alt-idx="selectedAltIdx = $event"
+          @route-data="onRouteData"
+        />
+      </van-collapse-item>
+      <van-collapse-item
+        v-if="routeData && routeData.routes && routeData.routes.length > 1"
+        title="Route Options"
+        name="alternatives"
+      >
+        <RouteAlternatives
+          :alternatives="routeData.routes"
+          :recommended-idx="routeData.recommendedIdx"
+          :selected-idx="selectedAltIdx"
+          @select="selectedAltIdx = $event"
+        />
+      </van-collapse-item>
+      <van-collapse-item
+        v-if="activeRouteSteps && activeRouteSteps.length"
+        title="Directions"
+        name="directions"
+      >
+        <RouteDirections
+          :steps="activeRouteSteps"
+          :destination="routeData && routeData.navigationDestination"
         />
       </van-collapse-item>
     </van-collapse>
@@ -30,7 +87,7 @@
       <van-collapse-item title="Truck Details" name="truck">
         <template v-if="truck">
           <div class="truck-detail-card">
-            <img v-if="truck.photo" :src="truck.photo" class="truck-photo" />
+            <img v-if="truck.has_photo || truck.photo" :src="truck.photo || '/api/driver/me/truck-photo'" class="truck-photo" />
             <div class="truck-fields">
               <van-cell title="Unit #" :value="truck.unit_number || '\u2014'" />
               <van-cell title="Make / Model" :value="[truck.make, truck.model].filter(Boolean).join(' ') || '\u2014'" />
@@ -58,7 +115,11 @@
           >
             <template #value>
               <div class="cell-value-row">
-                <span>{{ f.value || '\u2014' }}</span>
+                <span v-if="f.parts && f.parts.cityStateZip" class="addr-stack-driver">
+                  <span class="addr-street">{{ f.parts.street || f.parts.cityStateZip }}</span>
+                  <span v-if="f.parts.street" class="addr-csz">{{ f.parts.cityStateZip }}</span>
+                </span>
+                <span v-else>{{ f.value || '\u2014' }}</span>
                 <button v-if="isAddress(f.header) && f.value && pickupCoords" class="copy-btn" @click.stop="focusMapOn(pickupCoords)">
                   <span class="map-icon">&#128205;</span>
                 </button>
@@ -83,7 +144,11 @@
           >
             <template #value>
               <div class="cell-value-row">
-                <span>{{ f.value || '\u2014' }}</span>
+                <span v-if="f.parts && f.parts.cityStateZip" class="addr-stack-driver">
+                  <span class="addr-street">{{ f.parts.street || f.parts.cityStateZip }}</span>
+                  <span v-if="f.parts.street" class="addr-csz">{{ f.parts.cityStateZip }}</span>
+                </span>
+                <span v-else>{{ f.value || '\u2014' }}</span>
                 <button v-if="isAddress(f.header) && f.value && dropoffCoords" class="copy-btn" @click.stop="focusMapOn(dropoffCoords)">
                   <span class="map-icon">&#128205;</span>
                 </button>
@@ -99,7 +164,13 @@
       </van-collapse-item>
 
       <van-collapse-item title="Documents" name="documents">
-        <DocumentList :load-id="loadId" />
+        <DocumentUpload
+          :load-id="loadId"
+          :driver-name="driverName"
+          :row-index="load._rowIndex"
+          @uploaded="onUploaded"
+        />
+        <DocumentList ref="docListRef" :load-id="loadId" />
       </van-collapse-item>
 
       <van-collapse-item title="Expenses" name="expenses">
@@ -122,8 +193,8 @@
 
     <!-- Accept / Reject buttons for dispatched loads -->
     <div v-if="showResponseButtons" class="load-response-actions">
-      <van-button type="danger" plain block @click="$emit('decline', load)">Reject Load</van-button>
-      <van-button type="primary" block @click="$emit('accept', load)">Accept Load</van-button>
+      <van-button type="danger" plain block :loading="responding" :disabled="responding" @click="$emit('decline', load)">Reject Load</van-button>
+      <van-button type="primary" block :loading="responding" :disabled="responding" @click="$emit('accept', load)">Accept Load</van-button>
     </div>
     <div v-else-if="showAcceptedBadge" class="load-accepted-banner">
       <span>&#10003; Load Accepted</span>
@@ -135,9 +206,14 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
+import { splitAddress } from '../../lib/address.js'
 import StatusBadge from '../shared/StatusBadge.vue'
+import StatusStepper from './StatusStepper.vue'
 import DocumentList from './DocumentList.vue'
+import DocumentUpload from './DocumentUpload.vue'
 import DriverRouteMap from './DriverRouteMap.vue'
+import RouteAlternatives from './RouteAlternatives.vue'
+import RouteDirections from './RouteDirections.vue'
 import ExpenseForm from './ExpenseForm.vue'
 import ExpenseCard from './ExpenseCard.vue'
 
@@ -149,13 +225,69 @@ const props = defineProps({
   driverPosition: { type: Object, default: null },
   truck: { type: Object, default: null },
   loadExpenses: { type: Array, default: () => [] },
+  responding: { type: Boolean, default: false },
+  // TEMP — phone-GPS-for-test-load wiring. Removed alongside the temp block
+  // in DriverView when CEO testing is done.
+  phoneGpsModeActive: { type: Boolean, default: false },
+  phoneGpsStatus: { type: String, default: '' },
 })
 
-const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline', 'expense-submit'])
+const emit = defineEmits(['back', 'status-update', 'uploaded', 'accept', 'decline', 'expense-submit', 'enable-phone-gps'])
 
-const openSections = ref(['map'])
+// Status + Map open by default. Status is the primary action driver came
+// here for; Map gives context. Everything else stays collapsed to keep
+// the page short for older drivers.
+const openSections = ref(['status', 'map'])
 const copiedField = ref(null)
 const routeMapRef = ref(null)
+const docListRef = ref(null)
+
+// TEMP — banner text/styling for the phone-GPS-for-test-load flow.
+const bannerTitle = computed(() => {
+  switch (props.phoneGpsStatus) {
+    case 'requesting': return 'Requesting GPS permission…'
+    case 'denied': return 'GPS permission denied'
+    case 'error': return 'GPS error'
+    case 'unavailable': return 'GPS unavailable'
+    default: return 'This load uses phone GPS'
+  }
+})
+const bannerMessage = computed(() => {
+  switch (props.phoneGpsStatus) {
+    case 'requesting': return 'Allow location access in the browser prompt.'
+    case 'denied': return 'Re-enable location in Chrome site settings, then tap Try Again.'
+    case 'error': return 'Couldn’t get a fix. Check that location services are on.'
+    case 'unavailable': return 'This browser does not expose geolocation.'
+    default: return 'Tap Enable GPS to show your live truck pin and turn-by-turn guidance.'
+  }
+})
+const bannerClass = computed(() => {
+  if (props.phoneGpsStatus === 'denied' || props.phoneGpsStatus === 'error' || props.phoneGpsStatus === 'unavailable') return 'phone-gps-banner-error'
+  if (props.phoneGpsStatus === 'requesting') return 'phone-gps-banner-pending'
+  return 'phone-gps-banner-info'
+})
+
+// Smart route guidance state — DriverRouteMap emits 'route-data' after every
+// successful /api/route?alternatives=true call. We store it here so the
+// sibling collapses (Route Options + Directions) render off the same payload
+// without each component refetching.
+const selectedAltIdx = ref(0)
+const routeData = ref(null)
+function onRouteData(payload) {
+  routeData.value = payload
+}
+const activeRouteSteps = computed(() => {
+  const r = routeData.value?.routes?.[selectedAltIdx.value]
+  return r?.steps || []
+})
+
+function onUploaded(payload) {
+  // Refresh the document list so the new upload appears immediately.
+  docListRef.value?.refresh?.()
+  // Bubble up so DriverView can refresh derived state (e.g. _podCount which
+  // gates the Delivered button in StatusStepper).
+  emit('uploaded', payload)
+}
 
 function isAddress(header) {
   return /address|addr|location/i.test(header)
@@ -233,22 +365,31 @@ const pickupFields = computed(() => {
   const exclude = /lat|lng|lon/i
   return props.headers
     .filter(h => /pickup|shipper/i.test(h) && !exclude.test(h))
-    .map(h => ({
-      header: h,
-      label: h.replace(/pickup\s*|shipper\s*/gi, '').trim() || h,
-      value: (props.load[h] || '').trim()
-    }))
+    .map(h => {
+      const value = (props.load[h] || '').trim()
+      return {
+        header: h,
+        label: h.replace(/pickup\s*|shipper\s*/gi, '').trim() || h,
+        value,
+        // Two display lines for address fields; null for non-address fields.
+        parts: isAddress(h) ? splitAddress(value) : null
+      }
+    })
 })
 
 const dropoffFields = computed(() => {
   const exclude = /lat|lng|lon/i
   return props.headers
     .filter(h => /drop.?off|deliv|receiver|consignee/i.test(h) && !exclude.test(h))
-    .map(h => ({
-      header: h,
-      label: h.replace(/drop.?off\s*|delivery\s*|deliv\s*|receiver\s*|consignee\s*/gi, '').trim() || h,
-      value: (props.load[h] || '').trim()
-    }))
+    .map(h => {
+      const value = (props.load[h] || '').trim()
+      return {
+        header: h,
+        label: h.replace(/drop.?off\s*|delivery\s*|deliv\s*|receiver\s*|consignee\s*/gi, '').trim() || h,
+        value,
+        parts: isAddress(h) ? splitAddress(value) : null
+      }
+    })
 })
 </script>
 
@@ -284,6 +425,27 @@ const dropoffFields = computed(() => {
   background: var(--bg);
   border-radius: 8px;
   margin-bottom: 0.75rem;
+}
+
+/* Status update lives inside a van-collapse-item now (toggleable like
+   the other detail sections, per 2026-05-14 client direction). Keep the
+   StatusStepper's inner card flat so it doesn't double-frame inside the
+   accordion, and keep the "next step" button at the larger size we used
+   on the old hero card — older drivers, gloved hands, sun glare. */
+.status-collapse-body {
+  padding: 0.5rem 0.5rem 0.75rem;
+}
+.status-collapse-body :deep(.card) {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin-bottom: 0;
+  box-shadow: none;
+}
+.status-collapse-body :deep(.action-btn.primary) {
+  min-height: 60px;
+  font-size: 1rem;
+  letter-spacing: 0.01em;
 }
 
 .route-icon {
@@ -353,6 +515,20 @@ const dropoffFields = computed(() => {
   font-size: 0.85rem;
   line-height: 1;
 }
+/* Two-line address: street on line 1, "City, ST ZIP" muted on line 2.
+   Right-aligned to match .cell-value-row (justify-content: flex-end). */
+.addr-stack-driver {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+  line-height: 1.3;
+  min-width: 0;
+}
+.addr-stack-driver .addr-csz {
+  font-size: 0.85em;
+  color: var(--text-dim, #64748b);
+}
 
 /* Truck Details */
 .truck-detail-card { padding: 0.25rem 0; }
@@ -376,4 +552,49 @@ const dropoffFields = computed(() => {
 .expenses-section { padding: 0.5rem; background: var(--bg, #f8f9fa); border-radius: 8px; }
 .expense-history { margin-top: 0.75rem; }
 .expense-history-label { font-size: 0.72rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border, #e5e7eb); }
+
+/* TEMP — phone-GPS banner. Removed with the rest of the test-load wiring. */
+.phone-gps-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.9rem;
+  margin: 0.6rem 0;
+  border-radius: 10px;
+  font-size: 0.85rem;
+}
+.phone-gps-text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1; }
+.phone-gps-text strong { font-weight: 700; font-size: 0.88rem; }
+.phone-gps-text span { font-size: 0.78rem; line-height: 1.35; opacity: 0.85; }
+.phone-gps-btn {
+  flex: 0 0 auto;
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  border: none;
+  font-weight: 600;
+  font-size: 0.82rem;
+  cursor: pointer;
+  background: #fff;
+  color: #1f2937;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+}
+.phone-gps-btn:active { transform: scale(0.97); }
+.phone-gps-banner-info {
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+}
+.phone-gps-banner-info .phone-gps-btn { background: #2563eb; color: #fff; }
+.phone-gps-banner-pending {
+  background: #fefce8;
+  color: #854d0e;
+  border: 1px solid #fde68a;
+}
+.phone-gps-banner-error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+.phone-gps-banner-error .phone-gps-btn { background: #dc2626; color: #fff; }
 </style>

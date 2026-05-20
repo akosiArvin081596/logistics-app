@@ -12,6 +12,21 @@
         <div class="route-overlay-content">Getting route...</div>
       </div>
 
+      <!-- Follow truck toggle — only visible when a driver is focused.
+           When on, the camera tracks the marker once per second; when off
+           (default), the user can pan freely. Manual drag temporarily
+           suspends follow. -->
+      <button
+        v-if="selectedDriver && selectedDriver !== '__all__'"
+        class="follow-toggle"
+        :class="{ active: followTruck && !followSuppressed }"
+        :title="followTruck ? 'Following truck — click to release camera' : 'Click to follow truck'"
+        @click="toggleFollow"
+      >
+        <span class="follow-icon" aria-hidden="true">⊙</span>
+        <span class="follow-label">{{ followTruck && !followSuppressed ? 'Following' : 'Follow' }}</span>
+      </button>
+
       <!-- Driver list panel -->
       <div class="driver-panel" :class="{ collapsed: panelCollapsed }">
         <button class="panel-toggle" @click="panelCollapsed = !panelCollapsed">
@@ -40,8 +55,28 @@
             >
               <span :class="['driver-dot', loc.noGps ? 'no-gps' : isOnline(loc) ? 'online' : 'offline']"></span>
               <div class="driver-info">
-                <span class="driver-name">{{ loc.driver }}</span>
-                <span v-if="loc.noGps" class="driver-meta">
+                <span class="driver-name">
+                  {{ loc.driver }}
+                  <span
+                    v-if="loc.source === 'routemate'"
+                    class="src-badge src-eld"
+                    title="Live position sourced from the truck's Routemate ELD device"
+                  >ELD</span>
+                  <span
+                    v-else-if="loc.source === 'phone'"
+                    class="src-badge src-phone"
+                    title="Live position sourced from the driver's phone (no ELD or stale)"
+                  >Phone</span>
+                  <span
+                    v-else-if="loc.assignedTruck && !loc.assignedTruck.hasEld"
+                    class="src-badge src-no-eld"
+                    title="Truck is assigned to this driver but has no Routemate ELD linked"
+                  >No ELD</span>
+                </span>
+                <span v-if="loc.noGps && loc.assignedTruck" class="driver-meta">
+                  <span class="status-text no-gps">{{ loc.assignedTruck.hasEld ? 'ELD offline' : 'No ELD' }} — {{ loc.assignedTruck.unit }}</span>
+                </span>
+                <span v-else-if="loc.noGps" class="driver-meta">
                   <span class="status-text no-gps">No location data</span>
                 </span>
                 <span v-else class="driver-meta">
@@ -76,7 +111,10 @@
                       <span class="route-point-dot pickup"></span>
                       <span class="route-point-label">Pickup (A)</span>
                     </div>
-                    <div v-if="al.pickupAddress" class="route-point-address">{{ al.pickupAddress }}</div>
+                    <div v-if="al.pickupStreet || al.pickupAddress" class="route-point-address">
+                      <div v-if="al.pickupStreet">{{ al.pickupStreet }}</div>
+                      <div v-if="al.pickupAddress" class="route-point-csz">{{ al.pickupAddress }}</div>
+                    </div>
                     <div class="route-point-coords">{{ al.originLat.toFixed(5) }}, {{ al.originLng.toFixed(5) }}</div>
                   </div>
                   <div v-if="al.destLat" class="route-point clickable" @click.stop="focusPoint(al.destLat, al.destLng)">
@@ -84,7 +122,10 @@
                       <span class="route-point-dot dropoff"></span>
                       <span class="route-point-label">Drop-off (B)</span>
                     </div>
-                    <div v-if="al.dropoffAddress" class="route-point-address">{{ al.dropoffAddress }}</div>
+                    <div v-if="al.dropoffStreet || al.dropoffAddress" class="route-point-address">
+                      <div v-if="al.dropoffStreet">{{ al.dropoffStreet }}</div>
+                      <div v-if="al.dropoffAddress" class="route-point-csz">{{ al.dropoffAddress }}</div>
+                    </div>
                     <div class="route-point-coords">{{ al.destLat.toFixed(5) }}, {{ al.destLng.toFixed(5) }}</div>
                   </div>
                   <div v-if="routeDistance != null || routeEta != null || selectedDriverSpeed != null" class="route-summary">
@@ -115,7 +156,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
-import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
+import { useGoogleMaps, createDotPin, createTruckArrow } from '../../composables/useGoogleMaps'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -141,13 +182,16 @@ let originMarker = null
 let destMarker = null
 let distanceLabelMarker = null
 let routePolyline = null
-let driverRouteOverlays = []      // { polyline, originMarker, destMarker, infoO, infoD }
+let routeAnim = null              // setInterval handle for the dashed-blue polyline animation
+let approachPolyline = null       // pre-pickup driver→pickup leg (amber dashed)
+let approachAnim = null           // setInterval handle for the approach-leg animation
 let allRouteOverlays = []         // same shape, for "All Drivers" view
 let driverInfoWindows = new Map() // driver name -> google.maps.InfoWindow
 
 // Trail state (single driver)
 const trailPoints = ref([])
 const routePoints = ref([])
+const approachRoutePoints = ref([])  // driver→pickup polyline for pre-pickup loads
 const originLatLng = ref(null)
 const destLatLng = ref(null)
 const originAddress = ref('')
@@ -159,8 +203,6 @@ const weatherData = ref(null)
 
 // All-drivers route state
 const allRoutes = ref([])
-// Single-driver multi-load route state (when driver selected but no load expanded)
-const driverRoutes = ref([])
 const ROUTE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#65a30d']
 const PAST_PICKUP_RE = /^(at shipper|loading|in transit|at receiver)$/i
 
@@ -185,6 +227,67 @@ async function fetchRouteCached(fromLat, fromLng, toLat, toLng) {
 
 // Animation state
 const activeAnimations = {}
+// Per-driver last-ping epoch ms — used to derive a tween duration that
+// matches the Routemate ping cadence (~60s) instead of finishing in 1s
+// and leaving the pin frozen between updates.
+const lastPingAt = new Map()
+const PING_TWEEN_MIN_MS = 1000
+const PING_TWEEN_MAX_MS = 60000  // cap so a multi-minute stall doesn't produce a multi-minute glide
+
+// Follow-truck camera state (opt-in, persisted). followSuppressed must be
+// reactive so the template's "Following / Follow" label flips after a manual
+// drag without needing another state change.
+const FOLLOW_STORAGE_KEY = 'logisx.tracking.followTruck'
+const followTruck = ref(loadFollowPref())
+const followSuppressed = ref(false)
+let followInterval = null    // setInterval handle for the 1Hz panTo loop
+
+function loadFollowPref() {
+  try { return localStorage.getItem(FOLLOW_STORAGE_KEY) === '1' } catch { return false }
+}
+function saveFollowPref(v) {
+  try { localStorage.setItem(FOLLOW_STORAGE_KEY, v ? '1' : '0') } catch { /* ignore */ }
+}
+
+// Pan the map smoothly to the focused driver's current marker position.
+// Called on a 1Hz interval rather than per animation frame because Google
+// batches overlay rendering during panTo and the per-frame setPath inside
+// animateMarker would otherwise visually drop the polyline.
+function followTick() {
+  if (!followTruck.value || followSuppressed.value) return
+  if (!map) return
+  const name = selectedDriver.value
+  if (!name || name === '__all__') return
+  const marker = driverMarkers.get(name)
+  if (!marker || !marker.position) return
+  const pos = marker.position
+  const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat
+  const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    map.panTo({ lat, lng })
+  }
+}
+
+function startFollowLoop() {
+  if (followInterval) return
+  followInterval = setInterval(followTick, 1000)
+}
+function stopFollowLoop() {
+  if (followInterval) { clearInterval(followInterval); followInterval = null }
+}
+
+function toggleFollow() {
+  const next = !followTruck.value || followSuppressed.value
+  followTruck.value = next
+  followSuppressed.value = false
+  saveFollowPref(next)
+  if (next) {
+    followTick()        // pan once immediately so the click feels responsive
+    startFollowLoop()
+  } else {
+    stopFollowLoop()
+  }
+}
 
 // ---- Haversine distance in meters (replaces L.latLng().distanceTo()) ----
 function haversineMeters(lat1, lng1, lat2, lng2) {
@@ -196,26 +299,49 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
-// ---- Smooth marker animation via requestAnimationFrame ----
-function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 800) {
+// Smooth marker tween via requestAnimationFrame. The pin slides across a
+// *static* map; the polyline first-point follows the pin frame-by-frame so
+// the route stays glued to it without a visible gap during the tween.
+// We do NOT call map.panTo() — running panTo in parallel with the per-frame
+// setPath causes the polyline to visually disappear (Google batches overlay
+// rendering during camera animations). Initial focus (load-click) and
+// pin-click still re-center explicitly.
+function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000) {
   if (activeAnimations[driver]) cancelAnimationFrame(activeAnimations[driver])
   const markerObj = driverMarkers.get(driver)
   const start = performance.now()
+  const isSelected = selectedDriver.value
+    && selectedDriver.value.toLowerCase() === driver.toLowerCase()
+  const followLine = isSelected && !!expandedLoadId.value
+  // When a load is in focus, snap the tween target onto the route polyline
+  // so the pin always sits ON the dashed line. Raw GPS often lands on a
+  // parallel road (tollway vs frontage); snapping eliminates that gap.
+  if (followLine) {
+    const s = snapToRoute(toLat, toLng)
+    toLat = s.lat
+    toLng = s.lng
+  }
+
+  // Short tweens (initial draws, dedup-skip recovery) use ease-out for the
+  // satisfying "settle" feel. Long tweens (full inter-ping coverage at 60s)
+  // use linear — ease-out over 60s reads as the truck braking halfway
+  // through, which is wrong; the real truck is driving steady-state.
+  const useLinear = duration > 3000
 
   function frame(now) {
     const t = Math.min((now - start) / duration, 1)
-    const eased = t * (2 - t) // ease-out quadratic
+    const eased = useLinear ? t : t * (2 - t)
     const lat = fromLat + (toLat - fromLat) * eased
     const lng = fromLng + (toLng - fromLng) * eased
-    // Update the Google Maps marker position directly
-    if (markerObj) {
-      markerObj.position = { lat, lng }
-    }
-    // Also update reactive data for panel display
+    if (markerObj) markerObj.position = { lat, lng }
     const loc = locations.value.find((l) => l.driver === driver)
     if (loc) {
       loc.latitude = lat
       loc.longitude = lng
+    }
+    if (followLine && routePolyline) {
+      const livePath = buildSingleLoadPath({ lat, lng })
+      if (livePath) routePolyline.setPath(livePath)
     }
     if (t < 1) activeAnimations[driver] = requestAnimationFrame(frame)
     else delete activeAnimations[driver]
@@ -224,35 +350,17 @@ function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 800) {
   activeAnimations[driver] = requestAnimationFrame(frame)
 }
 
-// ---- Client-side road snapping (project GPS onto route polyline) ----
-function closestPointOnSegment(p, a, b) {
-  const dx = b[0] - a[0]
-  const dy = b[1] - a[1]
-  if (dx === 0 && dy === 0) return a
-  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)))
-  return [a[0] + t * dx, a[1] + t * dy]
-}
-
-function distSq(a, b) {
-  const dx = a[0] - b[0]
-  const dy = a[1] - b[1]
-  return dx * dx + dy * dy
-}
-
-function snapToRoute(point, route) {
-  if (route.length < 2) return null
-  let minDist = Infinity
-  let closest = null
-  for (let i = 0; i < route.length - 1; i++) {
-    const snapped = closestPointOnSegment(point, route[i], route[i + 1])
-    const d = distSq(point, snapped)
-    if (d < minDist) {
-      minDist = d
-      closest = snapped
-    }
-  }
-  // ~0.002 degrees ~ 200m -- only snap if reasonably close to route
-  return minDist < 0.002 * 0.002 ? closest : null
+// ---- Animate the dashed-icon polyline by shifting its icon offset each tick ----
+// Mirrors DriverRouteMap.vue's animatePolyline so the customer tracker and the
+// admin tracking map look identical when a load is focused.
+function animatePolyline(line) {
+  let offset = 0
+  return setInterval(() => {
+    offset = (offset + 1) % 200
+    const icons = line.get('icons')
+    icons[0].offset = (offset / 2) + '%'
+    line.set('icons', icons)
+  }, 80)
 }
 
 // ---- Google Maps helpers ----
@@ -280,19 +388,13 @@ function safeFitBounds(points, options = {}) {
 
 // ---- Clear overlay helpers ----
 function clearSingleLoadOverlays() {
+  if (routeAnim) { clearInterval(routeAnim); routeAnim = null }
   if (routePolyline) { routePolyline.setMap(null); routePolyline = null }
+  if (approachAnim) { clearInterval(approachAnim); approachAnim = null }
+  if (approachPolyline) { approachPolyline.setMap(null); approachPolyline = null }
   if (originMarker) { originMarker.map = null; originMarker = null }
   if (destMarker) { destMarker.map = null; destMarker = null }
   if (distanceLabelMarker) { distanceLabelMarker.map = null; distanceLabelMarker = null }
-}
-
-function clearDriverRouteOverlays() {
-  for (const o of driverRouteOverlays) {
-    if (o.polyline) o.polyline.setMap(null)
-    if (o.originMarker) o.originMarker.map = null
-    if (o.destMarker) o.destMarker.map = null
-  }
-  driverRouteOverlays = []
 }
 
 function clearAllRouteOverlays() {
@@ -305,30 +407,203 @@ function clearAllRouteOverlays() {
 }
 
 // ---- Build/rebuild Google Maps overlays from reactive state ----
+
+// Build the polyline path for the focused single load. Past pickup, this
+// trims the planned route at the closest point to the driver's live GPS so
+// only the *forward* segment is drawn — mirroring Google Maps Navigation.
+// Without trimming, prepending the live position creates a V-shape (line
+// goes back to the route's static start, then forward), which is the artifact
+// the user has been seeing whenever the truck moves more than a few meters.
+function buildSingleLoadPath(driverOverride = null) {
+  if (routePoints.value.length < 2) return null
+  const points = routePoints.value
+  const loc = locations.value.find(l => l.driver === selectedDriver.value)
+  const al = loc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
+  const isPastPickup = al && PAST_PICKUP_RE.test(al.status)
+
+  if (!isPastPickup) {
+    const p2 = points.map(p => ({ lat: p[0], lng: p[1] }))
+    if (destLatLng.value && Array.isArray(destLatLng.value) && destLatLng.value.length === 2) {
+      p2.push({ lat: destLatLng.value[0], lng: destLatLng.value[1] })
+    }
+    return p2
+  }
+
+  const driverPos = driverOverride
+    || (loc && loc.latitude != null && loc.longitude != null
+          ? { lat: loc.latitude, lng: loc.longitude }
+          : null)
+  if (!driverPos) {
+    const p3 = points.map(p => ({ lat: p[0], lng: p[1] }))
+    if (destLatLng.value && Array.isArray(destLatLng.value) && destLatLng.value.length === 2) {
+      p3.push({ lat: destLatLng.value[0], lng: destLatLng.value[1] })
+    }
+    return p3
+  }
+
+  // Project the driver onto every segment of the route, find the closest one,
+  // then return [driverPos, projectedPt, ...remainingRoutePoints]. This is
+  // the same trick Google Maps Navigation uses to "consume" the route as you
+  // drive.
+  let minDistSq = Infinity
+  let bestIdx = 0
+  let bestT = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    const ax = a[1], ay = a[0]
+    const bx = b[1], by = b[0]
+    const px = driverPos.lng, py = driverPos.lat
+    const dx = bx - ax, dy = by - ay
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) continue
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = ax + t * dx
+    const projY = ay + t * dy
+    const distSq = (projX - px) ** 2 + (projY - py) ** 2
+    if (distSq < minDistSq) {
+      minDistSq = distSq
+      bestIdx = i
+      bestT = t
+    }
+  }
+  // Skip the projected split-point — including it caused an L-shape whenever
+  // the driver pin sat laterally off the route line (GPS drift, road
+  // shoulder, parking lot edge). Going driver → next-waypoint draws a
+  // single smooth diagonal instead of a 90° elbow back to the road.
+  const path = [driverPos]
+  for (let i = bestIdx + 1; i < points.length; i++) {
+    path.push({ lat: points[i][0], lng: points[i][1] })
+  }
+  // Append the exact destination coord so the polyline ends at the red
+  // dot marker. Google snaps the route's last waypoint to the nearest
+  // road, which can leave a 20–80m gap when the destination is a building
+  // off the road (a warehouse loading dock, customer office, etc).
+  if (destLatLng.value && Array.isArray(destLatLng.value) && destLatLng.value.length === 2) {
+    path.push({ lat: destLatLng.value[0], lng: destLatLng.value[1] })
+  }
+  return path
+}
+
+// Bearing in degrees (0=north, clockwise) from `from` to `to`.
+function bearingDeg(from, to) {
+  const φ1 = from.lat * Math.PI / 180
+  const φ2 = to.lat * Math.PI / 180
+  const Δλ = (to.lng - from.lng) * Math.PI / 180
+  const y = Math.sin(Δλ) * Math.cos(φ2)
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ)
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360
+}
+
+// Project the driver onto the route and return the bearing along the segment
+// the driver is on. Returns null when the truck is genuinely off-route (>80m
+// from the nearest segment) so the caller can fall back to GPS heading
+// instead of forcing the arrow to face a route the truck isn't actually on.
+function routeHeadingAt(driverPos) {
+  const points = routePoints.value
+  if (!points || points.length < 2) return null
+  let minDistSq = Infinity
+  let bestIdx = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    const ax = a[1], ay = a[0]
+    const bx = b[1], by = b[0]
+    const px = driverPos.lng, py = driverPos.lat
+    const dx = bx - ax, dy = by - ay
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) continue
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = ax + t * dx
+    const projY = ay + t * dy
+    const distSq = (projX - px) ** 2 + (projY - py) ** 2
+    if (distSq < minDistSq) {
+      minDistSq = distSq
+      bestIdx = i
+    }
+  }
+  // ~80m threshold in deg² (matches snapToRoute). Off-route trucks fall back.
+  if (minDistSq > 5.2e-7) return null
+  const a = points[bestIdx]
+  const b = points[bestIdx + 1]
+  return bearingDeg({ lat: a[0], lng: a[1] }, { lat: b[0], lng: b[1] })
+}
+
+// Snap a raw GPS coord onto the route polyline if close enough. Returns
+// {lat, lng} of the projected point on the nearest route segment when the
+// truck is within ~80 m of the line; otherwise returns the raw coord so
+// genuinely off-route trucks (deliveries, side trips) still show their
+// real position. ~80 m in deg² with the conservative 1°≈111km factor.
+function snapToRoute(lat, lng) {
+  const points = routePoints.value
+  if (!points || points.length < 2) return { lat, lng }
+  let minDistSq = Infinity
+  let bestLat = null
+  let bestLng = null
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    const ax = a[1], ay = a[0]
+    const bx = b[1], by = b[0]
+    const px = lng, py = lat
+    const dx = bx - ax, dy = by - ay
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) continue
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const projX = ax + t * dx
+    const projY = ay + t * dy
+    const distSq = (projX - px) ** 2 + (projY - py) ** 2
+    if (distSq < minDistSq) {
+      minDistSq = distSq
+      bestLat = projY
+      bestLng = projX
+    }
+  }
+  if (minDistSq > 5.2e-7) return { lat, lng }
+  return { lat: bestLat, lng: bestLng }
+}
+
 function renderSingleLoadRoute() {
   clearSingleLoadOverlays()
   if (!map) return
   if (selectedDriver.value === '__all__' || !expandedLoadId.value) return
 
-  // Route polyline
-  if (routePoints.value.length >= 2) {
+  // Route polyline — white base with animated blue dashed icons, matching the
+  // public customer tracker (DriverRouteMap.vue) so dispatchers and customers
+  // see the same visual. The path is built via buildSingleLoadPath() which
+  // prepends the driver's live GPS when past pickup so the line always
+  // visually connects to the truck pin (without this the line ends at the
+  // route's static start point and looks disconnected once the driver pulls
+  // off the highway).
+  const path = buildSingleLoadPath()
+  if (path) {
     routePolyline = new google.maps.Polyline({
-      path: routePoints.value.map(p => ({ lat: p[0], lng: p[1] })),
-      strokeColor: '#000000',
-      strokeOpacity: 0.7,
-      strokeWeight: 6,
+      path,
+      strokeColor: '#ffffff',
+      strokeOpacity: 0.9,
+      strokeWeight: 5,
+      clickable: false,
+      icons: [{
+        icon: { path: 'M 0,-1 0,1', strokeColor: '#2563eb', strokeOpacity: 1, scale: 3 },
+        offset: '0',
+        repeat: '20px',
+      }],
       map,
     })
+    routeAnim = animatePolyline(routePolyline)
 
-    // Distance label at midpoint
+    // Distance label at midpoint of the route.
     if (routeDistance.value != null) {
-      const mid = Math.floor(routePoints.value.length / 2)
-      const midPt = routePoints.value[mid]
+      const mid = Math.floor(path.length / 2)
+      const midPt = path[mid]
       const labelEl = document.createElement('div')
       labelEl.textContent = routeDistance.value + ' mi'
       labelEl.style.cssText = 'color:#333;font-size:11px;font-weight:700;font-family:JetBrains Mono,monospace;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px;white-space:nowrap;pointer-events:none;'
       distanceLabelMarker = new google.maps.marker.AdvancedMarkerElement({
-        position: { lat: midPt[0], lng: midPt[1] },
+        position: { lat: midPt.lat, lng: midPt.lng },
         map,
         content: labelEl,
         zIndex: 900,
@@ -365,52 +640,34 @@ function renderSingleLoadRoute() {
   }
 }
 
-function renderDriverRoutes() {
-  clearDriverRouteOverlays()
+// Approach polyline (driver→pickup) for pre-pickup loads. Amber dashed so it's
+// visually distinct from the blue haul polyline; sits at a lower z-index so
+// the two lines don't fight at the pickup junction.
+function renderApproachLeg() {
+  if (approachAnim) { clearInterval(approachAnim); approachAnim = null }
+  if (approachPolyline) { approachPolyline.setMap(null); approachPolyline = null }
   if (!map) return
-  if (selectedDriver.value === '__all__' || expandedLoadId.value) return
+  if (selectedDriver.value === '__all__' || !expandedLoadId.value) return
 
-  for (const r of driverRoutes.value) {
-    const entry = {}
+  const pts = approachRoutePoints.value
+  if (!pts || pts.length < 2) return
 
-    if (r.route.length >= 2) {
-      entry.polyline = new google.maps.Polyline({
-        path: r.route.map(p => ({ lat: p[0], lng: p[1] })),
-        strokeColor: r.color,
-        strokeOpacity: 0.7,
-        strokeWeight: 4,
-        map,
-      })
-    }
-    if (r.origin) {
-      entry.originMarker = new google.maps.marker.AdvancedMarkerElement({
-        position: { lat: r.origin[0], lng: r.origin[1] },
-        map,
-        content: createDotPin('#16a34a', 18),
-        title: r.loadId + ' - Pickup',
-        zIndex: 800,
-      })
-      const info = new google.maps.InfoWindow({
-        content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Pickup</strong>${r.originAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.originAddress + '</div>' : ''}</div>`,
-      })
-      entry.originMarker.addEventListener('gmp-click', () => info.open({ map, anchor: entry.originMarker }))
-    }
-    if (r.dest) {
-      entry.destMarker = new google.maps.marker.AdvancedMarkerElement({
-        position: { lat: r.dest[0], lng: r.dest[1] },
-        map,
-        content: createDotPin('#dc2626', 18),
-        title: r.loadId + ' - Drop-off',
-        zIndex: 800,
-      })
-      const info = new google.maps.InfoWindow({
-        content: `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${r.loadId} — Drop-off</strong>${r.destAddress ? '<div style="color:#444;font-size:0.8rem;margin-top:2px">' + r.destAddress + '</div>' : ''}</div>`,
-      })
-      entry.destMarker.addEventListener('gmp-click', () => info.open({ map, anchor: entry.destMarker }))
-    }
-
-    driverRouteOverlays.push(entry)
-  }
+  const path = pts.map(p => ({ lat: p[0], lng: p[1] }))
+  approachPolyline = new google.maps.Polyline({
+    path,
+    strokeColor: '#ffffff',
+    strokeOpacity: 0.9,
+    strokeWeight: 5,
+    clickable: false,
+    icons: [{
+      icon: { path: 'M 0,-1 0,1', strokeColor: '#f59e0b', strokeOpacity: 1, scale: 3 },
+      offset: '0',
+      repeat: '20px',
+    }],
+    map,
+    zIndex: 50,
+  })
+  approachAnim = animatePolyline(approachPolyline)
 }
 
 function renderAllRoutes() {
@@ -461,6 +718,38 @@ function renderAllRoutes() {
   }
 }
 
+// Prefer the road's bearing at the driver's projected point over raw GPS
+// heading — Routemate emits don't always include a heading field, and GPS
+// heading drifts by a few degrees even when supplied. routeHeadingAt now
+// returns null if the truck is >80m off the polyline, so route bearing is
+// only applied to drivers actually on the focused route.
+//
+// Guard against a 180°-flipped polyline by requiring the route bearing to
+// agree with Routemate's reported bearing within HEADING_AGREE_DEG.
+// Without this, a reversed polyline (origin/dest swap, or backward route
+// fetch) silently forces the arrow to point against the truck's real
+// direction of travel.
+const HEADING_AGREE_DEG = 60
+function headingForMarker(loc) {
+  const gpsHeading = Number.isFinite(loc.heading) && loc.heading !== 0 ? loc.heading : null
+  if (expandedLoadId.value && routePoints.value.length >= 2) {
+    const routeH = routeHeadingAt({ lat: loc.latitude, lng: loc.longitude })
+    if (routeH != null) {
+      if (gpsHeading == null) return routeH
+      // Shortest-arc disagreement in [0, 180].
+      const diff = Math.abs((((routeH - gpsHeading) % 360) + 540) % 360 - 180)
+      if (diff <= HEADING_AGREE_DEG) return routeH
+      // Polyline-vs-Routemate disagree — trust the data source over the
+      // geometry. Logged below so a reversed route is visible in DevTools.
+      if (typeof window !== 'undefined' && window.__logisxHeadingDebug) {
+        // eslint-disable-next-line no-console
+        console.warn('[tracking] heading disagree', { driver: loc.driver, gpsHeading, routeH, diff })
+      }
+    }
+  }
+  return gpsHeading != null ? gpsHeading : 0
+}
+
 // ---- Sync driver markers with locations data ----
 function syncDriverMarkers() {
   if (!map) return
@@ -472,27 +761,63 @@ function syncDriverMarkers() {
     if (!marker) {
       // Create new marker for this driver
       const isOn = isOnline(loc)
+      const moving = (loc.speed || 0) > 0.5  // ~1 mph
+      const heading = headingForMarker(loc)
+      // Snap onto the route polyline if this driver's load is in focus.
+      const isSelectedDriver = selectedDriver.value
+        && selectedDriver.value.toLowerCase() === loc.driver.toLowerCase()
+      const initialPos = (isSelectedDriver && expandedLoadId.value)
+        ? snapToRoute(loc.latitude, loc.longitude)
+        : { lat: loc.latitude, lng: loc.longitude }
       marker = new google.maps.marker.AdvancedMarkerElement({
-        position: { lat: loc.latitude, lng: loc.longitude },
+        position: initialPos,
         map,
-        content: createDotPin(isOn ? '#16a34a' : '#9ca3af', 14),
+        content: createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving }),
         title: loc.driver,
         zIndex: 1000,
+        gmpClickable: true,
       })
-      // InfoWindow for the driver marker
+      // InfoWindow for the driver marker. Clicking also snaps the map to a
+      // close zoom centered on the pin so the user can inspect what the
+      // truck is parked next to / driving past.
       const iw = new google.maps.InfoWindow()
       marker.addEventListener('gmp-click', () => {
         iw.setContent(buildDriverPopupContent(loc))
         iw.open({ map, anchor: marker })
+        const pos = marker.position
+        if (map && pos) {
+          map.setCenter(pos)
+          map.setZoom(20)
+        }
       })
       driverInfoWindows.set(loc.driver, iw)
       driverMarkers.set(loc.driver, marker)
     } else {
-      // Update position
-      marker.position = { lat: loc.latitude, lng: loc.longitude }
-      // Update dot color based on online status
+      // Smoothly animate to new position
+      const oldPos = marker.position
+      if (oldPos) {
+        const oLat = typeof oldPos.lat === 'function' ? oldPos.lat() : oldPos.lat
+        const oLng = typeof oldPos.lng === 'function' ? oldPos.lng() : oldPos.lng
+        if (Math.abs(oLat - loc.latitude) > 0.0001 || Math.abs(oLng - loc.longitude) > 0.0001) {
+          animateMarker(loc.driver, oLat, oLng, loc.latitude, loc.longitude)
+        }
+      } else {
+        marker.position = { lat: loc.latitude, lng: loc.longitude }
+      }
+      // Update arrow rotation/state based on speed + heading + online status.
+      // Mutate the existing content so the CSS transform transition can
+      // smoothly rotate the arrow; legacy markers without the mutators (none
+      // expected after this commit, but defensive) fall back to full replace.
       const isOn = isOnline(loc)
-      marker.content = createDotPin(isOn ? '#16a34a' : '#9ca3af', 14)
+      const moving = (loc.speed || 0) > 0.5
+      const heading = headingForMarker(loc)
+      if (marker.content && typeof marker.content.updateHeading === 'function') {
+        marker.content.updateColor(isOn ? '#16a34a' : '#9ca3af')
+        marker.content.updateMoving(moving)
+        marker.content.updateHeading(heading)
+      } else {
+        marker.content = createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving })
+      }
     }
   }
 
@@ -562,75 +887,26 @@ function focusPoint(lat, lng) {
   }
 }
 
-async function fetchDriverRoutes(loc) {
-  driverRoutes.value = []
-  const loads = loc.activeLoads || []
-  if (loads.length === 0) return
-
-  const hasDriverGps = loc.latitude != null && loc.longitude != null
-
-  // Show points immediately from known coords with straight-line routes
-  const routes = []
-  for (let i = 0; i < loads.length; i++) {
-    const al = loads[i]
-    const oLat = Number(al.originLat), oLng = Number(al.originLng)
-    const dLat = Number(al.destLat), dLng = Number(al.destLng)
-    const origin = isFinite(oLat) && isFinite(oLng) ? [oLat, oLng] : null
-    const dest = isFinite(dLat) && isFinite(dLng) ? [dLat, dLng] : null
-    if (!origin && !dest) continue
-    const isPastPickup = PAST_PICKUP_RE.test(al.status)
-    const routeFrom = (isPastPickup && hasDriverGps) ? [loc.latitude, loc.longitude] : origin
-    routes.push({
-      loadId: al.loadId,
-      route: routeFrom && dest ? [routeFrom, dest] : [],
-      origin,
-      dest,
-      originAddress: al.pickupAddress || '',
-      destAddress: al.dropoffAddress || '',
-      color: ROUTE_COLORS[i % ROUTE_COLORS.length],
-    })
-  }
-  driverRoutes.value = routes
-
-  // Fetch actual driving routes and replace straight lines
-  for (let i = 0; i < routes.length; i++) {
-    const r = routes[i]
-    if (!r.dest) continue
-    const al = loads[i]
-    const isPastPickup = PAST_PICKUP_RE.test(al?.status)
-    const fromPt = (isPastPickup && hasDriverGps) ? [loc.latitude, loc.longitude] : r.origin
-    if (!fromPt) continue
-    try {
-      const data = await api.get(`/api/route?fromLat=${fromPt[0]}&fromLng=${fromPt[1]}&toLat=${r.dest[0]}&toLng=${r.dest[1]}`)
-      if (data.route && data.route.length >= 2) {
-        routes[i] = { ...r, route: data.route.map(p => [p.latitude, p.longitude]) }
-        driverRoutes.value = [...routes]
-      }
-    } catch { /* keep straight line */ }
-  }
-}
-
 function collapseDriver() {
   ++focusGeneration
   selectedDriver.value = ''
   expandedLoadId.value = ''
-  driverRoutes.value = []
   routePoints.value = []
   originLatLng.value = null
   destLatLng.value = null
   routeDistance.value = null
   fetchingRoute.value = false
   clearSingleLoadOverlays()
-  clearDriverRouteOverlays()
   clearAllRouteOverlays()
 }
 
+// Selecting a driver only re-centers the map on their current GPS — no route
+// polyline is drawn. The route guide is reserved for an expanded load.
 async function focusDriver(loc) {
   ++focusGeneration
   selectedDriver.value = loc.driver
   expandedLoadId.value = ''
   allRoutes.value = []
-  driverRoutes.value = []
   routePoints.value = []
   originLatLng.value = null
   destLatLng.value = null
@@ -638,6 +914,16 @@ async function focusDriver(loc) {
   fetchingRoute.value = false
   clearSingleLoadOverlays()
   clearAllRouteOverlays()
+
+  // Single click should reveal the route: auto-expand the driver's active load.
+  // Prefer a load that's actively being worked (at shipper → at receiver); else
+  // fall back to the first. toggleLoad() handles markers, polyline, and map fit.
+  const loads = loc.activeLoads || []
+  const target = loads.find(l => PAST_PICKUP_RE.test(l.status)) || loads[0] || null
+  if (target) {
+    await toggleLoad(target, loc)
+    return
+  }
 
   if (map && loc.latitude) {
     map.setCenter({ lat: loc.latitude, lng: loc.longitude })
@@ -652,6 +938,7 @@ async function toggleLoad(al, loc) {
     // Collapse
     expandedLoadId.value = ''
     routePoints.value = []
+    approachRoutePoints.value = []
     originLatLng.value = null
     destLatLng.value = null
     routeDistance.value = null
@@ -664,9 +951,8 @@ async function toggleLoad(al, loc) {
 
   // Expand: show origin/destination markers
   expandedLoadId.value = al.loadId
-  driverRoutes.value = []
   routePoints.value = []
-  clearDriverRouteOverlays()
+  approachRoutePoints.value = []
   clearSingleLoadOverlays()
 
   const oLat = Number(al.originLat)
@@ -702,14 +988,24 @@ async function toggleLoad(al, loc) {
   await nextTick()
 
   if (map) {
-    const boundsPoints = []
-    if (hasOrigin) boundsPoints.push([oLat, oLng])
-    if (hasDest) boundsPoints.push([dLat, dLng])
-    if (boundsPoints.length >= 2) {
-      safeFitBounds(boundsPoints, { padding: [50, 50], maxZoom: 14 })
-    } else if (boundsPoints.length === 1) {
-      map.setCenter({ lat: boundsPoints[0][0], lng: boundsPoints[0][1] })
-      map.setZoom(12)
+    const hasDriverGps = loc.latitude != null && loc.longitude != null
+    if (isPastPickup && hasDriverGps) {
+      // Snap to the truck pin at max zoom — same level as clicking the pin
+      // directly — so dispatchers immediately see street-level detail of
+      // where the truck is. fitBounds(origin, dest) here would zoom out to
+      // ~1000 mi on a long-haul load and bury the pin in the middle.
+      map.setCenter({ lat: loc.latitude, lng: loc.longitude })
+      map.setZoom(20)
+    } else {
+      const boundsPoints = []
+      if (hasOrigin) boundsPoints.push([oLat, oLng])
+      if (hasDest) boundsPoints.push([dLat, dLng])
+      if (boundsPoints.length >= 2) {
+        safeFitBounds(boundsPoints, { padding: [50, 50], maxZoom: 14 })
+      } else if (boundsPoints.length === 1) {
+        map.setCenter({ lat: boundsPoints[0][0], lng: boundsPoints[0][1] })
+        map.setZoom(12)
+      }
     }
   }
 
@@ -727,6 +1023,10 @@ async function toggleLoad(al, loc) {
       if (gen !== focusGeneration) return
       if (data.route && data.route.length >= 2) {
         routePoints.value = data.route.map(p => [p.latitude, p.longitude])
+        // Seed the periodic-refetch gate so maybeRefetchRoute waits 60s+100m
+        // from this fetch (not from epoch 0).
+        lastRouteRefetchPos = { lat: fromLat, lng: fromLng }
+        lastRouteRefetchTime = Date.now()
       } else if (hasOrigin) {
         routePoints.value = [[oLat, oLng], [dLat, dLng]]
       }
@@ -742,48 +1042,113 @@ async function toggleLoad(al, loc) {
     renderSingleLoadRoute()
   }
 
+  // Pre-pickup loads also draw a driver→pickup approach leg in amber so
+  // dispatchers can see the truck's path to the shipper alongside the
+  // planned blue haul. The haul polyline stays anchored at pickup→drop-off
+  // (see Step 1 in maybeRefetchRoute) while the approach leg refreshes as
+  // the truck moves toward pickup.
+  if (!isPastPickup && hasDriverGps && hasOrigin) {
+    const gen = focusGeneration
+    lastApproachRefetchPos = { lat: loc.latitude, lng: loc.longitude }
+    lastApproachRefetchTime = Date.now()
+    await fetchApproachLeg(loc.latitude, loc.longitude, oLat, oLng)
+    if (gen !== focusGeneration) return
+    renderApproachLeg()
+  }
+
   // Weather fetch disabled to reduce Google API costs
 }
 
-let lastRerouteTime = 0
+// Track the position/time of the last route fetch so we can refetch as the
+// truck progresses — matches DriverRouteMap.vue's 100m + 60s gate. Without
+// this, /tracking only refetched on off-route, so its routePoints stayed
+// stale relative to /track (which already refetches on movement). The stale
+// route caused the trim-at-driver projection to land on outdated road
+// segments, making /tracking's polyline diverge from /track's.
+let lastRouteRefetchPos = null
+let lastRouteRefetchTime = 0
 
-async function checkOffRoute(lat, lng) {
-  // Rate-limit: max once every 30 seconds
-  if (Date.now() - lastRerouteTime < 30000) return
+async function maybeRefetchRoute(lat, lng) {
+  if (!destLatLng.value || !expandedLoadId.value) return
+  // Only refetch the haul polyline for post-pickup loads. Pre-pickup loads
+  // have a static pickup→drop-off haul; refreshing it with driver coords
+  // would silently shift the displayed line from pickup→dest to driver→dest
+  // while the load is still Assigned. The dynamic leg (driver→pickup) is
+  // refreshed via maybeRefetchApproachLeg() instead.
+  const focusLoc = locations.value.find(l => l.driver === selectedDriver.value)
+  const focusLoad = focusLoc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
+  if (!focusLoad || !PAST_PICKUP_RE.test(focusLoad.status)) return
 
-  // Find minimum distance from driver to any point on the route
-  let minDist = Infinity
-  for (const pt of routePoints.value) {
-    const d = haversineMeters(lat, lng, pt[0], pt[1])
-    if (d < minDist) minDist = d
-    if (d < 100) return // still on route, no need to check further
+  const now = Date.now()
+  if (lastRouteRefetchPos) {
+    const moved = haversineMeters(lat, lng, lastRouteRefetchPos.lat, lastRouteRefetchPos.lng)
+    if (moved < 100 || now - lastRouteRefetchTime < 60000) return
   }
-
-  // Off-route: recalculate from current position to destination
-  // Only update if new route succeeds -- never clear the existing route
-  if (minDist >= 100 && destLatLng.value) {
-    lastRerouteTime = Date.now()
-    try {
-      const [toLat, toLng] = destLatLng.value
-      const data = await api.get(`/api/route?fromLat=${lat}&fromLng=${lng}&toLat=${toLat}&toLng=${toLng}`)
-      if (data.route && data.route.length >= 2) {
-        routePoints.value = data.route.map(p => [p.latitude, p.longitude])
-        routeDistance.value = data.distanceMiles
-        routeEta.value = data.etaMinutes
-        renderSingleLoadRoute()
-      }
-    } catch {
-      // silent -- keep existing route
+  lastRouteRefetchPos = { lat, lng }
+  lastRouteRefetchTime = now
+  try {
+    const [toLat, toLng] = destLatLng.value
+    const data = await api.get(`/api/route?fromLat=${lat}&fromLng=${lng}&toLat=${toLat}&toLng=${toLng}`)
+    if (data.route && data.route.length >= 2) {
+      routePoints.value = data.route.map(p => [p.latitude, p.longitude])
+      routeDistance.value = data.distanceMiles
+      routeEta.value = data.etaMinutes
+      // The watch on routePoints handles updating the existing polyline
+      // path in place — no need to call renderSingleLoadRoute() here, which
+      // would destroy and recreate the polyline and restart the animation.
     }
+  } catch {
+    // silent -- keep existing route
   }
+}
+
+// Approach leg (driver→pickup) for pre-pickup loads. Refetched on the same
+// 100m + 60s cadence as the haul leg, but the source/target are swapped:
+// origin is the truck's live GPS, destination is the load's pickup coord.
+// The 2000 km sanity threshold mirrors toggleLoad — if the truck is
+// implausibly far from the pickup, skip rendering rather than route across
+// the continent (mismatched data, dispatcher viewing the wrong driver, etc).
+let lastApproachRefetchPos = null
+let lastApproachRefetchTime = 0
+
+async function fetchApproachLeg(driverLat, driverLng, pickupLat, pickupLng) {
+  if (haversineMeters(driverLat, driverLng, pickupLat, pickupLng) > 2_000_000) {
+    approachRoutePoints.value = []
+    return
+  }
+  try {
+    const data = await api.get(`/api/route?fromLat=${driverLat}&fromLng=${driverLng}&toLat=${pickupLat}&toLng=${pickupLng}`)
+    if (data.route && data.route.length >= 2) {
+      approachRoutePoints.value = data.route.map(p => [p.latitude, p.longitude])
+    } else {
+      approachRoutePoints.value = [[driverLat, driverLng], [pickupLat, pickupLng]]
+    }
+  } catch {
+    // silent — keep last good approach polyline
+  }
+}
+
+async function maybeRefetchApproachLeg(driverLat, driverLng) {
+  if (!originLatLng.value || !expandedLoadId.value) return
+  const focusLoc = locations.value.find(l => l.driver === selectedDriver.value)
+  const focusLoad = focusLoc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
+  if (!focusLoad || PAST_PICKUP_RE.test(focusLoad.status)) return
+
+  const now = Date.now()
+  if (lastApproachRefetchPos) {
+    const moved = haversineMeters(driverLat, driverLng, lastApproachRefetchPos.lat, lastApproachRefetchPos.lng)
+    if (moved < 100 || now - lastApproachRefetchTime < 60000) return
+  }
+  lastApproachRefetchPos = { lat: driverLat, lng: driverLng }
+  lastApproachRefetchTime = now
+  const [pLat, pLng] = originLatLng.value
+  await fetchApproachLeg(driverLat, driverLng, pLat, pLng)
 }
 
 async function focusAll() {
   selectedDriver.value = '__all__'
   expandedLoadId.value = ''
-  driverRoutes.value = []
   clearSingleLoadOverlays()
-  clearDriverRouteOverlays()
   // Clear single-driver state
   trailPoints.value = []
   routePoints.value = []
@@ -876,6 +1241,9 @@ function driverOutOfRange(loc) {
       if (d < minDist) minDist = d
     }
   }
+  // No usable coords on any load (e.g. "Awaiting Rate Con" loads with empty
+  // addresses) — don't render the distance pill at all; "∞ mi away" was the bug.
+  if (!Number.isFinite(minDist)) return ''
   if (minDist > 1243) return `${Math.round(minDist).toLocaleString()} mi away`
   return ''
 }
@@ -898,7 +1266,23 @@ function timeAgo(ts) {
 
 const locationsWithGps = computed(() => locations.value.filter(loc => !loc.noGps && loc.latitude != null))
 const onlineCount = computed(() => locationsWithGps.value.filter(loc => isOnline(loc)).length)
-const activeLocations = computed(() => locations.value.filter(loc => loc.activeLoads && loc.activeLoads.length > 0))
+// Show every actively-assigned driver in the panel, even when they have
+// no active loads in the Job Tracking sheet (sheet/SQLite name drift) and
+// no live ELD ping. Sort so drivers with GPS come first, then drivers
+// with an assignment but no fix, then sheet-only fallbacks. Without the
+// assignedTruck branch the panel would hide every driver whose name
+// doesn't match a sheet row, which is most of them in production today.
+const activeLocations = computed(() => {
+  const visible = locations.value.filter(loc =>
+    (loc.activeLoads && loc.activeLoads.length > 0) || loc.assignedTruck
+  )
+  const score = (l) => {
+    if (!l.noGps && l.latitude != null) return 0
+    if (l.assignedTruck) return 1
+    return 2
+  }
+  return [...visible].sort((a, b) => score(a) - score(b))
+})
 const selectedDriverSpeed = computed(() => {
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
   return loc?.speed ? Math.round(loc.speed * 2.237) : null
@@ -918,26 +1302,32 @@ watch(selectedDriver, () => {
   nextTick(updateMarkerVisibility)
 })
 
-// Watch for changes in reactive route data and re-render overlays
+// Watch for changes in reactive route data. When the polyline already
+// exists, update its path in place — recreating it would restart the
+// dashed animation from offset 0 every refetch (every 100m + 60s), which
+// looks like the map "refreshing". Only do the full render when there's
+// no existing polyline (initial load).
 watch(routePoints, () => {
-  if (expandedLoadId.value) renderSingleLoadRoute()
+  if (!expandedLoadId.value) return
+  if (routePolyline) {
+    const newPath = buildSingleLoadPath()
+    if (newPath) routePolyline.setPath(newPath)
+  } else {
+    renderSingleLoadRoute()
+  }
 })
 
-watch(driverRoutes, () => {
-  renderDriverRoutes()
-}, { deep: true })
+// Approach polyline re-renders on every refetch — the underlying points have
+// changed (driver moved 100m+), so just rebuild the path. renderApproachLeg
+// itself tears down + recreates so the dashed animation stays in sync.
+watch(approachRoutePoints, () => {
+  if (!expandedLoadId.value) return
+  renderApproachLeg()
+})
 
 watch(allRoutes, () => {
   renderAllRoutes()
 }, { deep: true })
-
-// Watch selected driver to load routes for the driver
-watch(selectedDriver, async (driverName) => {
-  if (driverName && driverName !== '__all__' && !expandedLoadId.value) {
-    const loc = locations.value.find(l => l.driver === driverName)
-    if (loc) await fetchDriverRoutes(loc)
-  }
-})
 
 let initialFetchDone = false
 
@@ -966,32 +1356,63 @@ async function fetchLocations() {
 }
 
 function onLocationUpdate(payload) {
-  let targetLat = payload.latitude
-  let targetLng = payload.longitude
+  // Plot the raw GPS coordinates as reported. We used to snap onto the
+  // planned route polyline to hide phone-GPS jitter, but with Routemate ELD
+  // as the primary source the GPS is accurate enough that snapping just
+  // misrepresents the truck's real position (e.g. parked in a yard 100m off
+  // the route would appear to be on the highway). The public /track/:id
+  // tracker also plots raw coords, so this keeps both views consistent.
+  const targetLat = payload.latitude
+  const targetLng = payload.longitude
 
-  // Snap to route if we have one for this driver
-  if (
-    selectedDriver.value === payload.driver &&
-    routePoints.value.length >= 2
-  ) {
-    const snapped = snapToRoute([targetLat, targetLng], routePoints.value)
-    if (snapped) {
-      targetLat = snapped[0]
-      targetLng = snapped[1]
-    }
-  }
+  // Case-insensitive driver match. payload.driver comes from
+  // truck_assignments.driver_name (Routemate sync) or driver_locations.driver
+  // (phone GPS) and selectedDriver was set from the locations array; their
+  // casing can differ, which would otherwise silently skip the polyline /
+  // trail / off-route updates below.
+  const isSelectedDriver = selectedDriver.value
+    && payload.driver
+    && selectedDriver.value.toLowerCase() === payload.driver.toLowerCase()
 
   const idx = locations.value.findIndex(
     (l) => l.driver.toLowerCase() === payload.driver.toLowerCase()
   )
   if (idx >= 0) {
     const old = locations.value[idx]
-    // Animate from current display position to new (snapped) position
-    animateMarker(payload.driver, old.latitude, old.longitude, targetLat, targetLng)
+    // Stretch the tween to match the actual inter-ping gap so the pin is
+    // moving continuously instead of finishing in 1s and freezing for 59s.
+    // First ping for this driver falls back to the 1s default.
+    const now = Date.now()
+    const prevAt = lastPingAt.get(payload.driver)
+    const tweenMs = prevAt
+      ? Math.min(Math.max(now - prevAt, PING_TWEEN_MIN_MS), PING_TWEEN_MAX_MS)
+      : PING_TWEEN_MIN_MS
+    lastPingAt.set(payload.driver, now)
+    animateMarker(payload.driver, old.latitude, old.longitude, targetLat, targetLng, tweenMs)
     // Update non-position fields immediately
     locations.value[idx].speed = payload.speed || 0
     locations.value[idx].loadId = payload.loadId || ''
     locations.value[idx].timestamp = payload.timestamp
+    if (Number.isFinite(payload.heading)) locations.value[idx].heading = payload.heading
+    // Honor source/lastPingAge from the emitter so the ELD/Phone badge flips
+    // live without waiting for the next /api/locations/latest fetch.
+    if (payload.source) locations.value[idx].source = payload.source
+    locations.value[idx].lastPingAge = 0
+    if (locations.value[idx].noGps) locations.value[idx].noGps = false
+    // Mutate the existing marker content instead of replacing it — that lets
+    // the CSS transition on the arrow's transform smoothly rotate over the
+    // tween window. Replacing marker.content tears down the DOM element and
+    // destroys the in-flight transition.
+    const marker = driverMarkers.get(locations.value[idx].driver)
+    if (marker && marker.content && typeof marker.content.updateHeading === 'function') {
+      const updated = locations.value[idx]
+      const isOn = isOnline(updated)
+      const moving = (updated.speed || 0) > 0.5
+      const heading = headingForMarker(updated)
+      marker.content.updateColor(isOn ? '#16a34a' : '#9ca3af')
+      marker.content.updateMoving(moving)
+      marker.content.updateHeading(heading, tweenMs)
+    }
   } else {
     locations.value.push({
       driver: payload.driver,
@@ -1007,7 +1428,7 @@ function onLocationUpdate(payload) {
 
   // Extend trail in real-time if this update is for the selected driver/load
   if (
-    selectedDriver.value === payload.driver &&
+    isSelectedDriver &&
     trailLoadId.value &&
     payload.loadId === trailLoadId.value &&
     trailPoints.value.length > 0
@@ -1015,13 +1436,20 @@ function onLocationUpdate(payload) {
     trailPoints.value = [...trailPoints.value, [payload.latitude, payload.longitude]]
   }
 
-  // Auto-reroute if driver is off the planned route
-  if (
-    selectedDriver.value === payload.driver &&
-    routePoints.value.length >= 2 &&
-    destLatLng.value
-  ) {
-    checkOffRoute(payload.latitude, payload.longitude)
+  // Note: polyline first-point follow + map panTo are handled inside
+  // animateMarker's per-frame callback so they stay in lock-step with the
+  // marker animation. Don't update them separately here or they'd jump
+  // ahead of the marker.
+
+  // Refresh the route as the truck progresses (100m moved + 60s elapsed),
+  // mirroring the public /track tracker so both views render the same
+  // road segments at the same intervals. Pre-pickup loads refresh the
+  // amber driver→pickup approach leg instead of the static blue haul.
+  if (isSelectedDriver && originLatLng.value && expandedLoadId.value) {
+    maybeRefetchApproachLeg(payload.latitude, payload.longitude)
+  }
+  if (isSelectedDriver && routePoints.value.length >= 2 && destLatLng.value) {
+    maybeRefetchRoute(payload.latitude, payload.longitude)
   }
 }
 
@@ -1051,6 +1479,7 @@ function onStatusUpdated(payload) {
     selectedDriver.value === payload.driverName
   ) {
     routePoints.value = []
+    approachRoutePoints.value = []
     originLatLng.value = null
     destLatLng.value = null
     originAddress.value = ''
@@ -1060,6 +1489,19 @@ function onStatusUpdated(payload) {
     routeDistance.value = null
     routeEta.value = null
     clearSingleLoadOverlays()
+  }
+  // Pre→post-pickup transition (geofence auto-advance at shipper, or driver
+  // manual "Loaded / In Transit"): drop the amber approach leg. The blue haul
+  // polyline stays — next location-update will pass maybeRefetchRoute's new
+  // post-pickup gate and snap to the trimmed driver→drop-off geometry.
+  if (
+    payload.newStatus &&
+    PAST_PICKUP_RE.test(payload.newStatus) &&
+    selectedDriver.value === payload.driverName
+  ) {
+    approachRoutePoints.value = []
+    if (approachAnim) { clearInterval(approachAnim); approachAnim = null }
+    if (approachPolyline) { approachPolyline.setMap(null); approachPolyline = null }
   }
   // Refresh locations to get updated loadId
   fetchLocations()
@@ -1080,8 +1522,17 @@ async function initMap() {
     },
     minZoom: 3,
   })
+  // Manual pan/drag suspends follow-truck so a dispatcher inspecting a
+  // surrounding area isn't yanked back to the marker every second. The
+  // suspension persists until the user explicitly re-enables follow via
+  // the toggle, matching how Google Maps Navigation handles it.
+  map.addListener('dragstart', () => {
+    if (followTruck.value) followSuppressed.value = true
+  })
   // Render any already-fetched locations onto the map
   syncDriverMarkers()
+  // Honor the persisted follow preference on map ready
+  if (followTruck.value) startFollowLoop()
   if (initialFetchDone) {
     const withGps = locationsWithGps.value
     if (withGps.length > 0) {
@@ -1111,13 +1562,13 @@ onUnmounted(() => {
   socket.off('status-updated', onStatusUpdated)
   Object.values(activeAnimations).forEach(cancelAnimationFrame)
   clearInterval(nowInterval)
+  stopFollowLoop()
   // Clean up Google Maps objects
   for (const [, marker] of driverMarkers) marker.map = null
   driverMarkers.clear()
   for (const [, iw] of driverInfoWindows) iw.close()
   driverInfoWindows.clear()
   clearSingleLoadOverlays()
-  clearDriverRouteOverlays()
   clearAllRouteOverlays()
   map = null
 })
@@ -1134,6 +1585,43 @@ onUnmounted(() => {
   flex: 1;
   min-height: 400px;
   position: relative;
+}
+
+/* Follow-truck pill — sits top-left so it doesn't fight the driver panel
+   on the right or the Google MapType control just below it. */
+.follow-toggle {
+  position: absolute;
+  top: 56px;
+  left: 10px;
+  z-index: 1000;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #374151;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+.follow-toggle:hover {
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+.follow-toggle.active {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+}
+.follow-icon {
+  font-size: 0.95rem;
+  line-height: 1;
 }
 
 /* Driver panel */
@@ -1265,6 +1753,38 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Source badge — tells dispatchers whether the live position is from the
+   truck's Routemate ELD device or the driver's phone. Tiny chip next to
+   the driver name. */
+.src-badge {
+  display: inline-block;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-left: 0.35rem;
+  vertical-align: middle;
+}
+.src-badge.src-eld {
+  background: #dcfce7;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+.src-badge.src-phone {
+  background: #f3f4f6;
+  color: #4b5563;
+  border: 1px solid #e5e7eb;
+}
+/* Warning chip — driver is on an active assignment but the truck has no
+   Routemate device linked, so we can't show a live pin. Amber so it
+   reads as actionable (link the device) rather than offline. */
+.src-badge.src-no-eld {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
 }
 
 .driver-meta {
@@ -1457,6 +1977,8 @@ onUnmounted(() => {
   line-height: 1.3;
   margin-left: 1.1rem;
 }
+/* Line 2 (city/state/zip) under the street, slightly muted. */
+.route-point-csz { color: #888; }
 
 .route-point-coords {
   font-size: 0.62rem;

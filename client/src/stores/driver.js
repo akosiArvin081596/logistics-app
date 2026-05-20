@@ -15,6 +15,13 @@ export const useDriverStore = defineStore('driver', {
     drivers: [],
     headers: { jobTracking: [], carrierDB: [] },
     acceptedLoadIds: new Set(),
+    onboarding: null,
+    invoices: [],
+    sharedDocuments: [],
+    truckDocuments: [],
+    application: null,
+    profilePictureUrl: '',
+    driverDirectoryId: 0,
     currentTab: 'loads',
     selectedStatusLoad: null,
     isLoading: true,
@@ -39,7 +46,7 @@ export const useDriverStore = defineStore('driver', {
       const statusCol = findCol(state.headers.jobTracking, /status/i)
       const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
       if (!statusCol) return []
-      const workingRe = /^(assigned|at shipper|loading|in transit|at receiver)$/i
+      const workingRe = /^(assigned|heading to shipper|at shipper|loading|in transit|at receiver)$/i
       const filtered = state.loads.filter((l) => {
         const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
         return hasId && workingRe.test((l[statusCol] || '').trim())
@@ -49,7 +56,55 @@ export const useDriverStore = defineStore('driver', {
       return filtered.sort((a, b) => (b._rowIndex || 0) - (a._rowIndex || 0))
     },
 
+    // The single load currently being progressed (Heading to Shipper..Unloading).
+    // Returns null if none — in that case the driver app treats queuedLoads[0]
+    // as the effective active load (passive promotion on delivery).
+    inProgressLoad(state) {
+      const statusCol = findCol(state.headers.jobTracking, /status/i)
+      if (!statusCol) return null
+      const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
+      const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i
+      const matches = state.loads.filter((l) => {
+        const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
+        return hasId && inProgressRe.test((l[statusCol] || '').trim())
+      })
+      if (matches.length === 0) return null
+      // Degraded path: if two loads ended up in an in-progress status (legacy
+      // state or manual sheet edit), pick the highest _rowIndex so the driver
+      // sees the freshest one.
+      return matches.sort((a, b) => (b._rowIndex || 0) - (a._rowIndex || 0))[0]
+    },
+
+    // Accepted-but-not-yet-started loads ordered by FIFO queue position.
+    // _queuePosition is set by the server (computeDriverQueues). Falls back to
+    // accepted_at, then _rowIndex if positions are missing — degrades gracefully
+    // on a stale client cache that hasn't seen the new endpoint response.
+    queuedLoads(state) {
+      const statusCol = findCol(state.headers.jobTracking, /status/i)
+      if (!statusCol) return []
+      const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
+      const assignedRe = /^assigned$/i
+      const matches = state.loads.filter((l) => {
+        const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
+        return hasId && assignedRe.test((l[statusCol] || '').trim())
+      })
+      return matches.sort((a, b) => {
+        const pa = a._queuePosition || 0
+        const pb = b._queuePosition || 0
+        if (pa && pb) return pa - pb
+        if (pa) return -1
+        if (pb) return 1
+        const ta = a._acceptedAt || ''
+        const tb = b._acceptedAt || ''
+        if (ta && tb && ta !== tb) return ta.localeCompare(tb)
+        return (a._rowIndex || 0) - (b._rowIndex || 0)
+      })
+    },
+
     pendingLoads(state) {
+      // All Dispatched offers are always visible — a driver can accept multiple
+      // loads at once (dispatcher pre-planning), even while already working or
+      // holding accepted loads. No deferral guard.
       const statusCol = findCol(state.headers.jobTracking, /status/i)
       const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
       if (!statusCol) return []
@@ -155,6 +210,30 @@ export const useDriverStore = defineStore('driver', {
         }
       }
 
+      // Active sub-tab: in-progress load(s) on top, then queued loads in FIFO
+      // queue order. This way a driver looking at the Active list sees their
+      // current load first, then the "Up Next" loads in the order they'll
+      // pick them up. _queuePosition is set by the server (computeDriverQueues).
+      if (state.loadSubTab === 'active') {
+        const statusCol = findCol(headers, /status/i)
+        const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i
+        result.sort((a, b) => {
+          const aInProg = statusCol ? inProgressRe.test((a[statusCol] || '').trim()) : false
+          const bInProg = statusCol ? inProgressRe.test((b[statusCol] || '').trim()) : false
+          if (aInProg && !bInProg) return -1
+          if (!aInProg && bInProg) return 1
+          // Both in-progress (degraded state): newest row first.
+          if (aInProg && bInProg) return (b._rowIndex || 0) - (a._rowIndex || 0)
+          // Both queued (status === Assigned): sort by queue position ASC.
+          const pa = a._queuePosition || 0
+          const pb = b._queuePosition || 0
+          if (pa && pb) return pa - pb
+          if (pa) return -1
+          if (pb) return 1
+          return (b._rowIndex || 0) - (a._rowIndex || 0)
+        })
+      }
+
       // Sort historical loads by most recent first
       if (state.loadSubTab === 'historical') {
         const statusUpdateCol = findCol(headers, /status.*update.*date/i)
@@ -204,6 +283,17 @@ export const useDriverStore = defineStore('driver', {
         this.expenses = data.expenses || []
         this.drivers = data.drivers || []
         this.headers = data.headers || { jobTracking: [], carrierDB: [] }
+        // Only overwrite onboarding/application when the server actually
+        // returned a record. A transient missing field used to flicker
+        // `isOnboarding` false → drivers got bounced to the regular UI for
+        // ~1-2s on a slow connection after signing a document.
+        if (data.onboarding !== undefined) this.onboarding = data.onboarding
+        this.invoices = data.invoices || []
+        this.sharedDocuments = data.sharedDocuments || []
+        this.truckDocuments = data.truckDocuments || []
+        if (data.application !== undefined) this.application = data.application
+        this.profilePictureUrl = data.profilePictureUrl || ''
+        this.driverDirectoryId = data.driverDirectoryId || 0
 
         // Keep selected status load in sync
         if (this.selectedStatusLoad) {
@@ -230,15 +320,29 @@ export const useDriverStore = defineStore('driver', {
       if (response === 'accepted') {
         this.acceptedLoadIds.add(loadId)
       }
-      await this.loadData()
+      // Refresh from server. If the refresh itself fails (network blip,
+      // 500), undo the optimistic accept so the UI doesn't lie and let the
+      // caller surface the error.
+      try {
+        await this.loadData()
+        // After accept, the load's status moves from "Dispatched" to
+        // "Assigned" so it exits pendingLoads and enters workingLoads. Nudge
+        // the sub-tab so the driver sees where the load went without a
+        // refresh — otherwise filteredLoads stays empty on the Pending tab.
+        if (response === 'accepted') this.loadSubTab = 'active'
+      } catch (err) {
+        if (response === 'accepted') this.acceptedLoadIds.delete(loadId)
+        throw err
+      }
     },
 
-    async updateStatus(loadId, newStatus, rowIndex) {
+    async updateStatus(loadId, newStatus, rowIndex, rowData) {
       await api.put('/api/driver/status', {
         driverName: this.driverName,
         loadId,
         newStatus,
         rowIndex,
+        rowData,
       })
       await this.loadData()
     },
@@ -295,6 +399,32 @@ export const useDriverStore = defineStore('driver', {
 
     addNotification(notif) {
       this.notifications.unshift(notif)
+    },
+
+    async signDocument(docKey, signatureText, signatureImage, paymentInfo) {
+      const userId = this.onboarding?.user_id
+      if (!userId) throw new Error('No onboarding record')
+      const data = await api.post(`/api/onboarding/${userId}/documents/${docKey}/sign`, {
+        signatureText,
+        signatureImage: signatureImage || undefined,
+        paymentInfo: paymentInfo || undefined,
+      })
+      await this.loadData()
+      return data
+    },
+
+    async generateInvoice(weekEnd) {
+      const data = await api.post('/api/invoices/generate', {
+        driver: this.driverName,
+        weekEnd,
+      })
+      await this.loadData()
+      return data
+    },
+
+    async submitInvoice(invoiceId) {
+      await api.put(`/api/invoices/${invoiceId}/submit`)
+      await this.loadData()
     },
 
     addIncomingMessage(msg) {

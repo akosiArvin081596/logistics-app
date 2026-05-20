@@ -28,10 +28,10 @@ defineEmits(['switch'])
 
 const tabs = [
   { key: 'loads', label: 'Loads', icon: '&#128230;' },
-  { key: 'status', label: 'Status', icon: '&#128666;' },
   { key: 'notifications', label: 'Alerts', icon: '&#128276;' },
   { key: 'kit', label: 'Kit', icon: '&#128196;' },
   { key: 'messages', label: 'Messages', icon: '&#128172;' },
+  { key: 'invoices', label: 'Invoices', icon: '&#128179;' },
 ]
 </script>
 

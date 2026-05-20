@@ -1,0 +1,128 @@
+{
+  "name": "Gmail Unread Check",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -200,
+        200
+      ],
+      "id": "aaa00001-0001-4000-8000-000000000001",
+      "name": "Run Manually"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -200,
+        400
+      ],
+      "id": "aaa00001-0005-4000-8000-000000000005",
+      "name": "Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "oymS9U543xCU6JOB",
+          "name": "Gmail account 7"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 5,
+        "simple": false,
+        "filters": {},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        20,
+        300
+      ],
+      "id": "aaa00001-0002-4000-8000-000000000002",
+      "name": "Get Matching Emails",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "oymS9U543xCU6JOB",
+          "name": "Gmail account 7"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst count = items.length;\n\nif (count === 0) {\n  return [{ json: { total: 0, message: 'No emails found', would_trigger: 0 } }];\n}\n\nconst RATECONS_LABEL = 'Label_8836114819563300518';\n\nconst emails = items.map(item => {\n  const labels = item.json.labelIds || [];\n  const starred = labels.includes('STARRED');\n  const unread = labels.includes('UNREAD');\n  const ratecon = labels.includes(RATECONS_LABEL);\n  const has_attachment = item.json.binary ? Object.keys(item.json.binary).length > 0 : false;\n  return {\n    subject: item.json.headers?.subject || item.json.subject || 'No subject',\n    from: item.json.headers?.from || item.json.from || 'Unknown',\n    date: item.json.headers?.date || item.json.date || 'Unknown',\n    starred,\n    unread,\n    ratecon,\n    has_attachment,\n    would_trigger: starred && unread && ratecon\n  };\n});\n\nemails.sort((a, b) => new Date(b.date) - new Date(a.date));\nemails.forEach((e, i) => e.index = i + 1);\n\nconst triggerCount = emails.filter(e => e.would_trigger).length;\n\nreturn [{ json: {\n  total: count,\n  would_trigger: triggerCount,\n  emails\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "id": "aaa00001-0003-4000-8000-000000000003",
+      "name": "Summary"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Run Manually": {
+      "main": [
+        [
+          {
+            "node": "Get Matching Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Matching Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Matching Emails": {
+      "main": [
+        [
+          {
+            "node": "Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "gmail-check-2026-04-06",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4592d470efc124c12030577125a69a0c1bc1b221012904315f942d64b680aaef"
+  },
+  "id": "gmail-unread-check",
+  "tags": []
+}
