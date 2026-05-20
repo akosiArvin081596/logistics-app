@@ -115,7 +115,11 @@
           >
             <template #value>
               <div class="cell-value-row">
-                <span>{{ f.value || '\u2014' }}</span>
+                <span v-if="f.parts && f.parts.cityStateZip" class="addr-stack-driver">
+                  <span class="addr-street">{{ f.parts.street || f.parts.cityStateZip }}</span>
+                  <span v-if="f.parts.street" class="addr-csz">{{ f.parts.cityStateZip }}</span>
+                </span>
+                <span v-else>{{ f.value || '\u2014' }}</span>
                 <button v-if="isAddress(f.header) && f.value && pickupCoords" class="copy-btn" @click.stop="focusMapOn(pickupCoords)">
                   <span class="map-icon">&#128205;</span>
                 </button>
@@ -140,7 +144,11 @@
           >
             <template #value>
               <div class="cell-value-row">
-                <span>{{ f.value || '\u2014' }}</span>
+                <span v-if="f.parts && f.parts.cityStateZip" class="addr-stack-driver">
+                  <span class="addr-street">{{ f.parts.street || f.parts.cityStateZip }}</span>
+                  <span v-if="f.parts.street" class="addr-csz">{{ f.parts.cityStateZip }}</span>
+                </span>
+                <span v-else>{{ f.value || '\u2014' }}</span>
                 <button v-if="isAddress(f.header) && f.value && dropoffCoords" class="copy-btn" @click.stop="focusMapOn(dropoffCoords)">
                   <span class="map-icon">&#128205;</span>
                 </button>
@@ -198,6 +206,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
+import { splitAddress } from '../../lib/address.js'
 import StatusBadge from '../shared/StatusBadge.vue'
 import StatusStepper from './StatusStepper.vue'
 import DocumentList from './DocumentList.vue'
@@ -356,22 +365,31 @@ const pickupFields = computed(() => {
   const exclude = /lat|lng|lon/i
   return props.headers
     .filter(h => /pickup|shipper/i.test(h) && !exclude.test(h))
-    .map(h => ({
-      header: h,
-      label: h.replace(/pickup\s*|shipper\s*/gi, '').trim() || h,
-      value: (props.load[h] || '').trim()
-    }))
+    .map(h => {
+      const value = (props.load[h] || '').trim()
+      return {
+        header: h,
+        label: h.replace(/pickup\s*|shipper\s*/gi, '').trim() || h,
+        value,
+        // Two display lines for address fields; null for non-address fields.
+        parts: isAddress(h) ? splitAddress(value) : null
+      }
+    })
 })
 
 const dropoffFields = computed(() => {
   const exclude = /lat|lng|lon/i
   return props.headers
     .filter(h => /drop.?off|deliv|receiver|consignee/i.test(h) && !exclude.test(h))
-    .map(h => ({
-      header: h,
-      label: h.replace(/drop.?off\s*|delivery\s*|deliv\s*|receiver\s*|consignee\s*/gi, '').trim() || h,
-      value: (props.load[h] || '').trim()
-    }))
+    .map(h => {
+      const value = (props.load[h] || '').trim()
+      return {
+        header: h,
+        label: h.replace(/drop.?off\s*|delivery\s*|deliv\s*|receiver\s*|consignee\s*/gi, '').trim() || h,
+        value,
+        parts: isAddress(h) ? splitAddress(value) : null
+      }
+    })
 })
 </script>
 
@@ -496,6 +514,20 @@ const dropoffFields = computed(() => {
 .map-icon {
   font-size: 0.85rem;
   line-height: 1;
+}
+/* Two-line address: street on line 1, "City, ST ZIP" muted on line 2.
+   Right-aligned to match .cell-value-row (justify-content: flex-end). */
+.addr-stack-driver {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+  line-height: 1.3;
+  min-width: 0;
+}
+.addr-stack-driver .addr-csz {
+  font-size: 0.85em;
+  color: var(--text-dim, #64748b);
 }
 
 /* Truck Details */
