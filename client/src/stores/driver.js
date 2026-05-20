@@ -102,13 +102,9 @@ export const useDriverStore = defineStore('driver', {
     },
 
     pendingLoads(state) {
-      // Phase 2 (deferred acceptance): while the driver has an in-progression
-      // load or an Assigned load, dispatched offers stay hidden in the Pending
-      // sub-tab. They reappear once the driver delivers their current load.
-      // The backend at POST /api/driver/respond also returns 409 if the driver
-      // tries to accept while busy, so this is UX clarity / no-failed-clicks,
-      // not the source-of-truth guard.
-      if (this.inProgressLoad || this.queuedLoads.length > 0) return []
+      // All Dispatched offers are always visible — a driver can accept multiple
+      // loads at once (dispatcher pre-planning), even while already working or
+      // holding accepted loads. No deferral guard.
       const statusCol = findCol(state.headers.jobTracking, /status/i)
       const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
       if (!statusCol) return []
