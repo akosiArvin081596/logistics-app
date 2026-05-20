@@ -4224,8 +4224,16 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			stages.forEach((s, i) => { s.completed = i <= currentStageIdx; s.current = i === currentStageIdx; });
 		}
 
-		const originAddr = originAddrCol ? (load[originAddrCol] || "") : "";
-		const destAddr = destAddrCol ? (load[destAddrCol] || "") : "";
+		// Canonical-address precedence (matches the dashboard): prefer the
+		// geocoded address in load_coordinates over the sheet's first
+		// /pickup/i column, which is often "Pickup Info" (broker references
+		// like "ACME REF/PU#: 12345") not the actual address. Without this
+		// the public tracker leaked broker text as the city. Single DB read;
+		// the coords block below reuses lcRow.
+		let lcRow = null;
+		try { lcRow = db.prepare("SELECT * FROM load_coordinates WHERE load_id = ?").get(target); } catch { /* ignore */ }
+		const originAddr = (lcRow && lcRow.pickup_address) || (originAddrCol ? (load[originAddrCol] || "") : "");
+		const destAddr   = (lcRow && lcRow.dropoff_address) || (destAddrCol ? (load[destAddrCol] || "") : "");
 		const origin = parseOriginDestCity(originAddr);
 		const destination = parseOriginDestCity(destAddr);
 
@@ -4240,12 +4248,9 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			const dLng = parseFloat(load[destLngCol]);
 			if (!isNaN(dLat) && !isNaN(dLng)) { destLat = dLat; destLng = dLng; }
 		}
-		if (originLat == null || destLat == null) {
-			const lc = db.prepare("SELECT * FROM load_coordinates WHERE load_id = ?").get(target);
-			if (lc) {
-				if (originLat == null && lc.origin_lat) { originLat = lc.origin_lat; originLng = lc.origin_lng; }
-				if (destLat == null && lc.dest_lat) { destLat = lc.dest_lat; destLng = lc.dest_lng; }
-			}
+		if ((originLat == null || destLat == null) && lcRow) {
+			if (originLat == null && lcRow.origin_lat) { originLat = lcRow.origin_lat; originLng = lcRow.origin_lng; }
+			if (destLat == null && lcRow.dest_lat) { destLat = lcRow.dest_lat; destLng = lcRow.dest_lng; }
 		}
 
 		const driverNameRaw = driverCol ? (load[driverCol] || "").toString().trim() : "";
