@@ -5203,6 +5203,40 @@ function getDeductibleExpensesByDriverMonth() {
 	return out;
 }
 
+// Returns { [routemate_vehicle_id]: { travel: Set<"YYYY-MM-DD">, coverage: Set<...> } }.
+//   • coverage = days the ELD reported ANY clean ping (the truck was being tracked).
+//   • travel   = days with ≥1 clean ping faster than ~5 mph (the truck actually moved).
+// Day strings use local getters (server runs UTC) so they line up exactly with the
+// load-window day strings produced by each handler's fmtDate/expandDateRange.
+// Callers intersect a completed load's pickup→delivery window with `travel`, but
+// ONLY when the load's window overlaps `coverage` — a load that predates the ELD
+// feed (or any uncovered window) must fall back to the full window so historical
+// pay isn't zeroed. A covered-but-parked window legitimately yields 0 active days.
+// 2.235 m/s mirrors the MOVING_MPH_M_PER_S (~5 mph) constant used by the
+// stale-location scan.
+function getEldTravelDaysByVehicle(vehicleIds, minMs, maxMs) {
+	const out = {};
+	const ids = (vehicleIds || []).filter(Boolean);
+	if (!ids.length || !(maxMs > minMs)) return out;
+	const ph = ids.map(() => "?").join(",");
+	const rows = db.prepare(
+		`SELECT routemate_vehicle_id AS vid, location_date_ms AS ms, speed
+		 FROM routemate_telemetry
+		 WHERE routemate_vehicle_id IN (${ph})
+		   AND dropped_reason = ''
+		   AND location_date_ms >= ? AND location_date_ms < ?`
+	).all(...ids, minMs, maxMs);
+	for (const r of rows) {
+		const d = new Date(r.ms);
+		const day = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+		let e = out[r.vid];
+		if (!e) e = out[r.vid] = { travel: new Set(), coverage: new Set() };
+		e.coverage.add(day);
+		if ((r.speed || 0) > 2.235) e.travel.add(day);
+	}
+	return out;
+}
+
 // POST /api/invoices/generate — driver generates weekly invoice
 app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 	try {
@@ -12456,10 +12490,18 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const pickupDateCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
 		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
 
-		// Helper: parse a messy date cell like "5/16/25 9:00" or "5/16/25 06:00-18:00 Appt." into a Date
+		// Helper: parse a messy date cell like "5/16/25 9:00", "5/16/25 06:00-18:00 Appt.",
+		// or ISO "2026-05-13" (n8n + the reassign endpoint write the ISO form) into a Date.
 		function parseSheetDate(val) {
 			if (!val) return null;
-			const m = String(val).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+			const s = String(val).trim();
+			// ISO YYYY-MM-DD first — the US M/D/Y regex below would mis-read "2026-05-13".
+			const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+			if (iso) {
+				const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
+				return isNaN(d) ? null : d;
+			}
+			const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
 			if (!m) return null;
 			let yr = parseInt(m[3]);
 			if (yr < 100) yr += 2000;
@@ -12513,7 +12555,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 
 		// ---- Single-pass: revenue + driver pay + operating period + per-driver gross ----
-		const activeWorkStatuses = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
+		// (Driver active days now key off completedStatuses ∩ ELD travel — see the
+		// active-day block below — so the old broad activeWorkStatuses set is gone.)
 		let totalRevenue = 0;
 		let last30DaysRevenue = 0;
 		let earliestDate = null;
@@ -12538,6 +12581,31 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const now = new Date();
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+		// ---- ELD travel-day index (per linked vehicle) ----
+		// Map each in-scope truck's unit number → its Routemate vehicle id, then
+		// fetch the calendar days each vehicle actually traveled. The active-day
+		// loop below intersects a COMPLETED load's pickup→delivery window with
+		// these days, so we never count scheduled days the truck sat still nor
+		// ELD travel on a day with no load. Trucks with no ELD link fall back to
+		// the full window (so un-instrumented investors are unaffected).
+		const unitToVid = {};
+		{
+			const vidQuery = investorDriverSet
+				? "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE owner_id = ? AND COALESCE(routemate_vehicle_id, '') != ''"
+				: "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''";
+			db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
+		}
+		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), 0, Date.now() + 86400000);
+		// Per-driver-per-month ELD-source flags for the UI badge: { driver: { "YYYY-MM": {eld,est} } }
+		const driverDaySource = {};
+		const daySrcLabel = (o) => o ? (o.eld && o.est ? "mixed" : o.eld ? "eld" : "estimated") : "estimated";
+		const driverSrcAllTime = (drv) => {
+			const m = driverDaySource[drv]; if (!m) return "estimated";
+			let eld = false, est = false;
+			for (const k in m) { if (m[k].eld) eld = true; if (m[k].est) est = true; }
+			return daySrcLabel({ eld, est });
+		};
 
 		filteredJobData.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
@@ -12580,22 +12648,41 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				}
 			}
 
-			// Driver active days (all work statuses, not just completed)
-			if (activeWorkStatuses.test(st) && driver) {
-				const pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
+			// Driver active days — COMPLETED loads only (so driver pay is counted
+			// the same way as revenue), intersected with the days the truck
+			// actually traveled per ELD. A scheduled window day with no movement
+			// is not an active day; ELD travel on a day with no load is not one
+			// either. Falls back to the full pickup→delivery window only when the
+			// truck has no ELD link/data.
+			if (completedStatuses.test(st) && driver) {
+				let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
-				if (pickup) {
-					const days = expandDateRange(pickup, dropoff || pickup);
+				// Completed load with a blank pickup → fall back to its assigned date.
+				if (!pickup && jtDateCol && r[jtDateCol]) pickup = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				if (pickup && !isNaN(pickup)) {
+					const windowDays = expandDateRange(pickup, dropoff || pickup);
+					const vid = truckUnit ? unitToVid[truckUnit] : null;
+					const eld = vid ? eldByVid[vid] : null;
+					// Intersect with real travel days ONLY when the ELD covered this
+					// load's window (≥1 ping). Uncovered windows (load predates the
+					// feed, or no link) fall back to the full window so historical pay
+					// isn't zeroed; a covered-but-parked window stays 0.
+					const covered = eld && windowDays.some(d => eld.coverage.has(d));
+					const counted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
+					const srcKey = covered ? "eld" : "est";
 					// All-time set (for totals)
 					if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
-					days.forEach(d => driverDaySets[driver].add(d));
+					counted.forEach(d => driverDaySets[driver].add(d));
 					// Per-assigned-month set (for monthly P&L). Falls back to the
 					// physical day's month if the load has no assigned date (rare).
 					if (!driverMonthlyDays[driver]) driverMonthlyDays[driver] = {};
-					days.forEach(d => {
+					if (!driverDaySource[driver]) driverDaySource[driver] = {};
+					counted.forEach(d => {
 						const bucket = assignedMonthKey || d.slice(0, 7);
 						if (!driverMonthlyDays[driver][bucket]) driverMonthlyDays[driver][bucket] = new Set();
 						driverMonthlyDays[driver][bucket].add(d);
+						if (!driverDaySource[driver][bucket]) driverDaySource[driver][bucket] = { eld: false, est: false };
+						driverDaySource[driver][bucket][srcKey] = true;
 					});
 				}
 			}
@@ -12690,7 +12777,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					dates: [...daySet].sort(),
 					payType: struct.payType,
 					payPercentage: struct.payType === "percentage" ? struct.payPercentage : 0,
-					source: "estimate",
+					source: driverSrcAllTime(driver),
 				};
 			}
 			totalExpenses += totalDriverPay;
@@ -12768,7 +12855,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						monthRevenue: Math.round(monthRev),
 						monthDeductible: Math.round(monthExp),
 						netForPercentage: Math.round(net),
-						source: "estimate",
+						source: daySrcLabel(driverDaySource[driver] && driverDaySource[driver][mk]),
 					};
 				}
 			}
@@ -13226,11 +13313,17 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
-		const activeWorkStatuses = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading|delivered|completed|pod received)$/i;
 
 		function parseSheetDate(val) {
 			if (!val) return null;
-			const m = String(val).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+			const s = String(val).trim();
+			// ISO YYYY-MM-DD first — the US M/D/Y regex below would mis-read "2026-05-13".
+			const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+			if (iso) {
+				const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
+				return isNaN(d) ? null : d;
+			}
+			const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
 			if (!m) return null;
 			let yr = parseInt(m[3]);
 			if (yr < 100) yr += 2000;
@@ -13314,6 +13407,17 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const driverMonthlyRevenue = {}; // { driver_lc: { "YYYY-MM": revenue } }
 		const now = new Date();
 
+		// ---- ELD travel-day index (per linked vehicle), fleet-wide ----
+		// Same rationale as /api/investor: a COMPLETED load's pickup→delivery
+		// window is intersected with the days that truck actually traveled per
+		// ELD, so driver/truck active days reflect real working days. Trucks with
+		// no ELD link fall back to the full window. Keeps this P&L reconciled with
+		// the investor view (the CLAUDE.md consistency invariant).
+		const unitToVid = {};
+		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''").all()
+			.forEach(t => { unitToVid[t.u] = t.vid; });
+		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), 0, Date.now() + 86400000);
+
 		jobTracking.data.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
 			const driver = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
@@ -13396,21 +13500,31 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			}
 
 			// Active-day sets for driver pay (per-driver and per-truck).
-			// Per-truck days × that truck's `driver_pay_daily` is the
-			// authoritative per-row driver pay; per-driver days remain as
-			// the fallback when the sheet has no truck-column attribution.
-			if (activeWorkStatuses.test(st)) {
-				const pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
+			// COMPLETED loads only, intersected with the days the truck actually
+			// traveled per ELD. Per-truck days × that truck's `driver_pay_daily`
+			// is the authoritative per-row driver pay; per-driver days remain the
+			// fallback when the sheet has no truck-column attribution. Trucks with
+			// no ELD link fall back to the full pickup→delivery window.
+			if (completedStatuses.test(st)) {
+				let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
-				if (pickup) {
-					const days = expandDateRange(pickup, dropoff || pickup);
+				if (!pickup && jtDateCol && r[jtDateCol]) pickup = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				if (pickup && !isNaN(pickup)) {
+					const windowDays = expandDateRange(pickup, dropoff || pickup);
+					const vid = truckUnit ? unitToVid[truckUnit] : null;
+					const eld = vid ? eldByVid[vid] : null;
+					// Intersect with real travel days only when the ELD covered this
+					// window (≥1 ping); otherwise fall back to the full window (see
+					// /api/investor for rationale).
+					const covered = eld && windowDays.some(d => eld.coverage.has(d));
+					const counted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
 					if (driverLc) {
 						if (!driverDaySets[driverLc]) driverDaySets[driverLc] = new Set();
-						days.forEach(d => driverDaySets[driverLc].add(d));
+						counted.forEach(d => driverDaySets[driverLc].add(d));
 					}
 					if (truckUnit) {
 						if (!truckDaySets[truckUnit]) truckDaySets[truckUnit] = new Set();
-						days.forEach(d => truckDaySets[truckUnit].add(d));
+						counted.forEach(d => truckDaySets[truckUnit].add(d));
 					}
 				}
 			}

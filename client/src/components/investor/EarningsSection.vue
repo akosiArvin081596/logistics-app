@@ -192,7 +192,7 @@
         <template v-if="detailType === 'driverPay' && selected">
           <div class="modal-breakdown">
             <div class="modal-explain">
-              Driver compensation depends on each driver's pay structure. Fixed-rate drivers earn a flat amount per active day; percentage drivers earn a share of revenue after deductible trip expenses.
+              Driver compensation depends on each driver's pay structure. Fixed-rate drivers earn a flat amount per active day — a day the truck actually traveled while running a completed load, matched to ELD telematics. Percentage drivers earn a share of revenue after deductible trip expenses.
             </div>
 
             <template v-if="selected.driverDetails && Object.keys(selected.driverDetails).length">
@@ -207,6 +207,9 @@
                 </div>
                 <div class="modal-hint" v-else>
                   {{ d.activeDays }} active day{{ d.activeDays !== 1 ? 's' : '' }} × ${{ d.dailyRate || 250 }}/day
+                  <span v-if="d.source === 'eld'" class="modal-src eld">ELD-verified</span>
+                  <span v-else-if="d.source === 'mixed'" class="modal-src mixed">partly ELD-verified</span>
+                  <span v-else class="modal-src est">estimated</span>
                 </div>
               </div>
             </template>
@@ -753,6 +756,15 @@ const modalSubtitle = computed(() => {
   font-size: 0.65rem; font-weight: 600; color: var(--accent);
   background: var(--accent-dim); border-radius: 999px; vertical-align: middle;
 }
+/* Driver-pay source badge: ELD-verified vs estimated active days */
+.modal-src {
+  display: inline-block; margin-left: 0.4rem; padding: 0 0.4rem;
+  font-size: 0.6rem; font-weight: 700; border-radius: 999px;
+  vertical-align: middle; font-style: normal; letter-spacing: 0.02em;
+}
+.modal-src.eld { color: #16a34a; background: rgba(22, 163, 74, 0.12); }
+.modal-src.mixed { color: #ca8a04; background: rgba(202, 138, 4, 0.12); }
+.modal-src.est { color: var(--text-dim); background: var(--accent-dim); }
 
 /* Math formula */
 .modal-math {
