@@ -56,6 +56,51 @@ export const useDriverStore = defineStore('driver', {
       return filtered.sort((a, b) => (b._rowIndex || 0) - (a._rowIndex || 0))
     },
 
+    // The single load currently being progressed (Heading to Shipper..Unloading).
+    // Returns null if none — in that case the driver app treats queuedLoads[0]
+    // as the effective active load (passive promotion on delivery).
+    inProgressLoad(state) {
+      const statusCol = findCol(state.headers.jobTracking, /status/i)
+      if (!statusCol) return null
+      const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
+      const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i
+      const matches = state.loads.filter((l) => {
+        const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
+        return hasId && inProgressRe.test((l[statusCol] || '').trim())
+      })
+      if (matches.length === 0) return null
+      // Degraded path: if two loads ended up in an in-progress status (legacy
+      // state or manual sheet edit), pick the highest _rowIndex so the driver
+      // sees the freshest one.
+      return matches.sort((a, b) => (b._rowIndex || 0) - (a._rowIndex || 0))[0]
+    },
+
+    // Accepted-but-not-yet-started loads ordered by FIFO queue position.
+    // _queuePosition is set by the server (computeDriverQueues). Falls back to
+    // accepted_at, then _rowIndex if positions are missing — degrades gracefully
+    // on a stale client cache that hasn't seen the new endpoint response.
+    queuedLoads(state) {
+      const statusCol = findCol(state.headers.jobTracking, /status/i)
+      if (!statusCol) return []
+      const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
+      const assignedRe = /^assigned$/i
+      const matches = state.loads.filter((l) => {
+        const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
+        return hasId && assignedRe.test((l[statusCol] || '').trim())
+      })
+      return matches.sort((a, b) => {
+        const pa = a._queuePosition || 0
+        const pb = b._queuePosition || 0
+        if (pa && pb) return pa - pb
+        if (pa) return -1
+        if (pb) return 1
+        const ta = a._acceptedAt || ''
+        const tb = b._acceptedAt || ''
+        if (ta && tb && ta !== tb) return ta.localeCompare(tb)
+        return (a._rowIndex || 0) - (b._rowIndex || 0)
+      })
+    },
+
     pendingLoads(state) {
       const statusCol = findCol(state.headers.jobTracking, /status/i)
       const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
@@ -160,6 +205,30 @@ export const useDriverStore = defineStore('driver', {
             return true
           })
         }
+      }
+
+      // Active sub-tab: in-progress load(s) on top, then queued loads in FIFO
+      // queue order. This way a driver looking at the Active list sees their
+      // current load first, then the "Up Next" loads in the order they'll
+      // pick them up. _queuePosition is set by the server (computeDriverQueues).
+      if (state.loadSubTab === 'active') {
+        const statusCol = findCol(headers, /status/i)
+        const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i
+        result.sort((a, b) => {
+          const aInProg = statusCol ? inProgressRe.test((a[statusCol] || '').trim()) : false
+          const bInProg = statusCol ? inProgressRe.test((b[statusCol] || '').trim()) : false
+          if (aInProg && !bInProg) return -1
+          if (!aInProg && bInProg) return 1
+          // Both in-progress (degraded state): newest row first.
+          if (aInProg && bInProg) return (b._rowIndex || 0) - (a._rowIndex || 0)
+          // Both queued (status === Assigned): sort by queue position ASC.
+          const pa = a._queuePosition || 0
+          const pb = b._queuePosition || 0
+          if (pa && pb) return pa - pb
+          if (pa) return -1
+          if (pb) return 1
+          return (b._rowIndex || 0) - (a._rowIndex || 0)
+        })
       }
 
       // Sort historical loads by most recent first

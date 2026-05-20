@@ -8392,6 +8392,11 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		});
 		const driverList = [...driverMap.values()].sort();
 
+		// Per-driver FIFO queue map — keyed by normalized driver name. Same
+		// helper feeds the driver app so the queue position labels agree across
+		// both surfaces.
+		const driverQueues = computeDriverQueues(jobTracking.data, jobTracking.headers);
+
 		// Fleet details
 		const fleet = carrierDB.data.map((r) => {
 			const name = (r[carrierDriverCol] || "").trim();
@@ -8401,16 +8406,27 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 					driverCol && normalizeDriverName(j[driverCol]) === nameNorm,
 			);
 			const phoneCol = findCol(carrierDB.headers, /phone|contact/i);
+			const queue = driverQueues[nameNorm] || [];
+			// Status:
+			//   "On Load"  — driver has an active job (Dispatched..Unloading)
+			//   "Queued"   — no active job, but has Assigned loads waiting
+			//   "Available" — neither
+			let status;
+			if (currentLoad) status = "On Load";
+			else if (queue.length > 0) status = "Queued";
+			else status = "Available";
 			return {
 				Driver: name,
 				Truck: truckCol ? r[truckCol] || "" : "",
 				Phone: phoneCol ? r[phoneCol] || "" : "",
-				Status: currentLoad ? "On Load" : "Available",
+				Status: status,
 				CurrentLoad: currentLoad
 					? loadIdCol
 						? currentLoad[loadIdCol]
 						: ""
 					: "",
+				QueueCount: queue.length,
+				QueuedLoadIds: queue.map((q) => q.load_id),
 				CompletedLoads: completedJobs.filter((j) => {
 					return driverCol && normalizeDriverName(j[driverCol]) === nameNorm;
 				}).length,
@@ -8473,6 +8489,7 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			completedJobs: respCompleted,
 			fleet,
 			drivers: driverList,
+			driverQueues,
 		});
 	} catch (error) {
 		console.error("Error building dashboard:", error.message);
@@ -8656,6 +8673,72 @@ function excludeDroppedLoads(rows, headers, deletedIds) {
 		if (CANCELED_STATUS_RE.test(st)) return false;
 		return true;
 	});
+}
+
+// Compute per-driver FIFO queues from Job Tracking + load_responses.
+// Returns { [driverNameNorm]: [{ load_id, queue_position, accepted_at }, ...] }.
+// A "queued" load is one the driver has accepted (Sheet status === "Assigned")
+// but hasn't yet started progressing. The dispatcher's confirmation modal and
+// the driver app's "Up Next" list both read off this. Position is 1-based,
+// ordered by load_responses.responded_at ASC (the FIFO requirement).
+function computeDriverQueues(jobTrackingRows, headers) {
+	const driverCol = findCol(headers || [], /driver|operator/i);
+	const statusCol = findCol(headers || [], /^(job[\s._-]?)?status$/i) || findCol(headers || [], /status/i);
+	const loadIdCol = findCol(headers || [], /load.?id|job.?id/i);
+	if (!driverCol || !statusCol || !loadIdCol) return {};
+	if (!Array.isArray(jobTrackingRows) || jobTrackingRows.length === 0) return {};
+	const queuedRe = /^assigned$/i;
+	const candidates = [];
+	for (const r of jobTrackingRows) {
+		if (!queuedRe.test((r[statusCol] || "").toString().trim())) continue;
+		const driverNorm = normalizeDriverName(r[driverCol]);
+		const loadId = (r[loadIdCol] || "").toString().trim();
+		if (driverNorm && loadId) candidates.push({ driverNorm, loadId });
+	}
+	if (candidates.length === 0) return {};
+	const loadIds = [...new Set(candidates.map((c) => c.loadId))];
+	const placeholders = loadIds.map(() => "?").join(",");
+	let acceptRows = [];
+	try {
+		acceptRows = db.prepare(
+			`SELECT load_id, driver_name, responded_at, id FROM load_responses
+			 WHERE response = 'accepted' AND load_id IN (${placeholders})
+			 ORDER BY responded_at ASC, id ASC`
+		).all(...loadIds);
+	} catch {
+		acceptRows = [];
+	}
+	// Keep the latest accepted row per (driver, load_id) — a driver who declined
+	// then re-accepted has two rows; use the most recent acceptance as their
+	// accepted_at. ORDER BY ASC means we overwrite as we walk; later wins.
+	const acceptMap = new Map();
+	for (const ar of acceptRows) {
+		const key = `${normalizeDriverName(ar.driver_name)}::${ar.load_id}`;
+		acceptMap.set(key, ar.responded_at || "");
+	}
+	const byDriver = {};
+	for (const c of candidates) {
+		const ts = acceptMap.get(`${c.driverNorm}::${c.loadId}`) || "";
+		if (!byDriver[c.driverNorm]) byDriver[c.driverNorm] = [];
+		byDriver[c.driverNorm].push({ load_id: c.loadId, accepted_at: ts });
+	}
+	for (const driverNorm of Object.keys(byDriver)) {
+		// Loads without an accept timestamp (dispatch wrote "Assigned" directly,
+		// or load_responses was cleared) sort to the end — they're still queued
+		// but treated as "newest" because we have no FIFO signal for them.
+		byDriver[driverNorm].sort((a, b) => {
+			const at = a.accepted_at || "";
+			const bt = b.accepted_at || "";
+			if (!at && !bt) return 0;
+			if (!at) return 1;
+			if (!bt) return -1;
+			return at.localeCompare(bt);
+		});
+		byDriver[driverNorm].forEach((q, i) => {
+			q.queue_position = i + 1;
+		});
+	}
+	return byDriver;
 }
 
 // GET /api/driver/:driverName — All data for one driver (single batchGet)
@@ -8843,6 +8926,29 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			const lid = acceptLoadIdCol ? (load[acceptLoadIdCol] || "") : "";
 			load._accepted = acceptedSet.has(lid);
 		});
+
+		// Attach FIFO queue position for "Assigned" loads. Position is derived
+		// from load_responses.responded_at (oldest accept = position 1) by the
+		// shared computeDriverQueues helper so the driver app and the dispatch
+		// board agree on the ordering. Loads not in the "Assigned" state get no
+		// _queuePosition; the driver UI treats absence as "this isn't queued".
+		const driverQueueForName = computeDriverQueues(
+			jobTracking.data,
+			jobTracking.headers,
+		)[driverNameNorm] || [];
+		if (driverQueueForName.length > 0) {
+			const posByLoadId = new Map(
+				driverQueueForName.map((q) => [q.load_id, q]),
+			);
+			filteredLoads.forEach((load) => {
+				const lid = acceptLoadIdCol ? (load[acceptLoadIdCol] || "").toString().trim() : "";
+				const q = lid ? posByLoadId.get(lid) : null;
+				if (q) {
+					load._queuePosition = q.queue_position;
+					load._acceptedAt = q.accepted_at || null;
+				}
+			});
+		}
 
 		// PRIVACY: do not expose other drivers' names to a Driver-role caller.
 		// Previously this returned the full carrier driver list to every

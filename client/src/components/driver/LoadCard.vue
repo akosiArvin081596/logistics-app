@@ -6,6 +6,9 @@
       <StatusBadge :status="status" />
     </div>
 
+    <!-- Queue position pill (only when this card is in the Up Next list) -->
+    <div v-if="queuePosition > 0" class="queue-pill">Queue Position {{ queuePosition }}</div>
+
     <!-- Route -->
     <div v-if="route" class="card-route">
       <span class="route-icon">&#128205;</span>
@@ -65,6 +68,7 @@ const props = defineProps({
   pending: { type: Boolean, default: false },
   accepted: { type: Boolean, default: false },
   responding: { type: Boolean, default: false },
+  queuePosition: { type: Number, default: 0 },
 })
 
 defineEmits(['select', 'chat', 'accept', 'decline'])
@@ -207,6 +211,19 @@ function formatDate(str) {
   font-size: 0.78rem;
   font-weight: 600;
   border-radius: 6px;
+}
+
+.queue-pill {
+  display: inline-block;
+  margin-bottom: 0.55rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 9999px;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 .card-bottom { display: flex; align-items: flex-end; justify-content: space-between; }
