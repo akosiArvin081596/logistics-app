@@ -294,17 +294,43 @@
                 <details v-if="d.payType !== 'percentage' && d.dayBreakdown && d.dayBreakdown.length" class="day-details" :open="d.dayBreakdown.length <= 7">
                   <summary class="day-summary">Day breakdown ({{ d.dayBreakdown.length }} day{{ d.dayBreakdown.length !== 1 ? 's' : '' }})</summary>
                   <div class="day-list">
-                    <div v-for="row in d.dayBreakdown" :key="row.date" class="day-row">
-                      <span class="day-date">{{ formatDayLabel(row.date) }}</span>
-                      <span class="day-loads">{{ row.loadIds.length ? row.loadIds.join(', ') : '(no load id)' }}</span>
-                      <button
-                        v-if="isSuperAdmin"
-                        type="button"
-                        class="day-action exclude"
-                        title="Exclude this day from the driver's pay count"
-                        @click="askExclude(name, d, row)"
-                      >Exclude</button>
-                    </div>
+                    <template v-for="row in d.dayBreakdown" :key="row.date">
+                      <div class="day-row">
+                        <span class="day-date">{{ formatDayLabel(row.date) }}</span>
+                        <span class="day-loads">{{ row.loadIds.length ? row.loadIds.join(', ') : '(no load id)' }}</span>
+                        <button
+                          v-if="isSuperAdmin"
+                          type="button"
+                          class="day-action exclude"
+                          :disabled="!!pendingExclude"
+                          title="Exclude this day from the driver's pay count"
+                          @click="askExclude(name, d, row)"
+                        >Exclude</button>
+                      </div>
+                      <!-- Inline confirm — rendered in-place so it lives inside the
+                           dialog's focus scope (a separate teleported modal gets
+                           trapped/inert behind the parent dialog). -->
+                      <div
+                        v-if="isSuperAdmin && pendingExclude && pendingExclude.driverKey === name && pendingExclude.date === row.date"
+                        class="exclude-confirm"
+                      >
+                        <div class="exclude-confirm-sub">
+                          Removes <strong>{{ formatDayLabel(row.date) }}</strong> from {{ pendingExclude.driverDisplay }}'s active-day count — affects this portal and the company P&amp;L.
+                        </div>
+                        <textarea
+                          v-model="excludeReason"
+                          class="exclude-reason"
+                          rows="2"
+                          placeholder="Reason (optional, shown in the audit log)"
+                        ></textarea>
+                        <div class="exclude-confirm-actions">
+                          <button type="button" class="day-action" :disabled="excludeBusy" @click="cancelExclude">Cancel</button>
+                          <button type="button" class="day-action exclude" :disabled="excludeBusy" @click="submitExclude(excludeReason)">
+                            {{ excludeBusy ? 'Excluding…' : 'Exclude day' }}
+                          </button>
+                        </div>
+                      </div>
+                    </template>
                   </div>
                 </details>
 
@@ -335,18 +361,6 @@
               <span class="val danger">{{ fmt(selected.driverPay) }}</span>
             </div>
           </div>
-
-          <ConfirmModal
-            :open="!!pendingExclude"
-            title="Exclude this active day?"
-            :message="pendingExclude ? `Removes ${formatDayLabel(pendingExclude.date)} from ${pendingExclude.driverDisplay}'s active-day count. This affects both the investor view and the company P&L.` : ''"
-            confirm-text="Exclude day"
-            :danger="true"
-            prompt-label="Reason (visible in the audit log)"
-            prompt-placeholder="e.g. ELD ping on a parked truck"
-            @confirm="(reason) => submitExclude(reason)"
-            @cancel="pendingExclude = null"
-          />
         </template>
 
         <!-- ======================== -->
@@ -612,7 +626,6 @@
 import { ref, computed, watch } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import MetricInfoDialog from './MetricInfoDialog.vue'
-import ConfirmModal from '../shared/ConfirmModal.vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 
@@ -649,7 +662,16 @@ const fcb = computed(() => props.production?.fixedCostBreakdown || { insurance: 
 
 function openDetail(type) {
   detailType.value = type
+  // Drop any half-started exclude when (re)opening a modal section.
+  pendingExclude.value = null
+  excludeReason.value = ''
 }
+
+// Clear a pending exclude if the user navigates to another month mid-flow.
+watch(selectedIdx, () => {
+  pendingExclude.value = null
+  excludeReason.value = ''
+})
 
 // Expense category label (backend stores lowercase type strings)
 const CAT_LABELS = { fuel: 'Fuel', maintenance: 'Maintenance / Repairs', tolls: 'Tolls', parking: 'Parking', other: 'Other', repair: 'Repairs', tires: 'Tires', def: 'DEF Fluid' }
@@ -706,9 +728,12 @@ function formatDayLabel(ymd) {
 // Exclude/restore state — single-flight; the modal is small enough that we
 // don't need a per-driver busy map.
 const pendingExclude = ref(null) // { driverKey, driverDisplay, date }
+const excludeReason = ref('')
+const excludeBusy = ref(false)
 const busyId = ref(0)
 
 function askExclude(driverKey, driverDetail, row) {
+  excludeReason.value = ''
   pendingExclude.value = {
     driverKey,
     driverDisplay: driverDetail.displayDriverName || titleCase(driverKey),
@@ -716,10 +741,16 @@ function askExclude(driverKey, driverDetail, row) {
   }
 }
 
+function cancelExclude() {
+  if (excludeBusy.value) return
+  pendingExclude.value = null
+  excludeReason.value = ''
+}
+
 async function submitExclude(reason) {
   const target = pendingExclude.value
-  if (!target) return
-  pendingExclude.value = null
+  if (!target || excludeBusy.value) return
+  excludeBusy.value = true
   try {
     await api.post('/api/admin/excluded-days', {
       driverName: target.driverKey,
@@ -727,9 +758,13 @@ async function submitExclude(reason) {
       reason: reason || '',
     })
     toast(`Excluded ${formatDayLabel(target.date)}`)
+    pendingExclude.value = null
+    excludeReason.value = ''
     emit('changed')
   } catch (err) {
     toast(err?.message || 'Failed to exclude day', 'error')
+  } finally {
+    excludeBusy.value = false
   }
 }
 
@@ -988,6 +1023,32 @@ const modalSubtitle = computed(() => {
   padding: 0.25rem 0.4rem;
 }
 .day-row.excluded-row .day-date { text-decoration: line-through; opacity: 0.7; }
+
+/* Inline exclude confirmation (lives inside the dialog, no nested modal) */
+.exclude-confirm {
+  margin: 0.1rem 0.4rem 0.4rem;
+  padding: 0.6rem;
+  background: rgba(239, 68, 68, 0.05);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 6px;
+}
+.exclude-confirm-sub {
+  font-size: 0.74rem; color: var(--text-dim); line-height: 1.4;
+  margin-bottom: 0.5rem;
+}
+.exclude-reason {
+  width: 100%; box-sizing: border-box;
+  font-family: inherit; font-size: 0.8rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text);
+  resize: vertical; min-height: 48px;
+}
+.exclude-reason:focus { outline: none; border-color: var(--accent); }
+.exclude-confirm-actions {
+  display: flex; justify-content: flex-end; gap: 0.5rem;
+  margin-top: 0.5rem;
+}
 
 @media (max-width: 600px) {
   .alltime-grid { grid-template-columns: repeat(2, 1fr); }
