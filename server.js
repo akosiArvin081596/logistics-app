@@ -6353,7 +6353,17 @@ app.delete("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 	res.json({ success: true });
 });
 
-// Check if a driver has an active load (returns error message or null)
+// Check if a driver has an active load (returns error message or null).
+// "Active" here means Assigned (driver accepted, ready to start) or any
+// in-progression status (heading to shipper → unloading). Dispatched is
+// deliberately NOT in the regex: a Dispatched load is QUEUED behind the
+// driver's current work — they haven't accepted it yet — so it should not
+// block dispatchers from queueing more loads to the same driver, nor block
+// the driver from accepting their own dispatched load once they're free.
+// The "one accept at a time" rule for drivers is enforced at
+// POST /api/driver/respond, which calls this function with the load_id being
+// accepted in `excludeLoadId` so the driver can finish each queued load
+// serially.
 async function checkDriverActiveLoad(driverName, excludeLoadId = null) {
 	try {
 		const sheets = await getSheets();
@@ -6365,7 +6375,7 @@ async function checkDriverActiveLoad(driverName, excludeLoadId = null) {
 		const statusCol = headers.findIndex(h => /status/i.test(h));
 		if (driverCol === -1 || statusCol === -1) return null;
 		const loadIdCol = headers.findIndex(h => /load.?id|job.?id/i.test(h));
-		const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
+		const activeRe = /^(assigned|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 		const targetName = normalizeDriverName(driverName);
 		// When a driver accepts their own already-assigned load, that row is itself
 		// "active" — exclude it so the check only flags OTHER concurrent loads.
@@ -7704,14 +7714,14 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawDriver.trim());
 		const driver = userMatch ? userMatch.driver_name : rawDriver.trim();
 
-		// Golden rule — one load at a time. A driver who already has any load in
-		// an active/assigned state cannot be given another. checkDriverActiveLoad
-		// fails closed (throws → 500) if Sheets is unreachable, so a transient API
-		// blip can never let a double-dispatch slip through.
-		const activeLoadConflict = await checkDriverActiveLoad(driver);
-		if (activeLoadConflict) {
-			return res.status(409).json({ code: "ACTIVE_JOB_CONFLICT", error: activeLoadConflict });
-		}
+		// Queueing is allowed: dispatch to a driver who's already on a load,
+		// the new row lands as "Dispatched" and queues behind their current
+		// work. The "one accept at a time" rule is enforced at
+		// POST /api/driver/respond — the driver can't promote a queued load
+		// to Assigned until they've delivered their current one. The
+		// LoadAssignedBanner emit below is suppressed for busy drivers so the
+		// queue is silent until the driver is free (mid-trip notifications
+		// were noisy and confused drivers about which load to work next).
 
 		const sheets = await getSheets();
 		const headerResp = await sheets.spreadsheets.values.get({
@@ -7783,7 +7793,23 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			route,
 			JSON.stringify({ loadId, rowIndex, origin: origin || '', destination: destination || '' })
 		);
-		io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
+		// Suppress the per-driver real-time banner when the driver is already
+		// busy (queued load — they'll see it on the Notifications tab and in
+		// the Pending sub-tab once they deliver their current load). Reuses
+		// checkDriverActiveLoad which now treats only Assigned + in-progression
+		// rows as "busy" — the just-written "Dispatched" row doesn't count.
+		// Wrap in try so a Sheets blip degrades to "emit anyway" instead of
+		// breaking the dispatch flow (the notification row above is still
+		// persisted regardless).
+		let driverBusy = false;
+		try {
+			driverBusy = !!(await checkDriverActiveLoad(driver, loadId));
+		} catch {
+			driverBusy = false;
+		}
+		if (!driverBusy) {
+			io.to(driver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
+		}
 
 		// Notify dispatch team
 		insertDispatchNotification.run(
@@ -7836,15 +7862,9 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			return res.status(400).json({ error: "Driver column not found" });
 		}
 
-		// Golden rule — one load at a time. Don't move a load onto a driver who
-		// already has another active load. Skip the check when reassigning to the
-		// same driver already on this load (a no-op move shouldn't trip the guard).
-		if (normalizeDriverName(newDriver) !== normalizeDriverName(oldDriver || "")) {
-			const activeLoadConflict = await checkDriverActiveLoad(newDriver);
-			if (activeLoadConflict) {
-				return res.status(409).json({ code: "ACTIVE_JOB_CONFLICT", error: activeLoadConflict });
-			}
-		}
+		// Reassignment to a busy driver is allowed — the load queues behind
+		// their current work as "Dispatched". The "one accept at a time" rule
+		// for drivers is enforced at POST /api/driver/respond.
 
 		// Look up new driver's truck + owner so we can re-stamp Truck and
 		// Owner ID alongside the Driver cell. Without this, a load reassigned
@@ -7900,7 +7920,19 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			`Previously assigned to ${oldDriver || 'another driver'}`,
 			JSON.stringify({ loadId, rowIndex })
 		);
-		io.to(newDriver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex });
+		// Suppress the real-time banner when the new driver is already busy —
+		// same rationale as POST /api/dispatch above. The notification record
+		// is still persisted; the load will surface in the driver's Pending
+		// sub-tab once they deliver their current load.
+		let newDriverBusy = false;
+		try {
+			newDriverBusy = !!(await checkDriverActiveLoad(newDriver, loadId));
+		} catch {
+			newDriverBusy = false;
+		}
+		if (!newDriverBusy) {
+			io.to(newDriver.trim().toLowerCase()).emit("load-assigned", { loadId, rowIndex });
+		}
 
 		// Notify old driver — also emit a socket event so their app
 		// optimistically removes the ghost load instead of waiting for the
@@ -8397,22 +8429,30 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// both surfaces.
 		const driverQueues = computeDriverQueues(jobTracking.data, jobTracking.headers);
 
-		// Fleet details
+		// Fleet details. "On Load" should only fire when the driver is actually
+		// mid-trip (heading-to-shipper..unloading); a driver whose only loads are
+		// Dispatched (queued, unaccepted) or Assigned (accepted, not started) is
+		// "Queued" — distinguish them in the fleet pill so dispatchers see the
+		// difference between "Howard is driving" and "Howard has work waiting."
+		const inProgressRe = /^(heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
+		const statusColIdx = jobTracking.headers.findIndex((h) => /status/i.test(h));
 		const fleet = carrierDB.data.map((r) => {
 			const name = (r[carrierDriverCol] || "").trim();
 			const nameNorm = normalizeDriverName(name);
-			const currentLoad = activeJobs.find(
-				(j) =>
-					driverCol && normalizeDriverName(j[driverCol]) === nameNorm,
+			// In-progression load only — excludes Dispatched and Assigned. Used
+			// to decide the "On Load" pill and the CurrentLoad ID surfacing.
+			const inProgressLoad = statusColIdx === -1 ? null : activeJobs.find(
+				(j) => driverCol && normalizeDriverName(j[driverCol]) === nameNorm
+					&& inProgressRe.test((j[statusColIdx] || "").toString().trim()),
 			);
 			const phoneCol = findCol(carrierDB.headers, /phone|contact/i);
 			const queue = driverQueues[nameNorm] || [];
 			// Status:
-			//   "On Load"  — driver has an active job (Dispatched..Unloading)
-			//   "Queued"   — no active job, but has Assigned loads waiting
+			//   "On Load"   — in-progression load active
+			//   "Queued"    — no in-progression, but has Dispatched or Assigned waiting
 			//   "Available" — neither
 			let status;
-			if (currentLoad) status = "On Load";
+			if (inProgressLoad) status = "On Load";
 			else if (queue.length > 0) status = "Queued";
 			else status = "Available";
 			return {
@@ -8420,9 +8460,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 				Truck: truckCol ? r[truckCol] || "" : "",
 				Phone: phoneCol ? r[phoneCol] || "" : "",
 				Status: status,
-				CurrentLoad: currentLoad
+				CurrentLoad: inProgressLoad
 					? loadIdCol
-						? currentLoad[loadIdCol]
+						? inProgressLoad[loadIdCol]
 						: ""
 					: "",
 				QueueCount: queue.length,
@@ -8687,17 +8727,27 @@ function computeDriverQueues(jobTrackingRows, headers) {
 	const loadIdCol = findCol(headers || [], /load.?id|job.?id/i);
 	if (!driverCol || !statusCol || !loadIdCol) return {};
 	if (!Array.isArray(jobTrackingRows) || jobTrackingRows.length === 0) return {};
-	const queuedRe = /^assigned$/i;
+	// Both "Dispatched" (queued, awaiting acceptance) and "Assigned" (accepted,
+	// waiting to start) count as "in queue" — the dispatcher's (Queue: N) badge
+	// reflects total pending work for that driver. Phase 2 introduced deferred
+	// acceptance: dispatchers can queue ahead of a busy driver, the row sits at
+	// "Dispatched" until the driver delivers their current load, at which point
+	// it surfaces in their Pending sub-tab and they can accept it (→ Assigned).
+	const queuedRe = /^(assigned|dispatched)$/i;
 	const candidates = [];
 	for (const r of jobTrackingRows) {
-		if (!queuedRe.test((r[statusCol] || "").toString().trim())) continue;
+		const status = (r[statusCol] || "").toString().trim();
+		if (!queuedRe.test(status)) continue;
 		const driverNorm = normalizeDriverName(r[driverCol]);
 		const loadId = (r[loadIdCol] || "").toString().trim();
-		if (driverNorm && loadId) candidates.push({ driverNorm, loadId });
+		if (driverNorm && loadId) {
+			candidates.push({ driverNorm, loadId, isAssigned: /^assigned$/i.test(status) });
+		}
 	}
 	if (candidates.length === 0) return {};
 	const loadIds = [...new Set(candidates.map((c) => c.loadId))];
 	const placeholders = loadIds.map(() => "?").join(",");
+	// Accept timestamps for "Assigned" loads (driver's accept time = FIFO key).
 	let acceptRows = [];
 	try {
 		acceptRows = db.prepare(
@@ -8716,19 +8766,45 @@ function computeDriverQueues(jobTrackingRows, headers) {
 		const key = `${normalizeDriverName(ar.driver_name)}::${ar.load_id}`;
 		acceptMap.set(key, ar.responded_at || "");
 	}
+	// Dispatch timestamps for "Dispatched" loads (server's dispatch time = FIFO
+	// key). Pulled from the per-driver notifications table where each load
+	// assignment writes a row. Uses json_extract to read metadata.loadId.
+	const dispatchMap = new Map();
+	try {
+		const dispatchRows = db.prepare(
+			`SELECT driver_name, json_extract(metadata, '$.loadId') AS load_id, created_at, id
+			 FROM notifications
+			 WHERE type = 'load-assigned' AND json_extract(metadata, '$.loadId') IN (${placeholders})
+			 ORDER BY created_at ASC, id ASC`
+		).all(...loadIds);
+		for (const dr of dispatchRows) {
+			if (!dr.load_id) continue;
+			const key = `${normalizeDriverName(dr.driver_name)}::${String(dr.load_id).trim()}`;
+			dispatchMap.set(key, dr.created_at || "");
+		}
+	} catch {
+		// Best-effort: if notifications query fails, Dispatched loads fall back to row-order.
+	}
 	const byDriver = {};
 	for (const c of candidates) {
-		const ts = acceptMap.get(`${c.driverNorm}::${c.loadId}`) || "";
+		const key = `${c.driverNorm}::${c.loadId}`;
+		const ts = c.isAssigned ? (acceptMap.get(key) || "") : (dispatchMap.get(key) || "");
 		if (!byDriver[c.driverNorm]) byDriver[c.driverNorm] = [];
-		byDriver[c.driverNorm].push({ load_id: c.loadId, accepted_at: ts });
+		byDriver[c.driverNorm].push({
+			load_id: c.loadId,
+			accepted_at: c.isAssigned ? ts : null,
+			dispatched_at: c.isAssigned ? null : ts,
+			status: c.isAssigned ? "assigned" : "dispatched",
+			_sortKey: ts,
+		});
 	}
 	for (const driverNorm of Object.keys(byDriver)) {
-		// Loads without an accept timestamp (dispatch wrote "Assigned" directly,
-		// or load_responses was cleared) sort to the end — they're still queued
-		// but treated as "newest" because we have no FIFO signal for them.
+		// Sort by whichever timestamp applies (accepted_at for Assigned,
+		// dispatched_at for Dispatched). Loads without any timestamp sort to
+		// the end (treated as "newest" with no FIFO signal).
 		byDriver[driverNorm].sort((a, b) => {
-			const at = a.accepted_at || "";
-			const bt = b.accepted_at || "";
+			const at = a._sortKey || "";
+			const bt = b._sortKey || "";
 			if (!at && !bt) return 0;
 			if (!at) return 1;
 			if (!bt) return -1;
@@ -8736,6 +8812,7 @@ function computeDriverQueues(jobTrackingRows, headers) {
 		});
 		byDriver[driverNorm].forEach((q, i) => {
 			q.queue_position = i + 1;
+			delete q._sortKey;
 		});
 	}
 	return byDriver;

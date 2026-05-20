@@ -1026,13 +1026,9 @@ async function handleExpenseSubmit(data) {
 // Socket.IO for real-time notifications
 function onLoadAssigned(payload) {
   if (!isMounted) return
-  assignedNotification.value = {
-    loadId: payload.loadId || 'Load',
-    origin: payload.origin || '',
-    destination: payload.destination || '',
-    rowIndex: payload.rowIndex
-  }
   const route = [payload.origin, payload.destination].filter(Boolean).join(' \u2192 ')
+  // Always record the notification (so it shows on the Notifications tab and
+  // the next loadData refresh picks up the new row).
   driverStore.addNotification({
     id: payload.notificationId || Date.now(),
     type: 'load-assigned',
@@ -1042,6 +1038,20 @@ function onLoadAssigned(payload) {
     read: 0,
     createdAt: new Date().toISOString(),
   })
+  // Phase 2: suppress the LoadAssignedBanner when the driver is busy. The
+  // backend also suppresses the socket emit for busy drivers (see
+  // server.js POST /api/dispatch), but a race against driverStore state can
+  // let one through \u2014 this is defense in depth so a banner never flashes
+  // mid-trip with an Accept button the backend will 409 anyway.
+  const driverBusy = !!driverStore.inProgressLoad || driverStore.queuedLoads.length > 0
+  if (!driverBusy) {
+    assignedNotification.value = {
+      loadId: payload.loadId || 'Load',
+      origin: payload.origin || '',
+      destination: payload.destination || '',
+      rowIndex: payload.rowIndex
+    }
+  }
   scheduleDriverRefetch()
 }
 
