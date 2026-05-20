@@ -11831,7 +11831,79 @@ async function geocodeReverse(lat, lng) {
 // Route cache: TTL-based in-memory cache for Google Routes API results
 const routeCache = new Map();
 const ROUTE_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
-const ROUTE_CACHE_MAX = 500;
+const ROUTE_CACHE_MAX = 500;            // hard cap on entry COUNT
+// Byte budget — the real OOM guard. A single `alternatives` entry can hold 3
+// routes x ~10k-point decoded polylines (~2.5MB JSON / ~10MB in-heap), so a
+// count-only cap of 500 let the cache grow to multiple GB and blow Node's
+// ~2GB heap (crash always landed in JSON.stringify of a route response or the
+// shutdown snapshot). We now also cap total cached bytes; in-heap is ~3-6x the
+// figure below, so ~96MB of estimated payload ≈ ~300-500MB heap.
+const ROUTE_CACHE_MAX_BYTES = 96 * 1024 * 1024;
+const ROUTE_POINTS_MAX = 1500;          // cap decoded polyline points per route
+const ROUTE_STEP_POINTS_MAX = 60;       // cap per-step sub-polyline points
+const ROUTE_SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024; // cap persisted snapshot size
+let routeCacheBytes = 0;                // running estimate of cached result bytes
+
+// Uniformly downsample a [{latitude,longitude},...] array to at most `max`
+// points, always keeping the first and last. Visually identical at map zoom
+// levels but collapses cross-country polylines from ~10k points to ~1.5k —
+// the single biggest lever on per-entry memory.
+function downsamplePoints(points, max) {
+	if (!Array.isArray(points) || points.length <= max || max < 2) return points;
+	const out = new Array(max);
+	const stride = (points.length - 1) / (max - 1);
+	for (let i = 0; i < max; i++) out[i] = points[Math.round(i * stride)];
+	return out;
+}
+
+// Approximate the heap-relevant size of a cached route result. We count
+// decoded points (the dominant cost) rather than JSON.stringify, which would
+// itself allocate megabytes per call. ~40 bytes/point is a conservative
+// in-heap estimate for a {latitude, longitude} object plus array slot.
+function estimateRouteBytes(result) {
+	if (!result) return 64;
+	let pts = 0;
+	if (Array.isArray(result.points)) pts += result.points.length;
+	if (Array.isArray(result.routes)) {
+		for (const r of result.routes) {
+			if (Array.isArray(r.points)) pts += r.points.length;
+			if (Array.isArray(r.steps)) {
+				for (const s of r.steps) if (Array.isArray(s.polyline)) pts += s.polyline.length;
+			}
+		}
+	}
+	return 256 + pts * 40;
+}
+
+// Insert into the route cache with TTL-aware + byte-budget eviction. Replaces
+// the old count-only FIFO so fat multi-MB entries can't accumulate to GB.
+// Sweeps expired entries first, then evicts oldest (Map preserves insertion
+// order) until BOTH the count and byte budgets are satisfied.
+function routeCacheStore(key, entry) {
+	const now = Date.now();
+	const existing = routeCache.get(key);
+	if (existing) {
+		routeCacheBytes -= existing._bytes || 0;
+		routeCache.delete(key);
+	}
+	for (const [k, v] of routeCache) {
+		if (typeof v.time !== "number" || now - v.time >= ROUTE_CACHE_TTL) {
+			routeCacheBytes -= v._bytes || 0;
+			routeCache.delete(k);
+		}
+	}
+	entry._bytes = estimateRouteBytes(entry.result);
+	routeCache.set(key, entry);
+	routeCacheBytes += entry._bytes;
+	while (routeCache.size > ROUTE_CACHE_MAX || routeCacheBytes > ROUTE_CACHE_MAX_BYTES) {
+		const oldestKey = routeCache.keys().next().value;
+		if (oldestKey === undefined) break;
+		const oldest = routeCache.get(oldestKey);
+		routeCacheBytes -= (oldest && oldest._bytes) || 0;
+		routeCache.delete(oldestKey);
+	}
+	if (routeCacheBytes < 0) routeCacheBytes = 0; // guard against drift
+}
 
 function routeCacheKey(from, to, alternatives = false) {
 	// Round to 3 decimal places (~111m precision) to group nearby positions.
@@ -11849,10 +11921,17 @@ function parseRichRoute(googleRoute) {
 	if (!googleRoute || !googleRoute.legs || googleRoute.legs.length === 0) return null;
 	const leg = googleRoute.legs[0];
 	const durationSec = parseInt((leg.duration || "0s").replace("s", ""), 10);
-	const points = googleRoute.polyline?.encodedPolyline
+	const pointsRaw = googleRoute.polyline?.encodedPolyline
 		? decodePolyline(googleRoute.polyline.encodedPolyline)
 		: [];
-	if (points.length < 2) return null;
+	if (pointsRaw.length < 2) return null;
+	const points = downsamplePoints(pointsRaw, ROUTE_POINTS_MAX);
+	// speedReadingIntervals index into the *full* polyline; rescale those indices
+	// to the downsampled `points` array so the client's congestion overlay
+	// (DriverRouteMap / DriveModeOverlay) still lines up after downsampling.
+	const ptScale = (points.length !== pointsRaw.length && pointsRaw.length > 1)
+		? (points.length - 1) / (pointsRaw.length - 1)
+		: 1;
 
 	const adv = googleRoute.travelAdvisory || {};
 	let fuelLiters = null;
@@ -11876,8 +11955,8 @@ function parseRichRoute(googleRoute) {
 		trafficSegments = adv.speedReadingIntervals
 			.filter(s => s.speed)
 			.map(s => ({
-				startIdx: s.startPolylinePointIndex || 0,
-				endIdx: s.endPolylinePointIndex || 0,
+				startIdx: Math.round((s.startPolylinePointIndex || 0) * ptScale),
+				endIdx: Math.round((s.endPolylinePointIndex || 0) * ptScale),
 				congestion: s.speed, // NORMAL | SLOW | TRAFFIC_JAM
 			}));
 	}
@@ -11888,7 +11967,7 @@ function parseRichRoute(googleRoute) {
 			maneuver: s.navigationInstruction?.maneuver || "",
 			distanceMeters: s.distanceMeters || 0,
 			durationSec: parseInt((s.staticDuration || "0s").replace("s", ""), 10),
-			polyline: s.polyline?.encodedPolyline ? decodePolyline(s.polyline.encodedPolyline) : null,
+			polyline: s.polyline?.encodedPolyline ? downsamplePoints(decodePolyline(s.polyline.encodedPolyline), ROUTE_STEP_POINTS_MAX) : null,
 		}));
 	}
 
@@ -11959,7 +12038,10 @@ function loadRouteCacheSnapshot() {
 		let hydrated = 0;
 		for (const [k, v] of data) {
 			if (v && v.result && typeof v.time === "number" && now - v.time < ROUTE_CACHE_TTL) {
-				routeCache.set(k, v);
+				// Route through routeCacheStore so the byte tally + budget eviction
+				// apply to hydrated entries too (snapshot is already byte-capped, but
+				// this keeps routeCacheBytes accurate from boot).
+				routeCacheStore(k, { result: v.result, time: v.time });
 				hydrated++;
 			}
 		}
@@ -11972,12 +12054,19 @@ function saveRouteCacheSnapshot() {
 	try {
 		const entries = [];
 		const now = Date.now();
+		let bytes = 0;
 		for (const [k, v] of routeCache.entries()) {
 			// Only persist successful, unexpired results — nulls are transient API
 			// errors that should be retried on next attempt, not served stale.
-			if (v && v.result && typeof v.time === "number" && now - v.time < ROUTE_CACHE_TTL) {
-				entries.push([k, v]);
-			}
+			if (!(v && v.result && typeof v.time === "number" && now - v.time < ROUTE_CACHE_TTL)) continue;
+			// Byte-cap the persisted blob so a graceful restart can't OOM inside
+			// JSON.stringify (the original crash signature). Stop once we'd exceed
+			// the budget rather than serializing the whole cache.
+			const est = v._bytes || estimateRouteBytes(v.result);
+			if (bytes + est > ROUTE_SNAPSHOT_MAX_BYTES) break;
+			bytes += est;
+			// Strip the internal _bytes bookkeeping field from the persisted shape.
+			entries.push([k, { result: v.result, time: v.time }]);
 		}
 		db.prepare(`INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`)
 			.run("route_cache_snapshot", JSON.stringify(entries));
@@ -12054,14 +12143,12 @@ async function getRoute(from, to, opts = {}, retries = 2) {
 				const errText = await resp.text();
 				console.error(`Routes API HTTP error (attempt ${attempt + 1}): ${resp.status} — ${errText}`);
 				if (attempt < retries) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
-				routeCache.set(cacheKey, { result: null, time: Date.now() });
-				if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
+				routeCacheStore(cacheKey, { result: null, time: Date.now() });
 				return null;
 			}
 			const data = await resp.json();
 			if (!data.routes || data.routes.length === 0) {
-				routeCache.set(cacheKey, { result: null, time: Date.now() });
-				if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
+				routeCacheStore(cacheKey, { result: null, time: Date.now() });
 				return null;
 			}
 
@@ -12071,8 +12158,7 @@ async function getRoute(from, to, opts = {}, retries = 2) {
 					.map(r => parseRichRoute(r))
 					.filter(r => r !== null);
 				if (richRoutes.length === 0) {
-					routeCache.set(cacheKey, { result: null, time: Date.now() });
-					if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
+					routeCacheStore(cacheKey, { result: null, time: Date.now() });
 					return null;
 				}
 				result = { routes: richRoutes, recommendedIdx: scoreRoutes(richRoutes) };
@@ -12081,13 +12167,12 @@ async function getRoute(from, to, opts = {}, retries = 2) {
 				const leg = route.legs[0];
 				const durationSec = parseInt((leg.duration || "0s").replace("s", ""), 10);
 				result = {
-					points: decodePolyline(route.polyline.encodedPolyline),
+					points: downsamplePoints(decodePolyline(route.polyline.encodedPolyline), ROUTE_POINTS_MAX),
 					distanceMiles: Math.round(leg.distanceMeters / 160.934) / 10,
 					durationMin: Math.round(durationSec / 60),
 				};
 			}
-			routeCache.set(cacheKey, { result, time: Date.now() });
-			if (routeCache.size > ROUTE_CACHE_MAX) routeCache.delete(routeCache.keys().next().value);
+			routeCacheStore(cacheKey, { result, time: Date.now() });
 			return result;
 		} catch (err) {
 			console.error(`Routes API error (attempt ${attempt + 1}/${retries + 1}):`, err.message);
