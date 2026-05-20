@@ -23,16 +23,26 @@
         </div>
       </div>
       <div class="header-actions-row">
-        <a href="mailto:info@logisx.com" class="btn-email">Contact Operations</a>
-        <a href="mailto:dev@logisx.com" class="btn-email">Contact Tech Support</a>
+        <a href="mailto:info@logisx.com" class="btn-email" title="Email LogisX Operations (info@logisx.com) about loads, dispatch, or anything operational">Contact Operations</a>
+        <a href="mailto:dev@logisx.com" class="btn-email" title="Email LogisX Tech Support (dev@logisx.com) for portal or login issues">Contact Tech Support</a>
         <div class="report-group">
-          <input v-model="reportStart" type="date" class="date-input" title="Report start date" />
-          <input v-model="reportEnd" type="date" class="date-input" title="Report end date" />
-          <button class="btn-report" :disabled="reportLoading" @click="downloadReport">
+          <input v-model="reportStart" type="date" class="date-input" title="Start date of the report period" />
+          <input v-model="reportEnd" type="date" class="date-input" title="End date of the report period" />
+          <button
+            class="btn-report"
+            :disabled="reportLoading"
+            :title="reportLoading ? 'Generating PDF...' : 'Download a PDF report of your financials for the selected date range'"
+            @click="downloadReport"
+          >
             {{ reportLoading ? 'Generating...' : 'Download Report' }}
           </button>
         </div>
-        <button class="btn-refresh" :disabled="store.isLoading" @click="loadData">
+        <button
+          class="btn-refresh"
+          :disabled="store.isLoading"
+          :title="store.isLoading ? 'Loading latest data...' : 'Re-fetch the latest dashboard data from the server'"
+          @click="loadData"
+        >
           {{ store.isLoading ? 'Loading...' : 'Refresh' }}
         </button>
       </div>

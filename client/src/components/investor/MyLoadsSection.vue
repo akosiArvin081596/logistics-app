@@ -18,10 +18,24 @@
         <h3 class="section-title">My Loads</h3>
       </span>
       <span class="header-meta">
-        <span class="pill-summary pill-amber" :title="`${pending.length} pending`">
+        <span
+          class="pill-summary pill-amber clickable-pill"
+          role="button" tabindex="0"
+          title="Click for explanation of pending loads"
+          @click.stop="openDetail('pendingLoads')"
+          @keyup.enter.stop="openDetail('pendingLoads')"
+          @keyup.space.stop.prevent="openDetail('pendingLoads')"
+        >
           <strong>{{ pending.length }}</strong> pending
         </span>
-        <span class="pill-summary pill-green" :title="`${active.length} active`">
+        <span
+          class="pill-summary pill-green clickable-pill"
+          role="button" tabindex="0"
+          title="Click for explanation of active loads"
+          @click.stop="openDetail('activeLoads')"
+          @keyup.enter.stop="openDetail('activeLoads')"
+          @keyup.space.stop.prevent="openDetail('activeLoads')"
+        >
           <strong>{{ active.length }}</strong> active
         </span>
       </span>
@@ -50,7 +64,14 @@
             <span class="meta-truck" v-if="l.truck">Truck {{ l.truck }}</span>
             <span class="meta-driver" v-if="l.driver">{{ l.driver }}</span>
             <span :class="['status-pill', 'pill-amber']">{{ l.status }}</span>
-            <span class="share mono" :title="`Your share at ${splitPct}% split`">{{ fmtMoney(l.yourShare) }}</span>
+            <span
+              class="share mono clickable-share"
+              role="button" tabindex="0"
+              :title="`Your share at ${splitPct}% split — click for the math`"
+              @click="openLoadShare(l)"
+              @keyup.enter="openLoadShare(l)"
+              @keyup.space.prevent="openLoadShare(l)"
+            >{{ fmtMoney(l.yourShare) }}</span>
             <button
               v-if="l.loadId"
               type="button"
@@ -90,7 +111,14 @@
             <span class="meta-truck" v-if="l.truck">Truck {{ l.truck }}</span>
             <span class="meta-driver" v-if="l.driver">{{ l.driver }}</span>
             <span :class="['status-pill', 'pill-green']">{{ l.status }}</span>
-            <span class="share mono" :title="`Your share at ${splitPct}% split`">{{ fmtMoney(l.yourShare) }}</span>
+            <span
+              class="share mono clickable-share"
+              role="button" tabindex="0"
+              :title="`Your share at ${splitPct}% split — click for the math`"
+              @click="openLoadShare(l)"
+              @keyup.enter="openLoadShare(l)"
+              @keyup.space.prevent="openLoadShare(l)"
+            >{{ fmtMoney(l.yourShare) }}</span>
             <button
               v-if="l.loadId"
               type="button"
@@ -114,11 +142,100 @@
       earnings breakdown after driver pay and expenses are deducted.
     </p>
     </div>
+
+    <!-- Detail modal -->
+    <MetricInfoDialog
+      :open="!!detailType"
+      :title="modalTitle"
+      :subtitle="modalSubtitle"
+      @update:open="v => { if (!v) { detailType = ''; selectedLoad = null } }"
+    >
+      <!-- Pending Loads -->
+      <template v-if="detailType === 'pendingLoads'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            <strong>Pending</strong> loads are loads that have been assigned to one of your trucks but the driver has not yet started picking them up.
+          </div>
+          <div class="step-label">What This Counts</div>
+          <div class="modal-explain-sm">
+            Loads in the "Assigned", "Dispatched", or "Heading to Shipper" stage. Once the driver arrives at the shipper, the load moves into the Active bucket.
+          </div>
+          <template v-if="pending.length">
+            <div class="step-label">Current Pending Loads</div>
+            <div class="modal-monthly-list">
+              <div v-for="l in pending" :key="l.loadId" class="modal-row">
+                <span>{{ l.loadId || '—' }}</span>
+                <span class="val">{{ l.status || 'Pending' }}</span>
+              </div>
+            </div>
+          </template>
+          <div class="modal-divider"></div>
+          <div class="modal-row bold result">
+            <span>Pending Total</span>
+            <span class="val">{{ pending.length }}</span>
+          </div>
+        </div>
+      </template>
+
+      <!-- Active Loads -->
+      <template v-if="detailType === 'activeLoads'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            <strong>Active</strong> loads are currently being executed by one of your trucks &mdash; either at the shipper, loading, in transit between shipper and receiver, or unloading at the receiver.
+          </div>
+          <div class="step-label">Active Stages</div>
+          <div class="modal-explain-sm">
+            "At Shipper", "Loading", "In Transit", "At Receiver", and "Unloading" all count as active. Once the load is marked Delivered or POD-Received, it leaves this bucket.
+          </div>
+          <template v-if="active.length">
+            <div class="step-label">Current Active Loads</div>
+            <div class="modal-monthly-list">
+              <div v-for="l in active" :key="l.loadId" class="modal-row">
+                <span>{{ l.loadId || '—' }}</span>
+                <span class="val">{{ l.status || 'Active' }}</span>
+              </div>
+            </div>
+          </template>
+          <div class="modal-divider"></div>
+          <div class="modal-row bold result">
+            <span>Active Total</span>
+            <span class="val">{{ active.length }}</span>
+          </div>
+        </div>
+      </template>
+
+      <!-- Load Share -->
+      <template v-if="detailType === 'loadShare' && selectedLoad">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            "Your Share" is the estimated portion of the load's gross payment that you'll keep, based on your configured investor split.
+          </div>
+          <div class="step-label">For Load {{ selectedLoad.loadId }}</div>
+          <div class="modal-row">
+            <span>Load Gross (estimated)</span>
+            <span class="val">{{ fmtMoney(impliedLoadGross(selectedLoad)) }}</span>
+          </div>
+          <div class="modal-row deduct">
+            <span>&times; {{ splitPct }}% (your investor split)</span>
+            <span class="val">&nbsp;</span>
+          </div>
+          <div class="modal-divider"></div>
+          <div class="modal-row bold result">
+            <span>Your Share</span>
+            <span class="val accent">{{ fmtMoney(selectedLoad.yourShare) }}</span>
+          </div>
+          <div class="modal-callout warning">
+            This is an <strong>estimate</strong> &mdash; gross times your split percentage. The final take-home is reconciled in the monthly Earnings Summary after driver pay, fixed costs, and trip expenses are deducted.
+          </div>
+        </div>
+      </template>
+    </MetricInfoDialog>
   </div>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
+import MetricInfoDialog from './MetricInfoDialog.vue'
 
 const props = defineProps({
   myLoads: { type: Object, default: () => ({ pending: [], active: [] }) },
@@ -143,6 +260,36 @@ const splitPct = computed(() => {
 function fmtMoney(n) {
   const v = Number(n || 0)
   return '$' + v.toLocaleString('en-US')
+}
+
+// --- Detail modal ---
+const detailType = ref('')
+const selectedLoad = ref(null)
+function openDetail(type) {
+  detailType.value = type
+  selectedLoad.value = null
+}
+function openLoadShare(load) {
+  selectedLoad.value = load
+  detailType.value = 'loadShare'
+}
+
+const MODAL_CONFIG = {
+  pendingLoads: { title: 'Pending Loads', subtitle: 'Loads assigned to your trucks, not yet picked up' },
+  activeLoads: { title: 'Active Loads', subtitle: 'Loads your trucks are currently executing' },
+  loadShare: { title: 'Your Share for This Load', subtitle: 'How the per-load estimate is computed' },
+}
+
+const modalTitle = computed(() => MODAL_CONFIG[detailType.value]?.title || '')
+const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle || '')
+
+function impliedLoadGross(load) {
+  if (!load) return 0
+  if (load.loadGross) return load.loadGross
+  if (load.yourShare && splitPct.value > 0) {
+    return Math.round((load.yourShare * 100) / splitPct.value)
+  }
+  return load.yourShare || 0
 }
 
 const copiedLoadId = ref('')
@@ -193,6 +340,12 @@ async function copyTrackingLink(loadId) {
   white-space: nowrap;
 }
 .pill-summary strong { font-weight: 700; margin-right: 0.15rem; }
+.clickable-pill { cursor: pointer; transition: filter 0.15s ease, transform 0.15s ease; }
+.clickable-pill:hover { filter: brightness(0.92); transform: translateY(-1px); }
+.clickable-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.clickable-share { cursor: pointer; text-decoration-style: dotted; text-underline-offset: 3px; }
+.clickable-share:hover { text-decoration: underline; text-decoration-style: dotted; }
+.clickable-share:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .section-body { margin-top: 1rem; }
 .bucket { margin-bottom: 1.25rem; }
 .bucket:last-of-type { margin-bottom: 0.5rem; }
