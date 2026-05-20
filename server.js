@@ -9129,9 +9129,14 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 				),
 			].sort();
 
-		// Assigned truck from SQLite
+		// Assigned truck from SQLite. `photo` is a base64 data URI that can
+		// run ~700KB+ for a single truck — we ship `has_photo` only and let
+		// the driver app fetch the image lazily from /api/driver/me/truck-photo
+		// when the Truck Details accordion expands. Keeps this endpoint small
+		// enough to land reliably on a flaky mobile connection.
 		const assignedTruck = db.prepare(
-			`SELECT id, unit_number, make, model, year, vin, license_plate, status, photo
+			`SELECT id, unit_number, make, model, year, vin, license_plate, status,
+			        CASE WHEN photo IS NULL OR photo = '' THEN 0 ELSE 1 END AS has_photo
 			 FROM trucks WHERE LOWER(assigned_driver) = ?`
 		).get(nameLower) || null;
 
@@ -9167,14 +9172,31 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			: [];
 		// Also fetch the original application so the driver Kit can display
 		// the documents and qualifications the applicant submitted. SSN is
-		// stripped; drivers_license and CDL/medical uploads are kept — the
-		// driver is allowed to see their own license and uploaded documents.
+		// stripped. The CDL/medical card base64 uploads (~2.5MB each, ~8MB
+		// total for a typical driver) used to ship inline here, which is what
+		// turned a routine /api/driver/* response into an 8MB+ payload and
+		// caused drivers on weak signal to see a stale-or-empty loads tab
+		// (the fetch would stall or partially-fail before it could refresh
+		// the loads list). We now ship a *_type metadata field per file and
+		// let the Kit tab lazy-load actual bytes from
+		// /api/driver/me/identity-file/:fileType when it renders.
 		let application = null;
 		if (onboarding?.application_id) {
 			const fullApp = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(onboarding.application_id);
 			if (fullApp) {
-				const { ssn: _drop, ...safeApp } = fullApp;
-				application = safeApp;
+				const { ssn: _drop, cdl_front, cdl_back, medical_card, ...safeApp } = fullApp;
+				const detectMime = (b64) => {
+					if (!b64) return null;
+					if (b64.startsWith("data:application/pdf")) return "pdf";
+					if (b64.startsWith("data:image/")) return "image";
+					return null;
+				};
+				application = {
+					...safeApp,
+					cdl_front_type: detectMime(cdl_front),
+					cdl_back_type: detectMime(cdl_back),
+					medical_card_type: detectMime(medical_card),
+				};
 			}
 		}
 		// Recent invoices
@@ -9255,6 +9277,78 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 	} catch (error) {
 		console.error("Error fetching driver data:", error.message);
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/driver/me/identity-file/:fileType — Stream the requesting driver's
+// own CDL Front / CDL Back / Medical Card. Companion to the application_*_type
+// metadata in /api/driver/:driverName: the main endpoint advertises which
+// files exist (and their MIME type), and this one serves the bytes lazily so
+// the Driver Kit only pays the ~2.5MB-per-file cost when the user actually
+// opens the Kit tab. Super Admin can also call this against their own session
+// (debug); admins/dispatchers fetching ON BEHALF of a driver continue to use
+// /api/trucks/:id/driver-files, which already supports that flow.
+app.get("/api/driver/me/identity-file/:fileType", requireAuth, (req, res) => {
+	try {
+		const user = req.session.user;
+		if (user.role !== "Driver" && user.role !== "Super Admin") {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+		const colMap = {
+			"cdl-front": "cdl_front",
+			"cdl-back": "cdl_back",
+			"medical-card": "medical_card",
+		};
+		const col = colMap[req.params.fileType];
+		if (!col) return res.status(400).json({ error: "Invalid file type" });
+		const onboarding = db.prepare(
+			"SELECT application_id FROM driver_onboarding WHERE user_id = ?"
+		).get(user.id);
+		if (!onboarding?.application_id) return res.status(404).json({ error: "Not found" });
+		const row = db.prepare(`SELECT ${col} AS data FROM job_applications WHERE id = ?`).get(onboarding.application_id);
+		const data = row?.data;
+		if (!data) return res.status(404).json({ error: "Not found" });
+		const match = /^data:([^;]+);base64,(.+)$/.exec(data);
+		if (!match) return res.status(500).json({ error: "Invalid file format" });
+		const [, contentType, b64] = match;
+		const buf = Buffer.from(b64, "base64");
+		res.setHeader("Content-Type", contentType);
+		// Private cache — drivers won't refetch the same image every page open.
+		res.setHeader("Cache-Control", "private, max-age=3600");
+		res.setHeader("X-Content-Type-Options", "nosniff");
+		res.end(buf);
+	} catch (err) {
+		console.error("identity-file error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/driver/me/truck-photo — Stream the photo of the truck currently
+// assigned to the requesting driver. Paired with truck.has_photo in
+// /api/driver/:driverName, this lets LoadDetail render the truck image only
+// when the Truck Details accordion is expanded.
+app.get("/api/driver/me/truck-photo", requireAuth, (req, res) => {
+	try {
+		const user = req.session.user;
+		if (user.role !== "Driver" && user.role !== "Super Admin") {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+		const driverName = (user.driverName || user.driver_name || "").trim().toLowerCase();
+		if (!driverName) return res.status(404).json({ error: "Not found" });
+		const row = db.prepare("SELECT photo FROM trucks WHERE LOWER(assigned_driver) = ?").get(driverName);
+		const data = row?.photo;
+		if (!data) return res.status(404).json({ error: "Not found" });
+		const match = /^data:([^;]+);base64,(.+)$/.exec(data);
+		if (!match) return res.status(500).json({ error: "Invalid file format" });
+		const [, contentType, b64] = match;
+		const buf = Buffer.from(b64, "base64");
+		res.setHeader("Content-Type", contentType);
+		res.setHeader("Cache-Control", "private, max-age=3600");
+		res.setHeader("X-Content-Type-Options", "nosniff");
+		res.end(buf);
+	} catch (err) {
+		console.error("truck-photo error:", err.message);
+		res.status(500).json({ error: err.message });
 	}
 });
 
