@@ -6203,7 +6203,7 @@ app.delete("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 });
 
 // Check if a driver has an active load (returns error message or null)
-async function checkDriverActiveLoad(driverName) {
+async function checkDriverActiveLoad(driverName, excludeLoadId = null) {
 	try {
 		const sheets = await getSheets();
 		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
@@ -6213,17 +6213,20 @@ async function checkDriverActiveLoad(driverName) {
 		const driverCol = headers.findIndex(h => /^driver$/i.test(h));
 		const statusCol = headers.findIndex(h => /status/i.test(h));
 		if (driverCol === -1 || statusCol === -1) return null;
+		const loadIdCol = headers.findIndex(h => /load.?id|job.?id/i.test(h));
 		const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 		const targetName = normalizeDriverName(driverName);
+		// When a driver accepts their own already-assigned load, that row is itself
+		// "active" — exclude it so the check only flags OTHER concurrent loads.
+		const excludeId = excludeLoadId != null ? String(excludeLoadId).trim().toLowerCase() : null;
 		for (let i = 1; i < rows.length; i++) {
 			const r = rows[i];
 			const driver = normalizeDriverName(r[driverCol]);
 			const status = (r[statusCol] || "").trim();
-			if (driver === targetName && activeRe.test(status)) {
-				const loadIdCol = headers.findIndex(h => /load.?id|job.?id/i.test(h));
-				const loadId = loadIdCol !== -1 ? (r[loadIdCol] || "unknown") : "unknown";
-				return `${driverName} already has an active load (${loadId}, status: ${status}). Complete or reassign it before assigning another.`;
-			}
+			if (driver !== targetName || !activeRe.test(status)) continue;
+			const rowLoadId = loadIdCol !== -1 ? (r[loadIdCol] || "") : "";
+			if (excludeId && String(rowLoadId).trim().toLowerCase() === excludeId) continue;
+			return `${driverName} already has an active load (${rowLoadId || "unknown"}, status: ${status}). Complete or reassign it before assigning another.`;
 		}
 		return null;
 	} catch (err) {
@@ -7963,6 +7966,18 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 		).get(loadId, driverName.trim().toLowerCase(), rowIndex);
 		if (existing && existing.response === response && response === "accepted") {
 			return res.status(409).json({ error: "You have already accepted this load" });
+		}
+
+		// Golden rule — one load at a time. Block accepting a new load while
+		// another of the driver's loads is still active. Exclude THIS load (it's
+		// already assigned to them) so accepting their own load isn't self-blocked.
+		// Runs before we record the response or touch the sheet, so a rejected
+		// accept leaves no trace. Fails closed via checkDriverActiveLoad on a Sheets blip.
+		if (response === "accepted") {
+			const activeLoadConflict = await checkDriverActiveLoad(driverName, loadId);
+			if (activeLoadConflict) {
+				return res.status(409).json({ code: "ACTIVE_JOB_CONFLICT", error: activeLoadConflict });
+			}
 		}
 
 		// Insert response
