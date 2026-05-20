@@ -14094,7 +14094,7 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 
 		// All fuel expenses
 		const fuelExpenses = db.prepare(
-			`SELECT * FROM expenses WHERE LOWER(type) = 'fuel' ORDER BY date DESC`
+			`SELECT * FROM expenses WHERE LOWER(type) = 'fuel' AND ${EXPENSE_PNL_FILTER} ORDER BY date DESC`
 		).all();
 
 		const totalFuelSpend = fuelExpenses.reduce((s, e) => s + (e.amount || 0), 0);
