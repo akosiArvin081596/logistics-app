@@ -36,9 +36,30 @@
           <th>VIN</th>
           <th>Status</th>
           <th>Current Driver</th>
-          <th>Loads</th>
-          <th title="7-day average miles per gallon, derived from ELD telemetry. Tank size assumed 200 gal — value is a trend signal more than a calibrated number.">MPG (7d)</th>
-          <th title="Open ELD fault codes (DTCs) — admin acknowledges them on the Fleet Health page.">Faults</th>
+          <th
+            class="clickable-header"
+            role="button" tabindex="0"
+            title="Click for explanation of how Loads is counted"
+            @click="openDetail('loads')"
+            @keyup.enter="openDetail('loads')"
+            @keyup.space.prevent="openDetail('loads')"
+          >Loads <span class="info-marker" aria-hidden="true">i</span></th>
+          <th
+            class="clickable-header"
+            role="button" tabindex="0"
+            title="7-day average miles per gallon, derived from ELD telemetry. Click for full explanation."
+            @click="openDetail('mpg')"
+            @keyup.enter="openDetail('mpg')"
+            @keyup.space.prevent="openDetail('mpg')"
+          >MPG (7d) <span class="info-marker" aria-hidden="true">i</span></th>
+          <th
+            class="clickable-header"
+            role="button" tabindex="0"
+            title="Open ELD fault codes (DTCs). Click for full explanation."
+            @click="openDetail('faults')"
+            @keyup.enter="openDetail('faults')"
+            @keyup.space.prevent="openDetail('faults')"
+          >Faults <span class="info-marker" aria-hidden="true">i</span></th>
         </tr>
       </thead>
       <tbody>
@@ -57,20 +78,86 @@
           <td class="mono">{{ loadCountFor(t) }}</td>
           <td class="mono">{{ mpgFor(t) }}</td>
           <td>
-            <span v-if="faultCountFor(t) > 0" class="my-fault-pill">{{ faultCountFor(t) }}</span>
-            <span v-else class="mono" style="color:var(--text-dim);">—</span>
+            <span v-if="faultCountFor(t) > 0" class="my-fault-pill" :title="`${faultCountFor(t)} open fault code${faultCountFor(t) === 1 ? '' : 's'}`">{{ faultCountFor(t) }}</span>
+            <span v-else class="mono" style="color:var(--text-dim);" title="No open faults">—</span>
           </td>
         </tr>
       </tbody>
     </table>
+
+    <!-- Detail modal -->
+    <MetricInfoDialog
+      :open="!!detailType"
+      :title="modalTitle"
+      :subtitle="modalSubtitle"
+      @update:open="v => { if (!v) detailType = '' }"
+    >
+      <!-- Loads -->
+      <template v-if="detailType === 'loads'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            The number of completed loads each truck has hauled since being added to your fleet. A load counts here once it reaches a delivered/completed status.
+          </div>
+          <div class="step-label">What Counts</div>
+          <div class="modal-explain-sm">
+            Only loads that <strong>completed delivery</strong>. Cancelled, deleted, or in-progress loads are not counted.
+          </div>
+          <div class="step-label">Where the Number Comes From</div>
+          <div class="modal-explain-sm">
+            The Job Tracking sheet, filtered to rows whose assigned driver matches one of your truck's assignment history. Excludes loads soft-deleted or with a Cancelled status (per the standard load-exclusion filter).
+          </div>
+        </div>
+      </template>
+
+      <!-- MPG -->
+      <template v-if="detailType === 'mpg'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            Trailing 7-day fuel efficiency for each truck, expressed in miles per gallon. This is a directional figure &mdash; useful for spotting trends, but not a precise measurement.
+          </div>
+          <div class="step-label">How It's Computed</div>
+          <div class="modal-explain-sm">
+            We pull odometer readings and fuel-tank level estimates from Routemate ELD telemetry over the last 7 days. Tank capacity is assumed at 200 gallons. The result is miles driven divided by gallons inferred consumed.
+          </div>
+          <div class="step-label">Why It's Approximate</div>
+          <div class="modal-explain-sm">
+            Tank-level sensors drift, refuelling resets the baseline, and 200 gal is an industry-average assumption (actual tanks vary). For exact fuel economy, cross-check with the Fuel Analytics report which uses receipt-level data.
+          </div>
+          <div class="modal-callout info">
+            Use this as a trend indicator: a sudden drop in MPG can flag a maintenance issue (e.g., a clogged air filter or dragging brake) before it becomes a fault code.
+          </div>
+        </div>
+      </template>
+
+      <!-- Faults -->
+      <template v-if="detailType === 'faults'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            The count of open Diagnostic Trouble Codes (DTCs) reported by each truck's ELD. These are fault codes the engine ECM has logged but a fleet admin has not yet acknowledged.
+          </div>
+          <div class="step-label">Where They Come From</div>
+          <div class="modal-explain-sm">
+            Routemate ELD reads the truck's OBD-II / J1939 bus continuously and forwards any active fault codes to us. We store them in <code>routemate_fault_codes</code> and surface a count here.
+          </div>
+          <div class="step-label">How To Clear A Fault</div>
+          <div class="modal-explain-sm">
+            A Super Admin opens the Fleet Health page, reviews the fault, takes whatever action is needed (often: replace a part, schedule maintenance), then marks the code acknowledged. Acknowledged faults stop counting here.
+          </div>
+          <div class="modal-callout warning">
+            A non-zero count doesn't necessarily mean the truck is down &mdash; many DTCs are advisory. But a code that stays open for more than a week deserves attention.
+          </div>
+        </div>
+      </template>
+    </MetricInfoDialog>
   </div>
 </template>
 
 <script setup>
-import { reactive, ref, onMounted } from 'vue'
+import { reactive, ref, computed, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useInvestorStore } from '../../stores/investor'
+import MetricInfoDialog from './MetricInfoDialog.vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -142,6 +229,19 @@ function statusClass(s) {
   return 'pill-gray'
 }
 
+// --- Detail modal ---
+const detailType = ref('')
+function openDetail(type) { detailType.value = type }
+
+const MODAL_CONFIG = {
+  loads: { title: 'Loads', subtitle: 'How completed loads are counted per truck' },
+  mpg: { title: 'MPG (7d)', subtitle: 'Trailing 7-day fuel efficiency, derived from ELD telemetry' },
+  faults: { title: 'Faults', subtitle: 'Open ELD diagnostic codes per truck' },
+}
+
+const modalTitle = computed(() => MODAL_CONFIG[detailType.value]?.title || '')
+const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle || '')
+
 async function addTruck() {
   if (adding.value || !form.unitNumber?.trim()) return
   adding.value = true
@@ -191,6 +291,20 @@ async function addTruck() {
 .trucks-table th {
   text-align: left; padding: 0.5rem 0.6rem; font-size: 0.68rem; font-weight: 700;
   text-transform: uppercase; color: var(--text-dim); border-bottom: 1px solid var(--border);
+}
+.trucks-table th.clickable-header {
+  cursor: pointer; user-select: none; transition: color 0.15s ease;
+}
+.trucks-table th.clickable-header:hover { color: var(--accent); }
+.trucks-table th.clickable-header:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; color: var(--accent);
+}
+.info-marker {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--accent-dim); color: var(--accent);
+  font-size: 0.6rem; font-weight: 800; font-style: normal;
+  margin-left: 0.25rem; text-transform: lowercase;
 }
 .trucks-table td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--bg); }
 .photo-cell { width: 52px; padding: 0.3rem 0.25rem; }

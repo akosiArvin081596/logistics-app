@@ -60,9 +60,16 @@
         </tr>
       </tbody>
     </table>
-    <div class="totals-footer">
+    <div
+      class="totals-footer clickable"
+      role="button" tabindex="0"
+      title="Click for an explanation of this total"
+      @click="openDetail('expensesTotal')"
+      @keyup.enter="openDetail('expensesTotal')"
+      @keyup.space.prevent="openDetail('expensesTotal')"
+    >
       <div class="totals-row">
-        <span class="totals-label">Total of displayed rows</span>
+        <span class="totals-label">Total of displayed rows <span class="info-marker" aria-hidden="true">i</span></span>
         <span class="totals-value">${{ displayedTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
       </div>
       <div class="totals-disclaimer">
@@ -76,12 +83,41 @@
         <img :src="previewImg" class="preview-img" />
       </div>
     </Teleport>
+
+    <!-- Detail modal -->
+    <MetricInfoDialog
+      :open="!!detailType"
+      :title="modalTitle"
+      :subtitle="modalSubtitle"
+      @update:open="v => { if (!v) detailType = '' }"
+    >
+      <template v-if="detailType === 'expensesTotal'">
+        <div class="modal-breakdown">
+          <div class="modal-explain">
+            "Total of displayed rows" is the simple sum of the <strong>amount</strong> column for every expense currently visible in the table.
+          </div>
+          <div class="step-label">What's Included</div>
+          <div class="modal-explain-sm">
+            Only the expenses your active filters allow through &mdash; if you've narrowed by truck, type, status, or date range, the total reflects that subset. Clear the filters to see the unfiltered all-time total.
+          </div>
+          <div class="modal-divider"></div>
+          <div class="modal-row bold result">
+            <span>Displayed Total ({{ expenses.length }} {{ expenses.length === 1 ? 'expense' : 'expenses' }})</span>
+            <span class="val danger">${{ displayedTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
+          </div>
+          <div class="modal-callout warning">
+            This figure will <strong>not</strong> match the "Total Expenses" on Cash Flow above. That number is bottom-line P&amp;L &mdash; only expenses tied to completed loads, plus maintenance and compliance fees. This footer shows every expense entry, regardless of whether the load completed.
+          </div>
+        </div>
+      </template>
+    </MetricInfoDialog>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
+import MetricInfoDialog from './MetricInfoDialog.vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -139,6 +175,17 @@ function fmtDate(d) {
   if (!d) return '—'
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
+
+// --- Detail modal ---
+const detailType = ref('')
+function openDetail(type) { detailType.value = type }
+
+const MODAL_CONFIG = {
+  expensesTotal: { title: 'Total of Displayed Rows', subtitle: 'How this footer total is computed' },
+}
+
+const modalTitle = computed(() => MODAL_CONFIG[detailType.value]?.title || '')
+const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle || '')
 
 onMounted(loadExpenses)
 </script>
@@ -267,6 +314,18 @@ onMounted(loadExpenses)
   background: #f8fafc;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
+}
+.totals-footer.clickable {
+  cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease;
+}
+.totals-footer.clickable:hover { background: #f1f5f9; border-color: #cbd5e1; }
+.totals-footer.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.info-marker {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--accent-dim); color: var(--accent);
+  font-size: 0.6rem; font-weight: 800; font-style: normal;
+  margin-left: 0.25rem; text-transform: lowercase;
 }
 .totals-row {
   display: flex;
