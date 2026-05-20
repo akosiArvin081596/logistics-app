@@ -5211,11 +5211,38 @@ function getDeductibleExpensesByDriverMonth() {
 	return out;
 }
 
+// Map a longitude to a continental-US IANA timezone. Real zone boundaries follow
+// state lines, but a longitude band lands the right zone for the vast majority of
+// trips and — crucially — the IANA name carries DST rules, so the day formatter
+// handles CST↔CDT transitions automatically. Falls back to Central (the same zone
+// the invoice-week boundaries use, see getWeekRange) when longitude is unknown.
+// NOTE: this is US-centric; revisit if the fleet ever runs outside the lower 48.
+function usTzForLongitude(lng) {
+	if (typeof lng !== "number" || isNaN(lng)) return "America/Chicago";
+	if (lng >= -85) return "America/New_York";
+	if (lng >= -100) return "America/Chicago";
+	if (lng >= -114) return "America/Denver";
+	return "America/Los_Angeles";
+}
+// Cache one Intl formatter per zone (constructing them is the expensive part).
+const _tzDayFmtCache = {};
+function localDayInTz(ms, tz) {
+	let f = _tzDayFmtCache[tz];
+	if (!f) f = _tzDayFmtCache[tz] = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+	let y = "", m = "", d = "";
+	for (const p of f.formatToParts(new Date(ms))) {
+		if (p.type === "year") y = p.value; else if (p.type === "month") m = p.value; else if (p.type === "day") d = p.value;
+	}
+	return `${y}-${m}-${d}`; // "YYYY-MM-DD" in the given zone
+}
+
 // Returns { [routemate_vehicle_id]: { travel: Set<"YYYY-MM-DD">, coverage: Set<...> } }.
 //   • coverage = days the ELD reported ANY clean ping (the truck was being tracked).
 //   • travel   = days with ≥1 clean ping faster than ~5 mph (the truck actually moved).
-// Day strings use local getters (server runs UTC) so they line up exactly with the
-// load-window day strings produced by each handler's fmtDate/expandDateRange.
+// Day strings are bucketed in the TRUCK'S LOCAL timezone (derived per-ping from the
+// ping's longitude), not the server's UTC day — so "a day the truck worked" matches
+// the date the driver actually experienced, and lines up with the wall-clock pickup/
+// delivery dates each handler expands via fmtDate/expandDateRange.
 // Callers intersect a completed load's pickup→delivery window with `travel`, but
 // ONLY when the load's window overlaps `coverage` — a load that predates the ELD
 // feed (or any uncovered window) must fall back to the full window so historical
@@ -5228,15 +5255,14 @@ function getEldTravelDaysByVehicle(vehicleIds, minMs, maxMs) {
 	if (!ids.length || !(maxMs > minMs)) return out;
 	const ph = ids.map(() => "?").join(",");
 	const rows = db.prepare(
-		`SELECT routemate_vehicle_id AS vid, location_date_ms AS ms, speed
+		`SELECT routemate_vehicle_id AS vid, location_date_ms AS ms, speed, longitude AS lng
 		 FROM routemate_telemetry
 		 WHERE routemate_vehicle_id IN (${ph})
 		   AND dropped_reason = ''
 		   AND location_date_ms >= ? AND location_date_ms < ?`
 	).all(...ids, minMs, maxMs);
 	for (const r of rows) {
-		const d = new Date(r.ms);
-		const day = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+		const day = localDayInTz(r.ms, usTzForLongitude(r.lng));
 		let e = out[r.vid];
 		if (!e) e = out[r.vid] = { travel: new Set(), coverage: new Set() };
 		e.coverage.add(day);
