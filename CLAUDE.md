@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Commands
 
 ```bash
@@ -278,9 +276,7 @@ Key directories:
 
 **Optimistic updates**: Both `driver` and `messages` stores append messages locally before the API request completes.
 
-**Mobile / admin drawer**: A shared `appShell` Pinia store exposes `isMobile` (resize-listener-driven) and `sidebarOpen`. On mobile, `AppSidebar.vue` renders as a slide-in drawer with a backdrop overlay (`v-if="isMobile && appShell.sidebarOpen"`); on desktop, the same component is the persistent collapsible sidebar. New admin views should toggle the drawer via `appShell.openSidebar()` instead of rolling their own mobile nav. Admin pages (Dashboard, Notifications, Messages, Expenses) are responsive top-down — Phase 0–4 commits (`dbe9d4e` … `8e1a62d`) collapse multi-pane layouts into single-pane stacks below the `md` Tailwind breakpoint and swap detail tables for card lists. Vant components are reserved for the driver/public surfaces; admin views stick with shadcn-vue + Tailwind.
-
-**Mobile / admin drawer**: A shared `appShell` Pinia store exposes `isMobile` (resize-listener-driven) and `sidebarOpen`. On mobile, `AppSidebar.vue` renders as a slide-in drawer with a backdrop overlay (`v-if="isMobile && appShell.sidebarOpen"`); on desktop, the same component is the persistent collapsible sidebar. New admin views should toggle the drawer via `appShell.openSidebar()` instead of rolling their own mobile nav. Admin pages (Dashboard, Notifications, Messages, Expenses) are responsive top-down — Phase 0–4 commits (`dbe9d4e` … `8e1a62d`) collapse multi-pane layouts into single-pane stacks below the `md` Tailwind breakpoint and swap detail tables for card lists. Vant components are reserved for the driver/public surfaces; admin views stick with shadcn-vue + Tailwind.
+**Mobile / admin drawer**: A shared `appShell` Pinia store exposes `isMobile` (resize-driven) and `sidebarOpen`. On mobile, `AppSidebar.vue` renders as a slide-in drawer with a backdrop overlay (`v-if="isMobile && appShell.sidebarOpen"`); on desktop it's the persistent collapsible sidebar. New admin views should toggle it via `appShell.openSidebar()` rather than rolling their own mobile nav. Admin pages (Dashboard, Notifications, Messages, Expenses) are responsive top-down — Phase 0–4 commits (`dbe9d4e` … `8e1a62d`) collapse multi-pane layouts into single-pane stacks below the `md` breakpoint and swap detail tables for card lists. Vant is reserved for driver/public surfaces; admin views stick with shadcn-vue + Tailwind.
 
 **Routing** (25 routes with role-based guards):
 
@@ -316,10 +312,10 @@ Key directories:
 
 Auth guard calls `checkSession()` on first navigation only (blocks until resolved), then subsequent navigations use cached `isAuthenticated` state. Unauthorized users redirect to `auth.roleHome` (Driver → `/driver`, Dispatcher → `/dashboard`, Investor → `/investor`).
 
-Routes flagged `meta: { alwaysPublic: true }` (only `/track` and `/track/:loadId` today) bypass the "authenticated users get redirected to roleHome" rule applied to other public routes like `/login` and `/apply` — so a logged-in dispatcher can still preview the customer-facing tracker without being punted home.
+Routes flagged `meta: { alwaysPublic: true }` (only `/track` and `/track/:loadId` today) bypass the "authenticated users redirect to roleHome" rule that applies to `/login` and `/apply` — so a logged-in dispatcher can preview the customer tracker.
 
 ### Legacy Frontend (`public/`)
-Original vanilla HTML/CSS/JS pages. Kept as fallback — Express serves `client/dist/` if it exists, otherwise `public/`.
+Original vanilla HTML/CSS/JS pages, kept as the `public/` fallback (see Static file serving above).
 
 ## Key Conventions
 
