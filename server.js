@@ -782,6 +782,27 @@ db.exec(`
 `);
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_deleted_loads_load_id ON deleted_loads(load_id)"); } catch {}
 
+// Manual Super-Admin overrides on a driver's "active day" count. With the
+// ELD-intersection logic (see getEldTravelDaysByVehicle), miscounts are rarer
+// than the old pickup→dropoff expansion, but the ELD feed can still get a day
+// wrong: a parked-but-creeping truck registering >5 mph, a ping bucketed across
+// a midnight timezone boundary, or a load window expanded over a holiday the
+// driver wasn't actually paid for. This table lets an admin drop a specific
+// (driver, date) from /api/investor and /api/financials in lockstep so the
+// investor P&L and company P&L stay reconciled.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS excluded_driver_days (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		driver_name TEXT NOT NULL,
+		excluded_date TEXT NOT NULL,
+		reason TEXT DEFAULT '',
+		excluded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		excluded_by TEXT DEFAULT '',
+		UNIQUE(driver_name, excluded_date)
+	)
+`);
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_excl_driver_days_driver ON excluded_driver_days(driver_name)"); } catch {}
+
 // Migration: messages attachment columns
 try { db.prepare("SELECT attachment_url FROM messages LIMIT 1").get(); }
 catch {
@@ -8104,6 +8125,56 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 	}
 });
 
+// POST /api/admin/excluded-days — Super Admin manually drops a (driver, date)
+// from the active-day count. With ELD-intersection driving the count, the calc
+// is usually right — but a parked-but-creeping ELD ping, a midnight-boundary
+// quirk, or a stale window can still over-count. This is the manual override.
+// /api/investor and /api/financials both consult excluded_driver_days, so the
+// number drops in lockstep across the investor view and the company P&L.
+app.post("/api/admin/excluded-days", requireRole("Super Admin"), (req, res) => {
+	try {
+		const driverNameRaw = (req.body && req.body.driverName) || "";
+		const date = (req.body && req.body.date) || "";
+		const reason = ((req.body && req.body.reason) || "").toString().trim().slice(0, 500);
+		const driver = normalizeDriverName(driverNameRaw);
+		if (!driver) return res.status(400).json({ error: "Missing driverName" });
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Invalid date — must be YYYY-MM-DD" });
+		const excludedBy = req.session.user.username || req.session.user.full_name || "";
+		const result = db.prepare(
+			"INSERT OR IGNORE INTO excluded_driver_days (driver_name, excluded_date, reason, excluded_by) VALUES (?, ?, ?, ?)"
+		).run(driver, date, reason, excludedBy);
+		logAudit(req, "exclude_driver_day", "driver_active_day", `${driver}:${date}`, reason || `Excluded by ${excludedBy}`);
+		jtCacheInvalidate();
+		const row = db.prepare(
+			"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at FROM excluded_driver_days WHERE driver_name = ? AND excluded_date = ?"
+		).get(driver, date);
+		res.json({ success: true, inserted: result.changes > 0, row });
+	} catch (error) {
+		console.error("Error excluding driver day:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// DELETE /api/admin/excluded-days/:id — Super Admin restores a previously
+// excluded day. Mirror of the soft-delete + restore pattern used elsewhere.
+app.delete("/api/admin/excluded-days/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id, 10);
+		if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
+		const row = db.prepare(
+			"SELECT id, driver_name, excluded_date, reason FROM excluded_driver_days WHERE id = ?"
+		).get(id);
+		if (!row) return res.status(404).json({ error: "Not found" });
+		db.prepare("DELETE FROM excluded_driver_days WHERE id = ?").run(id);
+		logAudit(req, "restore_driver_day", "driver_active_day", `${row.driver_name}:${row.excluded_date}`, row.reason || "");
+		jtCacheInvalidate();
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error restoring driver day:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Per-IP throttle for driver write paths. Sized for one human driver hitting
 // these from a phone — a normal shift sees < 60 status/respond/message/expense
 // writes per minute. The Sheets API ceiling is 300 req/min for the whole
@@ -8713,6 +8784,23 @@ function excludeDroppedLoads(rows, headers, deletedIds) {
 		if (CANCELED_STATUS_RE.test(st)) return false;
 		return true;
 	});
+}
+
+// Returns { normalizedDriverName: Set<"YYYY-MM-DD"> } for every admin-excluded
+// active day. Consumed by /api/investor and /api/financials so a Super-Admin
+// override drops the day from the investor view and the company P&L together.
+function getAllExcludedDriverDays() {
+	const map = {};
+	try {
+		db.prepare("SELECT driver_name, excluded_date FROM excluded_driver_days").all().forEach((r) => {
+			const dn = (r.driver_name || "").trim();
+			const dt = (r.excluded_date || "").trim();
+			if (!dn || !dt) return;
+			if (!map[dn]) map[dn] = new Set();
+			map[dn].add(dt);
+		});
+	} catch { /* table missing on first boot — fall through */ }
+	return map;
 }
 
 // Compute per-driver FIFO queues from Job Tracking + load_responses.
@@ -12967,9 +13055,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// pay the driver?" Previously loads assigned in April with old pickup dates
 		// in 2021 would show their revenue in April but their driver pay in 2021.
 		const driverMonthlyDays = {};    // { driver: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
+		// Per-driver per-month per-day → contributing load IDs. Surfaces in the
+		// "Driver Pay Explained" modal so an investor can see e.g. May 18 was
+		// covered by loads 553198052 AND 552854956 (one calendar day, two loads).
+		const driverMonthlyDayLoads = {}; // { driver: { "YYYY-MM": { "YYYY-MM-DD": Set<loadId> } } }
+		// Preserve original sheet casing for display ("Howard Reddie" vs the
+		// lowercased "howard reddie" key used internally).
+		const driverDisplayName = {};    // { normalizedDriver: "Original Casing" }
 		// Per-driver per-month REVENUE (completed loads only). Used by the
 		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
 		const driverMonthlyRevenue = {}; // { driver: { "YYYY-MM": revenue } }
+		// Admin-excluded days — Super Admin override that drops a specific
+		// (driver, date) from /api/investor and /api/financials in lockstep.
+		const excludedDaysByDriver = getAllExcludedDriverDays();
 		const now = new Date();
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -13060,14 +13158,24 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					// feed, or no link) fall back to the full window so historical pay
 					// isn't zeroed; a covered-but-parked window stays 0.
 					const covered = eld && windowDays.some(d => eld.coverage.has(d));
-					const counted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
+					const eldCounted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
+					// Drop admin-excluded days last. The ELD/estimated source flag
+					// still reflects the underlying day source — an exclusion is a
+					// manual override, not a change to how the day was originally
+					// classified.
+					const skipSet = excludedDaysByDriver[driver] || null;
+					const counted = skipSet ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
 					const srcKey = covered ? "eld" : "est";
+					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
+					const displayDriver = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
+					if (displayDriver && !driverDisplayName[driver]) driverDisplayName[driver] = displayDriver;
 					// All-time set (for totals)
 					if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
 					counted.forEach(d => driverDaySets[driver].add(d));
 					// Per-assigned-month set (for monthly P&L). Falls back to the
 					// physical day's month if the load has no assigned date (rare).
 					if (!driverMonthlyDays[driver]) driverMonthlyDays[driver] = {};
+					if (!driverMonthlyDayLoads[driver]) driverMonthlyDayLoads[driver] = {};
 					if (!driverDaySource[driver]) driverDaySource[driver] = {};
 					counted.forEach(d => {
 						const bucket = assignedMonthKey || d.slice(0, 7);
@@ -13075,6 +13183,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						driverMonthlyDays[driver][bucket].add(d);
 						if (!driverDaySource[driver][bucket]) driverDaySource[driver][bucket] = { eld: false, est: false };
 						driverDaySource[driver][bucket][srcKey] = true;
+						if (!driverMonthlyDayLoads[driver][bucket]) driverMonthlyDayLoads[driver][bucket] = {};
+						if (!driverMonthlyDayLoads[driver][bucket][d]) driverMonthlyDayLoads[driver][bucket][d] = new Set();
+						if (lid) driverMonthlyDayLoads[driver][bucket][d].add(lid);
 					});
 				}
 			}
@@ -13221,7 +13332,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// both its revenue AND its driver pay in April.
 			// Branches on pay_type: percentage drivers use (monthRevenue − monthDeductible) × pct.
 			const monthlyDriverPay = {};
-			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay, payType, payPercentage, monthRevenue, monthDeductible, netForPercentage, source } } }
+			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay, payType, payPercentage, monthRevenue, monthDeductible, netForPercentage, source, dayBreakdown, excludedDays, displayDriverName } } }
+			// Full excluded-day rows (with id + reason) for the modal's restore action.
+			const excludedDayRows = (() => {
+				try {
+					return db.prepare(
+						"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at FROM excluded_driver_days"
+					).all();
+				} catch { return []; }
+			})();
 			for (const [driver, monthsMap] of Object.entries(driverMonthlyDays)) {
 				const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
 				const fixedRate = (driverPayDetails[driver] && driverPayDetails[driver].dailyRate) || 250;
@@ -13239,6 +13358,24 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						pay = activeDays * dailyRate;
 					}
 					monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + pay;
+					// Day-by-day breakdown: { date, loadIds[] } sorted by date.
+					// Only days that survived the ELD + admin-exclusion filters
+					// show up — same as what activeDays counted.
+					const perDayLoads = (driverMonthlyDayLoads[driver] || {})[mk] || {};
+					const dayBreakdown = Object.entries(perDayLoads)
+						.sort(([a], [b]) => a.localeCompare(b))
+						.map(([date, lidSet]) => ({ date, loadIds: [...lidSet].sort() }));
+					// Excluded days for this driver in this assigned-month bucket.
+					const excludedDays = excludedDayRows
+						.filter((er) => er.driver_name === driver && (er.excluded_date || "").slice(0, 7) === mk)
+						.map((er) => ({
+							id: er.id,
+							date: er.excluded_date,
+							reason: er.reason || "",
+							excludedBy: er.excluded_by || "",
+							excludedAt: er.excluded_at || "",
+						}))
+						.sort((a, b) => a.date.localeCompare(b.date));
 					if (!monthlyDriverDetails[mk]) monthlyDriverDetails[mk] = {};
 					monthlyDriverDetails[mk][driver] = {
 						activeDays, dailyRate, totalPay: pay,
@@ -13248,6 +13385,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						monthDeductible: Math.round(monthExp),
 						netForPercentage: Math.round(net),
 						source: daySrcLabel(driverDaySource[driver] && driverDaySource[driver][mk]),
+						dayBreakdown,
+						excludedDays,
+						displayDriverName: driverDisplayName[driver] || driver,
 					};
 				}
 			}
@@ -13797,6 +13937,9 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// Per-driver per-month REVENUE (completed loads only). Used by the
 		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
 		const driverMonthlyRevenue = {}; // { driver_lc: { "YYYY-MM": revenue } }
+		// Mirror the admin-exclusion filter from /api/investor so the company P&L
+		// and investor view honor the same overrides (CLAUDE.md consistency rule).
+		const excludedDaysByDriver = getAllExcludedDriverDays();
 		const now = new Date();
 
 		// ---- ELD travel-day index (per linked vehicle), fleet-wide ----
@@ -13909,14 +14052,20 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					// window (≥1 ping); otherwise fall back to the full window (see
 					// /api/investor for rationale).
 					const covered = eld && windowDays.some(d => eld.coverage.has(d));
-					const counted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
+					const eldCounted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
+					// Strip admin-excluded days last so the override flows here too.
+					const skipSet = driverLc ? (excludedDaysByDriver[driverLc] || null) : null;
+					const counted = skipSet ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
 					if (driverLc) {
 						if (!driverDaySets[driverLc]) driverDaySets[driverLc] = new Set();
 						counted.forEach(d => driverDaySets[driverLc].add(d));
 					}
+					// truckDaySets intentionally left unfiltered — truck-level days
+					// aren't user-visible, and the driver-keyed exclusion gets
+					// ambiguous when a truck has multiple drivers in a window.
 					if (truckUnit) {
 						if (!truckDaySets[truckUnit]) truckDaySets[truckUnit] = new Set();
-						counted.forEach(d => truckDaySets[truckUnit].add(d));
+						eldCounted.forEach(d => truckDaySets[truckUnit].add(d));
 					}
 				}
 			}
