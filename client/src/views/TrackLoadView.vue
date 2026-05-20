@@ -59,11 +59,13 @@
             <div class="track-city">
               <div class="track-city-label">FROM</div>
               <div class="track-city-name">{{ originDisplay }}</div>
+              <div v-if="originZip" class="track-city-zip">{{ originZip }}</div>
             </div>
             <div class="track-route-arrow">&rarr;</div>
             <div class="track-city track-city-dest">
               <div class="track-city-label">TO</div>
               <div class="track-city-name">{{ destDisplay }}</div>
+              <div v-if="destZip" class="track-city-zip">{{ destZip }}</div>
             </div>
           </div>
         </div>
@@ -342,6 +344,10 @@ const destDisplay = computed(() => {
   const { city, state } = data.value.destination
   return city ? (state ? `${city}, ${state}` : city) : '\u2014'
 })
+// ZIP shown on its own muted line under the city/state (street is never exposed
+// on the public tracker). zip is already in the payload from parseOriginDestCity.
+const originZip = computed(() => (data.value && data.value.origin && data.value.origin.zip) || '')
+const destZip = computed(() => (data.value && data.value.destination && data.value.destination.zip) || '')
 
 const statusChipClass = computed(() => {
   const s = (data.value?.status || '').toLowerCase()
@@ -571,6 +577,12 @@ const lastUpdatedText = computed(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.track-city-zip {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #64748b;
+  margin-top: 1px;
 }
 .track-route-arrow { color: #cbd5e1; font-size: 1.4rem; flex-shrink: 0; }
 

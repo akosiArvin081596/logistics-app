@@ -4069,19 +4069,56 @@ const TRACK_STAGES = [
 ];
 function parseOriginDestCity(addr) {
 	if (!addr || typeof addr !== "string") return { city: "", state: "", zip: "" };
-	const trimmed = addr.trim();
-	// Prefer "City, ST 12345" at end; capture ZIP when present.
-	const m = trimmed.match(/([^,]+),\s*([A-Za-z]{2})(?:\s+(\d{5}))?\s*$/);
-	if (m) return { city: m[1].trim(), state: m[2].toUpperCase(), zip: m[3] || "" };
-	return { city: trimmed.split(",")[0].trim(), state: "", zip: "" };
+	// Strip a trailing country suffix ("..., USA" / "United States"), then match
+	// "City, ST 12345" at the end. Two ordered passes so ZIP+4 ("64504-9534")
+	// and 9-digit-no-dash zips don't break the anchor; we keep the 5-digit zip.
+	const trimmed = addr.trim().replace(/,?\s*(USA|United States)\.?\s*$/i, "").trim();
+	const withZip = trimmed.match(/([^,\n]+?),\s*([A-Za-z]{2})\.?\s+(\d{5})(?:-?\d{4})?\s*$/);
+	if (withZip) return { city: withZip[1].trim(), state: withZip[2].toUpperCase(), zip: withZip[3] };
+	const noZip = trimmed.match(/([^,\n]+?),\s*([A-Za-z]{2})\.?\s*$/);
+	if (noZip) return { city: noZip[1].trim(), state: noZip[2].toUpperCase(), zip: "" };
+	return { city: (trimmed.split(/[,\n]/)[0] || "").trim(), state: "", zip: "" };
 }
 
-// Build the short "Dallas, TX 75201" label used on the admin dashboard Pickup
-// / Drop-off columns. Prefers the geocoded address in load_coordinates (clean
-// canonical string set by /api/geocode/load/:loadId) and falls back to
-// parsing whatever the sheet has for that column. Returns "" when nothing
-// parseable is available, which the UI renders as "—".
-function resolveCityState(row, kind, loadId, sheetAddr) {
+// Split a full address into two display lines: { street, cityStateZip }.
+//   line 1 (street)       = street + any suite / C-O / leading-name segments
+//   line 2 (cityStateZip) = canonical "City, ST 12345" (reuses parseOriginDestCity)
+// Handles the newline form ("street\nCity, ST ZIP") and the comma form, and
+// falls back to a single line (street = whole, cityStateZip = "") for
+// international / unparseable input so nothing is dropped. The street===csz
+// guards avoid a duplicated line when a row carries only "City, ST ZIP".
+function splitAddressLines(raw) {
+	const s = (raw == null ? "" : String(raw)).trim();
+	if (!s) return { street: "", cityStateZip: "" };
+	const cleaned = s.replace(/,?\s*(USA|United States)\.?\s*$/i, "").trim();
+	const p = parseOriginDestCity(cleaned);
+	const csz = p.city
+		? (p.zip ? `${p.city}, ${p.state} ${p.zip}` : (p.state ? `${p.city}, ${p.state}` : p.city))
+		: "";
+	const nl = cleaned.search(/\r?\n/);
+	if (nl !== -1) {
+		const street = cleaned.slice(0, nl).trim().replace(/,\s*$/, "");
+		const line2 = csz || cleaned.slice(nl).replace(/^\r?\n/, "").trim();
+		return street === line2 ? { street: "", cityStateZip: line2 } : { street, cityStateZip: line2 };
+	}
+	const tail = cleaned.match(/,\s*([^,]+?),\s*([A-Za-z]{2})\.?(?:\s+\d{5}(?:-?\d{4})?)?\s*$/);
+	if (tail && csz) {
+		const street = cleaned.slice(0, tail.index).trim().replace(/,\s*$/, "");
+		return { street: street && street !== csz ? street : "", cityStateZip: csz };
+	}
+	// No leading-street structure. With a confident "City, ST [ZIP]" parse, the
+	// whole string is the city line; otherwise (international / unparseable)
+	// show it all on line 1 rather than guessing a city for line 2.
+	if (p.state) return { street: cleaned === csz ? "" : cleaned, cityStateZip: csz };
+	return { street: cleaned, cityStateZip: "" };
+}
+
+// Resolve the source address for a row ONCE — prefers the geocoded address in
+// load_coordinates (clean canonical string set by /api/geocode/load/:loadId),
+// falls back to whatever the sheet column held — then splits it into
+// { street, cityStateZip }. Single source path shared by the dashboard
+// enrichment, the tracking panel, and the investor "My Loads" list.
+function resolveAddressParts(row, kind, loadId, sheetAddr) {
 	const lid = (loadId || "").toString().trim().toLowerCase().replace(/^#/, "");
 	let candidate = "";
 	if (lid) {
@@ -4091,10 +4128,14 @@ function resolveCityState(row, kind, loadId, sheetAddr) {
 		} catch { /* ignore */ }
 	}
 	if (!candidate) candidate = (sheetAddr || "").toString();
-	const parsed = parseOriginDestCity(candidate);
-	if (!parsed.city) return "";
-	const base = parsed.state ? `${parsed.city}, ${parsed.state}` : parsed.city;
-	return parsed.zip ? `${base} ${parsed.zip}` : base;
+	return splitAddressLines(candidate);
+}
+
+// Short "Dallas, TX 75201" label for the dashboard Pickup / Drop-off columns
+// and other city-level surfaces. Thin wrapper over resolveAddressParts; returns
+// "" when nothing parseable is available, which the UI renders as "—".
+function resolveCityState(row, kind, loadId, sheetAddr) {
+	return resolveAddressParts(row, kind, loadId, sheetAddr).cityStateZip;
 }
 
 // Sanitize the free-text "Details" column for display. Two cleanups:
@@ -8198,8 +8239,12 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		function enrichLocations(rows) {
 			for (const r of rows) {
 				const lid = loadIdCol ? r[loadIdCol] : "";
-				r._pickupLocation = resolveCityState(r, "pickup", lid, originAddrCol ? r[originAddrCol] : "");
-				r._dropLocation = resolveCityState(r, "drop", lid, destAddrCol ? r[destAddrCol] : "");
+				const pu = resolveAddressParts(r, "pickup", lid, originAddrCol ? r[originAddrCol] : "");
+				const dr = resolveAddressParts(r, "drop", lid, destAddrCol ? r[destAddrCol] : "");
+				r._pickupLocation = pu.cityStateZip;  // city/state/zip — unchanged contract
+				r._pickupStreet = pu.street;           // line 1 (street); "" when none
+				r._dropLocation = dr.cityStateZip;
+				r._dropStreet = dr.street;
 			}
 			return rows;
 		}
@@ -11321,12 +11366,15 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 							if (!driverActiveLoadsMap[key]) driverActiveLoadsMap[key] = [];
 							const rawPickup  = pickupAddrCol  ? (obj[pickupAddrCol]  || "") : "";
 							const rawDropoff = dropoffAddrCol ? (obj[dropoffAddrCol] || "") : "";
+								// Two-line address parts for the tracking panel — split once per side.
+								const puParts = resolveAddressParts(obj, "pickup", lid, rawPickup);
+								const drParts = resolveAddressParts(obj, "drop", lid, rawDropoff);
 							const entry = {
 								loadId: lid,
 								status,
 								details: sanitizeDetails(detailsCol ? obj[detailsCol] : ""),
-								pickupAddress:  resolveCityState(obj, "pickup", lid, rawPickup),
-								dropoffAddress: resolveCityState(obj, "drop",   lid, rawDropoff),
+								pickupAddress:  puParts.cityStateZip, pickupStreet: puParts.street,
+								dropoffAddress: drParts.cityStateZip, dropoffStreet: drParts.street,
 							};
 							if (originLatCol && originLngCol) {
 								const oLat = parseFloat(obj[originLatCol]);

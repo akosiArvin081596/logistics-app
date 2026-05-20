@@ -18,8 +18,18 @@
             <StatusBadge v-if="getCurrentStatus(job)" :status="getCurrentStatus(job)" />
           </div>
           <div class="mobile-load-route">
-            <div class="mobile-load-row"><span class="mobile-load-label">Pickup</span><span>{{ job._pickupLocation || '—' }}</span></div>
-            <div class="mobile-load-row"><span class="mobile-load-label">Drop-off</span><span>{{ job._dropLocation || '—' }}</span></div>
+            <div class="mobile-load-row"><span class="mobile-load-label">Pickup</span>
+              <span class="addr-stack">
+                <span class="addr-street">{{ job._pickupStreet || job._pickupLocation || '—' }}</span>
+                <span v-if="job._pickupStreet && job._pickupLocation" class="addr-csz">{{ job._pickupLocation }}</span>
+              </span>
+            </div>
+            <div class="mobile-load-row"><span class="mobile-load-label">Drop-off</span>
+              <span class="addr-stack">
+                <span class="addr-street">{{ job._dropStreet || job._dropLocation || '—' }}</span>
+                <span v-if="job._dropStreet && job._dropLocation" class="addr-csz">{{ job._dropLocation }}</span>
+              </span>
+            </div>
             <div class="mobile-load-row"><span class="mobile-load-label">Driver</span><span>{{ getCurrentDriver(job) || '—' }}</span></div>
           </div>
           <div class="mobile-load-actions" @click.stop>
@@ -58,6 +68,10 @@
           <TableRow v-for="job in paginatedItems" :key="job._rowIndex" class="cursor-pointer" @click="openDetail(job)">
             <TableCell v-for="col in displayCols" :key="col">
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
+              <div v-else-if="col === 'Pickup' || col === 'Drop-off'" class="addr-cell">
+                <span class="addr-street">{{ addrStreet(job, col) || addrCsz(job, col) || '—' }}</span>
+                <span v-if="addrStreet(job, col) && addrCsz(job, col)" class="addr-csz">{{ addrCsz(job, col) }}</span>
+              </div>
               <template v-else>{{ cellValue(job, col) }}</template>
             </TableCell>
             <TableCell @click.stop>
@@ -132,6 +146,21 @@
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
+          <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
+            <div class="dash-section-title">Pickup &amp; Drop-off</div>
+            <div class="dash-detail-grid">
+              <div style="display:flex;flex-direction:column;gap:2px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
+                <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Pickup</span>
+                <span class="addr-street" style="font-size:0.875rem;">{{ selectedJob._pickupStreet || selectedJob._pickupLocation || '—' }}</span>
+                <span v-if="selectedJob._pickupStreet && selectedJob._pickupLocation" class="addr-csz" style="font-size:0.8rem;">{{ selectedJob._pickupLocation }}</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:2px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
+                <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Drop-off</span>
+                <span class="addr-street" style="font-size:0.875rem;">{{ selectedJob._dropStreet || selectedJob._dropLocation || '—' }}</span>
+                <span v-if="selectedJob._dropStreet && selectedJob._dropLocation" class="addr-csz" style="font-size:0.8rem;">{{ selectedJob._dropLocation }}</span>
+              </div>
+            </div>
+          </div>
           <template v-for="section in detailSections" :key="section.title">
             <div v-if="section.fields.length" style="margin-bottom:1rem;">
               <div class="dash-section-title">{{ section.title }}</div>
@@ -522,6 +551,9 @@ function cellValue(j, c) {
   const p = parseJsonCell(v)
   return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v
 }
+// Two-line address parts for the synthetic Pickup/Drop-off columns (see JobBoardTab).
+function addrStreet(j, c) { return c === 'Pickup' ? j._pickupStreet : j._dropStreet }
+function addrCsz(j, c) { return c === 'Pickup' ? j._pickupLocation : j._dropLocation }
 function detailValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? Object.entries(p).filter(([,x]) => x).map(([k,x]) => `${k}: ${x}`).join(', ') : v }
 const sectionPatterns = [
   { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },
@@ -623,4 +655,8 @@ const detailSections = computed(() => {
   align-items: center;
 }
 .mobile-load-select { flex: 1; min-width: 0; }
+/* Two-line address: street on line 1, "City, ST ZIP" muted on line 2. */
+.addr-cell, .addr-stack { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.addr-street { font-weight: 500; }
+.addr-csz { font-size: 0.92em; color: #64748b; }
 </style>

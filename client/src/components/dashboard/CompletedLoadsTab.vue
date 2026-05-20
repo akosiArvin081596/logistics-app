@@ -15,6 +15,10 @@
           <TableRow v-for="job in paginatedItems" :key="job._rowIndex" class="cursor-pointer" @click="openDetail(job)">
             <TableCell v-for="col in displayCols" :key="col">
               <StatusBadge v-if="/status/i.test(col) && job[col]" :status="job[col]" />
+              <div v-else-if="col === 'Pickup' || col === 'Drop-off'" class="addr-cell">
+                <span class="addr-street">{{ addrStreet(job, col) || addrCsz(job, col) || '—' }}</span>
+                <span v-if="addrStreet(job, col) && addrCsz(job, col)" class="addr-csz">{{ addrCsz(job, col) }}</span>
+              </div>
               <template v-else>{{ cellValue(job, col) }}</template>
             </TableCell>
           </TableRow>
@@ -29,6 +33,21 @@
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
+          <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
+            <div class="dash-section-title">Pickup &amp; Drop-off</div>
+            <div class="dash-detail-grid">
+              <div style="display:flex;flex-direction:column;gap:2px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
+                <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Pickup</span>
+                <span class="addr-street" style="font-size:0.875rem;">{{ selectedJob._pickupStreet || selectedJob._pickupLocation || '—' }}</span>
+                <span v-if="selectedJob._pickupStreet && selectedJob._pickupLocation" class="addr-csz" style="font-size:0.8rem;">{{ selectedJob._pickupLocation }}</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:2px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
+                <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Drop-off</span>
+                <span class="addr-street" style="font-size:0.875rem;">{{ selectedJob._dropStreet || selectedJob._dropLocation || '—' }}</span>
+                <span v-if="selectedJob._dropStreet && selectedJob._dropLocation" class="addr-csz" style="font-size:0.8rem;">{{ selectedJob._dropLocation }}</span>
+              </div>
+            </div>
+          </div>
           <template v-for="section in detailSections" :key="section.title">
             <div v-if="section.fields.length" style="margin-bottom:1rem;">
               <div class="dash-section-title">{{ section.title }}</div>
@@ -126,9 +145,32 @@ const mapHeaders = computed(() => {
   return h
 })
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null); const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
-const displayCols = computed(() => { const kw = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery', 'date']; const m = []; for (const k of kw) { const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !m.includes(h)); if (c) m.push(c) }; return (m.length < 3 ? props.headers.slice(0, 8) : m).filter(c => c !== brokerSourceCol.value && c !== phoneSourceCol.value) })
+// See JobBoardTab/ActiveLoadsTab \u2014 swap the first origin/dest column for the
+// synthetic Pickup/Drop-off labels that render the two-line clean address.
+const ORIGIN_KW_RE = /origin|pickup|shipper/i
+const DEST_KW_RE = /dest|drop|receiver|delivery/i
+const displayCols = computed(() => {
+  const kw = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery', 'date']
+  const m = []
+  for (const k of kw) { const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !m.includes(h)); if (c) m.push(c) }
+  const base = (m.length < 3 ? props.headers.slice(0, 8) : m)
+    .filter(c => c !== brokerSourceCol.value && c !== phoneSourceCol.value && !/lat|lng|lon/i.test(c))
+  const out = []
+  let pickupDone = false
+  let dropDone = false
+  for (const col of base) {
+    if (!pickupDone && ORIGIN_KW_RE.test(col) && !/lat|lng|lon|date|time|appt|eta/i.test(col)) { out.push('Pickup'); pickupDone = true; continue }
+    if (!dropDone && DEST_KW_RE.test(col) && !/lat|lng|lon|date|time|appt|eta/i.test(col)) { out.push('Drop-off'); dropDone = true; continue }
+    out.push(col)
+  }
+  if (!pickupDone) out.splice(Math.min(3, out.length), 0, 'Pickup')
+  if (!dropDone) out.splice(Math.min(4, out.length), 0, 'Drop-off')
+  return out
+})
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
-function cellValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
+function cellValue(j, c) { if (c === 'Pickup') return j._pickupLocation || '\u2014'; if (c === 'Drop-off') return j._dropLocation || '\u2014'; const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
+function addrStreet(j, c) { return c === 'Pickup' ? j._pickupStreet : j._dropStreet }
+function addrCsz(j, c) { return c === 'Pickup' ? j._pickupLocation : j._dropLocation }
 function detailValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? Object.entries(p).filter(([,x]) => x).map(([k,x]) => `${k}: ${x}`).join(', ') : v }
 const sectionPatterns = [
   { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },
@@ -146,3 +188,10 @@ const detailSections = computed(() => {
   if (rem.length) secs.push({ title: 'Other Details', fields: rem }); return secs.filter(s => s.fields.length > 0)
 })
 </script>
+
+<style scoped>
+/* Two-line address: street on line 1, "City, ST ZIP" muted on line 2. */
+.addr-cell { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.addr-street { font-weight: 500; }
+.addr-csz { font-size: 0.92em; color: #64748b; }
+</style>
