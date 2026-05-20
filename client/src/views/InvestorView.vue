@@ -67,9 +67,9 @@
         <ProductionSection :production="store.production" :config="store.config" />
         <TrendSection :production="store.production" />
       </div>
+      <MyLoadsSection :my-loads="store.myLoads" :config="store.config" />
       <AssetSection v-if="store.asset?.totalMiles > 0" :asset="store.asset" :config="store.config" />
       <MyTrucks :trucks="trucks" :production="store.production" :is-preview="store.isPreview" @reload="loadData" />
-      <MyLoadsSection :my-loads="store.myLoads" :config="store.config" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <ExpensesSection :trucks="trucks" :preview-user-id="store.previewUserId" />
