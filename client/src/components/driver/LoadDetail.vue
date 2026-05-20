@@ -87,7 +87,7 @@
       <van-collapse-item title="Truck Details" name="truck">
         <template v-if="truck">
           <div class="truck-detail-card">
-            <img v-if="truck.photo" :src="truck.photo" class="truck-photo" />
+            <img v-if="truck.has_photo || truck.photo" :src="truck.photo || '/api/driver/me/truck-photo'" class="truck-photo" />
             <div class="truck-fields">
               <van-cell title="Unit #" :value="truck.unit_number || '\u2014'" />
               <van-cell title="Make / Model" :value="[truck.make, truck.model].filter(Boolean).join(' ') || '\u2014'" />

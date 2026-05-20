@@ -82,8 +82,8 @@
         <span class="kit-files-count">{{ identityFiles.length }}</span>
       </div>
       <div class="kit-files-grid">
-        <a v-for="(f, i) in identityFiles" :key="'id'+i" :href="f.data" :download="f.downloadName" target="_blank" rel="noopener" class="kit-file-card">
-          <div v-if="f.type === 'image'" class="kit-file-thumb" :style="{ backgroundImage: `url(${f.data})` }"></div>
+        <a v-for="(f, i) in identityFiles" :key="'id'+i" :href="f.url" :download="f.downloadName" target="_blank" rel="noopener" class="kit-file-card">
+          <div v-if="f.type === 'image'" class="kit-file-thumb" :style="{ backgroundImage: `url(${f.url})` }"></div>
           <div v-else class="kit-file-thumb pdf">
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
           </div>
@@ -175,31 +175,27 @@ const props = defineProps({
   truckDocuments: { type: Array, default: () => [] },
 })
 
-// Flatten CDL front/back and medical card into a display list. Detects
-// whether each upload is a PDF or an image from its data URI prefix.
+// Flatten CDL front/back and medical card into a display list. The actual
+// base64 bytes are no longer shipped in the driver payload (they bloated it
+// to 8MB+ and stalled loads on weak mobile connections) — the server now
+// sends a `*_type` metadata field per file ('pdf' | 'image' | null) and we
+// point at /api/driver/me/identity-file/:fileType to stream the bytes lazily.
 const identityFiles = computed(() => {
   const out = []
   const app = props.application
   if (!app) return out
-  const detect = (b64) => {
-    if (!b64) return null
-    if (b64.startsWith('data:application/pdf')) return 'pdf'
-    if (b64.startsWith('data:image/')) return 'image'
-    return null
-  }
-  const add = (label, b64) => {
-    const type = detect(b64)
-    if (!type) return
+  const add = (label, type, fileType) => {
+    if (type !== 'pdf' && type !== 'image') return
     out.push({
       label,
       type,
-      data: b64,
+      url: `/api/driver/me/identity-file/${fileType}`,
       downloadName: `${label.replace(/\s+/g, '-')}.${type === 'pdf' ? 'pdf' : 'jpg'}`,
     })
   }
-  add('CDL Front', app.cdl_front)
-  add('CDL Back', app.cdl_back)
-  add('Medical Card', app.medical_card)
+  add('CDL Front', app.cdl_front_type, 'cdl-front')
+  add('CDL Back', app.cdl_back_type, 'cdl-back')
+  add('Medical Card', app.medical_card_type, 'medical-card')
   return out
 })
 
