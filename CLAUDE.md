@@ -100,126 +100,38 @@ Session store also in SQLite.
 **AI / vision services**:
 - **Gemini 2.5 Flash vision** — powers expense receipt OCR (`POST /api/expenses/ocr`). Called via `fetch` (no SDK) with `responseSchema` so the API enforces the JSON shape. Requires `GEMINI_API_KEY`; falls back to 503 + silent manual-entry in the driver form when unset. Same key is reused across Alchemy projects so credentials rotate in one place. Retry pattern (2 retries, exp backoff, 15 s `AbortController` timeout) mirrors the Google Routes integration.
 
-REST endpoints (grouped by domain):
-
-**Sheets CRUD** (Google Sheets as database):
-- `GET /api/tabs` — list all sheet tab names
-- `GET /api/data?sheet=&page=&limit=` — read rows (paginated, max 200/page)
-- `POST /api/data?sheet=` — append row (`{ values: [...] }`)
-- `PUT /api/data/:rowIndex?sheet=` — update row by 1-based index
-- `DELETE /api/data/:rowIndex?sheet=` — delete row (shifts rows up, Super Admin only)
+REST endpoints — the full verb/path/role catalog lives in `docs/manual/technical/07-appendix-api.md`. Only the **non-obvious behavior** that reference doesn't capture is noted below:
 
 **Dashboard & dispatch**:
-- `GET /api/dashboard` — aggregated KPIs, job board, active loads, fleet data. Each job row is enriched with `_pickupLocation` / `_dropLocation` (clean "City, ST ZIP" strings derived from `load_coordinates.pickup_address` / `dropoff_address` or parsed from the sheet) plus `_pickupStreet` / `_dropStreet` (line 1 — the street/specific address, "" when none), which JobBoardTab + ActiveLoadsTab + CompletedLoadsTab render as a two-line address (street over "City, ST ZIP") in place of the raw broker-reference address columns. The split is done by `splitAddressLines()` / `resolveAddressParts()` in server.js (mirrored client-side in `client/src/lib/address.js` for surfaces that only have the raw string, e.g. the driver LoadDetail fields). The public tracker shows "City, State" + a separate ZIP line — never the street.
-- `POST /api/dispatch` — assign load to driver (writes to sheet + notifies via socket)
-- `POST /api/dispatch/reassign` — reassign load to different driver
-- `POST /api/dispatch/cancel` — **Super Admin only**. Sets status to `Cancelled` (not `Unassigned`) so the load drops out of every KPI via `excludeDroppedLoads()`. Per 2026-04-19 client decision, dispatchers lost this ability; use the Driver reassign dropdown for swaps.
-- `DELETE /api/loads/:loadId` — **Super Admin only**. Soft-delete via the `deleted_loads` SQLite table; row stays in the Google Sheet for audit but is filtered out of all admin lists + KPIs. Reversible via `DELETE FROM deleted_loads WHERE load_id = ?`.
-- `POST /api/driver/respond` — driver accepts/declines a load assignment
-- `GET /api/load/:loadId` — single load details
-- `PUT /api/load/:loadId` — update load fields
+- `GET /api/dashboard` — enriches each job row with `_pickupLocation`/`_dropLocation` ("City, ST ZIP") + `_pickupStreet`/`_dropStreet` (line 1, `""` when none); JobBoard/ActiveLoads/CompletedLoads render these as a two-line address (street over "City, ST ZIP") in place of the raw broker-reference column. Split by `splitAddressLines()`/`resolveAddressParts()` in server.js, mirrored client-side in `client/src/lib/address.js`. The public tracker shows "City, State" + a separate ZIP line — **never the street**.
+- `POST /api/dispatch/cancel` — **Super Admin only**. Sets status `Cancelled` (not `Unassigned`) so the load drops from every KPI via `excludeDroppedLoads()`. Per 2026-04-19 client decision dispatchers lost this; use the Driver reassign dropdown for swaps.
+- `DELETE /api/loads/:loadId` — **Super Admin only**. Soft-delete via the `deleted_loads` SQLite table; the sheet row stays for audit but is filtered from all admin lists + KPIs. Reversible via `DELETE FROM deleted_loads WHERE load_id = ?`.
 
 **Driver**:
-- `GET /api/driver/:driverName` — driver-specific data (financial columns auto-hidden for Driver role). Also returns `truckDocuments` — legal docs uploaded to the driver's currently-assigned truck that an admin flagged as driver-visible. File URLs are never included; the driver gets row IDs only.
-- `PUT /api/driver/status` — update load status (logs to "Status Logs" sheet)
-- `GET /api/driver/truck-documents/:id/view` — view-only inline stream of a driver-visible truck doc. Re-checks the active `truck_assignments` row on every request (reassignment revokes access immediately). Rate-limited. Sets `Content-Disposition: inline` + `X-Content-Type-Options: nosniff`.
-- `GET /api/driver/shared-documents/:id/download` — admin-shared docs uploaded via the drivers directory modal.
+- `GET /api/driver/:driverName` — financial columns auto-hidden for Driver role. Also returns `truckDocuments` (driver-visible legal docs on the assigned truck) as **row IDs only — never file URLs**.
+- `GET /api/driver/truck-documents/:id/view` — view-only inline stream; re-checks the active `truck_assignments` row on **every** request (reassignment revokes access immediately). Rate-limited; `Content-Disposition: inline` + `X-Content-Type-Options: nosniff`.
 
-**Fleet management**:
-- `/api/trucks` — CRUD for trucks (GET, POST, PUT, DELETE)
-- `/api/truck-assignments` — GET truck-driver assignments
-- `/api/trailers` — CRUD for trailers
-- `/api/drivers-directory` — CRUD for drivers directory (Carrier Database in SQLite)
-
-**Applications & onboarding**:
-- `POST /api/public/apply` — public driver application form (no auth)
-- `GET /api/applications`, `PUT /api/applications/:id/status` — manage driver applications
-- `GET /api/applications/:id/pdf` — download application as PDF
-- `POST /api/public/investor-apply` — public investor application (no auth)
-- `/api/investor-applications` — manage investor applications
-- `/api/public/investor-onboarding/:id/*` — public investor onboarding flow (document signing, banking)
-- `/api/onboarding/*` — driver onboarding (document signing, drug test upload)
-
-**Investors**:
-- `/api/investors` — CRUD for investor records
-- `/api/investor` — investor dashboard (financial data, reports)
-- `/api/investor/config` — investor view configuration
-- `/api/investor/documents`, `/api/investor/tax-csv`, `/api/investor/report` — investor documents and reports
-- `/api/investor-outreach/send`, `/api/investor-outreach/log` — email outreach
-- `/api/legal-documents` — manage legal documents for investor portal
-
-**Super Admin "View as investor" preview**: every `/api/investor/*` GET (plus `/api/trucks`) honors a `?as_user_id=N` query param **only when the session user is a Super Admin and N is a real Investor's `users.id`**. The `resolvePreviewUser(req)` helper (server.js, just below `getInvestorDriverSet`) does the validation and silently falls back to the session user otherwise — no 403, no info leak. Endpoints then shadow `user.id` / `user.username` / `isSuperAdmin` with the target's values so the rest of the handler runs the investor-scoped branch unchanged. Each preview is audit-logged (`audit_trail.action = 'investor_preview_view'`). Two distinct conventions coexist: `?as_user_id=` keys on `users.id` (this feature); `?investor_id=` keys on `investors.id` (only `/api/investor/onboarding-documents` and `/api/legal-documents`). Frontend entry point is `/investor-portals` (Super Admin sidebar), which lists every investor as a card; clicking through opens `/investor-portals/:userId` — a thin wrapper around `InvestorView.vue` that calls `investorStore.setPreview(userId)` and stamps a yellow read-only banner on top. Read-only UI: hides chat composer, "Add Truck" button, and legal-doc upload/delete. The store's `setPreview` resets `data` + `isLoading` to prevent stale-data flash when switching between previews (Pinia singleton gotcha).
-
-**Messaging**:
-- `POST /api/messages`, `GET /api/messages`, `GET /api/messages/:driverName` — driver messaging
-- `PUT /api/messages/read`, `PUT /api/notifications/read` — mark as read
-- `/api/dispatch-notifications` — dispatch-specific notifications
-- `/api/investor/messages` — investor chat
+**Super Admin "View as investor" preview**: every `/api/investor/*` GET (plus `/api/trucks`) honors `?as_user_id=N` **only when the session user is a Super Admin and N is a real Investor's `users.id`**. `resolvePreviewUser(req)` (server.js, below `getInvestorDriverSet`) validates and silently falls back to the session user otherwise — no 403, no info leak; handlers then shadow `user.id`/`user.username`/`isSuperAdmin` so the investor-scoped branch runs unchanged. Each preview is audit-logged (`audit_trail.action = 'investor_preview_view'`). Note two conventions: `?as_user_id=` keys on `users.id` (this feature); `?investor_id=` keys on `investors.id` (only `/api/investor/onboarding-documents` + `/api/legal-documents`). Frontend `/investor-portals` → `/investor-portals/:userId` wraps `InvestorView.vue`, calls `investorStore.setPreview(userId)` (resets `data`+`isLoading` to avoid stale-data flash — Pinia singleton gotcha), and stamps a read-only banner (hides chat composer, "Add Truck", legal-doc upload/delete).
 
 **Expenses & finance**:
-- `POST /api/expenses` — log expense (fuel with gallons/odometer, maintenance, with optional base64 photo). Receipt photos are re-saved to disk under `/uploads/expense-receipts/` and the URL stored in `expenses.photo_data`.
-- `POST /api/expenses/ocr` — send a receipt JPEG/PNG to Gemini 2.5 Flash vision, return structured `{amount, date, vendor, gallons, odometer, suggestedType, confidence}`. Used by the driver's ExpenseForm to prefill fields before the driver confirms. Role: Driver / Super Admin / Dispatcher. Rate-limited.
-- `GET /api/expenses/all`, `PUT /api/expenses/:id/status` — manage all expenses
-- `GET /api/expenses/fuel-analytics` — fuel spend, cost/gallon, monthly + per-driver breakdown
-- `/api/maintenance-fund` — maintenance fund tracking
-- `/api/compliance/fees`, `/api/compliance/ifta` — compliance fee tracking, IFTA mileage
+- `POST /api/expenses/ocr` — sends a receipt image to Gemini 2.5 Flash vision, returns `{amount, date, vendor, gallons, odometer, suggestedType, confidence}` to prefill the driver's ExpenseForm. Role: Driver/Super Admin/Dispatcher; rate-limited; 503 when `GEMINI_API_KEY` unset (form falls back to manual entry).
 
 **Invoices**:
-- `POST /api/invoices/generate` — generate the weekly (Sat–Fri) invoice PDF from completed loads. Fixed-driver pay uses the shared completed-loads ∩ ELD-travel active-day basis (see "Driver active days" in Key Conventions), clipped to the billing week, at the truck's `driver_pay_daily` rate; soft-deleted loads are filtered out. Owner-op/percentage drivers bill `(week revenue − fuel/maintenance) × pct` instead.
-- `GET /api/invoices`, `GET /api/invoices/:id/pdf` — list and download invoices
-- `PUT /api/invoices/:id/submit` — submit an invoice (driver/dispatcher)
-- `PUT /api/invoices/:id/approve` — approve submitted invoice (Super Admin only)
+- `POST /api/invoices/generate` — weekly (Sat–Fri) invoice PDF. Fixed-driver pay = active-days basis clipped to the billing week × the truck's `driver_pay_daily`; owner-op/percentage drivers bill `(week revenue − fuel/maintenance) × pct`. Reads the sheet directly, so applies its own `getDeletedLoadIds()` filter. See *Key Conventions → "Driver active days"* + *"Load exclusion"*.
 
 **Financials** (Super Admin only):
-- `GET /api/financials` — aggregated P&L: revenue, expenses, driver pay, profit. Revenue counts in the month the load was **assigned**, not delivered, to match the dashboard. Only completed loads count toward `totalRevenue`. Loads dropped via `excludeDroppedLoads()` (cancelled + soft-deleted) are filtered out upstream so these numbers match `/api/dashboard` and `/api/investor` exactly. Driver pay (per-driver and per-truck) uses the completed-loads ∩ ELD-travel active-day basis × the per-truck `driver_pay_daily` (see "Driver active days" in Key Conventions).
+- `GET /api/financials` — P&L. Revenue counts in the month the load was **assigned**, not delivered (matches the dashboard); only completed loads count toward `totalRevenue`; reconciles with `/api/dashboard` + `/api/investor` via `excludeDroppedLoads()`. Driver pay uses the active-days basis (see *Key Conventions*).
 
 **Public tracker** (no auth):
-- `GET /api/public/track/:loadId` — customer-facing load tracker. Returns stage progression, last driver GPS ping (redacted if >2 h stale), ETA + on-time/delayed flag, origin/destination city, and truck unit number. Response is a strict whitelist — driver name, phone, broker, rate, notes never flow through. Load-ID-only verification is the accepted client-chosen tradeoff; mitigated by the rate limiter, the whitelist, and `X-Robots-Tag: noindex, nofollow`. Input sanitized via `/^[A-Za-z0-9\-_.#]{1,40}$/`. Used by the `/track/:loadId` SPA view and the "Copy tracking link" button in ActiveLoadsTab's detail modal.
+- `GET /api/public/track/:loadId` — customer tracker. Strict response **whitelist** — driver name, phone, broker, rate, notes never flow through; GPS redacted if >2 h stale. Load-ID-only verification is the accepted client tradeoff, mitigated by the rate limiter, the whitelist, and `X-Robots-Tag: noindex, nofollow`. Input sanitized via `/^[A-Za-z0-9\-_.#]{1,40}$/`.
 
 **Documents & uploads**:
-- `POST /api/documents/upload` — upload POD/documents to Google Drive
-- `GET /api/documents/:loadId` — list documents for a load
-- `POST /api/chat/attachment` — upload chat attachment
-- `POST /api/legal-documents/upload` — upload a legal doc scoped to a truck, investor, or driver. Body accepts `visibleToDriver: boolean`; only honored when `truck_id > 0` (per-truck docs are the only kind the Driver Kit shows).
-- `PATCH /api/legal-documents/:id/visibility` — Super Admin toggles `visible_to_driver` on an existing truck doc. Useful for flipping a doc on/off without re-uploading.
-- `GET /api/legal-documents?truck_id=`/`?driver_id=`/`?investor_id=` — scoped fetch (Super Admin or doc-owning Investor).
+- `POST /api/legal-documents/upload` — `visibleToDriver` only honored when `truck_id > 0` (per-truck docs are the only kind the Driver Kit shows). `PATCH /api/legal-documents/:id/visibility` flips it without re-uploading.
 
 **Location & maps**:
-- `POST /api/location` — driver reports GPS position (geofence auto-triggers status updates)
-- `GET /api/locations/latest` — latest position per active driver with ETA enrichment
-- `GET /api/locations/trail` — historical GPS trail for a driver
-- `GET /api/route` — route directions via Google Maps
-- `/api/geocode`, `/api/geocode/search`, `/api/geocode/bulk`, `/api/geocode/load/:loadId` — geocoding with SQLite cache
-- `GET /api/config/maps-key` — expose Google Maps API key to frontend
-- `GET /api/weather` — weather data for coordinates
+- `POST /api/location` — retired **410 Gone** stub (Routemate ELD is the sole GPS source; see "Phone GPS retired").
 
-**Admin tools**:
-- `GET /api/admin/audit-trail` — view audit log
-- `PUT /api/admin/fix-driver-name` — rename driver across all sheets
-- `GET /api/admin/scan-duplicates` — find duplicate rows in sheets
-- `GET /api/admin/scan-driver-mismatches` — find driver name inconsistencies
-- `GET /api/admin/scan-orphans` — find orphaned data
-- `GET /api/admin/scan-stale-locations` — find stale GPS locations
-- `POST /api/admin/fix-stale-locations` — clean up stale locations
-- `POST /api/admin/remove-rows` — batch remove rows from sheets
-- `GET /api/archive`, `GET /api/archive/tabs` — view archived sheet data
-
-**Database admin** (Super Admin only):
-- `GET /api/db/download` — download SQLite database file
-- `GET /api/db/tables` — list all tables
-- `GET /api/db/query/:table` — query a table
-
-**Auth & users**:
-- `GET /api/auth/setup-check`, `POST /api/auth/setup`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/session`
-- `GET /api/users`, `POST /api/users`, `PUT /api/users/:id`, `DELETE /api/users/:id`
-- `PUT /api/users/:id/rating` — rate a user
-- `/api/load-ratings/*` — per-load driver ratings
-- `GET /api/users/investors` — list users with Investor role
-
-**Debug** (no auth required — development only):
-- `GET /api/debug/driver-view/:driverName`, `GET /api/debug/driver-empty/:driverName`
-- `GET /api/debug/sample-row`, `GET /api/debug/driver-loads/:driverName`
-- `GET /api/debug/user/:username`
+**Debug** (`/api/debug/*`) — **no auth, development only.**
 
 **Socket.IO events** (server emits):
 - `load-assigned` — to specific driver when dispatched
@@ -277,8 +189,6 @@ Key directories:
 **useGoogleMaps**: Loads the Google Maps JS API via `@googlemaps/js-api-loader`, fetches the API key from `GET /api/config/maps-key`.
 
 **Optimistic updates**: Both `driver` and `messages` stores append messages locally before the API request completes.
-
-**Mobile / admin drawer**: A shared `appShell` Pinia store exposes `isMobile` (resize-listener-driven) and `sidebarOpen`. On mobile, `AppSidebar.vue` renders as a slide-in drawer with a backdrop overlay (`v-if="isMobile && appShell.sidebarOpen"`); on desktop, the same component is the persistent collapsible sidebar. New admin views should toggle the drawer via `appShell.openSidebar()` instead of rolling their own mobile nav. Admin pages (Dashboard, Notifications, Messages, Expenses) are responsive top-down — Phase 0–4 commits (`dbe9d4e` … `8e1a62d`) collapse multi-pane layouts into single-pane stacks below the `md` Tailwind breakpoint and swap detail tables for card lists. Vant components are reserved for the driver/public surfaces; admin views stick with shadcn-vue + Tailwind.
 
 **Mobile / admin drawer**: A shared `appShell` Pinia store exposes `isMobile` (resize-listener-driven) and `sidebarOpen`. On mobile, `AppSidebar.vue` renders as a slide-in drawer with a backdrop overlay (`v-if="isMobile && appShell.sidebarOpen"`); on desktop, the same component is the persistent collapsible sidebar. New admin views should toggle the drawer via `appShell.openSidebar()` instead of rolling their own mobile nav. Admin pages (Dashboard, Notifications, Messages, Expenses) are responsive top-down — Phase 0–4 commits (`dbe9d4e` … `8e1a62d`) collapse multi-pane layouts into single-pane stacks below the `md` Tailwind breakpoint and swap detail tables for card lists. Vant components are reserved for the driver/public surfaces; admin views stick with shadcn-vue + Tailwind.
 
