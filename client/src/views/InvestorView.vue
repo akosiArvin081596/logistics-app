@@ -58,7 +58,11 @@
 
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
-      <EarningsSection :production="store.production" />
+      <EarningsSection
+        :production="store.production"
+        :is-super-admin="authStore.user?.role === 'Super Admin'"
+        @changed="loadData"
+      />
       <div class="sections-row">
         <ProductionSection :production="store.production" :config="store.config" />
         <TrendSection :production="store.production" />

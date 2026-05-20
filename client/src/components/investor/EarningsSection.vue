@@ -271,24 +271,57 @@
         <template v-if="detailType === 'driverPay' && selected">
           <div class="modal-breakdown">
             <div class="modal-explain">
-              Driver compensation depends on each driver's pay structure. Fixed-rate drivers earn a flat amount per active day — a day the truck actually traveled while running a completed load, matched to ELD telematics. Percentage drivers earn a share of revenue after deductible trip expenses.
+              Driver pay counts <strong>unique calendar days worked</strong>, not loads. A day counts when the truck actually traveled (Routemate ELD) while running a completed load. Percentage drivers earn a share of revenue after deductible trip expenses instead.
             </div>
 
             <template v-if="selected.driverDetails && Object.keys(selected.driverDetails).length">
               <div class="step-label">Driver Breakdown — {{ monthLabel(selected.month) }}</div>
-              <div v-for="(d, name) in selected.driverDetails" :key="name">
+              <div v-for="(d, name) in selected.driverDetails" :key="name" class="driver-block">
                 <div class="modal-row">
-                  <span>{{ name }}<span v-if="d.payType === 'percentage'" class="modal-tag">{{ d.payPercentage }}%</span></span>
+                  <span>{{ d.displayDriverName || titleCase(name) }}<span v-if="d.payType === 'percentage'" class="modal-tag">{{ d.payPercentage }}%</span></span>
                   <span class="val danger">{{ fmt(d.totalPay) }}</span>
                 </div>
                 <div class="modal-hint" v-if="d.payType === 'percentage'">
                   {{ d.payPercentage }}% × max(0, {{ fmt(d.monthRevenue || 0) }} revenue − {{ fmt(d.monthDeductible || 0) }} deductibles) = {{ fmt(d.totalPay) }}
                 </div>
                 <div class="modal-hint" v-else>
-                  {{ d.activeDays }} active day{{ d.activeDays !== 1 ? 's' : '' }} × ${{ d.dailyRate || 250 }}/day
+                  {{ d.activeDays }} unique calendar day{{ d.activeDays !== 1 ? 's' : '' }} worked × ${{ d.dailyRate || 250 }}/day
                   <span v-if="d.source === 'eld'" class="modal-src eld">ELD-verified</span>
                   <span v-else-if="d.source === 'mixed'" class="modal-src mixed">partly ELD-verified</span>
                   <span v-else class="modal-src est">estimated</span>
+                </div>
+
+                <details v-if="d.payType !== 'percentage' && d.dayBreakdown && d.dayBreakdown.length" class="day-details" :open="d.dayBreakdown.length <= 7">
+                  <summary class="day-summary">Day breakdown ({{ d.dayBreakdown.length }} day{{ d.dayBreakdown.length !== 1 ? 's' : '' }})</summary>
+                  <div class="day-list">
+                    <div v-for="row in d.dayBreakdown" :key="row.date" class="day-row">
+                      <span class="day-date">{{ formatDayLabel(row.date) }}</span>
+                      <span class="day-loads">{{ row.loadIds.length ? row.loadIds.join(', ') : '(no load id)' }}</span>
+                      <button
+                        v-if="isSuperAdmin"
+                        type="button"
+                        class="day-action exclude"
+                        title="Exclude this day from the driver's pay count"
+                        @click="askExclude(name, d, row)"
+                      >Exclude</button>
+                    </div>
+                  </div>
+                </details>
+
+                <div v-if="d.excludedDays && d.excludedDays.length" class="excluded-block">
+                  <div class="excluded-heading">Excluded by admin</div>
+                  <div v-for="row in d.excludedDays" :key="row.id" class="day-row excluded-row">
+                    <span class="day-date">{{ formatDayLabel(row.date) }}</span>
+                    <span class="day-reason" :title="row.reason">{{ row.reason || '(no reason given)' }}</span>
+                    <button
+                      v-if="isSuperAdmin"
+                      type="button"
+                      class="day-action restore"
+                      title="Add this day back to the driver's pay count"
+                      :disabled="busyId === row.id"
+                      @click="restoreDay(row)"
+                    >{{ busyId === row.id ? '...' : 'Restore' }}</button>
+                  </div>
                 </div>
               </div>
             </template>
@@ -302,6 +335,18 @@
               <span class="val danger">{{ fmt(selected.driverPay) }}</span>
             </div>
           </div>
+
+          <ConfirmModal
+            :open="!!pendingExclude"
+            title="Exclude this active day?"
+            :message="pendingExclude ? `Removes ${formatDayLabel(pendingExclude.date)} from ${pendingExclude.driverDisplay}'s active-day count. This affects both the investor view and the company P&L.` : ''"
+            confirm-text="Exclude day"
+            :danger="true"
+            prompt-label="Reason (visible in the audit log)"
+            prompt-placeholder="e.g. ELD ping on a parked truck"
+            @confirm="(reason) => submitExclude(reason)"
+            @cancel="pendingExclude = null"
+          />
         </template>
 
         <!-- ======================== -->
@@ -567,10 +612,18 @@
 import { ref, computed, watch } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import ConfirmModal from '../shared/ConfirmModal.vue'
+import { useApi } from '../../composables/useApi'
+import { useToast } from '../../composables/useToast'
 
 const props = defineProps({
   production: { type: Object, default: () => ({}) },
+  isSuperAdmin: { type: Boolean, default: false },
 })
+const emit = defineEmits(['changed'])
+
+const api = useApi()
+const { show: toast } = useToast()
 
 const months = computed(() => props.production?.monthlyEarnings || [])
 const selectedIdx = ref(0)
@@ -619,14 +672,14 @@ const allTimeEarnings = computed(() => Math.round(allTimeNet.value / 2))
 // "$250 × active days".
 const driverPayFormula = computed(() => {
   const details = selected.value && selected.value.driverDetails
-  if (!details || !Object.keys(details).length) return '= $250 × active days this month'
+  if (!details || !Object.keys(details).length) return '= $250 × calendar days worked this month'
   const drivers = Object.values(details)
   const allFixed = drivers.every(d => d.payType !== 'percentage')
   const allPct = drivers.every(d => d.payType === 'percentage')
   if (allFixed) {
     const rates = [...new Set(drivers.map(d => d.dailyRate || 250))]
     const rateStr = rates.length === 1 ? `$${rates[0]}` : '$rate'
-    return `= ${rateStr} × active days this month`
+    return `= ${rateStr} × calendar days worked this month`
   }
   if (allPct) {
     const pcts = [...new Set(drivers.map(d => d.payPercentage || 0))]
@@ -636,10 +689,68 @@ const driverPayFormula = computed(() => {
   return '= per-driver pay structure (see detail)'
 })
 
+function titleCase(s) {
+  return (s || '').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+// Render "Fri, May 15" from "2026-05-15". Parses as local time so the day
+// label matches what the user typed into the sheet, regardless of timezone.
+function formatDayLabel(ymd) {
+  if (!ymd) return ''
+  const [y, m, d] = ymd.split('-').map(Number)
+  if (!y || !m || !d) return ymd
+  const dt = new Date(y, m - 1, d)
+  return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+// Exclude/restore state — single-flight; the modal is small enough that we
+// don't need a per-driver busy map.
+const pendingExclude = ref(null) // { driverKey, driverDisplay, date }
+const busyId = ref(0)
+
+function askExclude(driverKey, driverDetail, row) {
+  pendingExclude.value = {
+    driverKey,
+    driverDisplay: driverDetail.displayDriverName || titleCase(driverKey),
+    date: row.date,
+  }
+}
+
+async function submitExclude(reason) {
+  const target = pendingExclude.value
+  if (!target) return
+  pendingExclude.value = null
+  try {
+    await api.post('/api/admin/excluded-days', {
+      driverName: target.driverKey,
+      date: target.date,
+      reason: reason || '',
+    })
+    toast(`Excluded ${formatDayLabel(target.date)}`)
+    emit('changed')
+  } catch (err) {
+    toast(err?.message || 'Failed to exclude day', 'error')
+  }
+}
+
+async function restoreDay(row) {
+  if (busyId.value) return
+  busyId.value = row.id
+  try {
+    await api.del(`/api/admin/excluded-days/${row.id}`)
+    toast(`Restored ${formatDayLabel(row.date)}`)
+    emit('changed')
+  } catch (err) {
+    toast(err?.message || 'Failed to restore day', 'error')
+  } finally {
+    busyId.value = 0
+  }
+}
+
 const MODAL_CONFIG = {
   earnings:     { title: 'How Your Earnings Are Calculated', subtitle: 'Step-by-step breakdown of your monthly earnings' },
   revenue:      { title: 'Revenue Explained', subtitle: 'Total income from completed loads' },
-  driverPay:    { title: 'Driver Pay Explained', subtitle: 'How driver compensation is calculated' },
+  driverPay:    { title: 'Driver Pay Explained', subtitle: 'Per calendar day worked (ELD-matched), not per load' },
   fixedCosts:   { title: 'Fixed Costs Explained', subtitle: 'Monthly costs to keep your truck(s) running' },
   tripExpenses: { title: 'Trip Expenses Explained', subtitle: 'Variable costs from hauling loads' },
   netProfit:    { title: 'Net Profit Explained', subtitle: 'Revenue minus all operating costs' },
@@ -805,6 +916,78 @@ const modalSubtitle = computed(() => {
 .modal-src.eld { color: #16a34a; background: rgba(22, 163, 74, 0.12); }
 .modal-src.mixed { color: #ca8a04; background: rgba(202, 138, 4, 0.12); }
 .modal-src.est { color: var(--text-dim); background: var(--accent-dim); }
+
+/* Day-by-day breakdown (Driver Pay modal) */
+.driver-block { padding-bottom: 0.4rem; }
+.driver-block + .driver-block { border-top: 1px dashed var(--border); padding-top: 0.4rem; }
+.day-details {
+  margin: 0.25rem 0.75rem 0.6rem;
+  background: var(--bg); border-radius: 6px;
+  font-size: 0.78rem;
+}
+.day-summary {
+  cursor: pointer; user-select: none;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.72rem; font-weight: 600; color: var(--text-dim);
+  list-style: none;
+}
+.day-summary::-webkit-details-marker { display: none; }
+.day-summary::before {
+  content: '▸'; display: inline-block; margin-right: 0.4rem;
+  transition: transform 0.15s;
+}
+.day-details[open] .day-summary::before { transform: rotate(90deg); }
+.day-list {
+  padding: 0 0.2rem 0.4rem;
+  display: flex; flex-direction: column; gap: 0.1rem;
+}
+.day-row {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr auto;
+  align-items: center; gap: 0.5rem;
+  padding: 0.3rem 0.6rem; border-radius: 4px;
+  font-size: 0.78rem;
+}
+.day-row:hover { background: var(--surface); }
+.day-date {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.74rem;
+  color: var(--text);
+}
+.day-loads {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.7rem;
+  color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.day-reason {
+  font-size: 0.74rem; color: var(--text-dim); font-style: italic;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.day-action {
+  font-family: inherit; font-size: 0.68rem; font-weight: 600;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: transparent; color: var(--text-dim);
+  padding: 0.15rem 0.5rem; cursor: pointer;
+  transition: all 0.12s;
+}
+.day-action:hover:not(:disabled) {
+  border-color: var(--accent); color: var(--accent);
+}
+.day-action.exclude:hover:not(:disabled) {
+  border-color: var(--danger); color: var(--danger);
+}
+.day-action:disabled { opacity: 0.4; cursor: default; }
+.excluded-block {
+  margin: 0 0.75rem 0.6rem;
+  background: rgba(234, 179, 8, 0.06);
+  border: 1px dashed rgba(234, 179, 8, 0.3);
+  border-radius: 6px; padding: 0.35rem 0.4rem;
+}
+.excluded-heading {
+  font-size: 0.65rem; font-weight: 700; color: rgba(180, 130, 0, 0.9);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 0.25rem 0.4rem;
+}
+.day-row.excluded-row .day-date { text-decoration: line-through; opacity: 0.7; }
 
 @media (max-width: 600px) {
   .alltime-grid { grid-template-columns: repeat(2, 1fr); }
