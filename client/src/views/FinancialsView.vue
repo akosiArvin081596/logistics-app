@@ -28,6 +28,18 @@
         </div>
       </div>
 
+      <!-- Idle-asset notice: onboarded trucks accruing fixed costs with no loads -->
+      <div v-if="store.summary.idleTruckCount > 0" class="data-warning idle-warning">
+        <div class="data-warning-title">&#128679; {{ store.summary.idleTruckCount }} Idle Truck{{ store.summary.idleTruckCount !== 1 ? 's' : '' }}</div>
+        <div class="data-warning-msg">
+          <strong>{{ fmt(store.summary.idleOverhead) }}</strong> in fixed costs has accrued on
+          <strong>{{ store.summary.idleTruckCount }}</strong> truck{{ store.summary.idleTruckCount !== 1 ? 's' : '' }}
+          with no completed loads since onboarding. This is idle-asset overhead (insurance + ELD on a parked
+          truck), <strong>not an operating loss</strong> — the negative Net on those rows below is just that overhead.
+          Dispatch a load or review the asset.
+        </div>
+      </div>
+
       <!-- 1. Summary KPI row -->
       <section class="section">
         <div class="section-title">
@@ -112,13 +124,16 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="t in sortedTrucks" :key="t.unitNumber">
-              <td class="mono">{{ t.unitNumber }}</td>
+            <tr v-for="t in sortedTrucks" :key="t.unitNumber" :class="{ 'row-idle': t.idle }">
+              <td class="mono">
+                {{ t.unitNumber }}
+                <span v-if="t.idle" class="idle-badge" :title="idleTitle(t)">IDLE</span>
+              </td>
               <td>{{ t.assignedDriver }}</td>
               <td class="num">{{ t.loadCount }}</td>
               <td class="num">{{ fmt(t.gross) }}</td>
               <td class="num dim">{{ fmt(t.expenses) }}</td>
-              <td class="num" :class="t.net >= 0 ? 'pos' : 'neg'">{{ fmt(t.net) }}</td>
+              <td class="num" :class="t.net >= 0 ? 'pos' : 'neg'" :title="t.idle ? idleTitle(t) : null">{{ fmt(t.net) }}</td>
               <td class="num">{{ (t.totalMiles || 0).toLocaleString() }}</td>
               <td class="num">${{ (t.ratePerMile || 0).toFixed(2) }}</td>
               <td class="num dim">{{ fmt(t.monthlyCost) }}</td>
@@ -258,6 +273,12 @@ function sortBy(key) {
 function sortIcon(key) {
   if (sortKey.value !== key) return ''
   return sortDir.value === 'asc' ? ' \u2191' : ' \u2193'
+}
+
+// Tooltip for idle trucks \u2014 explains the negative Net is overhead, not a loss.
+function idleTitle(t) {
+  const since = t.idleSince ? new Date(t.idleSince).toLocaleDateString() : 'onboarding'
+  return `Idle since ${since} \u2014 no completed loads. Net (${fmt(t.net)}) is accrued fixed-cost overhead (insurance + ELD), not an operating loss.`
 }
 
 // Category bars, sorted descending by amount
@@ -497,5 +518,28 @@ useSocketRefresh('invoices:changed', () => store.load())
   width: 24px; height: 24px;
   font-size: 0.95rem;
   color: #f59e0b;
+}
+
+/* Idle assets: neutral slate styling — informational, not an error/warning. */
+.idle-warning {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  border-left-color: #64748b;
+  color: #334155;
+}
+.row-idle { background: rgba(148, 163, 184, 0.10); }
+.row-idle:hover { background: rgba(148, 163, 184, 0.18); }
+.idle-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #475569;
+  background: #e2e8f0;
+  border-radius: 999px;
+  vertical-align: middle;
+  cursor: help;
 }
 </style>
