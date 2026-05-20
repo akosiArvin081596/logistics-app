@@ -5293,9 +5293,15 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		const completedRe = /delivered|completed|pod received/i;
 		const nameLower = driverName.toLowerCase();
 		const nameNorm = normalizeDriverName(driverName);
+		// Don't bill soft-deleted loads. The invoice reads the sheet directly
+		// (not via the excludeDroppedLoads path the KPI endpoints use), so apply
+		// the same deleted_loads filter here for consistency.
+		const deletedIds = getDeletedLoadIds();
 		const weekLoads = data.filter(row => {
 			if (!driverCol || normalizeDriverName(row[driverCol]) !== nameNorm) return false;
 			if (!statusCol || !completedRe.test(row[statusCol])) return false;
+			const lidLc = loadIdCol ? (row[loadIdCol] || "").toString().trim().toLowerCase() : "";
+			if (lidLc && deletedIds.has(lidLc)) return false;
 			if (!dateCol) return true; // if no date column, include all completed
 			// Parse date and check if in week range
 			const rawDate = (row[dateCol] || "").replace(/^date:\s*/i, "").trim();
@@ -5325,7 +5331,13 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		).all(nameLower, weekStart, computedWeekEnd);
 
 		const loadsCount = uniqueLoads.length;
-		const dailyRate = 250;
+		// Fixed-driver daily rate comes from the driver's assigned truck
+		// (trucks.driver_pay_daily) so the invoice matches the per-truck rate the
+		// investor P&L uses. Falls back to the legacy $250 when no truck rate is set.
+		const truckRateRow = db.prepare(
+			"SELECT driver_pay_daily FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) AND COALESCE(driver_pay_daily, 0) > 0 LIMIT 1"
+		).get(driverName);
+		const dailyRate = (truckRateRow && truckRateRow.driver_pay_daily) || 250;
 		const expensesTotal = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
 		const loadIds = uniqueLoads.map(l => loadIdCol ? l[loadIdCol] : "").filter(Boolean);
 		const expenseIds = expenses.map(e => e.id);
@@ -5360,6 +5372,19 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		// Broker-rate column for owner-op % pay. Same regex /api/dashboard uses.
 		const rateCol = headers.find(h => /payment|rate|amount|pay/i.test(h));
 		const parseAmount = (s) => parseFloat(String(s || "0").replace(/[$,]/g, "")) || 0;
+
+		// Truck column → Routemate vehicle → ELD travel/coverage days for the
+		// invoice week. Active days below are intersected with real travel days the
+		// same way /api/investor and /api/financials do; a week/truck with no ELD
+		// data falls back to the scheduled window (coverage-aware) so pay isn't zeroed.
+		const truckCol = headers.find(h => /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i.test(h));
+		const unitToVid = {};
+		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''")
+			.all().forEach(t => { unitToVid[t.u] = t.vid; });
+		const weekStartMs = new Date(weekStart + "T00:00:00").getTime();
+		const weekEndMs = new Date(computedWeekEnd + "T00:00:00").getTime() + 24 * 3600 * 1000;
+		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), weekStartMs, weekEndMs);
+
 		const activeDaySet = new Set();
 		const dayLoadMap = {}; // date string → [load IDs]
 
@@ -5377,17 +5402,28 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 			const end = dropoff ? new Date(dropoff) : new Date(pickup);
 			end.setHours(12, 0, 0, 0);
 			if (end < start) { end.setTime(start.getTime()); }
+			// Collect this load's scheduled days that fall within the invoice week.
+			const loadWindowDays = [];
 			const cur = new Date(start);
-			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
 			while (cur <= end) {
 				const ds = fmtLocalDate(cur);
-				// Only count days within the invoice week
-				if (ds >= weekStart && ds <= computedWeekEnd) {
-					activeDaySet.add(ds);
-					if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
-					if (lid && !dayLoadMap[ds].includes(lid)) dayLoadMap[ds].push(lid);
-				}
+				if (ds >= weekStart && ds <= computedWeekEnd) loadWindowDays.push(ds);
 				cur.setDate(cur.getDate() + 1);
+			}
+			// Intersect with the truck's real ELD travel days — but only when the
+			// ELD actually covered this window (≥1 ping). Uncovered windows (truck
+			// not linked, or load predates/outside the feed) fall back to the full
+			// scheduled window so pay isn't zeroed; a covered-but-parked day is dropped.
+			const truckUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
+			const vid = truckUnit ? unitToVid[truckUnit] : null;
+			const eld = vid ? eldByVid[vid] : null;
+			const covered = eld && loadWindowDays.some(d => eld.coverage.has(d));
+			const countedDays = covered ? loadWindowDays.filter(d => eld.travel.has(d)) : loadWindowDays;
+			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
+			for (const ds of countedDays) {
+				activeDaySet.add(ds);
+				if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
+				if (lid && !dayLoadMap[ds].includes(lid)) dayLoadMap[ds].push(lid);
 			}
 		}
 
@@ -5525,7 +5561,8 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		fs.writeFileSync(pdfPath, pdfBuffer);
 
 		// Insert into DB. Schema is shared between fixed/percentage drivers — for
-		// fixed: loads_count=activeDays, rate_per_load=$250. For percentage:
+		// fixed: loads_count=activeDays, rate_per_load=the truck's driver_pay_daily.
+		// For percentage:
 		// loads_count=uniqueLoads.length, rate_per_load=payPercentage (overloaded
 		// to carry the % so admin tooling has a single column to read).
 		const result = db.prepare(
