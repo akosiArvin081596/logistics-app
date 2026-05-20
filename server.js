@@ -13982,8 +13982,23 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				attributionMode: grossByTruck[unitLower] !== undefined
 					? "truck"
 					: (fleetHasTruckRevenue ? "no-data" : "driver-fallback"),
+				// Idle asset: a truck that's been onboarded (and is accruing fixed
+				// costs) but has never carried a completed load. Its negative Net is
+				// pure overhead, not an operating loss — flag it so the UI can label
+				// the row instead of showing a confusing red number.
+				idle: loadCount === 0 && gross === 0,
+				idleSince: (loadCount === 0 && gross === 0) ? (truck.created_at || null) : null,
 			};
 		});
+
+		// ---- Idle assets: onboarded trucks with zero completed loads ----
+		// Their fixed costs drag fleet net, but it's idle overhead (insurance +
+		// ELD on a parked truck), not a freight loss. Summarized so /admin/
+		// financials can warn up front rather than leaving Deshorn to puzzle
+		// over a negative-net row (e.g. Rodney Brown / INV-38-A).
+		const idleTrucksList = perTruck.filter(t => t.idle);
+		const idleTruckCount = idleTrucksList.length;
+		const idleOverhead = idleTrucksList.reduce((s, t) => s + (t.expenses || 0), 0);
 
 		// ---- Highest + lowest paying loads ----
 		// Guard against fewer than 10 completed loads: sliceStart below ensures
@@ -14069,6 +14084,11 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				// gaps the investor should know about.
 				unassignedRevenue: Math.round(unassignedGross),
 				unassignedLoadCount,
+				// Idle assets: onboarded trucks with zero completed loads. Their
+				// fixed costs reduce netProfit, but it's parked-truck overhead, not
+				// a freight loss — surfaced so the UI can explain the drag.
+				idleTruckCount,
+				idleOverhead: Math.round(idleOverhead),
 			},
 			expensesByCategory: Object.fromEntries(
 				Object.entries(expByCategory).map(([k, v]) => [k, Math.round(v)])
