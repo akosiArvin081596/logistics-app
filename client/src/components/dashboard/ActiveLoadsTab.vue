@@ -38,7 +38,7 @@
               <div class="mobile-load-action-row">
                 <select v-model="reassignSelections[job._rowIndex]" class="dash-select dash-select-sm mobile-load-select">
                   <option value="">Pick driver</option>
-                  <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
+                  <option v-for="d in drivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}</option>
                 </select>
                 <Button v-if="reassignSelections[job._rowIndex]" size="sm" @click="confirmReassign(job)">Go</Button>
               </div>
@@ -77,7 +77,7 @@
                   <div style="display:flex;align-items:center;gap:0.25rem;">
                     <select v-model="reassignSelections[job._rowIndex]" class="dash-select dash-select-sm" style="flex:1;min-width:0;">
                       <option value="">{{ getCurrentDriver(job) || 'Pick driver' }}</option>
-                      <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
+                      <option v-for="d in drivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}</option>
                     </select>
                     <Button v-if="reassignSelections[job._rowIndex]" size="sm" @click="confirmReassign(job)">Go</Button>
                   </div>
@@ -261,6 +261,7 @@
 import { computed, ref, reactive, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
+import { useToast } from '../../composables/useToast'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
@@ -277,10 +278,11 @@ import { useDashboardStore } from '../../stores/dashboard'
 import { useViewport } from '../../composables/useViewport'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 const api = useApi()
+const { show: toast } = useToast()
 const auth = useAuthStore()
 const dashStore = useDashboardStore()
 const { isMobile } = useViewport()
-const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] }, active: { type: Boolean, default: true }, focusLoadId: { type: String, default: '' } })
+const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] }, busyDrivers: { type: Array, default: () => [] }, active: { type: Boolean, default: true }, focusLoadId: { type: String, default: '' } })
 watch(() => props.active, v => { if (!v) { selectedJob.value = null; selectedDriverPosition.value = null } })
 const emit = defineEmits(['reassign', 'cancel', 'status-update', 'deleted', 'focus-consumed'])
 const searchQuery = ref('')
@@ -363,7 +365,18 @@ function formatPingAge(ms) {
   const h = Math.round(m / 60)
   return `${h}h`
 }
-function confirmReassign(j) { const d = reassignSelections[j._rowIndex]; if (!d) return; if (confirm(`Reassign to ${d}?`)) { emit('reassign', { rowIndex: j._rowIndex, newDriver: d, job: j }); reassignSelections[j._rowIndex] = '' } }
+function isBusy(d) { return props.busyDrivers.includes((d || '').trim().toLowerCase().replace(/\s+/g, ' ')) }
+function confirmReassign(j) {
+  const d = reassignSelections[j._rowIndex]; if (!d) return
+  const norm = s => (s || '').trim().toLowerCase().replace(/\s+/g, ' ')
+  // One load at a time. Block reassigning onto a driver who already has another
+  // active load (server also returns 409). Skip when the target is the driver
+  // already on this load — a no-op move shouldn't trip the guard.
+  if (norm(d) !== norm(getCurrentDriver(j)) && isBusy(d)) {
+    toast(`${d} already has an active load — one load at a time. Finish or reassign it first.`, 'error'); return
+  }
+  if (confirm(`Reassign to ${d}?`)) { emit('reassign', { rowIndex: j._rowIndex, newDriver: d, job: j }); reassignSelections[j._rowIndex] = '' }
+}
 function confirmCancel(j) { if (confirm('Cancel this assignment?')) emit('cancel', { rowIndex: j._rowIndex, job: j }) }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
 function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }; showDeleteConfirm.value = false }

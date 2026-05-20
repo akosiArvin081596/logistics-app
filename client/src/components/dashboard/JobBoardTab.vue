@@ -24,7 +24,7 @@
           <div v-if="!hideAssign(job)" class="mobile-job-actions" @click.stop>
             <select v-model="assignSelections[job._rowIndex]" class="dash-select mobile-job-select">
               <option value="">Select driver</option>
-              <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
+              <option v-for="d in drivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}</option>
             </select>
             <Button size="sm" class="mobile-job-btn" @click="assign(job)">Assign</Button>
             <Button v-if="auth.isSuperAdmin" variant="destructive" size="sm" class="mobile-job-btn" title="Cancel load (no driver needed)" @click="confirmCancel(job)">&#10005;</Button>
@@ -49,7 +49,7 @@
               <div v-if="!hideAssign(job)" class="flex items-center gap-2">
                 <select v-model="assignSelections[job._rowIndex]" class="dash-select" style="min-width:140px">
                   <option value="">Select driver</option>
-                  <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
+                  <option v-for="d in drivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}</option>
                 </select>
                 <Button size="sm" @click="assign(job)">Assign</Button>
                 <Button v-if="auth.isSuperAdmin" variant="destructive" size="sm" title="Cancel load (no driver needed)" @click="confirmCancel(job)">&#10005;</Button>
@@ -150,7 +150,7 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
 
-const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
+const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, busyDrivers: { type: Array, default: () => [] }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
 // Phase: cancel/delete for unassigned loads (2026-04-22 client request). The
 // parent DashboardView already has a handleCancel that reuses the same
@@ -256,7 +256,11 @@ const detailSections = computed(() => {
   const rem = []; for (const c of props.headers) { if (used.has(c)) continue; rem.push({ col: c, value: detailValue(selectedJob.value, c), wide: false }) }
   if (rem.length) secs.push({ title: 'Other Details', fields: rem }); return secs.filter(s => s.fields.length > 0)
 })
-function assign(j) { const d = assignSelections[j._rowIndex]; if (!d) { toast('Select a driver first', 'error'); return }; emit('assign', { rowIndex: j._rowIndex, driver: d, job: j }) }
+// One load at a time: a driver already on an active load can't be assigned
+// another. The dropdown flags them "— On Load"; this is the hard stop if a
+// dispatcher picks one anyway. The server also rejects it (409) as a backstop.
+function isBusy(d) { return props.busyDrivers.includes((d || '').trim().toLowerCase().replace(/\s+/g, ' ')) }
+function assign(j) { const d = assignSelections[j._rowIndex]; if (!d) { toast('Select a driver first', 'error'); return }; if (isBusy(d)) { toast(`${d} already has an active load — one load at a time. Finish or reassign it first.`, 'error'); return }; emit('assign', { rowIndex: j._rowIndex, driver: d, job: j }) }
 
 // Cancel / delete for unassigned loads. `cancel` reuses the same endpoint
 // Active Loads calls (POST /api/dispatch/cancel) — it clears the driver

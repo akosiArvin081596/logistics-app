@@ -6213,7 +6213,7 @@ async function checkDriverActiveLoad(driverName) {
 			if (driver === targetName && activeRe.test(status)) {
 				const loadIdCol = headers.findIndex(h => /load.?id|job.?id/i.test(h));
 				const loadId = loadIdCol !== -1 ? (r[loadIdCol] || "unknown") : "unknown";
-				return `${driverName} has an active load (${loadId}, status: ${status}). Complete or cancel the load before reassigning.`;
+				return `${driverName} already has an active load (${loadId}, status: ${status}). Complete or reassign it before assigning another.`;
 			}
 		}
 		return null;
@@ -7541,6 +7541,15 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawDriver.trim());
 		const driver = userMatch ? userMatch.driver_name : rawDriver.trim();
 
+		// Golden rule — one load at a time. A driver who already has any load in
+		// an active/assigned state cannot be given another. checkDriverActiveLoad
+		// fails closed (throws → 500) if Sheets is unreachable, so a transient API
+		// blip can never let a double-dispatch slip through.
+		const activeLoadConflict = await checkDriverActiveLoad(driver);
+		if (activeLoadConflict) {
+			return res.status(409).json({ code: "ACTIVE_JOB_CONFLICT", error: activeLoadConflict });
+		}
+
 		const sheets = await getSheets();
 		const headerResp = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
@@ -7645,6 +7654,16 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		const driverCol = headers.findIndex((h) => /driver/i.test(h));
 		if (driverCol === -1) {
 			return res.status(400).json({ error: "Driver column not found" });
+		}
+
+		// Golden rule — one load at a time. Don't move a load onto a driver who
+		// already has another active load. Skip the check when reassigning to the
+		// same driver already on this load (a no-op move shouldn't trip the guard).
+		if (normalizeDriverName(newDriver) !== normalizeDriverName(oldDriver || "")) {
+			const activeLoadConflict = await checkDriverActiveLoad(newDriver);
+			if (activeLoadConflict) {
+				return res.status(409).json({ code: "ACTIVE_JOB_CONFLICT", error: activeLoadConflict });
+			}
 		}
 
 		// Update driver cell

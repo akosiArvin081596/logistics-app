@@ -34,10 +34,10 @@
         </TabsList>
         <CardContent style="padding:0;">
           <TabsContent value="jobBoard" style="margin-top:0;">
-            <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" @cancel="handleCancel" @deleted="handleDeleted" />
+            <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :busy-drivers="busyDrivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" @cancel="handleCancel" @deleted="handleDeleted" />
           </TabsContent>
           <TabsContent value="activeLoads" style="margin-top:0;">
-            <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" :focus-load-id="focusLoadId" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" @deleted="handleDeleted" @focus-consumed="onFocusConsumed" />
+            <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" :busy-drivers="busyDrivers" :focus-load-id="focusLoadId" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" @deleted="handleDeleted" @focus-consumed="onFocusConsumed" />
           </TabsContent>
           <TabsContent value="completed" style="margin-top:0;">
             <CompletedLoadsTab :active="activeTab === 'completed'" :jobs="store.completedJobs" :headers="store.completedHeaders" />
@@ -103,6 +103,21 @@ const tabs = computed(() => [
   { key: 'fleet', label: 'Fleet & Drivers', count: store.fleet.length },
 ])
 
+// Drivers currently on an active load. The "one load at a time" rule blocks
+// assigning them another, so the assign/reassign dropdowns flag them and the
+// handlers refuse before hitting the server (the backend enforces it too).
+// Names normalized (lowercase, single-spaced) to match the server comparison.
+const busyDrivers = computed(() => {
+  const dc = store.headers.find(h => /driver/i.test(h))
+  if (!dc) return []
+  const seen = new Set()
+  for (const j of store.activeJobs) {
+    const n = (j[dc] || '').trim().toLowerCase().replace(/\s+/g, ' ')
+    if (n) seen.add(n)
+  }
+  return [...seen]
+})
+
 const lastUpdated = computed(() => {
   if (!store.timestamp) return 'Loading...'
   return 'Updated ' + new Date(store.timestamp).toLocaleTimeString()
@@ -110,8 +125,8 @@ const lastUpdated = computed(() => {
 
 function handleKpiClick(key) { const m = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }; activeTab.value = m[key] || activeTab.value }
 async function refresh() { try { await store.refresh() } catch { toast('Failed to load dashboard', 'error') } }
-async function handleAssign({ rowIndex, driver, job }) { try { await store.assignDriver(rowIndex, driver, job, store.headers); const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); toast(`${driver} assigned to ${lc ? job[lc] : 'load'}`, 'success'); refresh() } catch { toast('Failed to assign', 'error') } }
-async function handleReassign({ rowIndex, newDriver, job }) { try { await store.reassignDriver(rowIndex, newDriver, job, store.headers); toast(`Reassigned to ${newDriver}`, 'success'); refresh() } catch { toast('Failed to reassign', 'error') } }
+async function handleAssign({ rowIndex, driver, job }) { try { await store.assignDriver(rowIndex, driver, job, store.headers); const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); toast(`${driver} assigned to ${lc ? job[lc] : 'load'}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to assign', 'error') } }
+async function handleReassign({ rowIndex, newDriver, job }) { try { await store.reassignDriver(rowIndex, newDriver, job, store.headers); toast(`Reassigned to ${newDriver}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to reassign', 'error') } }
 async function handleCancel({ rowIndex, job }) { try { await store.cancelLoad(rowIndex, job, store.headers); toast('Assignment cancelled', 'success'); refresh() } catch { toast('Failed to cancel', 'error') } }
 function handleDeleted({ loadId }) { toast(`Load ${loadId} deleted`, 'success'); refresh() }
 async function handleStatusUpdate({ rowIndex, newStatus, job, _override }) { if (_override) { toast(`Status overridden: ${newStatus}`, 'success'); refresh(); return } try { const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); const dc = store.headers.find(h => /driver/i.test(h)); await store.updateStatus(rowIndex, dc ? job[dc] || '' : '', lc ? job[lc] || '' : '', newStatus, job); toast(`Status: ${newStatus}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to update', 'error') } }
