@@ -5184,6 +5184,14 @@ function getDriverPayStructures() {
 	return out;
 }
 
+// An expense an admin set to 'Rejected' was explicitly denied — it must never
+// reduce revenue/profit in ANY view (investor P&L, /api/financials, tax CSV,
+// investor reports, weekly driver invoices). This string is the single source
+// of truth for "does this expense count financially?": append it to every
+// expense-amount SUM. COALESCE keeps legacy NULL/'' rows and 'Pending'/'Approved'
+// counted; only 'Rejected' is dropped.
+const EXPENSE_PNL_FILTER = "COALESCE(status, '') != 'Rejected'";
+
 // Returns { [driver_name_lc]: { [yyyy-mm]: total, _total: allTime } } summing
 // Fuel + Maintenance only, Rejected excluded — the same filter the invoice
 // endpoint uses. One round-trip so financials/investor don't fan out.
@@ -5191,7 +5199,7 @@ function getDeductibleExpensesByDriverMonth() {
 	const rows = db.prepare(`
 		SELECT LOWER(driver) AS name_lc, substr(date, 1, 7) AS month, SUM(amount) AS total
 		FROM expenses
-		WHERE type IN ('Fuel', 'Maintenance') AND status != 'Rejected'
+		WHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}
 		GROUP BY LOWER(driver), month
 	`).all();
 	const out = {};
@@ -5327,7 +5335,7 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 
 		// Fetch expenses for this week
 		const expenses = db.prepare(
-			`SELECT * FROM expenses WHERE LOWER(driver) = ? AND date >= ? AND date <= ? ORDER BY date ASC`
+			`SELECT * FROM expenses WHERE LOWER(driver) = ? AND date >= ? AND date <= ? AND ${EXPENSE_PNL_FILTER} ORDER BY date ASC`
 		).all(nameLower, weekStart, computedWeekEnd);
 
 		const loadsCount = uniqueLoads.length;
@@ -10501,12 +10509,12 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 				if (jtRateCol) totalRevenue += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
 			});
 			const expClause = isSuperAdmin
-				? db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM expenses").get().t
+				? db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER}`).get().t
 				: (() => {
 					const drivers = [...getInvestorDriverSet(user.id, cdb.data, cDriverCol, cCarrierCol)];
 					if (!drivers.length) return 0;
 					const ph = drivers.map(() => "?").join(",");
-					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? OR LOWER(driver) IN (${ph})`).get(user.id, ...drivers).t;
+					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${ph})) AND ${EXPENSE_PNL_FILTER}`).get(user.id, ...drivers).t;
 				})();
 			netRevenueToDate = Math.round(totalRevenue - expClause);
 		} catch (sheetsErr) {
@@ -10708,7 +10716,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 				whereParams.push(...driverList);
 			}
 			const expRows = db.prepare(
-				`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE 1=1${whereClause}${dateWhere} GROUP BY LOWER(type)`
+				`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE 1=1${whereClause}${dateWhere} AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(type)`
 			).all(...whereParams, ...dateParams);
 			// Categorization per 2026-04-13 client feedback:
 			// - Fuel → Fuel Expenses
@@ -12758,10 +12766,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			if (investorOwnerId) {
 				const driverList = [...investorDriverSet];
 				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
-				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh}) AND (owner_id = ? OR LOWER(driver) IN (${driverPh}))`).get(...lidList, investorOwnerId, ...driverList);
+				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh}) AND (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER}`).get(...lidList, investorOwnerId, ...driverList);
 				totalExpenses += expSum.total;
 			} else if (isSuperAdmin) {
-				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh})`).get(...lidList);
+				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh}) AND ${EXPENSE_PNL_FILTER}`).get(...lidList);
 				totalExpenses += expSum.total;
 			}
 		}
@@ -12904,17 +12912,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const driverList = [...investorDriverSet];
 				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
 				const rows = db.prepare(
-					`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) GROUP BY m`
+					`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
 				).all(investorOwnerId, ...driverList);
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
 				const catRows = db.prepare(
-					`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) GROUP BY m, LOWER(type)`
+					`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`
 				).all(investorOwnerId, ...driverList);
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			} else if (isSuperAdmin) {
-				const rows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses GROUP BY m`).all();
+				const rows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`).all();
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
-				const catRows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses GROUP BY m, LOWER(type)`).all();
+				const catRows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`).all();
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			}
 
@@ -13026,7 +13034,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		if (investorDriverSet) {
 			// Batch queries BEFORE the loop (4 queries total instead of 5N)
 			const expByDriver = Object.fromEntries(
-				db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? GROUP BY LOWER(driver)`).all(user.id).map(r => [r.d, r.t])
+				db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE owner_id = ? AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all(user.id).map(r => [r.d, r.t])
 			);
 			const maintByTruck = Object.fromEntries(
 				db.prepare(`SELECT LOWER(mf.truck) AS u, COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type='service' GROUP BY LOWER(mf.truck)`).all(user.id).map(r => [r.u, r.t])
@@ -13577,14 +13585,14 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 
 		// ---- Expense totals (entire fleet, no filter) ----
 		const expByCategory = Object.fromEntries(
-			db.prepare(`SELECT LOWER(type) AS cat, COALESCE(SUM(amount),0) AS t FROM expenses GROUP BY LOWER(type)`).all().map(r => [r.cat || "other", r.t])
+			db.prepare(`SELECT LOWER(type) AS cat, COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY LOWER(type)`).all().map(r => [r.cat || "other", r.t])
 		);
 		const totalTripExpenses = Object.values(expByCategory).reduce((s, v) => s + v, 0);
 
 		// Monthly expenses by category
 		const monthlyCategoryRows = db.prepare(
 			`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount),0) AS t
-			 FROM expenses WHERE date IS NOT NULL AND date != '' GROUP BY m, LOWER(type) ORDER BY m ASC`
+			 FROM expenses WHERE date IS NOT NULL AND date != '' AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type) ORDER BY m ASC`
 		).all();
 		const expensesByMonthMap = {};
 		monthlyCategoryRows.forEach(r => {
@@ -13686,10 +13694,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// truck inherit another truck's revenue/expenses when a single
 		// load is missing its truck column — that was the source of the
 		// negative-Net rows reported by Deshorn on /admin/financials.
-		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses GROUP BY LOWER(driver)`).all();
+		const expByDriverRows = db.prepare(`SELECT LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY LOWER(driver)`).all();
 		const expByDriver = Object.fromEntries(expByDriverRows.map(r => [r.d, r.t]));
 		const expByTruck = Object.fromEntries(
-			db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' GROUP BY LOWER(truck_unit)`).all().map(r => [r.u, r.t])
+			db.prepare(`SELECT LOWER(truck_unit) AS u, COALESCE(SUM(amount),0) AS t FROM expenses WHERE truck_unit IS NOT NULL AND truck_unit != '' AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(truck_unit)`).all().map(r => [r.u, r.t])
 		);
 		const maintByTruck = Object.fromEntries(
 			db.prepare(`SELECT LOWER(truck) AS u, COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' GROUP BY LOWER(truck)`).all().map(r => [r.u, r.t])
