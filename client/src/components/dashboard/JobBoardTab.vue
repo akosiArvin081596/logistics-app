@@ -280,7 +280,10 @@ const sectionPatterns = [
   { title: 'Schedule', test: /date|time|pickup.*date|delivery.*date|appointment|eta|scheduled/i },
   { title: 'Financials', test: /rate|amount|revenue|pay|charge|price|cost|invoice|total/i },
 ]
-const hiddenCols = /broker|phone|email|contact|contract/i
+// Hide the raw Pickup/Drop-off Address columns from the detail sections — the
+// "Pickup & Drop-off" block above already shows them two-line, so repeating the
+// single-line raw value in the Route section is redundant.
+const hiddenCols = /broker|phone|email|contact|contract|address/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
 const statusValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /^status$/i.test(h) || /load.*status/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
 const detailSections = computed(() => {
