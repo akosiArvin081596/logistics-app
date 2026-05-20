@@ -18,6 +18,7 @@ export const useDashboardStore = defineStore('dashboard', {
     completedJobs: (s) => s.data?.completedJobs || [],
     fleet: (s) => s.data?.fleet || [],
     drivers: (s) => s.data?.drivers || [],
+    driverQueues: (s) => s.data?.driverQueues || {},
     headers: (s) => s.data?.jobTrackingHeaders || [],
     completedHeaders: (s) => s.data?.completedHeaders || s.data?.jobTrackingHeaders || [],
   },

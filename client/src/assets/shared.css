@@ -657,6 +657,15 @@ body {
 }
 .fleet-status-active   { background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; }
 .fleet-status-available{ background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+.fleet-status-queued   { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+.fleet-queue-pill {
+  display: inline-flex; align-items: center;
+  font-size: 0.625rem; font-weight: 600;
+  padding: 2px 8px; border-radius: 9999px;
+  background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  letter-spacing: 0;
+}
 
 /* Status Badges */
 .status-badge-pill {

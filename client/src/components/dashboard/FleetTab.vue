@@ -8,7 +8,10 @@
               <div style="font-weight:700;font-size:0.9375rem;color:#111827;">{{ f.Driver || 'Unknown' }}</div>
               <div style="font-size:0.6875rem;color:#9ca3af;font-family:'JetBrains Mono',monospace;margin-top:2px;">{{ f.Truck || 'No truck assigned' }}</div>
             </div>
-            <span :class="['fleet-status', f.Status === 'On Load' ? 'fleet-status-active' : 'fleet-status-available']">{{ f.Status }}</span>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:0.35rem;">
+              <span :class="['fleet-status', statusClass(f.Status)]">{{ f.Status }}</span>
+              <span v-if="f.QueueCount" class="fleet-queue-pill">+{{ f.QueueCount }} queued</span>
+            </div>
           </div>
           <div style="display:flex;align-items:center;gap:0.75rem;padding-top:0.75rem;margin-top:0.75rem;border-top:1px solid #f3f4f6;">
             <span style="font-size:0.6875rem;color:#9ca3af;"><span style="font-family:'JetBrains Mono',monospace;font-weight:600;color:#4b5563;">{{ f.CompletedLoads }}</span> completed</span>
@@ -31,11 +34,17 @@
             <div class="dash-detail-grid">
               <div style="display:flex;flex-direction:column;gap:4px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
                 <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Availability</span>
-                <span :class="['fleet-status', selected?.Status === 'On Load' ? 'fleet-status-active' : 'fleet-status-available']" style="width:fit-content;">{{ selected?.Status }}</span>
+                <span :class="['fleet-status', statusClass(selected?.Status)]" style="width:fit-content;">{{ selected?.Status }}</span>
               </div>
               <div style="display:flex;flex-direction:column;gap:4px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
                 <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Current Load</span>
                 <span style="font-size:0.875rem;">{{ selected?.CurrentLoad || '\u2014' }}</span>
+              </div>
+              <div v-if="selected?.QueuedLoadIds && selected.QueuedLoadIds.length" style="display:flex;flex-direction:column;gap:4px;padding:0.75rem;border-bottom:1px solid #f3f4f6;grid-column:1 / -1;">
+                <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Queued ({{ selected.QueuedLoadIds.length }})</span>
+                <div style="display:flex;flex-wrap:wrap;gap:0.35rem;">
+                  <span v-for="(lid, i) in selected.QueuedLoadIds" :key="lid" style="font-size:0.6875rem;font-family:'JetBrains Mono',monospace;color:#92400e;background:#fef3c7;padding:2px 8px;border-radius:4px;">{{ i + 1 }}. {{ lid }}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -68,4 +77,9 @@ import EmptyState from '../shared/EmptyState.vue'
 defineProps({ fleet: { type: Array, required: true }, activeJobs: { type: Array, default: () => [] }, headers: { type: Array, default: () => [] } })
 const selected = ref(null)
 function openDetail(f) { selected.value = f }
+function statusClass(s) {
+  if (s === 'On Load') return 'fleet-status-active'
+  if (s === 'Queued') return 'fleet-status-queued'
+  return 'fleet-status-available'
+}
 </script>

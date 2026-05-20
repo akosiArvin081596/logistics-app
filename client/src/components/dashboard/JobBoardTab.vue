@@ -34,7 +34,7 @@
           <div v-if="!hideAssign(job)" class="mobile-job-actions" @click.stop>
             <select v-model="assignSelections[job._rowIndex]" class="dash-select mobile-job-select">
               <option value="">Select driver</option>
-              <option v-for="d in drivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}</option>
+              <option v-for="d in drivers" :key="d.name" :value="d.name">{{ driverLabel(d) }}</option>
             </select>
             <Button size="sm" class="mobile-job-btn" @click="assign(job)">Assign</Button>
             <Button v-if="auth.isSuperAdmin" variant="destructive" size="sm" class="mobile-job-btn" title="Cancel load (no driver needed)" @click="confirmCancel(job)">&#10005;</Button>
@@ -63,7 +63,7 @@
               <div v-if="!hideAssign(job)" class="flex items-center gap-2">
                 <select v-model="assignSelections[job._rowIndex]" class="dash-select" style="min-width:140px">
                   <option value="">Select driver</option>
-                  <option v-for="d in drivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}</option>
+                  <option v-for="d in drivers" :key="d.name" :value="d.name">{{ driverLabel(d) }}</option>
                 </select>
                 <Button size="sm" @click="assign(job)">Assign</Button>
                 <Button v-if="auth.isSuperAdmin" variant="destructive" size="sm" title="Cancel load (no driver needed)" @click="confirmCancel(job)">&#10005;</Button>
@@ -157,6 +157,17 @@
       @confirm="runDelete"
       @cancel="showDeleteConfirm = false"
     />
+
+    <!-- Queue confirm — appears when dispatching to a driver who's already on
+         a load or has queued loads. Per Deshorn King 2026-05-20. -->
+    <ConfirmModal
+      :open="!!pendingAssignment"
+      title="Queue this load?"
+      :message="pendingAssignmentMessage"
+      confirm-text="Queue Load"
+      @confirm="confirmQueueAssign"
+      @cancel="pendingAssignment = null"
+    />
   </div>
 </template>
 
@@ -179,7 +190,7 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
 
-const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, busyDrivers: { type: Array, default: () => [] }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
+const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
 // Phase: cancel/delete for unassigned loads (2026-04-22 client request). The
 // parent DashboardView already has a handleCancel that reuses the same
@@ -293,11 +304,51 @@ const detailSections = computed(() => {
   const rem = []; for (const c of props.headers) { if (used.has(c)) continue; rem.push({ col: c, value: detailValue(selectedJob.value, c), wide: false }) }
   if (rem.length) secs.push({ title: 'Other Details', fields: rem }); return secs.filter(s => s.fields.length > 0)
 })
-// One load at a time: a driver already on an active load can't be assigned
-// another. The dropdown flags them "— On Load"; this is the hard stop if a
-// dispatcher picks one anyway. The server also rejects it (409) as a backstop.
-function isBusy(d) { return props.busyDrivers.includes((d || '').trim().toLowerCase().replace(/\s+/g, ' ')) }
-function assign(j) { const d = assignSelections[j._rowIndex]; if (!d) { toast('Select a driver first', 'error'); return }; if (isBusy(d)) { toast(`${d} already has an active load — one load at a time. Finish or reassign it first.`, 'error'); return }; emit('assign', { rowIndex: j._rowIndex, driver: d, job: j }) }
+function driverLabel(d) {
+  if (!d || !d.name) return ''
+  const onLoad = d.activeCount > 0
+  const qc = d.queueCount || 0
+  let suffix = ''
+  if (onLoad) suffix += ' — On Load'
+  if (qc > 0) suffix += ` (Queue: ${qc})`
+  return d.name + suffix
+}
+
+// Per Deshorn (2026-05-20): when dispatching to a driver who's already on a
+// load or has queued loads, confirm the queue position before posting. Avoids
+// silently stacking 3+ loads on someone by accident.
+const pendingAssignment = ref(null)
+function assign(j) {
+  const name = assignSelections[j._rowIndex]
+  if (!name) { toast('Select a driver first', 'error'); return }
+  const drv = (props.drivers || []).find((d) => d && d.name === name)
+  const willBeQueued = drv && (drv.activeCount > 0 || drv.queueCount > 0)
+  if (willBeQueued) {
+    pendingAssignment.value = {
+      job: j,
+      driver: name,
+      activeLoadId: drv.activeLoadId || '',
+      onLoad: drv.activeCount > 0,
+      newPosition: (drv.activeCount || 0) + (drv.queueCount || 0) + 1,
+    }
+    return
+  }
+  emit('assign', { rowIndex: j._rowIndex, driver: name, job: j })
+}
+function confirmQueueAssign() {
+  if (!pendingAssignment.value) return
+  const p = pendingAssignment.value
+  emit('assign', { rowIndex: p.job._rowIndex, driver: p.driver, job: p.job })
+  pendingAssignment.value = null
+}
+const pendingAssignmentMessage = computed(() => {
+  const p = pendingAssignment.value
+  if (!p) return ''
+  const activeBit = p.onLoad
+    ? `${p.driver} is currently on load ${p.activeLoadId || '(unknown)'}.`
+    : `${p.driver} already has loads queued.`
+  return `${activeBit} This new load will be queued as Position ${p.newPosition}. Continue?`
+})
 
 // Cancel / delete for unassigned loads. `cancel` reuses the same endpoint
 // Active Loads calls (POST /api/dispatch/cancel) — it clears the driver

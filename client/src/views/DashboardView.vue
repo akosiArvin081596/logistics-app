@@ -34,7 +34,7 @@
         </TabsList>
         <CardContent style="padding:0;">
           <TabsContent value="jobBoard" style="margin-top:0;">
-            <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="store.drivers" :busy-drivers="busyDrivers" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" @cancel="handleCancel" @deleted="handleDeleted" />
+            <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="driverOptions" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" @cancel="handleCancel" @deleted="handleDeleted" />
           </TabsContent>
           <TabsContent value="activeLoads" style="margin-top:0;">
             <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" :busy-drivers="busyDrivers" :focus-load-id="focusLoadId" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" @deleted="handleDeleted" @focus-consumed="onFocusConsumed" />
@@ -103,10 +103,10 @@ const tabs = computed(() => [
   { key: 'fleet', label: 'Fleet & Drivers', count: store.fleet.length },
 ])
 
-// Drivers currently on an active load. The "one load at a time" rule blocks
-// assigning them another, so the assign/reassign dropdowns flag them and the
-// handlers refuse before hitting the server (the backend enforces it too).
-// Names normalized (lowercase, single-spaced) to match the server comparison.
+// Drivers currently on an active load. ActiveLoadsTab reads this list to
+// flag busy drivers in the reassign dropdown. The Job Board's queue feature
+// (see driverOptions below) supersedes the one-load-at-a-time block in that
+// surface — a busy driver can be queued behind their current load.
 const busyDrivers = computed(() => {
   const dc = store.headers.find(h => /driver/i.test(h))
   if (!dc) return []
@@ -116,6 +116,23 @@ const busyDrivers = computed(() => {
     if (n) seen.add(n)
   }
   return [...seen]
+})
+
+// Enriched driver options for the Job Board assign dropdown. The new shape
+// lets the dropdown render '— On Load' / '(Queue: N)' suffixes and lets the
+// confirmation modal explain the queue position before posting. Other tabs
+// (ActiveLoadsTab reassign) still consume the plain string array + busyDrivers.
+const driverOptions = computed(() => {
+  const fleetByName = new Map((store.fleet || []).map((f) => [f.Driver, f]))
+  return (store.drivers || []).map((name) => {
+    const f = fleetByName.get(name) || {}
+    return {
+      name,
+      activeCount: f.Status === 'On Load' ? 1 : 0,
+      queueCount: f.QueueCount || 0,
+      activeLoadId: f.CurrentLoad || '',
+    }
+  })
 })
 
 const lastUpdated = computed(() => {
