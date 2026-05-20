@@ -110,7 +110,7 @@ REST endpoints (grouped by domain):
 - `DELETE /api/data/:rowIndex?sheet=` — delete row (shifts rows up, Super Admin only)
 
 **Dashboard & dispatch**:
-- `GET /api/dashboard` — aggregated KPIs, job board, active loads, fleet data. Each job row is enriched with `_pickupLocation` / `_dropLocation` (clean "City, ST ZIP" strings derived from `load_coordinates.pickup_address` / `dropoff_address` or parsed from the sheet), which JobBoardTab + ActiveLoadsTab render in place of the raw broker-reference address columns.
+- `GET /api/dashboard` — aggregated KPIs, job board, active loads, fleet data. Each job row is enriched with `_pickupLocation` / `_dropLocation` (clean "City, ST ZIP" strings derived from `load_coordinates.pickup_address` / `dropoff_address` or parsed from the sheet) plus `_pickupStreet` / `_dropStreet` (line 1 — the street/specific address, "" when none), which JobBoardTab + ActiveLoadsTab + CompletedLoadsTab render as a two-line address (street over "City, ST ZIP") in place of the raw broker-reference address columns. The split is done by `splitAddressLines()` / `resolveAddressParts()` in server.js (mirrored client-side in `client/src/lib/address.js` for surfaces that only have the raw string, e.g. the driver LoadDetail fields). The public tracker shows "City, State" + a separate ZIP line — never the street.
 - `POST /api/dispatch` — assign load to driver (writes to sheet + notifies via socket)
 - `POST /api/dispatch/reassign` — reassign load to different driver
 - `POST /api/dispatch/cancel` — **Super Admin only**. Sets status to `Cancelled` (not `Unassigned`) so the load drops out of every KPI via `excludeDroppedLoads()`. Per 2026-04-19 client decision, dispatchers lost this ability; use the Driver reassign dropdown for swaps.

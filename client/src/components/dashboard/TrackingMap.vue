@@ -111,7 +111,10 @@
                       <span class="route-point-dot pickup"></span>
                       <span class="route-point-label">Pickup (A)</span>
                     </div>
-                    <div v-if="al.pickupAddress" class="route-point-address">{{ al.pickupAddress }}</div>
+                    <div v-if="al.pickupStreet || al.pickupAddress" class="route-point-address">
+                      <div v-if="al.pickupStreet">{{ al.pickupStreet }}</div>
+                      <div v-if="al.pickupAddress" class="route-point-csz">{{ al.pickupAddress }}</div>
+                    </div>
                     <div class="route-point-coords">{{ al.originLat.toFixed(5) }}, {{ al.originLng.toFixed(5) }}</div>
                   </div>
                   <div v-if="al.destLat" class="route-point clickable" @click.stop="focusPoint(al.destLat, al.destLng)">
@@ -119,7 +122,10 @@
                       <span class="route-point-dot dropoff"></span>
                       <span class="route-point-label">Drop-off (B)</span>
                     </div>
-                    <div v-if="al.dropoffAddress" class="route-point-address">{{ al.dropoffAddress }}</div>
+                    <div v-if="al.dropoffStreet || al.dropoffAddress" class="route-point-address">
+                      <div v-if="al.dropoffStreet">{{ al.dropoffStreet }}</div>
+                      <div v-if="al.dropoffAddress" class="route-point-csz">{{ al.dropoffAddress }}</div>
+                    </div>
                     <div class="route-point-coords">{{ al.destLat.toFixed(5) }}, {{ al.destLng.toFixed(5) }}</div>
                   </div>
                   <div v-if="routeDistance != null || routeEta != null || selectedDriverSpeed != null" class="route-summary">
@@ -1961,6 +1967,8 @@ onUnmounted(() => {
   line-height: 1.3;
   margin-left: 1.1rem;
 }
+/* Line 2 (city/state/zip) under the street, slightly muted. */
+.route-point-csz { color: #888; }
 
 .route-point-coords {
   font-size: 0.62rem;
