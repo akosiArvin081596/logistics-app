@@ -915,6 +915,16 @@ async function focusDriver(loc) {
   clearSingleLoadOverlays()
   clearAllRouteOverlays()
 
+  // Single click should reveal the route: auto-expand the driver's active load.
+  // Prefer a load that's actively being worked (at shipper → at receiver); else
+  // fall back to the first. toggleLoad() handles markers, polyline, and map fit.
+  const loads = loc.activeLoads || []
+  const target = loads.find(l => PAST_PICKUP_RE.test(l.status)) || loads[0] || null
+  if (target) {
+    await toggleLoad(target, loc)
+    return
+  }
+
   if (map && loc.latitude) {
     map.setCenter({ lat: loc.latitude, lng: loc.longitude })
     map.setZoom(12)
