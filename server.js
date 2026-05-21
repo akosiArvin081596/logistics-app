@@ -39,9 +39,13 @@ const io = new Server(server);
 // Called after successful mutations (POST/PUT/DELETE) — no payload needed.
 function notifyChange(domain) {
 	io.to("dispatch").emit(`${domain}:changed`);
-	// Also notify investor room for domains that affect investor dashboards
+	// Also notify investor room for domains that affect investor dashboards.
+	// Emit both the domain-specific event and an umbrella `investor:changed`
+	// — InvestorView.vue subscribes to the latter so a truck toggle (or any
+	// other investor-relevant mutation) recomputes totals without a refresh.
 	if (["trucks", "expenses", "invoices", "investor"].includes(domain)) {
 		io.to("investor").emit(`${domain}:changed`);
+		io.to("investor").emit("investor:changed");
 	}
 }
 app.set("trust proxy", 1); // Behind nginx — use real client IP for rate limiting
@@ -11132,11 +11136,14 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			});
 		}
 
-		// Maintenance fund disbursements (truck-level service payments)
+		// Maintenance fund disbursements (truck-level service payments) —
+		// joined to trucks so inactive-truck disbursements drop out.
+		// Super-Admin path uses NOT IN so orphan rows (where `truck` doesn't
+		// match any truck) still appear in the global total.
 		{
 			const maintTotal = (investorDriverSet
-				? db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND mf.type='service'`).get(user.id)
-				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service'`).get()
+				? db.prepare(`SELECT COALESCE(SUM(mf.amount),0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND t.status='Active' AND mf.type='service'`).get(user.id)
+				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get()
 			).t;
 			maintenanceExpenses += maintTotal;
 			totalExpenses += maintTotal;
@@ -11150,7 +11157,11 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		// fixed expenses. On run report period it needs to show this month
 		// per month."
 		{
+			// Skip inactive trucks for projected fixed-cost accrual.
+			// Asset Security section above still shows them (the investor
+			// owns them); they just don't contribute compliance expense.
 			for (const t of ownedTrucks2) {
+				if (t.status !== "Active") continue;
 				const monthlyFixed = (t.eld_monthly || 0)
 					+ ((t.hvut_annual || 0) / 12)
 					+ ((t.irp_annual || 0) / 12);
@@ -11160,8 +11171,8 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 				totalExpenses += truckFixed;
 			}
 			const compFees = (investorDriverSet
-				? db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND cf.status='Paid'`).get(user.id)
-				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid'`).get()
+				? db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND t.status='Active' AND cf.status='Paid'`).get(user.id)
+				: db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get()
 			).t;
 			complianceExpenses += compFees;
 			totalExpenses += compFees;
@@ -13288,14 +13299,18 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		}
 		// Truck-level costs (maintenance fund DISBURSEMENTS, compliance fees)
 		// NOTE: maintenance_fund table = actual service payments. SEPARATE from trucks.maintenance_fund_monthly (budget).
+		// Inactive trucks are excluded — once a truck is flipped off Active,
+		// its associated costs drop out of the investor bottom-line. Orphan
+		// rows whose `truck` field doesn't match any truck still flow through
+		// the Super-Admin branch via the NOT IN subquery.
 		if (investorOwnerId) {
-			const maintSum = db.prepare(`SELECT COALESCE(SUM(mf.amount), 0) AS total FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND mf.type = 'service'`).get(user.id);
+			const maintSum = db.prepare(`SELECT COALESCE(SUM(mf.amount), 0) AS total FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND mf.type = 'service'`).get(user.id);
 			totalExpenses += maintSum.total;
-			const compSum = db.prepare(`SELECT COALESCE(SUM(cf.amount), 0) AS total FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND cf.status = 'Paid'`).get(user.id);
+			const compSum = db.prepare(`SELECT COALESCE(SUM(cf.amount), 0) AS total FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND cf.status = 'Paid'`).get(user.id);
 			totalExpenses += compSum.total;
 		} else if (isSuperAdmin) {
-			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM maintenance_fund WHERE type = 'service'`).get().total;
-			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid'`).get().total;
+			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get().total;
+			totalExpenses += db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get().total;
 		}
 
 		// ---- Driver Pay (branches on each driver's pay_type) ----
@@ -13348,9 +13363,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// elsewhere in this handler. Including the reserve here would
 		// double-count maintenance. Same fix as /api/financials.
 		{
+			// Inactive trucks don't contribute projected fixed costs — once a
+			// truck is flipped off Active in the Trucks UI, its IRP/HVUT/ELD/
+			// insurance stops accruing on the investor bottom-line.
 			const truckQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ?"
-				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks";
+				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
 			const truckArgs = investorDriverSet ? [user.id] : [];
 			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
 			for (const t of fleetTrucks) {
@@ -14154,9 +14172,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		});
 		const expensesByMonth = Object.values(expensesByMonthMap);
 
-		// Maintenance fund + compliance fees (truck-level) roll into totalExpenses
-		const maintSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service'`).get().t;
-		const compSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid'`).get().t;
+		// Maintenance fund + compliance fees (truck-level) roll into totalExpenses.
+		// Exclude rows tied to non-Active trucks (Inactive / Maintenance / OOS)
+		// via NOT IN, which preserves orphan rows whose `truck` cell doesn't
+		// match any truck (existing behavior) while dropping inactive ones.
+		const maintSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM maintenance_fund WHERE type='service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get().t;
+		const compSum = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM compliance_fees WHERE status='Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active')`).get().t;
 
 		// ---- Driver pay (branches on each driver's pay_type) ----
 		// Fixed drivers: activeDays × per-truck dailyRate (legacy logic).
@@ -14204,7 +14225,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// truck's first→last load date range, fall back to created_at-capped
 		// fleet months only when the truck has no recorded loads. Keeps the
 		// fleet KPI reconciled with sum(perTruck.fixedTotal).
-		const allTrucks = db.prepare("SELECT * FROM trucks").all();
+		// Inactive trucks drop out of the fleet P&L — they don't accrue
+		// projected fixed costs and they don't appear in the per-truck
+		// performance table further down (both consume `allTrucks`).
+		const allTrucks = db.prepare("SELECT * FROM trucks WHERE status = 'Active'").all();
 		let totalFixedCosts = 0;
 		for (const t of allTrucks) {
 			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
