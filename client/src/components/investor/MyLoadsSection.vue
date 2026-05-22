@@ -76,13 +76,11 @@
               v-if="l.loadId"
               type="button"
               class="track-btn"
-              :class="{ 'track-btn-copied': copiedLoadId === l.loadId }"
-              :title="copiedLoadId === l.loadId ? 'Copied!' : 'Copy public tracking link to share with customer'"
-              @click="copyTrackingLink(l.loadId)"
+              title="Open public tracking page in a new tab"
+              @click="openTrackingPage(l.loadId)"
             >
-              <svg v-if="copiedLoadId !== l.loadId" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-              {{ copiedLoadId === l.loadId ? 'Copied' : 'Track' }}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+              Track
             </button>
           </div>
         </li>
@@ -123,13 +121,11 @@
               v-if="l.loadId"
               type="button"
               class="track-btn"
-              :class="{ 'track-btn-copied': copiedLoadId === l.loadId }"
-              :title="copiedLoadId === l.loadId ? 'Copied!' : 'Copy public tracking link to share with customer'"
-              @click="copyTrackingLink(l.loadId)"
+              title="Open public tracking page in a new tab"
+              @click="openTrackingPage(l.loadId)"
             >
-              <svg v-if="copiedLoadId !== l.loadId" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-              {{ copiedLoadId === l.loadId ? 'Copied' : 'Track' }}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+              Track
             </button>
           </div>
         </li>
@@ -292,19 +288,10 @@ function impliedLoadGross(load) {
   return load.yourShare || 0
 }
 
-const copiedLoadId = ref('')
-let copiedTimer = null
-async function copyTrackingLink(loadId) {
+function openTrackingPage(loadId) {
   if (!loadId) return
   const url = `${window.location.origin}/track/${encodeURIComponent(loadId)}`
-  try {
-    await navigator.clipboard.writeText(url)
-    copiedLoadId.value = loadId
-    if (copiedTimer) clearTimeout(copiedTimer)
-    copiedTimer = setTimeout(() => { copiedLoadId.value = '' }, 1500)
-  } catch {
-    window.prompt('Copy this tracking link:', url)
-  }
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
 </script>
 
@@ -409,8 +396,6 @@ async function copyTrackingLink(loadId) {
   white-space: nowrap;
 }
 .track-btn:hover { background: var(--surface); color: var(--accent); border-color: var(--accent); }
-.track-btn-copied { background: #d1fae5; color: #065f46; border-color: #34d399; }
-.track-btn-copied:hover { background: #d1fae5; color: #065f46; }
 .status-pill {
   font-size: 0.68rem; font-weight: 600; padding: 0.15rem 0.5rem; border-radius: 99px;
 }
