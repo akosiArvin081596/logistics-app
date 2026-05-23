@@ -115,6 +115,20 @@ function header(msg) { console.log('\n' + msg); }
 	const replay = nodes.filter(n => n.name === 'Replay Webhook' || n.name === 'Replay Get Email');
 	check(replay.length === 0, 'No leftover replay nodes (' + nodes.length + ' total nodes)', 'Replay nodes still present: ' + replay.map(n => n.name).join(', '));
 
+	// 8. Prepare Attachment Data filters to PDFs only
+	header('8. Prepare Attachment Data filters to PDFs only');
+	const prep = find('Prepare Attachment Data');
+	if (!prep) { fail('Prepare Attachment Data node not found'); allOk = false; } else {
+		const a = prep.parameters.assignments?.assignments || [];
+		const entry = a.find(x => x.name === '=attachments');
+		const v = entry?.value || '';
+		check(
+			v.includes("mimeType === 'application/pdf'") || v.includes('mimeType === "application/pdf"'),
+			'attachments expression filters by application/pdf',
+			'attachments expression does NOT filter by PDF MIME (got: ' + v.slice(0, 120) + ')'
+		);
+	}
+
 	// Summary
 	console.log('\n' + (allOk ? '=== ALL CHECKS PASSED ===' : '=== SOME CHECKS FAILED — see above ==='));
 	process.exit(allOk ? 0 : 1);
