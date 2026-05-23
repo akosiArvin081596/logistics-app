@@ -69,9 +69,14 @@ function header(msg) { console.log('\n' + msg); }
 		check(falseEdge, 'Addresses Ready?[1] → Update Job Tracking (Distance)', 'Addresses Ready? FALSE branch does NOT go to Update Job Tracking (Distance)');
 	}
 
-	// 3. Mark Read after PDF path
+	// 3. Mark Read after PDF path (direct OR through the completeness gate)
 	header('3. Mark Read on PDF success path');
-	check(hasEdge('Update Job Tracking (Distance)', 'Mark Read (Processing)'), 'Update Job Tracking (Distance) → Mark Read (Processing)', 'Update Job Tracking (Distance) does NOT connect to Mark Read (Processing)');
+	const direct = hasEdge('Update Job Tracking (Distance)', 'Mark Read (Processing)');
+	const viaGate = hasEdge('Update Job Tracking (Distance)', 'Critical Fields Complete?')
+		&& hasEdge('Critical Fields Complete?', 'Mark Read (Processing)');
+	check(direct || viaGate,
+		viaGate ? 'Update Job Tracking → Critical Fields Complete? → Mark Read (Processing)' : 'Update Job Tracking (Distance) → Mark Read (Processing)',
+		'Update Job Tracking (Distance) does NOT reach Mark Read (Processing)');
 
 	// 4. Thread PDF lookup
 	header('4. Thread PDF lookup branch');
@@ -127,6 +132,30 @@ function header(msg) { console.log('\n' + msg); }
 			'attachments expression filters by application/pdf',
 			'attachments expression does NOT filter by PDF MIME (got: ' + v.slice(0, 120) + ')'
 		);
+	}
+
+	// 9. Completeness gate — Mark Read only fires when Rate is populated
+	header('9. Completeness gate before Mark Read (Processing)');
+	const gate = find('Critical Fields Complete?');
+	check(!!gate, '"Critical Fields Complete?" node present', '"Critical Fields Complete?" node MISSING — patch-completeness-gate.js not applied');
+	if (gate) {
+		const condV = gate.parameters?.conditions?.conditions?.[0]?.leftValue || '';
+		check(condV.includes('output.Rate') || condV.includes("output['Rate']"),
+			'gate condition references Normalize Load Fields output.Rate',
+			'gate condition does NOT reference output.Rate (got: ' + condV.slice(0, 100) + ')'
+		);
+		check(hasEdge('Update Job Tracking (Distance)', 'Critical Fields Complete?'),
+			'Update Job Tracking (Distance) → Critical Fields Complete?',
+			'Update Job Tracking (Distance) does NOT route through the gate');
+		check(hasEdge('Critical Fields Complete?', 'Mark Read (Processing)'),
+			'Critical Fields Complete?[TRUE] → Mark Read (Processing)',
+			'Gate TRUE branch does NOT reach Mark Read (Processing)');
+		check(!hasEdge('Google Drive', 'Mark Read (Processing)'),
+			'Google Drive → Mark Read (Processing) edge removed',
+			'Google Drive still directly marks email read (premature)');
+		check(!hasEdge('Extract from Email Body', 'Mark Read (No Attachment)'),
+			'Extract from Email Body → Mark Read (No Attachment) edge removed',
+			'Extract from Email Body still directly marks email read (premature)');
 	}
 
 	// Summary
