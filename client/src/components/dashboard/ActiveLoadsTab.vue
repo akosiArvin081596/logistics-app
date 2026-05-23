@@ -131,6 +131,16 @@
                 Override
               </button>
               <button
+                v-if="loadIdValue && (auth.isSuperAdmin || auth.user?.role === 'Dispatcher')"
+                type="button"
+                :style="editBtnStyle"
+                title="Manually edit load fields the dispatch workflow couldn't extract"
+                @click="openEdit"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                Edit
+              </button>
+              <button
                 v-if="loadIdValue && auth.isSuperAdmin"
                 type="button"
                 :style="deleteBtnStyle"
@@ -273,6 +283,49 @@
       </DialogContent>
     </Dialog>
 
+    <!-- Edit Load modal — Super Admin + Dispatcher. Manually fill columns the
+         n8n dispatch workflow couldn't extract (Bison-style emails, etc.). -->
+    <Dialog :open="showEdit" @update:open="v => { if (!v) closeEdit() }">
+      <DialogContent class="max-w-[640px] max-h-[85vh] flex flex-col overflow-hidden" style="padding:0;">
+        <DialogHeader style="padding:1rem 1.25rem;border-bottom:1px solid #f3f4f6;">
+          <DialogTitle>Edit Load — {{ loadIdValue }}</DialogTitle>
+          <DialogDescription class="sr-only">Update load details that the dispatch workflow couldn't extract from the rate-con PDF. Driver, Truck, and Status are managed separately.</DialogDescription>
+        </DialogHeader>
+        <div style="padding:1.25rem;display:flex;flex-direction:column;gap:0.85rem;overflow-y:auto;flex:1;">
+          <div v-for="col in editableHeaders" :key="col">
+            <label style="font-size:0.7rem;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:0.04em;">{{ col }}</label>
+            <textarea
+              v-if="MULTILINE_COLS.has(col)"
+              v-model="editForm[col]"
+              rows="3"
+              style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.875rem;resize:vertical;"
+            />
+            <input
+              v-else
+              v-model="editForm[col]"
+              type="text"
+              style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.875rem;"
+            />
+          </div>
+          <div v-if="editError" style="padding:0.5rem 0.75rem;background:#fef2f2;color:#991b1b;border-radius:6px;font-size:0.8rem;">{{ editError }}</div>
+          <div style="display:flex;gap:0.5rem;justify-content:flex-end;">
+            <button
+              type="button"
+              :disabled="saving"
+              style="padding:0.5rem 0.9rem;border:1px solid #d1d5db;background:#fff;color:#374151;border-radius:6px;font-family:inherit;font-size:0.85rem;font-weight:600;cursor:pointer;"
+              @click="closeEdit"
+            >Cancel</button>
+            <button
+              type="button"
+              :disabled="saving"
+              style="padding:0.5rem 0.9rem;border:none;background:#1d4ed8;color:#fff;border-radius:6px;font-family:inherit;font-size:0.85rem;font-weight:600;cursor:pointer;"
+              @click="submitEdit"
+            >{{ saving ? 'Saving...' : 'Save changes' }}</button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+
     <!-- Delete confirm — soft delete, reversible in SQL but not from the UI -->
     <ConfirmModal
       :open="showDeleteConfirm"
@@ -319,6 +372,25 @@ const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.tes
 const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
 const statusOptions = ['Dispatched', 'Heading to Shipper', 'At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Delivered']
+// Columns the dispatcher can manually fix when n8n's extraction is incomplete.
+// Excludes Driver/Truck/Owner ID/Job Status/* — those are managed by the
+// dispatch reassign flow and the status-override modal in this same file.
+const EDITABLE_COLS = [
+  'Contract ID',
+  'Details',
+  'Trailer Number',
+  'Pickup Info',
+  'Pickup Appointment',
+  'Pickup Address',
+  'Drop-off Info',
+  'Drop-off Appointment',
+  'Drop-off Address',
+  'Payment',
+  'Broker Contact Name',
+  'Phone Number',
+  'Email',
+]
+const MULTILINE_COLS = new Set(['Details', 'Pickup Info', 'Drop-off Info', 'Pickup Address', 'Drop-off Address'])
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
 const showDeleteConfirm = ref(false)
 const deleting = ref(false)
@@ -327,6 +399,11 @@ const overriding = ref(false)
 const overrideStatus = ref('')
 const overrideReason = ref('')
 const overrideError = ref('')
+const showEdit = ref(false)
+const saving = ref(false)
+const editForm = reactive({})
+const editError = ref('')
+const editableHeaders = computed(() => props.headers.filter(h => EDITABLE_COLS.includes(h)))
 let linkCopiedTimer = null
 const copyBtnStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
@@ -344,6 +421,15 @@ const overrideBtnStyle = computed(() => ({
   border: '1px solid #fde68a',
   background: '#fffbeb',
   color: '#92400e',
+  transition: 'all 0.15s',
+}))
+const editBtnStyle = computed(() => ({
+  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+  borderRadius: '6px', cursor: 'pointer', fontFamily: 'inherit',
+  border: '1px solid #bfdbfe',
+  background: '#eff6ff',
+  color: '#1d4ed8',
   transition: 'all 0.15s',
 }))
 const deleteBtnStyle = computed(() => ({
@@ -423,6 +509,51 @@ function openOverride() {
 function closeOverride() {
   if (overriding.value) return
   showOverride.value = false
+}
+
+function openEdit() {
+  if (!selectedJob.value) return
+  editError.value = ''
+  for (const col of editableHeaders.value) {
+    editForm[col] = selectedJob.value[col] || ''
+  }
+  showEdit.value = true
+}
+
+function closeEdit() {
+  if (saving.value) return
+  showEdit.value = false
+}
+
+async function submitEdit() {
+  if (!selectedJob.value || saving.value) return
+  const rowIndex = selectedJob.value._rowIndex
+  if (!rowIndex) { editError.value = 'Row index missing — cannot save.'; return }
+  saving.value = true
+  editError.value = ''
+  try {
+    // values MUST be built from props.headers (sheet column order). selectedJob
+    // carries derived fields like _pickupStreet / _rowIndex that must not appear
+    // in the PUT payload.
+    const values = props.headers.map(col =>
+      Object.prototype.hasOwnProperty.call(editForm, col)
+        ? editForm[col]
+        : (selectedJob.value[col] || '')
+    )
+    await api.put(
+      `/api/data/${rowIndex}?sheet=${encodeURIComponent('Job Tracking')}`,
+      { values }
+    )
+    const patch = {}
+    for (const col of editableHeaders.value) patch[col] = editForm[col]
+    selectedJob.value = { ...selectedJob.value, ...patch }
+    showEdit.value = false
+    await dashStore.refresh()
+  } catch (err) {
+    editError.value = (err && err.message) || 'Failed to save changes.'
+  } finally {
+    saving.value = false
+  }
 }
 
 async function submitOverride() {
