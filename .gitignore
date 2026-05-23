@@ -26,6 +26,7 @@ uploads/
 attachments/
 *.bak
 *.bak2
+scripts/.wf-backup-*.json
 
 # Claude
 .claude/
