@@ -158,6 +158,16 @@ function header(msg) { console.log('\n' + msg); }
 			'Extract from Email Body still directly marks email read (premature)');
 	}
 
+	// 10. Retry Counter tracks all pending jobs (no $input.first() drop)
+	header('10. Retry Counter handles all pending LlamaParse jobs');
+	const rc = find('Retry Counter');
+	if (!rc) { fail('Retry Counter node not found'); allOk = false; } else {
+		const code = rc.parameters?.jsCode || '';
+		check(code.includes('$input.all()'),
+			'Retry Counter maps over $input.all()',
+			'Retry Counter still uses $input.first() — pending jobs past the first are dropped');
+	}
+
 	// Summary
 	console.log('\n' + (allOk ? '=== ALL CHECKS PASSED ===' : '=== SOME CHECKS FAILED — see above ==='));
 	process.exit(allOk ? 0 : 1);
