@@ -167,6 +167,12 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    path: '/admin/driver-pay-overrides',
+    name: 'admin-driver-pay-overrides',
+    component: () => import('../views/DriverPayOverridesView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/archive',
     name: 'archive',
     component: () => import('../views/ArchiveView.vue'),

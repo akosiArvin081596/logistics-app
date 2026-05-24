@@ -136,6 +136,7 @@ const navConfig = {
     { to: '/investor-applications', icon: '&#128188;', label: 'Investor Applications' },
     { divider: true, label: 'System' },
     { to: '/admin/financials', icon: '&#128200;', label: 'Financials' },
+    { to: '/admin/driver-pay-overrides', icon: '&#128197;', label: 'Driver Pay Overrides' },
     { to: '/admin/fleet-health', icon: '&#128666;', label: 'Fleet Health' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
