@@ -291,6 +291,46 @@
                   <span v-else class="modal-src est">estimated</span>
                 </div>
 
+                <!-- Admin-only: credit a day the ELD missed (truck offline,
+                     feed gap). Available even when the driver had 0 days, so
+                     a missed day can be added before any breakdown exists. -->
+                <div v-if="isSuperAdmin && d.payType !== 'percentage'" class="add-day-row">
+                  <button
+                    type="button"
+                    class="day-action add"
+                    :disabled="!!pendingAdd"
+                    title="Credit a day the ELD missed (truck offline, lost feed)"
+                    @click="askAdd(name, d)"
+                  >+ Add day</button>
+                </div>
+                <div
+                  v-if="isSuperAdmin && pendingAdd && pendingAdd.driverKey === name"
+                  class="exclude-confirm"
+                >
+                  <div class="exclude-confirm-sub">
+                    Credit a day to <strong>{{ pendingAdd.driverDisplay }}</strong> in {{ monthLabel(selected.month) }} — affects this portal, the company P&amp;L, and any unbilled invoice that includes the date.
+                  </div>
+                  <input
+                    v-model="addDate"
+                    type="date"
+                    class="exclude-reason"
+                    :min="monthBounds.min"
+                    :max="monthBounds.max"
+                  />
+                  <textarea
+                    v-model="addReason"
+                    class="exclude-reason"
+                    rows="2"
+                    placeholder="Reason (optional, shown in the audit log — e.g. 'Truck ELD offline')"
+                  ></textarea>
+                  <div class="exclude-confirm-actions">
+                    <button type="button" class="day-action" :disabled="addBusy" @click="cancelAdd">Cancel</button>
+                    <button type="button" class="day-action add" :disabled="addBusy || !addDate" @click="submitAdd">
+                      {{ addBusy ? 'Adding…' : 'Add day' }}
+                    </button>
+                  </div>
+                </div>
+
                 <details v-if="d.payType !== 'percentage' && d.dayBreakdown && d.dayBreakdown.length" class="day-details" :open="d.dayBreakdown.length <= 7">
                   <summary class="day-summary">Day breakdown ({{ d.dayBreakdown.length }} day{{ d.dayBreakdown.length !== 1 ? 's' : '' }})</summary>
                   <div class="day-list">
@@ -347,6 +387,22 @@
                       :disabled="busyId === row.id"
                       @click="restoreDay(row)"
                     >{{ busyId === row.id ? '...' : 'Restore' }}</button>
+                  </div>
+                </div>
+
+                <div v-if="d.addedDays && d.addedDays.length" class="excluded-block added-block">
+                  <div class="excluded-heading">Added by admin</div>
+                  <div v-for="row in d.addedDays" :key="row.id" class="day-row added-row">
+                    <span class="day-date">{{ formatDayLabel(row.date) }}</span>
+                    <span class="day-reason" :title="row.reason">{{ row.reason || '(no reason given)' }}</span>
+                    <button
+                      v-if="isSuperAdmin"
+                      type="button"
+                      class="day-action restore"
+                      title="Remove this admin-added day from the pay count"
+                      :disabled="busyId === row.id"
+                      @click="restoreDay(row)"
+                    >{{ busyId === row.id ? '...' : 'Remove' }}</button>
                   </div>
                 </div>
               </div>
@@ -732,6 +788,22 @@ const excludeReason = ref('')
 const excludeBusy = ref(false)
 const busyId = ref(0)
 
+// Add-day state (mirror of exclude). `addDate` defaults to today clipped to
+// the currently-selected month; the date input enforces min/max via monthBounds.
+const pendingAdd = ref(null) // { driverKey, driverDisplay }
+const addDate = ref('')
+const addReason = ref('')
+const addBusy = ref(false)
+
+const monthBounds = computed(() => {
+  const mk = selected.value && selected.value.month
+  if (!mk || !/^\d{4}-\d{2}$/.test(mk)) return { min: '', max: '' }
+  const [y, m] = mk.split('-').map(Number)
+  const last = new Date(y, m, 0).getDate() // day 0 of next month = last day of this
+  const pad = (n) => String(n).padStart(2, '0')
+  return { min: `${mk}-01`, max: `${mk}-${pad(last)}` }
+})
+
 function askExclude(driverKey, driverDetail, row) {
   excludeReason.value = ''
   pendingExclude.value = {
@@ -779,6 +851,55 @@ async function restoreDay(row) {
     toast(err?.message || 'Failed to restore day', 'error')
   } finally {
     busyId.value = 0
+  }
+}
+
+function askAdd(driverKey, driverDetail) {
+  // Default to today if it's in the selected month, otherwise to the 1st.
+  const today = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  const todayStr = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
+  const inMonth = todayStr >= monthBounds.value.min && todayStr <= monthBounds.value.max
+  addDate.value = inMonth ? todayStr : monthBounds.value.min
+  addReason.value = ''
+  pendingAdd.value = {
+    driverKey,
+    driverDisplay: driverDetail.displayDriverName || titleCase(driverKey),
+  }
+}
+
+function cancelAdd() {
+  if (addBusy.value) return
+  pendingAdd.value = null
+  addDate.value = ''
+  addReason.value = ''
+}
+
+async function submitAdd() {
+  const target = pendingAdd.value
+  if (!target || addBusy.value || !addDate.value) return
+  // Guardrail: date input min/max only enforces in browsers that support it.
+  if (addDate.value < monthBounds.value.min || addDate.value > monthBounds.value.max) {
+    toast(`Date must be within ${monthLabel(selected.value.month)}`, 'error')
+    return
+  }
+  addBusy.value = true
+  try {
+    await api.post('/api/admin/excluded-days', {
+      driverName: target.driverKey,
+      date: addDate.value,
+      reason: addReason.value || '',
+      action: 'add',
+    })
+    toast(`Added ${formatDayLabel(addDate.value)} for ${target.driverDisplay}`)
+    pendingAdd.value = null
+    addDate.value = ''
+    addReason.value = ''
+    emit('changed')
+  } catch (err) {
+    toast(err?.message || 'Failed to add day', 'error')
+  } finally {
+    addBusy.value = false
   }
 }
 
@@ -1010,7 +1131,18 @@ const modalSubtitle = computed(() => {
 .day-action.exclude:hover:not(:disabled) {
   border-color: var(--danger); color: var(--danger);
 }
+.day-action.add {
+  border-color: rgba(34, 197, 94, 0.4); color: rgb(22, 163, 74);
+}
+.day-action.add:hover:not(:disabled) {
+  border-color: rgb(22, 163, 74); color: rgb(22, 163, 74);
+  background: rgba(34, 197, 94, 0.08);
+}
 .day-action:disabled { opacity: 0.4; cursor: default; }
+.add-day-row {
+  margin: 0.35rem 0.75rem 0;
+  display: flex; justify-content: flex-end;
+}
 .excluded-block {
   margin: 0 0.75rem 0.6rem;
   background: rgba(234, 179, 8, 0.06);
@@ -1023,6 +1155,12 @@ const modalSubtitle = computed(() => {
   padding: 0.25rem 0.4rem;
 }
 .day-row.excluded-row .day-date { text-decoration: line-through; opacity: 0.7; }
+.added-block {
+  background: rgba(34, 197, 94, 0.06);
+  border-color: rgba(34, 197, 94, 0.3);
+}
+.added-block .excluded-heading { color: rgb(22, 163, 74); }
+.day-row.added-row .day-date { font-weight: 700; color: rgb(22, 163, 74); }
 
 /* Inline exclude confirmation (lives inside the dialog, no nested modal) */
 .exclude-confirm {
