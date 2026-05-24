@@ -372,6 +372,12 @@
         <span class="label">&times; Owner-Operator Share (<span aria-label="Pay percentage"></span>%)</span>
         <span class="value"></span>
       </div>
+      <!-- Admin adjustment line — Super Admin's +/- delta with reason. Hidden
+           by the renderer when amount is empty (no adjustment). -->
+      <div class="row adjustment-row" data-show-when-adjusted>
+        <span class="label"><span aria-label="Adjustment label"></span> &nbsp;<em><span aria-label="Adjustment reason"></span></em></span>
+        <span class="value"><span aria-label="Adjustment amount"></span></span>
+      </div>
       <div class="row total-row">
         <span class="label">TOTAL DUE</span>
         <span class="value">$&nbsp;<span aria-label="Total due"></span></span>

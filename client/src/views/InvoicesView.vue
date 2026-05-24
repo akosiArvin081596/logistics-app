@@ -68,7 +68,12 @@
               <TableCell class="font-semibold text-[13px] text-gray-900 uppercase">{{ inv.driver }}</TableCell>
               <TableCell class="text-[12px] text-gray-600 whitespace-nowrap">{{ formatWeek(inv.week_start, inv.week_end) }}</TableCell>
               <TableCell class="text-[13px] text-gray-600 text-right">{{ inv.loads_count }}</TableCell>
-              <TableCell class="text-[13px] font-semibold text-emerald-700 text-right">${{ fmtMoney(inv.total_earnings) }}</TableCell>
+              <TableCell class="text-[13px] font-semibold text-emerald-700 text-right">
+                ${{ fmtMoney(inv.total_earnings) }}
+                <span v-if="hasAdjustment(inv)" :class="adjBadgeClass(inv)" :title="adjTooltip(inv)">
+                  {{ formatAdj(inv.adjustment) }}
+                </span>
+              </TableCell>
               <TableCell><Badge :class="statusBadge(inv.status)">{{ inv.status }}</Badge></TableCell>
               <TableCell class="text-[12px] text-gray-500 whitespace-nowrap">{{ inv.submitted_at ? formatDate(inv.submitted_at) : '\u2014' }}</TableCell>
               <TableCell class="text-right" @click.stop>
@@ -106,7 +111,27 @@
               <div class="meta-row"><span class="meta-label">Status</span><Badge :class="statusBadge(selectedInvoice.status)">{{ selectedInvoice.status }}</Badge></div>
               <div class="meta-row"><span class="meta-label">Loads</span><span>{{ selectedInvoice.loads_count }}</span></div>
               <div class="meta-row"><span class="meta-label">Rate / load</span><span>${{ fmtMoney(selectedInvoice.rate_per_load) }}</span></div>
-              <div class="meta-row"><span class="meta-label">Total earnings</span><span class="font-semibold text-emerald-700">${{ fmtMoney(selectedInvoice.total_earnings) }}</span></div>
+              <div class="meta-row"><span class="meta-label">{{ hasAdjustment(selectedInvoice) ? 'Computed' : 'Total earnings' }}</span><span class="font-semibold text-emerald-700">${{ fmtMoney(selectedInvoice.total_earnings) }}</span></div>
+              <template v-if="hasAdjustment(selectedInvoice)">
+                <div class="meta-row">
+                  <span class="meta-label">Admin adjust</span>
+                  <span :class="['font-semibold', selectedInvoice.adjustment > 0 ? 'text-emerald-700' : 'text-red-600']">
+                    {{ formatAdj(selectedInvoice.adjustment) }}
+                  </span>
+                </div>
+                <div v-if="selectedInvoice.adjustment_note" class="meta-row full">
+                  <span class="meta-label">Reason</span>
+                  <span class="text-gray-700 italic">{{ selectedInvoice.adjustment_note }}</span>
+                </div>
+                <div v-if="selectedInvoice.adjusted_by" class="meta-row">
+                  <span class="meta-label">Adjusted by</span>
+                  <span class="text-gray-600 text-[12px]">{{ selectedInvoice.adjusted_by }}{{ selectedInvoice.adjusted_at ? ' · ' + formatDateTime(selectedInvoice.adjusted_at) : '' }}</span>
+                </div>
+                <div class="meta-row" style="border-top:1px solid #e8edf2; padding-top:0.4rem; margin-top:0.2rem;">
+                  <span class="meta-label font-bold">Total due</span>
+                  <span class="font-bold text-emerald-700 text-[15px]">${{ fmtMoney((selectedInvoice.total_earnings || 0) + (selectedInvoice.adjustment || 0)) }}</span>
+                </div>
+              </template>
               <div v-if="selectedInvoice.expenses_total" class="meta-row"><span class="meta-label">Expenses (ref)</span><span>${{ fmtMoney(selectedInvoice.expenses_total) }}</span></div>
             </div>
 
@@ -121,6 +146,16 @@
 
             <!-- Actions -->
             <div class="meta-actions">
+              <!-- Adjust button — Super Admin, available on Draft and Submitted before approval. -->
+              <Button
+                v-if="canAdjust(selectedInvoice)"
+                variant="outline"
+                class="w-full border-amber-400 text-amber-700 hover:bg-amber-50 hover:text-amber-800 mb-2"
+                @click="openAdjust"
+              >
+                {{ hasAdjustment(selectedInvoice) ? 'Edit adjustment' : '+ Add adjustment' }}
+              </Button>
+
               <div v-if="selectedInvoice.status === 'Submitted'" class="flex flex-col gap-2">
                 <Button class="w-full bg-emerald-600 hover:bg-emerald-700 text-white" @click="doAction('approve')">Approve</Button>
                 <Button class="w-full bg-red-600 hover:bg-red-700 text-white" @click="showRejectPrompt = true">Reject</Button>
@@ -158,6 +193,58 @@
                 <Button class="flex-1 bg-red-600 hover:bg-red-700 text-white text-[12px]" :disabled="!rejectionNote.trim()" @click="doReject">Confirm Reject</Button>
               </div>
             </div>
+
+            <!-- Adjust prompt — inline form for +/- adjustment + reason -->
+            <div v-if="showAdjustPrompt" class="adjust-prompt">
+              <label class="text-[12px] font-semibold text-gray-700">Admin adjustment (USD)</label>
+              <div class="flex gap-2 items-center">
+                <span class="text-gray-500 text-[14px]">$</span>
+                <input
+                  v-model.number="adjustAmount"
+                  type="number"
+                  step="0.01"
+                  min="-10000"
+                  max="10000"
+                  class="adjust-input flex-1"
+                  placeholder="0.00"
+                />
+              </div>
+              <div class="adjust-hint">
+                Positive = bonus (e.g. <code>200</code>), negative = deduction (e.g. <code>-50</code>). Cap &plusmn;$10,000.
+              </div>
+              <label class="text-[12px] font-semibold text-gray-700 mt-2">Reason</label>
+              <textarea
+                v-model="adjustReason"
+                rows="2"
+                class="reject-textarea"
+                placeholder="e.g. Performance bonus / Advance recoupment / Damage deduction"
+              ></textarea>
+              <div class="adjust-preview" v-if="selectedInvoice">
+                Computed: <strong>${{ fmtMoney(selectedInvoice.total_earnings) }}</strong>
+                <span v-if="Number(adjustAmount) !== 0">
+                  &nbsp;{{ Number(adjustAmount) > 0 ? '+' : '-' }} <strong>${{ fmtMoney(Math.abs(Number(adjustAmount) || 0)) }}</strong>
+                  &nbsp;=&nbsp;
+                  <strong class="text-emerald-700">
+                    ${{ fmtMoney((selectedInvoice.total_earnings || 0) + (Number(adjustAmount) || 0)) }}
+                  </strong>
+                </span>
+              </div>
+              <div class="flex gap-2 mt-2">
+                <Button variant="outline" class="flex-1 text-[12px]" :disabled="adjustBusy" @click="cancelAdjust">Cancel</Button>
+                <Button
+                  v-if="hasAdjustment(selectedInvoice)"
+                  variant="outline"
+                  class="flex-1 text-[12px] border-red-300 text-red-600 hover:bg-red-50"
+                  :disabled="adjustBusy"
+                  @click="removeAdjustment"
+                >Remove</Button>
+                <Button
+                  class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-[12px]"
+                  :disabled="adjustBusy || !Number.isFinite(Number(adjustAmount))"
+                  @click="submitAdjust"
+                >{{ adjustBusy ? 'Saving…' : 'Save adjustment' }}</Button>
+              </div>
+            </div>
           </div>
         </div>
       </DialogContent>
@@ -168,6 +255,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useInvoicesStore } from '../stores/invoices'
+import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { Card, CardContent } from '@/components/ui/card'
@@ -177,6 +265,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
 const store = useInvoicesStore()
+const auth = useAuthStore()
 const { show: toast } = useToast()
 useSocketRefresh('invoices:changed', () => store.load())
 
@@ -187,6 +276,12 @@ const driverFilter = ref('')
 const weekFilter = ref('')
 const showRejectPrompt = ref(false)
 const rejectionNote = ref('')
+
+// Adjustment prompt state — opens inline below the action buttons.
+const showAdjustPrompt = ref(false)
+const adjustAmount = ref(0)
+const adjustReason = ref('')
+const adjustBusy = ref(false)
 
 const driverOptions = computed(() => {
   const names = store.invoices.map(i => (i.driver || '').toUpperCase()).filter(Boolean)
@@ -224,6 +319,86 @@ function openDetail(inv) {
   showDetail.value = true
   showRejectPrompt.value = false
   rejectionNote.value = ''
+  showAdjustPrompt.value = false
+  adjustAmount.value = 0
+  adjustReason.value = ''
+}
+
+// --- Adjustment helpers ---
+function hasAdjustment(inv) {
+  return inv && Number(inv.adjustment || 0) !== 0
+}
+function canAdjust(inv) {
+  return inv && auth.isSuperAdmin && (inv.status === 'Draft' || inv.status === 'Submitted')
+}
+function formatAdj(amount) {
+  const n = Number(amount || 0)
+  if (n === 0) return ''
+  return (n > 0 ? '+' : '-') + '$' + fmtMoney(Math.abs(n))
+}
+function adjBadgeClass(inv) {
+  const n = Number(inv.adjustment || 0)
+  const base = 'ml-1.5 inline-block px-1.5 py-0.5 rounded text-[10px] font-bold align-middle '
+  return base + (n > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700')
+}
+function adjTooltip(inv) {
+  const n = Number(inv.adjustment || 0)
+  const note = inv.adjustment_note || '(no reason given)'
+  const newTotal = (inv.total_earnings || 0) + n
+  return `Admin adjustment: ${formatAdj(n)} (${note})\nNew total: $${fmtMoney(newTotal)}`
+}
+
+function openAdjust() {
+  if (!selectedInvoice.value) return
+  adjustAmount.value = Number(selectedInvoice.value.adjustment || 0)
+  adjustReason.value = selectedInvoice.value.adjustment_note || ''
+  showAdjustPrompt.value = true
+  showRejectPrompt.value = false
+}
+function cancelAdjust() {
+  if (adjustBusy.value) return
+  showAdjustPrompt.value = false
+  adjustAmount.value = 0
+  adjustReason.value = ''
+}
+async function submitAdjust() {
+  if (!selectedInvoice.value || adjustBusy.value) return
+  const amt = Number(adjustAmount.value)
+  if (!Number.isFinite(amt)) {
+    toast('Adjustment must be a number', 'error')
+    return
+  }
+  if (Math.abs(amt) > 10000) {
+    toast('Adjustment magnitude capped at $10,000', 'error')
+    return
+  }
+  adjustBusy.value = true
+  try {
+    await store.adjust(selectedInvoice.value.id, amt, adjustReason.value.trim())
+    const fresh = store.invoices.find(i => i.id === selectedInvoice.value.id)
+    if (fresh) selectedInvoice.value = fresh
+    showAdjustPrompt.value = false
+    toast(amt === 0 ? 'Adjustment removed' : `Adjustment saved (${formatAdj(amt)})`, 'success')
+  } catch (err) {
+    toast(err?.message || 'Failed to save adjustment', 'error')
+  } finally {
+    adjustBusy.value = false
+  }
+}
+async function removeAdjustment() {
+  if (!selectedInvoice.value || adjustBusy.value) return
+  adjustBusy.value = true
+  try {
+    await store.adjust(selectedInvoice.value.id, 0, '')
+    const fresh = store.invoices.find(i => i.id === selectedInvoice.value.id)
+    if (fresh) selectedInvoice.value = fresh
+    showAdjustPrompt.value = false
+    toast('Adjustment removed', 'success')
+  } catch (err) {
+    toast(err?.message || 'Failed to remove adjustment', 'error')
+  } finally {
+    adjustBusy.value = false
+  }
 }
 
 async function quickAction(inv, action) {
@@ -459,6 +634,41 @@ onMounted(() => store.load())
   min-height: 70px;
 }
 .reject-textarea:focus { outline: none; border-color: #dc2626; box-shadow: 0 0 0 3px rgba(220,38,38,0.1); }
+
+/* Adjustment prompt — visually distinct from reject (amber tone) */
+.adjust-prompt {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.adjust-input {
+  padding: 0.5rem 0.7rem;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fff;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #111827;
+}
+.adjust-input:focus { outline: none; border-color: #d97706; box-shadow: 0 0 0 3px rgba(217,119,6,0.15); }
+.adjust-hint { font-size: 0.7rem; color: #92400e; }
+.adjust-hint code { background: #fef3c7; padding: 0 0.25rem; border-radius: 3px; }
+.adjust-preview {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  background: #fff;
+  border: 1px dashed #fde68a;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  color: #6b7280;
+  text-align: center;
+}
 
 @media (max-width: 900px) {
   .detail-body { grid-template-columns: 1fr; }

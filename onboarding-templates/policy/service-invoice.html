@@ -430,6 +430,20 @@
         tbody.appendChild(tr);
       });
 
+      // ADJUSTMENT row — populated by the renderer when invoices.adjustment != 0.
+      // Hidden when amount is empty (see policy-renderer.js). Sits between the
+      // day rows and TOTAL DUE so the admin's bonus/deduction is visible just
+      // before the final number.
+      const adjustmentRow = document.createElement('tr');
+      adjustmentRow.className = 'adjustment-row';
+      adjustmentRow.setAttribute('data-show-when-adjusted', '');
+      adjustmentRow.innerHTML = `
+        <td><strong><span aria-label="Adjustment label"></span></strong></td>
+        <td colspan="3"><em><span aria-label="Adjustment reason"></span></em></td>
+        <td class="total-cell"><span aria-label="Adjustment amount"></span></td>
+      `;
+      tbody.appendChild(adjustmentRow);
+
       // TOTAL DUE row
       const totalRow = document.createElement('tr');
       totalRow.className = 'total-row';
