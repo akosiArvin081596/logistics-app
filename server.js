@@ -8193,6 +8193,43 @@ app.delete("/api/admin/excluded-days/:id", requireRole("Super Admin"), (req, res
 	}
 });
 
+// GET /api/admin/driver-day-overrides — Super Admin only. Powers the dedicated
+// /admin/driver-pay-overrides admin page. Returns every override row in one
+// payload plus a `drivers` list (union of drivers_directory + currently-
+// assigned truck drivers) for the page's driver dropdown — saves a second
+// round-trip and keeps the page self-contained.
+app.get("/api/admin/driver-day-overrides", requireRole("Super Admin"), (req, res) => {
+	try {
+		const overrides = db.prepare(
+			"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days ORDER BY excluded_date DESC, id DESC"
+		).all();
+		// Driver universe = anyone in drivers_directory OR currently assigned to
+		// a truck. Some drivers exist in only one or the other depending on how
+		// they were onboarded, so union both. Lowercase-deduped, original case
+		// preserved when available.
+		const seen = new Map(); // lc → display
+		try {
+			db.prepare("SELECT driver_name FROM drivers_directory WHERE driver_name IS NOT NULL AND driver_name != ''")
+				.all().forEach(r => {
+					const lc = (r.driver_name || "").trim().toLowerCase();
+					if (lc && !seen.has(lc)) seen.set(lc, r.driver_name.trim());
+				});
+		} catch {}
+		try {
+			db.prepare("SELECT DISTINCT assigned_driver FROM trucks WHERE assigned_driver IS NOT NULL AND assigned_driver != ''")
+				.all().forEach(r => {
+					const lc = (r.assigned_driver || "").trim().toLowerCase();
+					if (lc && !seen.has(lc)) seen.set(lc, r.assigned_driver.trim());
+				});
+		} catch {}
+		const drivers = [...seen.values()].sort((a, b) => a.localeCompare(b));
+		res.json({ overrides, drivers });
+	} catch (error) {
+		console.error("Error listing driver day overrides:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Per-IP throttle for driver write paths. Sized for one human driver hitting
 // these from a phone — a normal shift sees < 60 status/respond/message/expense
 // writes per minute. The Sheets API ceiling is 300 req/min for the whole
