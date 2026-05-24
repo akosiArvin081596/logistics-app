@@ -806,6 +806,11 @@ db.exec(`
 	)
 `);
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_excl_driver_days_driver ON excluded_driver_days(driver_name)"); } catch {}
+// Action column lets the same table hold both kinds of override: 'remove'
+// (drop a day the ELD counted but the driver didn't work) and 'add' (credit
+// a day the driver worked but the ELD missed — truck offline, etc.).
+// Pre-existing rows default to 'remove' so behavior is unchanged.
+try { db.exec("ALTER TABLE excluded_driver_days ADD COLUMN action TEXT DEFAULT 'remove'"); } catch {}
 
 // Migration: messages attachment columns
 try { db.prepare("SELECT attachment_url FROM messages LIMIT 1").get(); }
@@ -5532,6 +5537,34 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 			}
 		}
 
+		// Apply admin overrides — Super Admin's manual (driver, date) adjustments
+		// from /api/admin/excluded-days. CLAUDE.md requires the three pay paths
+		// (/api/investor, /api/financials, this) stay in lockstep, so we honor the
+		// same overrides here, clipped to the invoice's Sat–Fri week.
+		{
+			const ovrAll = getAllExcludedDriverDays()[nameNorm];
+			if (ovrAll) {
+				if (ovrAll.remove && ovrAll.remove.size) {
+					for (const ds of ovrAll.remove) {
+						if (ds >= weekStart && ds <= computedWeekEnd) {
+							activeDaySet.delete(ds);
+							delete dayLoadMap[ds];
+						}
+					}
+				}
+				if (ovrAll.add && ovrAll.add.size) {
+					for (const ds of ovrAll.add) {
+						if (ds >= weekStart && ds <= computedWeekEnd) {
+							activeDaySet.add(ds);
+							// Admin-added days aren't tied to a load row, so the
+							// BoL column on the invoice grid stays empty for them.
+							if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
+						}
+					}
+				}
+			}
+		}
+
 		const activeDays = activeDaySet.size;
 		// `let` because owner-op (percentage) drivers override this further down.
 		let totalEarnings = activeDays * dailyRate;
@@ -8102,48 +8135,56 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 	}
 });
 
-// POST /api/admin/excluded-days — Super Admin manually drops a (driver, date)
-// from the active-day count. With ELD-intersection driving the count, the calc
-// is usually right — but a parked-but-creeping ELD ping, a midnight-boundary
-// quirk, or a stale window can still over-count. This is the manual override.
-// /api/investor and /api/financials both consult excluded_driver_days, so the
-// number drops in lockstep across the investor view and the company P&L.
+// POST /api/admin/excluded-days — Super Admin manually overrides a (driver, date)
+// in the active-day count. Two override types share this endpoint via `action`:
+//   - 'remove' (default): drop a day the ELD over-counted (parked-but-creeping
+//     ping, midnight-boundary quirk, stale window).
+//   - 'add': credit a day the driver worked but the ELD missed (truck offline,
+//     vehicle not yet linked, gap in the feed).
+// /api/investor, /api/financials, and /api/invoices/generate all consult this
+// table, so an override moves in lockstep across the investor view, company
+// P&L, and weekly invoice PDF.
 app.post("/api/admin/excluded-days", requireRole("Super Admin"), (req, res) => {
 	try {
 		const driverNameRaw = (req.body && req.body.driverName) || "";
 		const date = (req.body && req.body.date) || "";
 		const reason = ((req.body && req.body.reason) || "").toString().trim().slice(0, 500);
+		const actionRaw = ((req.body && req.body.action) || "remove").toString().toLowerCase();
+		const action = actionRaw === "add" ? "add" : "remove";
 		const driver = normalizeDriverName(driverNameRaw);
 		if (!driver) return res.status(400).json({ error: "Missing driverName" });
 		if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Invalid date — must be YYYY-MM-DD" });
 		const excludedBy = req.session.user.username || req.session.user.full_name || "";
 		const result = db.prepare(
-			"INSERT OR IGNORE INTO excluded_driver_days (driver_name, excluded_date, reason, excluded_by) VALUES (?, ?, ?, ?)"
-		).run(driver, date, reason, excludedBy);
-		logAudit(req, "exclude_driver_day", "driver_active_day", `${driver}:${date}`, reason || `Excluded by ${excludedBy}`);
+			"INSERT OR IGNORE INTO excluded_driver_days (driver_name, excluded_date, reason, excluded_by, action) VALUES (?, ?, ?, ?, ?)"
+		).run(driver, date, reason, excludedBy, action);
+		const auditAction = action === "add" ? "add_driver_day" : "exclude_driver_day";
+		logAudit(req, auditAction, "driver_active_day", `${driver}:${date}`, reason || `${action === "add" ? "Added" : "Excluded"} by ${excludedBy}`);
 		jtCacheInvalidate();
 		const row = db.prepare(
-			"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at FROM excluded_driver_days WHERE driver_name = ? AND excluded_date = ?"
+			"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days WHERE driver_name = ? AND excluded_date = ?"
 		).get(driver, date);
 		res.json({ success: true, inserted: result.changes > 0, row });
 	} catch (error) {
-		console.error("Error excluding driver day:", error.message);
+		console.error("Error overriding driver day:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
 
 // DELETE /api/admin/excluded-days/:id — Super Admin restores a previously
-// excluded day. Mirror of the soft-delete + restore pattern used elsewhere.
+// overridden day. Works for both 'remove' and 'add' overrides — dropping the
+// row reverts the active-day count to whatever ELD+loads compute on their own.
 app.delete("/api/admin/excluded-days/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		const id = parseInt(req.params.id, 10);
 		if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
 		const row = db.prepare(
-			"SELECT id, driver_name, excluded_date, reason FROM excluded_driver_days WHERE id = ?"
+			"SELECT id, driver_name, excluded_date, reason, COALESCE(action, 'remove') AS action FROM excluded_driver_days WHERE id = ?"
 		).get(id);
 		if (!row) return res.status(404).json({ error: "Not found" });
 		db.prepare("DELETE FROM excluded_driver_days WHERE id = ?").run(id);
-		logAudit(req, "restore_driver_day", "driver_active_day", `${row.driver_name}:${row.excluded_date}`, row.reason || "");
+		const auditAction = row.action === "add" ? "restore_added_driver_day" : "restore_driver_day";
+		logAudit(req, auditAction, "driver_active_day", `${row.driver_name}:${row.excluded_date}`, row.reason || "");
 		jtCacheInvalidate();
 		res.json({ success: true });
 	} catch (error) {
@@ -8751,18 +8792,22 @@ function excludeDroppedLoads(rows, headers, deletedIds) {
 	});
 }
 
-// Returns { normalizedDriverName: Set<"YYYY-MM-DD"> } for every admin-excluded
-// active day. Consumed by /api/investor and /api/financials so a Super-Admin
-// override drops the day from the investor view and the company P&L together.
+// Returns { normalizedDriverName: { remove: Set<"YYYY-MM-DD">, add: Set<"YYYY-MM-DD"> } }
+// for every admin override. Consumed by /api/investor, /api/financials, and
+// /api/invoices/generate so a Super-Admin override drops or adds the day
+// across the investor view, company P&L, and weekly invoice together.
+// `remove` strips a day from the computed active-day set; `add` credits a day
+// the ELD missed (truck offline / lost feed).
 function getAllExcludedDriverDays() {
 	const map = {};
 	try {
-		db.prepare("SELECT driver_name, excluded_date FROM excluded_driver_days").all().forEach((r) => {
+		db.prepare("SELECT driver_name, excluded_date, COALESCE(action, 'remove') AS action FROM excluded_driver_days").all().forEach((r) => {
 			const dn = (r.driver_name || "").trim();
 			const dt = (r.excluded_date || "").trim();
 			if (!dn || !dt) return;
-			if (!map[dn]) map[dn] = new Set();
-			map[dn].add(dt);
+			if (!map[dn]) map[dn] = { remove: new Set(), add: new Set() };
+			if (r.action === "add") map[dn].add.add(dt);
+			else map[dn].remove.add(dt);
 		});
 	} catch { /* table missing on first boot — fall through */ }
 	return map;
@@ -13131,9 +13176,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// Per-driver per-month REVENUE (completed loads only). Used by the
 		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
 		const driverMonthlyRevenue = {}; // { driver: { "YYYY-MM": revenue } }
-		// Admin-excluded days — Super Admin override that drops a specific
-		// (driver, date) from /api/investor and /api/financials in lockstep.
-		const excludedDaysByDriver = getAllExcludedDriverDays();
+		// Admin overrides — Super Admin moves a (driver, date) into or out of
+		// the active-day count. `remove` drops a day the ELD over-counted;
+		// `add` credits a day the ELD missed (truck offline, etc.). Applied
+		// the same way across /api/investor, /api/financials, and the weekly
+		// invoice so the three numbers stay reconciled.
+		const driverDayOverrides = getAllExcludedDriverDays();
 		const now = new Date();
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -13225,12 +13273,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					// isn't zeroed; a covered-but-parked window stays 0.
 					const covered = eld && windowDays.some(d => eld.coverage.has(d));
 					const eldCounted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
-					// Drop admin-excluded days last. The ELD/estimated source flag
-					// still reflects the underlying day source — an exclusion is a
-					// manual override, not a change to how the day was originally
-					// classified.
-					const skipSet = excludedDaysByDriver[driver] || null;
-					const counted = skipSet ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
+					// Drop admin-removed days last. The ELD/estimated source flag
+					// still reflects the underlying day source — an override is a
+					// manual adjustment, not a change to how the day was originally
+					// classified. Admin-added days are applied after this loop so
+					// they don't depend on a load existing for that date.
+					const ovr = driverDayOverrides[driver] || null;
+					const skipSet = ovr ? ovr.remove : null;
+					const counted = skipSet && skipSet.size ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
 					const srcKey = covered ? "eld" : "est";
 					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
 					const displayDriver = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
@@ -13265,6 +13315,28 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				}
 			}
 		});
+
+		// Apply admin-added days — Super Admin credits a day the ELD missed
+		// (truck offline, vehicle not linked, gap in feed). Bucketed by the
+		// date's own calendar month since added days aren't tied to any load's
+		// assigned-month key. Sourced as 'est' since by definition this isn't
+		// ELD-verified. Only applies to drivers visible in this scope (the
+		// outer filteredJobData is investor-scoped via investorDriverSet upstream).
+		for (const [drv, ovr] of Object.entries(driverDayOverrides)) {
+			if (!ovr.add || !ovr.add.size) continue;
+			if (investorDriverSet && !investorDriverSet.has(drv)) continue;
+			if (!driverDaySets[drv]) driverDaySets[drv] = new Set();
+			if (!driverMonthlyDays[drv]) driverMonthlyDays[drv] = {};
+			if (!driverDaySource[drv]) driverDaySource[drv] = {};
+			for (const d of ovr.add) {
+				driverDaySets[drv].add(d);
+				const bucket = d.slice(0, 7);
+				if (!driverMonthlyDays[drv][bucket]) driverMonthlyDays[drv][bucket] = new Set();
+				driverMonthlyDays[drv][bucket].add(d);
+				if (!driverDaySource[drv][bucket]) driverDaySource[drv][bucket] = { eld: false, est: false };
+				driverDaySource[drv][bucket].est = true;
+			}
+		}
 
 		// Avg daily revenue = 30-day average (S2).
 		// Gross = raw top-line from completed loads in the trailing 30 days.
@@ -13405,12 +13477,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// both its revenue AND its driver pay in April.
 			// Branches on pay_type: percentage drivers use (monthRevenue − monthDeductible) × pct.
 			const monthlyDriverPay = {};
-			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay, payType, payPercentage, monthRevenue, monthDeductible, netForPercentage, source, dayBreakdown, excludedDays, displayDriverName } } }
-			// Full excluded-day rows (with id + reason) for the modal's restore action.
-			const excludedDayRows = (() => {
+			const monthlyDriverDetails = {}; // { "YYYY-MM": { driver: { activeDays, dailyRate, totalPay, payType, payPercentage, monthRevenue, monthDeductible, netForPercentage, source, dayBreakdown, excludedDays, addedDays, displayDriverName } } }
+			// Full override rows (with id + reason + action) for the modal's
+			// restore action. Split into excluded vs added below.
+			const overrideRows = (() => {
 				try {
 					return db.prepare(
-						"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at FROM excluded_driver_days"
+						"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days"
 					).all();
 				} catch { return []; }
 			})();
@@ -13438,9 +13511,25 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					const dayBreakdown = Object.entries(perDayLoads)
 						.sort(([a], [b]) => a.localeCompare(b))
 						.map(([date, lidSet]) => ({ date, loadIds: [...lidSet].sort() }));
-					// Excluded days for this driver in this assigned-month bucket.
-					const excludedDays = excludedDayRows
-						.filter((er) => er.driver_name === driver && (er.excluded_date || "").slice(0, 7) === mk)
+					// Override rows for this driver in this assigned-month bucket.
+					// `excludedDays` (action='remove') = days the admin dropped from
+					// the count. `addedDays` (action='add') = days credited because
+					// the ELD missed them. Both surface in the modal so the audit
+					// trail is visible.
+					const driverMonthOverrides = overrideRows
+						.filter((er) => er.driver_name === driver && (er.excluded_date || "").slice(0, 7) === mk);
+					const excludedDays = driverMonthOverrides
+						.filter((er) => er.action !== "add")
+						.map((er) => ({
+							id: er.id,
+							date: er.excluded_date,
+							reason: er.reason || "",
+							excludedBy: er.excluded_by || "",
+							excludedAt: er.excluded_at || "",
+						}))
+						.sort((a, b) => a.date.localeCompare(b.date));
+					const addedDays = driverMonthOverrides
+						.filter((er) => er.action === "add")
 						.map((er) => ({
 							id: er.id,
 							date: er.excluded_date,
@@ -13460,6 +13549,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						source: daySrcLabel(driverDaySource[driver] && driverDaySource[driver][mk]),
 						dayBreakdown,
 						excludedDays,
+						addedDays,
 						displayDriverName: driverDisplayName[driver] || driver,
 					};
 				}
@@ -14010,9 +14100,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// Per-driver per-month REVENUE (completed loads only). Used by the
 		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
 		const driverMonthlyRevenue = {}; // { driver_lc: { "YYYY-MM": revenue } }
-		// Mirror the admin-exclusion filter from /api/investor so the company P&L
-		// and investor view honor the same overrides (CLAUDE.md consistency rule).
-		const excludedDaysByDriver = getAllExcludedDriverDays();
+		// Mirror the admin overrides from /api/investor so the company P&L
+		// and investor view honor the same adjustments (CLAUDE.md consistency
+		// rule). `remove` filters days out; `add` credits ELD-missed days.
+		const driverDayOverrides = getAllExcludedDriverDays();
 		const now = new Date();
 
 		// ---- ELD travel-day index (per linked vehicle), fleet-wide ----
@@ -14126,9 +14217,11 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					// /api/investor for rationale).
 					const covered = eld && windowDays.some(d => eld.coverage.has(d));
 					const eldCounted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
-					// Strip admin-excluded days last so the override flows here too.
-					const skipSet = driverLc ? (excludedDaysByDriver[driverLc] || null) : null;
-					const counted = skipSet ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
+					// Strip admin-removed days here; admin-added days are applied
+					// after the loop so they don't require a load row to exist.
+					const ovr = driverLc ? (driverDayOverrides[driverLc] || null) : null;
+					const skipSet = ovr ? ovr.remove : null;
+					const counted = skipSet && skipSet.size ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
 					if (driverLc) {
 						if (!driverDaySets[driverLc]) driverDaySets[driverLc] = new Set();
 						counted.forEach(d => driverDaySets[driverLc].add(d));
@@ -14143,6 +14236,17 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				}
 			}
 		});
+
+		// Apply admin-added days fleet-wide. Same as /api/investor: credits a
+		// day the ELD missed (truck offline, vehicle not linked, feed gap) to
+		// the driver's all-time active-day set. Per-truck day sets are not
+		// touched — added days are driver-keyed, and the per-truck breakdown
+		// uses unfiltered ELD travel anyway.
+		for (const [drv, ovr] of Object.entries(driverDayOverrides)) {
+			if (!ovr.add || !ovr.add.size) continue;
+			if (!driverDaySets[drv]) driverDaySets[drv] = new Set();
+			for (const d of ovr.add) driverDaySets[drv].add(d);
+		}
 
 		let monthsOfOperation = 1;
 		if (earliestDate && latestDate) {
