@@ -303,6 +303,11 @@ const SCAN_PRE_DOWNSCALE = 2000   // px — clip source before cv.imread() to av
 const SCAN_OUTPUT_MAX = 1200      // px — final long edge (matches compressImage)
 const SCAN_BW_CUTOFF = 150        // luma threshold; paper photos read dim, so 150
                                   // gives more black ink than the naive 127
+// iOS Safari doesn't fire <script>.onerror for WASM-instantiation failures —
+// only HTTP-level fetch errors. Without an explicit timeout, a stalled WASM
+// compile leaves the button frozen on "Loading scanner…". 30s tolerates
+// older iPhone WASM compile + cellular re-download of the 9MB bundle.
+const SCANNER_LOAD_TIMEOUT_MS = 30_000
 
 let openCVPromise = null
 
@@ -310,7 +315,7 @@ function loadOpenCV() {
   if (typeof window === 'undefined') return Promise.reject(new Error('no_window'))
   if (window.cv && window.cv.Mat) return Promise.resolve(window.cv)
   if (openCVPromise) return openCVPromise
-  openCVPromise = new Promise((resolve, reject) => {
+  const loadPromise = new Promise((resolve, reject) => {
     // The opencv.js we ship from /vendor/opencv/ has its WASM embedded as a
     // base64 data URL, so no locateFile shim is needed — it boots from the
     // single JS file alone. Module.onRuntimeInitialized must be set BEFORE the
@@ -326,11 +331,15 @@ function loadOpenCV() {
     const s = document.createElement('script')
     s.src = '/vendor/opencv/opencv.js'
     s.async = true
-    s.onerror = () => {
-      openCVPromise = null
-      reject(new Error('opencv_load_failed'))
-    }
+    s.onerror = () => reject(new Error('opencv_load_failed'))
     document.head.appendChild(s)
+  })
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('scanner_timeout')), SCANNER_LOAD_TIMEOUT_MS)
+  })
+  openCVPromise = Promise.race([loadPromise, timeoutPromise]).catch((err) => {
+    openCVPromise = null   // allow a fresh retry on the next tap
+    throw err
   })
   return openCVPromise
 }
@@ -353,8 +362,9 @@ async function startScan() {
   try {
     await loadJscanify()
   } catch (err) {
+    console.error('[scanner] load failed:', err?.message || err)
     scannerLoading.value = false
-    toast.show('Scanner unavailable, using photo instead', 'error')
+    toast.show('Scanner unavailable, opening camera instead', 'error')
     // Fallback path: the legacy Take Photo input only renders for non-POD
     // types, so for POD/BOL we use the same hidden scan input but skip the
     // scanner overlay — the file lands in files[] via the handleFile path.
