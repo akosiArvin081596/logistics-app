@@ -11,16 +11,6 @@
         <input v-model="form.fullName" class="form-input" type="text" placeholder="e.g. John Smith" />
       </div>
       <div class="form-group">
-        <label class="form-label">Carrier Name *</label>
-        <select v-model="form.carrierName" class="form-select">
-          <option value="">-- Select carrier --</option>
-          <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
-        </select>
-      </div>
-    </div>
-
-    <div class="form-row">
-      <div class="form-group">
         <label class="form-label">Status</label>
         <select v-model="form.status" class="form-select">
           <option value="Active">Active</option>
@@ -42,14 +32,10 @@
 <script setup>
 import { reactive, ref } from 'vue'
 
-defineProps({
-  carrierNames: { type: Array, default: () => [] },
-})
-
 const emit = defineEmits(['submit'])
 
 const defaults = () => ({
-  fullName: '', carrierName: '', status: 'Active', notes: '',
+  fullName: '', status: 'Active', notes: '',
 })
 
 const form = reactive(defaults())
@@ -58,7 +44,6 @@ const errorMsg = ref('')
 function handleSubmit() {
   errorMsg.value = ''
   if (!form.fullName.trim()) { errorMsg.value = 'Investor name is required.'; return }
-  if (!form.carrierName) { errorMsg.value = 'Please select a carrier.'; return }
   emit('submit', { ...form })
   Object.assign(form, defaults())
 }

@@ -20,7 +20,7 @@
         </CardContent>
       </Card>
     </div>
-    <EmptyState v-else>No carriers found.</EmptyState>
+    <EmptyState v-else>No fleet data.</EmptyState>
 
     <Dialog :open="!!selected" @update:open="v => { if (!v) selected = null }">
       <DialogContent class="max-w-[500px]" style="padding:0;">

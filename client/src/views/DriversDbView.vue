@@ -20,10 +20,7 @@
 
     <details class="form-accordion">
       <summary class="form-toggle">+ Add Driver <span class="form-toggle-note">(Case-by-case basis only — should go through the proper application process)</span></summary>
-      <AddDriverForm
-        :carrier-names="carrierNames"
-        @submit="handleAdd"
-      />
+      <AddDriverForm @submit="handleAdd" />
     </details>
 
     <template v-if="store.isLoading">
@@ -33,7 +30,6 @@
       <DriverTable
         :drivers="store.drivers"
         :headers="store.headers"
-        :carrier-names="carrierNames"
         :driver-ratings="driverRatings"
         :truck-assignments="truckAssignments"
         @delete="handleDelete"
@@ -61,13 +57,6 @@ const { show: toast } = useToast()
 useSocketRefresh('drivers:changed', () => store.load())
 const driverRatings = ref({})
 const truckAssignments = ref([])
-
-const carrierNames = computed(() => {
-  const col = store.headers.find(h => /carrier/i.test(h))
-  if (!col) return []
-  const names = store.drivers.map(r => (r[col] || '').trim()).filter(Boolean)
-  return [...new Set(names)].sort()
-})
 
 const kpiCards = computed(() => {
   const drv = store.drivers

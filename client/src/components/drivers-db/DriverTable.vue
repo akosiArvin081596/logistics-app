@@ -12,7 +12,6 @@
         <tr>
           <th>Driver</th>
           <th>Status</th>
-          <th>Carrier</th>
           <th>Location</th>
           <th>Phone</th>
           <th>Email</th>
@@ -30,7 +29,6 @@
           <td>
             <span class="status-badge" :class="statusClass(d)">{{ (d.Status || 'active').toUpperCase() }}</span>
           </td>
-          <td>{{ d[h.carrier] || '\u2014' }}</td>
           <td>{{ locStr(d) }}</td>
           <td>{{ d[h.phone] || '\u2014' }}</td>
           <td>{{ d[h.email] || '\u2014' }}</td>
@@ -174,18 +172,9 @@
         <div class="confirm-dialog edit-dialog">
           <h3>Edit Driver &mdash; {{ editForm.driver }}</h3>
 
-          <div class="edit-row">
-            <div class="edit-field">
-              <label>Driver Name</label>
-              <input v-model="editForm.driver" type="text" />
-            </div>
-            <div class="edit-field">
-              <label>Carrier Name</label>
-              <select v-model="editForm.carrierName">
-                <option value="">-- Select --</option>
-                <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
-              </select>
-            </div>
+          <div class="edit-field">
+            <label>Driver Name</label>
+            <input v-model="editForm.driver" type="text" />
           </div>
 
           <div class="edit-field">
@@ -322,7 +311,6 @@ const api = useApi()
 const props = defineProps({
   drivers: { type: Array, default: () => [] },
   headers: { type: Array, default: () => [] },
-  carrierNames: { type: Array, default: () => [] },
   driverRatings: { type: Object, default: () => ({}) },
   truckAssignments: { type: Array, default: () => [] },
 })
@@ -428,7 +416,6 @@ const h = computed(() => {
   const find = (re) => hd.find(c => re.test(c)) || ''
   return {
     driver: find(/^driver$/i),
-    carrier: find(/carrier/i),
     state: find(/^state$/i),
     city: find(/^city$/i),
     zip: find(/^zip$/i),
@@ -447,7 +434,7 @@ const h = computed(() => {
 const viewHeaders = computed(() => props.headers.filter(c => !/carrier/i.test(c)))
 
 const editForm = reactive({
-  driver: '', carrierName: '', state: '', city: '', zip: '', address: '',
+  driver: '', state: '', city: '', zip: '', address: '',
   trucks: '', hazmat: 'NO', phone: '', cell: '', email: '',
   dot: '', mc: '', rating: 'Not Rated', status: 'active',
   payType: 'fixed', payPercentage: 0,
@@ -475,7 +462,6 @@ function locStr(d) {
 function openEdit(d) {
   editRowIndex.value = d._rowIndex
   editForm.driver = d[h.value.driver] || ''
-  editForm.carrierName = d[h.value.carrier] || ''
   editForm.state = d[h.value.state] || ''
   editForm.city = d[h.value.city] || ''
   editForm.zip = d[h.value.zip] || ''
@@ -498,7 +484,9 @@ function handleSaveEdit() {
   emit('update', {
     rowIndex: editRowIndex.value,
     values: [
-      editForm.driver, editForm.carrierName, editForm.state, editForm.city,
+      editForm.driver,
+      '', // Carrier Name — server preserves existing on edit (UI no longer sets it)
+      editForm.state, editForm.city,
       editForm.zip, editForm.address, editForm.trucks, editForm.hazmat,
       editForm.phone, editForm.cell, editForm.email,
       editForm.dot, editForm.mc, editForm.rating, editForm.status,

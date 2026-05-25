@@ -12,7 +12,7 @@
         v-model="search"
         type="text"
         class="search-input"
-        placeholder="Search by name or carrier..."
+        placeholder="Search by name..."
         autocomplete="off"
       />
       <span class="result-count">
@@ -40,7 +40,6 @@
             </div>
             <div class="card-identity">
               <h3 class="card-name">{{ inv.fullName }}</h3>
-              <p v-if="inv.carrierName" class="card-carrier">{{ inv.carrierName }}</p>
             </div>
           </header>
 
@@ -99,7 +98,6 @@ const filtered = computed(() => {
   if (!q) return investors.value
   return investors.value.filter(i =>
     (i.fullName || '').toLowerCase().includes(q) ||
-    (i.carrierName || '').toLowerCase().includes(q) ||
     (i.username || '').toLowerCase().includes(q)
   )
 })
@@ -239,15 +237,6 @@ onMounted(async () => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.card-carrier {
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  margin: 0.15rem 0 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .card-stats {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
