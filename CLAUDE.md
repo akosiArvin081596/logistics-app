@@ -10,6 +10,10 @@ npm run dev          # Run with nodemon for auto-restart on file changes
 # Frontend (Vue 3 + Vite SPA)
 npm run dev:client   # Start Vite dev server on port 5173 (proxies to Express:3000)
 npm run build:client # Production build to client/dist/
+
+# Docs (Puppeteer-driven static doc/screenshot generation from scripts/docs/)
+npm run docs:build       # node scripts/docs/generate-docs.js
+npm run docs:screenshots # node scripts/docs/capture-screenshots.js
 ```
 
 Development requires two terminals: `npm run dev` + `npm run dev:client`. Open http://localhost:5173 during development.
@@ -24,7 +28,7 @@ ssh root@76.13.22.110 "cd /var/www/logistics-app && git pull --ff-only origin ma
 ```
 A staging process (`logisx-staging`) also runs on the same VPS.
 
-**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured. Integration harness at `test-suite.js` — 25 HTTP tests against a running server (`npm start`, then `node test-suite.js`). Covers auth, role gating, debug-endpoint auth, webhook secret, chat file validation, canceled-load exclusion. Exits 1 on any failure. Seed the DB via `scripts/truncate-and-seed.js` for deterministic state. When editing `server.js`, run `node --check server.js` before committing (~11k lines; a syntax error breaks the whole app).
+**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured. Integration harness at `test-suite.js` — 25 HTTP tests against a running server (`npm start`, then `node test-suite.js`). Covers auth, role gating, debug-endpoint auth, webhook secret, chat file validation, canceled-load exclusion. Exits 1 on any failure. Seed the DB via `scripts/truncate-and-seed.js` for deterministic state. When editing `server.js`, run `node --check server.js` before committing (~15k lines; a syntax error breaks the whole app).
 
 ## Environment Setup
 
@@ -62,7 +66,7 @@ Shared server-side modules live in `lib/` (required from `server.js`):
 ## Architecture
 
 ### Backend (`server.js`)
-Single-file Node.js/Express server (~11,200 lines, ~150 REST endpoints). Google Sheets is the primary database (Sheets API v4); SQLite for local data; Drive API for uploads; Socket.IO for real-time. Body limit raised to 50mb for large payloads with embedded base64 photos/signatures.
+Single-file Node.js/Express server (~15,350 lines, ~168 REST endpoints). Google Sheets is the primary database (Sheets API v4); SQLite for local data; Drive API for uploads; Socket.IO for real-time. Body limit raised to 50mb for large payloads with embedded base64 photos/signatures.
 
 **Static file serving**: Express serves `client/dist/` if it exists (production build), else `public/` (legacy vanilla HTML/JS). SPA catch-all `app.get("*")` serves `index.html` for client-side routing.
 
@@ -93,6 +97,7 @@ Session store also in SQLite.
 - **tesseract.js**: OCR fallback on POD image uploads only (`extractReceiptText()` at `POST /api/documents/upload`). Once hooked into expense receipts but unwired for low accuracy — that path now uses Gemini (see below). Errors are silently swallowed — OCR failure never blocks the upload.
 - **nodemailer**: emails for driver onboarding acceptance and investor outreach. Needs `GMAIL_USER` + `GMAIL_APP_PASSWORD`.
 - **compression**: Gzip response compression middleware.
+- **archiver**: Streams zip downloads directly to the response — currently the per-truck expense-receipts bundle (lazy `require`d inside the handler; error handler installed before `pipe()`).
 - **express-rate-limit**: Per-endpoint limiters; see the rate-limiting section below.
 
 **AI / vision services**:
@@ -260,7 +265,7 @@ Key directories:
 - `composables/` — useApi, useSocket, useToast, usePagination, useGeocode, useGoogleMaps
 - `components/ui/` — shadcn-vue primitives (badge, button, card, dialog, input, select, skeleton, table, tabs)
 - `components/` — feature-organized: layout, shared, dashboard, data-manager, driver, drivers-db, trucks, investors, investor, invest, apply, users
-- `views/` — 24 view components (includes the public `TrackLoadView.vue`)
+- `views/` — 28 view components (includes the public `TrackLoadView.vue`)
 - `wizard/` — JSON-driven framework for the multi-step Invest flow. `engine/WizardEngine.js` interprets a step schema from `data/`, `expressionEvaluator.js` evaluates `show-if`/`require-if` without `eval()`, `spotlight.js` drives the highlight overlay. Extend this engine for new multi-step forms instead of a bespoke stepper.
 
 **Vite proxy** (`client/vite.config.js`): `/api` and `/socket.io` (with `ws: true`) both proxy to `http://localhost:3000`.
@@ -275,7 +280,7 @@ Key directories:
 
 **Mobile / admin drawer**: A shared `appShell` Pinia store exposes `isMobile` (resize-driven) and `sidebarOpen`. On mobile, `AppSidebar.vue` is a slide-in drawer with backdrop (`v-if="isMobile && appShell.sidebarOpen"`); on desktop, the persistent collapsible sidebar. New admin views should toggle it via `appShell.openSidebar()` rather than rolling their own mobile nav. Admin pages (Dashboard, Notifications, Messages, Expenses) are responsive top-down — commits `dbe9d4e`…`8e1a62d` collapse multi-pane layouts into single-pane stacks below the `md` breakpoint and swap detail tables for card lists. Vant is reserved for driver/public surfaces; admin uses shadcn-vue + Tailwind.
 
-**Routing** (25 routes with role-based guards):
+**Routing** (34 routes with role-based guards):
 
 | Route | Access | Notes |
 |-------|--------|-------|
@@ -305,6 +310,7 @@ Key directories:
 | `/investor-applications` | Super Admin | Investor applications review |
 | `/admin/tools` | Super Admin | Admin data tools |
 | `/admin/financials` | Super Admin | Company P&L view |
+| `/admin/fleet-health` | Super Admin, Dispatcher | Routemate ELD fleet health — fault codes, DVIR, telemetry status |
 | `/archive` | Super Admin | Archived data viewer |
 
 Auth guard calls `checkSession()` on first navigation only (blocks until resolved); later navigations use cached `isAuthenticated`. Unauthorized users redirect to `auth.roleHome` (Driver → `/driver`, Dispatcher → `/dashboard`, Investor → `/investor`).
