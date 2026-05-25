@@ -1,20 +1,35 @@
 <template>
   <div>
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
-      <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
+      <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+        <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
+        <button
+          v-if="needsReviewCount > 0"
+          type="button"
+          :style="reviewToggleStyle"
+          :title="needsReviewOnly ? 'Showing only loads that need review' : 'Show only loads where the dispatch workflow couldn’t fully extract the rate-con'"
+          @click="needsReviewOnly = !needsReviewOnly"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          Needs Review ({{ needsReviewCount }})
+        </button>
+      </div>
       <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
 
     <div class="overflow-x-auto">
       <SkeletonLoader v-if="loading" />
-      <EmptyState v-else-if="filteredJobs.length === 0">{{ searchQuery ? 'No loads match your search.' : 'All loads are assigned.' }}</EmptyState>
+      <EmptyState v-else-if="filteredJobs.length === 0">{{ needsReviewOnly ? 'No unassigned loads need review.' : (searchQuery ? 'No loads match your search.' : 'All loads are assigned.') }}</EmptyState>
       <!-- Mobile: card-per-load. Tap the card body → detail modal. Assign
            dropdown stays inline so dispatch can handle the most common
            action without opening anything. -->
       <div v-else-if="isMobile" class="mobile-job-list">
         <div v-for="job in paginatedItems" :key="job._rowIndex" class="mobile-job-card" @click="openDetail(job)">
           <div class="mobile-job-head">
-            <div class="mobile-job-id">{{ cellValue(job, loadIdCol) || '—' }}</div>
+            <div class="mobile-job-id">
+              <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
+              {{ cellValue(job, loadIdCol) || '—' }}
+            </div>
             <StatusBadge :status="statusValueOf(job) || 'Unassigned'" />
           </div>
           <div class="mobile-job-route">
@@ -57,6 +72,10 @@
                 <span class="addr-street">{{ addrStreet(job, col) || addrCsz(job, col) || '—' }}</span>
                 <span v-if="addrStreet(job, col) && addrCsz(job, col)" class="addr-csz">{{ addrCsz(job, col) }}</span>
               </div>
+              <template v-else-if="col === loadIdCol">
+                <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
+                {{ cellValue(job, col) }}
+              </template>
               <template v-else>{{ cellValue(job, col) }}</template>
             </TableCell>
             <TableCell @click.stop>
@@ -78,9 +97,10 @@
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap;">
-            <div class="flex items-center gap-3">
+            <div class="flex items-center gap-3" style="flex-wrap:wrap;">
               <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
               <StatusBadge v-if="statusValue" :status="statusValue" />
+              <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Open in Active Loads → Edit to fill the gaps.">⚠ Needs Review</span>
             </div>
             <div style="display:flex;gap:0.5rem;align-items:center;">
               <button
@@ -189,6 +209,7 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
+import { needsReview, countNeedsReview } from '../../lib/loadReview'
 
 const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
@@ -206,8 +227,36 @@ const assignSelections = reactive({})
 watch(() => props.jobs, (jobs) => { jobs.forEach(j => { if (!(j._rowIndex in assignSelections)) assignSelections[j._rowIndex] = '' }) }, { immediate: true })
 const selectedJob = ref(null)
 const searchQuery = ref('')
+const needsReviewOnly = ref(false)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
-const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
+const needsReviewCount = computed(() => countNeedsReview(props.jobs))
+const filteredJobs = computed(() => {
+  let pool = props.jobs
+  if (needsReviewOnly.value) pool = pool.filter(needsReview)
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q || !loadIdCol.value) return pool
+  return pool.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q))
+})
+const reviewToggleStyle = computed(() => ({
+  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+  borderRadius: '6px', cursor: 'pointer', fontFamily: 'inherit',
+  border: '1px solid ' + (needsReviewOnly.value ? '#f59e0b' : '#d1d5db'),
+  background: needsReviewOnly.value ? '#fef3c7' : '#ffffff',
+  color: needsReviewOnly.value ? '#92400e' : '#374151',
+  transition: 'all 0.15s',
+}))
+const reviewBadgeStyle = {
+  display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
+  marginRight: '0.4rem',
+  padding: '1px 6px', fontSize: '0.62rem', fontWeight: '700',
+  textTransform: 'uppercase', letterSpacing: '0.04em',
+  borderRadius: '4px',
+  border: '1px solid #fde68a',
+  background: '#fffbeb',
+  color: '#92400e',
+  whiteSpace: 'nowrap',
+}
 const statusCol = computed(() => props.headers.find(h => /status/i.test(h)) || null)
 function hideAssign(j) { if (statusCol.value && /^(completed|canceled)$/i.test((j[statusCol.value] || '').trim())) return true; return false }
 async function openDetail(j) {

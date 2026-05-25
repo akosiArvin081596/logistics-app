@@ -1,12 +1,24 @@
 <template>
   <div>
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
-      <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
+      <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+        <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
+        <button
+          v-if="needsReviewCount > 0"
+          type="button"
+          :style="reviewToggleStyle"
+          :title="needsReviewOnly ? 'Showing only loads that need review' : 'Show only loads where the dispatch workflow couldn’t fully extract the rate-con'"
+          @click="needsReviewOnly = !needsReviewOnly"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          Needs Review ({{ needsReviewCount }})
+        </button>
+      </div>
       <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
 
     <div class="overflow-x-auto">
-      <EmptyState v-if="filteredJobs.length === 0">{{ searchQuery ? 'No loads match your search.' : 'No active loads right now.' }}</EmptyState>
+      <EmptyState v-if="filteredJobs.length === 0">{{ needsReviewOnly ? 'No loads currently need review — every active load has a complete rate-con.' : (searchQuery ? 'No loads match your search.' : 'No active loads right now.') }}</EmptyState>
       <!-- Mobile: card per active load. Tap the card body → detail modal
            (which carries the full status history, Cancel, Delete, and map).
            Inline Status + Driver selects stay because they're the two
@@ -14,7 +26,10 @@
       <div v-else-if="isMobile" class="mobile-load-list">
         <div v-for="job in paginatedItems" :key="job._rowIndex" class="mobile-load-card" @click="openDetail(job)">
           <div class="mobile-load-head">
-            <div class="mobile-load-id">{{ cellValue(job, loadIdCol) || '—' }}</div>
+            <div class="mobile-load-id">
+              <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
+              {{ cellValue(job, loadIdCol) || '—' }}
+            </div>
             <StatusBadge v-if="getCurrentStatus(job)" :status="getCurrentStatus(job)" />
           </div>
           <div class="mobile-load-route">
@@ -72,6 +87,10 @@
                 <span class="addr-street">{{ addrStreet(job, col) || addrCsz(job, col) || '—' }}</span>
                 <span v-if="addrStreet(job, col) && addrCsz(job, col)" class="addr-csz">{{ addrCsz(job, col) }}</span>
               </div>
+              <template v-else-if="col === loadIdCol">
+                <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
+                {{ cellValue(job, col) }}
+              </template>
               <template v-else>{{ cellValue(job, col) }}</template>
             </TableCell>
             <TableCell @click.stop>
@@ -107,7 +126,10 @@
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;">
-            <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+            <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+              <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+              <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Click Edit to fill in the gaps.">⚠ Needs Review</span>
+            </div>
             <div style="display:flex;gap:0.5rem;align-items:center;">
               <button
                 v-if="loadIdValue"
@@ -129,6 +151,16 @@
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
                 Override
+              </button>
+              <button
+                v-if="loadIdValue && (auth.isSuperAdmin || auth.user?.role === 'Dispatcher')"
+                type="button"
+                :style="editBtnStyle"
+                title="Manually edit load fields the dispatch workflow couldn't extract"
+                @click="openEdit"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                Edit
               </button>
               <button
                 v-if="loadIdValue && auth.isSuperAdmin"
@@ -273,6 +305,49 @@
       </DialogContent>
     </Dialog>
 
+    <!-- Edit Load modal — Super Admin + Dispatcher. Manually fill columns the
+         n8n dispatch workflow couldn't extract (Bison-style emails, etc.). -->
+    <Dialog :open="showEdit" @update:open="v => { if (!v) closeEdit() }">
+      <DialogContent class="max-w-[640px] max-h-[85vh] flex flex-col overflow-hidden" style="padding:0;">
+        <DialogHeader style="padding:1rem 1.25rem;border-bottom:1px solid #f3f4f6;">
+          <DialogTitle>Edit Load — {{ loadIdValue }}</DialogTitle>
+          <DialogDescription class="sr-only">Update load details that the dispatch workflow couldn't extract from the rate-con PDF. Driver, Truck, and Status are managed separately.</DialogDescription>
+        </DialogHeader>
+        <div style="padding:1.25rem;display:flex;flex-direction:column;gap:0.85rem;overflow-y:auto;flex:1;">
+          <div v-for="col in editableHeaders" :key="col">
+            <label style="font-size:0.7rem;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:0.04em;">{{ col }}</label>
+            <textarea
+              v-if="MULTILINE_COLS.has(col)"
+              v-model="editForm[col]"
+              rows="3"
+              style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.875rem;resize:vertical;"
+            />
+            <input
+              v-else
+              v-model="editForm[col]"
+              type="text"
+              style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.875rem;"
+            />
+          </div>
+          <div v-if="editError" style="padding:0.5rem 0.75rem;background:#fef2f2;color:#991b1b;border-radius:6px;font-size:0.8rem;">{{ editError }}</div>
+          <div style="display:flex;gap:0.5rem;justify-content:flex-end;">
+            <button
+              type="button"
+              :disabled="saving"
+              style="padding:0.5rem 0.9rem;border:1px solid #d1d5db;background:#fff;color:#374151;border-radius:6px;font-family:inherit;font-size:0.85rem;font-weight:600;cursor:pointer;"
+              @click="closeEdit"
+            >Cancel</button>
+            <button
+              type="button"
+              :disabled="saving"
+              style="padding:0.5rem 0.9rem;border:none;background:#1d4ed8;color:#fff;border-radius:6px;font-family:inherit;font-size:0.85rem;font-weight:600;cursor:pointer;"
+              @click="submitEdit"
+            >{{ saving ? 'Saving...' : 'Save changes' }}</button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+
     <!-- Delete confirm — soft delete, reversible in SQL but not from the UI -->
     <ConfirmModal
       :open="showDeleteConfirm"
@@ -301,6 +376,7 @@ import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
+import { needsReview, countNeedsReview } from '../../lib/loadReview'
 
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
@@ -315,10 +391,37 @@ const props = defineProps({ jobs: { type: Array, required: true }, headers: { ty
 watch(() => props.active, v => { if (!v) { selectedJob.value = null; selectedDriverPosition.value = null } })
 const emit = defineEmits(['reassign', 'cancel', 'status-update', 'deleted', 'focus-consumed'])
 const searchQuery = ref('')
+const needsReviewOnly = ref(false)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
-const filteredJobs = computed(() => { const q = searchQuery.value.trim().toLowerCase(); if (!q || !loadIdCol.value) return props.jobs; return props.jobs.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q)) })
+const needsReviewCount = computed(() => countNeedsReview(props.jobs))
+const filteredJobs = computed(() => {
+  let pool = props.jobs
+  if (needsReviewOnly.value) pool = pool.filter(needsReview)
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q || !loadIdCol.value) return pool
+  return pool.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q))
+})
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
-const statusOptions = ['Dispatched', 'Heading to Shipper', 'At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Unloading', 'Delivered']
+const statusOptions = ['Dispatched', 'Heading to Shipper', 'At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Delivered']
+// Columns the dispatcher can manually fix when n8n's extraction is incomplete.
+// Excludes Driver/Truck/Owner ID/Job Status/* — those are managed by the
+// dispatch reassign flow and the status-override modal in this same file.
+const EDITABLE_COLS = [
+  'Contract ID',
+  'Details',
+  'Trailer Number',
+  'Pickup Info',
+  'Pickup Appointment',
+  'Pickup Address',
+  'Drop-off Info',
+  'Drop-off Appointment',
+  'Drop-off Address',
+  'Payment',
+  'Broker Contact Name',
+  'Phone Number',
+  'Email',
+]
+const MULTILINE_COLS = new Set(['Details', 'Pickup Info', 'Drop-off Info', 'Pickup Address', 'Drop-off Address'])
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
 const showDeleteConfirm = ref(false)
 const deleting = ref(false)
@@ -327,6 +430,16 @@ const overriding = ref(false)
 const overrideStatus = ref('')
 const overrideReason = ref('')
 const overrideError = ref('')
+const showEdit = ref(false)
+const saving = ref(false)
+const editForm = reactive({})
+const editError = ref('')
+// EDITABLE_COLS uses canonical names; the sheet sometimes pads columns
+// with whitespace ("  Payment  "), so compare trimmed lowercase.
+const editableHeaders = computed(() => {
+  const want = new Set(EDITABLE_COLS.map(c => c.toLowerCase().trim()))
+  return props.headers.filter(h => want.has((h || '').toLowerCase().trim()))
+})
 let linkCopiedTimer = null
 const copyBtnStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
@@ -346,6 +459,37 @@ const overrideBtnStyle = computed(() => ({
   color: '#92400e',
   transition: 'all 0.15s',
 }))
+const editBtnStyle = computed(() => ({
+  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+  borderRadius: '6px', cursor: 'pointer', fontFamily: 'inherit',
+  border: '1px solid #bfdbfe',
+  background: '#eff6ff',
+  color: '#1d4ed8',
+  transition: 'all 0.15s',
+}))
+// Filter toggle: amber when active, neutral outline when inactive.
+const reviewToggleStyle = computed(() => ({
+  display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+  padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+  borderRadius: '6px', cursor: 'pointer', fontFamily: 'inherit',
+  border: '1px solid ' + (needsReviewOnly.value ? '#f59e0b' : '#d1d5db'),
+  background: needsReviewOnly.value ? '#fef3c7' : '#ffffff',
+  color: needsReviewOnly.value ? '#92400e' : '#374151',
+  transition: 'all 0.15s',
+}))
+// Row-level "needs review" badge — small amber pill.
+const reviewBadgeStyle = {
+  display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
+  marginRight: '0.4rem',
+  padding: '1px 6px', fontSize: '0.62rem', fontWeight: '700',
+  textTransform: 'uppercase', letterSpacing: '0.04em',
+  borderRadius: '4px',
+  border: '1px solid #fde68a',
+  background: '#fffbeb',
+  color: '#92400e',
+  whiteSpace: 'nowrap',
+}
 const deleteBtnStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
   padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
@@ -423,6 +567,51 @@ function openOverride() {
 function closeOverride() {
   if (overriding.value) return
   showOverride.value = false
+}
+
+function openEdit() {
+  if (!selectedJob.value) return
+  editError.value = ''
+  for (const col of editableHeaders.value) {
+    editForm[col] = selectedJob.value[col] || ''
+  }
+  showEdit.value = true
+}
+
+function closeEdit() {
+  if (saving.value) return
+  showEdit.value = false
+}
+
+async function submitEdit() {
+  if (!selectedJob.value || saving.value) return
+  const rowIndex = selectedJob.value._rowIndex
+  if (!rowIndex) { editError.value = 'Row index missing — cannot save.'; return }
+  saving.value = true
+  editError.value = ''
+  try {
+    // values MUST be built from props.headers (sheet column order). selectedJob
+    // carries derived fields like _pickupStreet / _rowIndex that must not appear
+    // in the PUT payload.
+    const values = props.headers.map(col =>
+      Object.prototype.hasOwnProperty.call(editForm, col)
+        ? editForm[col]
+        : (selectedJob.value[col] || '')
+    )
+    await api.put(
+      `/api/data/${rowIndex}?sheet=${encodeURIComponent('Job Tracking')}`,
+      { values }
+    )
+    const patch = {}
+    for (const col of editableHeaders.value) patch[col] = editForm[col]
+    selectedJob.value = { ...selectedJob.value, ...patch }
+    showEdit.value = false
+    await dashStore.refresh()
+  } catch (err) {
+    editError.value = (err && err.message) || 'Failed to save changes.'
+  } finally {
+    saving.value = false
+  }
 }
 
 async function submitOverride() {

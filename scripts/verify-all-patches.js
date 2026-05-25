@@ -69,9 +69,14 @@ function header(msg) { console.log('\n' + msg); }
 		check(falseEdge, 'Addresses Ready?[1] → Update Job Tracking (Distance)', 'Addresses Ready? FALSE branch does NOT go to Update Job Tracking (Distance)');
 	}
 
-	// 3. Mark Read after PDF path
+	// 3. Mark Read after PDF path (direct OR through the completeness gate)
 	header('3. Mark Read on PDF success path');
-	check(hasEdge('Update Job Tracking (Distance)', 'Mark Read (Processing)'), 'Update Job Tracking (Distance) → Mark Read (Processing)', 'Update Job Tracking (Distance) does NOT connect to Mark Read (Processing)');
+	const direct = hasEdge('Update Job Tracking (Distance)', 'Mark Read (Processing)');
+	const viaGate = hasEdge('Update Job Tracking (Distance)', 'Critical Fields Complete?')
+		&& hasEdge('Critical Fields Complete?', 'Mark Read (Processing)');
+	check(direct || viaGate,
+		viaGate ? 'Update Job Tracking → Critical Fields Complete? → Mark Read (Processing)' : 'Update Job Tracking (Distance) → Mark Read (Processing)',
+		'Update Job Tracking (Distance) does NOT reach Mark Read (Processing)');
 
 	// 4. Thread PDF lookup
 	header('4. Thread PDF lookup branch');
@@ -114,6 +119,54 @@ function header(msg) { console.log('\n' + msg); }
 	header('7. Replay nodes cleaned up');
 	const replay = nodes.filter(n => n.name === 'Replay Webhook' || n.name === 'Replay Get Email');
 	check(replay.length === 0, 'No leftover replay nodes (' + nodes.length + ' total nodes)', 'Replay nodes still present: ' + replay.map(n => n.name).join(', '));
+
+	// 8. Prepare Attachment Data filters to PDFs only
+	header('8. Prepare Attachment Data filters to PDFs only');
+	const prep = find('Prepare Attachment Data');
+	if (!prep) { fail('Prepare Attachment Data node not found'); allOk = false; } else {
+		const a = prep.parameters.assignments?.assignments || [];
+		const entry = a.find(x => x.name === '=attachments');
+		const v = entry?.value || '';
+		check(
+			v.includes("mimeType === 'application/pdf'") || v.includes('mimeType === "application/pdf"'),
+			'attachments expression filters by application/pdf',
+			'attachments expression does NOT filter by PDF MIME (got: ' + v.slice(0, 120) + ')'
+		);
+	}
+
+	// 9. Completeness gate — Mark Read only fires when Rate is populated
+	header('9. Completeness gate before Mark Read (Processing)');
+	const gate = find('Critical Fields Complete?');
+	check(!!gate, '"Critical Fields Complete?" node present', '"Critical Fields Complete?" node MISSING — patch-completeness-gate.js not applied');
+	if (gate) {
+		const condV = gate.parameters?.conditions?.conditions?.[0]?.leftValue || '';
+		check(condV.includes('output.Rate') || condV.includes("output['Rate']"),
+			'gate condition references Normalize Load Fields output.Rate',
+			'gate condition does NOT reference output.Rate (got: ' + condV.slice(0, 100) + ')'
+		);
+		check(hasEdge('Update Job Tracking (Distance)', 'Critical Fields Complete?'),
+			'Update Job Tracking (Distance) → Critical Fields Complete?',
+			'Update Job Tracking (Distance) does NOT route through the gate');
+		check(hasEdge('Critical Fields Complete?', 'Mark Read (Processing)'),
+			'Critical Fields Complete?[TRUE] → Mark Read (Processing)',
+			'Gate TRUE branch does NOT reach Mark Read (Processing)');
+		check(!hasEdge('Google Drive', 'Mark Read (Processing)'),
+			'Google Drive → Mark Read (Processing) edge removed',
+			'Google Drive still directly marks email read (premature)');
+		check(!hasEdge('Extract from Email Body', 'Mark Read (No Attachment)'),
+			'Extract from Email Body → Mark Read (No Attachment) edge removed',
+			'Extract from Email Body still directly marks email read (premature)');
+	}
+
+	// 10. Retry Counter tracks all pending jobs (no $input.first() drop)
+	header('10. Retry Counter handles all pending LlamaParse jobs');
+	const rc = find('Retry Counter');
+	if (!rc) { fail('Retry Counter node not found'); allOk = false; } else {
+		const code = rc.parameters?.jsCode || '';
+		check(code.includes('$input.all()'),
+			'Retry Counter maps over $input.all()',
+			'Retry Counter still uses $input.first() — pending jobs past the first are dropped');
+	}
 
 	// Summary
 	console.log('\n' + (allOk ? '=== ALL CHECKS PASSED ===' : '=== SOME CHECKS FAILED — see above ==='));

@@ -225,53 +225,22 @@
             </EmptyState>
           </div>
           <div v-else class="load-cards">
-            <!-- Section headers in the Active sub-tab when both an in-progress
-                 load and queued loads coexist. Plain visual dividers — no
-                 reshuffling of LoadCard layout. -->
-            <template v-if="driverStore.loadSubTab === 'active' && driverStore.inProgressLoad && driverStore.queuedLoads.length > 0">
-              <div class="load-list-section-label">Active Load</div>
-              <LoadCard
-                :key="`active-${driverStore.inProgressLoad._rowIndex}`"
-                :load="driverStore.inProgressLoad"
-                :headers="driverStore.headers.jobTracking"
-                :accepted="isLoadAccepted(driverStore.inProgressLoad)"
-                :responding="isResponding(driverStore.inProgressLoad)"
-                @select="handleLoadSelect"
-                @chat="handleLoadChat"
-              />
-              <div class="load-list-section-label">Up Next</div>
-              <LoadCard
-                v-for="load in driverStore.queuedLoads"
-                :key="`queued-${load._rowIndex}`"
-                :load="load"
-                :headers="driverStore.headers.jobTracking"
-                :queue-position="load._queuePosition || 0"
-                :accepted="isLoadAccepted(load)"
-                :responding="isResponding(load)"
-                @select="handleLoadSelect"
-                @chat="handleLoadChat"
-              />
-            </template>
-            <!-- Default rendering: flat list (no in-progress + queue split).
-                 Used for the Pending sub-tab, Historical sub-tab, and Active
-                 sub-tab when the driver doesn't yet have both an in-progress
-                 load and queued loads. -->
-            <template v-else>
-              <LoadCard
-                v-for="load in driverStore.filteredLoads"
-                :key="load._rowIndex"
-                :load="load"
-                :headers="driverStore.headers.jobTracking"
-                :pending="driverStore.loadSubTab === 'pending'"
-                :accepted="isLoadAccepted(load)"
-                :responding="isResponding(load)"
-                :queue-position="driverStore.loadSubTab === 'active' ? (load._queuePosition || 0) : 0"
-                @select="handleLoadSelect"
-                @chat="handleLoadChat"
-                @accept="handleAcceptLoad"
-                @decline="handleDeclineLoad"
-              />
-            </template>
+            <!-- Flat list of the driver's loads. Active sub-tab orders the
+                 in-progress load first, then accepted loads in backend queue
+                 order (filteredLoads handles the sort) — no queue labels. -->
+            <LoadCard
+              v-for="load in driverStore.filteredLoads"
+              :key="load._rowIndex"
+              :load="load"
+              :headers="driverStore.headers.jobTracking"
+              :pending="driverStore.loadSubTab === 'pending'"
+              :accepted="isLoadAccepted(load)"
+              :responding="isResponding(load)"
+              @select="handleLoadSelect"
+              @chat="handleLoadChat"
+              @accept="handleAcceptLoad"
+              @decline="handleDeclineLoad"
+            />
           </div>
 
           <!-- Active-load action panel (status stepper + documents + expense
@@ -1038,19 +1007,13 @@ function onLoadAssigned(payload) {
     read: 0,
     createdAt: new Date().toISOString(),
   })
-  // Phase 2: suppress the LoadAssignedBanner when the driver is busy. The
-  // backend also suppresses the socket emit for busy drivers (see
-  // server.js POST /api/dispatch), but a race against driverStore state can
-  // let one through \u2014 this is defense in depth so a banner never flashes
-  // mid-trip with an Accept button the backend will 409 anyway.
-  const driverBusy = !!driverStore.inProgressLoad || driverStore.queuedLoads.length > 0
-  if (!driverBusy) {
-    assignedNotification.value = {
-      loadId: payload.loadId || 'Load',
-      origin: payload.origin || '',
-      destination: payload.destination || '',
-      rowIndex: payload.rowIndex
-    }
+  // Always surface the new-load banner \u2014 drivers can hold multiple accepted
+  // loads at once, so a banner arriving mid-trip is expected, not suppressed.
+  assignedNotification.value = {
+    loadId: payload.loadId || 'Load',
+    origin: payload.origin || '',
+    destination: payload.destination || '',
+    rowIndex: payload.rowIndex
   }
   scheduleDriverRefetch()
 }
@@ -1580,20 +1543,6 @@ onUnmounted(() => {
 
 /* Sub-section labels inside the Active sub-tab card list. Splits the list
    into "Active Load" (top) and "Up Next" (queued) when both kinds coexist. */
-.load-list-section-label {
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  margin: 0.5rem 0 0.4rem;
-  padding-bottom: 0.25rem;
-  border-bottom: 1px solid var(--border);
-}
-.load-list-section-label:first-child {
-  margin-top: 0;
-}
-
 /* ────────────────────────────────────────────────────────────────────────
    Active-load hero (top of Loads tab). The CEO flagged that a lot of
    drivers are in their late 50s / early 60s and aren't comfortable
