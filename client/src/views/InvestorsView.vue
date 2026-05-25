@@ -20,10 +20,7 @@
 
     <details class="form-accordion">
       <summary class="form-toggle">+ Add Investor <span class="form-toggle-note">(Case-by-case basis only — should go through the proper application process)</span></summary>
-      <AddInvestorForm
-        :carrier-names="store.carrierNames"
-        @submit="handleAdd"
-      />
+      <AddInvestorForm @submit="handleAdd" />
     </details>
 
     <template v-if="store.isLoading">
@@ -32,7 +29,6 @@
     <template v-else>
       <InvestorTable
         :investors="store.investors"
-        :carrier-names="store.carrierNames"
         @delete="handleDelete"
         @update="handleUpdate"
         @picture-updated="store.load()"
@@ -97,6 +93,5 @@ async function handleDelete(id) {
 
 onMounted(() => {
   store.load()
-  store.loadCarrierNames()
 })
 </script>

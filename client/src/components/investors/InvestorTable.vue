@@ -11,7 +11,6 @@
       <thead>
         <tr>
           <th>Investor Name</th>
-          <th>Carrier Name</th>
           <th>Trucks</th>
           <th>Status</th>
           <th>Notes</th>
@@ -21,7 +20,6 @@
       <tbody>
         <tr v-for="inv in investors" :key="inv.id" class="clickable-row" @click="viewDetail(inv)">
           <td class="name-cell">{{ inv.fullName }}</td>
-          <td>{{ inv.carrierName || '\u2014' }}</td>
           <td class="mono">{{ inv.truckCount }}</td>
           <td>
             <span :class="['status-badge', inv.status === 'Active' ? 'status-active' : 'status-inactive']">{{ inv.status }}</span>
@@ -48,16 +46,6 @@
               <label>Investor Name</label>
               <input v-model="editForm.fullName" type="text" />
             </div>
-            <div class="edit-field">
-              <label>Carrier Name</label>
-              <select v-model="editForm.carrierName">
-                <option value="">-- Select carrier --</option>
-                <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="edit-row">
             <div class="edit-field">
               <label>Status</label>
               <select v-model="editForm.status">
@@ -216,7 +204,6 @@ import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 
 const props = defineProps({
   investors: { type: Array, default: () => [] },
-  carrierNames: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits(['delete', 'update', 'picture-updated'])
@@ -306,13 +293,12 @@ function resizeImageToBase64(file, maxDim) {
 
 function openPdf(url) { window.open(url, '_blank') }
 const editForm = reactive({
-  id: null, fullName: '', carrierName: '', status: 'Active', notes: '',
+  id: null, fullName: '', status: 'Active', notes: '',
 })
 
 function openEdit(inv) {
   editForm.id = inv.id
   editForm.fullName = inv.fullName
-  editForm.carrierName = inv.carrierName
   editForm.status = inv.status
   editForm.notes = inv.notes
   showEdit.value = true

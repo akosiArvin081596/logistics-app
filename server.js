@@ -2640,7 +2640,7 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const obj = {};
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		// Keep existing status / pay fields if the client didn't send them
-		const current = db.prepare("SELECT status, pay_type, pay_percentage FROM drivers_directory WHERE id = ?").get(id);
+		const current = db.prepare("SELECT status, pay_type, pay_percentage, carrier_name FROM drivers_directory WHERE id = ?").get(id);
 		const nextStatus = obj.Status || current?.status || "active";
 		const sentPayType = (obj.PayType || "").toLowerCase();
 		const nextPayType = sentPayType === "fixed" || sentPayType === "percentage"
@@ -2649,14 +2649,18 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const nextPayPct = obj.PayPercentage !== undefined && obj.PayPercentage !== ""
 			? Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0))
 			: (current?.pay_percentage || 0);
+		// Carrier UI was removed; the edit form now sends "" — preserve existing value.
+		const nextCarrier = obj["Carrier Name"] && obj["Carrier Name"].trim()
+			? obj["Carrier Name"]
+			: (current?.carrier_name || "");
 		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=?, status=?, pay_type=?, pay_percentage=? WHERE id=?`)
-			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
+			.run(obj.Driver || "", nextCarrier, obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				nextStatus, nextPayType, nextPayPct, id);
 		// Sync carrier-driver history on write (not on read)
-		if (obj.Driver && obj["Carrier Name"]) {
-			syncCarrierDriverHistory([obj], "Driver", "Carrier Name");
+		if (obj.Driver && nextCarrier) {
+			syncCarrierDriverHistory([{ ...obj, "Carrier Name": nextCarrier }], "Driver", "Carrier Name");
 		}
 		notifyChange("drivers");
 		res.json({ success: true });
@@ -6495,10 +6499,13 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 app.post("/api/investors", requireRole("Super Admin"), (req, res) => {
 	const { userId, fullName, carrierName, status, notes, entityType, address, phone, email, einSsn, taxClassification, contactPerson, contactTitle } = req.body;
 	if (!fullName || !fullName.trim()) return res.status(400).json({ error: "Full name is required" });
+	// Carrier UI was removed; default carrier_name to the investor's own name so
+	// the UNIQUE index on investors.carrier_name still holds for new rows.
+	const finalCarrier = (carrierName || fullName).trim();
 	const result = db.prepare(`
 		INSERT INTO investors (user_id, full_name, carrier_name, status, notes, entity_type, address, phone, email, ein_ssn, tax_classification, contact_person, contact_title)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).run(userId || null, fullName.trim(), (carrierName || "").trim(), status || "Active", (notes || "").trim(),
+	`).run(userId || null, fullName.trim(), finalCarrier, status || "Active", (notes || "").trim(),
 		(entityType || "").trim(), (address || "").trim(), (phone || "").trim(), (email || "").trim(),
 		(einSsn || "").trim(), (taxClassification || "").trim(), (contactPerson || "").trim(), (contactTitle || "").trim());
 	notifyChange("investors");

@@ -37,7 +37,7 @@
         </select>
       </div>
       <div v-show="form.role === 'Driver'" class="form-group">
-        <label class="form-label">Driver Name (Carrier DB)</label>
+        <label class="form-label">Driver Name</label>
         <select v-model="form.driverName" class="form-select">
           <option value="">-- Select driver --</option>
           <option v-for="name in driverNames" :key="name" :value="name">{{ name }}</option>
@@ -53,14 +53,6 @@
         type="text"
         placeholder="e.g. John Smith"
       />
-    </div>
-
-    <div v-show="form.role === 'Investor'" class="form-group">
-      <label class="form-label">Company Name (Carrier)</label>
-      <select v-model="form.companyName" class="form-select">
-        <option value="">-- Select carrier --</option>
-        <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
-      </select>
     </div>
 
     <div class="form-group">
@@ -83,7 +75,6 @@ import { reactive, ref } from 'vue'
 
 defineProps({
   driverNames: { type: Array, default: () => [] },
-  carrierNames: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits(['submit'])
@@ -95,7 +86,6 @@ const form = reactive({
   driverName: '',
   email: '',
   fullName: '',
-  companyName: '',
 })
 
 const errorMsg = ref('')
@@ -120,7 +110,6 @@ function handleSubmit() {
     driverName: form.driverName,
     email: form.email.trim(),
     fullName: form.fullName.trim(),
-    companyName: form.companyName.trim(),
   })
 
   // Reset form
@@ -129,7 +118,6 @@ function handleSubmit() {
   form.email = ''
   form.driverName = ''
   form.fullName = ''
-  form.companyName = ''
 }
 </script>
 

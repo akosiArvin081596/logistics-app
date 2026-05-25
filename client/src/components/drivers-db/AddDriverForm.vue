@@ -10,16 +10,6 @@
         <label class="form-label">Driver Name *</label>
         <input v-model="form.driver" class="form-input" type="text" placeholder="e.g. JOHN SMITH" />
       </div>
-      <div class="form-group">
-        <label class="form-label">Carrier Name</label>
-        <select v-model="form.carrierName" class="form-select">
-          <option value="">-- Select carrier --</option>
-          <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
-        </select>
-      </div>
-    </div>
-
-    <div class="form-row">
       <div class="form-group" style="flex:2;">
         <label class="form-label">Address</label>
         <input v-model="form.address" class="form-input" type="text" placeholder="Street address" />
@@ -118,14 +108,10 @@
 <script setup>
 import { reactive, ref } from 'vue'
 
-defineProps({
-  carrierNames: { type: Array, default: () => [] },
-})
-
 const emit = defineEmits(['submit'])
 
 const defaults = () => ({
-  driver: '', carrierName: '', state: '', city: '', zip: '', address: '',
+  driver: '', state: '', city: '', zip: '', address: '',
   trucks: '', hazmat: 'NO', phone: '', cell: '', email: '',
   dot: '', mc: '', rating: 'Not Rated',
   payType: 'fixed', payPercentage: 0,
@@ -141,7 +127,7 @@ function handleSubmit() {
   // (skip Status — server defaults manual adds to 'active'; pay fields tail).
   emit('submit', [
     form.driver.trim().toUpperCase(),
-    form.carrierName,
+    '', // Carrier Name placeholder — deprecated UI, backend keeps column for legacy data
     form.state.toUpperCase(),
     form.city.toUpperCase(),
     form.zip,

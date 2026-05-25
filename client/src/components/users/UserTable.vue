@@ -83,14 +83,6 @@
           </div>
 
           <div class="edit-field">
-            <label>Company Name (Carrier)</label>
-            <select v-model="editForm.companyName">
-              <option value="">-- Select carrier --</option>
-              <option v-for="name in carrierNames" :key="name" :value="name">{{ name }}</option>
-            </select>
-          </div>
-
-          <div class="edit-field">
             <label>Email</label>
             <input v-model="editForm.email" type="email" placeholder="Email" />
           </div>
@@ -128,7 +120,6 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 defineProps({
   users: { type: Array, default: () => [] },
   driverNames: { type: Array, default: () => [] },
-  carrierNames: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits(['delete', 'update', 'rate'])
@@ -137,7 +128,7 @@ const showConfirm = ref(false)
 const pendingUser = ref(null)
 
 const showEdit = ref(false)
-const editForm = reactive({ id: null, username: '', role: '', driverName: '', email: '', password: '', fullName: '', companyName: '' })
+const editForm = reactive({ id: null, username: '', role: '', driverName: '', email: '', password: '', fullName: '' })
 
 function openEdit(user) {
   editForm.id = user.id
@@ -146,7 +137,6 @@ function openEdit(user) {
   editForm.driverName = user.DriverName || ''
   editForm.email = user.Email || ''
   editForm.fullName = user.FullName || ''
-  editForm.companyName = user.CompanyName || ''
   editForm.password = ''
   showEdit.value = true
 }
@@ -157,7 +147,6 @@ function handleSaveEdit() {
     driverName: editForm.driverName,
     email: editForm.email,
     fullName: editForm.fullName,
-    companyName: editForm.companyName,
   }
   if (editForm.password) data.password = editForm.password
   emit('update', { id: editForm.id, data })
@@ -165,7 +154,6 @@ function handleSaveEdit() {
 }
 
 function userDetail(user) {
-  if (user.Role === 'Investor' && user.CompanyName) return user.CompanyName
   if (user.Role === 'Driver' && user.DriverName) return user.DriverName
   return '\u2014'
 }
