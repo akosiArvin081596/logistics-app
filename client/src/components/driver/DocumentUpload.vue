@@ -503,8 +503,8 @@ async function handleUpload() {
 /* Scan-driven "+" button (POD/BOL) — same visual as the gallery + label but
    it's a <button>, so we re-declare the box styles. */
 button.photo-add {
-  width: 72px;
-  height: 72px;
+  width: 96px;
+  height: 96px;
   border: 2px dashed var(--border);
   background: transparent;
   border-radius: 8px;
@@ -536,8 +536,8 @@ button.photo-add:disabled {
 }
 .photo-thumb {
   position: relative;
-  width: 72px;
-  height: 72px;
+  width: 96px;
+  height: 96px;
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -600,8 +600,8 @@ button.photo-add:disabled {
   border-radius: 4px;
 }
 .photo-add {
-  width: 72px;
-  height: 72px;
+  width: 96px;
+  height: 96px;
   border: 2px dashed var(--border);
   border-radius: 8px;
   display: flex;
