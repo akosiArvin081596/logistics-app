@@ -24,18 +24,19 @@
         <button v-if="f.isImage" class="thumb-edit" title="Adjust" @click.stop="openAdjust(i)">&#9998;</button>
         <span class="thumb-num">{{ i + 1 }}</span>
       </div>
-      <!-- + Add another page: scan-driven for POD/BOL, gallery picker otherwise -->
+      <!-- Scan another page with the camera — POD/BOL only -->
       <button
         v-if="isScanDocType"
         type="button"
         class="photo-add"
         :disabled="scanning"
-        title="Scan another page"
+        title="Scan another page (camera)"
         @click="startScan"
       >
-        <span>+</span>
+        <span>&#128247;</span>
       </button>
-      <label v-else class="photo-add">
+      <!-- Add a saved picture or file — available for every doc type (incl. POD/BOL) -->
+      <label class="photo-add" :title="isScanDocType ? 'Add a saved picture or file' : 'Add another page'">
         <input
           ref="addInput"
           type="file"
