@@ -15,12 +15,12 @@
     <!-- File thumbnails -->
     <div v-if="files.length" class="photo-grid">
       <div v-for="(f, i) in files" :key="i" class="photo-thumb">
-        <img v-if="f.isImage" :src="f.data" alt="Photo" />
-        <div v-else class="doc-icon">
+        <img v-if="f.isImage" :src="f.data" alt="Photo" class="thumb-clickable" title="Tap to enlarge" @click="openPreview(f)" />
+        <div v-else class="doc-icon thumb-clickable" title="Tap to view" @click="openPreview(f)">
           <span class="doc-icon-emoji">&#128196;</span>
           <span class="doc-icon-name">{{ f.name }}</span>
         </div>
-        <button class="thumb-remove" @click="removeFile(i)">&times;</button>
+        <button class="thumb-remove" @click.stop="removeFile(i)">&times;</button>
         <span class="thumb-num">{{ i + 1 }}</span>
       </div>
       <!-- + Add another page: scan-driven for POD/BOL, gallery picker otherwise -->
@@ -107,11 +107,20 @@
     >
       {{ uploading ? 'Uploading...' : `Upload ${selectedType} (${files.length} file${files.length !== 1 ? 's' : ''})` }}
     </button>
+
+    <!-- Tap-to-enlarge preview of a captured/scanned page (image or searchable PDF) -->
+    <Teleport to="body">
+      <div v-if="previewSrc" class="dup-preview-overlay" @click="closePreview">
+        <iframe v-if="previewIsPdf" :src="previewSrc" class="dup-preview-frame" title="Document preview" @click.stop></iframe>
+        <img v-else :src="previewSrc" class="dup-preview-img" alt="Document preview" @click.stop />
+        <button class="dup-preview-close" aria-label="Close preview" @click="closePreview">&times;</button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
@@ -148,6 +157,10 @@ const uploading = ref(false)
 const scanInput = ref(null)
 const scanning = ref(false)   // true while a captured photo is being enhanced
 const returnPdf = ref(false)  // per-scan toggle: searchable PDF vs cleaned image
+
+// Tap-to-enlarge preview of a thumbnail (image, or a searchable-PDF page).
+const previewSrc = ref(null)
+const previewIsPdf = ref(false)
 
 const isScanDocType = computed(() =>
   selectedType.value === 'POD' || selectedType.value === 'BOL'
@@ -229,6 +242,41 @@ async function handleFile(event) {
 function removeFile(index) {
   files.value.splice(index, 1)
 }
+
+let previewBlobUrl = ''
+
+function openPreview(f) {
+  closePreview()
+  if (f.isImage) {
+    previewSrc.value = f.data
+    previewIsPdf.value = false
+    return
+  }
+  // PDFs: a data: URI is unreliable inside <iframe> (some browsers block it),
+  // so render via a blob URL instead. Fall back to the data URI on failure.
+  previewIsPdf.value = true
+  try {
+    const [meta, b64] = String(f.data).split(',')
+    const mime = (meta.match(/data:([^;]+)/) || [])[1] || 'application/pdf'
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j)
+    previewBlobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }))
+    previewSrc.value = previewBlobUrl
+  } catch {
+    previewSrc.value = f.data
+  }
+}
+
+function closePreview() {
+  previewSrc.value = null
+  if (previewBlobUrl) {
+    URL.revokeObjectURL(previewBlobUrl)
+    previewBlobUrl = ''
+  }
+}
+
+onBeforeUnmount(closePreview)
 
 // ============================================================
 // Scan: capture a photo, enhance it server-side via ScanKit.io
@@ -545,4 +593,48 @@ button.photo-add:disabled {
 
 .btn-primary:hover { opacity: 0.9; }
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Tap-to-enlarge preview */
+.thumb-clickable { cursor: zoom-in; }
+.dup-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+.dup-preview-img {
+  max-width: 96vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+}
+.dup-preview-frame {
+  width: 96vw;
+  height: 92vh;
+  border: none;
+  border-radius: 6px;
+  background: #fff;
+}
+.dup-preview-close {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 </style>
