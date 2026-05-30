@@ -113,6 +113,7 @@
 import { ref, reactive, computed } from 'vue'
 import { Form as VanForm, Field as VanField, CellGroup as VanCellGroup, Button as VanButton, Uploader as VanUploader, Picker as VanPicker, Popup as VanPopup } from 'vant'
 import { useToast } from '../../composables/useToast'
+import { useDocumentScan } from '../../composables/useDocumentScan'
 
 const props = defineProps({
   loads: { type: Array, default: () => [] },
@@ -123,6 +124,7 @@ const props = defineProps({
 const emit = defineEmits(['submit'])
 
 const toast = useToast()
+const { scanDocument } = useDocumentScan()
 const submitting = ref(false)
 const fileList = ref([])
 const photoBase64 = ref('')
@@ -221,7 +223,25 @@ async function handlePhoto(file) {
     toast.show("Couldn't process the photo — please retake", 'error')
     return
   }
+  // Enhance the receipt via ScanKit (crop + flatten lighting) before OCR — a
+  // cleaner image improves Gemini's read and is what we store as the receipt.
+  // Cover the round-trip with the existing "Reading receipt…" spinner.
+  ocrLoading.value = true
+  await enhanceReceiptPhoto()
   await runReceiptOcr()
+}
+
+// Best-effort receipt enhancement. Any failure (scanning disabled, no credits,
+// rate limited, network) keeps the raw compressed photo so OCR + submit still
+// work — the driver is never blocked.
+async function enhanceReceiptPhoto() {
+  if (!photoBase64.value) return
+  try {
+    const res = await scanDocument(photoBase64.value, { returnPdf: false, filter: 'flat' })
+    if (res && res.data) photoBase64.value = res.data
+  } catch {
+    // Keep the raw photo — enhancement is a nice-to-have, not required.
+  }
 }
 
 async function runReceiptOcr() {
