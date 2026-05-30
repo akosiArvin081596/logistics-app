@@ -8,7 +8,6 @@
 
       <div ref="stageRef" class="iae-stage">
         <div
-          v-if="displayW && displayH"
           class="iae-canvas-stack"
           :style="{ width: displayW + 'px', height: displayH + 'px' }"
         >
@@ -87,13 +86,13 @@ const cl = ref(0), ct = ref(0), cr = ref(0), cb = ref(0)
 // Non-reactive: we don't want Vue proxying canvases/images.
 let sourceImg = null
 let workCanvas = null   // source scaled to WORK_MAX then rotated
-let displayScale = 1
+const displayScale = ref(1)  // displayed px / work px (reactive so the crop box rescales)
 
 const cropBoxStyle = computed(() => ({
-  left: (cl.value * displayScale) + 'px',
-  top: (ct.value * displayScale) + 'px',
-  width: ((cr.value - cl.value) * displayScale) + 'px',
-  height: ((cb.value - ct.value) * displayScale) + 'px',
+  left: (cl.value * displayScale.value) + 'px',
+  top: (ct.value * displayScale.value) + 'px',
+  width: ((cr.value - cl.value) * displayScale.value) + 'px',
+  height: ((cb.value - ct.value) * displayScale.value) + 'px',
 }))
 
 onMounted(async () => {
@@ -106,8 +105,9 @@ onMounted(async () => {
   buildWorkCanvas()
   resetCrop()
   await nextTick()
-  layout()
-  renderPreview()
+  // rAF: the freshly-teleported full-screen overlay needs a layout pass before
+  // we can measure the stage and size/draw the canvas.
+  requestAnimationFrame(() => { layout(); renderPreview() })
   window.addEventListener('resize', onResize)
 })
 
@@ -170,7 +170,7 @@ function layout() {
   const maxW = stage.clientWidth, maxH = stage.clientHeight
   if (!maxW || !maxH) return
   const scale = Math.min(maxW / workCanvas.width, maxH / workCanvas.height, 1)
-  displayScale = scale
+  displayScale.value = scale
   displayW.value = Math.round(workCanvas.width * scale)
   displayH.value = Math.round(workCanvas.height * scale)
   const v = viewRef.value
@@ -216,8 +216,8 @@ function onHandleDown(e, corner) {
   const MIN = 24 // minimum crop size in work px
 
   const move = (ev) => {
-    const x = Math.max(0, Math.min(workCanvas.width, (ev.clientX - rect.left) / displayScale))
-    const y = Math.max(0, Math.min(workCanvas.height, (ev.clientY - rect.top) / displayScale))
+    const x = Math.max(0, Math.min(workCanvas.width, (ev.clientX - rect.left) / displayScale.value))
+    const y = Math.max(0, Math.min(workCanvas.height, (ev.clientY - rect.top) / displayScale.value))
     if (corner === 'tl') { cl.value = Math.min(x, cr.value - MIN); ct.value = Math.min(y, cb.value - MIN) }
     else if (corner === 'tr') { cr.value = Math.max(x, cl.value + MIN); ct.value = Math.min(y, cb.value - MIN) }
     else if (corner === 'bl') { cl.value = Math.min(x, cr.value - MIN); cb.value = Math.max(y, ct.value + MIN) }
