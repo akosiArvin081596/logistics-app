@@ -37,17 +37,23 @@ Required files at project root:
 - `.env` — environment variables
 
 ```
+SPREADSHEET_ID=<optional — Google Sheet ID for the main Dispatch Management sheet; defaults to the production sheet when unset>
+ARCHIVE_SPREADSHEET_ID=<optional — Google Sheet ID for the read-only archive; defaults to the production archive when unset>
 GOOGLE_DRIVE_FOLDER_ID=<Drive folder ID for POD uploads — optional, uploads skip Drive if empty>
 GOOGLE_MAPS_API_KEY=<Google Maps API key — required for maps, routing, geocoding, and places>
 GMAIL_USER=<Gmail address for sending onboarding/outreach emails>
 GMAIL_APP_PASSWORD=<Gmail app password for nodemailer>
 GEMINI_API_KEY=<optional — enables receipt OCR auto-fill via Gemini 2.5 Flash vision; form falls back to manual entry when unset>
 GEMINI_OCR_MODEL=<optional — override the default gemini-2.5-flash model>
+SCANKIT_BASE_URL=<optional — ScanKit.io API base; defaults to https://api.scankit.io>
+SCANKIT_API_KEY=<optional — ScanKit.io key (sk_...) for document scanning; scanner returns 503 + raw-photo fallback when unset>
+SCANKIT_ENABLED=<optional — set "true" to enable; defaults off so the feature ships dormant>
 PORT=3000  # optional, defaults to 3000
 ```
 
-Hardcoded values in `server.js` (change if forking):
-- Spreadsheet ID `"1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"` — production Dispatch Management sheet (n8n writes into it). Archive sheet `1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI` is used only by the archive viewer.
+Default values in `server.js` (override via env):
+- Spreadsheet ID falls back to `"1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"` (production Dispatch Management — n8n writes here). Override by setting `SPREADSHEET_ID` in `.env`. Staging uses this to point at its own copy.
+- Archive Spreadsheet ID falls back to `"1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"` (read-only archive). Override via `ARCHIVE_SPREADSHEET_ID`.
 - Session secret: Set via `SESSION_SECRET` env var (required for production; falls back to default for dev)
 
 Helper scripts in `scripts/`:
@@ -62,6 +68,8 @@ Shared server-side modules live in `lib/` (required from `server.js`):
 - `ifta-states.js` — US state bounding-box lookup used by the IFTA mileage classifier.
 - `pdf-browser.js` — Puppeteer HTML→PDF renderer for onboarding/investor docs (why `puppeteer` is a top-level dep alongside `pdfkit`/`pdf-lib`).
 - `policy-field-maps.js`, `policy-renderer.js` — field mapping + template rendering for onboarding legal documents.
+- `routemate-client.js` — Routemate ELD/telematics API adapter (single point of contact).
+- `scankit-client.js` — ScanKit.io document-scanning API adapter (single point of contact; `POST /scan/crop`). See the AI/vision services note below.
 
 ## Architecture
 
@@ -102,6 +110,7 @@ Session store also in SQLite.
 
 **AI / vision services**:
 - **Gemini 2.5 Flash vision** — expense receipt OCR (`POST /api/expenses/ocr`). Called via `fetch` (no SDK) with `responseSchema` enforcing the JSON shape. Requires `GEMINI_API_KEY`; falls back to 503 + silent manual-entry in the driver form when unset. Key is shared across Alchemy projects (rotate in one place). Retry (2 retries, exp backoff, 15 s `AbortController` timeout) mirrors the Google Routes integration.
+- **ScanKit.io document scanning** — server-side crop / deskew / lighting-correction (and optional searchable-PDF with OCR layer) via `POST /api/documents/scan`, backed by the `lib/scankit-client.js` adapter (single point of contact; `Authorization: Bearer`, multipart upload, retry/timeout mirror the Routemate/Gemini pattern). **Replaced** the old client-side jscanify + OpenCV-WASM (~9 MB) scanner in `DocumentUpload.vue`. Used by driver POD/BOL scanning, the admin dashboard upload (`ActiveLoadsTab` reuses the same component), and receipt enhancement before Gemini OCR (`ExpenseForm`, `ExpensesTab`). Requires `SCANKIT_API_KEY` + `SCANKIT_ENABLED=true`; returns 503 (client falls back to attaching the raw photo) when unset. Credit-billed (`scanKitLimiter` caps spend) — **rotate the key if it is ever exposed**.
 
 REST endpoints (grouped by domain):
 

@@ -610,12 +610,14 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
+import { useDocumentScan } from '../../composables/useDocumentScan'
 import { useAuthStore } from '../../stores/auth'
 import { useViewport } from '../../composables/useViewport'
 import { useSocketRefresh } from '../../composables/useSocketRefresh'
 
 const api = useApi()
 const { show: toast } = useToast()
+const { scanDocument } = useDocumentScan()
 const auth = useAuthStore()
 const { isMobile } = useViewport()
 
@@ -885,12 +887,27 @@ async function handleFileInput(event) {
     bitmap.close()
     photoBase64.value = canvas.toDataURL('image/jpeg', 0.8)
     canvas.width = 0; canvas.height = 0
+    // Enhance the receipt via ScanKit (crop + flatten lighting) for a cleaner
+    // stored image. Best-effort — failure keeps the raw photo.
+    await enhanceReceiptPhoto()
   } catch {
     photoBase64.value = ''
     if (fileInputRef.value) fileInputRef.value.value = ''
     toast("Couldn't process the photo — try a different image", 'error')
   } finally {
     photoProcessing.value = false
+  }
+}
+
+// Best-effort receipt enhancement via ScanKit. Swallows all errors so a
+// disabled / uncredited / down service never blocks logging the expense.
+async function enhanceReceiptPhoto() {
+  if (!photoBase64.value) return
+  try {
+    const res = await scanDocument(photoBase64.value, { returnPdf: false, filter: 'flat' })
+    if (res && res.data) photoBase64.value = res.data
+  } catch {
+    // Keep the raw photo.
   }
 }
 

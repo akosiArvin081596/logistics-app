@@ -28,7 +28,7 @@
         v-if="isScanDocType"
         type="button"
         class="photo-add"
-        :disabled="scannerLoading"
+        :disabled="scanning"
         title="Scan another page"
         @click="startScan"
       >
@@ -46,18 +46,25 @@
       </label>
     </div>
 
+    <!-- Searchable-PDF toggle (POD/BOL scans only). When on, ScanKit returns a
+         PDF with an OCR text layer instead of a flat JPEG. -->
+    <label v-if="isScanDocType" class="pdf-toggle">
+      <input type="checkbox" v-model="returnPdf" :disabled="scanning" />
+      <span>Searchable PDF (OCR text layer)</span>
+    </label>
+
     <!-- Initial capture/upload button -->
-    <div v-else class="upload-buttons">
+    <div v-if="!files.length" class="upload-buttons">
       <!-- POD/BOL: Scan replaces Take Photo (brokers reject raw camera shots) -->
       <button
         v-if="isScanDocType"
         type="button"
         class="photo-btn scan-btn"
-        :disabled="scannerLoading"
+        :disabled="scanning"
         @click="startScan"
       >
-        <span v-if="!scannerLoading">&#128196; Scan Document</span>
-        <span v-else>Loading scanner&hellip;</span>
+        <span v-if="!scanning">&#128196; Scan Document</span>
+        <span v-else>Scanning&hellip;</span>
       </button>
       <label v-else class="photo-btn">
         <input
@@ -82,8 +89,8 @@
       </label>
     </div>
 
-    <!-- Hidden input used by Scan flow (clicked programmatically after the
-         jscanify/OpenCV bundle is loaded, so we can show a spinner first). -->
+    <!-- Hidden input used by the Scan flow. Captures straight from the rear
+         camera; the photo is enhanced server-side via ScanKit.io. -->
     <input
       ref="scanInput"
       type="file"
@@ -95,69 +102,19 @@
 
     <button
       class="btn btn-primary"
-      :disabled="files.length === 0 || uploading"
+      :disabled="files.length === 0 || uploading || scanning"
       @click="handleUpload"
     >
       {{ uploading ? 'Uploading...' : `Upload ${selectedType} (${files.length} file${files.length !== 1 ? 's' : ''})` }}
     </button>
-
-    <!-- Scanner overlay (full-screen). Teleported to body so the styles in the
-         second un-scoped <style> block apply and so nested overflow/transform
-         ancestors can't clip the modal. -->
-    <Teleport to="body">
-      <div
-        v-if="scannerOpen"
-        class="scanner-overlay"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Adjust scan corners"
-      >
-        <div class="scanner-header">
-          <span>Drag the corners to match the page</span>
-          <button class="scanner-close" aria-label="Close scanner" @click="cancelScan">&times;</button>
-        </div>
-        <div ref="canvasWrapRef" class="scanner-canvas-wrap">
-          <!-- Single stack so canvas + SVG + corner handles all share one
-               coordinate origin (the canvas's top-left), regardless of how
-               the wrap centers it. -->
-          <div
-            v-if="displayW && displayH"
-            class="scanner-canvas-stack"
-            :style="{ width: displayW + 'px', height: displayH + 'px' }"
-          >
-            <canvas ref="scanCanvasRef" class="scanner-canvas" />
-            <svg
-              class="scanner-quad"
-              :viewBox="`0 0 ${displayW} ${displayH}`"
-              preserveAspectRatio="none"
-            >
-              <polygon :points="quadPoints" />
-            </svg>
-            <div
-              v-for="(c, i) in corners"
-              :key="i"
-              class="scanner-corner"
-              :style="{ left: c.displayX + 'px', top: c.displayY + 'px' }"
-              @pointerdown="onCornerDown($event, i)"
-            />
-          </div>
-        </div>
-        <div class="scanner-actions">
-          <button class="scanner-btn scanner-btn-secondary" :disabled="processing" @click="cancelScan">Cancel</button>
-          <button class="scanner-btn scanner-btn-secondary" :disabled="processing" @click="retake">Retake</button>
-          <button class="scanner-btn scanner-btn-primary" :disabled="processing" @click="applyScan">
-            {{ processing ? 'Processing&hellip;' : 'Apply Scan' }}
-          </button>
-        </div>
-      </div>
-    </Teleport>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
+import { useDocumentScan } from '../../composables/useDocumentScan'
 
 const props = defineProps({
   loadId: { type: String, required: true },
@@ -171,6 +128,7 @@ const emit = defineEmits(['uploaded'])
 
 const api = useApi()
 const toast = useToast()
+const { scanDocument } = useDocumentScan()
 
 const docTypes = [
   { value: 'POD', label: 'Proof of Delivery' },
@@ -186,22 +144,10 @@ const addInput = ref(null)
 const files = ref([]) // { data: base64, name: string, type: string, isImage: boolean }
 const uploading = ref(false)
 
-// --- Scanner state (jscanify + OpenCV.js, lazy-loaded on first Scan tap) ---
+// --- Scan state (ScanKit.io server-side; replaced the old jscanify/OpenCV). ---
 const scanInput = ref(null)
-const canvasWrapRef = ref(null)
-const scanCanvasRef = ref(null)
-const scannerOpen = ref(false)
-const scannerLoading = ref(false)
-const processing = ref(false)
-const corners = ref([])      // [{x, y, displayX, displayY}] — x/y in source pixels
-const displayW = ref(0)
-const displayH = ref(0)
-
-// non-reactive references — we don't want Vue proxying the OpenCV instance
-let sourceImage = null       // HTMLImageElement of the captured photo
-let sourceBlobUrl = ''       // blob: URL for sourceImage.src — must be revoked
-let displayScale = 1         // canvas-displayed / source-pixel
-let jscanifyInstance = null  // cached so multi-page scans don't re-construct
+const scanning = ref(false)   // true while a captured photo is being enhanced
+const returnPdf = ref(false)  // per-scan toggle: searchable PDF vs cleaned image
 
 const isScanDocType = computed(() =>
   selectedType.value === 'POD' || selectedType.value === 'BOL'
@@ -209,14 +155,6 @@ const isScanDocType = computed(() =>
 
 watch(() => props.docType, (val) => {
   if (val) selectedType.value = val
-})
-
-onBeforeUnmount(() => {
-  // Defensive — if the user navigates away mid-scan, free the blob URL
-  if (sourceBlobUrl) {
-    URL.revokeObjectURL(sourceBlobUrl)
-    sourceBlobUrl = ''
-  }
 })
 
 const headerText = computed(() => {
@@ -229,12 +167,13 @@ const hintText = computed(() => {
   return `Take photos or upload files for Load ${props.loadId}`
 })
 
-async function compressImage(file) {
-  const MAX = 1200
-  // Decode + downscale via createImageBitmap. The previous Image+Canvas path
-  // materialised a 12MP photo as ~48MB of raw RGBA before drawing, which
-  // OOM-killed the tab on low-RAM phones (same fix already applied to the
-  // ExpenseForm receipt path in commit 59fcd80).
+// Decode + downscale an image to a JPEG data URL. maxEdge defaults to 1200 for
+// plain uploads; the scan flow passes a larger value so ScanKit has enough
+// detail to detect the document edges. createImageBitmap resizes in one pass —
+// the old Image+Canvas path materialised a 12MP photo as ~48MB of raw RGBA and
+// OOM-killed the tab on low-RAM phones (fix from commit 59fcd80).
+async function compressImage(file, maxEdge = 1200) {
+  const MAX = maxEdge
   try {
     const probe = await createImageBitmap(file)
     let w = probe.width
@@ -292,354 +231,63 @@ function removeFile(index) {
 }
 
 // ============================================================
-// Scanner: lazy-loaded jscanify + OpenCV.js
+// Scan: capture a photo, enhance it server-side via ScanKit.io
 // ============================================================
-// Module-scope caches: the wasm-bearing opencv.js is heavy (~9MB) — loading it
-// once and keeping the cv/jscanify references alive across component
-// remounts means the driver only pays the cost on the first POD/BOL of the
-// session. The downloaded script is also browser-cached by URL.
-const SCAN_PRE_DOWNSCALE = 2000   // px — clip source before cv.imread() to avoid
-                                  // OOM on older iPhones (12MP photos → ~50MB Mat)
-const SCAN_OUTPUT_MAX = 1200      // px — final long edge (matches compressImage)
-const SCAN_BW_CUTOFF = 150        // luma threshold; paper photos read dim, so 150
-                                  // gives more black ink than the naive 127
-// iOS Safari doesn't fire <script>.onerror for WASM-instantiation failures —
-// only HTTP-level fetch errors. Without an explicit timeout, a stalled WASM
-// compile leaves the button frozen on "Loading scanner…". 30s tolerates
-// older iPhone WASM compile + cellular re-download of the 9MB bundle.
-const SCANNER_LOAD_TIMEOUT_MS = 30_000
-
-let openCVPromise = null
-
-function loadOpenCV() {
-  if (typeof window === 'undefined') return Promise.reject(new Error('no_window'))
-  if (window.cv && window.cv.Mat) return Promise.resolve(window.cv)
-  if (openCVPromise) return openCVPromise
-  const loadPromise = new Promise((resolve, reject) => {
-    // The opencv.js we ship from /vendor/opencv/ has its WASM embedded as a
-    // base64 data URL, so no locateFile shim is needed — it boots from the
-    // single JS file alone. Module.onRuntimeInitialized must be set BEFORE the
-    // script runs (the Emscripten loader reads window.Module on init).
-    window.Module = window.Module || {}
-    const prev = window.Module.onRuntimeInitialized
-    window.Module.onRuntimeInitialized = () => {
-      if (typeof prev === 'function') {
-        try { prev() } catch { /* ignore upstream handler errors */ }
-      }
-      resolve(window.cv)
-    }
-    const s = document.createElement('script')
-    s.src = '/vendor/opencv/opencv.js'
-    s.async = true
-    s.onerror = () => reject(new Error('opencv_load_failed'))
-    document.head.appendChild(s)
-  })
-  const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('scanner_timeout')), SCANNER_LOAD_TIMEOUT_MS)
-  })
-  openCVPromise = Promise.race([loadPromise, timeoutPromise]).catch((err) => {
-    openCVPromise = null   // allow a fresh retry on the next tap
-    throw err
-  })
-  return openCVPromise
-}
-
-async function loadJscanify() {
-  if (jscanifyInstance) return jscanifyInstance
-  const [mod] = await Promise.all([
-    import('jscanify/client'),
-    loadOpenCV(),
-  ])
-  const Ctor = (mod && (mod.default || mod)) || window.jscanify
-  if (typeof Ctor !== 'function') throw new Error('jscanify_load_failed')
-  jscanifyInstance = new Ctor()
-  return jscanifyInstance
-}
-
-async function startScan() {
-  if (scannerLoading.value || scannerOpen.value) return
-  scannerLoading.value = true
-  try {
-    await loadJscanify()
-  } catch (err) {
-    console.error('[scanner] load failed:', err?.message || err)
-    scannerLoading.value = false
-    toast.show('Scanner unavailable, opening camera instead', 'error')
-    // Fallback path: the legacy Take Photo input only renders for non-POD
-    // types, so for POD/BOL we use the same hidden scan input but skip the
-    // scanner overlay — the file lands in files[] via the handleFile path.
-    triggerLegacyPhotoFallback()
-    return
-  }
-  scannerLoading.value = false
+function startScan() {
+  if (scanning.value) return
   scanInput.value?.click()
-}
-
-function triggerLegacyPhotoFallback() {
-  // Build a one-shot listener that routes the next scan-input change through
-  // the regular handleFile() so the user still gets *something* on the load.
-  const input = scanInput.value
-  if (!input) return
-  const onceHandler = async (ev) => {
-    input.removeEventListener('change', onceHandler)
-    input.addEventListener('change', handleScanFile)
-    await handleFile(ev)
-  }
-  input.removeEventListener('change', handleScanFile)
-  input.addEventListener('change', onceHandler, { once: true })
-  input.click()
 }
 
 async function handleScanFile(event) {
   const file = event.target.files && event.target.files[0]
   event.target.value = ''
   if (!file) return
+  scanning.value = true
+  let dataUrl = ''
   try {
-    const img = await fileToImage(file, SCAN_PRE_DOWNSCALE)
-    sourceImage = img
-    scannerOpen.value = true
-    await nextTick()
-    layoutCanvas(img)
-    autoDetectCorners(img)
+    // Send a higher-res input than plain uploads so ScanKit detects edges well.
+    dataUrl = await compressImage(file, 2000)
   } catch {
-    toast.show('Could not load the captured image. Please try again.', 'error')
-    closeScanner()
+    scanning.value = false
+    toast.show('Could not read the captured image. Please try again.', 'error')
+    return
   }
-}
-
-// Decode a File to an HTMLImageElement. We downscale via createImageBitmap if
-// the long edge exceeds `maxEdge` so OpenCV's cv.imread doesn't materialise a
-// 50MB Mat from a 12MP photo (same trick `compressImage` uses).
-async function fileToImage(file, maxEdge) {
-  let blob = file
   try {
-    const probe = await createImageBitmap(file)
-    const long = Math.max(probe.width, probe.height)
-    if (long > maxEdge) {
-      const scale = maxEdge / long
-      const w = Math.round(probe.width * scale)
-      const h = Math.round(probe.height * scale)
-      const bitmap = await createImageBitmap(file, {
-        resizeWidth: w,
-        resizeHeight: h,
-        resizeQuality: 'medium',
-      })
-      const canvas = document.createElement('canvas')
-      canvas.width = w
-      canvas.height = h
-      canvas.getContext('2d').drawImage(bitmap, 0, 0)
-      bitmap.close()
-      probe.close()
-      blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92))
-      canvas.width = 0
-      canvas.height = 0
-    } else {
-      probe.close()
-    }
-  } catch {
-    // Browsers without createImageBitmap (or HEIC blobs) — pass the raw file
-    // through. cv.imread will still work on the resulting <img>, just slower.
-  }
-  return await new Promise((resolve, reject) => {
-    if (sourceBlobUrl) URL.revokeObjectURL(sourceBlobUrl)
-    sourceBlobUrl = URL.createObjectURL(blob)
-    const img = new Image()
-    img.onload = () => resolve(img)
-    img.onerror = () => reject(new Error('decode_failed'))
-    img.src = sourceBlobUrl
-  })
-}
-
-function layoutCanvas(img) {
-  const wrap = canvasWrapRef.value
-  if (!wrap) return
-  const maxW = wrap.clientWidth
-  const maxH = wrap.clientHeight
-  if (!maxW || !maxH) return
-  const scale = Math.min(maxW / img.width, maxH / img.height, 1)
-  displayScale = scale
-  displayW.value = Math.round(img.width * scale)
-  displayH.value = Math.round(img.height * scale)
-  const cnv = scanCanvasRef.value
-  if (!cnv) return
-  cnv.width = displayW.value
-  cnv.height = displayH.value
-  cnv.getContext('2d').drawImage(img, 0, 0, displayW.value, displayH.value)
-}
-
-function autoDetectCorners(img) {
-  const cv = window.cv
-  let src = null
-  let contour = null
-  try {
-    src = cv.imread(img)
-    contour = jscanifyInstance.findPaperContour(src)
-    if (contour) {
-      const cp = jscanifyInstance.getCornerPoints(contour, src)
-      if (cp.topLeftCorner && cp.topRightCorner && cp.bottomRightCorner && cp.bottomLeftCorner) {
-        corners.value = [
-          toCorner(cp.topLeftCorner),
-          toCorner(cp.topRightCorner),
-          toCorner(cp.bottomRightCorner),
-          toCorner(cp.bottomLeftCorner),
-        ]
-        return
-      }
-    }
-    corners.value = defaultCorners(img.width, img.height)
-  } catch {
-    corners.value = defaultCorners(img.width, img.height)
-  } finally {
-    if (contour && typeof contour.delete === 'function') contour.delete()
-    if (src && typeof src.delete === 'function') src.delete()
-  }
-}
-
-function toCorner(pt) {
-  return {
-    x: pt.x,
-    y: pt.y,
-    displayX: pt.x * displayScale,
-    displayY: pt.y * displayScale,
-  }
-}
-
-function defaultCorners(w, h) {
-  const m = 0.1
-  return [
-    toCorner({ x: w * m,        y: h * m }),
-    toCorner({ x: w * (1 - m),  y: h * m }),
-    toCorner({ x: w * (1 - m),  y: h * (1 - m) }),
-    toCorner({ x: w * m,        y: h * (1 - m) }),
-  ]
-}
-
-function onCornerDown(e, idx) {
-  e.preventDefault()
-  const canvas = scanCanvasRef.value
-  if (!canvas) return
-  // Corners are positioned relative to the canvas's top-left (they live inside
-  // the .scanner-canvas-stack div which is exactly the canvas's size), so we
-  // measure pointer position against the canvas rect directly.
-  const canvasRect = canvas.getBoundingClientRect()
-  const target = e.currentTarget
-  try { target.setPointerCapture(e.pointerId) } catch { /* old browsers */ }
-
-  const move = (ev) => {
-    const dx = ev.clientX - canvasRect.left
-    const dy = ev.clientY - canvasRect.top
-    const clampedX = Math.max(0, Math.min(displayW.value, dx))
-    const clampedY = Math.max(0, Math.min(displayH.value, dy))
-    const c = corners.value[idx]
-    if (!c) return
-    c.displayX = clampedX
-    c.displayY = clampedY
-    c.x = clampedX / displayScale
-    c.y = clampedY / displayScale
-  }
-  const up = () => {
-    target.removeEventListener('pointermove', move)
-    target.removeEventListener('pointerup', up)
-    target.removeEventListener('pointercancel', up)
-    try { target.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
-  }
-  target.addEventListener('pointermove', move)
-  target.addEventListener('pointerup', up)
-  target.addEventListener('pointercancel', up)
-}
-
-const quadPoints = computed(() => {
-  if (!corners.value.length) return ''
-  return corners.value.map(c => `${c.displayX},${c.displayY}`).join(' ')
-})
-
-async function applyScan() {
-  if (processing.value || !sourceImage) return
-  processing.value = true
-  try {
-    const [tl, tr, br, bl] = corners.value
-    if (!tl || !tr || !br || !bl) throw new Error('missing_corners')
-    // Compute output dimensions from the quad — preserves the actual paper's
-    // aspect, not the photo's
-    const wTop = Math.hypot(tr.x - tl.x, tr.y - tl.y)
-    const wBot = Math.hypot(br.x - bl.x, br.y - bl.y)
-    const hLeft = Math.hypot(bl.x - tl.x, bl.y - tl.y)
-    const hRight = Math.hypot(br.x - tr.x, br.y - tr.y)
-    let outW = Math.round(Math.max(wTop, wBot))
-    let outH = Math.round(Math.max(hLeft, hRight))
-    if (!outW || !outH) throw new Error('zero_dim')
-    if (outW > SCAN_OUTPUT_MAX || outH > SCAN_OUTPUT_MAX) {
-      const r = outW > outH ? SCAN_OUTPUT_MAX / outW : SCAN_OUTPUT_MAX / outH
-      outW = Math.round(outW * r)
-      outH = Math.round(outH * r)
-    }
-    const warped = jscanifyInstance.extractPaper(sourceImage, outW, outH, {
-      topLeftCorner:     { x: tl.x, y: tl.y },
-      topRightCorner:    { x: tr.x, y: tr.y },
-      bottomRightCorner: { x: br.x, y: br.y },
-      bottomLeftCorner:  { x: bl.x, y: bl.y },
+    const res = await scanDocument(dataUrl, { returnPdf: returnPdf.value, filter: 'white' })
+    const ts = Date.now()
+    files.value.push({
+      data: res.data,
+      name: res.isPdf ? `scan-${ts}.pdf` : `scan-${ts}.jpg`,
+      type: res.contentType || (res.isPdf ? 'application/pdf' : 'image/jpeg'),
+      isImage: !res.isPdf,
     })
-    if (!warped) throw new Error('extract_failed')
-    const bw = thresholdToBW(warped, SCAN_BW_CUTOFF)
-    const dataUrl = bw.toDataURL('image/jpeg', 0.85)
+  } catch (err) {
+    handleScanError(err, dataUrl)
+  } finally {
+    scanning.value = false
+  }
+}
+
+// On a scan failure we still attach the raw captured photo (except on rate
+// limit, where the driver should just retry) so a POD/BOL upload is never
+// blocked because ScanKit is down, disabled, or out of credits.
+function handleScanError(err, dataUrl) {
+  const status = err && err.status
+  if (status === 429) {
+    toast.show('Too many scans — please wait a moment and try again.', 'error')
+    return
+  }
+  let msg = 'Scan failed — attaching your photo as-is.'
+  if (status === 503) msg = "Document scanning isn't available — attaching your photo as-is."
+  else if (status === 402) msg = 'Scanning temporarily unavailable — attaching your photo as-is.'
+  toast.show(msg, 'error')
+  if (dataUrl) {
     files.value.push({
       data: dataUrl,
-      name: `scan-${Date.now()}.jpg`,
+      name: `photo-${Date.now()}.jpg`,
       type: 'image/jpeg',
       isImage: true,
     })
-    closeScanner()
-  } catch {
-    toast.show('Could not process scan. Adjust the corners and try again.', 'error')
-    processing.value = false
-  }
-}
-
-// Canvas2D grayscale + threshold. Rec. 709 luma is closer to perceived brightness
-// than a naïve (R+G+B)/3 — black text on white paper comes out crisper.
-function thresholdToBW(srcCanvas, cutoff) {
-  const w = srcCanvas.width
-  const h = srcCanvas.height
-  const out = document.createElement('canvas')
-  out.width = w
-  out.height = h
-  const ctx = out.getContext('2d')
-  ctx.drawImage(srcCanvas, 0, 0)
-  const id = ctx.getImageData(0, 0, w, h)
-  const d = id.data
-  for (let i = 0; i < d.length; i += 4) {
-    const y = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]
-    const v = y >= cutoff ? 255 : 0
-    d[i] = v
-    d[i + 1] = v
-    d[i + 2] = v
-  }
-  ctx.putImageData(id, 0, 0)
-  return out
-}
-
-function retake() {
-  if (processing.value) return
-  closeScanner()
-  // Re-open the camera. We don't await loadJscanify again — it's cached.
-  scanInput.value?.click()
-}
-
-function cancelScan() {
-  if (processing.value) return
-  closeScanner()
-}
-
-function closeScanner() {
-  scannerOpen.value = false
-  processing.value = false
-  corners.value = []
-  displayW.value = 0
-  displayH.value = 0
-  sourceImage = null
-  if (sourceBlobUrl) {
-    URL.revokeObjectURL(sourceBlobUrl)
-    sourceBlobUrl = ''
   }
 }
 
@@ -663,7 +311,7 @@ async function handleUpload() {
       })
     }
 
-    // Upload each document file separately
+    // Upload each document file separately (incl. searchable-PDF scans)
     for (const doc of docs) {
       await api.post('/api/documents/upload', {
         loadId: props.loadId,
@@ -751,6 +399,18 @@ async function handleUpload() {
   opacity: 0.6;
   cursor: progress;
 }
+
+/* Searchable-PDF toggle */
+.pdf-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-bottom: 0.75rem;
+  cursor: pointer;
+}
+.pdf-toggle input { cursor: pointer; }
 
 /* Scan-driven "+" button (POD/BOL) — same visual as the gallery + label but
    it's a <button>, so we re-declare the box styles. */
@@ -885,116 +545,4 @@ button.photo-add:disabled {
 
 .btn-primary:hover { opacity: 0.9; }
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
-</style>
-
-<!-- Un-scoped: the scanner overlay is Teleport'd to <body>, outside this
-     component's scoped-styles attribute, so selectors here apply directly. -->
-<style>
-.scanner-overlay {
-  position: fixed;
-  inset: 0;
-  background: #000;
-  z-index: 9999;
-  display: flex;
-  flex-direction: column;
-  color: #fff;
-  font-family: inherit;
-}
-.scanner-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.75rem 1rem;
-  background: rgba(0, 0, 0, 0.85);
-  font-size: 0.95rem;
-  flex-shrink: 0;
-}
-.scanner-close {
-  background: transparent;
-  border: none;
-  color: #fff;
-  font-size: 1.6rem;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 0.25rem;
-}
-.scanner-canvas-wrap {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  /* Required so pointermove on .scanner-corner isn't eaten by mobile page-scroll */
-  touch-action: none;
-}
-.scanner-canvas-stack {
-  position: relative;
-  touch-action: none;
-}
-.scanner-canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-.scanner-quad {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-.scanner-quad polygon {
-  fill: rgba(74, 144, 226, 0.18);
-  stroke: #4a90e2;
-  stroke-width: 2;
-}
-.scanner-corner {
-  position: absolute;
-  width: 32px;
-  height: 32px;
-  /* center the 32px circle on the corner's (left, top) */
-  margin-left: -16px;
-  margin-top: -16px;
-  border-radius: 50%;
-  background: rgba(74, 144, 226, 0.4);
-  border: 2px solid #fff;
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.5);
-  touch-action: none;
-  cursor: grab;
-}
-.scanner-corner:active {
-  cursor: grabbing;
-  background: rgba(74, 144, 226, 0.75);
-}
-.scanner-actions {
-  display: flex;
-  gap: 0.5rem;
-  padding: 0.75rem;
-  background: rgba(0, 0, 0, 0.85);
-  flex-shrink: 0;
-}
-.scanner-btn {
-  flex: 1;
-  padding: 0.85rem 0.5rem;
-  border-radius: 8px;
-  border: none;
-  font-size: 0.9rem;
-  font-weight: 600;
-  font-family: inherit;
-  cursor: pointer;
-}
-.scanner-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.scanner-btn-secondary {
-  background: #333;
-  color: #fff;
-}
-.scanner-btn-primary {
-  background: #4a90e2;
-  color: #fff;
-}
 </style>

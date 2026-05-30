@@ -19,6 +19,7 @@ const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { renderPolicy } = require("./lib/policy-renderer");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
+const scankit = require("./lib/scankit-client");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -2436,8 +2437,10 @@ if (fs.existsSync(clientDistPath)) {
 // ============================================================
 // CONFIGURATION — Update these values with your own
 // ============================================================
-const SPREADSHEET_ID = "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"; // Production sheet (Dispatch Management - original, n8n writes here)
-const ARCHIVE_SPREADSHEET_ID = "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
+// Sheet IDs default to production so existing deployments keep working unchanged.
+// Override in staging (or any non-prod env) by setting these in the env file.
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"; // Production sheet (Dispatch Management - original, n8n writes here)
+const ARCHIVE_SPREADSHEET_ID = process.env.ARCHIVE_SPREADSHEET_ID || "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
 const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON
 
@@ -2464,6 +2467,16 @@ const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 // production so credentials can be rotated once across the org.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_OCR_MODEL = process.env.GEMINI_OCR_MODEL || "gemini-2.5-flash";
+
+// ScanKit.io document scanning — optional. When SCANKIT_ENABLED is not "true"
+// or SCANKIT_API_KEY is unset, POST /api/documents/scan returns 503 and the
+// client scanner surfaces an error / lets the user attach the raw photo
+// instead. Called via the lib/scankit-client.js adapter (no SDK) so boot still
+// works on hosts without the key. Credit-billed — keep SCANKIT_ENABLED off
+// until the key is wired in production.
+const SCANKIT_BASE_URL = process.env.SCANKIT_BASE_URL || "https://api.scankit.io";
+const SCANKIT_API_KEY = process.env.SCANKIT_API_KEY || "";
+const SCANKIT_ENABLED = String(process.env.SCANKIT_ENABLED || "").toLowerCase() === "true";
 
 // Routemate AI ELD/telematics integration. Phase 1 deploys with the kill
 // switch off (ROUTEMATE_ENABLED=false) so the foundation lands before the
@@ -10785,6 +10798,83 @@ app.post("/api/expenses/ocr", requireAuth, expenseOcrLimiter, async (req, res) =
 	} catch (err) {
 		console.error("Expense OCR error:", err.message);
 		res.status(500).json({ error: "ocr_failed" });
+	}
+});
+
+// POST /api/documents/scan — crop / deskew / lighting-correct a document photo
+// via ScanKit.io, returning the processed image (or a searchable OCR PDF) as a
+// base64 data URI so the client can preview it and then upload via the existing
+// POST /api/documents/upload. Replaces the old client-side jscanify/OpenCV
+// scanner in DocumentUpload.vue. Mirrors the /api/expenses/ocr contract.
+//
+// SECURITY:
+// - Role-gated identically to /api/expenses/ocr (Investors blocked).
+// - SCANKIT_API_KEY lives server-side only; never sent to or echoed at the
+//   client. An auth/key failure is masked as a generic 502 so a driver device
+//   never learns the company key is bad.
+// - Decoded image bytes re-validated via isValidImageMagic (the data-URI mime
+//   is client-controlled). Rate-limited to cap ScanKit credit spend.
+const scanKitLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	message: { error: "Too many scan requests. Try again later." },
+	standardHeaders: true,
+});
+app.post("/api/documents/scan", requireAuth, scanKitLimiter, async (req, res) => {
+	try {
+		const role = req.session.user.role;
+		if (role === "Investor") return res.status(403).json({ error: "Investors cannot scan documents" });
+		if (role !== "Driver" && role !== "Super Admin" && role !== "Dispatcher") {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+		const { photoData } = req.body || {};
+		if (!photoData || typeof photoData !== "string") return res.status(400).json({ error: "photoData required" });
+		if (photoData.length > 8_500_000) return res.status(413).json({ error: "Image too large" });
+		const m = photoData.match(/^data:image\/(jpeg|jpg|png|webp);base64,(.+)$/i);
+		if (!m) return res.status(400).json({ error: "photoData must be a base64 image data URI" });
+		if (!SCANKIT_ENABLED || !SCANKIT_API_KEY) return res.status(503).json({ error: "scan_unavailable" });
+
+		const imageBuffer = Buffer.from(m[2], "base64");
+		// Re-verify the decoded bytes — the data-URI mime is client-controlled.
+		if (!isValidImageMagic(imageBuffer)) return res.status(400).json({ error: "Invalid image data" });
+
+		// Whitelist / clamp the options the client may influence.
+		const filter = ["original", "flat", "white"].includes(req.body.filter) ? req.body.filter : "white";
+		const returnPdf = req.body.returnPdf === true;
+		const outputWidth = Math.min(2048, Math.max(512, Number(req.body.outputWidth) || 1536));
+
+		try {
+			const result = await scankit.cropDocument(
+				{ apiKey: SCANKIT_API_KEY, baseUrl: SCANKIT_BASE_URL },
+				imageBuffer,
+				{ outputWidth, filter, returnPdf, ocrLang: "eng" },
+			);
+			const dataUri = `data:${result.contentType};base64,${result.buffer.toString("base64")}`;
+			return res.json({
+				data: dataUri,
+				contentType: result.contentType,
+				ext: result.ext,
+				isPdf: result.ext === ".pdf",
+			});
+		} catch (err) {
+			// Map adapter error codes → client status. Never leak a key problem.
+			switch (err.code) {
+				case "SCANKIT_NO_CREDITS":
+					return res.status(402).json({ error: "scan_no_credits" });
+				case "SCANKIT_BAD_INPUT":
+					return res.status(400).json({ error: "scan_bad_input" });
+				case "SCANKIT_RATE_LIMIT":
+					return res.status(429).json({ error: "scan_rate_limited" });
+				case "SCANKIT_NO_KEY":
+				case "SCANKIT_AUTH":
+				default:
+					console.error("ScanKit scan failed:", err.code || "", err.message);
+					return res.status(502).json({ error: "scan_failed" });
+			}
+		}
+	} catch (err) {
+		console.error("Document scan error:", err.message);
+		res.status(500).json({ error: "scan_failed" });
 	}
 });
 
