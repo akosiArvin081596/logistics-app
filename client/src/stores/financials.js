@@ -7,6 +7,7 @@ export const useFinancialsStore = defineStore('financials', {
   state: () => ({
     summary: null,
     expensesByCategory: {},
+    monthlyPerformance: [],
     perTruck: [],
     loads: { highest: [], lowest: [] },
     drivers: [],
@@ -23,6 +24,7 @@ export const useFinancialsStore = defineStore('financials', {
         const data = await api.get('/api/financials')
         this.summary = data.summary || null
         this.expensesByCategory = data.expensesByCategory || {}
+        this.monthlyPerformance = data.monthlyPerformance || []
         this.perTruck = data.perTruck || []
         this.loads = data.loads || { highest: [], lowest: [] }
         this.drivers = data.drivers || []

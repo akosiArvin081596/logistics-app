@@ -45,11 +45,12 @@ export const useInvoicesStore = defineStore('invoices', {
     // Super Admin only. Sets a +/- adjustment line on a Draft or Submitted
     // invoice. Pass amount=0 to clear an existing adjustment.
     async adjust(id, amount, note) {
-      await api.put(`/api/invoices/${id}/adjust`, {
+      const res = await api.put(`/api/invoices/${id}/adjust`, {
         adjustment: Number(amount) || 0,
         adjustmentNote: note || '',
       })
       await this.load()
+      return res
     },
   },
 })
