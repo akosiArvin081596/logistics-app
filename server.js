@@ -5386,7 +5386,13 @@ async function rerenderInvoicePdfFromStoredData(invoiceRow) {
 	let renderData;
 	try { renderData = JSON.parse(invoiceRow.render_data || "{}"); } catch { renderData = null; }
 	if (!renderData || !renderData.__templateName) {
-		throw new Error("This invoice was generated before adjustment support — ask the driver to regenerate it first, then try the adjustment again.");
+		// Legacy invoice generated before render snapshots existed — the full
+		// template can't be faithfully re-rendered (the per-day breakdown, bank
+		// details, etc. were never stored). Rather than reject the adjustment, we
+		// honor it on the document by appending an "Adjustment Summary" page to
+		// the original PDF. The numeric adjustment is recorded regardless.
+		await appendInvoiceAdjustmentAddendum(invoiceRow);
+		return "addendum";
 	}
 	const templateName = renderData.__templateName;
 	delete renderData.__templateName;
@@ -5397,6 +5403,130 @@ async function rerenderInvoicePdfFromStoredData(invoiceRow) {
 	const uploadsDir = path.join(__dirname, "uploads", "invoices");
 	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 	fs.writeFileSync(path.join(uploadsDir, invoiceRow.pdf_file_name), pdfBuffer);
+	return "rerender";
+}
+
+// Append (or clear) a one-page "Adjustment Summary" on a legacy invoice PDF —
+// one whose render snapshot predates adjustment support. We preserve the
+// pristine original via a one-time `.base` sidecar copy, then rebuild the
+// served PDF as base [+ summary page]. This keeps repeated adjustments from
+// stacking pages and lets clearing the adjustment (amount 0) restore the
+// original exactly. Uses pdf-lib (already imported), so no source re-fetch and
+// no risk of the base totals drifting since the driver submitted.
+async function appendInvoiceAdjustmentAddendum(invoiceRow) {
+	const uploadsDir = path.join(__dirname, "uploads", "invoices");
+	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+	const servedPath = path.join(uploadsDir, invoiceRow.pdf_file_name);
+	const basePath = servedPath + ".base";
+	if (!invoiceRow.pdf_file_name || !fs.existsSync(servedPath)) {
+		// No file to amend — fall back to the original guidance so the admin
+		// knows the document itself needs regenerating (numeric adjustment still
+		// saved by the caller).
+		if (!fs.existsSync(basePath)) {
+			throw new Error("The invoice PDF is missing on the server — ask the driver to regenerate it, then re-apply the adjustment.");
+		}
+	}
+	// Preserve the pristine original exactly once.
+	if (fs.existsSync(servedPath) && !fs.existsSync(basePath)) {
+		fs.copyFileSync(servedPath, basePath);
+	}
+
+	const adjustment = Number(invoiceRow.adjustment) || 0;
+	// Cleared adjustment → restore the pristine original (no summary page).
+	if (adjustment === 0) {
+		fs.copyFileSync(basePath, servedPath);
+		return;
+	}
+
+	const baseBytes = fs.readFileSync(basePath);
+	const pdfDoc = await PdfLibDocument.load(baseBytes);
+	const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+	const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+	const page = pdfDoc.addPage([612, 792]); // US Letter
+
+	const baseTotal = Number(invoiceRow.total_earnings) || 0;
+	const adjustedTotal = baseTotal + adjustment;
+	// pdf-lib StandardFonts only encode WinAnsi; map common smart punctuation to
+	// ASCII and drop anything else non-ASCII so an admin-typed reason (em-dash,
+	// curly quotes, emoji, …) can never make drawText throw and 409 the save.
+	const winAnsiSafe = (s) => String(s)
+		.replace(/[‐-―−]/g, "-")
+		.replace(/[‘’‚′]/g, "'")
+		.replace(/[“”„″]/g, '"')
+		.replace(/…/g, "...")
+		.replace(/[^\x20-\x7E]/g, "?");
+	const note = winAnsiSafe(invoiceRow.adjustment_note || "");
+	const adjustedBy = winAnsiSafe(invoiceRow.adjusted_by || "");
+	const adjustedAt = (invoiceRow.adjusted_at || "").toString().slice(0, 10);
+	const invoiceNo = winAnsiSafe(invoiceRow.invoice_number || "");
+	const money = (n) =>
+		`$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+	const ink = rgb(0.1, 0.11, 0.13);
+	const muted = rgb(0.42, 0.45, 0.5);
+	const green = rgb(0.02, 0.55, 0.34);
+	const red = rgb(0.78, 0.12, 0.12);
+	const rule = rgb(0.85, 0.86, 0.88);
+	const LEFT = 56;
+	const RIGHT = 556;
+	let y = 720;
+
+	page.drawText("ADJUSTMENT SUMMARY", { x: LEFT, y, size: 20, font: fontBold, color: ink });
+	y -= 18;
+	page.drawText(`Invoice ${invoiceNo}`, { x: LEFT, y, size: 11, font, color: muted });
+	y -= 40;
+
+	const drawRow = (label, value, valueColor, bold) => {
+		page.drawText(label, { x: LEFT, y, size: 12, font, color: muted });
+		const valFont = bold ? fontBold : font;
+		const size = bold ? 14 : 12;
+		const w = valFont.widthOfTextAtSize(value, size);
+		page.drawText(value, { x: RIGHT - w, y, size, font: valFont, color: valueColor || ink });
+		y -= 26;
+	};
+
+	drawRow("Original Total Due", money(baseTotal), ink, false);
+	drawRow(
+		`Admin Adjustment (${adjustment < 0 ? "deduction" : "bonus"})`,
+		`${adjustment < 0 ? "-" : "+"}${money(Math.abs(adjustment))}`,
+		adjustment < 0 ? red : green,
+		false,
+	);
+	y += 6;
+	page.drawLine({ start: { x: LEFT, y }, end: { x: RIGHT, y }, thickness: 1, color: rule });
+	y -= 26;
+	drawRow("Adjusted Total Due", money(adjustedTotal), adjustedTotal < 0 ? red : green, true);
+	y -= 12;
+
+	if (note) {
+		page.drawText("Reason", { x: LEFT, y, size: 11, font: fontBold, color: muted });
+		y -= 16;
+		const maxWidth = RIGHT - LEFT;
+		let line = "";
+		for (const word of note.split(/\s+/)) {
+			const test = line ? `${line} ${word}` : word;
+			if (font.widthOfTextAtSize(test, 11) > maxWidth && line) {
+				page.drawText(line, { x: LEFT, y, size: 11, font, color: ink });
+				y -= 15;
+				line = word;
+			} else {
+				line = test;
+			}
+		}
+		if (line) { page.drawText(line, { x: LEFT, y, size: 11, font, color: ink }); y -= 15; }
+	}
+
+	const stamp = [adjustedBy ? `Adjusted by ${adjustedBy}` : "", adjustedAt ? `on ${adjustedAt}` : ""]
+		.filter(Boolean)
+		.join(" ");
+	if (stamp) { y -= 12; page.drawText(stamp, { x: LEFT, y, size: 9, font, color: muted }); }
+
+	page.drawText(
+		"This page documents an administrative adjustment applied after the invoice was generated.",
+		{ x: LEFT, y: 56, size: 8, font, color: muted },
+	);
+
+	const outBytes = await pdfDoc.save();
+	fs.writeFileSync(servedPath, outBytes);
 }
 
 // POST /api/invoices/generate — driver generates weekly invoice
@@ -6012,17 +6142,20 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), async (req, res)
 			"UPDATE invoices SET adjustment = ?, adjustment_note = ?, adjusted_by = ?, adjusted_at = ? WHERE id = ?"
 		).run(adjustment, note, adminName, now, invoice.id);
 
-		// Re-render PDF using the snapshot stored at generate time.
+		// Re-render PDF using the snapshot stored at generate time. Newer invoices
+		// re-render the full template ("rerender"); legacy invoices that predate
+		// snapshots get an appended Adjustment Summary page ("addendum") instead.
 		const updated = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
+		let pdfMode = "rerender";
 		try {
-			await rerenderInvoicePdfFromStoredData(updated);
+			pdfMode = await rerenderInvoicePdfFromStoredData(updated);
 		} catch (renderErr) {
-			// Roll the DB change back if the re-render fails — keeps the PDF on
-			// disk in sync with the row's claim about adjustment.
+			// Roll the DB change back if the PDF update genuinely fails — keeps the
+			// PDF on disk in sync with the row's claim about adjustment.
 			db.prepare(
 				"UPDATE invoices SET adjustment = ?, adjustment_note = ?, adjusted_by = ?, adjusted_at = ? WHERE id = ?"
 			).run(oldAdjustment, oldNote, invoice.adjusted_by || "", invoice.adjusted_at || "", invoice.id);
-			return res.status(409).json({ error: renderErr.message || "PDF re-render failed" });
+			return res.status(409).json({ error: renderErr.message || "PDF update failed" });
 		}
 
 		logAudit(
@@ -6033,7 +6166,7 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), async (req, res)
 			`Adjustment ${oldAdjustment.toFixed(2)} → ${adjustment.toFixed(2)} (${note || "no reason given"})`
 		);
 		const final = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
-		res.json({ success: true, invoice: final });
+		res.json({ success: true, invoice: final, pdfMode });
 	} catch (err) {
 		console.error("Invoice adjust error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -14365,6 +14498,9 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// Per-driver per-month REVENUE (completed loads only). Used by the
 		// percentage-pay branch so owner-op pay = (monthRevenue − monthDeductible) × pct.
 		const driverMonthlyRevenue = {}; // { driver_lc: { "YYYY-MM": revenue } }
+		// Fleet-wide completed revenue per assigned month (incl. unassigned
+		// loads) — drives the monthly performance breakdown. Keyed "YYYY-MM".
+		const monthlyRevenue = {};
 		// Mirror the admin overrides from /api/investor so the company P&L
 		// and investor view honor the same adjustments (CLAUDE.md consistency
 		// rule). `remove` filters days out; `add` credits ELD-missed days.
@@ -14451,13 +14587,18 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 						amount: amt,
 						date: dateStr,
 					});
-					// Per-driver per-month revenue (for percentage-pay branch)
-					if (driverLc && jtDateCol && r[jtDateCol]) {
+					// Per-month revenue: fleet-wide (incl. unassigned) for the
+					// monthly performance view, plus per-driver for the
+					// percentage-pay branch. Bucketed by the load's assigned month.
+					if (jtDateCol && r[jtDateCol]) {
 						const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
 						if (d && !isNaN(d)) {
 							const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-							if (!driverMonthlyRevenue[driverLc]) driverMonthlyRevenue[driverLc] = {};
-							driverMonthlyRevenue[driverLc][mk] = (driverMonthlyRevenue[driverLc][mk] || 0) + amt;
+							monthlyRevenue[mk] = (monthlyRevenue[mk] || 0) + amt;
+							if (driverLc) {
+								if (!driverMonthlyRevenue[driverLc]) driverMonthlyRevenue[driverLc] = {};
+								driverMonthlyRevenue[driverLc][mk] = (driverMonthlyRevenue[driverLc][mk] || 0) + amt;
+							}
 						}
 					}
 				}
@@ -14511,6 +14652,18 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			if (!ovr.add || !ovr.add.size) continue;
 			if (!driverDaySets[drv]) driverDaySets[drv] = new Set();
 			for (const d of ovr.add) driverDaySets[drv].add(d);
+		}
+
+		// Partition each driver's final active-day set by calendar month for the
+		// monthly performance breakdown. An exact partition of driverDaySets, so
+		// per-month fixed-driver pay sums back to the annual total computed below.
+		const driverMonthlyDays = {}; // { driver_lc: { "YYYY-MM": Set<"YYYY-MM-DD"> } }
+		for (const [drv, daySet] of Object.entries(driverDaySets)) {
+			const buckets = (driverMonthlyDays[drv] = {});
+			for (const d of daySet) {
+				const mk = d.slice(0, 7);
+				(buckets[mk] || (buckets[mk] = new Set())).add(d);
+			}
 		}
 
 		let monthsOfOperation = 1;
@@ -14841,6 +14994,115 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			? Math.round((totalRevenue / fleetTotalMiles) * 100) / 100
 			: 0;
 
+		// Reconciled expense breakdown for the Expense Categories chart: trip
+		// categories + driver pay + truck fixed costs + maintenance-fund service
+		// + compliance, so the bars sum to totalExpenses (the KPI). The "Biggest
+		// Trip Expense" KPI (`biggest`, above) intentionally stays trip-only.
+		// Maintenance-fund service folds into the single "maintenance" bar.
+		const reconciledExpenses = Object.fromEntries(
+			Object.entries(expByCategory).map(([k, v]) => [k, Math.round(v)])
+		);
+		reconciledExpenses.maintenance = Math.round((expByCategory.maintenance || 0) + maintSum);
+		reconciledExpenses.driver_pay = Math.round(totalDriverPay);
+		reconciledExpenses.fixed_costs = Math.round(totalFixedCosts);
+		reconciledExpenses.compliance = Math.round((expByCategory.compliance || 0) + compSum);
+
+		// ---- Monthly performance breakdown (revenue / expenses / net per
+		// calendar month, oldest → current incl. month-to-date) ----
+		// Mirrors /api/investor's monthlyEarnings so the two views reconcile:
+		// revenue by assigned month; fixed pay = month active-days × daily rate;
+		// percentage pay = max(0, monthRevenue − monthDeductible) × pct; plus
+		// per-month trip expenses (expenses table) and truck fixed costs.
+		// Monthly expenses exclude the maintenance-fund and compliance buckets
+		// (not date-bucketed here), so the annual KPIs remain authoritative.
+		const monthlyPerformance = (() => {
+			const pad = (n) => String(n).padStart(2, "0");
+			const currentMonthKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+
+			// Driver pay per month.
+			const monthlyDriverPay = {};
+			const payDrivers = new Set([
+				...Object.keys(driverMonthlyDays),
+				...Object.keys(driverMonthlyRevenue),
+			]);
+			for (const driver of payDrivers) {
+				const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
+				if (struct.payType === "percentage") {
+					const revByMonth = driverMonthlyRevenue[driver] || {};
+					const expByMonth = expensesByDriverMonth[driver] || {};
+					for (const [mk, monthRev] of Object.entries(revByMonth)) {
+						const net = Math.max(0, monthRev - (expByMonth[mk] || 0));
+						monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0)
+							+ Math.round((net * struct.payPercentage / 100) * 100) / 100;
+					}
+				} else {
+					const rate = trucksByDriver[driver] || 250;
+					for (const [mk, daySet] of Object.entries(driverMonthlyDays[driver] || {})) {
+						monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + daySet.size * rate;
+					}
+				}
+			}
+
+			// Trip expenses per month (expenses table — same source as the
+			// Expense Categories chart's trip rows).
+			const monthlyTripExp = {};
+			for (const m of expensesByMonth) {
+				monthlyTripExp[m.month] = (m.fuel || 0) + (m.maintenance || 0) + (m.repair || 0)
+					+ (m.toll || 0) + (m.food || 0) + (m.other || 0);
+			}
+
+			// Fixed costs per month — constant per Active truck for every month
+			// from its created_at onward (maintenance-fund reserve omitted, same
+			// as the fleet totals).
+			const fixedTrucks = db.prepare(
+				"SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'"
+			).all();
+			const monthlyFixedCosts = (mk) => {
+				let total = 0;
+				for (const t of fixedTrucks) {
+					if (t.created_at) {
+						const td = new Date(t.created_at);
+						if (!isNaN(td)) {
+							const truckKey = `${td.getFullYear()}-${pad(td.getMonth() + 1)}`;
+							if (mk < truckKey) continue; // truck didn't exist yet
+						}
+					}
+					total += (t.insurance_monthly || 0) + (t.eld_monthly || 0)
+						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
+				}
+				return Math.round(total);
+			};
+
+			// Walk every month from the earliest load month to the current month.
+			const startKey = earliestDate
+				? `${earliestDate.getFullYear()}-${pad(earliestDate.getMonth() + 1)}`
+				: currentMonthKey;
+			const out = [];
+			let cursor = new Date(parseInt(startKey.slice(0, 4), 10), parseInt(startKey.slice(5, 7), 10) - 1, 1);
+			const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
+			let guard = 0;
+			while (cursor <= endDate && guard++ < 600) {
+				const mk = `${cursor.getFullYear()}-${pad(cursor.getMonth() + 1)}`;
+				const revenue = monthlyRevenue[mk] || 0;
+				const driverPay = monthlyDriverPay[mk] || 0;
+				const tripExpenses = monthlyTripExp[mk] || 0;
+				const fixedCosts = monthlyFixedCosts(mk);
+				const totalExp = driverPay + tripExpenses + fixedCosts;
+				out.push({
+					month: mk,
+					revenue: Math.round(revenue),
+					driverPay: Math.round(driverPay),
+					tripExpenses: Math.round(tripExpenses),
+					fixedCosts,
+					totalExpenses: Math.round(totalExp),
+					netProfit: Math.round(revenue - totalExp),
+					isCurrentMonth: mk === currentMonthKey,
+				});
+				cursor.setMonth(cursor.getMonth() + 1);
+			}
+			return out;
+		})();
+
 		res.json({
 			summary: {
 				totalRevenue: Math.round(totalRevenue),
@@ -14875,10 +15137,9 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				idleTruckCount,
 				idleOverhead: Math.round(idleOverhead),
 			},
-			expensesByCategory: Object.fromEntries(
-				Object.entries(expByCategory).map(([k, v]) => [k, Math.round(v)])
-			),
+			expensesByCategory: reconciledExpenses,
 			expensesByMonth,
+			monthlyPerformance,
 			perTruck,
 			loads: { highest, lowest },
 			drivers,

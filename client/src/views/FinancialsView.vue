@@ -81,11 +81,64 @@
         </div>
       </section>
 
-      <!-- 2. Expense Categories -->
+      <!-- 2. Monthly Performance -->
+      <section class="section">
+        <div class="section-title">
+          <div class="section-icon" style="background: var(--accent-dim); color: var(--accent);">&#128197;</div>
+          Monthly Performance
+          <span class="section-sub">Revenue, expenses &amp; net by month &mdash; current month is to-date</span>
+        </div>
+        <div v-if="!monthsDesc.length" class="empty-msg">No monthly data yet.</div>
+        <template v-else>
+          <!-- Revenue trend (last 12 months) -->
+          <div class="month-chart">
+            <div
+              v-for="m in chartMonths"
+              :key="m.month"
+              class="month-bar-col"
+              :title="`${monthLabel(m.month)} — Revenue ${fmt(m.revenue)} · Net ${fmt(m.netProfit)}`"
+            >
+              <div class="month-bar-track">
+                <div
+                  class="month-bar-fill"
+                  :class="{ 'is-current': m.isCurrentMonth }"
+                  :style="{ height: barHeight(m.revenue) }"
+                ></div>
+              </div>
+              <div class="month-bar-label">{{ shortMonth(m.month) }}</div>
+            </div>
+          </div>
+          <!-- Month-by-month table (newest first) -->
+          <table class="data-table compact monthly-table">
+            <thead>
+              <tr>
+                <th>Month</th>
+                <th class="num">Revenue</th>
+                <th class="num">Expenses</th>
+                <th class="num">Net Profit</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="m in monthsDesc" :key="m.month" :class="{ 'row-current': m.isCurrentMonth }">
+                <td class="mono">
+                  {{ monthLabel(m.month) }}
+                  <span v-if="m.isCurrentMonth" class="mtd-badge">MTD</span>
+                </td>
+                <td class="num pos">{{ fmt(m.revenue) }}</td>
+                <td class="num dim">{{ fmt(m.totalExpenses) }}</td>
+                <td class="num" :class="m.netProfit >= 0 ? 'pos' : 'neg'">{{ fmt(m.netProfit) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+      </section>
+
+      <!-- 3. Expense Categories -->
       <section class="section">
         <div class="section-title">
           <div class="section-icon" style="background: var(--amber-dim); color: var(--amber);">&#128202;</div>
           Expense Categories
+          <span class="section-sub">All buckets &mdash; reconciles to Total Expenses</span>
         </div>
         <div v-if="!categoryBars.length" class="empty-msg">No expense data yet.</div>
         <div v-else class="bar-list">
@@ -101,7 +154,7 @@
         </div>
       </section>
 
-      <!-- 3. Per-Truck Performance -->
+      <!-- 4. Per-Truck Performance -->
       <section class="section">
         <div class="section-title">
           <div class="section-icon" style="background: var(--blue-dim, #dbeafe); color: var(--blue, #2563eb);">&#128665;</div>
@@ -142,7 +195,7 @@
         </table>
       </section>
 
-      <!-- 4. Highest & Lowest Loads -->
+      <!-- 5. Highest & Lowest Loads -->
       <section class="section two-col">
         <div class="col">
           <div class="section-title">
@@ -192,7 +245,7 @@
         </div>
       </section>
 
-      <!-- 5. Driver Earnings Leaderboard -->
+      <!-- 6. Driver Earnings Leaderboard -->
       <section class="section">
         <div class="section-title">
           <div class="section-icon" style="background: var(--accent-dim); color: var(--accent);">&#127942;</div>
@@ -283,10 +336,13 @@ function idleTitle(t) {
 
 // Category bars, sorted descending by amount
 const CATEGORY_META = {
+  driver_pay: { label: 'Driver Pay', color: '#0d9488' },
   fuel: { label: 'Fuel', color: '#f59e0b' },
+  fixed_costs: { label: 'Fixed Costs', color: '#64748b' },
   maintenance: { label: 'Maintenance', color: '#3b82f6' },
   repair: { label: 'Repair', color: '#ef4444' },
   toll: { label: 'Tolls', color: '#8b5cf6' },
+  compliance: { label: 'Compliance', color: '#d946ef' },
   food: { label: 'Food', color: '#10b981' },
   other: { label: 'Other', color: '#6b7280' },
 }
@@ -302,8 +358,30 @@ const categoryBars = computed(() => {
       amount,
       pct: (amount / total) * 100,
     }))
+    .filter(r => r.amount > 0)
     .sort((a, b) => b.amount - a.amount)
 })
+
+// Monthly performance — backend returns oldest → newest, incl. the current
+// (month-to-date) month flagged isCurrentMonth.
+const monthsAsc = computed(() => store.monthlyPerformance || [])
+const monthsDesc = computed(() => [...monthsAsc.value].reverse())
+const chartMonths = computed(() => monthsAsc.value.slice(-12))
+const maxMonthRevenue = computed(() =>
+  Math.max(1, ...chartMonths.value.map(m => m.revenue || 0))
+)
+function barHeight(rev) {
+  // Floor at 2% so a non-zero month is always a visible sliver.
+  return Math.max(2, ((rev || 0) / maxMonthRevenue.value) * 100) + '%'
+}
+function monthLabel(mk) {
+  const [y, m] = String(mk).split('-').map(Number)
+  return new Date(y, (m || 1) - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+}
+function shortMonth(mk) {
+  const [y, m] = String(mk).split('-').map(Number)
+  return new Date(y, (m || 1) - 1, 1).toLocaleDateString('en-US', { month: 'short' })
+}
 
 onMounted(() => store.load())
 useSocketRefresh('expenses:changed', () => store.load())
@@ -413,6 +491,64 @@ useSocketRefresh('invoices:changed', () => store.load())
 .bar-fill {
   height: 100%; border-radius: 6px;
   transition: width 0.5s ease;
+}
+
+/* Monthly performance */
+.month-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4rem;
+  height: 160px;
+  margin-bottom: 1.25rem;
+  padding-top: 0.5rem;
+}
+.month-bar-col {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+}
+.month-bar-track {
+  flex: 1;
+  width: 100%;
+  max-width: 46px;
+  display: flex;
+  align-items: flex-end;
+}
+.month-bar-fill {
+  width: 100%;
+  min-height: 2px;
+  background: linear-gradient(180deg, var(--accent), #0ea5e9);
+  border-radius: 5px 5px 0 0;
+  transition: height 0.5s ease;
+}
+.month-bar-fill.is-current {
+  background: linear-gradient(180deg, #10b981, #059669);
+}
+.month-bar-label {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.monthly-table .row-current {
+  background: rgba(16, 185, 129, 0.08);
+  font-weight: 600;
+}
+.monthly-table .row-current:hover { background: rgba(16, 185, 129, 0.14); }
+.mtd-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #065f46;
+  background: #d1fae5;
+  border-radius: 999px;
+  vertical-align: middle;
 }
 
 /* Tables */

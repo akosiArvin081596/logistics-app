@@ -374,11 +374,18 @@ async function submitAdjust() {
   }
   adjustBusy.value = true
   try {
-    await store.adjust(selectedInvoice.value.id, amt, adjustReason.value.trim())
+    const res = await store.adjust(selectedInvoice.value.id, amt, adjustReason.value.trim())
     const fresh = store.invoices.find(i => i.id === selectedInvoice.value.id)
     if (fresh) selectedInvoice.value = fresh
     showAdjustPrompt.value = false
-    toast(amt === 0 ? 'Adjustment removed' : `Adjustment saved (${formatAdj(amt)})`, 'success')
+    if (amt === 0) {
+      toast('Adjustment removed', 'success')
+    } else if (res?.pdfMode === 'addendum') {
+      // Legacy invoice (no render snapshot): the PDF got an appended summary page.
+      toast(`Adjustment saved (${formatAdj(amt)}) — a summary page was added to the PDF`, 'success')
+    } else {
+      toast(`Adjustment saved (${formatAdj(amt)})`, 'success')
+    }
   } catch (err) {
     toast(err?.message || 'Failed to save adjustment', 'error')
   } finally {
