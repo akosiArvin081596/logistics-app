@@ -29,10 +29,11 @@
           <button class="iae-btn" @click="rotate(90)">&#8635; Rotate</button>
           <button class="iae-btn" @click="resetCrop">Reset crop</button>
         </div>
-        <label class="iae-slider">
+        <div class="iae-slider">
           <span>Straighten {{ fineAngle }}&deg;</span>
           <input type="range" min="-15" max="15" step="0.5" v-model.number="fineAngle" @input="onStraighten" />
-        </label>
+          <button type="button" class="iae-auto-btn" @click="autoStraighten">Auto</button>
+        </div>
         <div class="iae-row iae-seg">
           <button :class="['iae-seg-btn', { on: bwMode === 'color' }]" @click="setBw('color')">Color</button>
           <button :class="['iae-seg-btn', { on: bwMode === 'gray' }]" @click="setBw('gray')">Grayscale</button>
@@ -112,7 +113,7 @@ onMounted(async () => {
   await nextTick()
   // rAF: the freshly-teleported full-screen overlay needs a layout pass before
   // we can measure the stage and size/draw the canvas.
-  requestAnimationFrame(() => { layout(); renderPreview() })
+  requestAnimationFrame(() => { try { autoStraighten() } catch { layout(); renderPreview() } })
   window.addEventListener('resize', onResize)
 })
 
@@ -186,6 +187,73 @@ function onStraighten() {
     layout()
     renderPreview()
   })
+}
+
+// Detect document skew via the projection-profile (row-variance) method: at the
+// correct angle, text lines collapse into a few dense rows, maximising the sum
+// of squared row-counts. Runs on a downscaled, 90deg-oriented copy and returns
+// the correcting angle in degrees (0 if there isn't enough ink to judge).
+function detectSkew() {
+  try {
+    const sw = sourceImg.naturalWidth || sourceImg.width
+    const sh = sourceImg.naturalHeight || sourceImg.height
+    const MAXD = 360
+    const s = Math.min(1, MAXD / Math.max(sw, sh))
+    const bw = Math.max(1, Math.round(sw * s)), bh = Math.max(1, Math.round(sh * s))
+    const base = document.createElement('canvas')
+    base.width = bw; base.height = bh
+    base.getContext('2d').drawImage(sourceImg, 0, 0, bw, bh)
+    // Apply the current 90deg orientation so detection matches what's shown.
+    const rot = ((rotation.value % 360) + 360) % 360
+    let cnv = base
+    if (rot !== 0) {
+      const r = document.createElement('canvas')
+      if (rot === 90 || rot === 270) { r.width = bh; r.height = bw } else { r.width = bw; r.height = bh }
+      const rc = r.getContext('2d')
+      rc.translate(r.width / 2, r.height / 2)
+      rc.rotate((rot * Math.PI) / 180)
+      rc.drawImage(base, -bw / 2, -bh / 2)
+      cnv = r
+    }
+    const w = cnv.width, h = cnv.height
+    const data = cnv.getContext('2d').getImageData(0, 0, w, h).data
+    // Collect dark ("ink") pixel coordinates, centred on the canvas.
+    const xs = [], ys = []
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4
+        const luma = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]
+        if (luma < 140) { xs.push(x - w / 2); ys.push(y - h / 2) }
+      }
+    }
+    if (xs.length < 80) return 0
+    let best = 0, bestScore = -1
+    const off = h / 2
+    for (let deg = -15; deg <= 15.0001; deg += 0.25) {
+      const rad = (deg * Math.PI) / 180, sin = Math.sin(rad), cos = Math.cos(rad)
+      const bins = new Float64Array(h + 2)
+      for (let k = 0; k < xs.length; k++) {
+        const b = (xs[k] * sin + ys[k] * cos + off) | 0
+        if (b >= 0 && b < bins.length) bins[b]++
+      }
+      let score = 0
+      for (let b = 0; b < bins.length; b++) score += bins[b] * bins[b]
+      if (score > bestScore) { bestScore = score; best = deg }
+    }
+    return best
+  } catch {
+    return 0
+  }
+}
+
+// Auto-straighten: detect the skew, snap to the slider step, then rebuild.
+function autoStraighten() {
+  const deg = detectSkew()
+  fineAngle.value = Math.max(-15, Math.min(15, Math.round(deg * 2) / 2))
+  buildWorkCanvas()
+  resetCrop()
+  layout()
+  renderPreview()
 }
 
 function setBw(mode) { bwMode.value = mode; renderPreview() }
@@ -394,4 +462,16 @@ function apply() {
 }
 .iae-slider span { width: 84px; flex-shrink: 0; }
 .iae-slider input { flex: 1; }
+.iae-auto-btn {
+  flex-shrink: 0;
+  padding: 0.3rem 0.6rem;
+  border: none;
+  border-radius: 6px;
+  background: #4a90e2;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
 </style>
