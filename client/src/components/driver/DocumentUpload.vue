@@ -21,6 +21,7 @@
           <span class="doc-icon-name">{{ f.name }}</span>
         </div>
         <button class="thumb-remove" @click.stop="removeFile(i)">&times;</button>
+        <button v-if="f.isImage" class="thumb-edit" title="Adjust" @click.stop="openAdjust(i)">&#9998;</button>
         <span class="thumb-num">{{ i + 1 }}</span>
       </div>
       <!-- + Add another page: scan-driven for POD/BOL, gallery picker otherwise -->
@@ -44,6 +45,21 @@
         />
         <span>+</span>
       </label>
+      <!-- Placeholder shown while an added page is being enhanced by ScanKit -->
+      <div v-if="scanning" class="photo-thumb scan-tile">
+        <span class="scan-spinner"></span>
+        <span>Scanning&hellip;</span>
+      </div>
+    </div>
+
+    <!-- Document vs Photo scan style (POD/BOL): maps to ScanKit's filter —
+         Document = clean white background, Photo = full colour (original). -->
+    <div v-if="isScanDocType" class="scan-style">
+      <span class="scan-style-label">Scan style</span>
+      <div class="scan-style-seg">
+        <button type="button" :class="['sss-btn', { on: scanFilter === 'white' }]" :disabled="scanning" @click="scanFilter = 'white'">Document</button>
+        <button type="button" :class="['sss-btn', { on: scanFilter === 'original' }]" :disabled="scanning" @click="scanFilter = 'original'">Photo</button>
+      </div>
     </div>
 
     <!-- Searchable-PDF toggle (POD/BOL scans only). When on, ScanKit returns a
@@ -116,6 +132,14 @@
         <button class="dup-preview-close" aria-label="Close preview" @click="closePreview">&times;</button>
       </div>
     </Teleport>
+
+    <!-- Per-page Adjust editor: crop / rotate / B&W / brightness / contrast -->
+    <ImageAdjustModal
+      v-if="editIndex !== null"
+      :src="files[editIndex].data"
+      @apply="onAdjustApply"
+      @cancel="editIndex = null"
+    />
   </div>
 </template>
 
@@ -124,6 +148,7 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
+import ImageAdjustModal from './ImageAdjustModal.vue'
 
 const props = defineProps({
   loadId: { type: String, required: true },
@@ -157,6 +182,8 @@ const uploading = ref(false)
 const scanInput = ref(null)
 const scanning = ref(false)   // true while a captured photo is being enhanced
 const returnPdf = ref(false)  // per-scan toggle: searchable PDF vs cleaned image
+const scanFilter = ref('white') // ScanKit filter: 'white' (Document) | 'original' (Photo/colour)
+const editIndex = ref(null)     // index of the image open in the Adjust editor, or null
 
 // Tap-to-enlarge preview of a thumbnail (image, or a searchable-PDF page).
 const previewSrc = ref(null)
@@ -243,6 +270,19 @@ function removeFile(index) {
   files.value.splice(index, 1)
 }
 
+function openAdjust(index) {
+  editIndex.value = index
+}
+
+// Replace the edited page with the adjusted image (immutable swap).
+function onAdjustApply(dataUrl) {
+  const i = editIndex.value
+  if (i !== null && files.value[i]) {
+    files.value[i] = { ...files.value[i], data: dataUrl, type: 'image/jpeg', isImage: true }
+  }
+  editIndex.value = null
+}
+
 let previewBlobUrl = ''
 
 function openPreview(f) {
@@ -301,7 +341,7 @@ async function handleScanFile(event) {
     return
   }
   try {
-    const res = await scanDocument(dataUrl, { returnPdf: returnPdf.value, filter: 'white' })
+    const res = await scanDocument(dataUrl, { returnPdf: returnPdf.value, filter: scanFilter.value })
     const ts = Date.now()
     files.value.push({
       data: res.data,
@@ -593,6 +633,62 @@ button.photo-add:disabled {
 
 .btn-primary:hover { opacity: 0.9; }
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Scan-style (Document / Photo) toggle */
+.scan-style { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; }
+.scan-style-label { font-size: 0.8rem; color: var(--text-dim); }
+.scan-style-seg { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.sss-btn {
+  padding: 0.35rem 0.7rem;
+  border: none;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.sss-btn.on { background: var(--accent); color: #fff; font-weight: 600; }
+.sss-btn:disabled { opacity: 0.6; cursor: progress; }
+
+/* Adjust (pencil) button on image thumbnails */
+.thumb-edit {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  border: none;
+  font-size: 0.7rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* Scanning placeholder tile (added-page enhancement in flight) */
+.scan-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 0.6rem;
+}
+.scan-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: dup-spin 0.8s linear infinite;
+}
+@keyframes dup-spin { to { transform: rotate(360deg); } }
 
 /* Tap-to-enlarge preview */
 .thumb-clickable { cursor: zoom-in; }
