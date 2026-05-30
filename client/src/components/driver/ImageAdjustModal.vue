@@ -29,6 +29,10 @@
           <button class="iae-btn" @click="rotate(90)">&#8635; Rotate</button>
           <button class="iae-btn" @click="resetCrop">Reset crop</button>
         </div>
+        <label class="iae-slider">
+          <span>Straighten {{ fineAngle }}&deg;</span>
+          <input type="range" min="-15" max="15" step="0.5" v-model.number="fineAngle" @input="onStraighten" />
+        </label>
         <div class="iae-row iae-seg">
           <button :class="['iae-seg-btn', { on: bwMode === 'color' }]" @click="setBw('color')">Color</button>
           <button :class="['iae-seg-btn', { on: bwMode === 'gray' }]" @click="setBw('gray')">Grayscale</button>
@@ -75,6 +79,7 @@ const displayH = ref(0)
 const processing = ref(false)
 
 const rotation = ref(0)       // 0 / 90 / 180 / 270 (degrees, clockwise)
+const fineAngle = ref(0)      // fine "straighten" angle in degrees (-15..15)
 const bwMode = ref('color')   // 'color' | 'gray' | 'bw'
 const bwCutoff = ref(150)     // luma threshold for B&W
 const brightness = ref(100)   // percent
@@ -136,13 +141,21 @@ function buildWorkCanvas() {
   base.width = bw; base.height = bh
   base.getContext('2d').drawImage(sourceImg, 0, 0, bw, bh)
 
-  const rot = ((rotation.value % 360) + 360) % 360
+  // Total rotation = the 90° steps + the fine "straighten" angle. Size the
+  // canvas to the rotated bounding box and fill it white so the triangular
+  // corners exposed by straightening blend into a paper document.
+  const rad = (((rotation.value + fineAngle.value) % 360) * Math.PI) / 180
+  const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad))
+  const cw = Math.max(1, Math.ceil(bw * cos + bh * sin))
+  const ch = Math.max(1, Math.ceil(bw * sin + bh * cos))
   const c = document.createElement('canvas')
-  if (rot === 90 || rot === 270) { c.width = bh; c.height = bw } else { c.width = bw; c.height = bh }
+  c.width = cw; c.height = ch
   const ctx = c.getContext('2d')
+  ctx.fillStyle = '#fff'
+  ctx.fillRect(0, 0, cw, ch)
   ctx.save()
-  ctx.translate(c.width / 2, c.height / 2)
-  ctx.rotate(rot * Math.PI / 180)
+  ctx.translate(cw / 2, ch / 2)
+  ctx.rotate(rad)
   ctx.drawImage(base, -bw / 2, -bh / 2)
   ctx.restore()
   workCanvas = c
@@ -159,6 +172,20 @@ function rotate(deg) {
   resetCrop()
   layout()
   renderPreview()
+}
+
+// Live "straighten" — rebuild the rotated work canvas, throttled to one rebuild
+// per animation frame so dragging the slider stays smooth.
+let straightenRaf = 0
+function onStraighten() {
+  if (straightenRaf) return
+  straightenRaf = requestAnimationFrame(() => {
+    straightenRaf = 0
+    buildWorkCanvas()
+    resetCrop()
+    layout()
+    renderPreview()
+  })
 }
 
 function setBw(mode) { bwMode.value = mode; renderPreview() }
