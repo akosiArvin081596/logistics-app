@@ -151,7 +151,7 @@ export const useDriverStore = defineStore('driver', {
       const statusCol = findCol(state.headers.jobTracking, /status/i)
       if (!statusCol) return [...state.loads]
       const activeRe =
-        /^(in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i
+        /^(in transit|dispatched|assigned|heading to shipper|picked up|at shipper|at receiver|loading|unloading)$/i
       return [...state.loads].sort((a, b) => {
         const aActive = activeRe.test((a[statusCol] || '').trim())
         const bActive = activeRe.test((b[statusCol] || '').trim())

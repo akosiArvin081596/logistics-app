@@ -32,7 +32,8 @@
 
     <!-- Status update + Route Map + smart guidance.
          Status only renders for active/working loads (assigned, dispatched,
-         at shipper, loading, in transit, at receiver, unloading). Pending
+         heading to shipper, at shipper, loading, in transit, at receiver,
+         unloading). Pending
          acceptance loads use Accept/Reject at the bottom of the page;
          Delivered loads see StatusStepper's own "Load Delivered" state. -->
     <van-collapse v-model="openSections" class="detail-collapse" :border="false">
@@ -348,7 +349,7 @@ const isPending = computed(() => /^(assigned|dispatched|)$/i.test(status.value))
 const isDispatched = computed(() => /^(dispatched)$/i.test(status.value))
 const showResponseButtons = computed(() => isDispatched.value && !props.load._accepted)
 const showAcceptedBadge = computed(() => isDispatched.value && props.load._accepted)
-const isActiveLoad = computed(() => /^(assigned|dispatched|at shipper|loading|in transit|at receiver|unloading)$/i.test(status.value))
+const isActiveLoad = computed(() => /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i.test(status.value))
 
 const route = computed(() => {
   if (detailsCol.value) {
