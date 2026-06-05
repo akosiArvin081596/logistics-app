@@ -983,6 +983,20 @@ function scheduleDriverRefetch() {
   }, 250)
 }
 
+// Reconcile on foreground. A driver's phone is backgrounded for long stretches
+// (screen locked, navigation app on top, truck stop) during which the socket
+// silently drops and any load-assigned / status / cancel events fired in that
+// window are missed — leaving the loads list stale until a manual refresh. The
+// socket-reconnect watcher only fires if the socket actually re-handshakes;
+// when the OS freezes the tab the visibility event is the reliable signal. Use
+// the debounced refetch so a visibility flip plus a socket reconnect coalesce
+// into one fetch.
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible' && isMounted) {
+    scheduleDriverRefetch()
+  }
+}
+
 async function handleExpenseSubmit(data) {
   try {
     await driverStore.submitExpense(data)
@@ -1052,17 +1066,25 @@ function onLoadCancelled(payload) {
     read: 0,
     createdAt: new Date().toISOString(),
   })
-  // Optimistically remove the load from local state so the driver doesn't
-  // see a ghost row for 1-5s while the refetch round-trips. Match by
-  // rowIndex first (precise) then by loadId (falls back if rowIndex shifts).
-  if (payload.rowIndex || payload.loadId) {
-    const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
-    driverStore.loads = driverStore.loads.filter(l => {
-      if (payload.rowIndex && l._rowIndex === payload.rowIndex) return false
-      if (payload.loadId && loadIdCol && l[loadIdCol] === payload.loadId) return false
-      return true
-    })
-    if (detailRowIndex.value === payload.rowIndex) detailRowIndex.value = null
+  // Optimistically remove the cancelled/reassigned load from local state so the
+  // driver doesn't see a ghost row for 1-5s while the refetch round-trips.
+  // Match by loadId ONLY — load_id is the stable identifier. We deliberately do
+  // NOT fall back to a bare _rowIndex match: Job Tracking rows shift as loads
+  // are added/removed, so a stale or reused row index can match — and wrongly
+  // hide — a DIFFERENT, still-active load. (Root cause of a driver losing his
+  // in-transit load: a reassign event for one load carried a rowIndex that,
+  // against his stale cache, collided with another live load's row.) When the
+  // payload has no loadId, skip the optimistic removal and let
+  // scheduleDriverRefetch() reconcile from the server.
+  const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
+  if (payload.loadId && loadIdCol) {
+    driverStore.loads = driverStore.loads.filter(
+      (l) => (l[loadIdCol] || '') !== payload.loadId
+    )
+    // Close the detail page only if it's showing the load that was removed.
+    if (detailLoad.value && (detailLoad.value[loadIdCol] || '') === payload.loadId) {
+      detailRowIndex.value = null
+    }
   }
   scheduleDriverRefetch()
 }
@@ -1218,6 +1240,8 @@ onMounted(async () => {
   // so the initial load isn't delayed by a Routemate query failure.
   fetchDriverPosition()
   positionPollTimer = setInterval(fetchDriverPosition, POSITION_POLL_INTERVAL_MS)
+  // Reconcile a stale loads list when the app returns to the foreground.
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onUnmounted(() => {
@@ -1231,6 +1255,7 @@ onUnmounted(() => {
   socket.off('load-cancelled', onLoadCancelled)
   socket.off('geofence-trigger', onGeofenceTrigger)
   socket.off('location-update', onLocationUpdate)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   socket.disconnect()
 })
 </script>
