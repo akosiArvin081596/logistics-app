@@ -16,7 +16,6 @@
         <p class="track-search-sub">Enter your Load ID to see real-time status, location, and ETA.</p>
         <form class="track-search-form" @submit.prevent="onSearch">
           <input
-            ref="searchInput"
             v-model="searchInput"
             type="text"
             class="track-search-input"
