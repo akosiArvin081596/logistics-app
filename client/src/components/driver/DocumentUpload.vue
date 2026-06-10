@@ -21,7 +21,6 @@
           <span class="doc-icon-name">{{ f.name }}</span>
         </div>
         <button class="thumb-remove" @click.stop="removeFile(i)">&times;</button>
-        <button v-if="f.isImage" class="thumb-edit" title="Adjust" @click.stop="openAdjust(i)">&#9998;</button>
         <span class="thumb-num">{{ i + 1 }}</span>
       </div>
       <!-- Scan another page with the camera — POD/BOL only -->
@@ -46,29 +45,12 @@
         />
         <span>+</span>
       </label>
-      <!-- Placeholder shown while an added page is being enhanced by ScanKit -->
+      <!-- Placeholder shown while a captured page is being enhanced by ScanKit -->
       <div v-if="scanning" class="photo-thumb scan-tile">
         <span class="scan-spinner"></span>
         <span>Scanning&hellip;</span>
       </div>
     </div>
-
-    <!-- Document vs Photo scan style (POD/BOL): maps to ScanKit's filter —
-         Document = clean white background, Photo = full colour (original). -->
-    <div v-if="isScanDocType" class="scan-style">
-      <span class="scan-style-label">Scan style</span>
-      <div class="scan-style-seg">
-        <button type="button" :class="['sss-btn', { on: scanFilter === 'white' }]" :disabled="scanning" @click="scanFilter = 'white'">Document</button>
-        <button type="button" :class="['sss-btn', { on: scanFilter === 'original' }]" :disabled="scanning" @click="scanFilter = 'original'">Photo</button>
-      </div>
-    </div>
-
-    <!-- Searchable-PDF toggle (POD/BOL scans only). When on, ScanKit returns a
-         PDF with an OCR text layer instead of a flat JPEG. -->
-    <label v-if="isScanDocType" class="pdf-toggle">
-      <input type="checkbox" v-model="returnPdf" :disabled="scanning" />
-      <span>Searchable PDF (OCR text layer)</span>
-    </label>
 
     <!-- Initial capture/upload button -->
     <div v-if="!files.length" class="upload-buttons">
@@ -125,7 +107,7 @@
       {{ uploading ? 'Uploading...' : `Upload ${selectedType} (${files.length} file${files.length !== 1 ? 's' : ''})` }}
     </button>
 
-    <!-- Tap-to-enlarge preview of a captured/scanned page (image or searchable PDF) -->
+    <!-- Tap-to-enlarge preview of a captured/scanned page (image or PDF) -->
     <Teleport to="body">
       <div v-if="previewSrc" class="dup-preview-overlay" @click="closePreview">
         <iframe v-if="previewIsPdf" :src="previewSrc" class="dup-preview-frame" title="Document preview" @click.stop></iframe>
@@ -133,14 +115,6 @@
         <button class="dup-preview-close" aria-label="Close preview" @click="closePreview">&times;</button>
       </div>
     </Teleport>
-
-    <!-- Per-page Adjust editor: crop / rotate / B&W / brightness / contrast -->
-    <ImageAdjustModal
-      v-if="editIndex !== null"
-      :src="files[editIndex].data"
-      @apply="onAdjustApply"
-      @cancel="editIndex = null"
-    />
   </div>
 </template>
 
@@ -149,7 +123,6 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
-import ImageAdjustModal from './ImageAdjustModal.vue'
 
 const props = defineProps({
   loadId: { type: String, required: true },
@@ -182,11 +155,8 @@ const uploading = ref(false)
 // --- Scan state (ScanKit.io server-side; replaced the old jscanify/OpenCV). ---
 const scanInput = ref(null)
 const scanning = ref(false)   // true while a captured photo is being enhanced
-const returnPdf = ref(false)  // per-scan toggle: searchable PDF vs cleaned image
-const scanFilter = ref('white') // ScanKit filter: 'white' (Document) | 'original' (Photo/colour)
-const editIndex = ref(null)     // index of the image open in the Adjust editor, or null
 
-// Tap-to-enlarge preview of a thumbnail (image, or a searchable-PDF page).
+// Tap-to-enlarge preview of a thumbnail (image, or an uploaded PDF).
 const previewSrc = ref(null)
 const previewIsPdf = ref(false)
 
@@ -271,19 +241,6 @@ function removeFile(index) {
   files.value.splice(index, 1)
 }
 
-function openAdjust(index) {
-  editIndex.value = index
-}
-
-// Replace the edited page with the adjusted image (immutable swap).
-function onAdjustApply(dataUrl) {
-  const i = editIndex.value
-  if (i !== null && files.value[i]) {
-    files.value[i] = { ...files.value[i], data: dataUrl, type: 'image/jpeg', isImage: true }
-  }
-  editIndex.value = null
-}
-
 let previewBlobUrl = ''
 
 function openPreview(f) {
@@ -320,7 +277,9 @@ function closePreview() {
 onBeforeUnmount(closePreview)
 
 // ============================================================
-// Scan: capture a photo, enhance it server-side via ScanKit.io
+// Scan: capture a photo, enhance it server-side via ScanKit.io.
+// Direct flow — capture → convert to a clean document → show it.
+// No adjustment step; on upload the image is saved as a PDF.
 // ============================================================
 function startScan() {
   if (scanning.value) return
@@ -342,13 +301,14 @@ async function handleScanFile(event) {
     return
   }
   try {
-    const res = await scanDocument(dataUrl, { returnPdf: returnPdf.value, filter: scanFilter.value })
+    // Clean-document filter, image output — the server turns it into a PDF on upload.
+    const res = await scanDocument(dataUrl, { filter: 'white' })
     const ts = Date.now()
     files.value.push({
       data: res.data,
-      name: res.isPdf ? `scan-${ts}.pdf` : `scan-${ts}.jpg`,
-      type: res.contentType || (res.isPdf ? 'application/pdf' : 'image/jpeg'),
-      isImage: !res.isPdf,
+      name: `scan-${ts}.jpg`,
+      type: res.contentType || 'image/jpeg',
+      isImage: true,
     })
   } catch (err) {
     handleScanError(err, dataUrl)
@@ -400,7 +360,7 @@ async function handleUpload() {
       })
     }
 
-    // Upload each document file separately (incl. searchable-PDF scans)
+    // Upload each document file separately (e.g. a PDF picked via Upload File)
     for (const doc of docs) {
       await api.post('/api/documents/upload', {
         loadId: props.loadId,
@@ -488,18 +448,6 @@ async function handleUpload() {
   opacity: 0.6;
   cursor: progress;
 }
-
-/* Searchable-PDF toggle */
-.pdf-toggle {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  font-size: 0.8rem;
-  color: var(--text-dim);
-  margin-bottom: 0.75rem;
-  cursor: pointer;
-}
-.pdf-toggle input { cursor: pointer; }
 
 /* Scan-driven "+" button (POD/BOL) — same visual as the gallery + label but
    it's a <button>, so we re-declare the box styles. */
@@ -635,42 +583,7 @@ button.photo-add:disabled {
 .btn-primary:hover { opacity: 0.9; }
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* Scan-style (Document / Photo) toggle */
-.scan-style { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; }
-.scan-style-label { font-size: 0.8rem; color: var(--text-dim); }
-.scan-style-seg { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-.sss-btn {
-  padding: 0.35rem 0.7rem;
-  border: none;
-  background: var(--surface);
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-.sss-btn.on { background: var(--accent); color: #fff; font-weight: 600; }
-.sss-btn:disabled { opacity: 0.6; cursor: progress; }
-
-/* Adjust (pencil) button on image thumbnails */
-.thumb-edit {
-  position: absolute;
-  bottom: 2px;
-  right: 2px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  border: none;
-  font-size: 0.7rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-}
-
-/* Scanning placeholder tile (added-page enhancement in flight) */
+/* Scanning placeholder tile (capture enhancement in flight) */
 .scan-tile {
   display: flex;
   flex-direction: column;
