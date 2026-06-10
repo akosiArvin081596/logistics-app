@@ -40,6 +40,7 @@
           ref="addInput"
           type="file"
           accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt"
+          multiple
           hidden
           @change="handleFile"
         />
@@ -81,6 +82,7 @@
           ref="fileInput"
           type="file"
           accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt"
+          multiple
           hidden
           @change="handleFile"
         />
@@ -224,15 +226,20 @@ function readFileAsDataURL(file) {
 }
 
 async function handleFile(event) {
-  const file = event.target.files[0]
-  if (!file) return
+  // The file inputs allow multi-select, so a driver can attach several pages or
+  // photos in one pick instead of one at a time. Process each in turn (images
+  // are compressed; other files read as-is) and append to the page list.
+  const selected = Array.from(event.target.files || [])
+  if (!selected.length) return
 
-  if (file.type.startsWith('image/')) {
-    const data = await compressImage(file)
-    files.value.push({ data, name: file.name, type: file.type, isImage: true })
-  } else {
-    const data = await readFileAsDataURL(file)
-    files.value.push({ data, name: file.name, type: file.type, isImage: false })
+  for (const file of selected) {
+    if (file.type.startsWith('image/')) {
+      const data = await compressImage(file)
+      files.value.push({ data, name: file.name, type: file.type, isImage: true })
+    } else {
+      const data = await readFileAsDataURL(file)
+      files.value.push({ data, name: file.name, type: file.type, isImage: false })
+    }
   }
   event.target.value = ''
 }
