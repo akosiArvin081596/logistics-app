@@ -21,6 +21,9 @@ export const useInvestorStore = defineStore('investor', {
     recessionProof: (s) => s.data?.recessionProof || null,
     config: (s) => s.data?.config || null,
     myLoads: (s) => s.data?.myLoads || { pending: [], active: [] },
+    // Monthly payout statements (owed vs paid per month). Empty for the
+    // fleet-wide Super Admin view — only investor-scoped requests get rows.
+    payouts: (s) => s.data?.payouts || [],
     isPreview: (s) => s.previewUserId != null,
     previewQuery: (s) => (s.previewUserId != null ? `as_user_id=${s.previewUserId}` : ''),
   },

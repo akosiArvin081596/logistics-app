@@ -8,6 +8,10 @@ export const useInvestorsStore = defineStore('investors', {
     investors: [],
     investorUsers: [],
     isLoading: false,
+    // Monthly payout ledger (Super Admin) — one statement per investor
+    // portal account: per-month loads/revenue/owed + paid status.
+    payoutStatements: [],
+    payoutsLoading: false,
   }),
 
   actions: {
@@ -43,6 +47,29 @@ export const useInvestorsStore = defineStore('investors', {
     async remove(id) {
       await api.del(`/api/investors/${id}`)
       await this.load()
+    },
+
+    // ---- Monthly payout ledger (Super Admin) ----
+    async loadPayouts() {
+      this.payoutsLoading = true
+      try {
+        const data = await api.get('/api/admin/investor-payouts')
+        this.payoutStatements = data.statements || []
+      } finally {
+        this.payoutsLoading = false
+      }
+    },
+
+    // Mark a month as paid out. { investorUserId, month: 'YYYY-MM', amount, note }
+    async markPayoutPaid(payload) {
+      await api.post('/api/admin/investor-payouts', payload)
+      await this.loadPayouts()
+    },
+
+    // Undo a mistaken mark-as-paid (reverts the month to Pending).
+    async unmarkPayout(payoutId) {
+      await api.del(`/api/admin/investor-payouts/${payoutId}`)
+      await this.loadPayouts()
     },
   },
 })

@@ -34,6 +34,11 @@
         @picture-updated="store.load()"
       />
     </template>
+
+    <!-- Monthly payout ledger — owed vs paid per investor per month.
+         Loads itself (own loading state) so it isn't gated on the
+         investor-directory fetch above. -->
+    <PayoutLedgerPanel />
   </div>
 </template>
 
@@ -44,6 +49,7 @@ import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddInvestorForm from '../components/investors/AddInvestorForm.vue'
 import InvestorTable from '../components/investors/InvestorTable.vue'
+import PayoutLedgerPanel from '../components/investors/PayoutLedgerPanel.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
 import { Card, CardContent } from '@/components/ui/card'
 
