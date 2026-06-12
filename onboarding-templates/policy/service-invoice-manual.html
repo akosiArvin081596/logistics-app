@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LogisX Inc. — Service Invoice</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <style>
+    @page { size: letter; margin: 1in; }
+
+    :root {
+      --ink: #000;
+      --rule: #d0d0d0;
+      --table-border: #c4c4c4;
+      --paper: #ffffff;
+      --bg: #f5f5f5;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+    }
+
+    body {
+      font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .document {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 76px 80px 96px;
+      background: var(--paper);
+      box-shadow: 0 2px 14px rgba(0, 0, 0, 0.08);
+    }
+
+    h1 {
+      font-size: 42px;
+      font-weight: 700;
+      text-align: left;
+      margin: 0 0 26px;
+      letter-spacing: 0.2px;
+      line-height: 1.1;
+    }
+
+    h2 {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 28px 0 12px;
+      line-height: 1.3;
+    }
+
+    h3 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 18px 0 10px;
+    }
+
+    p { margin: 0 0 14px; }
+
+    .italic-note {
+      font-style: italic;
+      margin: 0 0 12px;
+    }
+
+    strong { font-weight: 700; }
+
+    hr {
+      border: 0;
+      border-top: 1px solid var(--rule);
+      margin: 26px 0 20px;
+    }
+
+    .block-label { font-weight: 700; margin: 0 0 8px; }
+
+    .field-row {
+      margin-bottom: 12px;
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .field-row .label { font-weight: 700; white-space: nowrap; }
+
+    .from-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    .from-cell { display: flex; align-items: baseline; gap: 10px; }
+    .from-cell .label { font-weight: 700; white-space: nowrap; min-width: 130px; }
+    .from-cell .blank { flex: 1 1 auto; width: auto; max-width: 340px; }
+
+    .blank {
+      display: inline-block;
+      border: 0;
+      border-bottom: 1px solid var(--ink);
+      background: transparent;
+      font: inherit;
+      color: inherit;
+      outline: none;
+      padding: 0 4px;
+      vertical-align: baseline;
+      border-radius: 0;
+    }
+    .blank-xs  { width:  90px; }
+    .blank-sm  { width: 180px; }
+    .blank-md  { width: 240px; }
+    .blank-lg  { width: 320px; }
+
+    .bill-to .addr-line { margin: 2px 0; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 18px;
+      font-size: 14px;
+    }
+    table th, table td {
+      border: 1px solid var(--table-border);
+      padding: 14px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    table th { font-weight: 700; background: transparent; }
+    table td .blank { border-bottom-color: var(--ink); }
+
+    .meta-table td { height: 70px; }
+    .meta-table .prefix { display: inline-block; }
+
+    /* Line item + deduction tables */
+    .data-table th, .data-table td { padding: 10px 12px; }
+    .data-table .num-cell { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .data-table tfoot td {
+      font-weight: 700;
+      background: #f7f7f7;
+    }
+    .data-table .empty-row td {
+      text-align: center;
+      color: #777;
+      font-style: italic;
+      padding: 18px 12px;
+    }
+
+    /* Pay calculation summary box */
+    .pay-summary {
+      border: 1px solid var(--ink);
+      padding: 18px 22px;
+      margin: 18px 0 24px;
+      background: #fafafa;
+    }
+    .pay-summary .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 6px 0;
+      font-size: 15px;
+    }
+    .pay-summary .row .label { font-weight: 600; }
+    .pay-summary .row .value {
+      font-variant-numeric: tabular-nums;
+      min-width: 140px;
+      text-align: right;
+    }
+    .pay-summary .divider { border-top: 1px solid #c4c4c4; margin: 6px 0; }
+    .pay-summary .total-row {
+      font-size: 17px;
+      font-weight: 700;
+      border-top: 2px solid var(--ink);
+      margin-top: 8px;
+      padding-top: 12px;
+    }
+    .pay-summary .total-row .value { font-size: 20px; }
+
+    @media print {
+      html, body { background: #fff; }
+      .document { box-shadow: none; margin: 0; padding: 0; max-width: none; }
+      .blank { border-bottom: 1px solid #000; }
+    }
+  </style>
+</head>
+<body>
+  <main class="document">
+    <h1>SERVICE INVOICE</h1>
+
+    <p class="block-label">PAYEE (Service Provider):</p>
+    <div class="from-grid">
+      <label class="from-cell">
+        <span class="label">Name:</span>
+        <input type="text" class="blank" aria-label="Payee name">
+      </label>
+      <label class="from-cell">
+        <span class="label">Role / Title:</span>
+        <input type="text" class="blank" aria-label="Payee role">
+      </label>
+      <label class="from-cell">
+        <span class="label">Address:</span>
+        <input type="text" class="blank" aria-label="Payee address">
+      </label>
+      <label class="from-cell">
+        <span class="label">Phone:</span>
+        <input type="text" class="blank" aria-label="Payee phone">
+      </label>
+    </div>
+
+    <p class="block-label" style="margin-top: 22px;">BILL TO:</p>
+    <div class="bill-to">
+      <div class="addr-line"><strong>LogisX Inc.</strong></div>
+      <div class="addr-line">4576 Research Forest Dr, Suite 200</div>
+      <div class="addr-line">The Woodlands, TX 77381</div>
+    </div>
+
+    <p style="margin-top: 18px;"><strong>USDOT# 4302683</strong></p>
+
+    <hr>
+
+    <table class="meta-table">
+      <thead>
+        <tr>
+          <th>Invoice Number</th>
+          <th>Issue Date</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <span class="prefix">INV-</span><input type="text" class="blank" style="width: 160px;" aria-label="Invoice number suffix">
+          </td>
+          <td>
+            <input type="text" class="blank" style="width: 150px;" aria-label="Issue date">
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>SERVICE SUMMARY</h2>
+    <p class="italic-note">Billing Period: <span aria-label="Billing period start"></span> to <span aria-label="Billing period end"></span></p>
+
+    <h3>Services / Earnings</h3>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 20%;">Date</th>
+          <th>Description</th>
+          <th class="num-cell" style="width: 20%;">Amount</th>
+        </tr>
+      </thead>
+      <tbody id="items-rows">
+        <tr>
+          <td><span class="cell-text"></span></td>
+          <td><span class="cell-text"></span></td>
+          <td class="num-cell"><span class="cell-text"></span></td>
+        </tr>
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="2"><strong>Subtotal</strong></td>
+          <td class="num-cell">$&nbsp;<span aria-label="Subtotal"></span></td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <h3>Deductions</h3>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 20%;">Date</th>
+          <th>Description</th>
+          <th class="num-cell" style="width: 20%;">Amount</th>
+        </tr>
+      </thead>
+      <tbody id="deductions-rows">
+        <tr>
+          <td><span class="cell-text"></span></td>
+          <td><span class="cell-text"></span></td>
+          <td class="num-cell"><span class="cell-text"></span></td>
+        </tr>
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="2"><strong>Total Deductions</strong></td>
+          <td class="num-cell">$&nbsp;<span aria-label="Deductions total"></span></td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <h3>Pay Calculation</h3>
+    <div class="pay-summary">
+      <div class="row">
+        <span class="label">Subtotal (Services / Earnings)</span>
+        <span class="value">$&nbsp;<span aria-label="Summary subtotal"></span></span>
+      </div>
+      <div class="row">
+        <span class="label">Less Deductions</span>
+        <span class="value">($&nbsp;<span aria-label="Summary deductions"></span>)</span>
+      </div>
+      <!-- Admin adjustment line — Super Admin's +/- delta with reason. Hidden
+           by the renderer when amount is empty (no adjustment). -->
+      <div class="row adjustment-row" data-show-when-adjusted>
+        <span class="label"><span aria-label="Adjustment label"></span> &nbsp;<em><span aria-label="Adjustment reason"></span></em></span>
+        <span class="value"><span aria-label="Adjustment amount"></span></span>
+      </div>
+      <div class="row total-row">
+        <span class="label">TOTAL DUE</span>
+        <span class="value">$&nbsp;<span aria-label="Total due"></span></span>
+      </div>
+    </div>
+
+    <h2>NOTES</h2>
+    <p><input type="text" class="blank blank-lg" style="width: 100%;" aria-label="Notes"></p>
+
+    <hr>
+
+    <p><strong>PAYMENT INSTRUCTIONS:</strong> Payment will be remitted via the method on file for the payee named above. Questions regarding this invoice should be directed to LogisX Inc. accounting.</p>
+
+    <div class="field-row" style="margin-top: 18px;">
+      <span class="label">Prepared by:</span>
+      <input type="text" class="blank blank-md" aria-label="Prepared by">
+    </div>
+    <div class="field-row" style="margin-top: 12px;">
+      <span class="label">Payee Signature:</span>
+      <input type="text" class="blank blank-md" aria-label="Payee signature">
+      <span class="label">Date:</span>
+      <input type="text" class="blank blank-xs" aria-label="Signature date">
+    </div>
+  </main>
+</body>
+</html>

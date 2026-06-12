@@ -2,11 +2,13 @@
   <div class="flex flex-col">
     <div class="dash-header">
       <div>
-        <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Driver Invoices</h2>
-        <p class="text-[13px] text-gray-400 mt-0.5">Review, approve, and mark driver weekly invoices as paid</p>
+        <h2 class="text-[1.4rem] font-bold text-gray-900 tracking-tight">Invoices</h2>
+        <p class="text-[13px] text-gray-400 mt-0.5">Review, approve, and pay driver weekly invoices and manual invoices</p>
       </div>
       <div class="flex items-center gap-3">
         <span class="text-[11px] text-gray-400 font-mono bg-gray-50 px-3 py-1.5 rounded-full border border-gray-100">{{ filteredInvoices.length }} {{ activeFilter || 'total' }}</span>
+        <Button v-if="auth.isSuperAdmin" class="rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[12px] h-9" @click="showManualDialog = true">+ New Invoice</Button>
+        <Button v-if="auth.isSuperAdmin" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="showReportDialog = true">Payment Report</Button>
         <Button variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="exportCsv">Export CSV</Button>
         <Button variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-9" @click="store.load()">&#8635; Refresh</Button>
       </div>
@@ -28,13 +30,17 @@
 
     <!-- Filter bar -->
     <div class="flex items-center gap-3" style="margin-bottom:1rem;">
-      <label class="text-[12px] text-gray-500 font-semibold">Driver</label>
+      <label class="text-[12px] text-gray-500 font-semibold">Payee</label>
       <select v-model="driverFilter" class="filter-select">
-        <option value="">All drivers</option>
+        <option value="">All payees</option>
         <option v-for="d in driverOptions" :key="d" :value="d">{{ d }}</option>
       </select>
       <label class="text-[12px] text-gray-500 font-semibold">Week</label>
       <input v-model="weekFilter" type="date" class="filter-select" />
+      <label v-if="auth.isSuperAdmin" class="flex items-center gap-1.5 text-[12px] text-gray-500 font-semibold cursor-pointer select-none">
+        <input type="checkbox" :checked="store.showDeleted" class="accent-red-600" @change="store.setShowDeleted($event.target.checked)" />
+        Show deleted
+      </label>
       <Button v-if="activeFilter || driverFilter || weekFilter" variant="ghost" size="sm" class="text-[12px] h-8" @click="clearFilters">Clear filters</Button>
     </div>
 
@@ -53,7 +59,7 @@
           <TableHeader>
             <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Invoice #</TableHead>
-              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Driver</TableHead>
+              <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Payee</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Week</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider text-right">Loads</TableHead>
               <TableHead class="text-[11px] font-bold text-gray-500 uppercase tracking-wider text-right">Total</TableHead>
@@ -63,8 +69,11 @@
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow v-for="inv in filteredInvoices" :key="inv.id" class="hover:bg-blue-50/30 transition-colors duration-100 cursor-pointer" @click="openDetail(inv)">
-              <TableCell class="font-mono text-[12px] font-semibold text-gray-900">{{ inv.invoice_number }}</TableCell>
+            <TableRow v-for="inv in filteredInvoices" :key="inv.id" class="hover:bg-blue-50/30 transition-colors duration-100 cursor-pointer" :class="{ 'opacity-50': inv.deleted_at }" @click="openDetail(inv)">
+              <TableCell class="font-mono text-[12px] font-semibold text-gray-900">
+                {{ inv.invoice_number }}
+                <span v-if="inv.is_manual" class="manual-chip">Manual</span>
+              </TableCell>
               <TableCell class="font-semibold text-[13px] text-gray-900 uppercase">{{ inv.driver }}</TableCell>
               <TableCell class="text-[12px] text-gray-600 whitespace-nowrap">{{ formatWeek(inv.week_start, inv.week_end) }}</TableCell>
               <TableCell class="text-[13px] text-gray-600 text-right">{{ inv.loads_count }}</TableCell>
@@ -74,13 +83,19 @@
                   {{ formatAdj(inv.adjustment) }}
                 </span>
               </TableCell>
-              <TableCell><Badge :class="statusBadge(inv.status)">{{ inv.status }}</Badge></TableCell>
+              <TableCell>
+                <Badge :class="statusBadge(inv.status)">{{ inv.status }}</Badge>
+                <Badge v-if="inv.deleted_at" class="ml-1 bg-red-600 text-white text-[10px] font-bold">Deleted</Badge>
+              </TableCell>
               <TableCell class="text-[12px] text-gray-500 whitespace-nowrap">{{ inv.submitted_at ? formatDate(inv.submitted_at) : '\u2014' }}</TableCell>
               <TableCell class="text-right" @click.stop>
                 <div class="flex items-center justify-end gap-1.5">
                   <a :href="`/api/invoices/${inv.id}/pdf`" target="_blank"><Button size="sm" variant="outline" class="rounded-md border-[#e2e4ea] text-[12px] h-8">PDF</Button></a>
-                  <Button v-if="inv.status === 'Submitted'" size="sm" class="rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[12px] h-8" @click="quickAction(inv, 'approve')">Approve</Button>
-                  <Button v-if="inv.status === 'Approved'" size="sm" class="rounded-md bg-blue-600 hover:bg-blue-700 text-white text-[12px] h-8" @click="quickAction(inv, 'paid')">Mark Paid</Button>
+                  <template v-if="!inv.deleted_at">
+                    <Button v-if="inv.status === 'Submitted'" size="sm" class="rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[12px] h-8" @click="quickAction(inv, 'approve')">Approve</Button>
+                    <Button v-if="inv.status === 'Approved'" size="sm" class="rounded-md bg-blue-600 hover:bg-blue-700 text-white text-[12px] h-8" @click="quickAction(inv, 'paid')">Mark Paid</Button>
+                  </template>
+                  <Button v-else size="sm" variant="outline" class="rounded-md border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-[12px] h-8" @click="doRestore(inv)">Restore</Button>
                 </div>
               </TableCell>
             </TableRow>
@@ -109,8 +124,12 @@
           <div class="detail-meta">
             <div class="meta-section">
               <div class="meta-row"><span class="meta-label">Status</span><Badge :class="statusBadge(selectedInvoice.status)">{{ selectedInvoice.status }}</Badge></div>
-              <div class="meta-row"><span class="meta-label">Loads</span><span>{{ selectedInvoice.loads_count }}</span></div>
-              <div class="meta-row"><span class="meta-label">Rate / load</span><span>${{ fmtMoney(selectedInvoice.rate_per_load) }}</span></div>
+              <div v-if="selectedInvoice.is_manual" class="meta-row">
+                <span class="meta-label">Type</span>
+                <span class="text-[12px]"><span class="manual-chip" style="margin-left:0;">Manual</span>{{ selectedInvoice.created_by ? ' by ' + selectedInvoice.created_by : '' }}</span>
+              </div>
+              <div class="meta-row"><span class="meta-label">{{ selectedInvoice.is_manual ? 'Line items' : 'Loads' }}</span><span>{{ selectedInvoice.loads_count }}</span></div>
+              <div v-if="!selectedInvoice.is_manual" class="meta-row"><span class="meta-label">Rate / load</span><span>${{ fmtMoney(selectedInvoice.rate_per_load) }}</span></div>
               <div class="meta-row"><span class="meta-label">{{ hasAdjustment(selectedInvoice) ? 'Computed' : 'Total earnings' }}</span><span class="font-semibold text-emerald-700">${{ fmtMoney(selectedInvoice.total_earnings) }}</span></div>
               <template v-if="hasAdjustment(selectedInvoice)">
                 <div class="meta-row">
@@ -132,7 +151,7 @@
                   <span class="font-bold text-emerald-700 text-[15px]">${{ fmtMoney((selectedInvoice.total_earnings || 0) + (selectedInvoice.adjustment || 0)) }}</span>
                 </div>
               </template>
-              <div v-if="selectedInvoice.expenses_total" class="meta-row"><span class="meta-label">Expenses (ref)</span><span>${{ fmtMoney(selectedInvoice.expenses_total) }}</span></div>
+              <div v-if="selectedInvoice.expenses_total" class="meta-row"><span class="meta-label">{{ selectedInvoice.is_manual ? 'Deductions (in total)' : 'Expenses (ref)' }}</span><span>${{ fmtMoney(selectedInvoice.expenses_total) }}</span></div>
             </div>
 
             <div class="meta-section">
@@ -146,42 +165,76 @@
 
             <!-- Actions -->
             <div class="meta-actions">
-              <!-- Adjust button — Super Admin, available on Draft and Submitted before approval. -->
-              <Button
-                v-if="canAdjust(selectedInvoice)"
-                variant="outline"
-                class="w-full border-amber-400 text-amber-700 hover:bg-amber-50 hover:text-amber-800 mb-2"
-                @click="openAdjust"
-              >
-                {{ hasAdjustment(selectedInvoice) ? 'Edit adjustment' : '+ Add adjustment' }}
-              </Button>
-
-              <div v-if="selectedInvoice.status === 'Submitted'" class="flex flex-col gap-2">
-                <Button class="w-full bg-emerald-600 hover:bg-emerald-700 text-white" @click="doAction('approve')">Approve</Button>
-                <Button class="w-full bg-red-600 hover:bg-red-700 text-white" @click="showRejectPrompt = true">Reject</Button>
-              </div>
-              <div v-else-if="selectedInvoice.status === 'Approved'" class="flex flex-col gap-2">
-                <Button class="w-full bg-amber-500 hover:bg-amber-600 text-white" @click="doAction('processing')">Mark as Processing</Button>
-                <Button class="w-full bg-blue-600 hover:bg-blue-700 text-white" @click="doAction('paid')">Mark as Paid</Button>
-                <p class="text-[11px] text-gray-500 text-center">Use <b>Processing</b> when payment is initiated but not yet confirmed. Use <b>Paid</b> when funds are confirmed.</p>
-              </div>
-              <div v-else-if="selectedInvoice.status === 'Processing'" class="flex flex-col gap-2">
-                <Button class="w-full bg-blue-600 hover:bg-blue-700 text-white" @click="doAction('paid')">Mark as Paid</Button>
-                <p class="text-[11px] text-gray-500 text-center">Payment is in flight. Click when the funds clear.</p>
-              </div>
-              <div v-else-if="selectedInvoice.status === 'Paid'" class="paid-banner">
-                <div class="paid-icon">&#10003;</div>
-                <div>
-                  <div class="paid-title">Paid</div>
-                  <div class="paid-sub">Settled on {{ formatDate(selectedInvoice.approved_at) }}</div>
+              <!-- Deleted invoice: audit info + restore only -->
+              <template v-if="selectedInvoice.deleted_at">
+                <div class="deleted-banner">
+                  <div class="font-bold">Deleted invoice</div>
+                  <div>By {{ selectedInvoice.deleted_by || 'unknown' }} on {{ formatDateTime(selectedInvoice.deleted_at) }}</div>
+                  <div v-if="selectedInvoice.delete_reason" class="italic mt-1">"{{ selectedInvoice.delete_reason }}"</div>
                 </div>
-              </div>
-              <div v-else-if="selectedInvoice.status === 'Rejected'" class="rejected-banner">
-                <div>Invoice rejected. Driver can regenerate with corrections.</div>
-              </div>
-              <div v-else-if="selectedInvoice.status === 'Draft'" class="draft-banner">
-                <div>Driver has not submitted yet.</div>
-              </div>
+                <Button v-if="auth.isSuperAdmin" variant="outline" class="w-full mt-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50" @click="doRestore(selectedInvoice)">Restore invoice</Button>
+              </template>
+
+              <template v-else>
+                <!-- Adjust button — Super Admin, available on ANY status (post-approval edits are audit-flagged). -->
+                <Button
+                  v-if="canAdjust(selectedInvoice)"
+                  variant="outline"
+                  class="w-full border-amber-400 text-amber-700 hover:bg-amber-50 hover:text-amber-800 mb-2"
+                  @click="openAdjust"
+                >
+                  {{ hasAdjustment(selectedInvoice) ? 'Edit adjustment' : '+ Add adjustment' }}
+                </Button>
+
+                <div v-if="selectedInvoice.status === 'Submitted'" class="flex flex-col gap-2">
+                  <Button class="w-full bg-emerald-600 hover:bg-emerald-700 text-white" @click="doAction('approve')">Approve</Button>
+                  <Button class="w-full bg-red-600 hover:bg-red-700 text-white" @click="showRejectPrompt = true">Reject</Button>
+                </div>
+                <div v-else-if="selectedInvoice.status === 'Approved'" class="flex flex-col gap-2">
+                  <Button class="w-full bg-amber-500 hover:bg-amber-600 text-white" @click="doAction('processing')">Mark as Processing</Button>
+                  <Button class="w-full bg-blue-600 hover:bg-blue-700 text-white" @click="doAction('paid')">Mark as Paid</Button>
+                  <p class="text-[11px] text-gray-500 text-center">Use <b>Processing</b> when payment is initiated but not yet confirmed. Use <b>Paid</b> when funds are confirmed.</p>
+                </div>
+                <div v-else-if="selectedInvoice.status === 'Processing'" class="flex flex-col gap-2">
+                  <Button class="w-full bg-blue-600 hover:bg-blue-700 text-white" @click="doAction('paid')">Mark as Paid</Button>
+                  <p class="text-[11px] text-gray-500 text-center">Payment is in flight. Click when the funds clear.</p>
+                </div>
+                <div v-else-if="selectedInvoice.status === 'Paid'" class="paid-banner">
+                  <div class="paid-icon">&#10003;</div>
+                  <div>
+                    <div class="paid-title">Paid</div>
+                    <div class="paid-sub">Settled on {{ formatDate(selectedInvoice.paid_at || selectedInvoice.approved_at) }}</div>
+                  </div>
+                </div>
+                <div v-else-if="selectedInvoice.status === 'Rejected'" class="rejected-banner">
+                  <div>Invoice rejected. Driver can regenerate with corrections.</div>
+                </div>
+                <div v-else-if="selectedInvoice.status === 'Draft'" class="draft-banner">
+                  <div v-if="selectedInvoice.is_manual">Manual invoice — submit it to start the approval flow.</div>
+                  <div v-else>Driver has not submitted yet.</div>
+                </div>
+                <Button
+                  v-if="auth.isSuperAdmin && selectedInvoice.is_manual && selectedInvoice.status === 'Draft'"
+                  class="w-full mt-2 bg-emerald-600 hover:bg-emerald-700 text-white"
+                  @click="doSubmitManual"
+                >Submit for approval</Button>
+
+                <!-- Unlock: send an already-decided invoice back to review (owner request). -->
+                <Button
+                  v-if="canRevert(selectedInvoice)"
+                  variant="outline"
+                  class="w-full mt-2 border-blue-300 text-blue-700 hover:bg-blue-50"
+                  @click="openRevert"
+                >&#8634; Unlock &amp; send back to review</Button>
+
+                <!-- Soft delete with audit trail. -->
+                <Button
+                  v-if="auth.isSuperAdmin"
+                  variant="ghost"
+                  class="w-full mt-2 text-red-600 hover:bg-red-50 hover:text-red-700 text-[12px]"
+                  @click="openDelete"
+                >Delete invoice…</Button>
+              </template>
             </div>
 
             <!-- Reject prompt -->
@@ -196,6 +249,9 @@
 
             <!-- Adjust prompt — inline form for +/- adjustment + reason -->
             <div v-if="showAdjustPrompt" class="adjust-prompt">
+              <div v-if="isPostApproval(selectedInvoice)" class="post-approval-note">
+                &#9888; This invoice is <b>{{ selectedInvoice.status }}</b>. Saving will update its PDF and total, and the edit is recorded in the audit trail. Use "Unlock &amp; send back to review" if it also needs re-approval.
+              </div>
               <label class="text-[12px] font-semibold text-gray-700">Admin adjustment (USD)</label>
               <div class="flex gap-2 items-center">
                 <span class="text-gray-500 text-[14px]">$</span>
@@ -245,10 +301,41 @@
                 >{{ adjustBusy ? 'Saving…' : 'Save adjustment' }}</Button>
               </div>
             </div>
+
+            <!-- Revert prompt — unlock a decided invoice back to Submitted -->
+            <div v-if="showRevertPrompt" class="revert-prompt">
+              <div class="text-[12px] text-blue-900 leading-snug">
+                This sets the invoice back to <b>Submitted</b> so you can adjust deductions and re-approve it. The original
+                {{ selectedInvoice.status === 'Rejected' ? 'rejection' : 'approval/payment record' }} stays in the audit trail.
+              </div>
+              <label class="text-[12px] font-semibold text-gray-700 mt-1">Reason (optional)</label>
+              <textarea v-model="revertReason" rows="2" class="revert-textarea" placeholder="e.g. Approved by accident — need to add a deduction"></textarea>
+              <div class="flex gap-2">
+                <Button variant="outline" class="flex-1 text-[12px]" :disabled="revertBusy" @click="showRevertPrompt = false; revertReason = ''">Cancel</Button>
+                <Button class="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-[12px]" :disabled="revertBusy" @click="doRevert">{{ revertBusy ? 'Unlocking…' : 'Unlock invoice' }}</Button>
+              </div>
+            </div>
+
+            <!-- Delete prompt — soft delete with audited reason -->
+            <div v-if="showDeletePrompt" class="delete-prompt">
+              <div class="text-[12px] text-red-900 leading-snug">
+                Deletes <b>{{ selectedInvoice.invoice_number }}</b> from all lists and reports. Who deleted it, when, and why is recorded; a Super Admin can restore it from the "Show deleted" view.
+              </div>
+              <label class="text-[12px] font-semibold text-gray-700 mt-1">Reason (optional)</label>
+              <textarea v-model="deleteReason" rows="2" class="reject-textarea" placeholder="e.g. Duplicate of INV-..., generated by mistake"></textarea>
+              <div class="flex gap-2">
+                <Button variant="outline" class="flex-1 text-[12px]" :disabled="deleteBusy" @click="showDeletePrompt = false; deleteReason = ''">Cancel</Button>
+                <Button class="flex-1 bg-red-600 hover:bg-red-700 text-white text-[12px]" :disabled="deleteBusy" @click="doDelete">{{ deleteBusy ? 'Deleting…' : 'Delete invoice' }}</Button>
+              </div>
+            </div>
           </div>
         </div>
       </DialogContent>
     </Dialog>
+
+    <!-- Manual invoice + payment report dialogs (Super Admin) -->
+    <ManualInvoiceDialog v-model:open="showManualDialog" :payees="driverOptions" @created="onManualCreated" />
+    <PaymentReportDialog v-model:open="showReportDialog" :payees="driverOptions" />
   </div>
 </template>
 
@@ -263,6 +350,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import ManualInvoiceDialog from '../components/invoices/ManualInvoiceDialog.vue'
+import PaymentReportDialog from '../components/invoices/PaymentReportDialog.vue'
 
 const store = useInvoicesStore()
 const auth = useAuthStore()
@@ -282,6 +371,18 @@ const showAdjustPrompt = ref(false)
 const adjustAmount = ref(0)
 const adjustReason = ref('')
 const adjustBusy = ref(false)
+
+// Revert (unlock) + delete prompt state.
+const showRevertPrompt = ref(false)
+const revertReason = ref('')
+const revertBusy = ref(false)
+const showDeletePrompt = ref(false)
+const deleteReason = ref('')
+const deleteBusy = ref(false)
+
+// Manual invoice + payment report dialogs.
+const showManualDialog = ref(false)
+const showReportDialog = ref(false)
 
 const driverOptions = computed(() => {
   const names = store.invoices.map(i => (i.driver || '').toUpperCase()).filter(Boolean)
@@ -322,14 +423,27 @@ function openDetail(inv) {
   showAdjustPrompt.value = false
   adjustAmount.value = 0
   adjustReason.value = ''
+  showRevertPrompt.value = false
+  revertReason.value = ''
+  showDeletePrompt.value = false
+  deleteReason.value = ''
 }
 
 // --- Adjustment helpers ---
 function hasAdjustment(inv) {
   return inv && Number(inv.adjustment || 0) !== 0
 }
+// Any status is adjustable now (owner request) — post-approval edits get a
+// warning in the prompt and an explicit audit-trail marker server-side.
 function canAdjust(inv) {
-  return inv && auth.isSuperAdmin && (inv.status === 'Draft' || inv.status === 'Submitted')
+  return inv && auth.isSuperAdmin && !inv.deleted_at
+}
+function isPostApproval(inv) {
+  return inv && inv.status !== 'Draft' && inv.status !== 'Submitted'
+}
+function canRevert(inv) {
+  return inv && auth.isSuperAdmin && !inv.deleted_at
+    && ['Approved', 'Processing', 'Paid', 'Rejected'].includes(inv.status)
 }
 function formatAdj(amount) {
   const n = Number(amount || 0)
@@ -354,6 +468,88 @@ function openAdjust() {
   adjustReason.value = selectedInvoice.value.adjustment_note || ''
   showAdjustPrompt.value = true
   showRejectPrompt.value = false
+  showRevertPrompt.value = false
+  showDeletePrompt.value = false
+}
+
+function openRevert() {
+  if (!selectedInvoice.value) return
+  revertReason.value = ''
+  showRevertPrompt.value = true
+  showAdjustPrompt.value = false
+  showRejectPrompt.value = false
+  showDeletePrompt.value = false
+}
+
+function openDelete() {
+  if (!selectedInvoice.value) return
+  deleteReason.value = ''
+  showDeletePrompt.value = true
+  showAdjustPrompt.value = false
+  showRejectPrompt.value = false
+  showRevertPrompt.value = false
+}
+
+async function doRevert() {
+  if (!selectedInvoice.value || revertBusy.value) return
+  revertBusy.value = true
+  try {
+    await store.revert(selectedInvoice.value.id, revertReason.value.trim())
+    const fresh = store.invoices.find(i => i.id === selectedInvoice.value.id)
+    if (fresh) selectedInvoice.value = fresh
+    showRevertPrompt.value = false
+    revertReason.value = ''
+    toast('Invoice unlocked — back to Submitted for review', 'success')
+  } catch (err) {
+    toast(err?.message || 'Failed to unlock invoice', 'error')
+  } finally {
+    revertBusy.value = false
+  }
+}
+
+async function doDelete() {
+  if (!selectedInvoice.value || deleteBusy.value) return
+  deleteBusy.value = true
+  try {
+    const number = selectedInvoice.value.invoice_number
+    await store.remove(selectedInvoice.value.id, deleteReason.value.trim())
+    showDeletePrompt.value = false
+    deleteReason.value = ''
+    showDetail.value = false
+    toast(`Invoice ${number} deleted`, 'success')
+  } catch (err) {
+    toast(err?.message || 'Failed to delete invoice', 'error')
+  } finally {
+    deleteBusy.value = false
+  }
+}
+
+async function doRestore(inv) {
+  if (!inv) return
+  try {
+    await store.restore(inv.id)
+    const fresh = store.invoices.find(i => i.id === inv.id)
+    if (fresh && selectedInvoice.value?.id === inv.id) selectedInvoice.value = fresh
+    toast(`Invoice ${inv.invoice_number} restored`, 'success')
+  } catch (err) {
+    toast(err?.message || 'Failed to restore invoice', 'error')
+  }
+}
+
+async function doSubmitManual() {
+  if (!selectedInvoice.value) return
+  try {
+    await store.submit(selectedInvoice.value.id)
+    const fresh = store.invoices.find(i => i.id === selectedInvoice.value.id)
+    if (fresh) selectedInvoice.value = fresh
+    toast('Invoice submitted for approval', 'success')
+  } catch (err) {
+    toast(err?.message || 'Failed to submit invoice', 'error')
+  }
+}
+
+function onManualCreated(invoice) {
+  if (invoice) openDetail(invoice)
 }
 function cancelAdjust() {
   if (adjustBusy.value) return
@@ -446,7 +642,7 @@ async function doReject() {
 function exportCsv() {
   const rows = filteredInvoices.value
   if (!rows.length) { toast('Nothing to export', 'warning'); return }
-  const header = ['Invoice Number', 'Driver', 'Week Start', 'Week End', 'Loads', 'Rate', 'Total Earnings', 'Expenses', 'Status', 'Submitted At', 'Approved At', 'Approved By', 'Rejection Note']
+  const header = ['Invoice Number', 'Type', 'Payee', 'Week Start', 'Week End', 'Loads/Items', 'Rate', 'Total Earnings', 'Adjustment', 'Expenses', 'Status', 'Submitted At', 'Approved At', 'Approved By', 'Rejection Note', 'Deleted At', 'Deleted By', 'Delete Reason']
   const escape = (v) => {
     const s = v == null ? '' : String(v)
     return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
@@ -454,9 +650,10 @@ function exportCsv() {
   const lines = [header.join(',')]
   for (const r of rows) {
     lines.push([
-      r.invoice_number, r.driver, r.week_start, r.week_end,
-      r.loads_count, r.rate_per_load, r.total_earnings, r.expenses_total,
+      r.invoice_number, r.is_manual ? 'Manual' : 'Weekly', r.driver, r.week_start, r.week_end,
+      r.loads_count, r.rate_per_load, r.total_earnings, r.adjustment || 0, r.expenses_total,
       r.status, r.submitted_at, r.approved_at, r.approved_by, r.rejection_note,
+      r.deleted_at || '', r.deleted_by || '', r.delete_reason || '',
     ].map(escape).join(','))
   }
   const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
@@ -675,6 +872,84 @@ onMounted(() => store.load())
   font-size: 0.78rem;
   color: #6b7280;
   text-align: center;
+}
+
+/* Manual-invoice chip (table + detail) */
+.manual-chip {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  background: #f5f3ff;
+  color: #6d28d9;
+  border: 1px solid #ddd6fe;
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  vertical-align: middle;
+  font-family: inherit;
+}
+
+/* Deleted invoice banner (detail modal) */
+.deleted-banner {
+  padding: 0.85rem 1rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  color: #991b1b;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+/* Post-approval edit warning inside the adjust prompt */
+.post-approval-note {
+  padding: 0.5rem 0.7rem;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  color: #9a3412;
+  line-height: 1.45;
+  margin-bottom: 0.35rem;
+}
+
+/* Revert (unlock) prompt — blue tone to distinguish from reject/adjust */
+.revert-prompt {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.revert-textarea {
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #fff;
+  font-family: inherit;
+  font-size: 0.82rem;
+  color: #111827;
+  resize: vertical;
+  min-height: 60px;
+}
+.revert-textarea:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+
+/* Delete prompt — red tone, mirrors reject styling */
+.delete-prompt {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 
 @media (max-width: 900px) {
