@@ -17,6 +17,7 @@
           <th>Plate</th>
           <th>Status</th>
           <th>Current Driver</th>
+          <th>Driver Pay</th>
           <th>Loads</th>
           <th>Routemate</th>
           <th v-if="showOwner">Owner</th>
@@ -35,6 +36,10 @@
           </td>
           <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
             {{ truck.AssignedDriver || '\u2014' }}
+          </td>
+          <td class="mono">
+            <span v-if="truck.DriverPayDaily > 0">${{ truck.DriverPayDaily }}/day</span>
+            <span v-else class="pay-default" title="No custom rate set; pay calculations use the $250/day default">$250/day default</span>
           </td>
           <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
           <td>
@@ -187,6 +192,12 @@
             </div>
           </div>
 
+          <div class="edit-field">
+            <label>Driver Pay ($/day)</label>
+            <input v-model.number="editForm.driverPayDaily" type="number" min="0" max="10000" step="any" placeholder="250 (default)" />
+            <div class="field-hint">Daily rate paid to this truck's driver (used by invoices, financials, and the investor P&amp;L). Leave blank to use the $250/day default.</div>
+          </div>
+
           <div v-if="showOwner" class="edit-field">
             <label>Owner (Investor)</label>
             <select v-model="editForm.ownerId">
@@ -225,10 +236,6 @@
               <div class="edit-field">
                 <label>Maintenance Fund ($/mo)</label>
                 <input v-model.number="editForm.maintenanceFundMonthly" type="number" min="0" />
-              </div>
-              <div class="edit-field">
-                <label>Driver Pay ($/day)</label>
-                <input v-model.number="editForm.driverPayDaily" type="number" min="0" />
               </div>
             </div>
             <div class="edit-row">
@@ -293,7 +300,7 @@
           <div class="view-row"><span class="view-label">Maintenance Fund</span><span>{{ viewTruck.MaintenanceFundMonthly ? '$' + viewTruck.MaintenanceFundMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Insurance</span><span>{{ viewTruck.InsuranceMonthly ? '$' + viewTruck.InsuranceMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
-          <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '$250/day (default)' }}</span></div>
         </div>
         <!-- Driver-personal files (CDL, medical, signed contracts) intentionally
              NOT shown here. They live with the driver, not the truck. Manage
@@ -386,7 +393,9 @@ function openEdit(truck) {
   editForm.hvutAnnual = truck.HvutAnnual || 0
   editForm.irpAnnual = truck.IrpAnnual || 0
   editForm.adminFeePct = truck.AdminFeePct ?? 50
-  editForm.driverPayDaily = truck.DriverPayDaily || 0
+  // '' (not 0) when unset so the input shows the "250 (default)" placeholder
+  // instead of a misleading literal 0.
+  editForm.driverPayDaily = truck.DriverPayDaily || ''
   editForm.purchasePrice = truck.PurchasePrice || 0
   editForm.titleStatus = truck.TitleStatus || 'Clean'
   editForm.maintenanceFundMonthly = truck.MaintenanceFundMonthly || 0
@@ -421,7 +430,8 @@ function handleSaveEdit() {
       hvutAnnual: editForm.hvutAnnual,
       irpAnnual: editForm.irpAnnual,
       adminFeePct: editForm.adminFeePct,
-      driverPayDaily: editForm.driverPayDaily,
+      // Blank input = clear the custom rate (server stores 0 = use $250 default)
+      driverPayDaily: editForm.driverPayDaily === '' ? 0 : editForm.driverPayDaily,
       purchasePrice: editForm.purchasePrice,
       titleStatus: editForm.titleStatus,
       maintenanceFundMonthly: editForm.maintenanceFundMonthly,
@@ -635,6 +645,11 @@ async function handleUnlink(truck) {
 .edit-field textarea:focus {
   outline: none; border-color: var(--blue);
 }
+.field-hint {
+  font-size: 0.7rem; color: var(--text-dim); margin-top: 0.25rem;
+  text-transform: none; letter-spacing: normal;
+}
+.pay-default { color: var(--text-dim); font-size: 0.72rem; }
 .clickable-row { cursor: pointer; }
 .clickable-row:hover td { background: var(--accent-dim, #f0f9ff); }
 .view-grid { display: flex; flex-direction: column; gap: 0.4rem; }

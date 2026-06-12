@@ -106,7 +106,8 @@
         </div>
         <div class="form-group">
           <label class="form-label">Driver Pay ($/day)</label>
-          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" placeholder="250" />
+          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" max="10000" step="any" placeholder="250 (default)" />
+          <div class="field-hint">Daily rate for this truck's driver. Leave blank to use the $250/day default.</div>
         </div>
       </div>
       <div class="form-row">
@@ -194,7 +195,8 @@ const form = reactive({
   hvutAnnual: 0,
   irpAnnual: 0,
   adminFeePct: 50,
-  driverPayDaily: 0,
+  // '' (not 0) so the "250 (default)" placeholder is visible until a rate is typed
+  driverPayDaily: '',
   purchasePrice: 0,
   titleStatus: 'Clean',
   maintenanceFundMonthly: 0,
@@ -237,7 +239,8 @@ function handleSubmit() {
     hvutAnnual: form.hvutAnnual,
     irpAnnual: form.irpAnnual,
     adminFeePct: form.adminFeePct,
-    driverPayDaily: form.driverPayDaily,
+    // Blank input = no custom rate (server stores 0 = use $250 default)
+    driverPayDaily: form.driverPayDaily === '' ? 0 : form.driverPayDaily,
     purchasePrice: form.purchasePrice,
     titleStatus: form.titleStatus,
     maintenanceFundMonthly: form.maintenanceFundMonthly,
@@ -259,7 +262,7 @@ function handleSubmit() {
   form.hvutAnnual = 0
   form.irpAnnual = 0
   form.adminFeePct = 50
-  form.driverPayDaily = 0
+  form.driverPayDaily = ''
   form.purchasePrice = 0
   form.titleStatus = 'Clean'
   form.maintenanceFundMonthly = 0
@@ -285,6 +288,7 @@ function handleSubmit() {
 .form-textarea { resize: vertical; }
 .btn-add { width: auto; padding: 0.5rem 1.5rem; }
 .error-msg { color: var(--danger); font-size: 0.78rem; margin-top: 0.5rem; min-height: 1.1em; }
+.field-hint { font-size: 0.7rem; color: var(--text-dim); margin-top: 0.25rem; }
 .fixed-costs-label {
   font-size: 0.72rem; font-weight: 600; color: var(--text-dim);
   text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;
