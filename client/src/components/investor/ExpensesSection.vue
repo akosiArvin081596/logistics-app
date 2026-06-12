@@ -51,7 +51,8 @@
           <td class="desc-cell">{{ e.description || '—' }}</td>
           <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
           <td>
-            <img v-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
+            <a v-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener">PDF</a>
+            <img v-else-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
             <span v-else class="dim">—</span>
           </td>
           <td>
@@ -174,6 +175,12 @@ async function loadExpenses() {
 function fmtDate(d) {
   if (!d) return '—'
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// PDF receipts (admin/dispatcher uploads) render as a link chip instead of a
+// broken <img>. Mirrors ExpensesTab.vue's helper.
+function isPdfReceipt(p) {
+  return typeof p === 'string' && (/\.pdf$/i.test(p) || p.startsWith('data:application/pdf'))
 }
 
 // --- Detail modal ---
@@ -307,6 +314,16 @@ onMounted(loadExpenses)
   cursor: zoom-in;
   display: block;
 }
+
+.receipt-pdf-chip {
+  display: inline-flex; align-items: center;
+  padding: 0.25rem 0.55rem; border-radius: 6px;
+  background: #fee2e2; color: #b91c1c;
+  font-size: 0.66rem; font-weight: 700; letter-spacing: 0.04em;
+  text-decoration: none; border: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+.receipt-pdf-chip:hover { border-color: #b91c1c; }
 
 .totals-footer {
   margin-top: 0.85rem;
