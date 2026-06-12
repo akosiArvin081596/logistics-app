@@ -1838,6 +1838,37 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_driver ON invoices(driver
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_week ON invoices(week_start, week_end)`); } catch {}
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_driver_week ON invoices(driver, week_start)`);
 
+// Invoice management suite (owner requests 2026-06-11) — all additive ALTERs,
+// idempotent via try-catch, backward compatible.
+// Soft delete: deleted invoices stay in the table for audit ("track who deleted
+// it, how it got deleted") but are filtered from every list/report.
+try { db.exec("ALTER TABLE invoices ADD COLUMN deleted_at TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN deleted_by TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN delete_reason TEXT DEFAULT ''"); } catch {}
+// is_manual=1 → admin-created from-scratch invoice (free-text payee — "other
+// employees other than drivers" — line items + deductions live in render_data).
+// Bypasses the active-day pay math entirely; flows through the same
+// list/submit/approve/PDF pipeline as generated weekly invoices.
+try { db.exec("ALTER TABLE invoices ADD COLUMN is_manual INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN created_by TEXT DEFAULT ''"); } catch {}
+// Re-scope the one-invoice-per-driver-week guarantee to LIVE generated weekly
+// invoices only: a soft-deleted row must not block a regenerate, and manual
+// invoices may coexist with a weekly invoice (or each other) for the same
+// payee/period. SQLite can't alter an index, so drop + recreate as a partial
+// index under the same name (the plain CREATE IF NOT EXISTS above stays a
+// no-op on later boots because the name already exists).
+try {
+	const driverWeekIdx = db.prepare(
+		"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_invoices_driver_week'"
+	).get();
+	if (!driverWeekIdx || !/\bWHERE\b/i.test(driverWeekIdx.sql || "")) {
+		db.exec("DROP INDEX IF EXISTS idx_invoices_driver_week");
+		db.exec("CREATE UNIQUE INDEX idx_invoices_driver_week ON invoices(driver, week_start) WHERE deleted_at = '' AND is_manual = 0");
+	}
+} catch (err) {
+	console.error("invoices unique-index migration failed:", err.message);
+}
+
 // Onboarding document definitions
 const ONBOARDING_DOCS = [
 	{ key: "contractor_agreement", name: "Contractor Agreement", confidential: 1 },
@@ -5548,9 +5579,12 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		const range = weekEnd ? getWeekRange(weekEnd) : getWeekRange();
 		const { weekStart, weekEnd: computedWeekEnd } = range;
 
-		// Check for existing invoice this week
-		const existing = db.prepare("SELECT * FROM invoices WHERE LOWER(driver) = ? AND week_start = ?")
-			.get(driverName.toLowerCase(), weekStart);
+		// Check for existing invoice this week. Soft-deleted invoices and manual
+		// (admin-created) invoices never block a weekly regenerate — the partial
+		// unique index idx_invoices_driver_week applies the same scoping.
+		const existing = db.prepare(
+			"SELECT * FROM invoices WHERE LOWER(driver) = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0"
+		).get(driverName.toLowerCase(), weekStart);
 		if (existing && existing.status !== "Draft") {
 			return res.status(409).json({
 				error: `Invoice already exists for this week (${existing.invoice_number}, status: ${existing.status}). Contact admin if this needs to be regenerated.`,
@@ -5940,6 +5974,133 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 	}
 });
 
+// Validate + normalize the line-item/deduction rows of a manual invoice.
+// Returns { items } on success or { error } with a user-facing message.
+function sanitizeManualInvoiceRows(raw, label) {
+	if (raw == null) return { items: [] };
+	if (!Array.isArray(raw)) return { error: `${label} must be an array` };
+	if (raw.length > 100) return { error: `${label}: maximum 100 rows` };
+	const items = [];
+	for (const row of raw) {
+		const description = ((row && row.description) || "").toString().trim().slice(0, 200);
+		const date = ((row && row.date) || "").toString().trim().slice(0, 40);
+		const amount = Number(row && row.amount);
+		if (!description) return { error: `${label}: every row needs a description` };
+		if (!Number.isFinite(amount) || amount < 0 || amount > 1000000) {
+			return { error: `${label}: each amount must be between $0 and $1,000,000` };
+		}
+		items.push({ date, description, amount: Math.round(amount * 100) / 100 });
+	}
+	return { items };
+}
+
+// POST /api/invoices/manual — Super Admin creates an invoice from scratch in
+// the same PDF format (owner request: "other employees other than drivers").
+// Free-text payee (not limited to drivers), arbitrary period, line items +
+// deductions. Stored with is_manual=1 and flows through the same
+// list/submit/approve/adjust/PDF pipeline as generated weekly invoices; the
+// active-day / Sat–Fri pay math is intentionally bypassed.
+app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const body = req.body || {};
+		const payee = (body.payee || "").toString().trim();
+		if (!payee || payee.length > 100) {
+			return res.status(400).json({ error: "payee is required (max 100 characters)" });
+		}
+		const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+		const periodStart = (body.periodStart || "").toString().trim();
+		const periodEnd = (body.periodEnd || "").toString().trim();
+		if (!DATE_RE.test(periodStart) || !DATE_RE.test(periodEnd)) {
+			return res.status(400).json({ error: "periodStart and periodEnd must be YYYY-MM-DD" });
+		}
+		if (periodEnd < periodStart) {
+			return res.status(400).json({ error: "periodEnd must be on or after periodStart" });
+		}
+		const itemsRes = sanitizeManualInvoiceRows(body.lineItems, "lineItems");
+		if (itemsRes.error) return res.status(400).json({ error: itemsRes.error });
+		if (!itemsRes.items.length) return res.status(400).json({ error: "At least one line item is required" });
+		const dedRes = sanitizeManualInvoiceRows(body.deductions, "deductions");
+		if (dedRes.error) return res.status(400).json({ error: dedRes.error });
+		const payeeRole = (body.payeeRole || "").toString().trim().slice(0, 100);
+		const payeeAddress = (body.payeeAddress || "").toString().trim().slice(0, 200);
+		const payeePhone = (body.payeePhone || "").toString().trim().slice(0, 40);
+		const notes = (body.notes || "").toString().trim().slice(0, 500);
+
+		const round2 = (n) => Math.round(n * 100) / 100;
+		const subtotal = round2(itemsRes.items.reduce((s, i) => s + i.amount, 0));
+		const deductionsTotal = round2(dedRes.items.reduce((s, i) => s + i.amount, 0));
+		const totalDue = round2(subtotal - deductionsTotal);
+		const adminName = req.session.user.username || "";
+
+		// Manual numbers reuse the weekly scheme with an INV-M- prefix so they're
+		// visually distinct and can't collide with generated INV- numbers. The
+		// sequence inside generateInvoiceNumber counts ALL rows (incl. deleted +
+		// manual) for the payee/period, so repeats get -02, -03, ...
+		const invoiceNumber = generateInvoiceNumber(payee, periodStart).replace(/^INV-/, "INV-M-");
+		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+		const fmtPeriodDate = (s) =>
+			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+
+		const renderData = {
+			payeeName: payee,
+			payeeRole,
+			payeeAddress,
+			payeePhone,
+			invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
+			issueDate: nowStr,
+			billingPeriodStart: fmtPeriodDate(periodStart),
+			billingPeriodEnd: fmtPeriodDate(periodEnd),
+			lineItems: itemsRes.items,
+			deductions: dedRes.items,
+			subtotal,
+			deductionsTotal,
+			totalDue,
+			notes,
+			preparedBy: adminName,
+			adjustment: 0,
+			adjustmentNote: "",
+		};
+
+		const pdfBuffer = await renderPolicy("service_invoice_manual", renderData);
+		const uploadsDir = path.join(__dirname, "uploads", "invoices");
+		if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+		// Payee is free text, so the derived number could contain characters that
+		// are unsafe in a filename — sanitize the FILE name only (the DB keeps the
+		// raw invoice_number; serving goes through pdf_file_name).
+		const pdfFileName = `${invoiceNumber.replace(/[^A-Za-z0-9._-]+/g, "_")}.pdf`;
+		fs.writeFileSync(path.join(uploadsDir, pdfFileName), pdfBuffer);
+
+		// Same snapshot mechanism as weekly invoices so /api/invoices/:id/adjust
+		// can re-render the full manual template with a new adjustment.
+		const renderSnapshot = { ...renderData, __templateName: "service_invoice_manual" };
+
+		// loads_count carries the line-item count for manual rows; rate_per_load
+		// is 0 (no daily-rate semantics); expenses_total carries the deductions.
+		const result = db.prepare(
+			`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, render_data, is_manual, created_by)
+			 VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, '[]', '[]', ?, 1, ?)`
+		).run(
+			invoiceNumber, payee.toLowerCase(), periodStart, periodEnd,
+			itemsRes.items.length, totalDue, deductionsTotal,
+			pdfFileName, JSON.stringify(renderSnapshot), adminName
+		);
+
+		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(result.lastInsertRowid);
+		logAudit(
+			req,
+			"create_manual_invoice",
+			"invoice",
+			invoice.id,
+			`${invoiceNumber} for ${payee} (${periodStart} – ${periodEnd}), ${itemsRes.items.length} item(s), total $${totalDue.toFixed(2)}`
+		);
+		notifyChange("invoices");
+		res.json({ success: true, invoice });
+	} catch (err) {
+		console.error("Manual invoice error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // GET /api/invoices — list invoices
 app.get("/api/invoices", requireAuth, (req, res) => {
 	try {
@@ -5948,20 +6109,214 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 		if (user.role === "Super Admin") {
 			const driverFilter = req.query.driver;
 			const statusFilter = req.query.status;
+			// Soft-deleted invoices are hidden everywhere; Super Admin can opt in
+			// with ?include_deleted=true (recovery/audit view — rows carry
+			// deleted_at/deleted_by/delete_reason so the client can badge them).
+			const includeDeleted = req.query.include_deleted === "true";
 			let sql = "SELECT * FROM invoices WHERE 1=1";
 			const params = [];
+			if (!includeDeleted) sql += " AND deleted_at = ''";
 			if (driverFilter) { sql += " AND LOWER(driver) = ?"; params.push(driverFilter.toLowerCase()); }
 			if (statusFilter) { sql += " AND status = ?"; params.push(statusFilter); }
 			sql += " ORDER BY created_at DESC";
 			invoices = db.prepare(sql).all(...params);
 		} else {
 			const driverName = user.driverName || "";
-			invoices = db.prepare("SELECT * FROM invoices WHERE LOWER(driver) = ? ORDER BY created_at DESC")
+			invoices = db.prepare("SELECT * FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC")
 				.all(driverName.toLowerCase());
 		}
 		res.json({ invoices });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// === Payment-summary report (owner request 2026-06-11) ===
+// "Run a report for, say, Sean — how much I paid him; week or custom range."
+// Shared by GET /api/invoices/report (JSON) and /report/pdf (printable).
+// IMPORTANT: these routes are registered BEFORE /api/invoices/:id/pdf — the
+// literal "report" segment must not be captured as :id.
+function parsePaymentReportParams(req) {
+	const payee = (req.query.payee || "").toString().trim();
+	if (!payee || payee.length > 100) return { error: "payee is required (max 100 characters)" };
+	const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+	const week = (req.query.week || "").toString().trim();
+	if (week) {
+		if (!DATE_RE.test(week)) return { error: "week must be YYYY-MM-DD" };
+		// Snap any day to the invoice Sat–Fri billing week (same helper the
+		// weekly generator uses, so report weeks line up with invoice weeks).
+		const range = getWeekRange(week);
+		return { payee, from: range.weekStart, to: range.weekEnd };
+	}
+	const from = (req.query.from || "").toString().trim();
+	const to = (req.query.to || "").toString().trim();
+	if (!DATE_RE.test(from) || !DATE_RE.test(to)) {
+		return { error: "Pass week=YYYY-MM-DD, or from= and to= as YYYY-MM-DD" };
+	}
+	if (from > to) return { error: "from must be on or before to" };
+	return { payee, from, to };
+}
+
+// Aggregates every live (non-deleted) invoice for the payee whose billing
+// period OVERLAPS [from, to]. total_due = total_earnings + admin adjustment —
+// the same number the PDF "Total Due" shows. Rejected invoices are listed but
+// excluded from payable totals.
+function buildPaymentReport(payee, from, to) {
+	const rows = db.prepare(
+		`SELECT id, invoice_number, driver, week_start, week_end, loads_count, status, is_manual,
+		        total_earnings, expenses_total, adjustment, adjustment_note,
+		        submitted_at, approved_at, approved_by, paid_at, paid_by,
+		        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at
+		 FROM invoices
+		 WHERE LOWER(driver) = ? AND deleted_at = '' AND week_start <= ? AND week_end >= ?
+		 ORDER BY week_start ASC, created_at ASC`
+	).all(payee.toLowerCase(), to, from);
+	const round2 = (n) => Math.round(n * 100) / 100;
+	const invoices = rows.map((r) => ({
+		...r,
+		total_due: round2((r.total_earnings || 0) + (r.adjustment || 0)),
+	}));
+	const sumDue = (list) => round2(list.reduce((s, r) => s + r.total_due, 0));
+	const paid = invoices.filter((r) => r.status === "Paid");
+	const pending = invoices.filter((r) => ["Submitted", "Approved", "Processing"].includes(r.status));
+	const draft = invoices.filter((r) => r.status === "Draft");
+	const rejected = invoices.filter((r) => r.status === "Rejected");
+	return {
+		payee,
+		from,
+		to,
+		invoices,
+		summary: {
+			invoiceCount: invoices.length,
+			totalPaid: sumDue(paid),
+			paidCount: paid.length,
+			totalPending: sumDue(pending),
+			pendingCount: pending.length,
+			totalDraft: sumDue(draft),
+			draftCount: draft.length,
+			totalRejected: sumDue(rejected),
+			rejectedCount: rejected.length,
+			totalPayable: sumDue(invoices.filter((r) => r.status !== "Rejected")),
+		},
+	};
+}
+
+// GET /api/invoices/report?payee=&week=|&from=&to= — Super Admin JSON summary
+app.get("/api/invoices/report", requireRole("Super Admin"), (req, res) => {
+	try {
+		const p = parsePaymentReportParams(req);
+		if (p.error) return res.status(400).json({ error: p.error });
+		res.json(buildPaymentReport(p.payee, p.from, p.to));
+	} catch (err) {
+		console.error("Invoice report error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// GET /api/invoices/report/pdf — printable payment summary (pdfkit, same
+// params as the JSON report). Patterned on the investor performance report.
+app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const p = parsePaymentReportParams(req);
+		if (p.error) return res.status(400).json({ error: p.error });
+		const report = buildPaymentReport(p.payee, p.from, p.to);
+
+		const doc = new PDFDocument({ margin: 50, size: "LETTER" });
+		const chunks = [];
+		doc.on("data", (c) => chunks.push(c));
+
+		const fmtMoney = (n) =>
+			"$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+		const fmtDay = (s) => (s ? String(s).slice(0, 10) : "—");
+		const dateStr = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+		const payeeDisplay = report.payee.toUpperCase();
+
+		// ── Header band
+		doc.rect(0, 0, doc.page.width, 80).fill("#0f3460");
+		doc.fillColor("#ffffff").fontSize(20).font("Helvetica-Bold")
+			.text(`Payment Summary — ${payeeDisplay}`, 50, 18, { width: doc.page.width - 100 });
+		doc.fontSize(10).font("Helvetica").fillColor("rgba(255,255,255,0.7)")
+			.text(`Period: ${report.from} to ${report.to}  ·  Generated ${dateStr}`, 50, 48);
+		doc.y = 100;
+		doc.fillColor("#000000");
+
+		// ── Summary KPIs
+		const kpiRow = (label, value, label2, value2) => {
+			const y = doc.y;
+			doc.font("Helvetica-Bold").fontSize(9).fillColor("#666").text(label.toUpperCase(), 50, y, { width: 220 });
+			doc.font("Helvetica-Bold").fontSize(14).fillColor("#0f3460").text(value, 50, y + 11, { width: 220 });
+			if (label2) {
+				doc.font("Helvetica-Bold").fontSize(9).fillColor("#666").text(label2.toUpperCase(), 300, y, { width: 220 });
+				doc.font("Helvetica-Bold").fontSize(14).fillColor("#0f3460").text(value2 || "—", 300, y + 11, { width: 220 });
+			}
+			doc.moveDown(2.2);
+		};
+		kpiRow("Total Paid", `${fmtMoney(report.summary.totalPaid)} (${report.summary.paidCount})`,
+			"Pending (submitted/approved/processing)", `${fmtMoney(report.summary.totalPending)} (${report.summary.pendingCount})`);
+		kpiRow("Total Payable (excl. rejected)", fmtMoney(report.summary.totalPayable),
+			"Invoices in Period", String(report.summary.invoiceCount));
+
+		// ── Invoice table
+		const cols = [
+			{ label: "Invoice #", x: 50, w: 116, align: "left" },
+			{ label: "Period", x: 166, w: 94, align: "left" },
+			{ label: "Status", x: 260, w: 56, align: "left" },
+			{ label: "Base", x: 316, w: 62, align: "right" },
+			{ label: "Adjust", x: 378, w: 50, align: "right" },
+			{ label: "Total Due", x: 428, w: 64, align: "right" },
+			{ label: "Paid On", x: 492, w: 70, align: "right" },
+		];
+		const footerSafety = 60;
+		const drawTableHeader = () => {
+			const y = doc.y;
+			doc.rect(50, y, doc.page.width - 100, 18).fill("#e8f4fd");
+			doc.fillColor("#0f3460").font("Helvetica-Bold").fontSize(8);
+			cols.forEach((c) => doc.text(c.label.toUpperCase(), c.x + 3, y + 5, { width: c.w - 6, align: c.align, lineBreak: false }));
+			doc.y = y + 18;
+		};
+		drawTableHeader();
+		if (!report.invoices.length) {
+			doc.fillColor("#777").font("Helvetica-Oblique").fontSize(10)
+				.text("No invoices found for this payee in the selected period.", 50, doc.y + 10);
+			doc.moveDown(1);
+		}
+		report.invoices.forEach((inv, i) => {
+			if (doc.y + 18 > doc.page.height - footerSafety) {
+				doc.addPage();
+				doc.y = 50;
+				drawTableHeader();
+			}
+			const y = doc.y;
+			doc.rect(50, y, doc.page.width - 100, 16).fill(i % 2 === 0 ? "#ffffff" : "#f8f9fa");
+			doc.fillColor("#333333").font("Helvetica").fontSize(8);
+			const vals = [
+				inv.invoice_number + (inv.is_manual ? " (M)" : ""),
+				`${fmtDay(inv.week_start)} – ${fmtDay(inv.week_end)}`,
+				inv.status,
+				fmtMoney(inv.total_earnings),
+				inv.adjustment ? fmtMoney(inv.adjustment) : "—",
+				fmtMoney(inv.total_due),
+				inv.status === "Paid" ? fmtDay(inv.paid_at) : "—",
+			];
+			cols.forEach((c, j) => doc.text(vals[j], c.x + 3, y + 4, { width: c.w - 6, align: c.align, lineBreak: false }));
+			doc.y = y + 16;
+		});
+
+		// ── Footer
+		doc.rect(0, doc.page.height - 30, doc.page.width, 30).fill("#f0f0f0");
+		doc.fillColor("#999").fontSize(8).font("Helvetica")
+			.text(`Generated by LogisX  ·  ${dateStr}  ·  (M) = manual invoice`, 50, doc.page.height - 20, { lineBreak: false });
+
+		doc.end();
+		await new Promise((resolve) => doc.on("end", resolve));
+		const pdfBuffer = Buffer.concat(chunks);
+		const safePayee = report.payee.replace(/[^A-Za-z0-9._-]+/g, "_");
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader("Content-Disposition", `attachment; filename="Payment_Report_${safePayee}_${report.from}_${report.to}.pdf"`);
+		res.send(pdfBuffer);
+	} catch (err) {
+		console.error("Invoice report PDF error:", err.message);
+		res.status(500).json({ error: "Failed to generate report PDF" });
 	}
 });
 
@@ -5974,6 +6329,10 @@ app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {
 		const user = req.session.user;
 		if (user.role === "Driver" && invoice.driver !== (user.driverName || "").toLowerCase()) {
 			return res.status(403).json({ error: "Forbidden" });
+		}
+		// Soft-deleted invoices stay viewable by Super Admin only (audit/restore).
+		if (invoice.deleted_at && user.role !== "Super Admin") {
+			return res.status(404).json({ error: "Invoice not found" });
 		}
 		const pdfPath = path.join(__dirname, "uploads", "invoices", invoice.pdf_file_name);
 		if (!fs.existsSync(pdfPath)) return res.status(404).json({ error: "PDF file not found" });
@@ -5991,7 +6350,7 @@ app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {
 app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
-		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
+		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
 		const user = req.session.user;
 		if (user.role === "Driver" && invoice.driver !== (user.driverName || "").toLowerCase()) {
 			return res.status(403).json({ error: "Forbidden" });
@@ -6013,15 +6372,18 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 				const attachments = invoice.pdf_file_name && fs.existsSync(pdfPath)
 					? [{ filename: invoice.pdf_file_name, path: pdfPath }]
 					: [];
+				const submitLine = invoice.is_manual
+					? `Manual invoice for <b>${escHtml(invoice.driver)}</b> was submitted for the period ${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}.`
+					: `Driver <b>${escHtml(invoice.driver)}</b> just submitted an invoice for the week of ${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}.`;
 				const html = invoiceEmailHtml({
 					heading: `New Invoice: ${escHtml(invoice.invoice_number)}`,
 					bodyHtml: `
-						<p style="margin:0 0 12px;line-height:1.6;color:#334155">Driver <b>${escHtml(invoice.driver)}</b> just submitted an invoice for the week of ${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}.</p>
+						<p style="margin:0 0 12px;line-height:1.6;color:#334155">${submitLine}</p>
 						<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;margin:16px 0">
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Invoice</span><b>${escHtml(invoice.invoice_number)}</b></div>
-							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Driver</span><b>${escHtml(invoice.driver)}</b></div>
+							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${invoice.is_manual ? "Payee" : "Driver"}</span><b>${escHtml(invoice.driver)}</b></div>
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Week</span><b>${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}</b></div>
-							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Loads</span><b>${Number(invoice.loads_count || 0)}</b></div>
+							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${invoice.is_manual ? "Line items" : "Loads"}</span><b>${Number(invoice.loads_count || 0)}</b></div>
 							<div style="display:flex;justify-content:space-between;font-size:15px;padding:8px 0 0;border-top:1px solid #bae6fd;margin-top:6px"><span style="color:#64748b;font-weight:600">Total</span><b style="color:#0f172a">$${Number(invoice.total_earnings || 0).toFixed(2)}</b></div>
 						</div>
 						<p style="margin:0 0 12px;line-height:1.5;color:#334155;font-size:13px">The full invoice PDF is attached. Log in to the admin dashboard to approve, reject, or mark as paid.</p>
@@ -6048,7 +6410,7 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
-		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
+		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
 		const { action, rejectionNote } = req.body; // action: "approve" | "reject" | "processing" | "paid"
 		if (!["approve", "reject", "processing", "paid"].includes(action)) {
 			return res.status(400).json({ error: "Action must be 'approve', 'reject', 'processing', or 'paid'" });
@@ -6111,20 +6473,21 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 	}
 });
 
-// PUT /api/invoices/:id/adjust — Super Admin adds a +/- adjustment line to
-// a Draft or Submitted invoice (e.g. one-off bonus, advance recoupment).
-// The computed total_earnings stays untouched; the rendered PDF Total Due
-// becomes total_earnings + adjustment. Single-row, last-write-wins (passing
-// adjustment: 0 clears it). Audit trail captures old → new values.
+// PUT /api/invoices/:id/adjust — Super Admin adds a +/- adjustment line
+// (e.g. one-off bonus, advance recoupment, missed deduction). Allowed on ANY
+// status — including Approved/Processing/Paid — per the owner's 2026-06-11
+// request ("re-edit even if it's already paid"); post-approval edits are
+// flagged in the audit trail, and PUT /:id/revert can additionally send the
+// invoice back through review. The computed total_earnings stays untouched;
+// the rendered PDF Total Due becomes total_earnings + adjustment. Single-row,
+// last-write-wins (passing adjustment: 0 clears it).
 app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
-		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
-		if (invoice.status !== "Draft" && invoice.status !== "Submitted") {
-			return res.status(409).json({
-				error: `Cannot adjust an invoice with status "${invoice.status}" — adjustments only allowed while Draft or Submitted.`,
-			});
-		}
+		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
+		// Edits after approval are legitimate (mistaken approve, late deduction)
+		// but get an explicit audit marker below.
+		const postApproval = invoice.status !== "Draft" && invoice.status !== "Submitted";
 		const rawAmount = req.body && req.body.adjustment;
 		const adjustment = Number(rawAmount);
 		if (!Number.isFinite(adjustment)) {
@@ -6166,12 +6529,118 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), async (req, res)
 			"adjust_invoice",
 			"invoice",
 			invoice.id,
-			`Adjustment ${oldAdjustment.toFixed(2)} → ${adjustment.toFixed(2)} (${note || "no reason given"})`
+			`${postApproval ? `POST-APPROVAL EDIT (status ${invoice.status}): ` : ""}${invoice.invoice_number}: adjustment ${oldAdjustment.toFixed(2)} → ${adjustment.toFixed(2)} (${note || "no reason given"})`
 		);
+		notifyChange("invoices");
 		const final = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
 		res.json({ success: true, invoice: final, pdfMode });
 	} catch (err) {
 		console.error("Invoice adjust error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// PUT /api/invoices/:id/revert — Super Admin sends an Approved / Processing /
+// Paid / Rejected invoice back to 'Submitted' so it can be corrected and
+// re-approved ("I clicked approve by accident, but I needed to do the
+// deductions... edit it and then send it back to them"). Clears the
+// per-transition fields of the undone states — the prior approver/payer and
+// timestamps are preserved in the audit trail entry. Draft/Submitted invoices
+// are already editable and can't be reverted.
+app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
+	try {
+		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
+		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
+		const revertible = ["Approved", "Processing", "Paid", "Rejected"];
+		if (!revertible.includes(invoice.status)) {
+			return res.status(400).json({ error: `Cannot revert an invoice with status "${invoice.status}" — it is already editable.` });
+		}
+		const reason = ((req.body && req.body.reason) || "").toString().trim().slice(0, 500);
+		const priorState = [
+			invoice.approved_by ? `approved by ${invoice.approved_by} at ${invoice.approved_at}` : "",
+			invoice.processed_by ? `processing by ${invoice.processed_by} at ${invoice.processed_at}` : "",
+			invoice.paid_by ? `paid by ${invoice.paid_by} at ${invoice.paid_at}` : "",
+			invoice.rejection_note ? `rejection note: ${invoice.rejection_note}` : "",
+		].filter(Boolean).join("; ");
+		db.prepare(
+			`UPDATE invoices SET status = 'Submitted', approved_at = '', approved_by = '',
+			 processed_at = '', processed_by = '', paid_at = '', paid_by = '', rejection_note = ''
+			 WHERE id = ?`
+		).run(invoice.id);
+		logAudit(
+			req,
+			"revert_invoice",
+			"invoice",
+			invoice.id,
+			`${invoice.invoice_number}: status ${invoice.status} → Submitted${reason ? ` (${reason})` : ""}${priorState ? ` [was: ${priorState}]` : ""}`
+		);
+		notifyChange("invoices");
+		const fresh = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
+		res.json({ success: true, invoice: fresh });
+	} catch (err) {
+		console.error("Invoice revert error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// DELETE /api/invoices/:id?reason= — Super Admin soft delete. The row keeps
+// living in SQLite (deleted_at/deleted_by/delete_reason) and the audit trail
+// records who deleted it and why; the invoice disappears from every list and
+// report. Recover via PUT /:id/restore (or the "Show deleted" admin view).
+app.delete("/api/invoices/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
+		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
+		const reason = ((req.query && req.query.reason) || "").toString().trim().slice(0, 500);
+		const now = new Date().toISOString();
+		const adminName = req.session.user.username || "";
+		db.prepare("UPDATE invoices SET deleted_at = ?, deleted_by = ?, delete_reason = ? WHERE id = ?")
+			.run(now, adminName, reason, invoice.id);
+		const totalDue = (Number(invoice.total_earnings) || 0) + (Number(invoice.adjustment) || 0);
+		logAudit(
+			req,
+			"delete_invoice",
+			"invoice",
+			invoice.id,
+			`${invoice.invoice_number} (payee ${invoice.driver}, ${invoice.week_start} – ${invoice.week_end}, status ${invoice.status}, total $${totalDue.toFixed(2)}) soft-deleted${reason ? `: ${reason}` : ""}`
+		);
+		notifyChange("invoices");
+		res.json({ success: true });
+	} catch (err) {
+		console.error("Invoice delete error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// PUT /api/invoices/:id/restore — Super Admin restores a soft-deleted invoice.
+// Weekly (non-manual) invoices re-enter the one-per-driver-week guarantee, so
+// restore is refused if a live weekly invoice already covers that slot.
+app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
+	try {
+		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
+		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
+		if (!invoice.deleted_at) return res.status(400).json({ error: "Invoice is not deleted" });
+		if (!invoice.is_manual) {
+			const clash = db.prepare(
+				"SELECT invoice_number FROM invoices WHERE driver = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0 AND id != ?"
+			).get(invoice.driver, invoice.week_start, invoice.id);
+			if (clash) {
+				return res.status(409).json({ error: `Cannot restore — ${clash.invoice_number} already covers that driver/week. Delete it first.` });
+			}
+		}
+		db.prepare("UPDATE invoices SET deleted_at = '', deleted_by = '', delete_reason = '' WHERE id = ?").run(invoice.id);
+		logAudit(
+			req,
+			"restore_invoice",
+			"invoice",
+			invoice.id,
+			`${invoice.invoice_number} restored (was deleted by ${invoice.deleted_by || "unknown"} at ${invoice.deleted_at}${invoice.delete_reason ? `, reason: ${invoice.delete_reason}` : ""})`
+		);
+		notifyChange("invoices");
+		const fresh = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
+		res.json({ success: true, invoice: fresh });
+	} catch (err) {
+		console.error("Invoice restore error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -9573,10 +10042,10 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 				};
 			}
 		}
-		// Recent invoices
+		// Recent invoices (soft-deleted ones are hidden from drivers)
 		const driverInvoices = db.prepare(
 			`SELECT id, invoice_number, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at, created_at
-			 FROM invoices WHERE LOWER(driver) = ? ORDER BY created_at DESC LIMIT 20`
+			 FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC LIMIT 20`
 		).all(nameLower);
 
 		// Geocode enrichment from the local cache. Lets the driver-mobile-view
