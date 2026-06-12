@@ -9370,11 +9370,16 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		// Expenses from SQLite. photo_data is the receipt URL (per
 		// saveReceiptToDisk() — base64 is written to /uploads/expense-receipts/
 		// on submit and only the URL is stored), so the payload stays small
-		// even for drivers with hundreds of expenses.
+		// even for drivers with hundreds of expenses. PDF receipts (admin/
+		// dispatcher-logged via savePdfReceiptToDisk) are blanked here: the
+		// driver app renders photoData in an <img> and would show a broken
+		// thumbnail — the deliberately-unchanged driver UI is image-only.
 		const driverExpenses = db
 			.prepare(
 				`SELECT id, timestamp, driver, load_id AS loadId, type, amount,
-				        description, date, photo_data AS photoData, status
+				        description, date,
+				        CASE WHEN photo_data LIKE '%.pdf' THEN '' ELSE photo_data END AS photoData,
+				        status
 				 FROM expenses
 				 WHERE LOWER(driver) = ?
 				 ORDER BY id DESC`,
@@ -10747,6 +10752,40 @@ function saveReceiptToDisk(photoData) {
 	}
 }
 
+// PDF receipts (admin/dispatcher "Log Expense" only — 2026-06-11 owner
+// meeting: toll invoices, emailed receipts, etc. arrive as PDFs). Stored in
+// the same expense-receipts dir so the per-truck ZIP bundle picks them up
+// automatically (it preserves the file extension). Unlike the image path
+// above (silent drop — legacy driver-flow behavior), PDF failures return an
+// explicit error so an admin never saves an expense believing the invoice
+// attached when it didn't.
+const MAX_PDF_RECEIPT_BYTES = 15 * 1024 * 1024; // 15 MB decoded
+function savePdfReceiptToDisk(photoData) {
+	const m = String(photoData).match(/^data:application\/pdf;base64,(.+)$/i);
+	if (!m) return { error: "Receipt must be a base64 PDF data URI", status: 400 };
+	// Cheap pre-decode guard: base64 inflates ~4/3, so anything longer than
+	// this cannot decode under the byte cap — reject before buffering it.
+	if (m[1].length > Math.ceil((MAX_PDF_RECEIPT_BYTES * 4) / 3) + 4) {
+		return { error: "Receipt PDF too large (max 15 MB)", status: 413 };
+	}
+	const buf = Buffer.from(m[1], "base64");
+	if (buf.length === 0) return { error: "Receipt PDF could not be decoded", status: 400 };
+	if (buf.length > MAX_PDF_RECEIPT_BYTES) return { error: "Receipt PDF too large (max 15 MB)", status: 413 };
+	// Magic bytes: a real PDF starts with "%PDF-". The data-URI MIME alone is
+	// client-controlled (same reasoning as isValidImageMagic at top of file).
+	if (buf.length < 5 || buf.toString("latin1", 0, 5) !== "%PDF-") {
+		return { error: "File is not a valid PDF", status: 400 };
+	}
+	const fname = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.pdf`;
+	try {
+		fs.writeFileSync(path.join(RECEIPTS_DIR, fname), buf);
+		return { url: `/uploads/expense-receipts/${fname}` };
+	} catch (err) {
+		console.error("Receipt PDF save failed:", err.message);
+		return { error: "Failed to store receipt PDF", status: 500 };
+	}
+}
+
 // POST /api/expenses — Log a new expense (SQLite)
 app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
@@ -10790,8 +10829,21 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		const driverTruck = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
-		// Receipt photo: write base64 to disk, store URL path in column instead of blob
-		const photoUrlOrPath = saveReceiptToDisk(photoData);
+		// Receipt: images keep the legacy path (silent drop on bad format —
+		// the driver flow is unchanged). PDFs are an admin/dispatcher-only
+		// addition (toll invoices etc.) and fail loudly on validation errors.
+		let photoUrlOrPath = "";
+		if (typeof photoData === "string" && /^data:application\/pdf;base64,/i.test(photoData)) {
+			const role = req.session.user.role;
+			if (role !== "Super Admin" && role !== "Dispatcher") {
+				return res.status(403).json({ error: "PDF receipts are limited to admin and dispatcher uploads" });
+			}
+			const savedPdf = savePdfReceiptToDisk(photoData);
+			if (savedPdf.error) return res.status(savedPdf.status || 400).json({ error: savedPdf.error });
+			photoUrlOrPath = savedPdf.url;
+		} else {
+			photoUrlOrPath = saveReceiptToDisk(photoData);
+		}
 		const result = db
 			.prepare(
 				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit)
@@ -15341,6 +15393,50 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 	} catch (err) {
 		console.error("Error updating expense status:", err.message);
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// PUT /api/expenses/bulk-status — Approve/Reject/Pending many expenses in one
+// call (2026-06-11 owner meeting: "multi-select and approve instead of one by
+// one"). Same role gate + status whitelist as the single-row endpoint above.
+// ids are validated to positive integers and both queries are parameterized
+// IN (...) statements; one notifyChange covers the whole batch.
+const BULK_STATUS_MAX_IDS = 200;
+app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { ids, status } = req.body || {};
+		if (!["Approved", "Rejected", "Pending"].includes(status)) {
+			return res.status(400).json({ error: "Status must be Approved, Rejected, or Pending" });
+		}
+		if (!Array.isArray(ids) || ids.length === 0) {
+			return res.status(400).json({ error: "ids must be a non-empty array of expense ids" });
+		}
+		if (ids.length > BULK_STATUS_MAX_IDS) {
+			return res.status(400).json({ error: `Too many ids — max ${BULK_STATUS_MAX_IDS} per request` });
+		}
+		const numericIds = [
+			...new Set(ids.map((v) => (typeof v === "number" || typeof v === "string" ? Number(v) : NaN))),
+		];
+		if (!numericIds.every((n) => Number.isInteger(n) && n > 0)) {
+			return res.status(400).json({ error: "Every id must be a positive integer" });
+		}
+		const ph = numericIds.map(() => "?").join(",");
+		const existingIds = db
+			.prepare(`SELECT id FROM expenses WHERE id IN (${ph})`)
+			.all(...numericIds)
+			.map((r) => r.id);
+		if (existingIds.length === 0) {
+			return res.status(404).json({ error: "No matching expenses found" });
+		}
+		const updatePh = existingIds.map(() => "?").join(",");
+		const result = db
+			.prepare(`UPDATE expenses SET status = ? WHERE id IN (${updatePh})`)
+			.run(status, ...existingIds);
+		notifyChange("expenses");
+		res.json({ success: true, updated: result.changes, skipped: numericIds.length - existingIds.length });
+	} catch (err) {
+		console.error("Error bulk-updating expense status:", err.message);
+		res.status(500).json({ error: "Failed to update expense statuses" });
 	}
 });
 

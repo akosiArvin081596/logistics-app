@@ -55,18 +55,21 @@
         </div>
         <div class="add-expense-row add-expense-photo-row">
           <label class="add-photo-label">
-            Receipt
+            Receipt (photo or PDF)
+            <!-- No capture attr (unlike the driver form): admins/dispatchers
+                 pick files — a PDF toll invoice or a saved photo. Mobile still
+                 offers the camera through the chooser. -->
             <input
               ref="fileInputRef"
               type="file"
-              accept="image/*"
-              capture="environment"
+              accept="image/*,application/pdf"
               class="add-photo-input"
               :disabled="addLoading || photoProcessing"
               @change="handleFileInput"
             />
           </label>
-          <span v-if="photoProcessing" class="add-photo-hint">Processing image…</span>
+          <span v-if="photoProcessing" class="add-photo-hint">Processing file…</span>
+          <span v-else-if="photoIsPdf" class="receipt-pdf-chip add-pdf-chip" :title="pdfName">PDF · {{ pdfName || 'receipt.pdf' }}</span>
           <img
             v-else-if="photoBase64"
             :src="photoBase64"
@@ -110,6 +113,15 @@
           <span class="filter-count">{{ allExpenses.length }} expenses</span>
         </div>
 
+        <!-- Bulk actions bar — appears once anything is selected. Approve is
+             the owner's explicit ask; Reject rides the same endpoint. -->
+        <div v-if="selectedIds.size > 0" class="bulk-bar">
+          <span class="bulk-count">{{ selectedIds.size }} selected</span>
+          <button class="bulk-btn bulk-approve" :disabled="bulkLoading" @click="bulkSetStatus('Approved')">{{ bulkLoading ? 'Working…' : 'Approve selected' }}</button>
+          <button class="bulk-btn bulk-reject" :disabled="bulkLoading" @click="bulkSetStatus('Rejected')">Reject selected</button>
+          <button class="bulk-clear" :disabled="bulkLoading" @click="clearSelection">Clear</button>
+        </div>
+
         <div v-if="allExpenses.length === 0" class="empty-msg">No expenses found.</div>
         <!-- Mobile: card list. Tap the card → detail modal (shipped
              2026-04-20, already mobile-friendly). Approve / Reject full
@@ -117,6 +129,15 @@
         <div v-else-if="isMobile" class="mobile-exp-list">
           <div v-for="e in allExpenses" :key="e.id" class="mobile-exp-card" @click="openExpenseDetail(e)">
             <div class="mobile-exp-top">
+              <label class="mobile-exp-select" @click.stop>
+                <input
+                  type="checkbox"
+                  class="select-checkbox"
+                  :checked="selectedIds.has(e.id)"
+                  :aria-label="`Select expense ${e.id}`"
+                  @change="toggleSelect(e.id)"
+                />
+              </label>
               <div class="mobile-exp-top-left">
                 <div class="mobile-exp-date">{{ fmtDate(e.date) }}</div>
                 <div class="mobile-exp-driver">{{ e.driver }}<span v-if="e.truck_unit" class="mobile-exp-truck"> · #{{ e.truck_unit }}</span></div>
@@ -127,7 +148,8 @@
             <div class="mobile-exp-bottom">
               <div class="mobile-exp-amount">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
               <div class="mobile-exp-bottom-right">
-                <img v-if="e.photo_data" :src="e.photo_data" class="receipt-thumb mobile-exp-thumb" @click.stop="previewImg = e.photo_data" alt="Receipt" />
+                <a v-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener" @click.stop>PDF</a>
+                <img v-else-if="e.photo_data" :src="e.photo_data" class="receipt-thumb mobile-exp-thumb" @click.stop="previewImg = e.photo_data" alt="Receipt" />
                 <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
               </div>
             </div>
@@ -144,6 +166,21 @@
         <table v-else class="data-table">
           <thead>
             <tr>
+              <th class="select-cell">
+                <!-- Select-all targets the Pending rows in the current
+                     filtered view \u2014 the "approve everything I'm looking at"
+                     flow. Any row can still be ticked individually. -->
+                <input
+                  type="checkbox"
+                  class="select-checkbox"
+                  :checked="allVisiblePendingSelected"
+                  :indeterminate="selectedIds.size > 0 && !allVisiblePendingSelected"
+                  :disabled="visiblePendingIds.length === 0 && selectedIds.size === 0"
+                  title="Select all pending in view"
+                  aria-label="Select all pending expenses in view"
+                  @change="toggleSelectAllPending"
+                />
+              </th>
               <th>Date</th>
               <th>Driver</th>
               <th>Truck</th>
@@ -157,6 +194,15 @@
           </thead>
           <tbody>
             <tr v-for="e in allExpenses" :key="e.id" class="expense-row" @click="openExpenseDetail(e)">
+              <td class="select-cell" @click.stop>
+                <input
+                  type="checkbox"
+                  class="select-checkbox"
+                  :checked="selectedIds.has(e.id)"
+                  :aria-label="`Select expense ${e.id}`"
+                  @change="toggleSelect(e.id)"
+                />
+              </td>
               <td class="mono-sm">{{ fmtDate(e.date) }}</td>
               <td>{{ e.driver }}</td>
               <td class="mono-sm">{{ e.truck_unit ? '#' + e.truck_unit : '\u2014' }}</td>
@@ -164,7 +210,8 @@
               <td class="desc-cell">{{ e.description || '\u2014' }}</td>
               <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
               <td @click.stop>
-                <img v-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
+                <a v-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener">PDF</a>
+                <img v-else-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
                 <span v-else class="dim">\u2014</span>
               </td>
               <td>
@@ -250,8 +297,14 @@
             </div>
             <div v-if="selectedExpense.photo_data" class="exp-receipt">
               <div class="exp-desc-label">Receipt</div>
-              <img :src="selectedExpense.photo_data" class="exp-receipt-img" @click="previewImg = selectedExpense.photo_data" />
-              <div class="exp-receipt-hint">Click to enlarge</div>
+              <template v-if="isPdfReceipt(selectedExpense.photo_data)">
+                <a class="exp-receipt-pdf" :href="selectedExpense.photo_data" target="_blank" rel="noopener">Open PDF receipt</a>
+                <div class="exp-receipt-hint">Opens in a new tab</div>
+              </template>
+              <template v-else>
+                <img :src="selectedExpense.photo_data" class="exp-receipt-img" @click="previewImg = selectedExpense.photo_data" />
+                <div class="exp-receipt-hint">Click to enlarge</div>
+              </template>
             </div>
             <div class="exp-actions">
               <template v-if="(selectedExpense.status || 'Pending') === 'Pending'">
@@ -796,8 +849,14 @@ const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'D
 const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toISOString().slice(0, 10), loadId: '', description: '' })
 const addLoading = ref(false)
 const fileInputRef = ref(null)
+// photoBase64 holds the receipt as a data URI — image/jpeg from the canvas
+// pipeline, or application/pdf straight from FileReader (admin/dispatcher
+// PDF support, 2026-06-11 owner meeting). The server branches on the MIME.
 const photoBase64 = ref('')
 const photoProcessing = ref(false)
+const pdfName = ref('')
+const photoIsPdf = computed(() => photoBase64.value.startsWith('data:application/pdf'))
+const MAX_PDF_FILE_BYTES = 15 * 1024 * 1024 // matches the server-side cap
 
 // Download Receipts (Super Admin only) — ZIP bundle endpoint
 const truckList = ref([])
@@ -862,9 +921,55 @@ async function downloadReceipts() {
   }
 }
 
+function isPdfFile(file) {
+  // Some browsers report an empty MIME for .pdf files picked from odd
+  // sources — fall back to the extension.
+  return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(reader.error || new Error('File read failed'))
+    reader.readAsDataURL(file)
+  })
+}
+
+// PDFs skip the whole image pipeline (canvas downscale + ScanKit enhance +
+// Gemini OCR make no sense for a document) — read as-is, validate size, and
+// let the admin fill the fields manually.
+async function handlePdfInput(blob) {
+  if (blob.size > MAX_PDF_FILE_BYTES) {
+    if (fileInputRef.value) fileInputRef.value.value = ''
+    toast('PDF is too large — 15 MB max', 'error')
+    return
+  }
+  photoProcessing.value = true
+  try {
+    const dataUrl = await readFileAsDataUrl(blob)
+    // Normalize the prefix so the server's application/pdf branch always
+    // matches even when the browser left the MIME blank.
+    photoBase64.value = String(dataUrl).replace(/^data:[^;]*;base64,/, 'data:application/pdf;base64,')
+    pdfName.value = blob.name || 'receipt.pdf'
+  } catch {
+    photoBase64.value = ''
+    pdfName.value = ''
+    if (fileInputRef.value) fileInputRef.value.value = ''
+    toast("Couldn't read the PDF — try a different file", 'error')
+  } finally {
+    photoProcessing.value = false
+  }
+}
+
 async function handleFileInput(event) {
   const blob = event.target.files && event.target.files[0]
   if (!blob) return
+  if (isPdfFile(blob)) {
+    await handlePdfInput(blob)
+    return
+  }
+  pdfName.value = ''
   photoProcessing.value = true
   const MAX = 1024
   try {
@@ -913,6 +1018,7 @@ async function enhanceReceiptPhoto() {
 
 function clearPhoto() {
   photoBase64.value = ''
+  pdfName.value = ''
   if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
@@ -939,8 +1045,7 @@ async function submitExpense() {
     })
     toast('Expense logged')
     addForm.driver = ''; addForm.amount = ''; addForm.loadId = ''; addForm.description = ''
-    photoBase64.value = ''
-    if (fileInputRef.value) fileInputRef.value.value = ''
+    clearPhoto()
     await loadAll()
   } catch (err) {
     toast(err.message || 'Failed to log expense', 'error')
@@ -951,6 +1056,9 @@ async function submitExpense() {
 
 async function loadAll() {
   allLoading.value = true
+  // Full reload = filters (or data set) changed — a carried-over selection
+  // could silently target rows that are no longer on screen.
+  clearSelection()
   try {
     const params = new URLSearchParams()
     if (allFilter.driver) params.set('driver', allFilter.driver)
@@ -990,6 +1098,7 @@ async function quietReload() {
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await api.get(`/api/expenses/all${qs}`)
     allExpenses.value = data.expenses || []
+    pruneSelection()
   } catch { /* empty — leave existing data in place */ }
 }
 
@@ -1005,9 +1114,83 @@ async function setStatus(id, status) {
   }
 }
 
+// ---- Multi-select + bulk approve (2026-06-11 owner meeting) ---------------
+// selectedIds is always REPLACED with a new Set (never mutated in place) so
+// every computed/template dep re-evaluates reliably.
+const BULK_CHUNK = 200 // server caps ids per request \u2014 chunk larger selections
+const selectedIds = ref(new Set())
+const bulkLoading = ref(false)
+const visiblePendingIds = computed(() =>
+  allExpenses.value.filter(e => (e.status || 'Pending') === 'Pending').map(e => e.id)
+)
+const allVisiblePendingSelected = computed(() =>
+  visiblePendingIds.value.length > 0 &&
+  visiblePendingIds.value.every(id => selectedIds.value.has(id))
+)
+function toggleSelect(id) {
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = next
+}
+// Header checkbox targets Pending rows in the current filtered view (the
+// "approve everything I'm looking at" flow). Unchecking clears the whole
+// selection \u2014 including manually-ticked non-pending rows \u2014 so the bulk bar
+// never lingers with hidden selections.
+function toggleSelectAllPending() {
+  selectedIds.value = allVisiblePendingSelected.value
+    ? new Set()
+    : new Set(visiblePendingIds.value)
+}
+function clearSelection() {
+  selectedIds.value = new Set()
+}
+// Drop selected ids that no longer exist after a refetch (socket refresh or
+// another admin deleting rows) so a bulk action never targets stale ids.
+function pruneSelection() {
+  if (selectedIds.value.size === 0) return
+  const live = new Set(allExpenses.value.map(e => e.id))
+  selectedIds.value = new Set([...selectedIds.value].filter(id => live.has(id)))
+}
+async function bulkSetStatus(status) {
+  const ids = [...selectedIds.value]
+  if (ids.length === 0 || bulkLoading.value) return
+  bulkLoading.value = true
+  let updated = 0
+  try {
+    for (let i = 0; i < ids.length; i += BULK_CHUNK) {
+      const chunk = ids.slice(i, i + BULK_CHUNK)
+      const resp = await api.put('/api/expenses/bulk-status', { ids: chunk, status })
+      updated += resp?.updated ?? chunk.length
+      // Reflect each successful chunk immediately \u2014 if a later chunk fails,
+      // the UI still matches what the server actually committed.
+      const chunkSet = new Set(chunk)
+      allExpenses.value = allExpenses.value.map(e =>
+        chunkSet.has(e.id) ? { ...e, status } : e
+      )
+    }
+    const verb = status === 'Approved' ? 'approved' : status === 'Rejected' ? 'rejected' : 'reset'
+    toast(`${updated} expense${updated === 1 ? '' : 's'} ${verb}`, 'success')
+    clearSelection()
+  } catch (err) {
+    toast(err?.message || 'Bulk update failed', 'error')
+    // Re-sync with the server so partial progress isn't misrepresented.
+    await quietReload()
+  } finally {
+    bulkLoading.value = false
+  }
+}
+
 function fmtDate(d) {
   if (!d) return '\u2014'
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// photo_data is either a legacy base64 image data URI, an image URL under
+// /uploads/expense-receipts/, or (since 2026-06) a .pdf URL from the admin
+// Log Expense form. PDFs render as a link chip \u2014 never an <img>.
+function isPdfReceipt(p) {
+  return typeof p === 'string' && (/\.pdf$/i.test(p) || p.startsWith('data:application/pdf'))
 }
 
 // Fuel analytics
@@ -1530,6 +1713,58 @@ tr:hover td { background: var(--surface-hover); }
 }
 .receipt-thumb:hover { opacity: 0.7; }
 
+/* PDF receipt chip — link out instead of an <img> (table cell, mobile card,
+   add-form preview). */
+.receipt-pdf-chip {
+  display: inline-flex; align-items: center;
+  padding: 0.28rem 0.6rem; border-radius: 6px;
+  background: var(--danger-dim); color: var(--danger);
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.04em;
+  text-decoration: none; border: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+.receipt-pdf-chip:hover { border-color: var(--danger); }
+.add-pdf-chip { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.exp-receipt-pdf {
+  display: inline-flex; align-items: center;
+  padding: 0.55rem 0.9rem; border-radius: 8px;
+  background: var(--danger-dim); color: var(--danger);
+  font-size: 0.8rem; font-weight: 700; text-decoration: none;
+  border: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+.exp-receipt-pdf:hover { border-color: var(--danger); }
+
+/* Multi-select + bulk actions */
+.select-cell { width: 34px; text-align: center; padding-right: 0.25rem; }
+.select-checkbox { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); vertical-align: middle; }
+.select-checkbox:disabled { cursor: default; opacity: 0.4; }
+.bulk-bar {
+  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+  padding: 0.55rem 0.9rem; margin-bottom: 0.75rem;
+  background: var(--accent-dim); border: 1px solid var(--accent);
+  border-radius: var(--radius);
+}
+.bulk-count {
+  font-size: 0.76rem; font-weight: 700; color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+}
+.bulk-btn {
+  padding: 0.35rem 0.8rem; font-size: 0.74rem; font-weight: 600;
+  border: none; border-radius: 6px; cursor: pointer; font-family: inherit;
+  transition: opacity 0.15s;
+}
+.bulk-approve { background: var(--accent); color: #fff; }
+.bulk-reject { background: var(--danger); color: #fff; }
+.bulk-btn:hover:not(:disabled) { opacity: 0.85; }
+.bulk-clear {
+  margin-left: auto; padding: 0.35rem 0.7rem; font-size: 0.74rem; font-weight: 600;
+  background: transparent; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-dim); cursor: pointer; font-family: inherit;
+}
+.bulk-clear:hover:not(:disabled) { color: var(--text); }
+.bulk-btn:disabled, .bulk-clear:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .action-cell { white-space: nowrap; }
 .btn-approve, .btn-reject, .btn-undo {
   padding: 0.22rem 0.55rem; font-size: 0.68rem; font-weight: 600;
@@ -1849,7 +2084,13 @@ tr:hover td { background: var(--surface-hover); }
     align-items: flex-start;
     gap: 0.5rem;
   }
-  .mobile-exp-top-left { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .mobile-exp-select {
+    display: flex; align-items: center;
+    padding: 0.15rem 0.35rem 0.15rem 0; /* widen the tap target */
+    flex-shrink: 0;
+  }
+  .mobile-exp-select .select-checkbox { width: 18px; height: 18px; }
+  .mobile-exp-top-left { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1; }
   .mobile-exp-date {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 0.75rem;
