@@ -14589,6 +14589,15 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 // the investor-owner filter (Super Admin sees the whole fleet).
 app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 	try {
+		// Optional month drill-down (?month=YYYY-MM). Validated up front so a
+		// bad param fails fast before any Sheets/DB work. When absent the
+		// response is unchanged apart from `monthDetail: null`, so existing
+		// consumers are unaffected.
+		const monthParam = typeof req.query.month === "string" ? req.query.month.trim() : "";
+		if (monthParam && !/^\d{4}-(0[1-9]|1[0-2])$/.test(monthParam)) {
+			return res.status(400).json({ error: "month must be in YYYY-MM format" });
+		}
+
 		const jobTracking = await getJobTrackingCached();
 		// Drop soft-deleted + cancelled loads before any aggregation so the P&L
 		// numbers match the dashboard KPIs exactly.
@@ -14783,13 +14792,18 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 						if (truckUnit) milesByTruck[truckUnit] = (milesByTruck[truckUnit] || 0) + loadMiles;
 					}
 					// Capture for highest/lowest. Use display name for driver (not lowercase).
+					// monthKey (assigned-month bucket) is filled in below when the date
+					// parses; the month drill-down filters completedLoads on it so the
+					// month's load list reconciles with monthlyRevenue by construction.
 					const dateStr = jtDateCol && r[jtDateCol] ? String(r[jtDateCol]) : "";
-					completedLoads.push({
+					const loadEntry = {
 						loadId: lid || `#${completedLoads.length + 1}`,
 						driver: driver || "(unknown)",
 						amount: amt,
 						date: dateStr,
-					});
+						monthKey: "",
+					};
+					completedLoads.push(loadEntry);
 					// Per-month revenue: fleet-wide (incl. unassigned) for the
 					// monthly performance view, plus per-driver for the
 					// percentage-pay branch. Bucketed by the load's assigned month.
@@ -14797,6 +14811,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 						const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
 						if (d && !isNaN(d)) {
 							const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+							loadEntry.monthKey = mk;
 							monthlyRevenue[mk] = (monthlyRevenue[mk] || 0) + amt;
 							if (driverLc) {
 								if (!driverMonthlyRevenue[driverLc]) driverMonthlyRevenue[driverLc] = {};
@@ -15218,7 +15233,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// per-month trip expenses (expenses table) and truck fixed costs.
 		// Monthly expenses exclude the maintenance-fund and compliance buckets
 		// (not date-bucketed here), so the annual KPIs remain authoritative.
-		const monthlyPerformance = (() => {
+		// Also exposes the per-month intermediates (driver pay / trip expenses /
+		// fixed costs) so the optional ?month= drill-down below reuses the exact
+		// same numbers as the table rows instead of forking the math.
+		const { monthlyPerformance, monthlyDriverPay, monthlyTripExp, monthlyFixedCosts } = (() => {
 			const pad = (n) => String(n).padStart(2, "0");
 			const currentMonthKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
 
@@ -15303,8 +15321,252 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				});
 				cursor.setMonth(cursor.getMonth() + 1);
 			}
-			return out;
+			return { monthlyPerformance: out, monthlyDriverPay, monthlyTripExp, monthlyFixedCosts };
 		})();
+
+		// ---- Month drill-down (?month=YYYY-MM) ----
+		// Built from the SAME aggregates that feed monthlyPerformance (revenue
+		// by assigned month, driverMonthlyDays for active-day pay, strftime
+		// month-bucketed trip expenses with EXPENSE_PNL_FILTER), so the modal
+		// reconciles with the row the admin clicked by construction. Like the
+		// monthly table, it excludes the maintenance-fund and compliance
+		// buckets (not month-bucketed in this P&L) — the annual KPIs remain
+		// authoritative for those.
+		let monthDetail = null;
+		if (monthParam) {
+			const pad2 = (n) => String(n).padStart(2, "0");
+			const currentMonthKey = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}`;
+			const yearN = parseInt(monthParam.slice(0, 4), 10);
+			const monthN = parseInt(monthParam.slice(5, 7), 10);
+			const prevDate = new Date(yearN, monthN - 2, 1);
+			const prevMk = `${prevDate.getFullYear()}-${pad2(prevDate.getMonth() + 1)}`;
+			const daysInMonth = new Date(yearN, monthN, 0).getDate();
+			const isCurrentMonth = monthParam === currentMonthKey;
+			// For the in-progress month, per-day/per-week averages use elapsed
+			// days so they aren't diluted by days that haven't happened yet.
+			const elapsedDays = isCurrentMonth ? Math.max(1, now.getDate()) : daysInMonth;
+			const weeksElapsed = elapsedDays / 7;
+
+			// Same formula as the monthlyPerformance rows — keep in lockstep.
+			const summarizeMonth = (mk) => {
+				const revenue = monthlyRevenue[mk] || 0;
+				const driverPay = monthlyDriverPay[mk] || 0;
+				const tripExpenses = monthlyTripExp[mk] || 0;
+				const fixedCosts = monthlyFixedCosts(mk);
+				const totalExpenses = driverPay + tripExpenses + fixedCosts;
+				return {
+					month: mk,
+					revenue: Math.round(revenue),
+					driverPay: Math.round(driverPay),
+					tripExpenses: Math.round(tripExpenses),
+					fixedCosts,
+					totalExpenses: Math.round(totalExpenses),
+					netProfit: Math.round(revenue - totalExpenses),
+				};
+			};
+			const cur = summarizeMonth(monthParam);
+			const prev = summarizeMonth(prevMk);
+			const prevHasData = prev.revenue !== 0 || prev.totalExpenses !== 0;
+
+			// Expense split for the month: trip categories (same strftime
+			// bucketing as expensesByMonth) plus the two P&L-level buckets.
+			const catRow = expensesByMonthMap[monthParam]
+				|| { fuel: 0, maintenance: 0, repair: 0, toll: 0, food: 0, other: 0 };
+			const expenseCategories = {
+				fuel: Math.round(catRow.fuel || 0),
+				maintenance: Math.round(catRow.maintenance || 0),
+				repair: Math.round(catRow.repair || 0),
+				toll: Math.round(catRow.toll || 0),
+				food: Math.round(catRow.food || 0),
+				other: Math.round(catRow.other || 0),
+				driver_pay: cur.driverPay,
+				fixed_costs: cur.fixedCosts,
+			};
+
+			// Fuel analytics for the month — same source/filters as
+			// /api/expenses/fuel-analytics (LOWER(type)='fuel', Rejected
+			// excluded) with the same strftime month bucket as the category
+			// rows, so fuel.spend === expenseCategories.fuel.
+			const fuelTotals = db.prepare(
+				`SELECT COALESCE(SUM(amount),0) AS spend, COALESCE(SUM(gallons),0) AS gallons, COUNT(*) AS fills
+				 FROM expenses WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}`
+			).get(monthParam);
+			const prevFuelSpend = db.prepare(
+				`SELECT COALESCE(SUM(amount),0) AS spend
+				 FROM expenses WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}`
+			).get(prevMk).spend;
+			const fuelByTruckRows = db.prepare(
+				`SELECT TRIM(COALESCE(truck_unit, '')) AS unit,
+				        COALESCE(SUM(amount),0) AS spend, COALESCE(SUM(gallons),0) AS gallons, COUNT(*) AS fills
+				 FROM expenses WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}
+				 GROUP BY LOWER(TRIM(COALESCE(truck_unit, '')))
+				 ORDER BY spend DESC`
+			).all(monthParam);
+			const fuel = {
+				spend: Math.round(fuelTotals.spend),
+				gallons: Math.round(fuelTotals.gallons * 10) / 10,
+				fills: fuelTotals.fills,
+				avgPricePerGallon: fuelTotals.gallons > 0
+					? Math.round((fuelTotals.spend / fuelTotals.gallons) * 100) / 100 : 0,
+				avgWeeklySpend: Math.round(fuelTotals.spend / weeksElapsed),
+				prevMonthSpend: Math.round(prevFuelSpend),
+				byTruck: fuelByTruckRows.map((r) => ({
+					unit: r.unit || "(no truck)",
+					spend: Math.round(r.spend),
+					gallons: Math.round(r.gallons * 10) / 10,
+					fills: r.fills,
+					avgPricePerGallon: r.gallons > 0
+						? Math.round((r.spend / r.gallons) * 100) / 100 : 0,
+					avgWeeklySpend: Math.round(r.spend / weeksElapsed),
+				})),
+			};
+
+			// Loads assigned to this month (revenue-bearing completed loads —
+			// the same rows monthlyRevenue counted).
+			const monthLoads = completedLoads.filter((l) => l.monthKey === monthParam);
+			const monthLoadsSorted = [...monthLoads].sort((a, b) => b.amount - a.amount);
+			const monthLoadRevenue = monthLoads.reduce((s, l) => s + l.amount, 0);
+			const briefLoad = (l) => l
+				? { loadId: l.loadId, driver: l.driver, amount: Math.round(l.amount), date: l.date }
+				: null;
+			const loads = {
+				count: monthLoads.length,
+				avgRevenuePerLoad: monthLoads.length
+					? Math.round(monthLoadRevenue / monthLoads.length) : 0,
+				avgLoadsPerDay: Math.round((monthLoads.length / elapsedDays) * 100) / 100,
+				avgRevenuePerDay: Math.round(monthLoadRevenue / elapsedDays),
+				highest: briefLoad(monthLoadsSorted[0] || null),
+				lowest: briefLoad(monthLoadsSorted.length
+					? monthLoadsSorted[monthLoadsSorted.length - 1] : null),
+			};
+
+			// Invoices whose Sat–Fri billing week OVERLAPS this month. Weekly
+			// invoices straddle month boundaries, so this is the closest faithful
+			// mapping to "this month's invoices" — the UI footnotes it. Rejected
+			// invoices never count. `adjustment` carries admin deductions (−) /
+			// bonuses (+), so invoiced = total_earnings + adjustment.
+			const monthStartStr = `${monthParam}-01`;
+			const monthEndStr = `${monthParam}-${pad2(daysInMonth)}`;
+			const invByDriver = {};
+			db.prepare(
+				`SELECT driver, COALESCE(total_earnings,0) AS earned, COALESCE(adjustment,0) AS adj
+				 FROM invoices WHERE status != 'Rejected' AND week_start <= ? AND week_end >= ?`
+			).all(monthEndStr, monthStartStr).forEach((r) => {
+				const k = normalizeDriverName(r.driver);
+				if (!k) return;
+				if (!invByDriver[k]) invByDriver[k] = { count: 0, invoiced: 0, adjustments: 0 };
+				invByDriver[k].count += 1;
+				invByDriver[k].invoiced += r.earned + r.adj;
+				invByDriver[k].adjustments += r.adj;
+			});
+
+			// Per-driver pay detail for the month. Same branch math as the
+			// monthlyDriverPay loop above (fixed: month active days × per-truck
+			// daily rate; percentage: max(0, month revenue − deductible) × pct),
+			// so the rows sum back to summary.driverPay.
+			const monthDriverRows = [];
+			const monthDriverKeys = new Set([
+				...Object.keys(driverMonthlyDays),
+				...Object.keys(driverMonthlyRevenue),
+				...Object.keys(invByDriver),
+			]);
+			for (const drv of monthDriverKeys) {
+				const struct = payStructures[drv] || { payType: "fixed", payPercentage: 0 };
+				const activeDays = driverMonthlyDays[drv]?.[monthParam]?.size || 0;
+				const revenue = (driverMonthlyRevenue[drv] || {})[monthParam] || 0;
+				let pay, dailyRate;
+				if (struct.payType === "percentage") {
+					const deductible = (expensesByDriverMonth[drv] || {})[monthParam] || 0;
+					pay = Math.round((Math.max(0, revenue - deductible) * struct.payPercentage / 100) * 100) / 100;
+					dailyRate = 0;
+				} else {
+					dailyRate = trucksByDriver[drv] || 250;
+					pay = activeDays * dailyRate;
+				}
+				const inv = invByDriver[drv] || null;
+				if (!activeDays && !revenue && !pay && !inv) continue;
+				monthDriverRows.push({
+					name: driverDisplayNames[drv] || drv,
+					payType: struct.payType,
+					payPercentage: struct.payType === "percentage" ? struct.payPercentage : 0,
+					activeDays,
+					dailyRate,
+					pay: Math.round(pay),
+					revenue: Math.round(revenue),
+					// Revenue the driver generated minus their pay — the driver's
+					// contribution margin for the month.
+					margin: Math.round(revenue - pay),
+					invoiceCount: inv ? inv.count : 0,
+					invoicedTotal: inv ? Math.round(inv.invoiced) : 0,
+					adjustments: inv ? Math.round(inv.adjustments) : 0,
+					// Invoiced (incl. adjustments) − computed pay. Positive = the
+					// driver has invoiced MORE than the active-day estimate for the
+					// month (overage); negative = under. null when no invoice's
+					// billing week overlaps this month.
+					variance: inv ? Math.round(inv.invoiced - pay) : null,
+				});
+			}
+			monthDriverRows.sort((a, b) => b.pay - a.pay);
+
+			// Per-truck daily rates + activity for the month. truckDaySets is the
+			// same completed-loads ∩ ELD-travel basis the annual per-truck pay
+			// uses, partitioned to this calendar month.
+			const perTruckMonth = [];
+			for (const t of allTrucks) {
+				const unitLower = (t.unit_number || "").toLowerCase();
+				const daySet = truckDaySets[unitLower];
+				let activeDays = 0;
+				if (daySet) for (const d of daySet) { if (d.startsWith(monthParam)) activeDays++; }
+				if (!activeDays) continue; // only trucks that worked this month
+				const driverKey = normalizeDriverName(t.assigned_driver);
+				const struct = (driverKey && payStructures[driverKey]) || { payType: "fixed", payPercentage: 0 };
+				const dailyRateRaw = t.driver_pay_daily || 0;
+				const dailyRate = dailyRateRaw > 0 ? dailyRateRaw : 250;
+				perTruckMonth.push({
+					unitNumber: t.unit_number,
+					assignedDriver: t.assigned_driver || "—",
+					activeDays,
+					dailyRate,
+					dailyRateIsDefault: dailyRateRaw === 0,
+					driverPayType: struct.payType,
+					estDriverPay: struct.payType === "percentage" ? null : activeDays * dailyRate,
+				});
+			}
+			perTruckMonth.sort((a, b) => b.activeDays - a.activeDays);
+			const ratedTrucks = perTruckMonth.filter((t) => t.driverPayType !== "percentage");
+			const avgDailyRatePerTruck = ratedTrucks.length
+				? Math.round(ratedTrucks.reduce((s, t) => s + t.dailyRate, 0) / ratedTrucks.length)
+				: 0;
+
+			const pctDelta = (curV, prevV) =>
+				prevV > 0 ? Math.round(((curV - prevV) / prevV) * 1000) / 10 : null;
+			monthDetail = {
+				month: monthParam,
+				isCurrentMonth,
+				daysInMonth,
+				elapsedDays,
+				summary: cur,
+				prevMonth: { ...prev, hasData: prevHasData },
+				// Month-over-month deltas — the "winning / scaling / losing /
+				// stagnant" signal. Pct deltas are null when the previous value
+				// isn't a positive base (the UI falls back to absolute deltas).
+				deltas: {
+					revenue: cur.revenue - prev.revenue,
+					revenuePct: pctDelta(cur.revenue, prev.revenue),
+					totalExpenses: cur.totalExpenses - prev.totalExpenses,
+					totalExpensesPct: pctDelta(cur.totalExpenses, prev.totalExpenses),
+					driverPay: cur.driverPay - prev.driverPay,
+					netProfit: cur.netProfit - prev.netProfit,
+					fuelSpend: fuel.spend - fuel.prevMonthSpend,
+				},
+				expenseCategories,
+				fuel,
+				loads,
+				drivers: monthDriverRows,
+				trucks: perTruckMonth,
+				avgDailyRatePerTruck,
+			};
+		}
 
 		res.json({
 			summary: {
@@ -15346,6 +15608,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			perTruck,
 			loads: { highest, lowest },
 			drivers,
+			monthDetail,
 		});
 	} catch (error) {
 		console.error("GET /api/financials error:", error.message);

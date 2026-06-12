@@ -86,7 +86,7 @@
         <div class="section-title">
           <div class="section-icon" style="background: var(--accent-dim); color: var(--accent);">&#128197;</div>
           Monthly Performance
-          <span class="section-sub">Revenue, expenses &amp; net by month &mdash; current month is to-date</span>
+          <span class="section-sub">Click a month for the full breakdown &mdash; current month is to-date</span>
         </div>
         <div v-if="!monthsDesc.length" class="empty-msg">No monthly data yet.</div>
         <template v-else>
@@ -95,8 +95,9 @@
             <div
               v-for="m in chartMonths"
               :key="m.month"
-              class="month-bar-col"
-              :title="`${monthLabel(m.month)} — Revenue ${fmt(m.revenue)} · Net ${fmt(m.netProfit)}`"
+              class="month-bar-col month-clickable"
+              :title="`${monthLabel(m.month)} — Revenue ${fmt(m.revenue)} · Net ${fmt(m.netProfit)} — click for details`"
+              @click="openMonth(m.month)"
             >
               <div class="month-bar-track">
                 <div
@@ -108,7 +109,7 @@
               <div class="month-bar-label">{{ shortMonth(m.month) }}</div>
             </div>
           </div>
-          <!-- Month-by-month table (newest first) -->
+          <!-- Month-by-month table (newest first); each row opens the drill-down -->
           <table class="data-table compact monthly-table">
             <thead>
               <tr>
@@ -116,10 +117,18 @@
                 <th class="num">Revenue</th>
                 <th class="num">Expenses</th>
                 <th class="num">Net Profit</th>
+                <th class="chevron-col"></th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="m in monthsDesc" :key="m.month" :class="{ 'row-current': m.isCurrentMonth }">
+              <tr
+                v-for="m in monthsDesc"
+                :key="m.month"
+                class="row-click"
+                :class="{ 'row-current': m.isCurrentMonth }"
+                :title="`Open ${monthLabel(m.month)} breakdown`"
+                @click="openMonth(m.month)"
+              >
                 <td class="mono">
                   {{ monthLabel(m.month) }}
                   <span v-if="m.isCurrentMonth" class="mtd-badge">MTD</span>
@@ -127,6 +136,7 @@
                 <td class="num pos">{{ fmt(m.revenue) }}</td>
                 <td class="num dim">{{ fmt(m.totalExpenses) }}</td>
                 <td class="num" :class="m.netProfit >= 0 ? 'pos' : 'neg'">{{ fmt(m.netProfit) }}</td>
+                <td class="chevron-col"><span class="row-chevron">&rsaquo;</span></td>
               </tr>
             </tbody>
           </table>
@@ -282,6 +292,9 @@
         </table>
       </section>
     </template>
+
+    <!-- Month drill-down modal -->
+    <MonthDetailModal :open="!!selectedMonth" :month="selectedMonth || ''" @close="closeMonth" />
   </div>
 </template>
 
@@ -290,8 +303,20 @@ import { ref, computed, onMounted } from 'vue'
 import { useFinancialsStore } from '../stores/financials'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { formatCurrency as fmt } from '../utils/format'
+import MonthDetailModal from '../components/financials/MonthDetailModal.vue'
 
 const store = useFinancialsStore()
+
+// Month drill-down state
+const selectedMonth = ref(null)
+function openMonth(mk) {
+  selectedMonth.value = mk
+  store.loadMonth(mk)
+}
+function closeMonth() {
+  selectedMonth.value = null
+  store.clearMonth()
+}
 
 const sortKey = ref('net')
 const sortDir = ref('desc')
@@ -538,6 +563,18 @@ useSocketRefresh('invoices:changed', () => store.load())
   font-weight: 600;
 }
 .monthly-table .row-current:hover { background: rgba(16, 185, 129, 0.14); }
+/* Clickable months (drill-down) */
+.month-clickable { cursor: pointer; }
+.month-clickable:hover .month-bar-fill { filter: brightness(1.12); }
+.monthly-table .row-click { cursor: pointer; }
+.monthly-table .chevron-col { width: 28px; text-align: right; }
+.row-chevron {
+  color: var(--text-dim);
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.monthly-table .row-click:hover .row-chevron { color: var(--text); }
 .mtd-badge {
   display: inline-block;
   margin-left: 0.4rem;
