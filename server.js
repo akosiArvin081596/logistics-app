@@ -6833,10 +6833,29 @@ app.get("/api/truck-assignments", requireAuth, (req, res) => {
 	}
 });
 
+// Driver daily pay ($/day) validator shared by POST/PUT /api/trucks.
+// Blank/0 means "unset" — every pay calculation (invoices, /api/financials,
+// /api/investor) falls back to the $250/day default. When a value is given it
+// must be a finite number 0..10000 so a typo or negative rate can't silently
+// corrupt invoices and P&L.
+const DRIVER_PAY_DAILY_MAX = 10000;
+function parseDriverPayDaily(raw) {
+	if (raw === undefined || raw === null || raw === "") return { value: 0 };
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n < 0 || n > DRIVER_PAY_DAILY_MAX) {
+		return { error: `Driver daily pay must be a number between 0 and ${DRIVER_PAY_DAILY_MAX}` };
+	}
+	return { value: n };
+}
+
 // Truck Database: add a new truck
 app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	try {
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId, driverPayDaily, purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
+		const driverPayParsed = parseDriverPayDaily(driverPayDaily);
+		if (driverPayParsed.error) {
+			return res.status(400).json({ error: driverPayParsed.error });
+		}
 		// Investors auto-set owner_id to their own user ID
 		let finalOwnerId = parseInt(ownerId) || 0;
 		if (req.session.user.role === "Investor") {
@@ -6857,7 +6876,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		}
 		const result = db.prepare(
 			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", finalOwnerId, parseFloat(driverPayDaily) || 0, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0);
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", finalOwnerId, driverPayParsed.value, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0);
 		// Create truck assignment record
 		if (assignedDriver && assignedDriver.trim()) {
 			assignDriverToTruck(result.lastInsertRowid, assignedDriver.trim());
@@ -6880,6 +6899,15 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId,
 			photo, insuranceMonthly, eldMonthly, hvutAnnual, irpAnnual, adminFeePct, driverPayDaily,
 			purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
+		// Validate driver pay before any side effects (assignDriverToTruck runs
+		// below) so a bad rate rejects the whole edit instead of half-applying it.
+		let driverPayParsed = null;
+		if (driverPayDaily !== undefined) {
+			driverPayParsed = parseDriverPayDaily(driverPayDaily);
+			if (driverPayParsed.error) {
+				return res.status(400).json({ error: driverPayParsed.error });
+			}
+		}
 		const updates = [];
 		const params = [];
 
@@ -6914,7 +6942,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (hvutAnnual !== undefined) { updates.push("hvut_annual = ?"); params.push(parseFloat(hvutAnnual) || 0); }
 		if (irpAnnual !== undefined) { updates.push("irp_annual = ?"); params.push(parseFloat(irpAnnual) || 0); }
 		if (adminFeePct !== undefined) { updates.push("admin_fee_pct = ?"); params.push(parseFloat(adminFeePct) ?? 50); }
-		if (driverPayDaily !== undefined) { updates.push("driver_pay_daily = ?"); params.push(parseFloat(driverPayDaily) || 0); }
+		if (driverPayParsed) { updates.push("driver_pay_daily = ?"); params.push(driverPayParsed.value); }
 		if (purchasePrice !== undefined) { updates.push("purchase_price = ?"); params.push(parseFloat(purchasePrice) || 0); }
 		if (titleStatus !== undefined) { updates.push("title_status = ?"); params.push(titleStatus || "Clean"); }
 		if (maintenanceFundMonthly !== undefined) { updates.push("maintenance_fund_monthly = ?"); params.push(parseFloat(maintenanceFundMonthly) || 0); }
@@ -6922,6 +6950,13 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 		params.push(id);
 		db.prepare(`UPDATE trucks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+		// Audit pay-rate changes — the rate drives invoices and P&L. Reuses the
+		// established truck-entity logAudit pattern (see routemate_link/unlink).
+		if (driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {
+			const fmtRate = (v) => (v > 0 ? `$${v}/day` : "default ($250/day)");
+			logAudit(req, "update_driver_pay", "truck", String(id),
+				`Driver daily pay for ${truck.unit_number}: ${fmtRate(truck.driver_pay_daily || 0)} → ${fmtRate(driverPayParsed.value)}`);
+		}
 		// Log driver assignment change to history + sync to Carrier Database sheet
 		if (assignedDriver !== undefined) {
 			const oldDriver = truck.assigned_driver;
