@@ -44,6 +44,9 @@
               <span class="driver-coords">{{ onlineCount }} online — show all routes</span>
             </div>
           </div>
+          <div v-if="activeLocations.length === 0" class="no-active-drivers">
+            No active drivers right now
+          </div>
           <div
             v-for="loc in activeLocations"
             :key="loc.driver"
@@ -88,6 +91,23 @@
               </div>
               <span v-if="loc.speed && isOnline(loc)" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
             </div>
+            <!-- Driver vitals (expands with the driver): latest ELD fuel level
+                 + FMCSA hours-of-service clocks (remaining drive/shift/cycle).
+                 The HOS pills hide themselves when /api/tracking/hos is
+                 unavailable (Routemate disabled or upstream outage). -->
+            <div v-if="selectedDriver === loc.driver && (loc.fuelPct != null || hosFor(loc))" class="driver-vitals">
+              <span
+                v-if="loc.fuelPct != null"
+                :class="['vital-pill', 'fuel', { low: loc.fuelPct <= 25 }]"
+                title="Latest fuel level reported by the truck's ELD"
+              >Fuel {{ Math.round(loc.fuelPct) }}%</span>
+              <template v-if="hosFor(loc)">
+                <span class="vital-pill hos" title="Drive time remaining (11h FMCSA clock)">Drive {{ formatClockMs(hosFor(loc).driveMs) || '—' }}</span>
+                <span class="vital-pill hos" title="On-duty shift time remaining (14h FMCSA clock)">Shift {{ formatClockMs(hosFor(loc).shiftMs) || '—' }}</span>
+                <span class="vital-pill hos" title="Cycle time remaining (60/70h FMCSA clock)">Cycle {{ formatClockMs(hosFor(loc).cycleMs) || '—' }}</span>
+                <span v-if="hosFor(loc).dutyStatus" class="vital-pill duty" title="Current duty status from the ELD">{{ hosFor(loc).dutyStatus }}</span>
+              </template>
+            </div>
             <!-- Level 1: Active loads list (expands when driver is selected) -->
             <div v-if="selectedDriver === loc.driver && loc.activeLoads && loc.activeLoads.length > 0" class="loads-accordion">
               <div
@@ -130,7 +150,7 @@
                   </div>
                   <div v-if="routeDistance != null || routeEta != null || selectedDriverSpeed != null" class="route-summary">
                     <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} mi</span>
-                    <span v-if="routeEta != null" class="route-stat">{{ routeEta }} min ETA</span>
+                    <span v-if="routeEta != null" class="route-stat">{{ formatMinutes(routeEta) }} ETA</span>
                     <span v-if="selectedDriverSpeed != null" class="route-stat speed">{{ selectedDriverSpeed }} mph</span>
                   </div>
                   <div v-if="weatherData" class="route-weather">
@@ -146,6 +166,13 @@
               <div class="no-active-loads">No active loads</div>
             </div>
           </div>
+          <!-- Off by default (owner request 2026-06-11): only drivers with a
+               live load show in the panel and on the All Drivers map view.
+               This restores assigned-but-idle drivers for dispatch triage. -->
+          <label class="show-inactive-toggle">
+            <input v-model="showInactive" type="checkbox" />
+            Show inactive drivers
+          </label>
         </div>
       </div>
     </div>
@@ -157,6 +184,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import { useGoogleMaps, createDotPin, createTruckArrow } from '../../composables/useGoogleMaps'
+import { formatMinutes, formatClockMs } from '../../lib/duration'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -175,6 +203,51 @@ const expandedLoadId = ref('')
 let focusGeneration = 0  // incremented on each focus action to cancel stale async fits
 const fetchingRoute = ref(false)
 const panelCollapsed = ref(false)
+
+// Active-only driver filter (owner request 2026-06-11): the panel and the
+// "All Drivers" map view show only drivers with a live load in progress.
+// The "Show inactive" toggle (off by default) restores assigned-but-idle
+// drivers for dispatch triage.
+const showInactive = ref(false)
+
+// FMCSA hours-of-service clocks from GET /api/tracking/hos, keyed by
+// lowercased LogisX driver name (server resolves Routemate names/vehicles to
+// LogisX drivers; raw Routemate driverName is the fallback key). When the
+// endpoint is unavailable (Routemate disabled, no key, upstream outage) the
+// HOS pills hide entirely. Refresh rides the existing 10s `now` interval,
+// gated to the server cache's 60s TTL — no new polling loop.
+const hosByDriver = ref({})
+const hosAvailable = ref(false)
+let hosFetchedAt = 0
+let hosFetchInFlight = false
+const HOS_REFRESH_MS = 60 * 1000
+
+async function fetchHos() {
+  if (hosFetchInFlight || Date.now() - hosFetchedAt < HOS_REFRESH_MS) return
+  hosFetchInFlight = true
+  hosFetchedAt = Date.now()
+  try {
+    const data = await api.get('/api/tracking/hos')
+    const byDriver = {}
+    for (const c of (data.clocks || [])) {
+      const key = (c.logisxDriver || c.driverName || '').trim().toLowerCase()
+      if (key) byDriver[key] = c
+    }
+    hosByDriver.value = byDriver
+    hosAvailable.value = true
+  } catch {
+    // 503 (integration off) or upstream failure — hide the HOS block.
+    hosByDriver.value = {}
+    hosAvailable.value = false
+  } finally {
+    hosFetchInFlight = false
+  }
+}
+
+function hosFor(loc) {
+  if (!hosAvailable.value || !loc) return null
+  return hosByDriver.value[(loc.driver || '').trim().toLowerCase()] || null
+}
 
 // Google Maps overlay objects (managed programmatically)
 const driverMarkers = new Map()   // driver name -> AdvancedMarkerElement
@@ -782,7 +855,13 @@ function syncDriverMarkers() {
       // truck is parked next to / driving past.
       const iw = new google.maps.InfoWindow()
       marker.addEventListener('gmp-click', () => {
-        iw.setContent(buildDriverPopupContent(loc))
+        // Resolve the live entry at click time — `loc` is captured at marker
+        // creation and detaches from the array after a fetchLocations()
+        // refresh, which would freeze speed/fuel/HOS at page-load values.
+        const live = locations.value.find(
+          l => l.driver.toLowerCase() === loc.driver.toLowerCase()
+        ) || loc
+        iw.setContent(buildDriverPopupContent(live))
         iw.open({ map, anchor: marker })
         const pos = marker.position
         if (map && pos) {
@@ -841,6 +920,26 @@ function buildDriverPopupContent(loc) {
   if (loadId) html += `<div style="color:#555;font-size:0.8rem">Load: ${loadId}</div>`
   html += `<div style="color:#888;font-size:0.72rem;font-family:JetBrains Mono,monospace">${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}</div>`
   if (loc.speed) html += `<div style="color:#555;font-size:0.8rem">Speed: ${Math.round(loc.speed * 2.237)} mph</div>`
+  // Latest ELD fuel level. fuelPct is numeric (0-100) from the server; null
+  // when the device doesn't report fuel — line hidden rather than "Fuel: —".
+  if (loc.fuelPct != null && Number.isFinite(Number(loc.fuelPct))) {
+    html += `<div style="color:#555;font-size:0.8rem">Fuel: ${Math.round(loc.fuelPct)}%</div>`
+  }
+  // FMCSA hours-of-service clocks (remaining). formatClockMs emits only
+  // digits + h/m, so the interpolation below is injection-safe.
+  const hos = hosFor(loc)
+  if (hos) {
+    const parts = []
+    const drive = formatClockMs(hos.driveMs)
+    const shift = formatClockMs(hos.shiftMs)
+    const cycle = formatClockMs(hos.cycleMs)
+    if (drive) parts.push(`Drive ${drive}`)
+    if (shift) parts.push(`Shift ${shift}`)
+    if (cycle) parts.push(`Cycle ${cycle}`)
+    if (parts.length > 0) {
+      html += `<div style="color:#555;font-size:0.8rem">HOS: ${parts.join(' &middot; ')}</div>`
+    }
+  }
   if (selectedDriver.value === loc.driver && originLatLng.value && expandedLoadId.value) {
     html += `<div style="font-weight:600;font-size:0.8rem">${driverToPickupMi(loc)} mi to Pickup</div>`
   }
@@ -1158,8 +1257,9 @@ async function focusAll() {
   routeDistance.value = null
   routeEta.value = null
 
-  // Fetch routes for all online drivers with a load (concurrency-limited)
-  const onlineWithLoad = locations.value.filter(loc => isOnline(loc) && loc.loadId)
+  // Fetch routes for all panel-visible online drivers with a load
+  // (concurrency-limited). activeLocations honors the active-only filter.
+  const onlineWithLoad = activeLocations.value.filter(loc => isOnline(loc) && loc.loadId)
   const MAX_CONCURRENT = 3
   const results = new Array(onlineWithLoad.length).fill(null)
   let nextIdx = 0
@@ -1189,10 +1289,10 @@ async function focusAll() {
   // Render all routes on map
   renderAllRoutes()
 
-  // Fit bounds to all online drivers
+  // Fit bounds to all panel-visible drivers
   await nextTick()
   if (!map) return
-  const withGps = locationsWithGps.value
+  const withGps = visibleLocationsWithGps.value
   if (withGps.length === 0) return
   const allPts = withGps.map(loc => [loc.latitude, loc.longitude])
   // Include origins and destinations from routes
@@ -1265,17 +1365,22 @@ function timeAgo(ts) {
 }
 
 const locationsWithGps = computed(() => locations.value.filter(loc => !loc.noGps && loc.latitude != null))
-const onlineCount = computed(() => locationsWithGps.value.filter(loc => isOnline(loc)).length)
-// Show every actively-assigned driver in the panel, even when they have
-// no active loads in the Job Tracking sheet (sheet/SQLite name drift) and
-// no live ELD ping. Sort so drivers with GPS come first, then drivers
-// with an assignment but no fix, then sheet-only fallbacks. Without the
-// assignedTruck branch the panel would hide every driver whose name
-// doesn't match a sheet row, which is most of them in production today.
+// Active = has a live load in progress (assigned/dispatched/at shipper/
+// loading/in transit/at receiver/... — the server's workingRe fills
+// activeLoads from the same status set as /api/dashboard). Owner request
+// 2026-06-11: idle drivers are hidden by default; the "Show inactive"
+// toggle restores the old behavior (any actively-assigned driver, even with
+// no load — useful when sheet/SQLite driver names drift). Sort so drivers
+// with GPS come first, then drivers with an assignment but no fix, then
+// sheet-only fallbacks.
 const activeLocations = computed(() => {
-  const visible = locations.value.filter(loc =>
-    (loc.activeLoads && loc.activeLoads.length > 0) || loc.assignedTruck
-  )
+  const visible = locations.value.filter(loc => {
+    // activeLoads comes from /api/locations/latest (workingRe statuses);
+    // loadId covers drivers pushed mid-session by a socket location-update
+    // (payload carries the active loadId but no activeLoads array).
+    const hasLiveLoad = (loc.activeLoads && loc.activeLoads.length > 0) || !!loc.loadId
+    return showInactive.value ? (hasLiveLoad || loc.assignedTruck) : hasLiveLoad
+  })
   const score = (l) => {
     if (!l.noGps && l.latitude != null) return 0
     if (l.assignedTruck) return 1
@@ -1283,6 +1388,13 @@ const activeLocations = computed(() => {
   }
   return [...visible].sort((a, b) => score(a) - score(b))
 })
+// Panel-visible drivers that have a GPS fix — drives the online counter,
+// marker visibility, and every map-fit so hidden (inactive) drivers never
+// drag the viewport or leave orphan pins.
+const visibleLocationsWithGps = computed(() =>
+  activeLocations.value.filter(loc => !loc.noGps && loc.latitude != null)
+)
+const onlineCount = computed(() => visibleLocationsWithGps.value.filter(loc => isOnline(loc)).length)
 const selectedDriverSpeed = computed(() => {
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
   return loc?.speed ? Math.round(loc.speed * 2.237) : null
@@ -1292,13 +1404,21 @@ function updateMarkerVisibility() {
   if (!map) return
   const sel = selectedDriver.value
   const showAll = !sel || sel === '__all__'
+  // Markers exist for every driver with GPS, but only panel-visible
+  // (active, or all when "Show inactive" is on) drivers render — toggling
+  // the filter flips visibility without a refetch.
+  const visibleNames = new Set(activeLocations.value.map(l => (l.driver || '').toLowerCase()))
   for (const [driver, marker] of driverMarkers) {
-    const show = showAll || driver === sel
+    const show = showAll ? visibleNames.has(driver.toLowerCase()) : driver === sel
     marker.map = show ? map : null
   }
 }
 
 watch(selectedDriver, () => {
+  nextTick(updateMarkerVisibility)
+})
+
+watch(showInactive, () => {
   nextTick(updateMarkerVisibility)
 })
 
@@ -1341,7 +1461,7 @@ async function fetchLocations() {
     // Only fit map on the very first load, not on refreshes
     if (!initialFetchDone) {
       initialFetchDone = true
-      const withGps = locations.value.filter(l => !l.noGps && l.latitude != null)
+      const withGps = visibleLocationsWithGps.value
       if (withGps.length > 0) {
         const pts = withGps.map(l => [l.latitude, l.longitude])
         await nextTick()
@@ -1394,6 +1514,11 @@ function onLocationUpdate(payload) {
     locations.value[idx].loadId = payload.loadId || ''
     locations.value[idx].timestamp = payload.timestamp
     if (Number.isFinite(payload.heading)) locations.value[idx].heading = payload.heading
+    // Live fuel level from the ELD ping (null when the device omits it —
+    // keep the last known value rather than blanking the pill).
+    if (payload.fuelPct != null && Number.isFinite(Number(payload.fuelPct))) {
+      locations.value[idx].fuelPct = payload.fuelPct
+    }
     // Honor source/lastPingAge from the emitter so the ELD/Phone badge flips
     // live without waiting for the next /api/locations/latest fetch.
     if (payload.source) locations.value[idx].source = payload.source
@@ -1421,6 +1546,7 @@ function onLocationUpdate(payload) {
       speed: payload.speed || 0,
       loadId: payload.loadId || '',
       timestamp: payload.timestamp,
+      fuelPct: payload.fuelPct != null ? payload.fuelPct : null,
     })
     // Create a marker for the new driver
     nextTick(() => syncDriverMarkers())
@@ -1534,7 +1660,7 @@ async function initMap() {
   // Honor the persisted follow preference on map ready
   if (followTruck.value) startFollowLoop()
   if (initialFetchDone) {
-    const withGps = locationsWithGps.value
+    const withGps = visibleLocationsWithGps.value
     if (withGps.length > 0) {
       const bounds = new google.maps.LatLngBounds()
       withGps.forEach(l => bounds.extend({ lat: l.latitude, lng: l.longitude }))
@@ -1552,9 +1678,16 @@ onMounted(() => {
   socket.connect()
   socket.register('dispatch')
   fetchLocations()
+  fetchHos()
   socket.on('location-update', onLocationUpdate)
   socket.on('status-updated', onStatusUpdated)
-  nowInterval = setInterval(() => { now.value = Date.now() }, 10000)
+  // HOS refresh rides the existing 10s tick; fetchHos() self-gates to the
+  // server cache's 60s TTL, so this adds at most one request per minute
+  // while the tracking view is open.
+  nowInterval = setInterval(() => {
+    now.value = Date.now()
+    fetchHos()
+  }, 10000)
 })
 
 onUnmounted(() => {
@@ -1913,6 +2046,68 @@ onUnmounted(() => {
   color: #aaa;
   text-align: center;
   padding: 0.5rem 0;
+}
+
+.no-active-drivers {
+  font-size: 0.72rem;
+  color: #aaa;
+  text-align: center;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+/* "Show inactive drivers" filter — pinned at the bottom of the panel list. */
+.show-inactive-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #888;
+  border-top: 1px solid #eee;
+  cursor: pointer;
+  user-select: none;
+}
+.show-inactive-toggle input {
+  accent-color: #2563eb;
+  cursor: pointer;
+}
+
+/* Driver vitals strip — fuel + HOS clocks under the selected driver row. */
+.driver-vitals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.35rem 0.75rem 0.45rem 1.4rem;
+  background: #f8fafc;
+  border-top: 1px dashed #e5e7eb;
+}
+.vital-pill {
+  font-size: 0.62rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: #f3f4f6;
+  color: #4b5563;
+  border: 1px solid #e5e7eb;
+  white-space: nowrap;
+}
+.vital-pill.fuel {
+  background: #ecfdf5;
+  color: #065f46;
+  border-color: #a7f3d0;
+}
+.vital-pill.fuel.low {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+.vital-pill.duty {
+  background: #eef2ff;
+  color: #4338ca;
+  border-color: #c7d2fe;
+  text-transform: capitalize;
 }
 
 .route-accordion {

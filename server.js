@@ -1293,6 +1293,9 @@ async function routemateSyncTelemetry() {
 				loadId: activeLoadId,
 				timestamp,
 				source: "routemate",
+				// Latest fuel level (0-100, null when the ELD doesn't report it)
+				// so the tracking popup/panel stays current between page loads.
+				fuelPct: Number.isFinite(t.fuel_pct) ? t.fuel_pct : null,
 			};
 			io.to("dispatch").emit("location-update", locationPayload);
 			// Also push to the driver's own socket room so the driver app's
@@ -12242,6 +12245,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					heading: 0,
 					timestamp: null,
 					loadId: '',
+					fuelPct: null,
 					noGps: true,
 				});
 				seen.add(name.toLowerCase());
@@ -12260,6 +12264,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				SELECT
 					LOWER(ta.driver_name) AS driver_lc,
 					rt.latitude, rt.longitude, rt.speed, rt.bearing,
+					rt.fuel_pct,
 					rt.location_date_ms,
 					-- Prior telemetry row's coords, used as a fallback heading source
 					-- when rt.bearing is missing or non-numeric. Index idx_rm_tel_vid_date
@@ -12309,6 +12314,10 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.timestamp = new Date(rm.location_date_ms).toISOString();
 					loc.source = "routemate";
 					loc.lastPingAge = now - rm.location_date_ms;
+					// Latest ELD fuel level (0-100). Same convention as
+					// /api/admin/fleet-health: fuelPct, null when the device
+					// doesn't report fuel.
+					loc.fuelPct = Number.isFinite(rm.fuel_pct) ? rm.fuel_pct : null;
 					if (loc.noGps) loc.noGps = false;
 					// Heading: parse Routemate's compass string (NW/SE/SSW/...) or numeric
 					// bearing to degrees; fall back to the rhumb-line bearing between the
@@ -12538,6 +12547,113 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 	} catch (error) {
 		console.error("Error fetching locations:", error.message);
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/tracking/hos — Current FMCSA hours-of-service clocks for all
+// drivers, pulled on demand from Routemate's /api/v0/drivers/hos (no sync
+// interval — dispatchers only need this while /tracking is open). Each row
+// carries the remaining drive/shift/cycle/break countdowns in milliseconds
+// (see lib/routemate-client.js listHosClocks for the unit rationale) plus
+// dutyStatus, and is resolved to a LogisX driver name where possible so the
+// tracking panel can match rows to its driver list:
+//   1. Routemate driverName vs active truck_assignments.driver_name
+//   2. Routemate vehicleId label → routemate_vehicles → trucks link → driver
+//   3. Routemate vehicleId label vs trucks.unit_number directly
+// A 60s in-memory cache absorbs dispatcher refreshes; on upstream failure the
+// last good snapshot is served (tagged stale:true) so clocks don't blink out
+// during a transient Routemate outage. Returns 503 when the integration is
+// disabled — the UI hides the HOS block entirely on any non-200.
+const HOS_CACHE_TTL_MS = 60 * 1000;
+let hosClockCache = { at: 0, payload: null };
+
+app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	if (!ROUTEMATE_ENABLED) {
+		return res.status(503).json({ error: "Routemate integration disabled (set ROUTEMATE_ENABLED=true)" });
+	}
+	if (!ROUTEMATE_API_KEY) {
+		return res.status(503).json({ error: "Routemate API key not configured (set ROUTEMATE_API_KEY)" });
+	}
+	try {
+		const now = Date.now();
+		if (hosClockCache.payload && now - hosClockCache.at < HOS_CACHE_TTL_MS) {
+			return res.json(hosClockCache.payload);
+		}
+
+		// Page through the clocks (required pagination params handled by the
+		// adapter). Small fleets fit in one page; the cap bounds a runaway loop.
+		const HARD_PAGE_CAP = 10;
+		const PAGE_SIZE = 200;
+		let rows = [];
+		for (let page = 0; page < HARD_PAGE_CAP; page++) {
+			const batch = await routemate.listHosClocks(routemateCreds(), { page, elements: PAGE_SIZE });
+			rows = rows.concat(batch.rows);
+			if (batch.rows.length < PAGE_SIZE || rows.length >= batch.total) break;
+		}
+
+		// Build the three matchers from SQLite (active assignments + vehicle links).
+		const byName = {};
+		const byUnit = {};
+		const driverByRvid = {};
+		try {
+			const assignRows = db.prepare(`
+				SELECT ta.driver_name, t.unit_number,
+				       COALESCE(t.routemate_vehicle_id, '') AS rvid
+				FROM truck_assignments ta
+				JOIN trucks t ON t.id = ta.truck_id
+				WHERE ta.end_date = ''
+			`).all();
+			for (const a of assignRows) {
+				const nm = (a.driver_name || "").trim();
+				if (!nm) continue;
+				byName[nm.toLowerCase()] = nm;
+				if (a.unit_number) byUnit[String(a.unit_number).trim().toLowerCase()] = nm;
+				if (a.rvid) driverByRvid[a.rvid] = nm;
+			}
+		} catch (mapErr) {
+			console.error("HOS assignment-map error:", mapErr.message);
+		}
+		const rvidByLabel = {};
+		try {
+			const rvRows = db.prepare(
+				"SELECT routemate_vehicle_id, vehicle_id FROM routemate_vehicles WHERE COALESCE(vehicle_id, '') <> ''"
+			).all();
+			for (const rv of rvRows) {
+				rvidByLabel[String(rv.vehicle_id).trim().toLowerCase()] = rv.routemate_vehicle_id;
+			}
+		} catch (rvErr) {
+			console.error("HOS vehicle-map error:", rvErr.message);
+		}
+
+		const clocks = rows.map((r) => {
+			const nameKey = (r.driver_name || "").trim().toLowerCase();
+			const labelKey = (r.vehicle_id || "").trim().toLowerCase();
+			const viaLink = labelKey && rvidByLabel[labelKey] ? driverByRvid[rvidByLabel[labelKey]] : "";
+			const logisxDriver = byName[nameKey] || viaLink || byUnit[labelKey] || "";
+			return {
+				driverName: r.driver_name,
+				vehicleId: r.vehicle_id,
+				dutyStatus: r.duty_status,
+				driveMs: r.drive_ms,
+				shiftMs: r.shift_ms,
+				cycleMs: r.cycle_ms,
+				breakMs: r.break_ms,
+				cycleTomorrowMs: r.cycle_tomorrow_ms,
+				logisxDriver,
+			};
+		});
+
+		const payload = { clocks, fetchedAt: new Date().toISOString(), source: "routemate" };
+		hosClockCache = { at: now, payload };
+		res.json(payload);
+	} catch (err) {
+		console.error("tracking HOS error:", err.message);
+		if (hosClockCache.payload) {
+			return res.json({ ...hosClockCache.payload, stale: true });
+		}
+		res.status(err.status === 401 || err.status === 403 ? err.status : 502).json({
+			error: err.message || "Routemate HOS fetch failed",
+		});
 	}
 });
 
