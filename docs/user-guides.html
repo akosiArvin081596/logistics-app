@@ -743,8 +743,8 @@
           <h4>Geofence Auto-Triggers</h4>
           <p>The system automatically detects when you arrive at pickup or delivery locations:</p>
           <ul>
-            <li><strong>Near Pickup (500m):</strong> If your status is "Dispatched" or "Assigned", it auto-changes to <span class="status-pill active">At Shipper</span></li>
-            <li><strong>Near Delivery (500m):</strong> If your status is "In Transit", it auto-changes to <span class="status-pill active">At Receiver</span></li>
+            <li><strong>Near Pickup (1000m):</strong> If your status is "Dispatched" or "Assigned", it auto-changes to <span class="status-pill active">At Shipper</span></li>
+            <li><strong>Near Delivery (1000m):</strong> If your status is "In Transit", it auto-changes to <span class="status-pill active">At Receiver</span></li>
             <li>You'll see a notification: "You have arrived at the pickup/delivery location"</li>
           </ul>
         </div>
@@ -1039,10 +1039,10 @@
             <tr><td><span class="status-pill new">Unassigned</span></td><td>System / SA</td><td>Created via New Job form or returned from decline/cancel</td></tr>
             <tr><td><span class="status-pill dispatched">Dispatched</span></td><td>SA / Dispatcher</td><td>Driver assigned from Dashboard Job Board</td></tr>
             <tr><td><span class="status-pill dispatched">Assigned</span></td><td>Driver</td><td>Driver accepts load in Driver App</td></tr>
-            <tr><td><span class="status-pill active">At Shipper</span></td><td>Driver / Geofence</td><td>Manual or auto when within 500m of pickup</td></tr>
+            <tr><td><span class="status-pill active">At Shipper</span></td><td>Driver / Geofence</td><td>Manual or auto when within 1000m of pickup</td></tr>
             <tr><td><span class="status-pill active">Loading</span></td><td>Driver</td><td>Manual status update</td></tr>
             <tr><td><span class="status-pill transit">In Transit</span></td><td>Driver</td><td>Manual status update</td></tr>
-            <tr><td><span class="status-pill active">At Receiver</span></td><td>Driver / Geofence</td><td>Manual or auto when within 500m of delivery</td></tr>
+            <tr><td><span class="status-pill active">At Receiver</span></td><td>Driver / Geofence</td><td>Manual or auto when within 1000m of delivery</td></tr>
             <tr><td><span class="status-pill done">Delivered</span></td><td>Driver</td><td>Manual (requires POD upload first)</td></tr>
             <tr><td><span class="status-pill done">POD Received</span></td><td>System</td><td>After POD document confirmed</td></tr>
           </tbody>
@@ -1056,7 +1056,7 @@
         <table class="tbl">
           <thead><tr><th>Parameter</th><th>Value</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td>Geofence Radius</td><td>500 m</td><td>Auto-status trigger distance from pickup/delivery</td></tr>
+            <tr><td>Geofence Radius</td><td>1000 m</td><td>Auto-status trigger distance from pickup/delivery</td></tr>
             <tr><td>GPS Movement</td><td>50 m</td><td>Min distance to trigger new position report</td></tr>
             <tr><td>GPS Min Interval</td><td>10 sec</td><td>Minimum time between GPS reports</td></tr>
             <tr><td>GPS Heartbeat</td><td>60 sec</td><td>Stationary ping interval</td></tr>

@@ -150,7 +150,7 @@ h3 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; color: #475569
 
   <div class="node node-process">Driver heads to pickup<br><small>GPS tracking active, route guide on map</small></div>
   <div class="arrow-down">▼</div>
-  <div class="node node-auto">Geofence: within 500m of pickup<br><small>Auto-trigger → "Driver has arrived at pickup location"</small></div>
+  <div class="node node-auto">Geofence: within 1000m of pickup<br><small>Auto-trigger → "Driver has arrived at pickup location"</small></div>
   <div class="arrow-down">▼</div>
   <div class="node node-status">STATUS: At Shipper</div>
   <div class="arrow-down">▼</div>
@@ -160,7 +160,7 @@ h3 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; color: #475569
     <div class="arrow">→</div>
     <div class="node node-status">In Transit</div>
     <div class="arrow">→</div>
-    <div class="node node-auto">Geofence: 500m of delivery</div>
+    <div class="node node-auto">Geofence: 1000m of delivery</div>
     <div class="arrow">→</div>
     <div class="node node-status">At Receiver</div>
   </div>
@@ -255,7 +255,7 @@ h3 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; color: #475569
 <tr><td><code>load-accepted</code></td><td>Driver accepts</td><td>Dispatch room</td><td>loadId, driverName</td></tr>
 <tr><td><code>load-declined</code></td><td>Driver rejects</td><td>Dispatch room</td><td>loadId, driverName</td></tr>
 <tr><td><code>status-updated</code></td><td>Driver changes status</td><td>Dispatch room</td><td>loadId, newStatus</td></tr>
-<tr><td><code>geofence-trigger</code></td><td>GPS within 500m of pickup/delivery</td><td>Driver + Dispatch</td><td>loadId, status (At Shipper / At Receiver)</td></tr>
+<tr><td><code>geofence-trigger</code></td><td>GPS within 1000m of pickup/delivery</td><td>Driver + Dispatch</td><td>loadId, status (At Shipper / At Receiver)</td></tr>
 <tr><td><code>location-update</code></td><td>Driver GPS report</td><td>Dispatch room</td><td>lat, lng, speed, accuracy</td></tr>
 <tr><td><code>new-message</code></td><td>Chat message sent</td><td>All connected</td><td>from, to, text</td></tr>
 <tr><td><code>pod-uploaded</code></td><td>Driver uploads POD</td><td>Dispatch room</td><td>loadId, fileName</td></tr>
@@ -308,7 +308,7 @@ h3 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; color: #475569
     <div class="arrow">→</div>
     <div class="node node-status" style="background:#d1fae5;border-color:#059669;">POD Received ✓</div>
   </div>
-  <div style="margin-top:0.75rem;font-size:0.75rem;color:#7c3aed;">⚡ = Auto-triggered by geofence (500m radius)</div>
+  <div style="margin-top:0.75rem;font-size:0.75rem;color:#7c3aed;">⚡ = Auto-triggered by geofence (1000m radius)</div>
 </div>
 </div>
 

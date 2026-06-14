@@ -62,7 +62,7 @@ Dispatched → At Shipper → Loading → In Transit → At Receiver → Unloadi
 
 Most transitions happen automatically:
 
-- When you enter the **geofence around the pickup location** (about 500 m), your status auto-advances to **At Shipper**.
+- When you enter the **geofence around the pickup location** (about 1000 m), your status auto-advances to **At Shipper**.
 - When you leave the pickup area, it advances to **In Transit**.
 - When you enter the dropoff geofence, it advances to **At Receiver**.
 

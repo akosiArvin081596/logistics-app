@@ -33,7 +33,7 @@ The map needs the Google Maps API to work. If it doesn't load, your network may 
 Your position is reported by the truck's Routemate ELD, not your phone or the browser. If the position is wrong or stale, message dispatch with the load ID — they can verify the ELD is reporting and reach out to Routemate support if the device is offline.
 
 **"My status didn't auto-update when I arrived."**
-The geofence is generous (~500 m) but it isn't perfect. Tap the next status in the stepper manually and give a brief reason. This is normal — auto-advance covers most cases but never claims 100%.
+The geofence is generous (~1000 m) but it isn't perfect. Tap the next status in the stepper manually and give a brief reason. This is normal — auto-advance covers most cases but never claims 100%.
 
 **"I uploaded a POD but the system says it didn't upload."**
 Try once more. If it keeps failing, your cell signal may be too weak for the upload. Move to a stronger signal area or use Wi-Fi. As a fallback, you can text or email the POD to dispatch.

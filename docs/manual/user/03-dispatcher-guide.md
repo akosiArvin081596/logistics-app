@@ -147,7 +147,7 @@ If you need any of those actions, escalate to a Super Admin.
 
 **"A driver isn't responding to a load assignment."** Check their location on the Tracking map — if their phone is offline, they may not have seen it. Message them on Messages; if they still don't respond, reassign.
 
-**"The status auto-advanced too early."** The geofence is generous (~500 m). If a driver's GPS pings briefly inside the geofence then back out (parking on the wrong side of a yard, going through a gas station next to the receiver), the status might advance prematurely. You can edit the status back from the Active Loads tab.
+**"The status auto-advanced too early."** The geofence is generous (~1000 m). If a driver's GPS pings briefly inside the geofence then back out (parking on the wrong side of a yard, going through a gas station next to the receiver), the status might advance prematurely. You can edit the status back from the Active Loads tab.
 
 **"A POD upload failed."** The driver can retry from their phone. If it keeps failing, ask the driver to text or email the POD as a fallback and you can upload it from your side via the load's documents area.
 
