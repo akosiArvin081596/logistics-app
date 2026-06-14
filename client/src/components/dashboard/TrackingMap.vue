@@ -1141,6 +1141,14 @@ async function toggleLoad(al, loc) {
     renderSingleLoadRoute()
   }
 
+  // Pre-pickup loads still draw the haul polyline from pickup above, but the
+  // headline ETA/distance should measure from the truck's CURRENT position to
+  // delivery (not pickup→delivery), matching the driver-list ETA. Override the
+  // summary numbers here without disturbing the drawn haul/approach polylines.
+  if (!useDriverPos && hasDriverGps && hasDest) {
+    await updateDriverToDestStats(loc.latitude, loc.longitude, dLat, dLng, focusGeneration)
+  }
+
   // Pre-pickup loads also draw a driver→pickup approach leg in amber so
   // dispatchers can see the truck's path to the shipper alongside the
   // planned blue haul. The haul polyline stays anchored at pickup→drop-off
@@ -1227,6 +1235,27 @@ async function fetchApproachLeg(driverLat, driverLng, pickupLat, pickupLng) {
   }
 }
 
+// Override the headline route stats (distance + ETA) with a CURRENT-position →
+// delivery road route. Pre-pickup loads draw the haul polyline from pickup, but
+// the panel ETA should answer "how long until this load reaches delivery from
+// where the truck is now" — i.e. driver→delivery, matching the driver-list ETA
+// from /api/locations/latest — not the bare pickup→delivery haul. The drawn
+// haul/approach polylines are left untouched; only the summary numbers change.
+async function updateDriverToDestStats(fromLat, fromLng, toLat, toLng, gen) {
+  if (!isFinite(fromLat) || !isFinite(fromLng) || !isFinite(toLat) || !isFinite(toLng)) return
+  if (haversineMeters(fromLat, fromLng, toLat, toLng) > 2_000_000) return
+  try {
+    const d = await fetchRouteCached(fromLat, fromLng, toLat, toLng)
+    if (gen !== focusGeneration) return
+    if (d && (d.distanceMiles != null || d.etaMinutes != null)) {
+      routeDistance.value = d.distanceMiles ?? routeDistance.value
+      routeEta.value = d.etaMinutes ?? routeEta.value
+    }
+  } catch {
+    // silent — keep whatever stats we already have
+  }
+}
+
 async function maybeRefetchApproachLeg(driverLat, driverLng) {
   if (!originLatLng.value || !expandedLoadId.value) return
   const focusLoc = locations.value.find(l => l.driver === selectedDriver.value)
@@ -1242,6 +1271,11 @@ async function maybeRefetchApproachLeg(driverLat, driverLng) {
   lastApproachRefetchTime = now
   const [pLat, pLng] = originLatLng.value
   await fetchApproachLeg(driverLat, driverLng, pLat, pLng)
+  // Keep the headline driver→delivery ETA fresh as the truck advances to pickup.
+  if (destLatLng.value) {
+    const [dLat, dLng] = destLatLng.value
+    await updateDriverToDestStats(driverLat, driverLng, dLat, dLng, focusGeneration)
+  }
 }
 
 async function focusAll() {

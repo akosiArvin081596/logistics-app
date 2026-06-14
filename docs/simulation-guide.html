@@ -960,10 +960,10 @@
           <tbody>
             <tr><td>Unassigned &rarr; Dispatched</td><td><span class="role-sa">Super Admin</span> / <span class="role-disp">Dispatcher</span></td><td>Assigns driver from Dashboard Job Board</td></tr>
             <tr><td>Dispatched &rarr; Assigned</td><td><span class="role-drv">Driver</span></td><td>Accepts load in Driver App</td></tr>
-            <tr><td>Assigned &rarr; At Shipper</td><td><span class="role-drv">Driver</span> or <span style="color:#a855f7;font-weight:600;">Geofence</span></td><td>Manual status update or arrives within 500m of pickup</td></tr>
+            <tr><td>Assigned &rarr; At Shipper</td><td><span class="role-drv">Driver</span> or <span style="color:#a855f7;font-weight:600;">Geofence</span></td><td>Manual status update or arrives within 1000m of pickup</td></tr>
             <tr><td>At Shipper &rarr; Loading</td><td><span class="role-drv">Driver</span></td><td>Manual status update</td></tr>
             <tr><td>Loading &rarr; In Transit</td><td><span class="role-drv">Driver</span></td><td>Manual status update</td></tr>
-            <tr><td>In Transit &rarr; At Receiver</td><td><span class="role-drv">Driver</span> or <span style="color:#a855f7;font-weight:600;">Geofence</span></td><td>Manual status update or arrives within 500m of delivery</td></tr>
+            <tr><td>In Transit &rarr; At Receiver</td><td><span class="role-drv">Driver</span> or <span style="color:#a855f7;font-weight:600;">Geofence</span></td><td>Manual status update or arrives within 1000m of delivery</td></tr>
             <tr><td>At Receiver &rarr; Delivered</td><td><span class="role-drv">Driver</span></td><td>Manual (requires POD upload first)</td></tr>
             <tr><td>Delivered &rarr; POD Received</td><td><span style="color:#a855f7;font-weight:600;">System</span></td><td>Automatic after POD document confirmed</td></tr>
           </tbody>
@@ -977,7 +977,7 @@
         <table class="tbl">
           <thead><tr><th>Parameter</th><th>Value</th><th>Context</th></tr></thead>
           <tbody>
-            <tr><td>Geofence Radius</td><td>500 meters</td><td>Auto-status trigger distance</td></tr>
+            <tr><td>Geofence Radius</td><td>1000 meters</td><td>Auto-status trigger distance</td></tr>
             <tr><td>GPS Movement Threshold</td><td>50 meters</td><td>Minimum distance to report new position</td></tr>
             <tr><td>GPS Min Interval</td><td>10 seconds</td><td>Minimum time between reports</td></tr>
             <tr><td>GPS Heartbeat</td><td>60 seconds</td><td>Reports even when stationary</td></tr>

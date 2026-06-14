@@ -12535,7 +12535,7 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 // GPS TRACKING & GEOFENCING
 // ============================================================
 
-const GEOFENCE_RADIUS = 500; // meters
+const GEOFENCE_RADIUS = 1000; // meters
 
 function checkGeofence(lat, lng, loadData, headers) {
 	// Look for lat/lng columns for origin and destination
@@ -12591,19 +12591,22 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 
 			const triggers = checkGeofence(latitude, longitude, loadObj, headers);
 			if (triggers.length === 0) return null;
-			const trigger = triggers[0];
-
-			const isCompletionTrigger = /^(delivered|completed|pod received)$/i.test(trigger);
-			const canUpdate = !isCompletionTrigger && (
-				(trigger === "At Shipper" && /^(dispatched|assigned|heading to shipper)$/i.test(rowStatus)) ||
-				(trigger === "At Receiver" && /^(in transit)$/i.test(rowStatus))
+			// With a 1000m radius a short-haul load whose pickup and drop sit
+			// within ~2km can fall inside BOTH geofences at once (checkGeofence
+			// then returns both). Pick the trigger whose predecessor matches the
+			// current status instead of taking triggers[0], so the correct
+			// transition still fires. checkGeofence only ever emits the two
+			// arrival statuses, so a completion status can never be auto-written.
+			const trigger = triggers.find((t) =>
+				(t === "At Shipper" && /^(dispatched|assigned|heading to shipper)$/i.test(rowStatus)) ||
+				(t === "At Receiver" && /^(in transit)$/i.test(rowStatus))
 			);
-			if (!canUpdate) return null;
+			if (!trigger) return null;
 
 			// Dwell hysteresis (Tier 1, 2026-05-15). Require the *previous*
 			// non-dropped fix on this vehicle to ALSO be inside the same
 			// trigger zone. Single-ping noise on a highway pass-through can
-			// drop a fix 150m sideways into the 500m radius; demanding two
+			// drop a fix 150m sideways into the 1000m radius; demanding two
 			// consecutive fixes (≈30s at 15s polling) rules that out without
 			// adding meaningful latency to legitimate arrivals.
 			if (routemateVehicleId) {

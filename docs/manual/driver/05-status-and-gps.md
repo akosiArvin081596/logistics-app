@@ -112,7 +112,7 @@ A few realities about phone GPS:
 - **Marginal signal (tall buildings, deep canyons):** accurate to 30-100 meters.
 - **No signal (indoor, tunnel):** no GPS at all; the app keeps the last known position.
 
-The geofence is generous (500 m) to tolerate the marginal-signal case. In tunnels and deep indoor areas, the app falls back to "last known position" until GPS returns.
+The geofence is generous (1000 m) to tolerate the marginal-signal case. In tunnels and deep indoor areas, the app falls back to "last known position" until GPS returns.
 
 If you see your position on the map jumping around erratically, your phone is having trouble locking onto satellites. Move outside, stand still for 30 seconds, then check again.
 

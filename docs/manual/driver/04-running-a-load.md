@@ -40,7 +40,7 @@ Use your preferred navigation app to drive to pickup. The LogisX map is for refe
 
 ## Arriving at the shipper
 
-When you get within about **500 meters** of the pickup location, your status will **auto-advance to "At Shipper."** You'll see a small notification confirming the change.
+When you get within about **1000 meters** (1 km) of the pickup location, your status will **auto-advance to "At Shipper."** You'll see a small notification confirming the change.
 
 If you arrive and the status doesn't auto-advance:
 
@@ -82,7 +82,7 @@ If dispatch messages you on the way, you'll see a badge on the **Messages** tab.
 
 ## Arriving at the receiver
 
-Same as pickup: when you get within ~500 m, status auto-advances to **At Receiver.** If it misses, manually update.
+Same as pickup: when you get within ~1000 m, status auto-advances to **At Receiver.** If it misses, manually update.
 
 When you check in with the receiver, update to **Unloading** if your workflow uses that step. (Some don't — fine either way.)
 
