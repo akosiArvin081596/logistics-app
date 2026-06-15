@@ -72,6 +72,7 @@
       <MyTrucks :trucks="trucks" :production="store.production" :is-preview="store.isPreview" @reload="loadData" />
       <FleetBreakdownSection :trucks="trucks" :asset="store.asset" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
+      <LoadReportsSection :production="store.production" :config="store.config" :preview-user-id="store.previewUserId" />
       <ExpensesSection :trucks="trucks" :preview-user-id="store.previewUserId" />
       <!-- <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" /> -->
       <InvestorChat :trucks="trucks" :preview-user-id="store.previewUserId" :is-preview="store.isPreview" />
@@ -115,6 +116,7 @@ import DocumentPortal from '../components/investor/DocumentPortal.vue'
 import LegalDocumentPortal from '../components/investor/LegalDocumentPortal.vue'
 import MyTrucks from '../components/investor/MyTrucks.vue'
 import MyLoadsSection from '../components/investor/MyLoadsSection.vue'
+import LoadReportsSection from '../components/investor/LoadReportsSection.vue'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import AvatarPlaceholder from '../components/shared/AvatarPlaceholder.vue'
