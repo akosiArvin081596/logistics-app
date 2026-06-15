@@ -12070,6 +12070,182 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 	}
 });
 
+// GET /api/investor/load-report — Per-period load report for an investor.
+// period=weekly (Sat–Fri, via getWeekRange) | monthly. Returns the actual loads
+// in each period plus load count, gross revenue (completed loads), and a
+// gross-based investor-share ESTIMATE (gross × split — same convention as
+// myLoads.yourShare). The authoritative NET monthly share + cumulative
+// owed-to-date come from the dashboard's monthlyEarnings/investorNetToDate, so
+// this endpoint deliberately avoids duplicating that money math. Honors
+// ?as_user_id= preview like the other /api/investor/* endpoints. format=json|csv|pdf.
+app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), async (req, res) => {
+	try {
+		const period = req.query.period === "weekly" ? "weekly" : "monthly";
+		const format = ["csv", "pdf"].includes(req.query.format) ? req.query.format : "json";
+		const maxPeriods = Math.min(Math.max(parseInt(req.query.limit) || 12, 1), 53);
+		const startBound = (req.query.start || "").toString().trim();   // YYYY-MM-DD inclusive
+		const endBound = (req.query.end || "").toString().trim();
+
+		const jobTracking = await getJobTrackingCached();
+		const headers = jobTracking.headers;
+		const data = excludeDroppedLoads(jobTracking.data, headers);
+		const carrierDB = getCarrierDBFromSQLite();
+
+		// Preview ("view as investor") + scoping — mirror /api/investor exactly.
+		const preview = resolvePreviewUser(req);
+		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
+		if (preview.isPreview) logAudit(req, "investor_preview_view", "investor", preview.effectiveUserId, "");
+
+		const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+		const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
+		let investorDriverSet = null;
+		const investorOwnerId = !isSuperAdmin ? user.id : null;
+		if (!isSuperAdmin) investorDriverSet = getInvestorDriverSet(user.id, carrierDB.data, carrierDriverCol, carrierCarrierCol);
+
+		const cfg = {};
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (cfg[r.key] = r.value));
+		if (!isSuperAdmin) db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(user.id).forEach((r) => (cfg[r.key] = r.value));
+		const investorSplit = (parseFloat(cfg.investor_split_pct) || 50) / 100;
+
+		const driverCol = findCol(headers, /^driver$/i);
+		const ownerIdCol = findCol(headers, /^owner.?id$/i);
+		const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+		const rateCol = findCol(headers, /payment|rate|amount|revenue/i);
+		const dateCol = findCol(headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(headers, /date/i);
+		const truckCol = findCol(headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
+		const statusCol = findCol(headers, /status/i);
+		const brokerCol = findCol(headers, /broker|customer/i);
+		const pickupDateCol = findCol(headers, /pickup.*appo|pickup.*date/i);
+		const dropoffDateCol = findCol(headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
+		const originCol = headers.find((h) => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const destCol = headers.find((h) => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const completedStatuses = /^(delivered|completed|pod received)$/i;
+
+		// Same messy-date parser as /api/investor's inline helper (kept local).
+		function parseSheetDate(val) {
+			if (!val) return null;
+			const s = String(val).trim();
+			const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+			if (iso) { const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3])); return isNaN(d) ? null : d; }
+			const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+			if (!m) return null;
+			let yr = parseInt(m[3]); if (yr < 100) yr += 2000;
+			const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
+			return isNaN(d) ? null : d;
+		}
+
+		const filtered = investorDriverSet
+			? data.filter((r) => {
+				if (ownerIdCol) {
+					const raw = r[ownerIdCol];
+					if (raw !== undefined && raw !== null && String(raw).trim() !== "") return (parseInt(raw) || 0) === investorOwnerId;
+				}
+				const d = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
+				return d && investorDriverSet.has(d);
+			})
+			: data;
+
+		const periodsMap = new Map();
+		for (const r of filtered) {
+			const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
+			if (!lid) continue;
+			const dt = dateCol ? parseSheetDate(r[dateCol]) : null;
+			if (!dt) continue; // un-dateable rows can't be bucketed
+			const dayKey = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+			if (startBound && dayKey < startBound) continue;
+			if (endBound && dayKey > endBound) continue;
+			let key, label, start, end;
+			if (period === "weekly") {
+				const wr = getWeekRange(dt);
+				key = wr.weekStart; start = wr.weekStart; end = wr.weekEnd; label = `${wr.weekStart} to ${wr.weekEnd}`;
+			} else {
+				key = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0");
+				start = key + "-01"; end = ""; label = key;
+			}
+			if (!periodsMap.has(key)) periodsMap.set(key, { key, label, start, end, loadCount: 0, grossRevenue: 0, loads: [] });
+			const bucket = periodsMap.get(key);
+			const status = statusCol ? (r[statusCol] || "").trim() : "";
+			const gross = parseFloat(String(rateCol ? r[rateCol] : "0").replace(/[$,]/g, "")) || 0;
+			const isCompleted = completedStatuses.test(status);
+			bucket.loadCount++;
+			if (isCompleted) bucket.grossRevenue += gross;
+			bucket.loads.push({
+				loadId: lid, status,
+				broker: brokerCol ? (r[brokerCol] || "").trim() : "",
+				pickup: resolveCityState(r, "pickup", lid, originCol ? r[originCol] : ""),
+				dropoff: resolveCityState(r, "drop", lid, destCol ? r[destCol] : ""),
+				truck: truckCol ? (r[truckCol] || "").trim() : "",
+				driver: driverCol ? (r[driverCol] || "").trim() : "",
+				pickupDate: pickupDateCol ? (r[pickupDateCol] || "") : "",
+				dropDate: dropoffDateCol ? (r[dropoffDateCol] || "") : "",
+				rate: Math.round(gross),
+				completed: isCompleted,
+				yourShare: isCompleted ? Math.round(gross * investorSplit) : 0,
+			});
+		}
+
+		const periods = [...periodsMap.values()].sort((a, b) => (a.key < b.key ? 1 : -1)).slice(0, maxPeriods);
+		periods.forEach((p) => {
+			p.grossRevenue = Math.round(p.grossRevenue);
+			p.investorShareEst = Math.round(p.grossRevenue * investorSplit);
+			p.loads.sort((a, b) => (a.loadId < b.loadId ? 1 : -1));
+		});
+
+		const investorName = isSuperAdmin
+			? "All Investors"
+			: (((db.prepare("SELECT full_name FROM investors WHERE user_id = ?").get(user.id) || {}).full_name) || user.username || "Investor");
+		const splitPct = Math.round(investorSplit * 100);
+
+		if (format === "json") {
+			return res.json({ periodType: period, splitPct, investorName, periods });
+		}
+
+		if (format === "csv") {
+			const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+			const lines = ["Period,Start,End,Load ID,Status,Broker,Pickup,Dropoff,Truck,Driver,Pickup Date,Drop Date,Rate,Completed,Your Share (est)"];
+			for (const p of periods) {
+				for (const l of p.loads) {
+					lines.push([p.label, p.start, p.end, l.loadId, l.status, l.broker, l.pickup, l.dropoff, l.truck, l.driver, l.pickupDate, l.dropDate, l.rate, l.completed ? "Yes" : "No", l.yourShare].map(esc).join(","));
+				}
+			}
+			res.setHeader("Content-Type", "text/csv");
+			res.setHeader("Content-Disposition", `attachment; filename="load-report-${period}.csv"`);
+			return res.send(lines.join("\r\n"));
+		}
+
+		// format === "pdf"
+		const PDFDocument = require("pdfkit");
+		const doc = new PDFDocument({ margin: 40, size: "LETTER" });
+		const chunks = [];
+		doc.on("data", (c) => chunks.push(c));
+		doc.on("end", () => {
+			res.setHeader("Content-Type", "application/pdf");
+			res.setHeader("Content-Disposition", `attachment; filename="load-report-${period}.pdf"`);
+			res.send(Buffer.concat(chunks));
+		});
+		doc.fontSize(18).fillColor("#0f172a").text(`${period === "weekly" ? "Weekly" : "Monthly"} Load Report`);
+		doc.moveDown(0.2).fontSize(10).fillColor("#475569").text(investorName);
+		doc.fontSize(8).fillColor("#94a3b8").text(`Investor share shown is an estimate at ${splitPct}% of gross revenue. Settled monthly net figures appear on the investor dashboard. Generated by LogisX.`);
+		doc.moveDown(0.5);
+		for (const p of periods) {
+			doc.moveDown(0.4).fontSize(12).fillColor("#0f172a").text(p.label);
+			doc.fontSize(9).fillColor("#475569").text(`${p.loadCount} loads · Gross $${p.grossRevenue.toLocaleString()} · Your share (est) $${p.investorShareEst.toLocaleString()}`);
+			doc.moveDown(0.15).fontSize(8).fillColor("#334155");
+			for (const l of p.loads) {
+				const route = `${l.pickup || "?"} -> ${l.dropoff || "?"}`;
+				doc.text(`${l.loadId}  ${l.status}  ${route}  $${(l.rate || 0).toLocaleString()}${l.completed ? "  (share $" + l.yourShare.toLocaleString() + ")" : ""}`, { lineGap: 1 });
+			}
+			if (!p.loads.length) doc.fillColor("#94a3b8").text("No loads in this period.");
+		}
+		if (!periods.length) doc.moveDown().fontSize(11).fillColor("#94a3b8").text("No loads found for this investor in the selected range.");
+		doc.end();
+	} catch (error) {
+		console.error("Investor load-report error:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // GET /api/investor/report — Generate PDF performance report
 app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
