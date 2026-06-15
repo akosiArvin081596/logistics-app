@@ -46,10 +46,27 @@
           @keyup.enter="openDetail('revenue')"
           @keyup.space.prevent="openDetail('revenue')"
         >
-          <span class="breakdown-label">Revenue</span>
+          <span class="breakdown-label">
+            Revenue
+            <span v-if="selected.loadsCompleted != null" class="loads-chip" :title="`${selected.loadsCompleted} completed load${selected.loadsCompleted === 1 ? '' : 's'} generated this revenue`">
+              {{ selected.loadsCompleted }} load{{ selected.loadsCompleted === 1 ? '' : 's' }}
+            </span>
+          </span>
           <span class="breakdown-value" style="color: var(--accent)">{{ fmt(selected.revenue) }}</span>
           <span class="breakdown-formula">= SUM(Payment col, completed loads)</span>
         </div>
+        <!-- Per-truck loads/revenue split for the selected month. Auto-open for
+             multi-truck investors; single-truck stays collapsible but present. -->
+        <details v-if="perTruckEntries.length" class="truck-split" :open="perTruckEntries.length > 1">
+          <summary class="truck-split-summary">By truck ({{ perTruckEntries.length }})</summary>
+          <div class="truck-split-rows">
+            <div v-for="t in perTruckEntries" :key="t.unit" class="truck-split-row">
+              <span class="truck-split-unit">{{ t.unit === 'Unassigned' ? 'No truck recorded' : `Truck ${t.unit}` }}</span>
+              <span class="truck-split-loads">{{ t.loads }} load{{ t.loads === 1 ? '' : 's' }}</span>
+              <span class="truck-split-rev">{{ fmt(t.revenue) }}</span>
+            </div>
+          </div>
+        </details>
         <div
           class="breakdown-row deduct clickable"
           role="button" tabindex="0"
@@ -257,9 +274,18 @@
             <div class="modal-explain-sm">
               <strong>Where it comes from:</strong> The "Payment" column in our Job Tracking system, filtered to loads completed by your assigned driver(s) this month.
             </div>
+
+            <template v-if="perTruckEntries.length">
+              <div class="step-label">Loads &amp; Revenue by Truck</div>
+              <div v-for="t in perTruckEntries" :key="t.unit" class="modal-row">
+                <span>{{ t.unit === 'Unassigned' ? 'No truck recorded' : `Truck ${t.unit}` }}<span class="modal-tag">{{ t.loads }} load{{ t.loads === 1 ? '' : 's' }}</span></span>
+                <span class="val accent">{{ fmt(t.revenue) }}</span>
+              </div>
+            </template>
+
             <div class="modal-divider"></div>
             <div class="modal-row bold result">
-              <span>Monthly Revenue</span>
+              <span>Monthly Revenue<span v-if="selected.loadsCompleted != null" class="modal-tag">{{ selected.loadsCompleted }} load{{ selected.loadsCompleted === 1 ? '' : 's' }}</span></span>
               <span class="val accent">{{ fmt(selected.revenue) }}</span>
             </div>
           </div>
@@ -705,6 +731,16 @@ watch(months, (v) => {
 
 const selected = computed(() => months.value[selectedIdx.value] || null)
 
+// Per-truck {loads, revenue} split for the selected month, biggest earner
+// first. Empty for payloads from servers that predate the field (graceful
+// degradation — the split UI simply doesn't render).
+const perTruckEntries = computed(() => {
+  const pt = selected.value?.perTruck || {}
+  return Object.entries(pt)
+    .map(([unit, v]) => ({ unit, loads: v?.loads || 0, revenue: v?.revenue || 0 }))
+    .sort((a, b) => b.revenue - a.revenue)
+})
+
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 function monthLabel(mk) {
   if (!mk) return ''
@@ -1015,6 +1051,49 @@ const modalSubtitle = computed(() => {
 .breakdown-row.split .breakdown-label { color: var(--text-dim); font-size: 0.75rem; }
 .breakdown-divider {
   border-top: 1px dashed var(--border); margin: 0.3rem 0;
+}
+
+/* Loads-hauled chip beside the monthly revenue figure */
+.loads-chip {
+  display: inline-block; margin-left: 0.45rem; padding: 0.05rem 0.5rem;
+  font-size: 0.62rem; font-weight: 700; color: var(--accent);
+  background: var(--accent-dim); border-radius: 999px;
+  font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em;
+  vertical-align: middle; white-space: nowrap;
+}
+
+/* Per-truck loads/revenue split under the Revenue row */
+.truck-split {
+  margin: 0.1rem 0 0.35rem;
+  background: var(--surface); border: 1px dashed var(--border);
+  border-radius: 6px; font-size: 0.78rem;
+}
+.truck-split-summary {
+  cursor: pointer; user-select: none; list-style: none;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.68rem; font-weight: 600; color: var(--text-dim);
+}
+.truck-split-summary::-webkit-details-marker { display: none; }
+.truck-split-summary::before {
+  content: '▸'; display: inline-block; margin-right: 0.4rem;
+  transition: transform 0.15s;
+}
+.truck-split[open] .truck-split-summary::before { transform: rotate(90deg); }
+.truck-split-rows { padding: 0 0.4rem 0.4rem; display: flex; flex-direction: column; gap: 0.1rem; }
+.truck-split-row {
+  display: grid; grid-template-columns: 1fr auto auto;
+  align-items: center; gap: 0.75rem;
+  padding: 0.28rem 0.45rem; border-radius: 4px;
+}
+.truck-split-row:hover { background: var(--bg); }
+.truck-split-unit { font-weight: 600; font-size: 0.76rem; }
+.truck-split-loads {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.truck-split-rev {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.76rem;
+  font-weight: 600; color: var(--accent); text-align: right; min-width: 5rem;
 }
 
 .month-note {

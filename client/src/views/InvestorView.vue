@@ -63,6 +63,11 @@
         :is-super-admin="authStore.user?.role === 'Super Admin'"
         @changed="loadData"
       />
+      <!-- Monthly payout statements — owed vs paid per month. `payouts` is
+           empty for the fleet-wide Super Admin view (no single investor to
+           owe), so the section only renders for investor-scoped data,
+           including the Super Admin read-only preview (?as_user_id=). -->
+      <MonthlyStatementsSection v-if="store.payouts.length" :payouts="store.payouts" />
       <div class="sections-row">
         <ProductionSection :production="store.production" :config="store.config" />
         <TrendSection :production="store.production" />
@@ -104,6 +109,7 @@ import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import EarningsSection from '../components/investor/EarningsSection.vue'
+import MonthlyStatementsSection from '../components/investor/MonthlyStatementsSection.vue'
 import ProductionSection from '../components/investor/ProductionSection.vue'
 import TrendSection from '../components/investor/TrendSection.vue'
 import AssetSection from '../components/investor/AssetSection.vue'

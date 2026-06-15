@@ -1734,6 +1734,31 @@ if (configCount === 0) {
 	]);
 }
 
+// Investor payout ledger — one row per (investor user, month) marks that
+// month's investor earnings as PAID OUT. A month is "paid" ⇔ a row exists;
+// deleting the row (unmark) reverts it to Pending. "Owed" is never stored
+// here as a source of truth — it's always recomputed live from the same
+// monthlyEarnings math the investor dashboard uses (buildInvestorDashboard),
+// so the ledger can't drift from the dashboard. `owed_snapshot` only records
+// what the computed owed was at mark-time, for audit ("we paid $X when the
+// books said $Y"). Keys on users.id (same convention as /api/investor
+// scoping and ?as_user_id= — NOT investors.id).
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_payouts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		investor_user_id INTEGER NOT NULL,
+		month TEXT NOT NULL,
+		amount_paid REAL NOT NULL DEFAULT 0,
+		owed_snapshot REAL NOT NULL DEFAULT 0,
+		note TEXT DEFAULT '',
+		marked_by TEXT DEFAULT '',
+		paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(investor_user_id, month)
+	)
+`);
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_investor_payouts_user ON investor_payouts(investor_user_id)"); } catch {}
+
 // --- Driver Onboarding ---
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_onboarding (
@@ -14349,8 +14374,19 @@ async function getJobTrackingCached() {
 }
 function jtCacheInvalidate() { _jtCache = null; }
 
-// GET /api/investor — Aggregated financial data for investor view
-app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {
+// buildInvestorDashboard — assembles the full investor-dashboard payload.
+// Extracted from the GET /api/investor handler (2026-06) so the Super Admin
+// payout-ledger endpoints reuse the EXACT same computation: a month's "owed"
+// is monthlyEarnings[].investorEarnings from this function, so the ledger can
+// never drift from what the investor's own dashboard shows. One aggregation
+// path — do NOT fork this math elsewhere.
+//   scope = { sessionUser, effectiveUserId, effectiveUsername, isPreview }
+//   (resolvePreviewUser()'s return shape — routes pass it straight through).
+// When isPreview=true (or the caller is an Investor) the investor-scoped
+// branch runs against effectiveUserId; a non-preview Super Admin gets the
+// fleet-wide branch, same as before the extraction. Throws on failure —
+// callers own the HTTP error response.
+async function buildInvestorDashboard(scope) {
 	try {
 		const jobTracking = await getJobTrackingCached();
 		// Drop soft-deleted + cancelled loads before any aggregation so investor
@@ -14358,22 +14394,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		jobTracking.data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 		const carrierDB = getCarrierDBFromSQLite();
 
-		// Super Admin can pass ?as_user_id=N to preview a specific investor's
-		// portal (read-only admin "view as" flow). When in preview mode the
-		// endpoint takes the investor-scoped branch using the target's user_id;
-		// `user` and `isSuperAdmin` shadow the session values so the rest of
-		// the endpoint scopes data as if the admin were logged in as that
+		// When in preview mode (or for a real Investor session) the function
+		// takes the investor-scoped branch using the effective user_id; `user`
+		// and `isSuperAdmin` shadow the session values so the rest of the
+		// computation scopes data as if the caller were logged in as that
 		// investor. Outside preview mode the values match the session user.
-		const preview = resolvePreviewUser(req);
 		const user = {
-			...preview.sessionUser,
-			id: preview.effectiveUserId,
-			username: preview.effectiveUsername,
+			...scope.sessionUser,
+			id: scope.effectiveUserId,
+			username: scope.effectiveUsername,
 		};
-		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
-		if (preview.isPreview) {
-			logAudit(req, "investor_preview_view", "investor", preview.effectiveUserId, "");
-		}
+		const isSuperAdmin = scope.sessionUser.role === "Super Admin" && !scope.isPreview;
 
 		// Resolve carrier DB columns (history sync moved to POST/PUT /api/drivers-directory)
 		const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
@@ -14511,6 +14542,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const milesByTruck = {};        // per-truck haversine miles
 		const loadsByDriver = {};       // per-driver completed load count (fallback when no truck column)
 		const loadsByTruck = {};        // per-truck completed load count (preferred when truck column exists)
+		// Per-MONTH load counts + per-month-per-truck {loads, revenue}. Bucketed by
+		// the load's ASSIGNED month — the same key monthlyRevenue uses — so the
+		// "loads hauled" count always reconciles with the revenue shown for that
+		// month in monthlyEarnings. ($0-rate completed loads count as hauled loads
+		// but contribute $0, so SUM(perTruck revenue) still equals monthlyRevenue.)
+		const monthlyLoadCounts = {};   // { "YYYY-MM": completed-load count }
+		const monthlyTruckStats = {};   // { "YYYY-MM": { unitLower: { loads, revenue } } }
+		const truckDisplayUnit = {};    // unitLower → original sheet casing for display
 		const driverDaySets = {};        // per-driver active day Sets (all-time, used for totals)
 		// Driver active days bucketed by LOAD'S ASSIGNED MONTH (not by physical day).
 		// This matches how revenue is bucketed — both should answer the question:
@@ -14601,6 +14640,25 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 								(driverMonthlyRevenue[driver][assignedMonthKey] || 0) + amt;
 						}
 					}
+				}
+				// Per-month load count + per-truck split (see accumulator comment
+				// above). Runs for EVERY completed load with an assigned month —
+				// including $0-rate rows — so the count answers "how many loads
+				// did we haul that month", while revenue stays identical to the
+				// monthlyRevenue bucketing above. Loads with no truck cell group
+				// under "unassigned" so per-truck loads still sum to the total.
+				if (assignedMonthKey) {
+					monthlyLoadCounts[assignedMonthKey] = (monthlyLoadCounts[assignedMonthKey] || 0) + 1;
+					const unitKey = truckUnit || "unassigned";
+					if (truckUnit && !truckDisplayUnit[truckUnit]) {
+						truckDisplayUnit[truckUnit] = String(r[jtTruckCol] || "").trim();
+					}
+					if (!monthlyTruckStats[assignedMonthKey]) monthlyTruckStats[assignedMonthKey] = {};
+					if (!monthlyTruckStats[assignedMonthKey][unitKey]) {
+						monthlyTruckStats[assignedMonthKey][unitKey] = { loads: 0, revenue: 0 };
+					}
+					monthlyTruckStats[assignedMonthKey][unitKey].loads += 1;
+					monthlyTruckStats[assignedMonthKey][unitKey].revenue += amt;
 				}
 			}
 
@@ -14975,9 +15033,20 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
 				if (isZeroActivity && rawFixedCosts > 0) deferredAccrual += rawFixedCosts;
 				const netProfit = revenue - driverPay - fixedCosts - tripExpenses;
+				// Per-truck {loads, revenue} for this month, keyed by the unit's
+				// original sheet casing ("Unassigned" bucket for loads with no
+				// truck cell). Sums reconcile: Σ perTruck.loads = loadsCompleted,
+				// Σ perTruck.revenue = revenue (± $1 rounding per truck).
+				const perTruck = {};
+				for (const [unitKey, stats] of Object.entries(monthlyTruckStats[mk] || {})) {
+					const label = unitKey === "unassigned" ? "Unassigned" : (truckDisplayUnit[unitKey] || unitKey);
+					perTruck[label] = { loads: stats.loads, revenue: Math.round(stats.revenue) };
+				}
 				monthlyEarnings.push({
 					month: mk,
 					revenue: Math.round(revenue),
+					loadsCompleted: monthlyLoadCounts[mk] || 0,
+					perTruck,
 					driverPay: Math.round(driverPay),
 					driverDetails: monthlyDriverDetails[mk] || {},
 					fixedCosts,
@@ -15204,7 +15273,59 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				.map(shapeMyLoad),
 		};
 
-		res.json({
+		// ---- Monthly payout statements (investor-scoped only) ----
+		// One entry per monthlyEarnings month. `owed` IS that month's
+		// investorEarnings — read off the same array, never recomputed — merged
+		// with investor_payouts ledger rows for paid status. Ledger rows whose
+		// month fell out of the computed range (sheet data changed after the
+		// month was marked) still surface with owed=0 so a recorded payment is
+		// never silently hidden. Empty for the fleet-wide Super Admin branch —
+		// there's no single investor to owe.
+		let payouts = [];
+		if (investorOwnerId) {
+			const payoutRows = db.prepare(
+				"SELECT id, month, amount_paid, owed_snapshot, COALESCE(note, '') AS note, COALESCE(marked_by, '') AS marked_by, strftime('%Y-%m-%dT%H:%M:%SZ', paid_at) AS paid_at_iso FROM investor_payouts WHERE investor_user_id = ?"
+			).all(investorOwnerId);
+			const payoutByMonth = new Map(payoutRows.map((p) => [p.month, p]));
+			const shapePayout = (p) => ({
+				id: p.id,
+				amountPaid: p.amount_paid,
+				owedSnapshot: p.owed_snapshot,
+				note: p.note,
+				markedBy: p.marked_by,
+				paidAt: p.paid_at_iso,
+			});
+			const computedMonths = new Set(monthlyEarnings.map((m) => m.month));
+			payouts = [
+				...monthlyEarnings.map((m) => {
+					const p = payoutByMonth.get(m.month);
+					return {
+						month: m.month,
+						loads: m.loadsCompleted,
+						revenue: m.revenue,
+						perTruck: m.perTruck,
+						owed: m.investorEarnings,
+						isCurrentMonth: m.isCurrentMonth,
+						paid: !!p,
+						payout: p ? shapePayout(p) : null,
+					};
+				}),
+				...payoutRows
+					.filter((p) => !computedMonths.has(p.month))
+					.map((p) => ({
+						month: p.month,
+						loads: 0,
+						revenue: 0,
+						perTruck: {},
+						owed: 0,
+						isCurrentMonth: false,
+						paid: true,
+						payout: shapePayout(p),
+					})),
+			].sort((a, b) => a.month.localeCompare(b.month));
+		}
+
+		return {
 			production: {
 				totalRevenue: Math.round(totalRevenue),
 				avgDailyRevenue: Math.round(avgDailyRevenue),
@@ -15251,6 +15372,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				completedJobs: completedJobCount,
 			},
 			myLoads,
+			payouts,
 			config,
 			investor: investorProfile ? {
 				id: investorProfile.id,
@@ -15259,9 +15381,171 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				carrierName: investorProfile.carrier_name || "",
 				username: user.username || "",
 			} : null,
-		});
+		};
 	} catch (error) {
 		console.error("Error building investor data:", error.message);
+		throw error;
+	}
+}
+
+// GET /api/investor — Aggregated financial data for investor view
+app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {
+	try {
+		// Super Admin can pass ?as_user_id=N to preview a specific investor's
+		// portal (read-only admin "view as" flow). resolvePreviewUser validates
+		// the target and silently falls back to the session user otherwise.
+		const preview = resolvePreviewUser(req);
+		if (preview.isPreview) {
+			logAudit(req, "investor_preview_view", "investor", preview.effectiveUserId, "");
+		}
+		res.json(await buildInvestorDashboard(preview));
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// ============================================================
+// INVESTOR PAYOUT LEDGER (Super Admin)
+// ============================================================
+
+// GET /api/admin/investor-payouts — monthly statements for every investor
+// that has portal access (users.role='Investor'): per month → loads, revenue,
+// owed and paid status. Owed comes from buildInvestorDashboard's payouts
+// section — the exact monthlyEarnings.investorEarnings the investor's own
+// portal shows — so admin and investor views reconcile by construction.
+// Investor records without a linked login (investors.user_id NULL) are
+// omitted: earnings scoping keys on users.id, so there is nothing to compute.
+app.get("/api/admin/investor-payouts", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const investorUsers = db.prepare(`
+			SELECT u.id, u.username, COALESCE(NULLIF(TRIM(i.full_name), ''), u.username) AS display_name
+			FROM users u
+			LEFT JOIN investors i ON i.user_id = u.id
+			WHERE u.role = 'Investor'
+			ORDER BY display_name COLLATE NOCASE ASC
+		`).all();
+		const statements = [];
+		for (const u of investorUsers) {
+			const dash = await buildInvestorDashboard({
+				sessionUser: req.session.user,
+				effectiveUserId: u.id,
+				effectiveUsername: u.username,
+				isPreview: true,
+			});
+			const months = dash.payouts || [];
+			const owedAllTime = months.reduce((s, m) => s + (m.owed || 0), 0);
+			const totalPaid = months.reduce((s, m) => s + (m.paid && m.payout ? (m.payout.amountPaid || 0) : 0), 0);
+			// Outstanding = unpaid, completed (non-current) months, summed as-is.
+			// Negative (loss) months net against positive ones — the same
+			// carry-forward semantics as the dashboard's investorNetToDate.
+			const outstanding = months.reduce(
+				(s, m) => s + (!m.paid && !m.isCurrentMonth ? (m.owed || 0) : 0), 0
+			);
+			statements.push({
+				investorUserId: u.id,
+				username: u.username,
+				fullName: u.display_name,
+				months,
+				totals: {
+					owedAllTime: Math.round(owedAllTime),
+					paid: Math.round(totalPaid * 100) / 100,
+					outstanding: Math.round(outstanding),
+				},
+			});
+		}
+		res.json({ statements });
+	} catch (error) {
+		console.error("Error building investor payout statements:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// POST /api/admin/investor-payouts — mark an investor's month as PAID.
+// Body: { investorUserId, month: "YYYY-MM", amount, note? }. amount = what was
+// actually transferred (prefilled with owed in the UI but editable, so a
+// partial/adjusted payment is recorded truthfully). The live computed owed is
+// snapshotted alongside for audit. UNIQUE(investor_user_id, month) turns a
+// double-mark into a 409 instead of a duplicate payment row.
+app.post("/api/admin/investor-payouts", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const investorUserId = parseInt(req.body && req.body.investorUserId, 10);
+		const month = String((req.body && req.body.month) || "").trim();
+		const amount = Number(req.body && req.body.amount);
+		const note = String((req.body && req.body.note) || "").trim().slice(0, 500);
+		if (!Number.isFinite(investorUserId) || investorUserId <= 0) {
+			return res.status(400).json({ error: "Invalid investorUserId" });
+		}
+		if (!/^\d{4}-\d{2}$/.test(month) || parseInt(month.slice(5, 7), 10) < 1 || parseInt(month.slice(5, 7), 10) > 12) {
+			return res.status(400).json({ error: "Invalid month — must be YYYY-MM" });
+		}
+		const now = new Date();
+		const currentKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+		if (month > currentKey) {
+			return res.status(400).json({ error: "Cannot mark a future month as paid" });
+		}
+		// amount ≥ 0: zero is allowed so a loss/zero month can still be closed
+		// out ("settled, nothing transferred"); negatives are rejected.
+		if (!Number.isFinite(amount) || amount < 0) {
+			return res.status(400).json({ error: "Amount must be a non-negative number" });
+		}
+		const target = db.prepare("SELECT id, username FROM users WHERE id = ? AND role = 'Investor'").get(investorUserId);
+		if (!target) return res.status(404).json({ error: "Investor user not found" });
+		// Snapshot the live owed — same computation the investor dashboard runs.
+		const dash = await buildInvestorDashboard({
+			sessionUser: req.session.user,
+			effectiveUserId: target.id,
+			effectiveUsername: target.username,
+			isPreview: true,
+		});
+		const monthEntry = ((dash.production && dash.production.monthlyEarnings) || []).find((m) => m.month === month);
+		const owedSnapshot = monthEntry ? (monthEntry.investorEarnings || 0) : 0;
+		const markedBy = req.session.user.username || "";
+		let result;
+		try {
+			result = db.prepare(
+				"INSERT INTO investor_payouts (investor_user_id, month, amount_paid, owed_snapshot, note, marked_by) VALUES (?, ?, ?, ?, ?, ?)"
+			).run(investorUserId, month, amount, owedSnapshot, note, markedBy);
+		} catch (e) {
+			const msg = String((e && e.message) || "");
+			if (String((e && e.code) || "").startsWith("SQLITE_CONSTRAINT") || msg.includes("UNIQUE")) {
+				return res.status(409).json({ error: `${month} is already marked paid for this investor` });
+			}
+			throw e;
+		}
+		logAudit(req, "investor_payout_marked", "investor_payout", result.lastInsertRowid,
+			`${target.username} ${month}: paid $${amount} (computed owed $${owedSnapshot})${note ? " — " + note : ""}`);
+		notifyChange("investor");
+		const row = db.prepare(
+			"SELECT id, investor_user_id, month, amount_paid, owed_snapshot, COALESCE(note, '') AS note, COALESCE(marked_by, '') AS marked_by, strftime('%Y-%m-%dT%H:%M:%SZ', paid_at) AS paid_at, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM investor_payouts WHERE id = ?"
+		).get(result.lastInsertRowid);
+		res.json({ success: true, payout: row });
+	} catch (error) {
+		console.error("Error marking investor payout:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// DELETE /api/admin/investor-payouts/:id — unmark (undo a mistaken
+// mark-as-paid). Reverts the month to Pending. The deleted row's full
+// contents go into the audit trail so the action is reconstructable.
+app.delete("/api/admin/investor-payouts/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id, 10);
+		if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
+		const row = db.prepare(`
+			SELECT p.id, p.investor_user_id, p.month, p.amount_paid, p.owed_snapshot, COALESCE(p.note, '') AS note, u.username
+			FROM investor_payouts p
+			LEFT JOIN users u ON u.id = p.investor_user_id
+			WHERE p.id = ?
+		`).get(id);
+		if (!row) return res.status(404).json({ error: "Not found" });
+		db.prepare("DELETE FROM investor_payouts WHERE id = ?").run(id);
+		logAudit(req, "investor_payout_unmarked", "investor_payout", id,
+			`${row.username || row.investor_user_id} ${row.month}: removed paid record of $${row.amount_paid} (owed snapshot $${row.owed_snapshot})${row.note ? " — " + row.note : ""}`);
+		notifyChange("investor");
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error unmarking investor payout:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
