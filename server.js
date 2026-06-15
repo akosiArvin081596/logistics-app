@@ -480,6 +480,45 @@ function logAudit(req, action, entity, entityId, details) {
 	} catch (err) { console.error("Audit log error:", err.message); }
 }
 
+// Load status phase history — append-only transition log. Powers the per-phase
+// started/ended/duration timeline (admin load modals + driver app). Forward-only:
+// rows accrue from the moment this ships; pre-existing loads have none. Mirrors
+// the audit_trail idiom above.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS load_status_history (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		load_id TEXT NOT NULL,
+		old_status TEXT DEFAULT '',
+		new_status TEXT NOT NULL,
+		source TEXT NOT NULL DEFAULT 'manual',
+		actor TEXT DEFAULT '',
+		changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_lsh_load ON load_status_history(load_id, changed_at)`); } catch {}
+
+const insertStatusHistory = db.prepare(
+	`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor) VALUES (?, ?, ?, ?, ?)`
+);
+
+// Record one load status transition for the phase timeline. Best-effort: never
+// throws into the caller (a failed history write must not break a status update),
+// and skips no-op transitions (old === new, case-insensitive) so a re-saved
+// identical status or a geofence re-fire doesn't create duplicate rows. load_id
+// is normalized (lowercase, leading '#' stripped) to match the lookup convention.
+function recordStatusChange({ loadId, oldStatus, newStatus, source, actor }) {
+	try {
+		const lid = String(loadId || "").trim().toLowerCase().replace(/^#/, "");
+		const ns = String(newStatus || "").trim();
+		if (!lid || !ns) return;
+		const os = String(oldStatus || "").trim();
+		if (os && os.toLowerCase() === ns.toLowerCase()) return; // no-op transition
+		insertStatusHistory.run(lid, os, ns, source || "manual", String(actor || "").trim());
+	} catch (err) {
+		console.error("recordStatusChange error:", err.message);
+	}
+}
+
 // Escape applicant-controlled text before interpolating into HTML email bodies.
 // Submission and acceptance emails embed full_name, address, phone, etc.; without
 // this, a name like `<img src=x onerror=...>` would render in the admin's mail
@@ -8664,6 +8703,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 
 		logAudit(req, 'dispatch_load', 'load', loadId, `Assigned driver ${driver} to load ${loadId}`);
+			recordStatusChange({ loadId, newStatus: 'Dispatched', source: 'dispatch', actor: req.session?.user?.username || '' });
 		notifyChange("dashboard"); jtCacheInvalidate();
 		res.json({ success: true });
 	} catch (error) {
@@ -8842,6 +8882,7 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 				requestBody: { values: [["Cancelled"]] },
 			});
 		}
+		recordStatusChange({ loadId, newStatus: 'Cancelled', source: 'cancel', actor: req.session?.user?.username || '' });
 
 		// Notify driver
 		if (driver) {
@@ -9092,6 +9133,7 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 					requestBody: { values: [["Assigned"]] },
 				});
 			}
+			recordStatusChange({ loadId, oldStatus: 'Dispatched', newStatus: 'Assigned', source: 'accept', actor: driverName });
 
 			// Notify dispatch
 			insertDispatchNotification.run(
@@ -9132,6 +9174,7 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 					requestBody: { values: [["Unassigned"]] },
 				});
 			}
+			recordStatusChange({ loadId, newStatus: 'Unassigned', source: 'decline', actor: driverName });
 
 			// Notify dispatch
 			insertDispatchNotification.run(
@@ -10451,6 +10494,7 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 		});
 
 		logAudit(req, 'update_status', 'load', loadId, `Status changed to "${newStatus}" for load ${loadId} (driver: ${driverName})`);
+		recordStatusChange({ loadId, oldStatus, newStatus, source: 'manual', actor: driverName });
 		res.json({ success: true });
 	} catch (error) {
 		console.error("Error updating driver status:", error.message);
@@ -10551,9 +10595,67 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		});
 
 		logAudit(req, 'status_override', 'load', loadId, `Override "${oldStatus}" → "${newStatus}" by ${overrideUser}: ${reason.trim()}`);
+		recordStatusChange({ loadId, oldStatus, newStatus, source: 'override', actor: overrideUser });
 		res.json({ success: true, oldStatus, newStatus });
 	} catch (error) {
 		console.error("Error overriding load status:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/loads/:loadId/status-history — per-phase timeline for one load.
+// Returns ordered raw transitions PLUS a derived phases[] (started/ended/duration),
+// computed server-side so the driver app and the admin modals render identical
+// numbers. Roles: Super Admin + Dispatcher see any load; a Driver only their own
+// (same ownership gate the write paths use). Forward-only: loads that predate this
+// feature return empty arrays (the UI shows a friendly empty state).
+app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
+	try {
+		const rawId = (req.params.loadId || "").trim();
+		if (!rawId || !/^[A-Za-z0-9\-_.#]{1,40}$/.test(rawId)) {
+			return res.status(400).json({ error: "Invalid load id" });
+		}
+		const role = req.session.user.role;
+		if (role === "Driver") {
+			const owned = await loadBelongsToDriver(rawId, req.session.user.driverName || "");
+			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
+		} else if (role !== "Super Admin" && role !== "Dispatcher") {
+			return res.status(403).json({ error: "Forbidden" });
+		}
+
+		const lid = rawId.toLowerCase().replace(/^#/, "");
+		const rows = db.prepare(
+			`SELECT old_status AS oldStatus, new_status AS newStatus, source, actor,
+			        strftime('%Y-%m-%dT%H:%M:%SZ', changed_at) AS at
+			 FROM load_status_history
+			 WHERE load_id = ?
+			 ORDER BY changed_at ASC, id ASC`
+		).all(lid);
+
+		// Each transition opens a phase; its end = the next transition's start.
+		// The last phase is in-progress unless its status is terminal.
+		const TERMINAL_RE = /^(delivered|completed|pod received|cancel|canceled|cancelled)$/i;
+		const phases = rows.map((r, i) => {
+			const next = rows[i + 1];
+			const startedAt = r.at;
+			const endedAt = next ? next.at : null;
+			const durationMs = endedAt ? (new Date(endedAt) - new Date(startedAt)) : null;
+			const terminal = !next && TERMINAL_RE.test((r.newStatus || "").trim());
+			return {
+				status: r.newStatus,
+				source: r.source,
+				actor: r.actor,
+				startedAt,
+				endedAt,
+				durationMs,
+				inProgress: !next && !terminal,
+				terminal,
+			};
+		});
+
+		res.json({ loadId: rawId, transitions: rows, phases });
+	} catch (error) {
+		console.error("status-history error:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
@@ -12638,6 +12740,7 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				requestBody: { values: [[trigger]] },
 			});
 			jtCacheInvalidate();
+			recordStatusChange({ loadId, oldStatus: loadObj[statusCol] || '', newStatus: trigger, source: 'geofence', actor: driverName });
 
 			const geoMsg = trigger === "At Shipper"
 				? "You have arrived at the pickup location"
