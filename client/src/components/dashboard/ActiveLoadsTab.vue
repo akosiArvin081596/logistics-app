@@ -205,6 +205,12 @@
             </div>
           </template>
           <div style="margin-bottom:1rem;">
+            <div class="dash-section-title">Status Timeline</div>
+            <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
+              <StatusTimeline v-if="loadIdValue" :load-id="loadIdValue" />
+            </div>
+          </div>
+          <div style="margin-bottom:1rem;">
             <div class="dash-section-title">Documents</div>
             <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
               <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
@@ -371,6 +377,7 @@ import { Button } from '@/components/ui/button'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import StatusBadge from '../shared/StatusBadge.vue'
+import StatusTimeline from '../shared/StatusTimeline.vue'
 import StarRating from '../shared/StarRating.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'

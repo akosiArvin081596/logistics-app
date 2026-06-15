@@ -85,6 +85,11 @@
 
     <!-- Main accordion sections -->
     <van-collapse v-model="openSections" class="detail-collapse" :border="false">
+      <van-collapse-item title="Status Timeline" name="timeline">
+        <div class="timeline-collapse-body">
+          <StatusTimeline :load-id="String(loadId || '')" compact />
+        </div>
+      </van-collapse-item>
       <van-collapse-item title="Truck Details" name="truck">
         <template v-if="truck">
           <div class="truck-detail-card">
@@ -209,6 +214,7 @@ import { computed, ref } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
 import { splitAddress } from '../../lib/address.js'
 import StatusBadge from '../shared/StatusBadge.vue'
+import StatusTimeline from '../shared/StatusTimeline.vue'
 import StatusStepper from './StatusStepper.vue'
 import DocumentList from './DocumentList.vue'
 import DocumentUpload from './DocumentUpload.vue'
