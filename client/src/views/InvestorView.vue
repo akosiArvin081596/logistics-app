@@ -243,14 +243,19 @@ async function downloadReport() {
     const res = await fetch(`/api/investor/report${qs}`, { credentials: 'include' })
     if (!res.ok) throw new Error('Failed')
     const blob = await res.blob()
+    const cd = res.headers.get('Content-Disposition') || ''
+    const match = cd.match(/filename="?([^"]+)"?/)
+    const filename = match ? match[1] : 'investor-report.pdf'
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    const cd = res.headers.get('Content-Disposition') || ''
-    const match = cd.match(/filename="(.+)"/)
-    a.download = match ? match[1] : 'report.pdf'
+    a.download = filename
+    document.body.appendChild(a)
     a.click()
-    URL.revokeObjectURL(url)
+    a.remove()
+    // Defer revoke: revoking synchronously after click() races the download and
+    // makes Chrome fall back to a blob-UUID filename with no extension.
+    setTimeout(() => URL.revokeObjectURL(url), 1500)
   } catch {
     toast('Failed to generate report', 'error')
   } finally {
