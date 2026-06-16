@@ -142,7 +142,12 @@ const driverLatLng = computed(() => {
   return { lat: props.driverPosition.latitude, lng: props.driverPosition.longitude }
 })
 
-const statusCol = computed(() => (props.headers || []).find(h => /^status$/i.test(h)) || null)
+// Match "Status" AND "Job Status" (the Job Tracking sheet's column name used on
+// the dispatcher dashboard). Anchored so it never grabs "Status Update Date" or
+// "Carrier Stage". Without this the dispatcher's status was always empty, so an
+// In-Transit load was treated as not-yet-picked-up and the route/ETA was drawn to
+// the PICKUP (full haul) instead of from the truck's position to the DROP-OFF.
+const statusCol = computed(() => (props.headers || []).find(h => /^(job[\s_-]*)?status$/i.test(h)) || null)
 const loadStatus = computed(() => !props.load || !statusCol.value ? '' : (props.load[statusCol.value] || '').trim().toLowerCase())
 const isDelivered = computed(() => /^(delivered|completed|pod received)$/i.test(loadStatus.value))
 const hasCoords = computed(() => destLatLng.value != null && (!isDelivered.value || props.dispatchMode))
