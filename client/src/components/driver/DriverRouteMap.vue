@@ -425,7 +425,15 @@ function fitBounds() {
 
 let initialFitDone = false
 
+// Monotonic guard against out-of-order responses. Several fetchRoute() calls can
+// be in flight at once — on the dispatcher dashboard an initial origin→drop-off
+// fetch fires before the ELD position loads, then a driver→drop-off fetch fires
+// once it arrives. The full-haul response is larger and can land LAST, clobbering
+// the correct current-leg distance/ETA with the whole planned haul. We apply only
+// the latest invocation's result so the ETA stays on the live leg.
+let fetchSeq = 0
 async function fetchRoute(doFit = false) {
+  const mySeq = ++fetchSeq
   routePoints.value = []
   distanceMiles.value = null
   etaMinutes.value = null
@@ -461,6 +469,7 @@ async function fetchRoute(doFit = false) {
       } catch { /* silent */ }
     }
     if (!data || !data.routes || data.routes.length === 0) return
+    if (mySeq !== fetchSeq) return // a newer fetchRoute() superseded this — drop the stale (e.g. full-haul) response
 
     allRoutes.value = data.routes
     recommendedIdx.value = typeof data.recommendedIdx === 'number' ? data.recommendedIdx : 0
