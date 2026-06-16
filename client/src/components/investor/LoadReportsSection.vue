@@ -1,11 +1,14 @@
 <!--
   LoadReportsSection — weekly & monthly load reports + totals owed for the
   investor portal. Fetches GET /api/investor/load-report (per-period load lists +
-  gross + a gross-based share estimate). For MONTHLY it shows the authoritative
-  NET investor share from the dashboard's monthlyEarnings (passed in via
-  :production), so numbers reconcile with the rest of the portal. "Owed to date"
-  is the cumulative investorNetToDate. Honors Super-Admin "view as investor"
-  through the :preview-user-id prop (threaded as ?as_user_id=).
+  gross revenue). Broker identity is never shown. "Your Share" is the authoritative
+  NET investor earnings from the dashboard's monthlyEarnings (passed in via
+  :production): the monthly total, and per completed load its rate-weighted slice
+  of that month's net — so every figure reconciles with EarningsSection / the rest
+  of the portal. Weekly has no monthly-net mapping, so it shows loads + gross only.
+  Exports pass the same net back as ?net=YYYY-MM:amount so the PDF/CSV reconcile too.
+  "Owed to date" is the cumulative investorNetToDate. Honors Super-Admin "view as
+  investor" through the :preview-user-id prop (threaded as ?as_user_id=).
 -->
 <template>
   <div class="lr-section">
@@ -51,21 +54,17 @@
           <div class="lr-card-label">Your Share (net)</div>
           <div class="lr-card-value accent">{{ fmtMoney(monthlyNet) }}</div>
         </div>
-        <div class="lr-card" v-else>
-          <div class="lr-card-label">Your Share <span class="lr-est">est</span></div>
-          <div class="lr-card-value accent">{{ fmtMoney(sel.investorShareEst) }}</div>
-        </div>
       </div>
 
       <p v-if="period === 'weekly'" class="lr-note">
-        Weekly share is an estimate at {{ splitPct }}% of gross; settled net amounts are reconciled monthly.
+        Net investor share is reconciled monthly — switch to Monthly to see your share.
       </p>
 
       <div class="lr-table-wrap" v-if="sel">
         <table class="lr-table">
           <thead>
             <tr>
-              <th>Load</th><th>Status</th><th>Route</th><th>Broker</th>
+              <th>Load</th><th>Status</th><th>Route</th>
               <th class="num">Rate</th><th class="num">Your Share</th>
             </tr>
           </thead>
@@ -74,11 +73,10 @@
               <td class="mono">{{ l.loadId }}</td>
               <td><span class="lr-badge">{{ l.status || '—' }}</span></td>
               <td class="lr-route">{{ l.pickup || '—' }} → {{ l.dropoff || '—' }}</td>
-              <td>{{ l.broker || '—' }}</td>
               <td class="num">{{ l.rate ? fmtMoney(l.rate) : '—' }}</td>
-              <td class="num">{{ l.completed ? fmtMoney(l.yourShare) : '—' }}</td>
+              <td class="num">{{ shareOf(l) == null ? '—' : fmtMoney(shareOf(l)) }}</td>
             </tr>
-            <tr v-if="!sel.loads.length"><td colspan="6" class="lr-empty">No loads in this period.</td></tr>
+            <tr v-if="!sel.loads.length"><td colspan="5" class="lr-empty">No loads in this period.</td></tr>
           </tbody>
         </table>
       </div>
@@ -102,7 +100,6 @@ const { show: toast } = useToast()
 
 const period = ref('monthly')
 const periods = ref([])
-const splitPct = ref(Number(props.config?.investor_split_pct) || 50)
 const selectedIdx = ref(0)
 const loading = ref(false)
 const error = ref(false)
@@ -117,6 +114,47 @@ const monthlyNet = computed(() => {
   return m ? (m.investorEarnings || 0) : null
 })
 
+// Allocate the month's authoritative net investor earnings (monthlyNet) across
+// its completed loads, rate-weighted, as whole dollars that sum EXACTLY to
+// monthlyNet (largest-remainder) so the rows reconcile with the "Your Share
+// (net)" card above. {} when there's no monthly net (e.g. the weekly view) —
+// never a gross-based estimate. Mirrors allocateNet() in server.js — keep in sync.
+function allocateNet(loads, net) {
+  const out = {}
+  if (net == null) return out
+  const done = (loads || []).filter((l) => l.completed && (l.rate || 0) > 0)
+  const denom = done.reduce((s, l) => s + l.rate, 0)
+  if (denom <= 0) return out
+  const target = Math.round(net)
+  let allocated = 0
+  const rema = []
+  for (const l of done) {
+    const exact = (target * l.rate) / denom
+    const base = Math.floor(exact)
+    out[l.loadId] = base
+    allocated += base
+    rema.push({ id: l.loadId, f: exact - base })
+  }
+  let leftover = target - allocated
+  rema.sort((a, b) => b.f - a.f)
+  for (let i = 0; i < rema.length && leftover > 0; i++, leftover--) out[rema[i].id] += 1
+  return out
+}
+const shareMap = computed(() => allocateNet(sel.value?.loads, monthlyNet.value))
+function shareOf(l) {
+  if (!l) return null
+  return Object.prototype.hasOwnProperty.call(shareMap.value, l.loadId) ? shareMap.value[l.loadId] : null
+}
+
+// Authoritative net per month from the dashboard, handed to the export so the
+// PDF/CSV reconcile with the portal. Server matches by YYYY-MM; weekly ignores it.
+function netParam() {
+  return (props.production?.monthlyEarnings || [])
+    .filter((m) => m && m.month)
+    .map((m) => `${m.month}:${Math.round(m.investorEarnings || 0)}`)
+    .join(',')
+}
+
 function previewParams(extra) {
   const params = new URLSearchParams(extra || {})
   if (props.previewUserId != null) params.set('as_user_id', String(props.previewUserId))
@@ -130,7 +168,6 @@ async function fetchReport() {
     const qs = previewParams({ period: period.value }).toString()
     const r = await api.get(`/api/investor/load-report?${qs}`)
     periods.value = Array.isArray(r.periods) ? r.periods : []
-    if (r.splitPct) splitPct.value = r.splitPct
     selectedIdx.value = 0
   } catch {
     error.value = true
@@ -150,7 +187,10 @@ watch(() => props.previewUserId, fetchReport)
 
 async function exportReport(format) {
   try {
-    const qs = previewParams({ period: period.value, format }).toString()
+    const extra = { period: period.value, format }
+    const net = netParam()
+    if (net) extra.net = net
+    const qs = previewParams(extra).toString()
     const res = await fetch(`/api/investor/load-report?${qs}`, { credentials: 'include' })
     if (!res.ok) throw new Error('Failed')
     const blob = await res.blob()
@@ -209,7 +249,6 @@ fetchReport()
 .lr-card-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: #94a3b8; }
 .lr-card-value { font-size: 1.2rem; font-weight: 700; color: #0f172a; margin-top: 2px; }
 .lr-card-value.accent { color: #15803d; }
-.lr-est { font-size: 0.6rem; background: #fde68a; color: #92400e; padding: 0 5px; border-radius: 999px; vertical-align: middle; }
 .lr-note { font-size: 0.74rem; color: #94a3b8; margin: 0.1rem 0 0.5rem; }
 
 .lr-table-wrap { overflow-x: auto; margin-top: 0.4rem; }
