@@ -12072,12 +12072,14 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 
 // GET /api/investor/load-report — Per-period load report for an investor.
 // period=weekly (Sat–Fri, via getWeekRange) | monthly. Returns the actual loads
-// in each period plus load count, gross revenue (completed loads), and a
-// gross-based investor-share ESTIMATE (gross × split — same convention as
-// myLoads.yourShare). The authoritative NET monthly share + cumulative
-// owed-to-date come from the dashboard's monthlyEarnings/investorNetToDate, so
-// this endpoint deliberately avoids duplicating that money math. Honors
-// ?as_user_id= preview like the other /api/investor/* endpoints. format=json|csv|pdf.
+// in each period plus load count and gross revenue (completed loads). Broker /
+// customer identity is deliberately NOT exposed here — the investor portal must
+// never leak broker contacts. No share is derived from gross: the authoritative
+// NET monthly share lives in the dashboard's monthlyEarnings/investorNetToDate.
+// For CSV/PDF exports the caller passes ?net=YYYY-MM:amount,... (the per-month net
+// investor earnings from monthlyEarnings); each completed load's "Your Share" is
+// that month's net allocated proportionally by rate, so the exported rows
+// reconcile with the dashboard exactly. Honors ?as_user_id= preview. format=json|csv|pdf.
 app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const period = req.query.period === "weekly" ? "weekly" : "monthly";
@@ -12115,7 +12117,6 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		const dateCol = findCol(headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(headers, /date/i);
 		const truckCol = findCol(headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
 		const statusCol = findCol(headers, /status/i);
-		const brokerCol = findCol(headers, /broker|customer/i);
 		const pickupDateCol = findCol(headers, /pickup.*appo|pickup.*date/i);
 		const dropoffDateCol = findCol(headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
 		const originCol = headers.find((h) => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
@@ -12172,7 +12173,6 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			if (isCompleted) bucket.grossRevenue += gross;
 			bucket.loads.push({
 				loadId: lid, status,
-				broker: brokerCol ? (r[brokerCol] || "").trim() : "",
 				pickup: resolveCityState(r, "pickup", lid, originCol ? r[originCol] : ""),
 				dropoff: resolveCityState(r, "drop", lid, destCol ? r[destCol] : ""),
 				truck: truckCol ? (r[truckCol] || "").trim() : "",
@@ -12181,14 +12181,12 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 				dropDate: dropoffDateCol ? (r[dropoffDateCol] || "") : "",
 				rate: Math.round(gross),
 				completed: isCompleted,
-				yourShare: isCompleted ? Math.round(gross * investorSplit) : 0,
 			});
 		}
 
 		const periods = [...periodsMap.values()].sort((a, b) => (a.key < b.key ? 1 : -1)).slice(0, maxPeriods);
 		periods.forEach((p) => {
 			p.grossRevenue = Math.round(p.grossRevenue);
-			p.investorShareEst = Math.round(p.grossRevenue * investorSplit);
 			p.loads.sort((a, b) => (a.loadId < b.loadId ? 1 : -1));
 		});
 
@@ -12197,16 +12195,58 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			: (((db.prepare("SELECT full_name FROM investors WHERE user_id = ?").get(user.id) || {}).full_name) || user.username || "Investor");
 		const splitPct = Math.round(investorSplit * 100);
 
+		// Authoritative per-month NET investor earnings, supplied by the client from
+		// the dashboard's monthlyEarnings as ?net=YYYY-MM:amount,... Used only to
+		// render CSV/PDF exports so the document reconciles with the investor
+		// dashboard. No gross-based share is ever computed or shown.
+		const netByMonth = {};
+		String(req.query.net || "").split(",").forEach((pair) => {
+			const idx = pair.indexOf(":");
+			if (idx <= 0) return;
+			const k = pair.slice(0, idx).trim();
+			const amt = parseFloat(pair.slice(idx + 1));
+			if (/^\d{4}-\d{2}$/.test(k) && Number.isFinite(amt)) netByMonth[k] = amt;
+		});
+		const periodNet = (p) => (Object.prototype.hasOwnProperty.call(netByMonth, p.key) ? netByMonth[p.key] : null);
+		// Allocate a period's net investor earnings across its completed loads,
+		// rate-weighted, as whole dollars that sum EXACTLY to the period net
+		// (largest-remainder method) so the rows reconcile with the stated total.
+		// Returns {} (→ no share shown) when no net is known, e.g. the weekly view.
+		// Mirrors allocateNet() in client LoadReportsSection.vue — keep in sync.
+		const allocateNet = (loads, net) => {
+			const out = {};
+			if (net == null) return out;
+			const done = loads.filter((l) => l.completed && (l.rate || 0) > 0);
+			const denom = done.reduce((s, l) => s + l.rate, 0);
+			if (denom <= 0) return out;
+			const target = Math.round(net);
+			let allocated = 0;
+			const rema = [];
+			for (const l of done) {
+				const exact = (target * l.rate) / denom;
+				const base = Math.floor(exact);
+				out[l.loadId] = base;
+				allocated += base;
+				rema.push({ id: l.loadId, f: exact - base });
+			}
+			let leftover = target - allocated; // 0 <= leftover < done.length
+			rema.sort((a, b) => b.f - a.f);
+			for (let i = 0; i < rema.length && leftover > 0; i++, leftover--) out[rema[i].id] += 1;
+			return out;
+		};
+
 		if (format === "json") {
 			return res.json({ periodType: period, splitPct, investorName, periods });
 		}
 
 		if (format === "csv") {
 			const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
-			const lines = ["Period,Start,End,Load ID,Status,Broker,Pickup,Dropoff,Truck,Driver,Pickup Date,Drop Date,Rate,Completed,Your Share (est)"];
+			const lines = ["Period,Start,End,Load ID,Status,Pickup,Dropoff,Truck,Driver,Pickup Date,Drop Date,Rate,Completed,Your Share (net)"];
 			for (const p of periods) {
+				const shares = allocateNet(p.loads, periodNet(p));
 				for (const l of p.loads) {
-					lines.push([p.label, p.start, p.end, l.loadId, l.status, l.broker, l.pickup, l.dropoff, l.truck, l.driver, l.pickupDate, l.dropDate, l.rate, l.completed ? "Yes" : "No", l.yourShare].map(esc).join(","));
+					const ns = Object.prototype.hasOwnProperty.call(shares, l.loadId) ? shares[l.loadId] : null;
+					lines.push([p.label, p.start, p.end, l.loadId, l.status, l.pickup, l.dropoff, l.truck, l.driver, l.pickupDate, l.dropDate, l.rate, l.completed ? "Yes" : "No", ns == null ? "" : ns].map(esc).join(","));
 				}
 			}
 			res.setHeader("Content-Type", "text/csv");
@@ -12226,17 +12266,55 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		});
 		doc.fontSize(18).fillColor("#0f172a").text(`${period === "weekly" ? "Weekly" : "Monthly"} Load Report`);
 		doc.moveDown(0.2).fontSize(10).fillColor("#475569").text(investorName);
-		doc.fontSize(8).fillColor("#94a3b8").text(`Investor share shown is an estimate at ${splitPct}% of gross revenue. Settled monthly net figures appear on the investor dashboard. Generated by LogisX.`);
-		doc.moveDown(0.5);
-		for (const p of periods) {
-			doc.moveDown(0.4).fontSize(12).fillColor("#0f172a").text(p.label);
-			doc.fontSize(9).fillColor("#475569").text(`${p.loadCount} loads · Gross $${p.grossRevenue.toLocaleString()} · Your share (est) $${p.investorShareEst.toLocaleString()}`);
-			doc.moveDown(0.15).fontSize(8).fillColor("#334155");
-			for (const l of p.loads) {
-				const route = `${l.pickup || "?"} -> ${l.dropoff || "?"}`;
-				doc.text(`${l.loadId}  ${l.status}  ${route}  $${(l.rate || 0).toLocaleString()}${l.completed ? "  (share $" + l.yourShare.toLocaleString() + ")" : ""}`, { lineGap: 1 });
+		doc.fontSize(8).fillColor("#94a3b8").text(`"Your Share" is your net investor earnings — gross minus driver pay, fuel and fixed costs — reconciled with the totals on your investor dashboard. Generated by LogisX.`);
+		doc.moveDown(0.6);
+
+		// Fixed-column table so the statement reads cleanly (widths sum to the
+		// 532pt LETTER content area). Single-line rows (clip + no wrap) keep columns
+		// aligned; rows page-break safely.
+		const money = (n) => "$" + Math.round(Number(n) || 0).toLocaleString();
+		const L = doc.page.margins.left;
+		const cols = [
+			{ key: "load", x: L, w: 66 },
+			{ key: "status", x: L + 66, w: 78 },
+			{ key: "route", x: L + 144, w: 218 },
+			{ key: "rate", x: L + 362, w: 75, align: "right" },
+			{ key: "share", x: L + 437, w: 95, align: "right" },
+		];
+		const ROW_H = 13;
+		const bottom = () => doc.page.height - doc.page.margins.bottom;
+		const clip = (s, n) => { s = String(s == null ? "" : s); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
+		const row = (cells, { color = "#334155", size = 8, bold = false } = {}) => {
+			if (doc.y + ROW_H > bottom()) doc.addPage();
+			const y = doc.y;
+			doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(size).fillColor(color);
+			for (const c of cols) {
+				doc.text(cells[c.key] == null ? "" : String(cells[c.key]), c.x, y, { width: c.w, align: c.align || "left", lineBreak: false, ellipsis: true });
 			}
-			if (!p.loads.length) doc.fillColor("#94a3b8").text("No loads in this period.");
+			doc.font("Helvetica").x = L;
+			doc.y = y + ROW_H;
+		};
+
+		for (const p of periods) {
+			const net = periodNet(p);
+			const shares = allocateNet(p.loads, net);
+			if (doc.y + 46 > bottom()) doc.addPage();
+			doc.moveDown(0.5).font("Helvetica-Bold").fontSize(12).fillColor("#0f172a").text(p.label, L);
+			const shareTxt = net == null ? "" : `   ·   Your share (net) ${money(net)}`;
+			doc.font("Helvetica").fontSize(9).fillColor("#475569").text(`${p.loadCount} loads   ·   Gross ${money(p.grossRevenue)}${shareTxt}`, L);
+			doc.moveDown(0.4);
+			row({ load: "LOAD", status: "STATUS", route: "ROUTE", rate: "RATE", share: "YOUR SHARE" }, { color: "#94a3b8", size: 7, bold: true });
+			if (!p.loads.length) { doc.fontSize(8).fillColor("#94a3b8").text("No loads in this period.", L); continue; }
+			for (const l of p.loads) {
+				const ns = Object.prototype.hasOwnProperty.call(shares, l.loadId) ? shares[l.loadId] : null;
+				row({
+					load: l.loadId,
+					status: clip(l.status, 16),
+					route: clip(`${l.pickup || "?"} -> ${l.dropoff || "?"}`, 46),
+					rate: money(l.rate),
+					share: ns == null ? "—" : money(ns),
+				});
+			}
 		}
 		if (!periods.length) doc.moveDown().fontSize(11).fillColor("#94a3b8").text("No loads found for this investor in the selected range.");
 		doc.end();
