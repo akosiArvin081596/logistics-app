@@ -87,7 +87,6 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
-import { useToast } from '../../composables/useToast'
 
 const props = defineProps({
   production: { type: Object, default: () => ({}) },
@@ -96,7 +95,6 @@ const props = defineProps({
 })
 
 const api = useApi()
-const { show: toast } = useToast()
 
 const period = ref('monthly')
 const periods = ref([])
@@ -185,31 +183,21 @@ function setPeriod(p) {
 }
 watch(() => props.previewUserId, fetchReport)
 
-async function exportReport(format) {
-  try {
-    const extra = { period: period.value, format }
-    const net = netParam()
-    if (net) extra.net = net
-    const qs = previewParams(extra).toString()
-    const res = await fetch(`/api/investor/load-report?${qs}`, { credentials: 'include' })
-    if (!res.ok) throw new Error('Failed')
-    const blob = await res.blob()
-    const cd = res.headers.get('Content-Disposition') || ''
-    const match = cd.match(/filename="?([^"]+)"?/)
-    const filename = match ? match[1] : `load-report-${period.value}.${format}`
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    // Defer revoke: revoking synchronously after click() races the download and
-    // makes Chrome fall back to a blob-UUID filename with no extension.
-    setTimeout(() => URL.revokeObjectURL(url), 1500)
-  } catch {
-    toast('Failed to export report', 'error')
-  }
+function exportReport(format) {
+  // Direct same-origin download. The endpoint responds with
+  // Content-Disposition: attachment and we set an explicit download filename, so
+  // the browser saves it by that name. No fetch/blob is involved, so there's no
+  // object-URL that could be saved as a name-less UUID (the earlier bug).
+  const extra = { period: period.value, format }
+  const net = netParam()
+  if (net) extra.net = net
+  const qs = previewParams(extra).toString()
+  const a = document.createElement('a')
+  a.href = `/api/investor/load-report?${qs}`
+  a.download = `load-report-${period.value}.${format}`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
 }
 
 function fmtMoney(n) {
