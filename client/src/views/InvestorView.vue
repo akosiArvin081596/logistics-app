@@ -232,35 +232,21 @@ async function loadData() {
   }
 }
 
-async function downloadReport() {
-  reportLoading.value = true
-  try {
-    const params = new URLSearchParams()
-    if (reportStart.value) params.set('start', reportStart.value)
-    if (reportEnd.value) params.set('end', reportEnd.value)
-    if (store.isPreview) params.set('as_user_id', String(store.previewUserId))
-    const qs = params.toString() ? `?${params.toString()}` : ''
-    const res = await fetch(`/api/investor/report${qs}`, { credentials: 'include' })
-    if (!res.ok) throw new Error('Failed')
-    const blob = await res.blob()
-    const cd = res.headers.get('Content-Disposition') || ''
-    const match = cd.match(/filename="?([^"]+)"?/)
-    const filename = match ? match[1] : 'investor-report.pdf'
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    // Defer revoke: revoking synchronously after click() races the download and
-    // makes Chrome fall back to a blob-UUID filename with no extension.
-    setTimeout(() => URL.revokeObjectURL(url), 1500)
-  } catch {
-    toast('Failed to generate report', 'error')
-  } finally {
-    reportLoading.value = false
-  }
+function downloadReport() {
+  // Direct same-origin download — no fetch/blob, so the saved file can't become a
+  // name-less blob UUID (the bug investors hit). The endpoint sends
+  // Content-Disposition: attachment and we also set an explicit filename.
+  const params = new URLSearchParams()
+  if (reportStart.value) params.set('start', reportStart.value)
+  if (reportEnd.value) params.set('end', reportEnd.value)
+  if (store.isPreview) params.set('as_user_id', String(store.previewUserId))
+  const range = [reportStart.value, reportEnd.value].filter(Boolean).join('_')
+  const a = document.createElement('a')
+  a.href = `/api/investor/report${params.toString() ? `?${params.toString()}` : ''}`
+  a.download = `investor-report${range ? '-' + range : ''}.pdf`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
 }
 
 async function handleSaveConfig(config) {
