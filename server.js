@@ -914,6 +914,19 @@ function nextInvoiceNumber(date = new Date()) {
 	return `${day}-${row.n}`;
 }
 
+// Like nextInvoiceNumber but WITHOUT incrementing — used by dryRun/preview so a
+// preview never burns a real invoice number.
+const peekInvoiceSeqStmt = db.prepare("SELECT n FROM bison_invoice_seq WHERE day = ?");
+function peekInvoiceNumber(date = new Date()) {
+	const d = date instanceof Date ? date : new Date(date);
+	const day =
+		String(d.getMonth() + 1).padStart(2, "0") +
+		String(d.getDate()).padStart(2, "0") +
+		d.getFullYear();
+	const row = peekInvoiceSeqStmt.get(day);
+	return `${day}-${(row ? row.n : 0) + 1}`;
+}
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_locations (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12044,7 +12057,8 @@ app.post(
 			//    load's ACTUAL delivery/completion date from the sheet — never
 			//    today, never the rate-con scheduled date.
 			const today = new Date();
-			const invoiceId = nextInvoiceNumber(today);
+			// dryRun previews the next number without consuming it; a real draft commits it.
+			const invoiceId = dryRun ? peekInvoiceNumber(today) : nextInvoiceNumber(today);
 			const invoiceDate = bisonInvoice.formatDate(today);
 			const rawDeliveryDate = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
 			const deliveryDate = bisonInvoice.formatDate(rawDeliveryDate);
@@ -12080,7 +12094,7 @@ app.post(
 
 			// Dry-run / preview: generate everything but create no draft.
 			if (dryRun) {
-				return res.json({ success: true, n8nSkipped: true, invoiceId, invoicePdfBase64 });
+				return res.json({ success: true, preview: true, dryRun: true, invoiceId, invoicePdfBase64 });
 			}
 
 			// PRIMARY: create the Gmail draft directly via IMAP APPEND using the
@@ -12088,6 +12102,7 @@ app.post(
 			// token expiry. The draft lands in that mailbox's [Gmail]/Drafts.
 			const gmailUser = process.env.GMAIL_USER;
 			const gmailPass = process.env.GMAIL_APP_PASSWORD;
+			let imapError = null;
 			if (gmailUser && gmailPass) {
 				try {
 					await appendGmailDraft({
@@ -12101,8 +12116,9 @@ app.post(
 					});
 					return res.json({ success: true, invoiceId, via: "imap", draftMailbox: "[Gmail]/Drafts" });
 				} catch (e) {
+					imapError = e;
 					console.error("Bison invoice: IMAP draft failed:", e.message);
-					// fall through to the n8n fallback (if configured), else preview below
+					// fall through to the n8n fallback (if configured), else surface the error below
 				}
 			}
 
@@ -12144,9 +12160,18 @@ app.post(
 				}
 			}
 
-			// Nothing configured (or IMAP failed with no fallback): return the
-			// generated invoice for preview so the call still yields something useful.
-			return res.json({ success: true, n8nSkipped: true, invoiceId, invoicePdfBase64, note: "No Gmail/n8n draft target configured — invoice generated (preview only)." });
+			// IMAP was configured but failed, and no n8n fallback handled it →
+			// surface the failure instead of pretending it worked.
+			if (imapError) {
+				return res.status(502).json({
+					error: `Invoice ${invoiceId} was generated, but saving the Gmail draft failed (${imapError.message}). No draft was created — please retry.`,
+					code: "DRAFT_SAVE_FAILED",
+					invoiceId,
+				});
+			}
+			// Nothing configured: return the generated invoice for preview so the
+			// call still yields something useful.
+			return res.json({ success: true, preview: true, invoiceId, invoicePdfBase64, note: "No Gmail/n8n draft target configured — invoice generated (preview only)." });
 		} catch (err) {
 			console.error("Draft Bison invoice error:", err.message);
 			return res.status(500).json({ error: "Failed to draft Bison invoice." });
