@@ -48,7 +48,9 @@
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
             <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
             <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Open in Active Loads → Edit to fill the gaps.">⚠ Needs Review</span>
+            <button v-if="isBisonLoad" type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Generate the Bison invoice, attach the POD + rate-con, and save a Gmail draft for you to verify then send.">{{ drafting ? 'Drafting…' : '✉ Draft Invoice Email' }}</button>
           </div>
+          <div v-if="draftResult" :style="draftMsgStyle">{{ draftResult.msg }}</div>
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
@@ -187,7 +189,7 @@ const reviewBadgeStyle = {
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(sortedJobs)
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
 async function openDetail(job) {
-  selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0
+  selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
@@ -258,6 +260,53 @@ const sectionPatterns = [
 // single-line raw value in the Route section is redundant.
 const hiddenCols = /broker|phone|email|contact|contract|address/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
+
+// --- Draft Invoice Email (Bison loads only) --------------------------------
+// One-click: the backend pulls the rate-con from Drive, generates the invoice,
+// attaches the POD, validates the trailer, and saves a Gmail draft via n8n.
+// Show the button only on Bison loads (broker email ends @bisontransport.com —
+// the same rule the endpoint enforces); the backend is the real authority.
+const brokerEmailCol = computed(() =>
+  props.headers.find(h => /^email$/i.test(h)) || props.headers.find(h => /broker.*email|email/i.test(h)) || null
+)
+const isBisonLoad = computed(() => {
+  if (!selectedJob.value || !brokerEmailCol.value) return false
+  const e = String(selectedJob.value[brokerEmailCol.value] || '').trim().toLowerCase()
+  return /bisontransport\.com$/.test(e)
+})
+const drafting = ref(false)
+const draftResult = ref(null) // { ok: boolean, msg: string } | null
+const draftBtnStyle = computed(() => ({
+  marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
+  padding: '0.4rem 0.8rem', fontSize: '0.78rem', fontWeight: '700', borderRadius: '6px',
+  border: '1px solid #0f2847', background: drafting.value ? '#64748b' : '#0f2847', color: '#fff',
+  fontFamily: 'inherit', whiteSpace: 'nowrap', cursor: drafting.value ? 'not-allowed' : 'pointer',
+  opacity: drafting.value ? 0.85 : 1, transition: 'all 0.15s',
+}))
+const draftMsgStyle = computed(() => ({
+  marginTop: '0.5rem', fontSize: '0.78rem', fontWeight: '600',
+  padding: '0.4rem 0.6rem', borderRadius: '6px',
+  background: draftResult.value && draftResult.value.ok ? '#f0fdf4' : '#fef2f2',
+  color: draftResult.value && draftResult.value.ok ? '#166534' : '#991b1b',
+  border: '1px solid ' + (draftResult.value && draftResult.value.ok ? '#bbf7d0' : '#fecaca'),
+}))
+async function draftInvoice() {
+  if (!loadIdValue.value || drafting.value) return
+  drafting.value = true; draftResult.value = null
+  try {
+    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-bison-invoice`, {})
+    draftResult.value = {
+      ok: true,
+      msg: r.n8nSkipped
+        ? `Invoice ${r.invoiceId} generated — n8n isn't wired yet, so no Gmail draft was created.`
+        : `✓ Draft ready in Gmail (invoice ${r.invoiceId}). Verify the details, then send.`,
+    }
+  } catch (e) {
+    draftResult.value = { ok: false, msg: (e && e.message) || 'Failed to draft the invoice.' }
+  } finally {
+    drafting.value = false
+  }
+}
 const detailSections = computed(() => {
   if (!selectedJob.value) return []; const used = new Set(); const secs = []
   for (const c of props.headers) { if (hiddenCols.test(c)) used.add(c) }
