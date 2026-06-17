@@ -152,6 +152,18 @@ const filteredJobs = computed(() => {
   if (!q || !loadIdCol.value) return pool
   return pool.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q))
 })
+// Delivery date/time lives in "Completion Date" (stamped when a load is marked
+// delivered through the app; equals the final Status Update Date). Loads
+// delivered/imported before this tracking have it blank.
+const completionCol = computed(() => props.headers.find(h => /completion|complete/i.test(h)) || props.headers.find(h => /status.*update/i.test(h)) || null)
+// Order completed loads by delivery date, most recent first; loads with no
+// recorded delivery time sort to the bottom.
+const sortedJobs = computed(() => {
+  const col = completionCol.value
+  if (!col) return filteredJobs.value
+  const ts = (v) => { const d = new Date(v); return isNaN(d.getTime()) ? -Infinity : d.getTime() }
+  return [...filteredJobs.value].sort((a, b) => ts(b[col]) - ts(a[col]))
+})
 const reviewToggleStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
   padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
@@ -172,7 +184,7 @@ const reviewBadgeStyle = {
   color: '#92400e',
   whiteSpace: 'nowrap',
 }
-const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(sortedJobs)
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
 async function openDetail(job) {
   selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0
@@ -205,7 +217,7 @@ const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)
 const ORIGIN_KW_RE = /origin|pickup|shipper/i
 const DEST_KW_RE = /dest|drop|receiver|delivery/i
 const displayCols = computed(() => {
-  const kw = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate', 'delivery', 'date']
+  const kw = ['load', 'status', 'driver', 'origin', 'pickup', 'destination', 'drop', 'rate']
   const m = []
   for (const k of kw) { const c = props.headers.find(h => new RegExp(k, 'i').test(h) && !m.includes(h)); if (c) m.push(c) }
   const base = (m.length < 3 ? props.headers.slice(0, 8) : m)
@@ -220,10 +232,18 @@ const displayCols = computed(() => {
   }
   if (!pickupDone) out.splice(Math.min(3, out.length), 0, 'Pickup')
   if (!dropDone) out.splice(Math.min(4, out.length), 0, 'Drop-off')
+  out.push('Delivery Date') // actual delivery date/time as the last column (replaces the old Assigned Date)
   return out
 })
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
-function cellValue(j, c) { if (c === 'Pickup') return j._pickupLocation || '\u2014'; if (c === 'Drop-off') return j._dropLocation || '\u2014'; const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
+// Delivery date/time, formatted consistently (the raw cell is 24h, no comma).
+function fmtDeliveryDate(v) {
+  if (!v || !String(v).trim()) return '\u2014'
+  const d = new Date(v)
+  if (isNaN(d.getTime())) return String(v)
+  return d.toLocaleString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
+}
+function cellValue(j, c) { if (c === 'Pickup') return j._pickupLocation || '\u2014'; if (c === 'Drop-off') return j._dropLocation || '\u2014'; if (c === 'Delivery Date') return fmtDeliveryDate(completionCol.value ? j[completionCol.value] : ''); const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
 function addrStreet(j, c) { return c === 'Pickup' ? j._pickupStreet : j._dropStreet }
 function addrCsz(j, c) { return c === 'Pickup' ? j._pickupLocation : j._dropLocation }
 function detailValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? Object.entries(p).filter(([,x]) => x).map(([k,x]) => `${k}: ${x}`).join(', ') : v }
