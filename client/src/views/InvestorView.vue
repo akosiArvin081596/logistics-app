@@ -74,6 +74,7 @@
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <LoadReportsSection :production="store.production" :config="store.config" :preview-user-id="store.previewUserId" />
       <ExpensesSection :trucks="trucks" :preview-user-id="store.previewUserId" />
+      <PayoutsSection :preview-user-id="store.previewUserId" />
       <!-- <TaxShieldSection :tax-shield="taxShieldData" :config="store.config" /> -->
       <InvestorChat :trucks="trucks" :preview-user-id="store.previewUserId" :is-preview="store.isPreview" />
       <LegalDocumentPortal
@@ -110,6 +111,7 @@ import AssetSection from '../components/investor/AssetSection.vue'
 import FleetBreakdownSection from '../components/investor/FleetBreakdownSection.vue'
 import CashFlowSection from '../components/investor/CashFlowSection.vue'
 import ExpensesSection from '../components/investor/ExpensesSection.vue'
+import PayoutsSection from '../components/investor/PayoutsSection.vue'
 import TaxShieldSection from '../components/investor/TaxShieldSection.vue'
 import InvestorChat from '../components/investor/InvestorChat.vue'
 import DocumentPortal from '../components/investor/DocumentPortal.vue'

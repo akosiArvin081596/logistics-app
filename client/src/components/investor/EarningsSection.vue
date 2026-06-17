@@ -742,7 +742,10 @@ const allTimeFixedCosts = computed(() => months.value.reduce((s, m) => s + (m.fi
 const allTimeTripExpenses = computed(() => months.value.reduce((s, m) => s + (m.tripExpenses || 0), 0))
 const allTimeExpenses = computed(() => allTimeDriverPay.value + allTimeFixedCosts.value + allTimeTripExpenses.value)
 const allTimeNet = computed(() => allTimeRevenue.value - allTimeExpenses.value)
-const allTimeEarnings = computed(() => Math.round(allTimeNet.value / 2))
+// Investor's share of net profit, driven by the configured split (server returns
+// investorSplitPct on the production payload). Defaults to 50 when absent.
+const investorSplitPct = computed(() => props.production?.investorSplitPct ?? 50)
+const allTimeEarnings = computed(() => Math.round(allTimeNet.value * (investorSplitPct.value / 100)))
 
 // Render the right formula label for the selected month's Driver Pay row.
 // Server returns payType / payPercentage per driver in driverDetails — branch

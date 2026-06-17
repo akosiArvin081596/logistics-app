@@ -1782,6 +1782,30 @@ if (configCount === 0) {
 	]);
 }
 
+// --- Investor Payouts (settlement layer on top of /api/investor earnings) ---
+// One row per (owner_id, period) = one completed work month's settlement.
+// `amount` is sourced from that month's dashboard investorEarnings (net profit ×
+// investor_split_pct) — see computeInvestorMonthlyEarnings(); it is refreshed
+// while the row is still 'owed' but frozen once an admin advances the status.
+// `due_date` = last Friday of the month FOLLOWING the work month.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_payouts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_id INTEGER NOT NULL,
+		period TEXT NOT NULL,
+		amount REAL NOT NULL,
+		due_date TEXT NOT NULL,
+		status TEXT DEFAULT 'owed' CHECK(status IN ('owed','processing','paid')),
+		processed_at TEXT,
+		processed_by TEXT,
+		paid_at TEXT,
+		paid_by TEXT,
+		notes TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(owner_id, period)
+	)
+`);
+
 // --- Driver Onboarding ---
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_onboarding (
@@ -14883,6 +14907,300 @@ async function getJobTrackingCached() {
 }
 function jtCacheInvalidate() { _jtCache = null; }
 
+// ============================================================
+// INVESTOR PAYOUTS — settlement helpers
+// ============================================================
+
+// 'YYYY-MM' (work month) → ISO date ('YYYY-MM-DD') of the last Friday of the
+// month FOLLOWING the work month. Investors are settled the last Friday after
+// the work month closes out.
+//   '2026-05' → '2026-06-26'  (June 2026's last Friday)
+//   '2026-06' → '2026-07-31'  (July 31 2026 is itself a Friday)
+// Day 0 of (followingMonth + 1) is the last calendar day of the following
+// month; Date normalizes the +2 month offset across year boundaries. We then
+// walk back to the nearest Friday (getDay() === 5). All local-time, no UTC.
+function lastFridayOfFollowingMonth(period) {
+	const m = /^(\d{4})-(\d{2})$/.exec(String(period || "").trim());
+	if (!m) throw new Error(`period must be 'YYYY-MM', got: ${period}`);
+	const year = parseInt(m[1], 10);
+	const monthIdx = parseInt(m[2], 10) - 1; // 0-based index of the work month
+	const d = new Date(year, monthIdx + 2, 0); // last day of the FOLLOWING month
+	const back = (d.getDay() - 5 + 7) % 7;     // days to step back to Friday
+	d.setDate(d.getDate() - back);
+	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// 'YYYY-MM' → "May 2026" for display.
+function periodLabel(period) {
+	const m = /^(\d{4})-(\d{2})$/.exec(String(period || "").trim());
+	if (!m) return String(period || "");
+	const d = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, 1);
+	return d.toLocaleString("en-US", { month: "long", year: "numeric" });
+}
+
+// Single source of truth for the per-month investor take-home shown on the
+// dashboard. This recomputes the SAME monthlyEarnings array the inline block in
+// GET /api/investor builds (revenue − driverPay − fixedCosts − tripExpenses,
+// then × investor_split_pct), using the same module-level primitives
+// (getJobTrackingCached, getInvestorDriverSet, getDriverPayStructures,
+// getDeductibleExpensesByDriverMonth, getEldTravelDaysByVehicle, ELD-intersected
+// active days, admin day overrides, completed-status + Active-truck rules, the
+// zero-activity fixed-cost deferral). The settlement layer
+// (GET /api/investor/payouts) calls this so a payout's `amount` equals the
+// dashboard's investorEarnings to the cent — no second formula.
+//
+// opts: { user, isSuperAdmin, investorDriverSet, investorOwnerId, config }
+//   - investorDriverSet: Set of lowercased driver names, or null for Super Admin
+//   - investorOwnerId:   user.id for an investor, or null for Super Admin
+//   - config:            merged investor_config (must include investor_split_pct)
+// returns: { monthlyEarnings: [...], currentMonthKey }
+async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config }) {
+	const jobTracking = await getJobTrackingCached();
+	const data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+	const headers = jobTracking.headers;
+	const investorSplit = (parseFloat(config && config.investor_split_pct) || 50) / 100;
+
+	// Local date helpers — identical to the ones inside GET /api/investor.
+	const parseSheetDate = (val) => {
+		if (!val) return null;
+		const s = String(val).trim();
+		const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+		if (iso) {
+			const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
+			return isNaN(d) ? null : d;
+		}
+		const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+		if (!m) return null;
+		let yr = parseInt(m[3]);
+		if (yr < 100) yr += 2000;
+		const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
+		return isNaN(d) ? null : d;
+	};
+	const fmtDate = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+	const expandDateRange = (start, end) => {
+		const dates = [];
+		const s = new Date(start); s.setHours(12, 0, 0, 0);
+		const e = end ? new Date(end) : new Date(start);
+		e.setHours(12, 0, 0, 0);
+		if (e < s) return [fmtDate(s)];
+		const MAX_SPAN = 31 * 24 * 3600 * 1000;
+		if (e - s > MAX_SPAN) e.setTime(s.getTime() + MAX_SPAN);
+		const cur = new Date(s);
+		while (cur <= e) { dates.push(fmtDate(cur)); cur.setDate(cur.getDate() + 1); }
+		return dates;
+	};
+
+	// Column resolution — same regexes as GET /api/investor.
+	const jtRateCol = findCol(headers, /payment|rate|amount|revenue/i);
+	const jtDateCol = findCol(headers, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(headers, /date/i);
+	const jtDriverCol = findCol(headers, /^driver$/i);
+	const jtTruckCol = findCol(headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
+	const statusCol = findCol(headers, /status/i);
+	const pickupDateCol = findCol(headers, /pickup.*appo|pickup.*date/i);
+	const dropoffDateCol = findCol(headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
+	const ownerIdCol = findCol(headers, /^owner.?id$/i);
+	const driverCol = findCol(headers, /^driver$/i);
+	const completedStatuses = /^(delivered|completed|pod received)$/i;
+
+	// Investor-scope the rows: Owner ID column (primary) or driver-set (fallback).
+	const filteredJobData = investorDriverSet
+		? data.filter(r => {
+			if (ownerIdCol) {
+				const raw = r[ownerIdCol];
+				const hasOwnerIdValue = raw !== undefined && raw !== null && String(raw).trim() !== "";
+				if (hasOwnerIdValue) return (parseInt(raw) || 0) === investorOwnerId;
+			}
+			const driver = driverCol ? (r[driverCol] || "").trim().toLowerCase() : "";
+			return driver && investorDriverSet.has(driver);
+		})
+		: data;
+
+	const now = new Date();
+	const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+	// ELD travel-day index per in-scope truck (same as GET /api/investor).
+	const unitToVid = {};
+	{
+		const vidQuery = investorDriverSet
+			? "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE owner_id = ? AND COALESCE(routemate_vehicle_id, '') != ''"
+			: "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''";
+		db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
+	}
+	const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), 0, Date.now() + 86400000);
+	const driverDayOverrides = getAllExcludedDriverDays();
+
+	// Pass: monthly revenue, per-driver active days (ELD-intersected), earliest date.
+	const monthlyRevenue = {};
+	const driverDaySets = {};
+	const driverMonthlyDays = {};        // { driver: { mk: Set<day> } }
+	const driverMonthlyRevenue = {};     // { driver: { mk: revenue } }
+	let earliestDate = null;
+	filteredJobData.forEach((r) => {
+		const st = statusCol ? (r[statusCol] || "").trim() : "";
+		const driver = jtDriverCol ? normalizeDriverName(r[jtDriverCol]) : "";
+		const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
+		let assignedMonthKey = null;
+		if (jtDateCol && r[jtDateCol]) {
+			const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+			if (d && !isNaN(d)) assignedMonthKey = fmtDate(d).slice(0, 7);
+		}
+		if (completedStatuses.test(st)) {
+			const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
+			if (amt && assignedMonthKey) {
+				monthlyRevenue[assignedMonthKey] = (monthlyRevenue[assignedMonthKey] || 0) + amt;
+				if (driver) {
+					if (!driverMonthlyRevenue[driver]) driverMonthlyRevenue[driver] = {};
+					driverMonthlyRevenue[driver][assignedMonthKey] = (driverMonthlyRevenue[driver][assignedMonthKey] || 0) + amt;
+				}
+			}
+		}
+		if (completedStatuses.test(st) && driver) {
+			let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
+			const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
+			if (!pickup && jtDateCol && r[jtDateCol]) pickup = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+			if (pickup && !isNaN(pickup)) {
+				const windowDays = expandDateRange(pickup, dropoff || pickup);
+				const vid = truckUnit ? unitToVid[truckUnit] : null;
+				const eld = vid ? eldByVid[vid] : null;
+				const covered = eld && windowDays.some(d => eld.coverage.has(d));
+				const eldCounted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
+				const ovr = driverDayOverrides[driver] || null;
+				const skipSet = ovr ? ovr.remove : null;
+				const counted = skipSet && skipSet.size ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
+				if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
+				counted.forEach(d => driverDaySets[driver].add(d));
+				if (!driverMonthlyDays[driver]) driverMonthlyDays[driver] = {};
+				counted.forEach(d => {
+					const bucket = assignedMonthKey || d.slice(0, 7);
+					if (!driverMonthlyDays[driver][bucket]) driverMonthlyDays[driver][bucket] = new Set();
+					driverMonthlyDays[driver][bucket].add(d);
+				});
+			}
+		}
+		if (jtDateCol && r[jtDateCol]) {
+			const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+			if (d && !isNaN(d) && (!earliestDate || d < earliestDate)) earliestDate = d;
+		}
+	});
+
+	// Admin-added days (ELD missed) — same bucketing as GET /api/investor.
+	for (const [drv, ovr] of Object.entries(driverDayOverrides)) {
+		if (!ovr.add || !ovr.add.size) continue;
+		if (investorDriverSet && !investorDriverSet.has(drv)) continue;
+		if (!driverDaySets[drv]) driverDaySets[drv] = new Set();
+		if (!driverMonthlyDays[drv]) driverMonthlyDays[drv] = {};
+		for (const d of ovr.add) {
+			driverDaySets[drv].add(d);
+			const bucket = d.slice(0, 7);
+			if (!driverMonthlyDays[drv][bucket]) driverMonthlyDays[drv][bucket] = new Set();
+			driverMonthlyDays[drv][bucket].add(d);
+		}
+	}
+
+	// Per-month driver pay — fixed: activeDays × dailyRate; percentage:
+	// max(0, monthRevenue − monthDeductible) × pct. Same as GET /api/investor.
+	const payStructures = getDriverPayStructures();
+	const expensesByDriverMonth = getDeductibleExpensesByDriverMonth();
+	const trucksByDriver = {};
+	{
+		const truckQuery = investorDriverSet
+			? "SELECT assigned_driver, driver_pay_daily FROM trucks WHERE owner_id = ?"
+			: "SELECT assigned_driver, driver_pay_daily FROM trucks";
+		db.prepare(truckQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => {
+			const d = normalizeDriverName(t.assigned_driver);
+			if (d) trucksByDriver[d] = t.driver_pay_daily || 250;
+		});
+	}
+	const monthlyDriverPay = {};
+	for (const [driver, monthsMap] of Object.entries(driverMonthlyDays)) {
+		const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };
+		const fixedRate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);
+		for (const [mk, daySet] of Object.entries(monthsMap)) {
+			const activeDays = daySet.size;
+			const monthRev = (driverMonthlyRevenue[driver] || {})[mk] || 0;
+			const monthExp = (expensesByDriverMonth[driver] || {})[mk] || 0;
+			const net = Math.max(0, monthRev - monthExp);
+			let pay;
+			if (struct.payType === "percentage") {
+				pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
+			} else {
+				pay = activeDays * fixedRate;
+			}
+			monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + pay;
+		}
+	}
+
+	// Monthly trip expenses (P&L filter, owner_id OR driver-set), grouped by month.
+	const monthlyTripExp = {};
+	if (investorOwnerId) {
+		const driverList = investorDriverSet ? [...investorDriverSet] : [];
+		const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
+		db.prepare(
+			`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+		).all(investorOwnerId, ...driverList).forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+	} else if (isSuperAdmin) {
+		db.prepare(`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
+			.all().forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+	}
+
+	// Monthly fixed costs — Active trucks only, charged from truck.created_at.
+	const truckFixedQuery = investorDriverSet
+		? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+		: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
+	const fixedTrucks = db.prepare(truckFixedQuery).all(...(investorDriverSet ? [user.id] : []));
+	const getMonthlyFixedCosts = (monthKey) => {
+		let total = 0;
+		for (const t of fixedTrucks) {
+			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
+			if (t.created_at) {
+				const td = new Date(t.created_at);
+				const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
+				if (monthKey < truckKey) continue;
+			}
+			total += perMonth;
+		}
+		return Math.round(total);
+	};
+
+	// Build the per-month array from earliest month → current month inclusive.
+	const monthlyEarnings = [];
+	const startMonth = earliestDate
+		? `${earliestDate.getFullYear()}-${String(earliestDate.getMonth() + 1).padStart(2, "0")}`
+		: currentMonthKey;
+	let cursor = new Date(parseInt(startMonth.slice(0, 4)), parseInt(startMonth.slice(5, 7)) - 1, 1);
+	const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
+	while (cursor <= endDate) {
+		const mk = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`;
+		const revenue = monthlyRevenue[mk] || 0;
+		const driverPay = monthlyDriverPay[mk] || 0;
+		const rawFixedCosts = getMonthlyFixedCosts(mk);
+		const tripExpenses = monthlyTripExp[mk] || 0;
+		// Zero-activity grace: defer fixed costs in months with no activity so
+		// onboarding months don't read as losses (matches GET /api/investor,
+		// including its driver-day-count guard for percentage drivers whose pay
+		// nets to $0 but who were still active that month).
+		const driverCount = Object.values(driverMonthlyDays).filter(m => m[mk] && m[mk].size).length;
+		const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && driverCount === 0;
+		const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
+		const netProfit = revenue - driverPay - fixedCosts - tripExpenses;
+		// Match GET /api/investor exactly: split is applied to the RAW netProfit
+		// (the rounded netProfit is only what gets surfaced for display).
+		const investorEarnings = Math.round(netProfit * investorSplit);
+		monthlyEarnings.push({
+			month: mk,
+			revenue: Math.round(revenue),
+			driverPay: Math.round(driverPay),
+			fixedCosts,
+			tripExpenses: Math.round(tripExpenses),
+			netProfit: Math.round(netProfit),
+			investorEarnings,
+			isCurrentMonth: mk === currentMonthKey,
+		});
+		cursor.setMonth(cursor.getMonth() + 1);
+	}
+	return { monthlyEarnings, currentMonthKey };
+}
+
 // GET /api/investor — Aggregated financial data for investor view
 app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
@@ -15356,6 +15674,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const monthlyEarnings = [];
 		{
 			const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+			// Investor take-home = configurable split of net profit (default 50%).
+			// Read from investor_config.investor_split_pct (per-investor override
+			// already merged into `config` above). This is the SAME split the
+			// settlement layer (/api/investor/payouts) applies, so a payout's
+			// amount equals the investorEarnings shown here.
+			const monthlySplit = (parseFloat(config.investor_split_pct) || 50) / 100;
 
 			// 1. Monthly driver pay — bucketed by each load's ASSIGNED month,
 			// not by the physical day the driver was active. This keeps revenue
@@ -15467,8 +15791,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// fix above. Reserve budget ≠ actual cost; actual maintenance
 			// flows through monthlyTripExp / maintByTruck.
 			const truckFixedQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ?"
-				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks";
+				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
 			const truckFixedArgs = investorDriverSet ? [user.id] : [];
 			const fixedTrucks = db.prepare(truckFixedQuery).all(...truckFixedArgs);
 			function getMonthlyFixedCosts(monthKey) {
@@ -15519,8 +15843,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					tripExpenses: Math.round(tripExpenses),
 					tripExpCategories: tripExpByCategory[mk] || {},
 					netProfit: Math.round(netProfit),
-					investorEarnings: Math.round(netProfit / 2),
-					companyEarnings: Math.round(netProfit / 2),
+					investorEarnings: Math.round(netProfit * monthlySplit),
+					companyEarnings: Math.round(netProfit - Math.round(netProfit * monthlySplit)),
 					isCurrentMonth: mk === currentMonthKey,
 				});
 				cursor.setMonth(cursor.getMonth() + 1);
@@ -15771,7 +16095,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalJobs,
 				completedJobs: completedJobCount,
 				totalExpenses: Math.round(totalExpenses),
-				investorEarnings: Math.round((totalRevenue - totalExpenses) / 2),
+				investorEarnings: Math.round((totalRevenue - totalExpenses) * investorSplit),
 				investorNetToDate,
 				totalDriverPay: Math.round(totalDriverPay),
 				driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(([k, v]) => [k, { activeDays: v.activeDays, dailyRate: v.dailyRate, totalPay: v.totalPay }])),
@@ -15882,6 +16206,170 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 	} catch (err) {
 		console.error("GET /api/investor/expenses error:", err.message);
 		res.status(500).json({ error: "Failed to load investor expenses" });
+	}
+});
+
+// GET /api/investor/payouts — settlement view for one investor.
+// Auth mirrors /api/investor: an Investor sees their own payouts; a Super Admin
+// previews a specific investor via ?as_user_id=N (payouts are per-owner, so a
+// target is required for the admin path — there is no whole-fleet payout).
+//
+// For every COMPLETED PAST work month (current, in-progress month excluded) we
+// idempotently UPSERT one investor_payouts row:
+//   - missing  → INSERT (amount = that month's investorEarnings,
+//                due_date = lastFridayOfFollowingMonth(period), status 'owed')
+//   - existing → refresh `amount` ONLY (earnings can still move while 'owed');
+//                status / processed_* / paid_* are NEVER touched here.
+// The amount is the SAME number the dashboard shows (computeInvestorMonthlyEarnings).
+app.get("/api/investor/payouts", requireRole("Super Admin", "Investor"), async (req, res) => {
+	try {
+		const preview = resolvePreviewUser(req);
+		const user = { ...preview.sessionUser, id: preview.effectiveUserId, username: preview.effectiveUsername };
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
+
+		// A Super Admin not previewing anyone has no single owner to settle.
+		if (isSuperAdmin) {
+			return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to view an investor's payouts." });
+		}
+		if (preview.isPreview) {
+			logAudit(req, "investor_payouts_view", "investor", user.id, "");
+		}
+
+		const ownerId = user.id;
+
+		// Build the same driver set the dashboard aggregator uses so the monthly
+		// earnings (and therefore each payout amount) reconcile to /api/investor.
+		const carrierDB = getCarrierDBFromSQLite();
+		const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+		const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
+		const investorDriverSet = getInvestorDriverSet(ownerId, carrierDB.data, carrierDriverCol, carrierCarrierCol);
+
+		// Per-investor config (override global defaults) — same merge as /api/investor.
+		const config = {};
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (config[r.key] = r.value));
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).forEach((r) => (config[r.key] = r.value));
+
+		const { monthlyEarnings, currentMonthKey } = await computeInvestorMonthlyEarnings({
+			user, isSuperAdmin: false, investorDriverSet, investorOwnerId: ownerId, config,
+		});
+
+		// Reconcile completed PAST months into investor_payouts (idempotent).
+		const findRow = db.prepare("SELECT * FROM investor_payouts WHERE owner_id = ? AND period = ?");
+		const insertRow = db.prepare(
+			"INSERT INTO investor_payouts (owner_id, period, amount, due_date, status) VALUES (?, ?, ?, ?, 'owed')"
+		);
+		const refreshAmount = db.prepare(
+			"UPDATE investor_payouts SET amount = ? WHERE owner_id = ? AND period = ?"
+		);
+		const reconcile = db.transaction((months) => {
+			for (const m of months) {
+				if (m.isCurrentMonth || m.month >= currentMonthKey) continue; // only completed past months
+				const amount = Math.round(m.investorEarnings);
+				const existing = findRow.get(ownerId, m.month);
+				if (!existing) {
+					insertRow.run(ownerId, m.month, amount, lastFridayOfFollowingMonth(m.month));
+				} else if (existing.status === "owed" && existing.amount !== amount) {
+					// Refresh amount ONLY for still-owed rows — never overwrite a
+					// processing/paid settlement's amount when live earnings recompute.
+					refreshAmount.run(amount, ownerId, m.month);
+				}
+			}
+		});
+		reconcile(monthlyEarnings);
+
+		// Read back the settled rows (period DESC).
+		const rows = db.prepare(
+			"SELECT id, owner_id, period, amount, due_date, status, paid_at FROM investor_payouts WHERE owner_id = ? ORDER BY period DESC"
+		).all(ownerId);
+		const payouts = rows.map((r) => ({
+			id: r.id,
+			ownerId: r.owner_id,
+			period: r.period,
+			periodLabel: periodLabel(r.period),
+			amount: r.amount,
+			dueDate: r.due_date,
+			status: r.status,
+			paidAt: r.paid_at || null,
+		}));
+
+		// Current, in-progress month — shown but NOT a payable row.
+		const cur = monthlyEarnings.find((m) => m.month === currentMonthKey);
+		const currentMonth = {
+			period: currentMonthKey,
+			periodLabel: periodLabel(currentMonthKey),
+			amountInProgress: cur ? Math.round(cur.investorEarnings) : 0,
+		};
+
+		const totals = payouts.reduce((acc, p) => {
+			if (p.status === "owed") acc.totalOwed += p.amount;
+			else if (p.status === "processing") acc.totalProcessing += p.amount;
+			else if (p.status === "paid") acc.totalPaid += p.amount;
+			return acc;
+		}, { totalOwed: 0, totalProcessing: 0, totalPaid: 0 });
+		totals.totalOwed = Math.round(totals.totalOwed);
+		totals.totalProcessing = Math.round(totals.totalProcessing);
+		totals.totalPaid = Math.round(totals.totalPaid);
+
+		res.json({ payouts, currentMonth, totals });
+	} catch (err) {
+		console.error("GET /api/investor/payouts error:", err.message);
+		res.status(500).json({ error: "Failed to load investor payouts" });
+	}
+});
+
+// POST /api/investor/payouts/:id/status — Super Admin advances a payout's
+// lifecycle: owed → processing → paid (owed → paid is also allowed). Stamps
+// processed_at/by when entering 'processing' and paid_at/by when entering
+// 'paid', using the session admin's username. Amount/period are immutable here.
+app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id, 10);
+		if (!Number.isFinite(id) || id <= 0) {
+			return res.status(400).json({ error: "Invalid payout id" });
+		}
+		const status = typeof req.body?.status === "string" ? req.body.status.trim() : "";
+		if (status !== "processing" && status !== "paid") {
+			return res.status(400).json({ error: "status must be 'processing' or 'paid'" });
+		}
+
+		const payout = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
+		if (!payout) return res.status(404).json({ error: "Payout not found" });
+
+		// Allowed transitions: owed→processing, processing→paid, owed→paid.
+		const allowed = {
+			processing: ["owed"],
+			paid: ["owed", "processing"],
+		};
+		if (!allowed[status].includes(payout.status)) {
+			return res.status(409).json({ error: `Cannot move a '${payout.status}' payout to '${status}'.` });
+		}
+
+		const nowIso = new Date().toISOString();
+		const actor = req.session.user.username;
+		if (status === "processing") {
+			db.prepare(
+				"UPDATE investor_payouts SET status = 'processing', processed_at = ?, processed_by = ? WHERE id = ?"
+			).run(nowIso, actor, id);
+		} else {
+			// Moving to paid. If it skipped 'processing' (owed→paid), stamp the
+			// processing fields too so the audit trail is complete.
+			if (payout.status === "owed") {
+				db.prepare(
+					"UPDATE investor_payouts SET status = 'paid', processed_at = COALESCE(processed_at, ?), processed_by = COALESCE(processed_by, ?), paid_at = ?, paid_by = ? WHERE id = ?"
+				).run(nowIso, actor, nowIso, actor, id);
+			} else {
+				db.prepare(
+					"UPDATE investor_payouts SET status = 'paid', paid_at = ?, paid_by = ? WHERE id = ?"
+				).run(nowIso, actor, id);
+			}
+		}
+
+		logAudit(req, "investor_payout_status", "investor_payout", id, `${payout.status} -> ${status}`);
+		const updated = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
+		res.json({ success: true, payout: updated });
+	} catch (err) {
+		console.error("POST /api/investor/payouts/:id/status error:", err.message);
+		res.status(500).json({ error: "Failed to update payout status" });
 	}
 });
 
