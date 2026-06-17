@@ -263,12 +263,17 @@
             <div class="pay-options">
               <label class="pay-radio">
                 <input type="radio" v-model="editForm.payType" value="fixed" />
-                <span>Fixed Daily Rate ($250/day &times; active days)</span>
+                <span>Fixed Daily Rate (per day &times; active days)</span>
               </label>
               <label class="pay-radio">
                 <input type="radio" v-model="editForm.payType" value="percentage" />
                 <span>Percentage of Net Load Revenue (owner-operator)</span>
               </label>
+            </div>
+            <div v-if="editForm.payType === 'fixed'" class="edit-field" style="margin-top:0.5rem;">
+              <label>Daily Rate ($/day)</label>
+              <input v-model.number="editForm.payDaily" type="number" min="0" step="1" placeholder="e.g. 250" />
+              <p class="status-help">Driver earns this &times; active days. Leave blank/0 to use the assigned truck's rate (default $250).</p>
             </div>
             <div v-if="editForm.payType === 'percentage'" class="edit-field" style="margin-top:0.5rem;">
               <label>Owner-Operator Share (%)</label>
@@ -437,7 +442,7 @@ const editForm = reactive({
   driver: '', state: '', city: '', zip: '', address: '',
   trucks: '', hazmat: 'NO', phone: '', cell: '', email: '',
   dot: '', mc: '', rating: 'Not Rated', status: 'active',
-  payType: 'fixed', payPercentage: 0,
+  payType: 'fixed', payPercentage: 0, payDaily: 0,
 })
 
 function statusClass(d) {
@@ -477,6 +482,7 @@ function openEdit(d) {
   editForm.status = d.Status || 'active'
   editForm.payType = d.PayType || 'fixed'
   editForm.payPercentage = Number(d.PayPercentage) || 0
+  editForm.payDaily = Number(d.PayDaily) || 0
   showEdit.value = true
 }
 
@@ -492,6 +498,7 @@ function handleSaveEdit() {
       editForm.dot, editForm.mc, editForm.rating, editForm.status,
       editForm.payType,
       editForm.payType === 'percentage' ? (Number(editForm.payPercentage) || 0) : 0,
+      editForm.payType === 'fixed' ? (Number(editForm.payDaily) || 0) : 0,
     ],
   })
   showEdit.value = false
