@@ -15201,6 +15201,135 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	return { monthlyEarnings, currentMonthKey };
 }
 
+// Enumerate every investor that can be settled, as { ownerId, name }. An
+// investor is settled by users.id, so we list `investors` rows whose user_id
+// links to a real user with role 'Investor' (same join /api/investors-style
+// listings use), then UNION in any `trucks.owner_id > 0` whose user is an
+// Investor but is missing an `investors` profile row — that owner still has
+// loads to reconcile. Name prefers investors.full_name, then the user's
+// company_name / username. Sorted by name (case-insensitive) so the aggregate
+// console and its monthlyTotals render deterministically.
+function listSettlableInvestors() {
+	const rows = db.prepare(`
+		SELECT u.id AS ownerId,
+		       COALESCE(NULLIF(TRIM(i.full_name), ''), NULLIF(TRIM(u.company_name), ''), u.username) AS name
+		FROM users u
+		LEFT JOIN investors i ON i.user_id = u.id
+		WHERE u.role = 'Investor'
+		UNION
+		SELECT u.id AS ownerId,
+		       COALESCE(NULLIF(TRIM(u.company_name), ''), u.username) AS name
+		FROM (SELECT DISTINCT owner_id FROM trucks WHERE owner_id > 0) t
+		JOIN users u ON u.id = t.owner_id
+		WHERE u.role = 'Investor'
+	`).all();
+	// De-dup by ownerId (UNION already collapses identical rows, but the two
+	// SELECTs can yield the same owner with a different name); keep the first
+	// (investors.full_name-derived) name. Then sort by name.
+	const byId = new Map();
+	for (const r of rows) {
+		if (!byId.has(r.ownerId)) byId.set(r.ownerId, { ownerId: r.ownerId, name: r.name || `Investor #${r.ownerId}` });
+	}
+	return [...byId.values()].sort((a, b) =>
+		a.name.localeCompare(b.name, "en", { sensitivity: "base" })
+	);
+}
+
+// Shared settlement reconcile for ONE investor — the single source of truth for
+// both GET /api/investor/payouts (one owner) and GET /api/payouts (all owners).
+// For every COMPLETED PAST work month (current/in-progress excluded) it
+// idempotently UPSERTs one investor_payouts row: INSERT if missing (amount =
+// that month's investorEarnings, due = lastFridayOfFollowingMonth, status
+// 'owed'); refresh `amount` ONLY while still 'owed'; never touch
+// processing/paid. amount === the dashboard's investorEarnings to the cent
+// (via computeInvestorMonthlyEarnings — no second formula here).
+//
+// ctx carries request-scoped data fetched ONCE by the caller so a multi-investor
+// loop never refetches per investor:
+//   - ctx.sessionUser:  req.session.user (for the synthesized per-owner `user`)
+//   - ctx.carrierDB:    getCarrierDBFromSQLite() result (shared)
+//   - ctx.globalConfig: investor_config rows for owner_id = 0 as { key: value }
+// The Job Tracking sheet is threaded implicitly: computeInvestorMonthlyEarnings
+// reads getJobTrackingCached(), which the caller primes once up front so every
+// investor reconciles against the same cached snapshot (no per-investor fetch).
+// Returns { payouts, currentMonth, totals }.
+async function reconcileInvestorPayouts(ownerId, ctx) {
+	const carrierDB = ctx.carrierDB;
+	const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+	const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
+	const investorDriverSet = getInvestorDriverSet(ownerId, carrierDB.data, carrierDriverCol, carrierCarrierCol);
+
+	// Per-investor config layered over the shared global defaults (owner_id = 0).
+	const config = { ...ctx.globalConfig };
+	db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).forEach((r) => (config[r.key] = r.value));
+
+	// computeInvestorMonthlyEarnings only needs user.id for its owner-scoped
+	// truck/expense queries; synthesize an investor-scoped user from the session.
+	const user = { ...ctx.sessionUser, id: ownerId };
+	const { monthlyEarnings, currentMonthKey } = await computeInvestorMonthlyEarnings({
+		user, isSuperAdmin: false, investorDriverSet, investorOwnerId: ownerId, config,
+	});
+
+	// Reconcile completed PAST months into investor_payouts (idempotent).
+	const findRow = db.prepare("SELECT * FROM investor_payouts WHERE owner_id = ? AND period = ?");
+	const insertRow = db.prepare(
+		"INSERT INTO investor_payouts (owner_id, period, amount, due_date, status) VALUES (?, ?, ?, ?, 'owed')"
+	);
+	const refreshAmount = db.prepare(
+		"UPDATE investor_payouts SET amount = ? WHERE owner_id = ? AND period = ?"
+	);
+	const reconcile = db.transaction((months) => {
+		for (const m of months) {
+			if (m.isCurrentMonth || m.month >= currentMonthKey) continue; // only completed past months
+			const amount = Math.round(m.investorEarnings);
+			const existing = findRow.get(ownerId, m.month);
+			if (!existing) {
+				insertRow.run(ownerId, m.month, amount, lastFridayOfFollowingMonth(m.month));
+			} else if (existing.status === "owed" && existing.amount !== amount) {
+				// Refresh amount ONLY for still-owed rows — never overwrite a
+				// processing/paid settlement's amount when live earnings recompute.
+				refreshAmount.run(amount, ownerId, m.month);
+			}
+		}
+	});
+	reconcile(monthlyEarnings);
+
+	// Read back the settled rows (period DESC).
+	const rows = db.prepare(
+		"SELECT id, owner_id, period, amount, due_date, status, paid_at FROM investor_payouts WHERE owner_id = ? ORDER BY period DESC"
+	).all(ownerId);
+	const payouts = rows.map((r) => ({
+		id: r.id,
+		ownerId: r.owner_id,
+		period: r.period,
+		periodLabel: periodLabel(r.period),
+		amount: r.amount,
+		dueDate: r.due_date,
+		status: r.status,
+		paidAt: r.paid_at || null,
+	}));
+
+	// Current, in-progress month — shown but NOT a payable row.
+	const cur = monthlyEarnings.find((m) => m.month === currentMonthKey);
+	const currentMonth = {
+		period: currentMonthKey,
+		periodLabel: periodLabel(currentMonthKey),
+		amountInProgress: cur ? Math.round(cur.investorEarnings) : 0,
+	};
+
+	const totals = payouts.reduce((acc, p) => {
+		if (p.status === "owed") acc.totalOwed += p.amount;
+		else if (p.status === "processing") acc.totalProcessing += p.amount;
+		else if (p.status === "paid") acc.totalPaid += p.amount;
+		return acc;
+	}, { totalOwed: 0, totalProcessing: 0, totalPaid: 0 });
+	totals.totalOwed = Math.round(totals.totalOwed);
+	totals.totalProcessing = Math.round(totals.totalProcessing);
+	totals.totalPaid = Math.round(totals.totalPaid);
+
+	return { payouts, currentMonth, totals };
+}
+
 // GET /api/investor — Aggregated financial data for investor view
 app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
@@ -16237,83 +16366,100 @@ app.get("/api/investor/payouts", requireRole("Super Admin", "Investor"), async (
 
 		const ownerId = user.id;
 
-		// Build the same driver set the dashboard aggregator uses so the monthly
-		// earnings (and therefore each payout amount) reconcile to /api/investor.
-		const carrierDB = getCarrierDBFromSQLite();
-		const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
-		const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
-		const investorDriverSet = getInvestorDriverSet(ownerId, carrierDB.data, carrierDriverCol, carrierCarrierCol);
+		// Prime the Job Tracking cache once, then delegate to the shared
+		// reconcile (the SAME implementation GET /api/payouts runs per investor).
+		// carrierDB + global config are fetched once and threaded via ctx.
+		await getJobTrackingCached();
+		const globalConfig = {};
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (globalConfig[r.key] = r.value));
+		const ctx = { sessionUser: preview.sessionUser, carrierDB: getCarrierDBFromSQLite(), globalConfig };
 
-		// Per-investor config (override global defaults) — same merge as /api/investor.
-		const config = {};
-		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (config[r.key] = r.value));
-		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).forEach((r) => (config[r.key] = r.value));
-
-		const { monthlyEarnings, currentMonthKey } = await computeInvestorMonthlyEarnings({
-			user, isSuperAdmin: false, investorDriverSet, investorOwnerId: ownerId, config,
-		});
-
-		// Reconcile completed PAST months into investor_payouts (idempotent).
-		const findRow = db.prepare("SELECT * FROM investor_payouts WHERE owner_id = ? AND period = ?");
-		const insertRow = db.prepare(
-			"INSERT INTO investor_payouts (owner_id, period, amount, due_date, status) VALUES (?, ?, ?, ?, 'owed')"
-		);
-		const refreshAmount = db.prepare(
-			"UPDATE investor_payouts SET amount = ? WHERE owner_id = ? AND period = ?"
-		);
-		const reconcile = db.transaction((months) => {
-			for (const m of months) {
-				if (m.isCurrentMonth || m.month >= currentMonthKey) continue; // only completed past months
-				const amount = Math.round(m.investorEarnings);
-				const existing = findRow.get(ownerId, m.month);
-				if (!existing) {
-					insertRow.run(ownerId, m.month, amount, lastFridayOfFollowingMonth(m.month));
-				} else if (existing.status === "owed" && existing.amount !== amount) {
-					// Refresh amount ONLY for still-owed rows — never overwrite a
-					// processing/paid settlement's amount when live earnings recompute.
-					refreshAmount.run(amount, ownerId, m.month);
-				}
-			}
-		});
-		reconcile(monthlyEarnings);
-
-		// Read back the settled rows (period DESC).
-		const rows = db.prepare(
-			"SELECT id, owner_id, period, amount, due_date, status, paid_at FROM investor_payouts WHERE owner_id = ? ORDER BY period DESC"
-		).all(ownerId);
-		const payouts = rows.map((r) => ({
-			id: r.id,
-			ownerId: r.owner_id,
-			period: r.period,
-			periodLabel: periodLabel(r.period),
-			amount: r.amount,
-			dueDate: r.due_date,
-			status: r.status,
-			paidAt: r.paid_at || null,
-		}));
-
-		// Current, in-progress month — shown but NOT a payable row.
-		const cur = monthlyEarnings.find((m) => m.month === currentMonthKey);
-		const currentMonth = {
-			period: currentMonthKey,
-			periodLabel: periodLabel(currentMonthKey),
-			amountInProgress: cur ? Math.round(cur.investorEarnings) : 0,
-		};
-
-		const totals = payouts.reduce((acc, p) => {
-			if (p.status === "owed") acc.totalOwed += p.amount;
-			else if (p.status === "processing") acc.totalProcessing += p.amount;
-			else if (p.status === "paid") acc.totalPaid += p.amount;
-			return acc;
-		}, { totalOwed: 0, totalProcessing: 0, totalPaid: 0 });
-		totals.totalOwed = Math.round(totals.totalOwed);
-		totals.totalProcessing = Math.round(totals.totalProcessing);
-		totals.totalPaid = Math.round(totals.totalPaid);
+		const { payouts, currentMonth, totals } = await reconcileInvestorPayouts(ownerId, ctx);
 
 		res.json({ payouts, currentMonth, totals });
 	} catch (err) {
 		console.error("GET /api/investor/payouts error:", err.message);
 		res.status(500).json({ error: "Failed to load investor payouts" });
+	}
+});
+
+// GET /api/payouts — ADMIN settlement console: aggregates payouts ACROSS every
+// investor. Runs the SAME per-investor reconcile (reconcileInvestorPayouts) the
+// single-investor route uses — one formula, no duplication. The Job Tracking
+// sheet is fetched ONCE up front (cache primed) and the carrier DB + global
+// config are fetched once and threaded into each investor's reconcile, so a
+// fleet-wide loop never refetches per investor.
+//
+// Returns:
+//   investors[]    — per investor: { ownerId, name, payouts[], currentMonth,
+//                    totalOwed, totalProcessing, totalPaid }, sorted by name
+//   monthlyTotals[]— per period summed across investors (owed/processing/paid/
+//                    total) = "how much is paid out each month", period DESC
+//   grandTotals    — { totalOwed, totalProcessing, totalPaid } across everyone
+app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
+	try {
+		// Fetch the Job Tracking sheet ONCE up front (primes the 60s cache so every
+		// per-investor computeInvestorMonthlyEarnings reconciles against the same
+		// snapshot — no per-investor sheet fetch). carrierDB + global config are
+		// likewise read once and threaded through ctx.
+		await getJobTrackingCached();
+		const globalConfig = {};
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (globalConfig[r.key] = r.value));
+		const ctx = { sessionUser: req.session.user, carrierDB: getCarrierDBFromSQLite(), globalConfig };
+
+		const investorList = listSettlableInvestors();
+
+		const investors = [];
+		const monthly = new Map();   // period -> { period, periodLabel, owed, processing, paid, total }
+		const grandTotals = { totalOwed: 0, totalProcessing: 0, totalPaid: 0 };
+
+		for (const inv of investorList) {
+			// SAME reconcile as GET /api/investor/payouts (shared implementation).
+			const { payouts, currentMonth, totals } = await reconcileInvestorPayouts(inv.ownerId, ctx);
+
+			investors.push({
+				ownerId: inv.ownerId,
+				name: inv.name,
+				payouts: payouts.map((p) => ({
+					id: p.id,
+					period: p.period,
+					periodLabel: p.periodLabel,
+					amount: p.amount,
+					dueDate: p.dueDate,
+					status: p.status,
+					paidAt: p.paidAt,
+				})),
+				currentMonth,
+				totalOwed: totals.totalOwed,
+				totalProcessing: totals.totalProcessing,
+				totalPaid: totals.totalPaid,
+			});
+
+			grandTotals.totalOwed += totals.totalOwed;
+			grandTotals.totalProcessing += totals.totalProcessing;
+			grandTotals.totalPaid += totals.totalPaid;
+
+			// Sum each settled month ACROSS investors → "paid out each month".
+			for (const p of payouts) {
+				let bucket = monthly.get(p.period);
+				if (!bucket) {
+					bucket = { period: p.period, periodLabel: p.periodLabel, owed: 0, processing: 0, paid: 0, total: 0 };
+					monthly.set(p.period, bucket);
+				}
+				if (p.status === "owed") bucket.owed += p.amount;
+				else if (p.status === "processing") bucket.processing += p.amount;
+				else if (p.status === "paid") bucket.paid += p.amount;
+				bucket.total += p.amount;
+			}
+		}
+
+		const monthlyTotals = [...monthly.values()]
+			.sort((a, b) => (a.period < b.period ? 1 : a.period > b.period ? -1 : 0)); // period DESC
+
+		res.json({ investors, monthlyTotals, grandTotals });
+	} catch (err) {
+		console.error("GET /api/payouts error:", err.message);
+		res.status(500).json({ error: "Failed to load payouts" });
 	}
 });
 
