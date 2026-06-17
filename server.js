@@ -15670,17 +15670,28 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// totals. For multi-truck investors each truck gets an equal share;
 		// true per-truck monthly tracking is a P1 enhancement.
 		{
-			const truckCount = Math.max(1, allOwnedTrucks.length);
-			const perTruckMonthlyInvestor = Math.round(trailing3MonthInvestor / truckCount);
+			// Split the investor's trailing earnings across ACTIVE trucks
+			// only — inactive/OOS/maintenance units don't run, so they must
+			// not dilute the active trucks' per-unit projection, and they
+			// show $0 expected take-home / ROI (an inactive truck "is not
+			// supposed to show any data").
+			const activeUnits = new Set(
+				allOwnedTrucks
+					.filter(t => String(t.status || "").toLowerCase() === "active")
+					.map(t => t.unit_number)
+			);
+			const activeTruckCount = Math.max(1, activeUnits.size);
+			const perTruckMonthlyInvestor = Math.round(trailing3MonthInvestor / activeTruckCount);
 			const perTruckEstAnnualInvestor = Math.round(perTruckMonthlyInvestor * 12);
 			for (const unit of Object.keys(perTruckData)) {
 				const price = (allOwnedTrucks.find(t => t.unit_number === unit)?.purchase_price) || 0;
-				perTruckData[unit].monthlyInvestorEarnings = perTruckMonthlyInvestor;
-				perTruckData[unit].estAnnualInvestorRevenue = perTruckEstAnnualInvestor;
-				perTruckData[unit].investorROI = price > 0
+				const unitActive = activeUnits.has(unit);
+				perTruckData[unit].monthlyInvestorEarnings = unitActive ? perTruckMonthlyInvestor : 0;
+				perTruckData[unit].estAnnualInvestorRevenue = unitActive ? perTruckEstAnnualInvestor : 0;
+				perTruckData[unit].investorROI = (unitActive && price > 0)
 					? Math.round((perTruckEstAnnualInvestor / price) * 1000) / 10
 					: 0;
-				perTruckData[unit].breakEvenMonths = perTruckMonthlyInvestor > 0
+				perTruckData[unit].breakEvenMonths = (unitActive && perTruckMonthlyInvestor > 0)
 					? Math.ceil(price / perTruckMonthlyInvestor)
 					: null;
 			}
