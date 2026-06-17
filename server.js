@@ -12425,6 +12425,10 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 			const cCarrierCol = findCol(cdb.headers, /carrier/i);
 			const jtRateCol = findCol(jt.headers, /rate|amount|revenue|pay|charge|price|cost/i);
 			const jtDriverCol = findCol(jt.headers, /driver/i);
+			// Tax revenue counts COMPLETED loads only — match the other
+			// financial endpoints; never inflate with dispatched/in-transit.
+			const jtStatusCol = findCol(jt.headers, /^(job[\s._-]?)?status$/i) || findCol(jt.headers, /status/i);
+			const taxCompletedStatuses = /^(delivered|completed|pod received)$/i;
 			let totalRevenue = 0;
 			let driverSet = null;
 			const taxOwnerId = !isSuperAdmin ? user.id : null;
@@ -12442,6 +12446,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 					}
 					if (!match) return;
 				}
+				if (jtStatusCol && !taxCompletedStatuses.test(String(r[jtStatusCol] || "").trim())) return;
 				if (jtRateCol) totalRevenue += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
 			});
 			const expClause = isSuperAdmin
@@ -15592,12 +15597,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const loadCount = (truckLoadCount !== undefined)
 					? truckLoadCount
 					: (loadsByDriver[driverName] || 0);
+				// Inactive/OOS/Maintenance trucks must not project expected
+				// revenue — only Active units run. Zero their monthly gross +
+				// estimated annual revenue (an inactive truck "is not supposed
+				// to show any data"). The truck still counts as an owned asset
+				// (purchase price etc.) in the asset section above.
+				const truckActive = String(truck.status || "").toLowerCase() === "active";
 				perTruckData[truck.unit_number] = {
-					unitMonthlyGross: avgMonthlyGross,
-					unitMonthlyExpenses: avgMonthlyExpenses,
-					estAnnualRevenue: Math.round((avgMonthlyGross - avgMonthlyExpenses) * 12),
+					unitMonthlyGross: truckActive ? avgMonthlyGross : 0,
+					unitMonthlyExpenses: truckActive ? avgMonthlyExpenses : 0,
+					estAnnualRevenue: truckActive ? Math.round((avgMonthlyGross - avgMonthlyExpenses) * 12) : 0,
 					totalMiles,
 					loadCount,
+					status: truck.status || "",
 				};
 			});
 		}
