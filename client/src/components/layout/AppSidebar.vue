@@ -128,6 +128,7 @@ const navConfig = {
     { to: '/users', icon: '&#9881;', label: 'User Management' },
     { to: '/investors', icon: '&#128188;', label: 'Investor Database' },
     { to: '/investor-portals', icon: '&#128065;', label: 'Investor Portals' },
+    { to: '/payouts', icon: '&#128181;', label: 'Payouts' },
     { to: '/drivers', icon: '&#128100;', label: 'Driver Database' },
     { to: '/trucks', icon: '&#128203;', label: 'Truck Database' },
     { to: '/trailers', icon: '&#128718;', label: 'Trailer Database' },
@@ -152,6 +153,7 @@ const navConfig = {
   ],
   Investor: [
     { to: '/investor', icon: '&#128200;', label: 'Financial Overview' },
+    { to: '/my-payouts', icon: '&#128181;', label: 'Payouts' },
     { to: '/trucks', icon: '&#128203;', label: 'My Trucks' },
   ],
   Driver: [],

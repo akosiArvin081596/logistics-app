@@ -95,6 +95,12 @@ const routes = [
     meta: { roles: ['Super Admin', 'Investor'] },
   },
   {
+    path: '/my-payouts',
+    name: 'my-payouts',
+    component: () => import('../views/MyPayoutsView.vue'),
+    meta: { roles: ['Super Admin', 'Investor'] },
+  },
+  {
     path: '/users',
     name: 'users',
     component: () => import('../views/UsersView.vue'),
@@ -122,6 +128,12 @@ const routes = [
     path: '/investor-portals/:userId',
     name: 'investor-portal-preview',
     component: () => import('../views/InvestorPortalPreviewView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
+    path: '/payouts',
+    name: 'payouts',
+    component: () => import('../views/PayoutsView.vue'),
     meta: { roles: ['Super Admin'] },
   },
   {
