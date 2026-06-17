@@ -22,6 +22,7 @@ const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
 const scankit = require("./lib/scankit-client");
 const bisonInvoice = require("./lib/bison-invoice");
+const { appendGmailDraft } = require("./lib/imap-draft");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -12061,67 +12062,91 @@ app.post(
 			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
 			const invoicePdfBase64 = Buffer.from(invoicePdf).toString("base64");
 
-			// 9) Config guard: skip n8n when not wired (or on dryRun) so the
-			//    LogisX half is testable / previewable before n8n exists.
-			const webhookUrl =
-				process.env.N8N_INVOICE_WEBHOOK_URL ||
-				"https://sandhub.app.n8n.cloud/webhook/bison-invoice-draft";
-			const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
-			if (dryRun || !webhookSecret || !webhookUrl) {
-				return res.json({
-					success: true,
-					n8nSkipped: true,
-					invoiceId,
-					invoicePdfBase64,
-				});
-			}
-
-			// 8) POST the assembled payload to the n8n webhook.
-			const payload = {
-				loadId,
+			// 7b) Build the standard Bison email (body + signature) — the same
+			//     content the draft carries.
+			const draftSubject = `Bison Transport Order #${rcFields.orderNumber}`;
+			const draftHtml = bisonInvoice.buildBisonEmailHtml({
 				orderNumber: rcFields.orderNumber,
 				moveNumber: rcFields.moveNumber,
 				poNumber: rcFields.poNumber,
-				to: "QPinvoicesUSA@bisontransport.com",
-				invoicePdfBase64,
-				invoiceFileName: `Bison Invoice Order #${rcFields.orderNumber}.pdf`,
-				podPdfBase64: Buffer.from(podBuffer).toString("base64"),
-				podFileName: podDoc.file_name || `${loadId}_POD.pdf`,
-				rateconPdfBase64: rateconBuffer ? Buffer.from(rateconBuffer).toString("base64") : "",
-				rateconFileName: `${rcFields.orderNumber}.pdf`,
-			};
-
-			let n8nResponse = null;
-			try {
-				const controller = new AbortController();
-				const timer = setTimeout(() => controller.abort(), 30000);
-				const r = await fetch(webhookUrl, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", "x-webhook-secret": webhookSecret },
-					body: JSON.stringify(payload),
-					signal: controller.signal,
-				});
-				clearTimeout(timer);
-				const txt = await r.text().catch(() => "");
-				try { n8nResponse = txt ? JSON.parse(txt) : {}; } catch { n8nResponse = { raw: txt.slice(0, 500) }; }
-				if (!r.ok) {
-					return res.status(502).json({
-						error: `n8n webhook returned ${r.status}`,
-						details: n8nResponse,
-					});
-				}
-			} catch (e) {
-				console.error("Bison invoice: n8n webhook call failed:", e.message);
-				return res.status(502).json({ error: "Failed to reach the invoice-draft webhook." });
+			});
+			const draftAttachments = [
+				{ filename: `Bison Invoice Order #${rcFields.orderNumber}.pdf`, content: invoicePdf, contentType: "application/pdf" },
+				{ filename: podDoc.file_name || `${loadId}_POD.pdf`, content: podBuffer, contentType: "application/pdf" },
+			];
+			if (rateconBuffer && rateconBuffer.length) {
+				draftAttachments.push({ filename: `${rcFields.orderNumber}.pdf`, content: rateconBuffer, contentType: "application/pdf" });
 			}
 
-			// 10) Success.
-			return res.json({
-				success: true,
-				invoiceId,
-				draftId: n8nResponse && (n8nResponse.draftId || n8nResponse.id),
-				n8n: n8nResponse,
-			});
+			// Dry-run / preview: generate everything but create no draft.
+			if (dryRun) {
+				return res.json({ success: true, n8nSkipped: true, invoiceId, invoicePdfBase64 });
+			}
+
+			// PRIMARY: create the Gmail draft directly via IMAP APPEND using the
+			// existing app password (GMAIL_USER/GMAIL_APP_PASSWORD). No OAuth, no
+			// token expiry. The draft lands in that mailbox's [Gmail]/Drafts.
+			const gmailUser = process.env.GMAIL_USER;
+			const gmailPass = process.env.GMAIL_APP_PASSWORD;
+			if (gmailUser && gmailPass) {
+				try {
+					await appendGmailDraft({
+						user: gmailUser,
+						pass: gmailPass,
+						from: `LogisX Inc. <${gmailUser}>`,
+						to: "QPinvoicesUSA@bisontransport.com",
+						subject: draftSubject,
+						html: draftHtml,
+						attachments: draftAttachments,
+					});
+					return res.json({ success: true, invoiceId, via: "imap", draftMailbox: "[Gmail]/Drafts" });
+				} catch (e) {
+					console.error("Bison invoice: IMAP draft failed:", e.message);
+					// fall through to the n8n fallback (if configured), else preview below
+				}
+			}
+
+			// FALLBACK: POST to the n8n webhook, only if explicitly configured.
+			const webhookUrl = process.env.N8N_INVOICE_WEBHOOK_URL;
+			const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
+			if (webhookUrl && webhookSecret) {
+				const payload = {
+					loadId,
+					orderNumber: rcFields.orderNumber,
+					moveNumber: rcFields.moveNumber,
+					poNumber: rcFields.poNumber,
+					to: "QPinvoicesUSA@bisontransport.com",
+					invoicePdfBase64,
+					invoiceFileName: `Bison Invoice Order #${rcFields.orderNumber}.pdf`,
+					podPdfBase64: Buffer.from(podBuffer).toString("base64"),
+					podFileName: podDoc.file_name || `${loadId}_POD.pdf`,
+					rateconPdfBase64: rateconBuffer ? Buffer.from(rateconBuffer).toString("base64") : "",
+					rateconFileName: `${rcFields.orderNumber}.pdf`,
+				};
+				try {
+					const controller = new AbortController();
+					const timer = setTimeout(() => controller.abort(), 30000);
+					const r = await fetch(webhookUrl, {
+						method: "POST",
+						headers: { "Content-Type": "application/json", "x-webhook-secret": webhookSecret },
+						body: JSON.stringify(payload),
+						signal: controller.signal,
+					});
+					clearTimeout(timer);
+					const txt = await r.text().catch(() => "");
+					let n8nResponse;
+					try { n8nResponse = txt ? JSON.parse(txt) : {}; } catch { n8nResponse = { raw: txt.slice(0, 500) }; }
+					if (!r.ok) return res.status(502).json({ error: `n8n webhook returned ${r.status}`, details: n8nResponse });
+					return res.json({ success: true, invoiceId, via: "n8n", draftId: n8nResponse && (n8nResponse.draftId || n8nResponse.id), n8n: n8nResponse });
+				} catch (e) {
+					console.error("Bison invoice: n8n webhook call failed:", e.message);
+					return res.status(502).json({ error: "Failed to reach the invoice-draft webhook." });
+				}
+			}
+
+			// Nothing configured (or IMAP failed with no fallback): return the
+			// generated invoice for preview so the call still yields something useful.
+			return res.json({ success: true, n8nSkipped: true, invoiceId, invoicePdfBase64, note: "No Gmail/n8n draft target configured — invoice generated (preview only)." });
 		} catch (err) {
 			console.error("Draft Bison invoice error:", err.message);
 			return res.status(500).json({ error: "Failed to draft Bison invoice." });
