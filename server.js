@@ -345,6 +345,7 @@ catch {
 
 // Migration: add driver_pay_daily to trucks
 try { db.exec("ALTER TABLE trucks ADD COLUMN driver_pay_daily REAL DEFAULT 0"); } catch {}
+	try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_daily REAL DEFAULT 0"); } catch {}
 
 // Migration: add per-truck business config columns
 try { db.exec("ALTER TABLE trucks ADD COLUMN purchase_price REAL DEFAULT 0"); } catch {}
@@ -2674,7 +2675,7 @@ app.get("/api/drivers-directory", requireAuth, (req, res) => {
 	try {
 		const drivers = db.prepare("SELECT * FROM drivers_directory ORDER BY driver_name ASC").all();
 		// Return in a format compatible with the old sheet-based response
-		const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating", "Status", "PayType", "PayPercentage"];
+		const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating", "Status", "PayType", "PayPercentage", "PayDaily"];
 		const data = drivers.map(d => ({
 			Driver: d.driver_name, "Carrier Name": d.carrier_name, State: d.state, City: d.city,
 			ZIP: d.zip, Address: d.address, Trucks: d.trucks, Hazmat: d.hazmat,
@@ -2682,6 +2683,7 @@ app.get("/api/drivers-directory", requireAuth, (req, res) => {
 			Status: d.status || 'active',
 			PayType: d.pay_type || 'fixed',
 			PayPercentage: d.pay_percentage || 0,
+			PayDaily: d.pay_daily || 0,
 			ProfilePictureUrl: d.profile_picture_url || '',
 			_rowIndex: d.id, _id: d.id,
 		}));
@@ -2700,12 +2702,13 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		const insPayType = (obj.PayType || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
 		const insPayPct = Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0));
-		db.prepare(`INSERT OR REPLACE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating, status, pay_type, pay_percentage)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		const insPayDaily = Math.max(0, parseFloat(obj.PayDaily) || 0);
+		db.prepare(`INSERT OR REPLACE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating, status, pay_type, pay_percentage, pay_daily)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
-				obj.Status || "active", insPayType, insPayPct);
+				obj.Status || "active", insPayType, insPayPct, insPayDaily);
 		// Sync carrier-driver history on write (not on read)
 		if (obj.Driver && obj["Carrier Name"]) {
 			syncCarrierDriverHistory([obj], "Driver", "Carrier Name");
@@ -2726,7 +2729,7 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const obj = {};
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
 		// Keep existing status / pay fields if the client didn't send them
-		const current = db.prepare("SELECT status, pay_type, pay_percentage, carrier_name FROM drivers_directory WHERE id = ?").get(id);
+		const current = db.prepare("SELECT status, pay_type, pay_percentage, pay_daily, carrier_name FROM drivers_directory WHERE id = ?").get(id);
 		const nextStatus = obj.Status || current?.status || "active";
 		const sentPayType = (obj.PayType || "").toLowerCase();
 		const nextPayType = sentPayType === "fixed" || sentPayType === "percentage"
@@ -2735,15 +2738,18 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const nextPayPct = obj.PayPercentage !== undefined && obj.PayPercentage !== ""
 			? Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0))
 			: (current?.pay_percentage || 0);
+		const nextPayDaily = obj.PayDaily !== undefined && obj.PayDaily !== ""
+			? Math.max(0, parseFloat(obj.PayDaily) || 0)
+			: (current?.pay_daily || 0);
 		// Carrier UI was removed; the edit form now sends "" — preserve existing value.
 		const nextCarrier = obj["Carrier Name"] && obj["Carrier Name"].trim()
 			? obj["Carrier Name"]
 			: (current?.carrier_name || "");
-		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=?, status=?, pay_type=?, pay_percentage=? WHERE id=?`)
+		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=?, status=?, pay_type=?, pay_percentage=?, pay_daily=? WHERE id=?`)
 			.run(obj.Driver || "", nextCarrier, obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
-				nextStatus, nextPayType, nextPayPct, id);
+				nextStatus, nextPayType, nextPayPct, nextPayDaily, id);
 		// Sync carrier-driver history on write (not on read)
 		if (obj.Driver && nextCarrier) {
 			syncCarrierDriverHistory([{ ...obj, "Carrier Name": nextCarrier }], "Driver", "Carrier Name");
@@ -5351,16 +5357,28 @@ function generateInvoiceNumber(driverName, weekStart) {
 // Returns { [driver_name_lc]: { payType, payPercentage } } for branch decisions.
 function getDriverPayStructures() {
 	const rows = db.prepare(
-		"SELECT LOWER(driver_name) AS name_lc, pay_type, pay_percentage FROM drivers_directory"
+		"SELECT LOWER(driver_name) AS name_lc, pay_type, pay_percentage, pay_daily FROM drivers_directory"
 	).all();
 	const out = {};
 	for (const r of rows) {
 		out[r.name_lc] = {
 			payType: (r.pay_type || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed",
 			payPercentage: Math.max(0, Math.min(100, Number(r.pay_percentage) || 0)),
+			payDaily: Math.max(0, Number(r.pay_daily) || 0),
 		};
 	}
 	return out;
+}
+
+// Resolve a fixed-pay driver's daily rate: per-driver override > per-truck rate
+// > $250 default. drivers_directory.pay_daily wins when set; else the assigned
+// truck's trucks.driver_pay_daily; else the legacy $250. Keep every pay path
+// (invoices, financials, investor) calling this so they stay in lockstep.
+function resolveDailyRate(driverPayDaily, truckDaily) {
+	const d = Number(driverPayDaily) || 0;
+	if (d > 0) return d;
+	const t = Number(truckDaily) || 0;
+	return t > 0 ? t : 250;
 }
 
 // An expense an admin set to 'Rejected' was explicitly denied — it must never
@@ -5705,7 +5723,10 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		const truckRateRow = db.prepare(
 			"SELECT driver_pay_daily FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) AND COALESCE(driver_pay_daily, 0) > 0 LIMIT 1"
 		).get(driverName);
-		const dailyRate = (truckRateRow && truckRateRow.driver_pay_daily) || 250;
+		const driverDailyRow = db.prepare(
+			"SELECT pay_daily FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?) LIMIT 1"
+		).get(driverName);
+		const dailyRate = resolveDailyRate(driverDailyRow && driverDailyRow.pay_daily, truckRateRow && truckRateRow.driver_pay_daily);
 		const expensesTotal = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
 		const loadIds = uniqueLoads.map(l => loadIdCol ? l[loadIdCol] : "").filter(Boolean);
 		const expenseIds = expenses.map(e => e.id);
@@ -14843,7 +14864,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
 					dailyRate = 0;
 				} else {
-					dailyRate = trucksByDriver[driver] || 250;
+					dailyRate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);
 					pay = activeDays * dailyRate;
 				}
 				totalDriverPay += pay;
@@ -15772,7 +15793,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
 				dailyRate = 0;
 			} else {
-				dailyRate = trucksByDriver[driver] || 250;
+				dailyRate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);
 				pay = activeDays * dailyRate;
 			}
 			totalDriverPay += pay;
@@ -15911,9 +15932,9 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// truck's share of the driver's total active days so multi-truck
 			// drivers don't double-count.
 			const truckDays = truckDaySets[unitLower]?.size || 0;
-			const dailyRateRaw = truck.driver_pay_daily || 0;
-			const dailyRate = dailyRateRaw > 0 ? dailyRateRaw : 250;
 			const driverStruct = (driverName && payStructures[driverName]) || { payType: "fixed", payPercentage: 0 };
+			const dailyRateRaw = truck.driver_pay_daily || 0;
+			const dailyRate = resolveDailyRate(driverStruct.payDaily, dailyRateRaw);
 			let driverPay;
 			let driverPayUsedDefault;
 			if (driverStruct.payType === "percentage") {
@@ -16086,7 +16107,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 							+ Math.round((net * struct.payPercentage / 100) * 100) / 100;
 					}
 				} else {
-					const rate = trucksByDriver[driver] || 250;
+					const rate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);
 					for (const [mk, daySet] of Object.entries(driverMonthlyDays[driver] || {})) {
 						monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + daySet.size * rate;
 					}
@@ -16309,7 +16330,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					pay = Math.round((Math.max(0, revenue - deductible) * struct.payPercentage / 100) * 100) / 100;
 					dailyRate = 0;
 				} else {
-					dailyRate = trucksByDriver[drv] || 250;
+					dailyRate = resolveDailyRate(struct.payDaily, trucksByDriver[drv]);
 					pay = activeDays * dailyRate;
 				}
 				const inv = invByDriver[drv] || null;
@@ -16349,14 +16370,15 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				if (!activeDays) continue; // only trucks that worked this month
 				const driverKey = normalizeDriverName(t.assigned_driver);
 				const struct = (driverKey && payStructures[driverKey]) || { payType: "fixed", payPercentage: 0 };
+				const driverDaily = Number(struct.payDaily) || 0;
 				const dailyRateRaw = t.driver_pay_daily || 0;
-				const dailyRate = dailyRateRaw > 0 ? dailyRateRaw : 250;
+				const dailyRate = resolveDailyRate(driverDaily, dailyRateRaw);
 				perTruckMonth.push({
 					unitNumber: t.unit_number,
 					assignedDriver: t.assigned_driver || "—",
 					activeDays,
 					dailyRate,
-					dailyRateIsDefault: dailyRateRaw === 0,
+					dailyRateIsDefault: driverDaily === 0 && dailyRateRaw === 0,
 					driverPayType: struct.payType,
 					estDriverPay: struct.payType === "percentage" ? null : activeDays * dailyRate,
 				});

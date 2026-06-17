@@ -87,12 +87,16 @@
       <div class="pay-options">
         <label class="pay-radio">
           <input type="radio" v-model="form.payType" value="fixed" />
-          <span>Fixed Daily Rate ($250/day &times; active days)</span>
+          <span>Fixed Daily Rate (per day &times; active days)</span>
         </label>
         <label class="pay-radio">
           <input type="radio" v-model="form.payType" value="percentage" />
           <span>Percentage of Net Load Revenue (owner-operator)</span>
         </label>
+      </div>
+      <div v-if="form.payType === 'fixed'" class="form-group" style="margin-top:0.5rem;max-width:220px;">
+        <label class="form-label">Daily Rate ($/day)</label>
+        <input v-model.number="form.payDaily" class="form-input" type="number" min="0" step="1" placeholder="e.g. 250" />
       </div>
       <div v-if="form.payType === 'percentage'" class="form-group" style="margin-top:0.5rem;max-width:220px;">
         <label class="form-label">Owner-Operator Share (%)</label>
@@ -114,7 +118,7 @@ const defaults = () => ({
   driver: '', state: '', city: '', zip: '', address: '',
   trucks: '', hazmat: 'NO', phone: '', cell: '', email: '',
   dot: '', mc: '', rating: 'Not Rated',
-  payType: 'fixed', payPercentage: 0,
+  payType: 'fixed', payPercentage: 0, payDaily: 0,
 })
 
 const form = reactive(defaults())
@@ -143,6 +147,7 @@ function handleSubmit() {
     '', // Status placeholder — server falls back to 'active'
     form.payType,
     form.payType === 'percentage' ? (Number(form.payPercentage) || 0) : 0,
+    form.payType === 'fixed' ? (Number(form.payDaily) || 0) : 0,
   ])
   Object.assign(form, defaults())
 }
