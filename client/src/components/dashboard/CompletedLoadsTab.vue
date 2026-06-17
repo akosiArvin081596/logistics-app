@@ -297,9 +297,11 @@ async function draftInvoice() {
     const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-bison-invoice`, {})
     draftResult.value = {
       ok: true,
-      msg: r.n8nSkipped
-        ? `Invoice ${r.invoiceId} generated — n8n isn't wired yet, so no Gmail draft was created.`
-        : `✓ Draft ready in Gmail (invoice ${r.invoiceId}). Verify the details, then send.`,
+      msg: r.via
+        ? `✓ Draft ready in Gmail (invoice ${r.invoiceId}). Verify the details, then send.`
+        : (r.preview
+          ? `Invoice ${r.invoiceId} generated (preview) — no Gmail draft target is configured, so no draft was saved.`
+          : `Invoice ${r.invoiceId} generated.`),
     }
   } catch (e) {
     draftResult.value = { ok: false, msg: (e && e.message) || 'Failed to draft the invoice.' }
