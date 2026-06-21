@@ -231,7 +231,7 @@ async function upload() {
 async function remove(doc) {
   if (!confirm(`Delete "${doc.file_name}"?`)) return
   try {
-    await api.delete(`/api/legal-documents/${doc.id}`)
+    await api.del(`/api/legal-documents/${doc.id}`)
     docs.value = docs.value.filter(d => d.id !== doc.id)
   } catch {
     errorMsg.value = 'Delete failed.'

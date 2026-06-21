@@ -44,7 +44,7 @@ export const useTrailersStore = defineStore('trailers', {
       return res
     },
     async remove(id) {
-      await api.delete(`/api/trailers/${id}`)
+      await api.del(`/api/trailers/${id}`)
       await this.load()
     },
   },
