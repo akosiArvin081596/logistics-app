@@ -27,6 +27,10 @@
  * Backs up the unmodified workflow to scripts/.wf-backup-<ts>.json before PUT.
  *
  * Run: N8N_API_KEY=... node scripts/patch-filter-pdf-attachments.js
+ *
+ * REQUIRED follow-up — smoke-test the live pipeline AFTER patching:
+ *   N8N_API_KEY=... node scripts/n8n-smoke-test.js
+ * Replays a known-good email and asserts the sheet-write step ran.
  */
 
 const fs = require('fs');
