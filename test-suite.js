@@ -22,7 +22,7 @@ const results = [];
 function test(name, pass) { results.push({ name, pass }); }
 
 (async () => {
-  console.log("=== RUNNING 28 TESTS ===\n");
+  console.log("=== RUNNING 29 TESTS ===\n");
 
   // 1. Server health
   const health = await req("GET", "/api/auth/setup-check");
@@ -136,6 +136,12 @@ function test(name, pass) { results.push({ name, pass }); }
   // 28. Public tracker sets noindex robots tag (prevents search engine indexing)
   const robotsHeader = (unknownTrack.headers && unknownTrack.headers["x-robots-tag"]) || "";
   test("28. Public tracker sets noindex header", /noindex/i.test(robotsHeader));
+
+  // 29. Public tracker payload exposes pickup/delivery date-time keys
+  const okTrack = await req("GET", "/api/public/track/554954475");
+  const tb = (okTrack && okTrack.body) || {};
+  test("29. Track payload exposes pickup/delivery date-time keys",
+    okTrack.status === 200 && "scheduledPickup" in tb && "scheduledDelivery" in tb && "actualPickup" in tb && "actualDelivery" in tb);
 
   // Results
   console.log("");

@@ -67,6 +67,19 @@
               <div v-if="destZip" class="track-city-zip">{{ destZip }}</div>
             </div>
           </div>
+
+          <div class="track-sched-line">
+            <div v-if="data.scheduledPickup || data.actualPickup" class="track-sched">
+              <div class="track-city-label">PICKUP</div>
+              <div class="track-sched-val">{{ formatFriendlyDate(data.scheduledPickup) || '—' }}</div>
+              <div v-if="data.actualPickup" class="track-sched-actual">Actual: {{ formatFriendlyDate(data.actualPickup) }}</div>
+            </div>
+            <div v-if="data.scheduledDelivery || data.actualDelivery" class="track-sched track-sched-dest">
+              <div class="track-city-label">DELIVERY</div>
+              <div class="track-sched-val">{{ formatFriendlyDate(data.scheduledDelivery) || '—' }}</div>
+              <div v-if="data.actualDelivery" class="track-sched-actual">Actual: {{ formatFriendlyDate(data.actualDelivery) }}</div>
+            </div>
+          </div>
         </div>
 
         <!-- 5-stage stepper, visual only -->
@@ -584,6 +597,27 @@ const lastUpdatedText = computed(() => {
   margin-top: 1px;
 }
 .track-route-arrow { color: #cbd5e1; font-size: 1.4rem; flex-shrink: 0; }
+
+.track-sched-line {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.6rem 0 0.1rem;
+  border-top: 1px solid #f1f5f9;
+}
+.track-sched { flex: 1; min-width: 0; }
+.track-sched-dest { text-align: right; }
+.track-sched-val {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin-top: 0.15rem;
+}
+.track-sched-actual {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #16a34a;
+  margin-top: 1px;
+}
 
 .track-stepper-card { padding: 0.5rem 0.5rem 0.25rem; }
 
