@@ -82,14 +82,10 @@
           </div>
         </div>
 
-        <!-- 5-stage stepper, visual only -->
-        <div class="track-card track-stepper-card">
-          <StatusStepper
-            :load="stepperLoad"
-            :headers="stepperHeaders"
-            :current-status="data.status"
-            :read-only="true"
-          />
+        <!-- Detailed per-phase status timeline (mirrors the admin load-detail modal) -->
+        <div class="track-card">
+          <div class="track-map-title">Status timeline</div>
+          <StatusTimeline :phases="data.phases || []" />
         </div>
 
         <!-- ETA or Delivered state -->
@@ -157,7 +153,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { io } from 'socket.io-client'
-import StatusStepper from '../components/driver/StatusStepper.vue'
+import StatusTimeline from '../components/shared/StatusTimeline.vue'
 import DriverRouteMap from '../components/driver/DriverRouteMap.vue'
 
 const route = useRoute()
@@ -309,17 +305,11 @@ watch(loadIdParam, async (v, prev) => {
   }
 })
 
-// -- Helpers that shape the server payload into what StatusStepper + DriverRouteMap expect
+// -- Helpers that shape the server payload into what DriverRouteMap expects
 //
-// The two reused components were built for the driver app and key off the
-// Job Tracking sheet's column names. We synthesise a minimal "load" object
-// and header list so they work without any driver-side context.
-const stepperHeaders = ['Load ID', 'Status']
-const stepperLoad = computed(() => {
-  if (!data.value) return {}
-  return { 'Load ID': data.value.loadId, Status: data.value.status }
-})
-
+// DriverRouteMap was built for the driver app and keys off the Job Tracking
+// sheet's column names. We synthesise a minimal "load" object and header list
+// so it works without any driver-side context.
 const mapHeaders = [
   'Load ID', 'Status',
   'Origin Lat', 'Origin Lng',
@@ -618,8 +608,6 @@ const lastUpdatedText = computed(() => {
   color: #16a34a;
   margin-top: 1px;
 }
-
-.track-stepper-card { padding: 0.5rem 0.5rem 0.25rem; }
 
 .track-eta-top {
   display: flex;

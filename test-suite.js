@@ -22,7 +22,7 @@ const results = [];
 function test(name, pass) { results.push({ name, pass }); }
 
 (async () => {
-  console.log("=== RUNNING 29 TESTS ===\n");
+  console.log("=== RUNNING 30 TESTS ===\n");
 
   // 1. Server health
   const health = await req("GET", "/api/auth/setup-check");
@@ -142,6 +142,15 @@ function test(name, pass) { results.push({ name, pass }); }
   const tb = (okTrack && okTrack.body) || {};
   test("29. Track payload exposes pickup/delivery date-time keys",
     okTrack.status === 200 && "scheduledPickup" in tb && "scheduledDelivery" in tb && "actualPickup" in tb && "actualDelivery" in tb);
+
+  // 30. Public tracker status timeline is an array and never leaks the per-transition actor
+  const phases = tb.phases;
+  const phasesIsArray = Array.isArray(phases);
+  const phasesShaped = phasesIsArray && phases.every(p => p && "status" in p && "startedAt" in p);
+  const noActorKey = phasesIsArray && phases.every(p => !p || !("actor" in p));
+  const noActorString = !/actor/i.test(JSON.stringify(phases || []));
+  test("30. Track phases is array and exposes no actor",
+    okTrack.status === 200 && phasesIsArray && phasesShaped && noActorKey && noActorString);
 
   // Results
   console.log("");
