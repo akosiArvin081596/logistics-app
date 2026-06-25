@@ -364,6 +364,18 @@
       @confirm="runDelete"
       @cancel="showDeleteConfirm = false"
     />
+
+    <!-- Queue confirm — appears when reassigning onto a driver who's already on
+         a load. Queues behind their active work instead of replacing it.
+         Mirrors JobBoardTab's queue-confirm. -->
+    <ConfirmModal
+      :open="!!pendingReassign"
+      title="Queue this load?"
+      :message="pendingReassignMessage"
+      confirm-text="Queue Load"
+      @confirm="confirmQueueReassign"
+      @cancel="pendingReassign = null"
+    />
   </div>
 </template>
 
@@ -371,7 +383,6 @@
 import { computed, ref, reactive, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
-import { useToast } from '../../composables/useToast'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
@@ -390,7 +401,6 @@ import { useDashboardStore } from '../../stores/dashboard'
 import { useViewport } from '../../composables/useViewport'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 const api = useApi()
-const { show: toast } = useToast()
 const auth = useAuthStore()
 const dashStore = useDashboardStore()
 const { isMobile } = useViewport()
@@ -546,16 +556,33 @@ function formatPingAge(ms) {
   return `${h}h`
 }
 function isBusy(d) { return props.busyDrivers.includes((d || '').trim().toLowerCase().replace(/\s+/g, ' ')) }
+// Per Deshorn King (client request): a dispatcher can queue a load onto a driver
+// who's already busy — the new load sits behind their active work and starts
+// when they finish. Mirrors JobBoardTab's queue-confirm flow. We only have the
+// busyDrivers list here (no queue count), so the confirm omits an exact position.
+const pendingReassign = ref(null)
 function confirmReassign(j) {
   const d = reassignSelections[j._rowIndex]; if (!d) return
   const norm = s => (s || '').trim().toLowerCase().replace(/\s+/g, ' ')
-  // One load at a time. Block reassigning onto a driver who already has another
-  // active load (server also returns 409). Skip when the target is the driver
-  // already on this load — a no-op move shouldn't trip the guard.
+  // Reassigning onto a different, already-busy driver queues the load instead of
+  // replacing their active one — confirm before posting. Skip when the target is
+  // the driver already on this load (a no-op move shouldn't open the modal).
   if (norm(d) !== norm(getCurrentDriver(j)) && isBusy(d)) {
-    toast(`${d} already has an active load — one load at a time. Finish or reassign it first.`, 'error'); return
+    pendingReassign.value = { job: j, driver: d }; return
   }
   if (confirm(`Reassign to ${d}?`)) { emit('reassign', { rowIndex: j._rowIndex, newDriver: d, job: j }); reassignSelections[j._rowIndex] = '' }
+}
+const pendingReassignMessage = computed(() => {
+  const p = pendingReassign.value
+  if (!p) return ''
+  return `${p.driver} is already on a load. This load will be queued behind their current work — they'll get it when they finish their active load. Continue?`
+})
+function confirmQueueReassign() {
+  if (!pendingReassign.value) return
+  const { job, driver } = pendingReassign.value
+  emit('reassign', { rowIndex: job._rowIndex, newDriver: driver, job })
+  reassignSelections[job._rowIndex] = ''
+  pendingReassign.value = null
 }
 function confirmCancel(j) { if (confirm('Cancel this assignment?')) emit('cancel', { rowIndex: j._rowIndex, job: j }) }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
