@@ -4623,6 +4623,19 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		let deliveredAt = null;
 		if (isDelivered) deliveredAt = statusUpdateCol ? (load[statusUpdateCol] || "").toString().trim() : "";
 
+		let actualPickup = null, actualDelivery = null;
+		try {
+			const hist = db.prepare(
+				`SELECT new_status AS s, strftime('%Y-%m-%dT%H:%M:%SZ', changed_at) AS at
+				 FROM load_status_history WHERE load_id = ? ORDER BY changed_at ASC, id ASC`
+			).all(target);
+			for (const r of hist) {
+				const s = (r.s || "").trim();
+				if (!actualPickup && /^in transit$/i.test(s)) actualPickup = r.at;
+				if (!actualDelivery && /^(delivered|pod received|completed)$/i.test(s)) actualDelivery = r.at;
+			}
+		} catch { /* table may not exist on legacy installs */ }
+
 		const payload = {
 			loadId: (load[loadIdCol] || "").toString().trim(),
 			status,
@@ -4639,6 +4652,8 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			scheduledPickup: pickupDateCol ? (load[pickupDateCol] || "").toString().trim() : "",
 			scheduledDelivery: deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "",
 			deliveredAt,
+			actualPickup,
+			actualDelivery,
 		};
 		trackResponseCache.set(cacheKey, { response: payload, time: Date.now() });
 		if (trackResponseCache.size > TRACK_CACHE_MAX) trackResponseCache.delete(trackResponseCache.keys().next().value);
