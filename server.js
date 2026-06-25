@@ -4305,7 +4305,9 @@ app.post("/api/public/investor-preview-pdf/:docKey", async (req, res) => {
 //     * strict rate limit (60 / 15min / IP)
 //     * strict regex on the ID before any sheet lookup
 //     * response is a pure whitelist — no driver name, no phone, no broker,
-//       no rate / financial columns EVER flow through
+//       no rate / financial columns EVER flow through. The phases[] timeline
+//       is mirrored from the admin modal but with the per-phase `actor`
+//       field stripped, so driver/admin names never leak via the timeline.
 //     * X-Robots-Tag keeps tracker URLs out of search indexes
 //   - Driver GPS privacy: only the last ping is returned, and only if it's
 //     within the last 2 hours — prevents leaking a driver's off-shift
@@ -4636,10 +4638,15 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			}
 		} catch { /* table may not exist on legacy installs */ }
 
+		// Per-phase timeline mirrored from the admin modal, with the `actor`
+		// field stripped so no driver/admin name leaks through the public payload.
+		const phases = computeStatusPhases(target).map(({ actor, ...p }) => p);
+
 		const payload = {
 			loadId: (load[loadIdCol] || "").toString().trim(),
 			status,
 			stages,
+			phases,
 			origin,
 			destination,
 			originLat,
@@ -10748,12 +10755,52 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 	}
 });
 
+// computeStatusPhases(loadId) — derive the per-phase timeline for one load from
+// the load_status_history table. Each transition opens a phase whose end is the
+// next transition's start; the last phase is in-progress unless its status is
+// terminal. Returns Array<{ status, source, actor, startedAt, endedAt,
+// durationMs, inProgress, terminal }>. Shared by the auth-protected
+// /api/loads/:loadId/status-history route (which returns phases WITH actor) and
+// the public tracker (which strips actor — no driver names). Forward-only: loads
+// that predate this feature yield an empty array.
+function computeStatusPhases(loadId) {
+	const lid = (loadId || "").toString().trim().toLowerCase().replace(/^#/, "");
+	const rows = db.prepare(
+		`SELECT new_status AS newStatus, source, actor,
+		        strftime('%Y-%m-%dT%H:%M:%SZ', changed_at) AS at
+		 FROM load_status_history
+		 WHERE load_id = ?
+		 ORDER BY changed_at ASC, id ASC`
+	).all(lid);
+
+	// Each transition opens a phase; its end = the next transition's start.
+	// The last phase is in-progress unless its status is terminal.
+	const TERMINAL_RE = /^(delivered|completed|pod received|cancel|canceled|cancelled)$/i;
+	return rows.map((r, i) => {
+		const next = rows[i + 1];
+		const startedAt = r.at;
+		const endedAt = next ? next.at : null;
+		const durationMs = endedAt ? (new Date(endedAt) - new Date(startedAt)) : null;
+		const terminal = !next && TERMINAL_RE.test((r.newStatus || "").trim());
+		return {
+			status: r.newStatus,
+			source: r.source,
+			actor: r.actor,
+			startedAt,
+			endedAt,
+			durationMs,
+			inProgress: !next && !terminal,
+			terminal,
+		};
+	});
+}
+
 // GET /api/loads/:loadId/status-history — per-phase timeline for one load.
-// Returns ordered raw transitions PLUS a derived phases[] (started/ended/duration),
-// computed server-side so the driver app and the admin modals render identical
-// numbers. Roles: Super Admin + Dispatcher see any load; a Driver only their own
-// (same ownership gate the write paths use). Forward-only: loads that predate this
-// feature return empty arrays (the UI shows a friendly empty state).
+// Returns a derived phases[] (started/ended/duration), computed server-side so
+// the driver app and the admin modals render identical numbers. Roles: Super
+// Admin + Dispatcher see any load; a Driver only their own (same ownership gate
+// the write paths use). Forward-only: loads that predate this feature return an
+// empty array (the UI shows a friendly empty state).
 app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 	try {
 		const rawId = (req.params.loadId || "").trim();
@@ -10768,37 +10815,8 @@ app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 			return res.status(403).json({ error: "Forbidden" });
 		}
 
-		const lid = rawId.toLowerCase().replace(/^#/, "");
-		const rows = db.prepare(
-			`SELECT old_status AS oldStatus, new_status AS newStatus, source, actor,
-			        strftime('%Y-%m-%dT%H:%M:%SZ', changed_at) AS at
-			 FROM load_status_history
-			 WHERE load_id = ?
-			 ORDER BY changed_at ASC, id ASC`
-		).all(lid);
-
-		// Each transition opens a phase; its end = the next transition's start.
-		// The last phase is in-progress unless its status is terminal.
-		const TERMINAL_RE = /^(delivered|completed|pod received|cancel|canceled|cancelled)$/i;
-		const phases = rows.map((r, i) => {
-			const next = rows[i + 1];
-			const startedAt = r.at;
-			const endedAt = next ? next.at : null;
-			const durationMs = endedAt ? (new Date(endedAt) - new Date(startedAt)) : null;
-			const terminal = !next && TERMINAL_RE.test((r.newStatus || "").trim());
-			return {
-				status: r.newStatus,
-				source: r.source,
-				actor: r.actor,
-				startedAt,
-				endedAt,
-				durationMs,
-				inProgress: !next && !terminal,
-				terminal,
-			};
-		});
-
-		res.json({ loadId: rawId, transitions: rows, phases });
+		const phases = computeStatusPhases(rawId);
+		res.json({ loadId: rawId, phases });
 	} catch (error) {
 		console.error("status-history error:", error.message);
 		res.status(500).json({ error: error.message });

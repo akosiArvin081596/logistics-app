@@ -37,7 +37,11 @@ import { ref, watch } from 'vue'
 import { useApi } from '@/composables/useApi'
 
 const props = defineProps({
-  loadId: { type: String, required: true },
+  // When provided (non-null), phases are rendered directly and no fetch happens —
+  // lets the unauthenticated public tracker pass pre-fetched phases since it can't
+  // call the protected status-history endpoint. Null = self-fetch by loadId.
+  phases: { type: Array, default: null },
+  loadId: { type: String, default: '' },
   autoLoad: { type: Boolean, default: true },
   compact: { type: Boolean, default: false },
 })
@@ -61,7 +65,12 @@ async function load() {
     loading.value = false
   }
 }
-watch(() => props.loadId, () => { if (props.autoLoad) load() }, { immediate: true })
+// Pre-fetched phases passed in: render them, never fetch.
+watch(() => props.phases, (v) => {
+  if (v != null) { phases.value = v; loading.value = false; error.value = false }
+}, { immediate: true })
+// Self-fetch only when no phases prop is supplied.
+watch(() => props.loadId, () => { if (props.phases == null && props.autoLoad) load() }, { immediate: true })
 defineExpose({ reload: load })
 
 // Status → colors, mirroring StatusBadge.vue's palette.
