@@ -137,6 +137,7 @@ import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { parseSheetUtc, formatDeliveredLocal } from '@/utils/datetime'
 
 const api = useApi()
 const auth = useAuthStore()
@@ -163,7 +164,7 @@ const completionCol = computed(() => props.headers.find(h => /completion|complet
 const sortedJobs = computed(() => {
   const col = completionCol.value
   if (!col) return filteredJobs.value
-  const ts = (v) => { const d = new Date(v); return isNaN(d.getTime()) ? -Infinity : d.getTime() }
+  const ts = (v) => { const d = parseSheetUtc(v); return d && !isNaN(d.getTime()) ? d.getTime() : -Infinity }
   return [...filteredJobs.value].sort((a, b) => ts(b[col]) - ts(a[col]))
 })
 const reviewToggleStyle = computed(() => ({
@@ -238,12 +239,11 @@ const displayCols = computed(() => {
   return out
 })
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
-// Delivery date/time, formatted consistently (the raw cell is 24h, no comma).
+// Delivery date/time. The raw cell is a UTC wall-clock string with no zone; we
+// re-interpret it as UTC and render the viewer-local instant + zone label so
+// this column matches the load-detail Status Timeline. See @/utils/datetime.
 function fmtDeliveryDate(v) {
-  if (!v || !String(v).trim()) return '\u2014'
-  const d = new Date(v)
-  if (isNaN(d.getTime())) return String(v)
-  return d.toLocaleString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
+  return formatDeliveredLocal(v)
 }
 function cellValue(j, c) { if (c === 'Pickup') return j._pickupLocation || '\u2014'; if (c === 'Drop-off') return j._dropLocation || '\u2014'; if (c === 'Delivery Date') return fmtDeliveryDate(completionCol.value ? j[completionCol.value] : ''); const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
 function addrStreet(j, c) { return c === 'Pickup' ? j._pickupStreet : j._dropStreet }
