@@ -114,6 +114,7 @@ import { ref, reactive, computed } from 'vue'
 import { Form as VanForm, Field as VanField, CellGroup as VanCellGroup, Button as VanButton, Uploader as VanUploader, Picker as VanPicker, Popup as VanPopup } from 'vant'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
+import { compressImage } from '../../lib/imageUtils'
 
 const props = defineProps({
   loads: { type: Array, default: () => [] },
@@ -190,36 +191,10 @@ const ocrConfidence = ref('')
 async function handlePhoto(file) {
   const blob = file && file.file
   if (!blob) return
-  const MAX = 1024
-  try {
-    // Decode + downscale in one pass via createImageBitmap. Without resize
-    // options, a 12MP phone photo would materialize ~48MB of raw RGBA in
-    // memory before we touch the canvas — that's what was OOM-killing the
-    // tab on low-RAM phones and bouncing the driver to /login.
-    const probe = await createImageBitmap(blob)
-    let w = probe.width
-    let h = probe.height
-    probe.close()
-    if (w > MAX || h > MAX) {
-      if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
-      else { w = Math.round((w * MAX) / h); h = MAX }
-    }
-    const bitmap = await createImageBitmap(blob, {
-      resizeWidth: w,
-      resizeHeight: h,
-      resizeQuality: 'medium',
-    })
-    const canvas = document.createElement('canvas')
-    canvas.width = w
-    canvas.height = h
-    canvas.getContext('2d').drawImage(bitmap, 0, 0)
-    bitmap.close()
-    photoBase64.value = canvas.toDataURL('image/jpeg', 0.8)
-    // Release the canvas backing store now that the encoded string is captured.
-    canvas.width = 0
-    canvas.height = 0
-  } catch {
-    photoBase64.value = ''
+  // Decode + downscale to a JPEG data URL via the shared one-pass helper
+  // (see imageUtils for the low-RAM OOM fix). Keep the receipt's 1024 max-edge.
+  photoBase64.value = await compressImage(blob, 1024)
+  if (!photoBase64.value) {
     toast.show("Couldn't process the photo — please retake", 'error')
     return
   }
