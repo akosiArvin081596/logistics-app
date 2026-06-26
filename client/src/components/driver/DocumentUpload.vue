@@ -106,7 +106,7 @@
       :disabled="files.length === 0 || uploading || scanning"
       @click="handleUpload"
     >
-      {{ uploading ? 'Uploading...' : `Upload ${selectedType} (${files.length} file${files.length !== 1 ? 's' : ''})` }}
+      {{ uploading ? (progress.total > 1 ? `Uploading ${progress.done}/${progress.total}…` : 'Uploading…') : `Upload ${selectedType} (${files.length} file${files.length !== 1 ? 's' : ''})` }}
     </button>
 
     <!-- Tap-to-enlarge preview of a captured/scanned page (image or PDF) -->
@@ -122,9 +122,10 @@
 
 <script setup>
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
+import { useUpload } from '../../composables/useUpload'
+import { compressImage, readFileAsDataURL, SCAN_MAX_EDGE } from '../../lib/imageUtils'
 
 const props = defineProps({
   loadId: { type: String, required: true },
@@ -136,9 +137,9 @@ const props = defineProps({
 
 const emit = defineEmits(['uploaded'])
 
-const api = useApi()
 const toast = useToast()
 const { scanDocument } = useDocumentScan()
+const { uploadDocuments, uploading, progress } = useUpload()
 
 const docTypes = [
   { value: 'POD', label: 'Proof of Delivery' },
@@ -152,7 +153,6 @@ const cameraInput = ref(null)
 const fileInput = ref(null)
 const addInput = ref(null)
 const files = ref([]) // { data: base64, name: string, type: string, isImage: boolean }
-const uploading = ref(false)
 
 // --- Scan state (ScanKit.io server-side; replaced the old jscanify/OpenCV). ---
 const scanInput = ref(null)
@@ -179,51 +179,6 @@ const hintText = computed(() => {
   if (selectedType.value === 'Receipt') return `Take photos of the receipt for Load ${props.loadId}`
   return `Take photos or upload files for Load ${props.loadId}`
 })
-
-// Decode + downscale an image to a JPEG data URL. maxEdge defaults to 1200 for
-// plain uploads; the scan flow passes a larger value so ScanKit has enough
-// detail to detect the document edges. createImageBitmap resizes in one pass —
-// the old Image+Canvas path materialised a 12MP photo as ~48MB of raw RGBA and
-// OOM-killed the tab on low-RAM phones (fix from commit 59fcd80).
-async function compressImage(file, maxEdge = 1200) {
-  const MAX = maxEdge
-  try {
-    const probe = await createImageBitmap(file)
-    let w = probe.width
-    let h = probe.height
-    probe.close()
-    if (w > MAX || h > MAX) {
-      if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
-      else { w = Math.round((w * MAX) / h); h = MAX }
-    }
-    const bitmap = await createImageBitmap(file, {
-      resizeWidth: w,
-      resizeHeight: h,
-      resizeQuality: 'medium',
-    })
-    const canvas = document.createElement('canvas')
-    canvas.width = w
-    canvas.height = h
-    canvas.getContext('2d').drawImage(bitmap, 0, 0)
-    bitmap.close()
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.8)
-    canvas.width = 0
-    canvas.height = 0
-    return dataUrl
-  } catch {
-    // Unsupported format (HEIC on older browsers, etc.) — fall back to the
-    // raw file so the upload can still proceed without compression.
-    return await readFileAsDataURL(file)
-  }
-}
-
-function readFileAsDataURL(file) {
-  return new Promise((resolve) => {
-    const reader = new FileReader()
-    reader.onload = (e) => resolve(e.target.result)
-    reader.readAsDataURL(file)
-  })
-}
 
 async function handleFile(event) {
   // The file inputs allow multi-select, so a driver can attach several pages or
@@ -301,7 +256,7 @@ async function handleScanFile(event) {
   let dataUrl = ''
   try {
     // Send a higher-res input than plain uploads so ScanKit detects edges well.
-    dataUrl = await compressImage(file, 2000)
+    dataUrl = await compressImage(file, SCAN_MAX_EDGE)
   } catch {
     scanning.value = false
     toast.show('Could not read the captured image. Please try again.', 'error')
@@ -349,27 +304,39 @@ function handleScanError(err, dataUrl) {
 
 async function handleUpload() {
   if (files.value.length === 0 || uploading.value) return
-  uploading.value = true
-  try {
-    const images = files.value.filter(f => f.isImage)
-    const docs = files.value.filter(f => !f.isImage)
 
-    // Upload images as before (converted to multi-page PDF server-side)
-    if (images.length > 0) {
-      const photoData = images.length === 1 ? images[0].data : images.map(f => f.data)
-      await api.post('/api/documents/upload', {
+  const fileCount = files.value.length
+  const images = files.value.filter(f => f.isImage)
+  const docs = files.value.filter(f => !f.isImage)
+
+  // All images ride in ONE POST as a photoData array — the server stitches them
+  // into a single multi-page PDF. Each non-image doc is its own POST. `taskSrc`
+  // maps each task back to the exact file object(s) it carries, so a partial
+  // failure re-tains only what didn't land — matched by object identity, so two
+  // files sharing a name can't alias each other on retry.
+  const imageLabel = images.length
+    ? `${selectedType.value} (${images.length} page${images.length !== 1 ? 's' : ''})`
+    : ''
+  const tasks = []
+  const taskSrc = []
+  if (images.length) {
+    tasks.push({
+      label: imageLabel,
+      body: {
         loadId: props.loadId,
         rowIndex: props.rowIndex,
         docType: selectedType.value,
-        photoData,
+        photoData: images.length === 1 ? images[0].data : images.map(f => f.data),
         driverName: props.driverName,
         fileType: 'image',
-      })
-    }
-
-    // Upload each document file separately (e.g. a PDF picked via Upload File)
-    for (const doc of docs) {
-      await api.post('/api/documents/upload', {
+      },
+    })
+    taskSrc.push(images)
+  }
+  for (const doc of docs) {
+    tasks.push({
+      label: doc.name,
+      body: {
         loadId: props.loadId,
         rowIndex: props.rowIndex,
         docType: selectedType.value,
@@ -377,18 +344,29 @@ async function handleUpload() {
         driverName: props.driverName,
         fileType: 'document',
         fileName: doc.name,
-      })
-    }
+      },
+    })
+    taskSrc.push([doc])
+  }
 
-    const total = files.value.length
-    toast.show(`${selectedType.value} uploaded (${total} file${total !== 1 ? 's' : ''})`)
+  // useUpload posts each task with retry + a 90s timeout and reports per-task
+  // outcomes by index. It owns the `uploading` / `progress` refs the button reads.
+  const { failed } = await uploadDocuments(tasks)
+
+  if (failed.length === 0) {
+    toast.show(`${selectedType.value} uploaded (${fileCount} file${fileCount !== 1 ? 's' : ''})`)
     emit('uploaded', { type: selectedType.value })
     files.value = []
-  } catch (err) {
-    toast.show(err.message || 'Failed to upload document', 'error')
-  } finally {
-    uploading.value = false
+    return
   }
+
+  // Keep only the files whose task failed so re-tapping Upload retries just those;
+  // the ones that already landed are dropped to avoid duplicate uploads server-side.
+  // Match by object identity (not filename) so duplicate names can't drop a file.
+  const keep = new Set()
+  for (const f of failed) for (const src of (taskSrc[f.index] || [])) keep.add(src)
+  files.value = files.value.filter(file => keep.has(file))
+  toast.show(`Upload failed for ${failed.length} item${failed.length !== 1 ? 's' : ''} — tap Upload to retry.`, 'error')
 }
 </script>
 

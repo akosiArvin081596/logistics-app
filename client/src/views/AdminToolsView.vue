@@ -267,6 +267,65 @@
       </div>
     </div>
 
+    <!-- ScanKit Document Scanning -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <div class="section-dot" style="background: #7c3aed;"></div>
+          ScanKit Document Scanning
+        </div>
+      </div>
+      <div class="card-body">
+        <div v-if="skHealthLoading" class="scan-empty">Loading status...</div>
+        <div v-else-if="!skHealth" class="scan-empty">Status unavailable.</div>
+        <div v-else>
+          <div class="rm-status-grid">
+            <div class="rm-status-row">
+              <span class="rm-status-label">Kill switch</span>
+              <span :class="['rm-pill', skHealth.enabled ? 'rm-pill-on' : 'rm-pill-off']">
+                {{ skHealth.enabled ? 'ENABLED' : 'DISABLED' }}
+              </span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">API key</span>
+              <span :class="['rm-pill', skHealth.hasKey ? 'rm-pill-on' : 'rm-pill-off']">
+                {{ skHealth.hasKey ? 'CONFIGURED' : 'MISSING' }}
+              </span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">Base URL</span>
+              <span class="rm-status-mono">{{ skHealth.baseUrl || '—' }}</span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">Last scan</span>
+              <span class="rm-status-mono">{{ formatRmTs(skHealth.lastScan) }}</span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">Out of credits since</span>
+              <span :class="['rm-status-mono', skHealth.noCreditsSince ? 'rm-error-text' : '']">
+                {{ skHealth.noCreditsSince ? formatRmTs(skHealth.noCreditsSince) : '—' }}
+              </span>
+            </div>
+            <div class="rm-status-row">
+              <span class="rm-status-label">Errors (last 24h)</span>
+              <span :class="['rm-status-mono', skHealth.errorsLast24h > 0 ? 'rm-error-text' : '']">
+                {{ skHealth.errorsLast24h ?? 0 }}
+              </span>
+            </div>
+          </div>
+          <div v-if="skHealth.lastError" class="rm-last-error">
+            <strong>{{ skHealth.lastError.code || 'error' }}:</strong>
+            {{ skHealth.lastError.message }}
+            <span v-if="skHealth.lastError.status">(HTTP {{ skHealth.lastError.status }})</span>
+          </div>
+          <p class="rm-help">
+            ScanKit crops/deskews driver POD &amp; BOL scans. On 402 (out of credits) the app
+            falls back to attaching the raw photo. Top up credits to restore scanning.
+          </p>
+        </div>
+      </div>
+    </div>
+
     <!-- Business Configuration (Investor Settings) -->
     <ConfigPanel
       :config="investorStore.config"
@@ -291,6 +350,9 @@ const rmHealth = ref(null)
 const rmHealthLoading = ref(true)
 const rmSyncBusy = ref(false)
 
+const skHealth = ref(null)
+const skHealthLoading = ref(true)
+
 async function loadRoutemateHealth() {
   rmHealthLoading.value = true
   try {
@@ -299,6 +361,16 @@ async function loadRoutemateHealth() {
     rmHealth.value = null
   } finally {
     rmHealthLoading.value = false
+  }
+}
+
+async function loadScanKitHealth() {
+  try {
+    skHealth.value = await api.get('/api/scankit/health')
+  } catch {
+    skHealth.value = null
+  } finally {
+    skHealthLoading.value = false
   }
 }
 
@@ -331,6 +403,7 @@ function formatRmTs(iso) {
 onMounted(() => {
   if (!investorStore.data) investorStore.load().catch(() => {})
   loadRoutemateHealth()
+  loadScanKitHealth()
 })
 const { show: toast } = useToast()
 const dupShowCount = ref(20)

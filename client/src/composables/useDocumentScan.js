@@ -22,7 +22,7 @@ export function useDocumentScan() {
       photoData: photoDataUrl,
       returnPdf,
       filter,
-    })
+    }, { timeout: 30000 })
   }
 
   return { scanDocument }
