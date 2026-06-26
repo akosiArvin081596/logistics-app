@@ -22,7 +22,7 @@ const results = [];
 function test(name, pass) { results.push({ name, pass }); }
 
 (async () => {
-  console.log("=== RUNNING 30 TESTS ===\n");
+  console.log("=== RUNNING 33 TESTS ===\n");
 
   // 1. Server health
   const health = await req("GET", "/api/auth/setup-check");
@@ -151,6 +151,37 @@ function test(name, pass) { results.push({ name, pass }); }
   const noActorString = !/actor/i.test(JSON.stringify(phases || []));
   test("30. Track phases is array and exposes no actor",
     okTrack.status === 200 && phasesIsArray && phasesShaped && noActorKey && noActorString);
+
+  // 31. ScanKit health probe — Super Admin gets the contract keys and the API key is NEVER echoed.
+  //     Contract: { enabled, hasKey, baseUrl, lastScan, noCreditsSince, errorsLast24h, lastError }.
+  const sk = await req("GET", "/api/scankit/health", null, ac);
+  const skb = (sk && sk.body) || {};
+  const skKeysPresent = sk.status === 200 &&
+    typeof skb === "object" &&
+    "enabled" in skb && "hasKey" in skb && "baseUrl" in skb && "errorsLast24h" in skb;
+  // Defense-in-depth: no raw-key field, and no ScanKit "sk_..." secret anywhere in the payload.
+  const skNoRawKey = !("apiKey" in skb) && !("key" in skb) && !/sk_[A-Za-z0-9]/.test(JSON.stringify(skb));
+  test("31. ScanKit health works for Super Admin & never echoes the key", skKeysPresent && skNoRawKey);
+
+  // 32. ScanKit health is admin-only — the Investor session (ic, created in test 3) is forbidden.
+  const skInv = await req("GET", "/api/scankit/health", null, ic);
+  test("32. ScanKit health blocked for non-admin (Investor)", skInv.status === 403);
+
+  // 33. POST /api/documents/upload fast-return smoke (Super Admin; non-Driver roles skip the
+  //     load-ownership check). Sends a minimal, real 1x1 baseline JPEG (verified to pass the
+  //     server's isValidImageMagic guard AND pdfkit imageToPdf). A NON-"POD" docType is used so
+  //     the (non-critical) Job Tracking POD-column write is skipped — keeps this smoke from
+  //     mutating a real seeded sheet row. ASSUMPTION: no real seeded load is required (the SQLite
+  //     documents row is keyed by loadId with no FK); QA can swap in a seeded loadId + its real
+  //     rowIndex and docType:"POD" for a stricter POD-path check. Robust assertion: expect a clean
+  //     200, but accept any clean 4xx JSON error too — contract is "responds fast & well-formed,
+  //     never a 5xx/crash" across the fast-return refactor.
+  const tinyJpeg = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=";
+  const up = await req("POST", "/api/documents/upload",
+    { loadId: "SMOKE-UPLOAD-TEST", rowIndex: 2, photoData: "data:image/jpeg;base64," + tinyJpeg, docType: "Test" }, ac);
+  const up2xx = up.status === 200 && up.body && typeof up.body === "object" && up.body.error === undefined;
+  const upClean4xx = up.status >= 400 && up.status < 500 && up.body && typeof up.body === "object" && "error" in up.body;
+  test("33. Documents upload fast-return responds 200 (or clean 4xx, never 5xx)", up2xx || upClean4xx);
 
   // Results
   console.log("");

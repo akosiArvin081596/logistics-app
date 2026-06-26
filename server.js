@@ -2677,6 +2677,14 @@ const routemateHealth = {
 	errorsLast24h: 0,
 };
 
+// Last-scan / error tracker for /api/scankit/health. ScanKit is credit-billed
+// and answers 402 (SCANKIT_NO_CREDITS) when the account is dry — the scan
+// endpoint runs server-side with no UI signal, so this surfaces credit/auth
+// outages to Super Admins. Rolling 24h counters reset on the interval below;
+// noCreditsSince latches the first 402 until a successful scan clears it.
+const scanKitHealth = { lastScan: null, lastError: null, noCreditsSince: null, errorsLast24h: 0, scans24h: { ok: 0, failed: 0 } };
+setInterval(() => { scanKitHealth.errorsLast24h = 0; scanKitHealth.scans24h = { ok: 0, failed: 0 }; }, 24 * 60 * 60 * 1000);
+
 // Per-source error de-dup state. Long-running upstream outages (e.g. the
 // /assets/vehicles 500 loop on Routemate's side) should log ONCE on first
 // occurrence + every 50th repeat, not every poll cycle. Cleared when the
@@ -10888,6 +10896,20 @@ app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
 	});
 });
 
+// GET /api/scankit/health — Super Admin only. Surfaces ScanKit credit/auth
+// state for the admin dashboard. Never echoes the API key (hasKey boolean only).
+app.get("/api/scankit/health", requireRole("Super Admin"), (req, res) => {
+	res.json({
+		enabled: SCANKIT_ENABLED,
+		hasKey: !!SCANKIT_API_KEY,
+		baseUrl: SCANKIT_BASE_URL,
+		lastScan: scanKitHealth.lastScan,
+		noCreditsSince: scanKitHealth.noCreditsSince,
+		errorsLast24h: scanKitHealth.errorsLast24h,
+		lastError: scanKitHealth.lastError,
+	});
+});
+
 // GET /api/routemate/vehicles — Mirrored Routemate vehicle inventory.
 // Used by the truck-linkage UI in /trucks. Super Admin + Dispatcher.
 app.get("/api/routemate/vehicles", requireRole("Super Admin", "Dispatcher"), (req, res) => {
@@ -11807,6 +11829,9 @@ app.post("/api/documents/scan", requireAuth, scanKitLimiter, async (req, res) =>
 				{ outputWidth, filter, returnPdf, ocrLang: "eng" },
 			);
 			const dataUri = `data:${result.contentType};base64,${result.buffer.toString("base64")}`;
+			scanKitHealth.lastScan = new Date().toISOString();
+			scanKitHealth.scans24h.ok++;
+			scanKitHealth.noCreditsSince = null;
 			return res.json({
 				data: dataUri,
 				contentType: result.contentType,
@@ -11815,8 +11840,22 @@ app.post("/api/documents/scan", requireAuth, scanKitLimiter, async (req, res) =>
 			});
 		} catch (err) {
 			// Map adapter error codes → client status. Never leak a key problem.
+			// Record health BEFORE the switch so every failure path is counted.
+			// status = the HTTP status this maps to for the known codes; for the
+			// masked cases (NO_KEY/AUTH/ERROR) fall back to the real upstream
+			// err.status (more useful to an admin than the client-facing 502),
+			// or null when the failure happened before any HTTP response.
+			const mappedStatus =
+				err.code === "SCANKIT_NO_CREDITS" ? 402 :
+				err.code === "SCANKIT_BAD_INPUT" ? 400 :
+				err.code === "SCANKIT_RATE_LIMIT" ? 429 :
+				(err.status || null);
+			scanKitHealth.lastError = { at: new Date().toISOString(), status: mappedStatus, code: err.code || null, message: err.message };
+			scanKitHealth.errorsLast24h++;
+			scanKitHealth.scans24h.failed++;
 			switch (err.code) {
 				case "SCANKIT_NO_CREDITS":
+					if (!scanKitHealth.noCreditsSince) scanKitHealth.noCreditsSince = new Date().toISOString();
 					return res.status(402).json({ error: "scan_no_credits" });
 				case "SCANKIT_BAD_INPUT":
 					return res.status(400).json({ error: "scan_bad_input" });
@@ -13321,33 +13360,9 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 			return res.status(500).json({ error: "Could not save the document. Please try again." });
 		}
 
-		// Mark sheet column only for POD uploads (non-critical — don't block upload)
-		if (docType === "POD") {
-			try {
-				const sheets = await getSheets();
-				const headerResp = await sheets.spreadsheets.values.get({
-					spreadsheetId: SPREADSHEET_ID,
-					range: "Job Tracking!1:1",
-				});
-				const headers = (headerResp.data.values || [[]])[0];
-				const podColIdx = headers.findIndex((h) =>
-					/pod.*upload|^documents$/i.test(h),
-				);
-				if (podColIdx >= 0) {
-					const podColLetter = colLetter(podColIdx);
-					await sheets.spreadsheets.values.update({
-						spreadsheetId: SPREADSHEET_ID,
-						range: `Job Tracking!${podColLetter}${rowIndex}`,
-						valueInputOption: "USER_ENTERED",
-						requestBody: { values: [["Yes"]] },
-					});
-				}
-			} catch (sheetErr) {
-				console.error("Sheet POD column update error (non-critical):", sheetErr.message);
-			}
-		}
-
-		// OCR for receipts (images only)
+		// OCR for receipts (images only). Stays ON the critical path because it
+		// populates ocrText in the response body below; it only runs for
+		// docType === "Receipt", never for the POD path.
 		let ocrText = "";
 		if (docType === "Receipt" && fileType !== 'document') {
 			const photoArray = Array.isArray(photoData) ? photoData : [photoData];
@@ -13394,6 +13409,42 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 		});
 
 		res.json({ success: true, driveUrl, ocrText });
+		console.log(`[upload] 200 sent; deferring POD sheet update row ${rowIndex}`);
+
+		// Mark the POD column in the sheet AFTER the response is sent. This Sheets
+		// get+update adds 2–3s+ and used to block the response long enough that
+		// iPhone-on-cellular clients aborted mid-upload (nginx 499) even though
+		// the file was already saved. setImmediate runs it once the response has
+		// flushed; rowIndex/loadId/docType are captured from the handler closure.
+		// The try/catch keeps a Sheets failure from surfacing as an unhandled
+		// rejection — res IS in closure scope but MUST NOT be touched (already sent).
+		if (docType === "POD") {
+			setImmediate(async () => {
+				try {
+					const sheets = await getSheets();
+					const headerResp = await sheets.spreadsheets.values.get({
+						spreadsheetId: SPREADSHEET_ID,
+						range: "Job Tracking!1:1",
+					});
+					const headers = (headerResp.data.values || [[]])[0];
+					const podColIdx = headers.findIndex((h) =>
+						/pod.*upload|^documents$/i.test(h),
+					);
+					if (podColIdx >= 0) {
+						const podColLetter = colLetter(podColIdx);
+						await sheets.spreadsheets.values.update({
+							spreadsheetId: SPREADSHEET_ID,
+							range: `Job Tracking!${podColLetter}${rowIndex}`,
+							valueInputOption: "USER_ENTERED",
+							requestBody: { values: [["Yes"]] },
+						});
+						console.log(`[upload] deferred POD sheet update done row ${rowIndex}`);
+					}
+				} catch (sheetErr) {
+					console.error("Sheet POD column update error (non-critical):", sheetErr.message);
+				}
+			});
+		}
 	} catch (error) {
 		console.error("Error uploading document:", error.message);
 		res.status(500).json({ error: "Something went wrong. Please try again or contact dispatch." });
