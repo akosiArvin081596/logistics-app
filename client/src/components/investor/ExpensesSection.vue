@@ -35,6 +35,7 @@
           <th>Date</th>
           <th>Driver</th>
           <th>Truck</th>
+          <th>City / State</th>
           <th>Type</th>
           <th>Description</th>
           <th>Amount</th>
@@ -47,6 +48,7 @@
           <td class="mono-sm">{{ fmtDate(e.date) }}</td>
           <td>{{ e.driver }}</td>
           <td class="mono-sm">{{ e.truck_unit ? '#' + e.truck_unit : '—' }}</td>
+          <td class="mono-sm">{{ fmtLocation(e) }}</td>
           <td><span :class="['type-pill', 'type-' + (e.type || 'other').toLowerCase()]">{{ e.type || 'Other' }}</span></td>
           <td class="desc-cell">{{ e.description || '—' }}</td>
           <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
@@ -79,11 +81,7 @@
     </div>
     </template>
 
-    <Teleport to="body">
-      <div v-if="previewImg" class="preview-overlay" @click="previewImg = null">
-        <img :src="previewImg" class="preview-img" />
-      </div>
-    </Teleport>
+    <ZoomableImage :src="previewImg" alt="Receipt" @close="previewImg = null" />
 
     <!-- Detail modal -->
     <MetricInfoDialog
@@ -119,6 +117,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import ZoomableImage from '../shared/ZoomableImage.vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -175,6 +174,16 @@ async function loadExpenses() {
 function fmtDate(d) {
   if (!d) return '—'
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// City/State display: both -> "City, ST"; one -> that one; neither -> em-dash.
+// Read defensively — location_city/location_state may be absent until the
+// backend lane lands.
+function fmtLocation(e) {
+  const city = (e?.location_city || '').trim()
+  const state = (e?.location_state || '').trim()
+  if (city && state) return `${city}, ${state}`
+  return city || state || '—'
 }
 
 // PDF receipts (admin/dispatcher uploads) render as a link chip instead of a
@@ -368,17 +377,6 @@ onMounted(loadExpenses)
   color: #94a3b8;
   line-height: 1.5;
   font-style: italic;
-}
-
-.preview-overlay {
-  position: fixed; inset: 0;
-  background: rgba(0,0,0,0.7);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 300; cursor: pointer;
-}
-.preview-img {
-  max-width: 90vw; max-height: 90vh;
-  border-radius: 8px;
 }
 
 .skeleton {

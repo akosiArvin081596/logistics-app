@@ -51,6 +51,16 @@
         </div>
         <div class="add-expense-row">
           <input v-model="addForm.loadId" type="text" placeholder="Load ID (optional)" class="add-input" style="max-width:180px" />
+          <input v-model="addForm.city" type="text" placeholder="City (optional)" class="add-input" style="max-width:160px" />
+          <input
+            v-model="addForm.state"
+            type="text"
+            placeholder="ST"
+            class="add-input"
+            style="max-width:70px"
+            maxlength="2"
+            @input="addForm.state = addForm.state.toUpperCase()"
+          />
           <input v-model="addForm.description" type="text" placeholder="Description (e.g., Tire repair paid via phone)" class="add-input" style="flex:1" />
         </div>
         <div class="add-expense-row add-expense-photo-row">
@@ -141,6 +151,7 @@
               <div class="mobile-exp-top-left">
                 <div class="mobile-exp-date">{{ fmtDate(e.date) }}</div>
                 <div class="mobile-exp-driver">{{ e.driver }}<span v-if="e.truck_unit" class="mobile-exp-truck"> · #{{ e.truck_unit }}</span></div>
+                <div v-if="e.location_city || e.location_state" class="mobile-exp-location">{{ fmtLocation(e) }}</div>
               </div>
               <span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span>
             </div>
@@ -184,6 +195,7 @@
               <th>Date</th>
               <th>Driver</th>
               <th>Truck</th>
+              <th>City / State</th>
               <th>Type</th>
               <th>Description</th>
               <th>Amount</th>
@@ -206,6 +218,7 @@
               <td class="mono-sm">{{ fmtDate(e.date) }}</td>
               <td>{{ e.driver }}</td>
               <td class="mono-sm">{{ e.truck_unit ? '#' + e.truck_unit : '\u2014' }}</td>
+              <td class="mono-sm">{{ fmtLocation(e) }}</td>
               <td><span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span></td>
               <td class="desc-cell">{{ e.description || '\u2014' }}</td>
               <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
@@ -229,12 +242,8 @@
         </table>
       </template>
 
-      <!-- Receipt preview overlay -->
-      <Teleport to="body">
-        <div v-if="previewImg" class="preview-overlay" @click="previewImg = null">
-          <img :src="previewImg" class="preview-img" />
-        </div>
-      </Teleport>
+      <!-- Receipt preview overlay (zoom + pan) -->
+      <ZoomableImage :src="previewImg" alt="Receipt" @close="previewImg = null" />
 
       <!-- Expense breakdown modal. Opens on row click. Shows the same fields
            that live in the DB but aren't in the list (gallons, odometer,
@@ -289,6 +298,37 @@
               <div v-if="selectedExpense.truck_unit" class="exp-stat">
                 <span class="exp-stat-label">Truck</span>
                 <span class="exp-stat-value">#{{ selectedExpense.truck_unit }}</span>
+              </div>
+              <div class="exp-stat exp-stat-location">
+                <span class="exp-stat-label">City / State</span>
+                <template v-if="editingLocation">
+                  <div class="loc-edit-row">
+                    <input
+                      v-model="locDraft.city"
+                      type="text"
+                      class="loc-input"
+                      placeholder="City"
+                      aria-label="City"
+                    />
+                    <input
+                      v-model="locDraft.state"
+                      type="text"
+                      class="loc-input loc-input-state"
+                      placeholder="ST"
+                      maxlength="2"
+                      aria-label="State (2-letter)"
+                      @input="locDraft.state = locDraft.state.toUpperCase()"
+                    />
+                  </div>
+                  <div class="loc-edit-actions">
+                    <button class="loc-save" :disabled="savingLocation" @click="saveLocation">{{ savingLocation ? '…' : 'Save' }}</button>
+                    <button class="loc-cancel" :disabled="savingLocation" @click="editingLocation = false">Cancel</button>
+                  </div>
+                </template>
+                <span v-else class="exp-stat-value exp-stat-value-loc">
+                  {{ fmtLocation(selectedExpense) }}
+                  <button class="loc-edit-btn" @click="startEditLocation" aria-label="Edit city and state">Edit</button>
+                </span>
               </div>
             </div>
             <div v-if="selectedExpense.description" class="exp-desc">
@@ -667,6 +707,7 @@ import { useDocumentScan } from '../../composables/useDocumentScan'
 import { useAuthStore } from '../../stores/auth'
 import { useViewport } from '../../composables/useViewport'
 import { useSocketRefresh } from '../../composables/useSocketRefresh'
+import ZoomableImage from '../shared/ZoomableImage.vue'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -738,6 +779,12 @@ const canGoNext = computed(() => {
   return pis[pis.length - 1] > idx
 })
 const approveLoading = ref(false)
+
+// Inline city/state edit inside the detail modal. Reset whenever the modal
+// opens / closes / navigates (see the selectedExpense watch below).
+const editingLocation = ref(false)
+const savingLocation = ref(false)
+const locDraft = reactive({ city: '', state: '' })
 
 function openExpenseDetail(e) {
   selectedId.value = e.id
@@ -834,6 +881,11 @@ const allFilter = reactive({ driver: '', type: '', status: '', truck: '' })
 // Keyboard nav for the detail modal. Listener attaches only while the
 // modal is open so we don't leak global handlers.
 function onModalKeydown(ev) {
+  // When the receipt viewer is open over the modal, let it own the keyboard
+  // (its own Esc closes just the viewer; arrows would otherwise navigate the
+  // modal underneath). This listener is registered before the viewer mounts,
+  // so it fires first — bail out here and let ZoomableImage handle the key.
+  if (previewImg.value) return
   if (ev.key === 'ArrowLeft') { ev.preventDefault(); goPrev() }
   else if (ev.key === 'ArrowRight') { ev.preventDefault(); goNext() }
   else if (ev.key === 'Escape') { ev.preventDefault(); closeExpenseDetail() }
@@ -841,12 +893,40 @@ function onModalKeydown(ev) {
 watch(selectedExpense, (cur, prev) => {
   if (cur && !prev) window.addEventListener('keydown', onModalKeydown)
   else if (!cur && prev) window.removeEventListener('keydown', onModalKeydown)
+  // Drop edit mode on open/close/navigate so a stale draft never leaks across rows.
+  editingLocation.value = false
 })
+
+function startEditLocation() {
+  const e = selectedExpense.value
+  locDraft.city = e?.location_city || ''
+  locDraft.state = e?.location_state || ''
+  editingLocation.value = true
+}
+async function saveLocation() {
+  const e = selectedExpense.value
+  if (!e || savingLocation.value) return
+  savingLocation.value = true
+  try {
+    const city = locDraft.city.trim()
+    const state = locDraft.state.trim().toUpperCase()
+    await api.patch(`/api/expenses/${e.id}/location`, { city, state })
+    // Reflect on the live row so the table + modal update immediately.
+    const row = allExpenses.value.find(x => x.id === e.id)
+    if (row) { row.location_city = city; row.location_state = state }
+    toast('Location updated', 'success')
+    editingLocation.value = false
+  } catch (err) {
+    toast(err?.message || 'Failed to update location', 'error')
+  } finally {
+    savingLocation.value = false
+  }
+}
 onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
 
 // Add Expense form (Super Admin / Dispatcher only)
 const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
-const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toISOString().slice(0, 10), loadId: '', description: '' })
+const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toISOString().slice(0, 10), loadId: '', description: '', city: '', state: '' })
 const addLoading = ref(false)
 const fileInputRef = ref(null)
 // photoBase64 holds the receipt as a data URI — image/jpeg from the canvas
@@ -1039,12 +1119,14 @@ async function submitExpense() {
       date: addForm.date,
       loadId: addForm.loadId || '',
       description: addForm.description || '',
+      city: addForm.city || '',
+      state: addForm.state || '',
       photoData: photoBase64.value,
       gallons: 0,
       odometer: 0,
     })
     toast('Expense logged')
-    addForm.driver = ''; addForm.amount = ''; addForm.loadId = ''; addForm.description = ''
+    addForm.driver = ''; addForm.amount = ''; addForm.loadId = ''; addForm.description = ''; addForm.city = ''; addForm.state = ''
     clearPhoto()
     await loadAll()
   } catch (err) {
@@ -1184,6 +1266,16 @@ async function bulkSetStatus(status) {
 function fmtDate(d) {
   if (!d) return '\u2014'
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// City/State display: both -> "City, ST"; one -> that one; neither -> em-dash.
+// Read defensively \u2014 location_city/location_state may be absent until the
+// backend lane lands.
+function fmtLocation(e) {
+  const city = (e?.location_city || '').trim()
+  const state = (e?.location_state || '').trim()
+  if (city && state) return `${city}, ${state}`
+  return city || state || '\u2014'
 }
 
 // photo_data is either a legacy base64 image data URI, an image URL under
@@ -1776,13 +1868,6 @@ tr:hover td { background: var(--surface-hover); }
 .btn-undo { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border); }
 .btn-approve:hover, .btn-reject:hover, .btn-undo:hover { opacity: 0.7; }
 
-.preview-overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.7);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 300; cursor: pointer;
-}
-.preview-img { max-width: 90vw; max-height: 85vh; border-radius: 8px; }
-
 /* Row click affordance + detail modal */
 .expense-row { cursor: pointer; transition: background 0.12s; }
 .expense-row:hover { background: #f8fafc; }
@@ -1860,6 +1945,36 @@ tr:hover td { background: var(--surface-hover); }
   color: #94a3b8;
 }
 .exp-stat-value { font-size: 0.95rem; font-weight: 600; color: #0f172a; }
+
+/* City/State stat — spans the full modal width so the inline editor has room */
+.exp-stat-location { grid-column: 1 / -1; }
+.exp-stat-value-loc { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.loc-edit-btn {
+  padding: 0.15rem 0.5rem; font-size: 0.68rem; font-weight: 600;
+  background: var(--accent-dim); color: var(--accent);
+  border: none; border-radius: 5px; cursor: pointer; font-family: inherit;
+  transition: opacity 0.15s;
+}
+.loc-edit-btn:hover { opacity: 0.75; }
+.loc-edit-row { display: flex; gap: 0.4rem; margin-top: 0.15rem; }
+.loc-input {
+  flex: 1; min-width: 0;
+  padding: 0.35rem 0.5rem; border: 1px solid #e2e8f0; border-radius: 6px;
+  font-family: inherit; font-size: 0.82rem; color: #0f172a; background: #fff;
+}
+.loc-input:focus { outline: none; border-color: var(--accent); }
+.loc-input-state { flex: 0 0 3.25rem; text-transform: uppercase; }
+.loc-edit-actions { display: flex; gap: 0.4rem; margin-top: 0.45rem; }
+.loc-save, .loc-cancel {
+  padding: 0.3rem 0.7rem; font-size: 0.72rem; font-weight: 600;
+  border-radius: 6px; cursor: pointer; font-family: inherit; border: none;
+  transition: opacity 0.15s;
+}
+.loc-save { background: var(--accent); color: #fff; }
+.loc-cancel { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+.loc-save:hover:not(:disabled), .loc-cancel:hover:not(:disabled) { opacity: 0.8; }
+.loc-save:disabled, .loc-cancel:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .exp-desc, .exp-receipt { margin-top: 0.75rem; }
 .exp-desc-label {
   font-size: 0.62rem;
@@ -2100,6 +2215,10 @@ tr:hover td { background: var(--surface-hover); }
     font-size: 0.92rem;
     font-weight: 600;
     color: #0f172a;
+  }
+  .mobile-exp-location {
+    font-size: 0.78rem;
+    color: #64748b;
   }
   .mobile-exp-truck {
     font-weight: 500;
