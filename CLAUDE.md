@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## Commands
 
 ```bash
@@ -22,13 +24,17 @@ For production: `npm run build:client` then `npm start` — Express serves the b
 
 `postinstall` auto-runs `cd client && npm install`, so `npm install` at root installs both backend and frontend deps.
 
+**Repo layout & parallel dev:** the git repo root is *this* folder (the app), with sibling worktrees `LogisX-wt-1` / `LogisX-wt-2` for running parallel feature branches side by side. To run two full stacks at once, give each worktree its own ports in its `.env`: `PORT` (Express), `VITE_DEV_PORT`, and `VITE_API_TARGET` (the Express URL Vite proxies `/api` + `/socket.io` to — read in `client/vite.config.js`); leave all three unset for the default `5173 → :3000` pairing.
+
+**Branch & PR workflow:** cut `feat/…` or `fix/…` branches off `main`; PRs target `main`, and merging to `main` is what ships to production (run the deploy command below). The `/start-task` (or `/logisx-start`) skill freshens the branch from `origin/main` and cuts a fresh feature branch; `/end-task` (or `/logisx-end`) commits, pushes, and opens/locates the PR to `main`. These skills never merge or switch branches for you.
+
 **Deploy:** production runs on a VPS at `76.13.22.110` under `/var/www/logistics-app`, managed by pm2 (process name `logistics-app`). Standard deploy flow after merging to `main`:
 ```bash
 ssh root@76.13.22.110 "cd /var/www/logistics-app && git pull --ff-only origin main && npm install --silent --no-audit --no-fund && npm run build:client --silent && pm2 restart logistics-app --silent"
 ```
 A staging process (`logisx-staging`) also runs on the same VPS.
 
-**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured. Integration harness at `test-suite.js` — 25 HTTP tests against a running server (`npm start`, then `node test-suite.js`). Covers auth, role gating, debug-endpoint auth, webhook secret, chat file validation, canceled-load exclusion. Exits 1 on any failure. Seed the DB via `scripts/truncate-and-seed.js` for deterministic state. When editing `server.js`, run `node --check server.js` before committing (~15k lines; a syntax error breaks the whole app).
+**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured. Integration harness at `test-suite.js` — 25 HTTP tests against a running server (`npm start`, then `node test-suite.js`). Covers auth, role gating, debug-endpoint auth, webhook secret, chat file validation, canceled-load exclusion. Exits 1 on any failure. Seed the DB via `scripts/truncate-and-seed.js` for deterministic state. When editing `server.js`, run `node --check server.js` before committing (~18k lines; a syntax error breaks the whole app).
 
 ## Environment Setup
 
@@ -70,11 +76,13 @@ Shared server-side modules live in `lib/` (required from `server.js`):
 - `policy-field-maps.js`, `policy-renderer.js` — field mapping + template rendering for onboarding legal documents.
 - `routemate-client.js` — Routemate ELD/telematics API adapter (single point of contact).
 - `scankit-client.js` — ScanKit.io document-scanning API adapter (single point of contact; `POST /scan/crop`). See the AI/vision services note below.
+- `bison-invoice.js` — Bison-broker invoice assembly: `isBisonLoad()` guard, deterministic field extraction, and the payload shape for the Draft Bison Invoice route. See the "Bison invoice drafting" section below.
+- `imap-draft.js` — `appendGmailDraft()`: writes an assembled invoice email straight into the Gmail Drafts folder over IMAP (no send), using `GMAIL_USER` / `GMAIL_APP_PASSWORD`.
 
 ## Architecture
 
 ### Backend (`server.js`)
-Single-file Node.js/Express server (~15,350 lines, ~168 REST endpoints). Google Sheets is the primary database (Sheets API v4); SQLite for local data; Drive API for uploads; Socket.IO for real-time. Body limit raised to 50mb for large payloads with embedded base64 photos/signatures.
+Single-file Node.js/Express server (~18,450 lines, ~185 REST endpoints). Google Sheets is the primary database (Sheets API v4); SQLite for local data; Drive API for uploads; Socket.IO for real-time. Body limit raised to 50mb for large payloads with embedded base64 photos/signatures.
 
 **Static file serving**: Express serves `client/dist/` if it exists (production build), else `public/` (legacy vanilla HTML/JS). SPA catch-all `app.get("*")` serves `index.html` for client-side routing.
 
@@ -266,7 +274,12 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 
 The 60s in-memory Job Tracking cache (`getJobTrackingCached()`) is the other core throttle — it absorbs bursty dashboard traffic so the Sheets 300 req/min quota isn't a real constraint day-to-day.
 
-### Frontend (`client/`)
+### Bison invoice drafting (IMAP + n8n rate-cons)
+One-click "Draft Invoice Email" for Bison Transport loads, distinct from the generic `/api/invoices/generate` flow.
+- `POST /api/loads/:loadId/draft-bison-invoice` — guards that the load is a Bison load (`bisonInvoice.isBisonLoad()`) **and** delivered/completed, assembles the invoice + supporting docs, and writes a Gmail **draft** (never auto-sends) via `lib/imap-draft.js`. Pass `dryRun` to preview **without** burning an invoice number.
+- **Invoice numbering**: per-calendar-day counter in the `bison_invoice_seq` SQLite table (`nextInvoiceNumber()` / `peekInvoiceSeqStmt`). Only a real (non-dryRun) draft increments it.
+- **Rate-con attachment**: the n8n dispatch workflow (see `Dispatch-v2-fixed.json`, `docs/n8n-webhook-integration-plan.md`) drops every Bison rate-con PDF into a Google Drive folder, named by email subject (e.g. `…Bison Transport Order #7007280`). The route matches on the Bison order number (== `loadId`) and attaches the most recent — needs `drive.readonly`.
+- **Rate-con field extraction** is broker-agnostic and lives in `RATECON_PDF_SYSTEM_PROMPT` (Gemini, focused on semantic meaning rather than per-broker headers); `bison-invoice.js` holds the deterministic Bison-specific fallback. Many `scripts/patch-bison-*.js` / `diag-bison-ratecon.js` helpers exist for one-off fixes to this pipeline.
 Vue 3 + Vite SPA with Vue Router, Pinia stores, Tailwind CSS v4, shadcn-vue components (via radix-vue/reka-ui), Vant mobile UI, Leaflet + Google Maps for maps, and Socket.IO client for real-time updates.
 
 Key directories:
@@ -401,3 +414,7 @@ Replaces phone-based driver GPS. Routemate is FMCSA-certified ELD hardware in tr
 **Demo viewer** is blocked from `/api/admin/routemate/sync-now` by the global write-lockdown middleware (server.js:~1630).
 
 **Spec reference:** OpenAPI 3.0.1 at `https://cloud.routemate.ai/v3/api-docs` (public, no auth). Doc viewer `https://cloud.routemate.ai/open-api.html` is JS-rendered Redocly. Path prefix `/api/v0/`.
+
+## House rules (`.claude/rules/`)
+
+`.claude/rules/*.md` holds generic team coding guidelines (immutability, error handling, input validation, web security/perf, git/commit conventions, etc.). Treat them as defaults, **but this repo's reality overrides them where they conflict** — notably: the rules call for "many small files (<800 lines)" and "TDD with 80%+ coverage", whereas the backend is a deliberate ~18k-line single-file `server.js` and there is **no test framework** (only the `test-suite.js` HTTP harness). Follow the surrounding code's established patterns over the aspirational rules. Useful, accurate bits to keep: conventional-commit message format (`feat:`/`fix:`/`refactor:`/`docs:`/`test:`/`chore:`/`perf:`/`ci:`) and parameterized SQLite queries everywhere.
