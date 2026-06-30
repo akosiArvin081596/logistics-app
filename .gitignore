@@ -36,3 +36,24 @@ scripts/.wf-backup-*.json
 docs/*timeline*.docx
 docs/*timeline*.html
 scripts/generate-timeline*.py
+
+# Local-only secrets (keep on disk, never commit)
+.env.local
+google-maps-api-key.txt
+
+# One-off diagnostic / helper scripts + output (kept locally, not part of the repo)
+.diag-n8n/
+scripts/copy-prod-sheet.js
+scripts/diag-bison-ratecon.js
+scripts/diag-ratecon-folder.js
+scripts/driver-load-statuses.js
+scripts/find-load-row.js
+scripts/replay-driver.js
+scripts/search-gmail-for-load.js
+
+# Browser-automation artifacts (Playwright MCP runs) — local only, never deploy
+.playwright-mcp/
+
+# Ad-hoc screenshots dropped at the repo root (keep tracked assets like logo.png)
+/*.png
+!/logo.png
