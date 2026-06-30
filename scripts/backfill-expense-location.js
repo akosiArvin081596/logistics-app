@@ -47,9 +47,11 @@ const DRY_RUN = process.argv.includes("--dry-run");
 const LIMIT = parseLimit(process.argv);
 const THROTTLE_MS = 1000;
 
-// "Confident" = high-confidence OCR with BOTH a city and a state. `medium` is a
-// documented tunable — add it here if precision proves too strict on staging.
-const ACCEPTED_CONFIDENCE = new Set(["high"]);
+// "Confident" = high- or medium-confidence OCR with BOTH a city and a state.
+// Widened from high-only to also accept `medium` (the documented tunable) to
+// fill more rows; values stay correctable via the inline City/State edit on the
+// expense. `low` is still skipped — never guess a location.
+const ACCEPTED_CONFIDENCE = new Set(["high", "medium"]);
 
 // MIME lookup for the on-disk receipt extensions saveReceiptToDisk writes
 // (server.js: jpg/jpeg/png/webp). Anything else can't be handed to image OCR.
