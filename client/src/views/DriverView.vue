@@ -329,12 +329,8 @@
         </div>
       </section>
 
-      <!-- Receipt preview overlay (shared with any card in the expenses list) -->
-      <Teleport to="body">
-        <div v-if="receiptPreview" class="receipt-preview-overlay" @click="receiptPreview = ''">
-          <img :src="receiptPreview" class="receipt-preview-img" alt="Receipt preview" />
-        </div>
-      </Teleport>
+      <!-- Receipt preview overlay (zoom + pan, shared with any card in the expenses list) -->
+      <ZoomableImage :src="receiptPreview" alt="Receipt preview" @close="receiptPreview = ''" />
 
       <!-- INVOICES TAB -->
       <section v-if="currentTab === 'invoices'" class="tab-panel">
@@ -409,6 +405,7 @@ import DocumentSignModal from '../components/driver/DocumentSignModal.vue'
 import InvoiceTab from '../components/driver/InvoiceTab.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
+import ZoomableImage from '../components/shared/ZoomableImage.vue'
 
 const auth = useAuthStore()
 const driverStore = useDriverStore()
@@ -1976,22 +1973,4 @@ onUnmounted(() => {
 }
 .loc-btn-sub:hover { background: var(--bg); }
 
-/* Full-screen receipt preview overlay — same pattern used on admin /expenses */
-.receipt-preview-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 300;
-  cursor: zoom-out;
-  padding: 1rem;
-}
-.receipt-preview-img {
-  max-width: 95vw;
-  max-height: 90vh;
-  border-radius: 8px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
-}
 </style>
