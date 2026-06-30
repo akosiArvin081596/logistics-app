@@ -77,6 +77,16 @@
         autosize
       />
 
+      <van-field v-model="form.city" label="City" placeholder="City" />
+      <van-field
+        v-model="form.state"
+        label="State"
+        placeholder="ST"
+        :maxlength="2"
+        :formatter="(v) => (v || '').toUpperCase()"
+        format-trigger="onChange"
+      />
+
       <van-field label="Receipt Photo">
         <template #input>
           <van-uploader
@@ -138,6 +148,8 @@ const form = reactive({
   date: new Date().toLocaleDateString('en-CA'),
   loadId: '',
   description: '',
+  city: '',
+  state: '',
   gallons: '',
   odometer: '',
 })
@@ -230,6 +242,8 @@ async function runReceiptOcr() {
     date: form.date,
     type: form.type,
     description: form.description,
+    city: form.city,
+    state: form.state,
     gallons: form.gallons,
     odometer: form.odometer,
   }
@@ -257,6 +271,8 @@ async function runReceiptOcr() {
     if (data.vendor && !form.description) form.description = data.vendor
     if (data.gallons != null) form.gallons = String(data.gallons)
     if (data.odometer != null) form.odometer = String(data.odometer)
+    if (data.city != null) form.city = String(data.city)
+    if (data.state != null) form.state = String(data.state).toUpperCase()
     if (data.suggestedType && form.type === 'Fuel') form.type = data.suggestedType
     ocrApplied.value = true
     ocrConfidence.value = data.confidence || ''
@@ -274,6 +290,8 @@ function undoAutofill() {
   form.date = preOcrSnapshot.value.date
   form.type = preOcrSnapshot.value.type
   form.description = preOcrSnapshot.value.description
+  form.city = preOcrSnapshot.value.city
+  form.state = preOcrSnapshot.value.state
   form.gallons = preOcrSnapshot.value.gallons
   form.odometer = preOcrSnapshot.value.odometer
   ocrApplied.value = false
@@ -298,6 +316,8 @@ function handleSubmit() {
       type: form.type,
       amount: form.amount,
       description: form.description,
+      city: form.city,
+      state: form.state,
       date: form.date,
       photoData: photoBase64.value,
       gallons: form.gallons || 0,
@@ -306,6 +326,8 @@ function handleSubmit() {
 
     form.amount = ''
     form.description = ''
+    form.city = ''
+    form.state = ''
     form.gallons = ''
     form.odometer = ''
     photoBase64.value = ''
