@@ -654,7 +654,11 @@ try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFA
 // One-time seed: import Carrier Database from Google Sheet into SQLite on first boot
 const driverCount = db.prepare("SELECT COUNT(*) AS cnt FROM drivers_directory").get().cnt;
 if (driverCount === 0) {
-	(async () => {
+	// Deferred to the next tick: getSheets() reads module-scope `sheetsClient`/`auth`
+	// declared ~2000 lines below, so seeding inline during module load throws a TDZ
+	// ("Cannot access 'sheetsClient' before initialization") and silently skips the import
+	// on a fresh DB (e.g. staging). setImmediate runs it after the module fully evaluates.
+	setImmediate(async () => {
 		try {
 			const sheets = await getSheets();
 			const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Carrier Database" });
@@ -676,7 +680,7 @@ if (driverCount === 0) {
 			}
 			console.log(`Seeded ${rows.length - 1} drivers from Carrier Database sheet into SQLite`);
 		} catch (err) { console.error("Driver seed error:", err.message); }
-	})();
+	});
 }
 
 // Backfill carrier_driver_history from drivers_directory on first startup
@@ -13326,24 +13330,47 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 			setImmediate(async () => {
 				try {
 					const sheets = await getSheets();
-					const headerResp = await sheets.spreadsheets.values.get({
+					// Resolve the target row authoritatively by loadId rather than trusting the
+					// client-supplied rowIndex, which can arrive bogus (e.g. 999999) and blow past
+					// the sheet grid ("Range 'Job Tracking'!T999999 exceeds grid limits"), silently
+					// dropping the POD flag. Falls back to the client rowIndex only when it is a real
+					// in-bounds row and no loadId match is found.
+					const jtResp = await sheets.spreadsheets.values.get({
 						spreadsheetId: SPREADSHEET_ID,
-						range: "Job Tracking!1:1",
+						range: "Job Tracking",
 					});
-					const headers = (headerResp.data.values || [[]])[0];
+					const jtRows = jtResp.data.values || [];
+					const headers = jtRows[0] || [];
 					const podColIdx = headers.findIndex((h) =>
 						/pod.*upload|^documents$/i.test(h),
 					);
-					if (podColIdx >= 0) {
-						const podColLetter = colLetter(podColIdx);
-						await sheets.spreadsheets.values.update({
-							spreadsheetId: SPREADSHEET_ID,
-							range: `Job Tracking!${podColLetter}${rowIndex}`,
-							valueInputOption: "USER_ENTERED",
-							requestBody: { values: [["Yes"]] },
-						});
-						console.log(`[upload] deferred POD sheet update done row ${rowIndex}`);
+					if (podColIdx < 0) return;
+					const loadIdColIdx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
+					const targetLid = String(loadId).trim().toLowerCase().replace(/^#/, "");
+					let targetRow = -1;
+					if (loadIdColIdx >= 0) {
+						// jtRows[] is 0-based and includes the header at [0], so sheet row = i + 1.
+						for (let i = jtRows.length - 1; i >= 1; i--) {
+							const lid = String(jtRows[i][loadIdColIdx] || "").trim().toLowerCase().replace(/^#/, "");
+							if (lid === targetLid) { targetRow = i + 1; break; }
+						}
 					}
+					const clientRow = parseInt(rowIndex, 10);
+					if (targetRow < 0 && Number.isInteger(clientRow) && clientRow >= 2 && clientRow <= jtRows.length) {
+						targetRow = clientRow;
+					}
+					if (targetRow < 0) {
+						console.error(`Sheet POD column update skipped: no row for load ${loadId} (client rowIndex=${rowIndex})`);
+						return;
+					}
+					const podColLetter = colLetter(podColIdx);
+					await sheets.spreadsheets.values.update({
+						spreadsheetId: SPREADSHEET_ID,
+						range: `Job Tracking!${podColLetter}${targetRow}`,
+						valueInputOption: "USER_ENTERED",
+						requestBody: { values: [["Yes"]] },
+					});
+					console.log(`[upload] deferred POD sheet update done row ${targetRow} (load ${loadId})`);
 				} catch (sheetErr) {
 					console.error("Sheet POD column update error (non-critical):", sheetErr.message);
 				}
