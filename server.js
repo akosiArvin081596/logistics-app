@@ -12026,23 +12026,42 @@ app.post(
 			//    The Gemini fallback reuses the shared runRateConGemini() helper; it
 			//    only fires when the rate-con has no usable text layer AND the API key
 			//    is configured.
+			const geminiConfigured = Boolean(GEMINI_API_KEY);
 			const rcFields = await bisonInvoice.extractRateConFields(rateconBuffer, {
-				geminiExtract: GEMINI_API_KEY
+				geminiExtract: geminiConfigured
 					? async (buf) => {
+							if (!Buffer.isBuffer(buf) || !buf.length) return null;
 							const b64 = Buffer.from(buf).toString("base64");
 							if (!/^JVBERi/.test(b64)) return null;
 							return runRateConGemini(b64);
 					  }
 					: null,
-				onGeminiError: (e) => console.error("Bison invoice: Gemini fallback failed:", e.message),
+				onGeminiError: (e) => console.error(`Bison invoice [${loadId}]: Gemini fallback failed:`, e.message),
 			});
 
 			if (!rcFields.orderNumber) {
-				return res.status(422).json({
-					error:
-						"Could not read the rate-con. Order #, PO #, Move # and Trailer could not be extracted (no text layer and Gemini fallback unavailable or failed).",
-					code: "RATECON_UNREADABLE",
-				});
+				// Pick the accurate, actionable error from the extraction diagnostics
+				// rather than one catch-all message. Every case is remediable by the
+				// dispatcher attaching a rate-con PDF, so all carry canAttach: true.
+				const diag = rcFields.diagnostics || {};
+				let code, error;
+				if (!diag.hadBuffer) {
+					code = "RATECON_NOT_FOUND";
+					error = `No rate-confirmation PDF found for this load. Searched the rate-con Drive folder by Order # "${loadId}", the documents table, and the request. Attach the rate-con PDF and retry.`;
+				} else if (diag.geminiError) {
+					code = "RATECON_OCR_FAILED";
+					error = `The rate-con has no text layer and OCR failed: ${diag.geminiError}. Try attaching a clearer, text-based PDF.`;
+				} else if (!diag.hadText && !geminiConfigured) {
+					code = "RATECON_NO_TEXT_NO_OCR";
+					error =
+						"The rate-con has no readable text layer and OCR is not configured on the server. Attach a text-based rate-con PDF (or configure GEMINI_API_KEY).";
+				} else {
+					code = "RATECON_ORDER_NOT_FOUND";
+					error =
+						"Read the rate-con but couldn't find a Bison Order #. The broker layout may differ from the expected Bison format. Attach the correct rate-con.";
+				}
+				console.error(`Bison invoice [${loadId}]: ratecon unreadable -> ${code}`, JSON.stringify(diag));
+				return res.status(422).json({ error, code, canAttach: true });
 			}
 
 			// 5) Validation: rate-con trailer must match the load's stored trailer.
