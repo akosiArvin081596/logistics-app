@@ -16151,6 +16151,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const investorNetToDate = Math.round(
 			(monthlyEarnings || []).reduce((s, m) => s + (m.investorEarnings || 0), 0)
 		);
+		// Payouts already settled for the SAME investor(s) this banner sums.
+		// Scoped by owner when viewing one investor (real login or ?as_user_id
+		// preview); summed across all owners for the Super-Admin all-investors
+		// view (investorOwnerId null). investor_payouts.owner_id === users.id.
+		// Read-only SUM over already-settled rows: no reconcile here (that would
+		// recompute monthlyEarnings a second time).
+		const investorPaidToDate = Math.round(
+			investorOwnerId != null
+				? db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM investor_payouts WHERE owner_id = ? AND status = 'paid'").get(investorOwnerId).s
+				: db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM investor_payouts WHERE status = 'paid'").get().s
+		);
+		// What's genuinely still owed = lifetime net earned - already paid out (clamp >= 0).
+		const investorStillOwed = Math.max(0, investorNetToDate - investorPaidToDate);
 		// Trailing 3-month average investor take-home. Uses the most recent
 		// 3 entries from monthlyEarnings (which is ordered oldest → newest).
 		// Falls back to all-time avg if fewer than 3 months exist.
@@ -16254,6 +16267,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalExpenses: Math.round(totalExpenses),
 				investorEarnings: Math.round((totalRevenue - totalExpenses) * investorSplit),
 				investorNetToDate,
+				investorPaidToDate,
+				investorStillOwed,
 				totalDriverPay: Math.round(totalDriverPay),
 				driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(([k, v]) => [k, { activeDays: v.activeDays, dailyRate: v.dailyRate, totalPay: v.totalPay }])),
 				netRevenueToDate,

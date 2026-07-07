@@ -7,8 +7,10 @@
   of that month's net — so every figure reconciles with EarningsSection / the rest
   of the portal. Weekly has no monthly-net mapping, so it shows loads + gross only.
   Exports pass the same net back as ?net=YYYY-MM:amount so the PDF/CSV reconcile too.
-  "Owed to date" is the cumulative investorNetToDate. Honors Super-Admin "view as
-  investor" through the :preview-user-id prop (threaded as ?as_user_id=).
+  The banner shows what's STILL owed = lifetime net earned (investorNetToDate) −
+  already paid out (investorPaidToDate), with earned/paid shown as context, so it
+  reconciles with the Payouts section. Honors Super-Admin "view as investor"
+  through the :preview-user-id prop (threaded as ?as_user_id=).
 -->
 <template>
   <div class="lr-section">
@@ -21,8 +23,11 @@
     </div>
 
     <div class="lr-owed">
-      <span class="lr-owed-label">Total owed to date <span class="lr-sub">(earned, before payouts)</span></span>
-      <span class="lr-owed-value">{{ fmtMoney(owedToDate) }}</span>
+      <div class="lr-owed-row">
+        <span class="lr-owed-label">Still owed to you</span>
+        <span class="lr-owed-value">{{ fmtMoney(stillOwed) }}</span>
+      </div>
+      <span class="lr-owed-context">Earned {{ fmtMoney(earnedToDate) }} · Paid out {{ fmtMoney(paidToDate) }}</span>
     </div>
 
     <div v-if="loading" class="lr-msg">Loading load reports…</div>
@@ -102,7 +107,13 @@ const selectedIdx = ref(0)
 const loading = ref(false)
 const error = ref(false)
 
-const owedToDate = computed(() => props.production?.investorNetToDate || 0)
+// Lifetime net earned (before payouts), what's already been paid out, and the
+// real outstanding = earned − paid. Falls back to earned − paid client-side if
+// the API payload predates these fields (e.g. a stale cache mid-deploy).
+const earnedToDate = computed(() => props.production?.investorNetToDate || 0)
+const paidToDate = computed(() => props.production?.investorPaidToDate || 0)
+const stillOwed = computed(() =>
+  props.production?.investorStillOwed ?? Math.max(0, earnedToDate.value - paidToDate.value))
 const sel = computed(() => periods.value[selectedIdx.value] || null)
 // Authoritative monthly net share, reused from the dashboard's monthlyEarnings
 // so this section reconciles with EarningsSection / the rest of the portal.
@@ -222,10 +233,12 @@ fetchReport()
 .lr-tab { border: none; background: transparent; padding: 5px 14px; border-radius: 999px; font-size: 0.82rem; font-weight: 600; color: #64748b; cursor: pointer; }
 .lr-tab.active { background: #fff; color: #0f172a; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
 
-.lr-owed { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; margin: 0.9rem 0 0.4rem; padding: 0.7rem 0.9rem; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; }
+.lr-owed { display: flex; flex-direction: column; gap: 0.15rem; margin: 0.9rem 0 0.4rem; padding: 0.7rem 0.9rem; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; }
+.lr-owed-row { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
 .lr-owed-label { font-size: 0.82rem; font-weight: 600; color: #166534; }
 .lr-sub { font-weight: 400; color: #4d7c5a; }
 .lr-owed-value { font-size: 1.35rem; font-weight: 800; color: #15803d; }
+.lr-owed-context { font-size: 0.74rem; font-weight: 500; color: #4d7c5a; }
 
 .lr-msg { color: #64748b; font-size: 0.88rem; padding: 0.8rem 0; }
 
