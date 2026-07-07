@@ -4467,8 +4467,8 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		if (!load) return res.status(404).json({ error: "not_found" });
 		const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
 		const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
-		const originAddrCol = headers.find((h) => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
-		const destAddrCol = headers.find((h) => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const originAddrCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
+		const destAddrCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 		const originLatCol = findCol(headers, /origin.*lat|pickup.*lat|shipper.*lat/i);
 		const originLngCol = findCol(headers, /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i);
 		const destLatCol = findCol(headers, /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i);
@@ -9597,8 +9597,8 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// raw "Pickup Info" sheet column carries broker-facing references like
 		// "Brothers WMS RDC - MPS REF/PU#: 29284990" that are useless for
 		// scanning the dispatch board.
-		const originAddrCol = jobTracking.headers.find((h) => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
-		const destAddrCol = jobTracking.headers.find((h) => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const originAddrCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
+		const destAddrCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
 		function enrichLocations(rows) {
 			for (const r of rows) {
 				const lid = loadIdCol ? r[loadIdCol] : "";
@@ -9740,6 +9740,21 @@ function sanitizeBrokerColumns(headers, rows) {
 
 function findCol(headers, regex) {
 	return headers.find((h) => regex.test(h)) || null;
+}
+
+// Pick the sheet column that holds a side's REAL address, not the broker-reference /
+// company-info column that sorts before it. The Job Tracking sheet carries BOTH
+// "Pickup Company Information" (broker refs like "... REF/PU#: 29284990") AND
+// "Pickup Address", info first — so a naive headers.find(/pickup/i) grabbed the ref column
+// and leaked it into the Pickup/Drop-off cells. Prefer an explicit "* Address" header; else
+// fall back to the looser side match but skip info / reference / appointment columns.
+// sideRe selects the side (e.g. /origin|pickup|shipper/i). Returns null when nothing matches —
+// every caller already treats null/"" as "no source" and renders "—".
+function pickAddressColumn(headers, sideRe) {
+	const notMeta = (h) => !/lat|lng|lon|date|time|appt|eta/i.test(h);
+	return (headers || []).find((h) => sideRe.test(h) && /address/i.test(h) && notMeta(h))
+		|| (headers || []).find((h) => sideRe.test(h) && notMeta(h) && !/info|reference|appointment/i.test(h))
+		|| null;
 }
 
 // Normalize a driver name for comparison. Lowercases, trims, AND collapses
@@ -12579,8 +12594,8 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		const statusCol = findCol(headers, /status/i);
 		const pickupDateCol = findCol(headers, /pickup.*appo|pickup.*date/i);
 		const dropoffDateCol = findCol(headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
-		const originCol = headers.find((h) => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
-		const destCol = headers.find((h) => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const originCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
+		const destCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
 		// Same messy-date parser as /api/investor's inline helper (kept local).
@@ -14584,8 +14599,8 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 				const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
 
 				// Find address/city columns for origin and destination
-				const originAddrCol = headers.find((h) => /origin|pickup|shipper/i.test(h) && !/lat|lng|lon/i.test(h));
-				const destAddrCol = headers.find((h) => /dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h));
+				const originAddrCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
+				const destAddrCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 
 				if (loadIdCol) {
 					const statusCol = headers.find((h) => /status/i.test(h));
@@ -16196,10 +16211,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const myPendingRe = /^(dispatched|assigned|heading to shipper)$/i;
 		const myActiveRe = /^(in transit|picked up|at shipper|at receiver|loading|unloading)$/i;
 		const investorSplit = (parseFloat(config.investor_split_pct) || 50) / 100;
-		const myLoadsOriginCol = jobTracking.headers.find(h =>
-			/origin|pickup|shipper/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
-		const myLoadsDestCol = jobTracking.headers.find(h =>
-			/dest|drop|receiver|delivery/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null;
+		const myLoadsOriginCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
+		const myLoadsDestCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
 		function shapeMyLoad(r) {
 			const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
 			const gross = parseFloat(String(jtRateCol ? r[jtRateCol] : "0").replace(/[$,]/g, "")) || 0;
