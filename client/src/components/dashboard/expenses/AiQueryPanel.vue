@@ -204,12 +204,14 @@ function formatCell(col, value) {
 }
 
 // ---- Mini chart -------------------------------------------------------------
-// First column whose value is numeric in every row drives the chart.
+// First numeric column AFTER the label column drives the chart. Column 0 is
+// always the group label in this contract — skipping it matters when truck
+// units are numeric strings ("101"), which would otherwise win the scan.
 const numericCol = computed(() => {
   if (!result.value || result.value.unsupported) return null
   const { columns = [], rows = [] } = result.value
   if (!rows.length) return null
-  return columns.find((c) => rows.every((r) => isNumeric(r[c.key]))) || null
+  return columns.slice(1).find((c) => rows.every((r) => isNumeric(r[c.key]))) || null
 })
 
 const labelCol = computed(() => {

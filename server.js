@@ -24,7 +24,7 @@ const scankit = require("./lib/scankit-client");
 const bisonInvoice = require("./lib/bison-invoice");
 const { appendGmailDraft } = require("./lib/imap-draft");
 const { runReceiptOcr } = require("./lib/receipt-ocr");
-const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
+const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDetailed, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
 const expenseAi = require("./lib/expense-ai");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
@@ -11586,6 +11586,22 @@ function savePdfReceiptToDisk(photoData) {
 	}
 }
 
+// Geocode-enrichment budget. Expense inserts are driver-triggerable and every
+// UNIQUE junk city is a billable Google Geocoding call (geocode_cache only
+// dedupes exact strings), so cap enrichment lookups per UTC day and require a
+// plausible city string. Enrichment is best-effort — skipping is always safe.
+const GEOCODE_ENRICH_DAILY_MAX = 500;
+const GEOCODE_CITY_RE = /^[A-Za-z][A-Za-z .'\-]{1,49}$/;
+let geocodeEnrichDay = "";
+let geocodeEnrichCount = 0;
+function spendGeocodeBudget() {
+	const day = new Date().toISOString().slice(0, 10);
+	if (day !== geocodeEnrichDay) { geocodeEnrichDay = day; geocodeEnrichCount = 0; }
+	if (geocodeEnrichCount >= GEOCODE_ENRICH_DAILY_MAX) return false;
+	geocodeEnrichCount++;
+	return true;
+}
+
 // POST /api/expenses — Log a new expense (SQLite)
 app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
@@ -11611,6 +11627,11 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		if (isNaN(parsedAmount) || parsedAmount <= 0 || parsedAmount > 1_000_000) {
 			return res.status(400).json({ error: "Amount must be a positive number under 1,000,000" });
 		}
+		// Date must be a real calendar day — junk like "2026-13-01" would leak
+		// into month buckets and the ELD enrichment window math downstream.
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date)) || !Number.isFinite(Date.parse(`${date}T00:00:00Z`))) {
+			return res.status(400).json({ error: "Date must be a valid YYYY-MM-DD" });
+		}
 		// Sanitize free-text fields
 		const safeDescription = (description || "").toString().slice(0, 500);
 		const safeLoadId = (loadId || "").toString().slice(0, 100);
@@ -11619,10 +11640,18 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		const safeCity = (city || "").toString().trim().slice(0, 60);
 		const rawState = (state || "").toString().trim().toUpperCase();
 		const safeState = /^[A-Z]{2}$/.test(rawState) ? rawState : "";
-		// Merchant name (optional — prefilled by receipt OCR, editable). The
-		// description fallback catches legacy clients that never send vendor.
+		// Merchant name (optional — prefilled by receipt OCR, editable). Explicit
+		// vendors normalize leniently (unknown brands still group). The
+		// description fallback exists for legacy clients that folded the OCR
+		// vendor into description — those are overwhelmingly known brands, so it
+		// is ALIAS-GATED (mirrors backfill pass 1b): free-typed text like
+		// "oil change" must never mint a pseudo-vendor in the leaderboard.
 		const safeVendor = (vendor || "").toString().trim().slice(0, 80);
-		const vendorNormalized = normalizeVendor(safeVendor || safeDescription);
+		let vendorNormalized = normalizeVendor(safeVendor);
+		if (!vendorNormalized && safeDescription) {
+			const det = normalizeVendorDetailed(safeDescription);
+			if (det.aliasHit) vendorNormalized = det.normalized;
+		}
 
 		// SECURITY: drivers can only file expenses against loads assigned to
 		// them. Without this check a driver could pollute another driver's
@@ -11661,7 +11690,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		let locLat = null, locLng = null, locSource = "";
 		let enrichState = safeState, enrichCity = safeCity;
 		try {
-			if (safeCity && safeState) {
+			if (safeCity && safeState && GEOCODE_CITY_RE.test(safeCity) && spendGeocodeBudget()) {
 				const g = await geocodeAddress(`${safeCity}, ${safeState}`);
 				if (g) { locLat = g.lat; locLng = g.lng; locSource = "geocode"; }
 			} else if (!safeState && driverTruck?.routemate_vehicle_id) {
@@ -14186,18 +14215,26 @@ async function geocodeAddress(address) {
 	// Check cache
 	const cached = db.prepare("SELECT lat, lng FROM geocode_cache WHERE address = ?").get(key);
 	if (cached) return cached.lat ? { lat: cached.lat, lng: cached.lng } : null;
-	// Call Google Geocoding API
+	// Call Google Geocoding API. 5s abort — this now runs inline in the expense
+	// submit path, so a hung Google call must not hang the driver's POST.
 	try {
-		const resp = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_API_KEY}`);
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 5000);
+		const resp = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_API_KEY}`, { signal: controller.signal });
+		clearTimeout(timeout);
 		const data = await resp.json();
 		if (data.status === "OK" && data.results && data.results.length > 0) {
 			const loc = data.results[0].geometry.location;
 			db.prepare("INSERT OR REPLACE INTO geocode_cache (address, lat, lng) VALUES (?, ?, ?)").run(key, loc.lat, loc.lng);
 			return { lat: loc.lat, lng: loc.lng };
 		}
-	} catch { /* silent */ }
-	// Cache null to avoid retrying
-	db.prepare("INSERT OR REPLACE INTO geocode_cache (address, lat, lng) VALUES (?, NULL, NULL)").run(key);
+		// Only a definitive "no such place" is worth remembering. Caching null on
+		// quota blips / transient errors would permanently poison real cities in
+		// the shared geocode_cache (backfill + live inserts both read it).
+		if (data.status === "ZERO_RESULTS") {
+			db.prepare("INSERT OR REPLACE INTO geocode_cache (address, lat, lng) VALUES (?, NULL, NULL)").run(key);
+		}
+	} catch { /* transient — do not cache */ }
 	return null;
 }
 
@@ -17870,10 +17907,18 @@ app.patch("/api/expenses/:id/location", requireRole("Super Admin", "Dispatcher")
 		db.prepare("UPDATE expenses SET location_city = ?, location_state = ? WHERE id = ?").run(safeCity, safeState, id);
 		// Best-effort: refresh the coordinates for the corrected City/State so
 		// map pins + region rollups track the fix. Never fails the update itself.
+		// A cleared/partial location (or a geocode miss) must also clear the old
+		// coordinates — a stale pin contradicting the corrected state is worse
+		// than no pin.
 		try {
-			if (safeCity && safeState) {
-				const g = await geocodeAddress(`${safeCity}, ${safeState}`);
-				if (g) db.prepare("UPDATE expenses SET location_lat = ?, location_lng = ?, location_source = 'geocode' WHERE id = ?").run(g.lat, g.lng, id);
+			let coords = null;
+			if (safeCity && safeState && GEOCODE_CITY_RE.test(safeCity) && spendGeocodeBudget()) {
+				coords = await geocodeAddress(`${safeCity}, ${safeState}`);
+			}
+			if (coords) {
+				db.prepare("UPDATE expenses SET location_lat = ?, location_lng = ?, location_source = 'geocode' WHERE id = ?").run(coords.lat, coords.lng, id);
+			} else {
+				db.prepare("UPDATE expenses SET location_lat = NULL, location_lng = NULL, location_source = '' WHERE id = ?").run(id);
 			}
 		} catch (e) {
 			console.warn("expense location geocode skipped:", e.message);
@@ -18139,9 +18184,18 @@ app.post("/api/expenses/ai/query", requireRole("Super Admin", "Dispatcher"), exp
 			const rows = table.rows || [];
 			if (rows.length) {
 				const cell = (row, i) => (Array.isArray(row) ? row[i] : row ? row[(cols[i] || {}).key] : undefined);
-				let metricIdx = cols.length > 1 ? 1 : 0;
-				for (let i = 1; i < cols.length; i++) {
-					if (typeof cell(rows[0], i) === "number") { metricIdx = i; break; }
+				// Narrate the REQUESTED metric's column when present (a gallons
+				// question should not fall back to narrating Count).
+				const metricKeys = {
+					spend: ["spend", "totalSpend"], count: ["visits", "count"],
+					gallons: ["gallons", "totalGallons"], avg_per_gallon: ["avgPerGallon"], avg_amount: ["avgAmount"],
+				}[spec.metric] || [];
+				let metricIdx = cols.findIndex((c) => c && metricKeys.includes(c.key));
+				if (metricIdx < 0) {
+					metricIdx = cols.length > 1 ? 1 : 0;
+					for (let i = 1; i < cols.length; i++) {
+						if (typeof cell(rows[0], i) === "number") { metricIdx = i; break; }
+					}
 				}
 				answer = `Top result: ${cell(rows[0], 0)} — ${(cols[metricIdx] || {}).label || "value"}: ${cell(rows[0], metricIdx)}.`;
 			} else {
@@ -18162,8 +18216,12 @@ app.post("/api/expenses/ai/query", requireRole("Super Admin", "Dispatcher"), exp
 let expenseInsightsCache = { key: "", at: 0, data: null };
 app.get("/api/expenses/ai/insights", requireRole("Super Admin", "Dispatcher"), expenseAiLimiter, async (req, res) => {
 	try {
-		const stat = db.prepare("SELECT COALESCE(MAX(id),0) AS m, COUNT(*) AS c FROM expenses").get();
-		const key = `${stat.m}:${stat.c}:${localDayInTz(Date.now(), "America/Chicago")}`;
+		const stat = db.prepare(
+			"SELECT COALESCE(MAX(id),0) AS m, COUNT(*) AS c, COALESCE(SUM(status = 'Pending'), 0) AS p, COALESCE(SUM(status = 'Rejected'), 0) AS r FROM expenses"
+		).get();
+		// p/r fold status-only changes (approve/reject) into the key — without
+		// them the "pending approvals" insight goes stale until the next insert.
+		const key = `${stat.m}:${stat.c}:${stat.p}:${stat.r}:${localDayInTz(Date.now(), "America/Chicago")}`;
 		if (expenseInsightsCache.key === key && expenseInsightsCache.data && Date.now() - expenseInsightsCache.at < 6 * 3600e3) {
 			return res.json({ ...expenseInsightsCache.data, cached: true });
 		}

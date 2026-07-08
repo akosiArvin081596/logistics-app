@@ -217,12 +217,13 @@ function passNormalize(db) {
 	// cleaner) is the gate.
 	const rowsB = db.prepare(
 		`SELECT id, description FROM expenses
-		 WHERE COALESCE(vendor, '') = '' AND COALESCE(description, '') <> ''
+		 WHERE COALESCE(vendor, '') = '' AND COALESCE(vendor_normalized, '') = ''
+		   AND COALESCE(description, '') <> ''
 		 ORDER BY id`
 	).all();
 	const updB = db.prepare(
 		`UPDATE expenses SET vendor = ?, vendor_normalized = ?
-		 WHERE id = ? AND COALESCE(vendor, '') = ''`
+		 WHERE id = ? AND COALESCE(vendor, '') = '' AND COALESCE(vendor_normalized, '') = ''`
 	);
 	for (const row of rowsB) {
 		if (budget-- <= 0) break;
@@ -299,7 +300,10 @@ async function passReocr(db) {
 			continue;
 		}
 		const normalized = normalizeVendor(vendor);
-		if (!normalized) { skip(c, "ocr_vendor_unnormalizable"); continue; } // avoids endless re-OCR of junk
+		// Unusable vendor: the row stays unstamped, so it WILL be re-OCR'd on a
+		// future --reocr run (bounded by --limit; acceptable retry-vs-give-up
+		// tradeoff for blurry receipts that might scan better later).
+		if (!normalized) { skip(c, "ocr_vendor_unnormalizable"); continue; }
 
 		const city = String(result.city || "").trim().slice(0, 60);
 		const stateRaw = String(result.state || "").trim().toUpperCase();
@@ -326,9 +330,13 @@ async function passReocr(db) {
 // PASS 3 (--geocode): "City, ST" → lat/lng via cached Google Geocoding
 // ---------------------------------------------------------------------------
 
-// Inline forward-geocode mirroring server.js:14121 geocodeAddress: Google
-// Geocoding API, first result's location, null on any miss/error. The caller
-// handles the geocode_cache read/write (including caching nulls).
+// Inline forward-geocode mirroring server.js geocodeAddress. Returns:
+//   { ok: true,  coords: {lat,lng} } — found
+//   { ok: true,  coords: null }      — definitive ZERO_RESULTS (safe to cache)
+//   { ok: false, coords: null }      — transient error / quota / other status.
+// The ok flag matters: caching a null on a quota blip would permanently mark a
+// REAL city un-geocodable in the shared geocode_cache (the live server reads
+// the same table), and a mass backfill is exactly when quota blips happen.
 async function googleGeocode(address) {
 	try {
 		const resp = await fetch(
@@ -337,10 +345,11 @@ async function googleGeocode(address) {
 		const data = await resp.json();
 		if (data.status === "OK" && data.results && data.results.length > 0) {
 			const loc = data.results[0].geometry.location;
-			return { lat: loc.lat, lng: loc.lng };
+			return { ok: true, coords: { lat: loc.lat, lng: loc.lng } };
 		}
-	} catch { /* fall through → null */ }
-	return null;
+		if (data.status === "ZERO_RESULTS") return { ok: true, coords: null };
+	} catch { /* fall through */ }
+	return { ok: false, coords: null };
 }
 
 async function passGeocode(db) {
@@ -391,12 +400,13 @@ async function passGeocode(db) {
 			if (!coords) { skip(c, "cached_null_geocode"); continue; }
 		} else {
 			c.apiCalls++;
-			coords = await googleGeocode(address);
-			// Cache NULL results too so a bad "City, ST" is never re-fetched
-			// (server.js geocodeAddress convention). Dry-run writes nothing.
-			if (!DRY_RUN) cachePut.run(key, coords ? coords.lat : null, coords ? coords.lng : null);
+			const geo = await googleGeocode(address);
+			coords = geo.coords;
+			// Cache real coordinates and definitive ZERO_RESULTS misses only.
+			// Transient errors are NOT cached so those rows retry next run.
+			if (!DRY_RUN && geo.ok) cachePut.run(key, coords ? coords.lat : null, coords ? coords.lng : null);
 			await sleep(GEOCODE_THROTTLE_MS); // throttle cache misses only
-			if (!coords) { skip(c, "geocode_no_result"); continue; }
+			if (!coords) { skip(c, geo.ok ? "geocode_no_result" : "geocode_error_not_cached"); continue; }
 		}
 
 		if (DRY_RUN) { dryLog(c, `id=${row.id} '${address}' → lat=${coords.lat} lng=${coords.lng}`); continue; }

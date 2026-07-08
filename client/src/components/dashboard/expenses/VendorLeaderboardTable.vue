@@ -3,7 +3,7 @@
     <div class="exp-card-head">
       <div class="exp-card-titles">
         <h3 class="exp-card-title">Vendor Leaderboard</h3>
-        <div class="exp-card-sub">Every vendor &mdash; click a row to drill in</div>
+        <div class="exp-card-sub">Top 50 vendors by spend &mdash; click a row to drill in</div>
       </div>
     </div>
 
