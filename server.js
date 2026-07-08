@@ -24,6 +24,8 @@ const scankit = require("./lib/scankit-client");
 const bisonInvoice = require("./lib/bison-invoice");
 const { appendGmailDraft } = require("./lib/imap-draft");
 const { runReceiptOcr } = require("./lib/receipt-ocr");
+const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
+const expenseAi = require("./lib/expense-ai");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -270,6 +272,19 @@ try { db.exec("ALTER TABLE expenses ADD COLUMN truck_unit TEXT DEFAULT ''"); } c
 // or admin entry) so finance can break fuel/spend down by location + IFTA.
 try { db.exec("ALTER TABLE expenses ADD COLUMN location_city TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE expenses ADD COLUMN location_state TEXT DEFAULT ''"); } catch {}
+
+// Migration (Expense Intelligence): vendor capture + geo enrichment. vendor is
+// the raw merchant string (<=80 chars); vendor_normalized is the canonical
+// brand via lib/expense-analytics ('' = unknown). location_lat/lng have NO
+// default — NULL means unknown, since 0 is a real coordinate. location_source
+// records how the point was derived: 'geocode' | 'eld' | ''.
+try { db.exec("ALTER TABLE expenses ADD COLUMN vendor TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE expenses ADD COLUMN vendor_normalized TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE expenses ADD COLUMN location_lat REAL"); } catch {}
+try { db.exec("ALTER TABLE expenses ADD COLUMN location_lng REAL"); } catch {}
+try { db.exec("ALTER TABLE expenses ADD COLUMN location_source TEXT DEFAULT ''"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_vendor_norm ON expenses(vendor_normalized)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_loc_state ON expenses(location_state)"); } catch {}
 
 // Maintenance sinking fund: tracks $800/mo reserve contributions + PM services
 db.exec(`
@@ -11574,7 +11589,7 @@ function savePdfReceiptToDisk(photoData) {
 // POST /api/expenses — Log a new expense (SQLite)
 app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
-		const { loadId, type, amount, description, date, photoData, gallons, odometer, city, state } =
+		const { loadId, type, amount, description, date, photoData, gallons, odometer, city, state, vendor } =
 			req.body;
 		// SECURITY: drivers must use their session identity; admin/dispatcher
 		// can pass driver in the body to log on behalf. Investors cannot log
@@ -11604,6 +11619,10 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		const safeCity = (city || "").toString().trim().slice(0, 60);
 		const rawState = (state || "").toString().trim().toUpperCase();
 		const safeState = /^[A-Z]{2}$/.test(rawState) ? rawState : "";
+		// Merchant name (optional — prefilled by receipt OCR, editable). The
+		// description fallback catches legacy clients that never send vendor.
+		const safeVendor = (vendor || "").toString().trim().slice(0, 80);
+		const vendorNormalized = normalizeVendor(safeVendor || safeDescription);
 
 		// SECURITY: drivers can only file expenses against loads assigned to
 		// them. Without this check a driver could pollute another driver's
@@ -11616,7 +11635,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 
 		const timestamp = new Date().toISOString();
 		// Look up truck/owner for this driver to stamp on expense
-		const driverTruck = db.prepare("SELECT unit_number, owner_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
+		const driverTruck = db.prepare("SELECT unit_number, owner_id, routemate_vehicle_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
 		// Receipt: images keep the legacy path (silent drop on bad format —
@@ -11634,13 +11653,56 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		} else {
 			photoUrlOrPath = saveReceiptToDisk(photoData);
 		}
+		// Best-effort geo enrichment — a failure here must NEVER fail the insert.
+		// (a) City+State known (OCR/admin) → forward geocode (cached, null-safe).
+		// (b) No state, but the driver's truck is ELD-linked → locate the truck
+		//     from clean telemetry pings on the expense's calendar day and derive
+		//     the state via the IFTA bounding boxes. City is never invented.
+		let locLat = null, locLng = null, locSource = "";
+		let enrichState = safeState, enrichCity = safeCity;
+		try {
+			if (safeCity && safeState) {
+				const g = await geocodeAddress(`${safeCity}, ${safeState}`);
+				if (g) { locLat = g.lat; locLng = g.lng; locSource = "geocode"; }
+			} else if (!safeState && driverTruck?.routemate_vehicle_id) {
+				// Window = user-entered day: [00:00Z − 6h, 00:00Z + 30h] covers the
+				// full local day in every US zone; pick the ping closest to 18:00Z
+				// (≈ noon Central) as the "midday" position.
+				const dayMs = Date.parse(`${date}T00:00:00Z`);
+				if (Number.isFinite(dayMs)) {
+					const pings = db.prepare(
+						`SELECT latitude, longitude, location_date_ms FROM routemate_telemetry
+						 WHERE routemate_vehicle_id = ? AND dropped_reason = ''
+						   AND location_date_ms BETWEEN ? AND ?`
+					).all(driverTruck.routemate_vehicle_id, dayMs - 6 * 3600e3, dayMs + 30 * 3600e3);
+					const targetMs = Date.parse(`${date}T18:00:00Z`);
+					let best = null;
+					for (const p of pings) {
+						if (typeof p.latitude !== "number" || typeof p.longitude !== "number") continue;
+						if (!best || Math.abs(p.location_date_ms - targetMs) < Math.abs(best.location_date_ms - targetMs)) best = p;
+					}
+					if (best) {
+						const pingState = getStateFromCoords(best.latitude, best.longitude);
+						if (/^[A-Z]{2}$/.test(pingState || "")) {
+							enrichState = pingState;
+							locLat = best.latitude;
+							locLng = best.longitude;
+							locSource = "eld";
+						}
+					}
+				}
+			}
+		} catch (e) {
+			console.warn("expense enrichment skipped:", e.message);
+		}
 		const result = db
 			.prepare(
-				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoUrlOrPath,
-				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit, safeCity, safeState);
+				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit, enrichCity, enrichState,
+				safeVendor, vendorNormalized, locLat, locLng, locSource);
 		notifyChange("expenses");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -17623,17 +17685,52 @@ app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 // EXPENSE & MAINTENANCE TRACKING
 // ============================================================
 
-// GET /api/expenses/all — All expenses (all types) for dispatcher/admin
+// GET /api/expenses/all — All expenses (all types) for dispatcher/admin.
+// Optional filters (all additive): driver, type, status, truck (legacy) plus
+// from/to (YYYY-MM-DD), state (2-letter), region (Census division name →
+// resolveRegionToStates), and q (free-text across vendor/description/city).
 app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
-		const { driver, type, status, truck } = req.query;
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, created_at FROM expenses";
+		const { driver, type, status, truck, from, to, state, region, q } = req.query;
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, created_at FROM expenses";
 		const conditions = [];
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
 		if (type) { conditions.push("LOWER(type) = ?"); params.push(type.toLowerCase()); }
 		if (status) { conditions.push("LOWER(status) = ?"); params.push(status.toLowerCase()); }
 		if (truck) { conditions.push("LOWER(truck_unit) = ?"); params.push(String(truck).toLowerCase()); }
+		if (from) {
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return res.status(400).json({ error: "Invalid date" });
+			conditions.push("date >= ?"); params.push(from);
+		}
+		if (to) {
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(to)) return res.status(400).json({ error: "Invalid date" });
+			conditions.push("date <= ?"); params.push(to);
+		}
+		const stateUc = state ? String(state).trim().toUpperCase() : "";
+		if (region) {
+			const regionStates = resolveRegionToStates(String(region));
+			if (!regionStates) return res.status(400).json({ error: "Unknown region" });
+			// If BOTH state and region are given, the state is unioned into the list.
+			const list = [...new Set(regionStates.map((s) => String(s).toUpperCase()).concat(stateUc ? [stateUc] : []))];
+			if (list.length) {
+				conditions.push(`UPPER(location_state) IN (${list.map(() => "?").join(",")})`);
+				params.push(...list);
+			}
+		} else if (stateUc) {
+			conditions.push("UPPER(location_state) = ?");
+			params.push(stateUc);
+		}
+		if (q) {
+			const qSafe = q.toString().trim().slice(0, 80);
+			if (qSafe) {
+				// Escape LIKE wildcards so a literal % or _ in the search term
+				// can't blow the match wide open.
+				const term = "%" + qSafe.replace(/[\\%_]/g, (m) => "\\" + m) + "%";
+				conditions.push("(vendor LIKE ? ESCAPE '\\' OR vendor_normalized LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR location_city LIKE ? ESCAPE '\\')");
+				params.push(term, term, term, term);
+			}
+		}
 		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 		sql += " ORDER BY id DESC";
 		const expenses = db.prepare(sql).all(...params);
@@ -17760,7 +17857,7 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 // expense (back-office correction; drivers capture it at submit time via the
 // OCR prefill on POST /api/expenses). Same validation as the POST route: city
 // is trimmed to <=60 chars, state must be a 2-letter US code or it's cleared.
-app.patch("/api/expenses/:id/location", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+app.patch("/api/expenses/:id/location", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
 		if (!id || id <= 0) return res.status(400).json({ error: "Invalid expense id" });
@@ -17771,10 +17868,43 @@ app.patch("/api/expenses/:id/location", requireRole("Super Admin", "Dispatcher")
 		const expense = db.prepare("SELECT id FROM expenses WHERE id = ?").get(id);
 		if (!expense) return res.status(404).json({ error: "Expense not found" });
 		db.prepare("UPDATE expenses SET location_city = ?, location_state = ? WHERE id = ?").run(safeCity, safeState, id);
+		// Best-effort: refresh the coordinates for the corrected City/State so
+		// map pins + region rollups track the fix. Never fails the update itself.
+		try {
+			if (safeCity && safeState) {
+				const g = await geocodeAddress(`${safeCity}, ${safeState}`);
+				if (g) db.prepare("UPDATE expenses SET location_lat = ?, location_lng = ?, location_source = 'geocode' WHERE id = ?").run(g.lat, g.lng, id);
+			}
+		} catch (e) {
+			console.warn("expense location geocode skipped:", e.message);
+		}
 		notifyChange("expenses");
 		res.json({ success: true, city: safeCity, state: safeState });
 	} catch (err) {
 		console.error("Error updating expense location:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// PATCH /api/expenses/:id/vendor — set/correct the merchant on an expense
+// (back-office correction; drivers capture it at submit time via the OCR
+// prefill on POST /api/expenses). Empty vendor is allowed and clears the
+// field; vendor_normalized is always recomputed via lib/expense-analytics so
+// vendor rollups stay canonical.
+app.patch("/api/expenses/:id/vendor", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id);
+		if (!id || id <= 0) return res.status(400).json({ error: "Invalid expense id" });
+		const { vendor } = req.body || {};
+		const safeVendor = (vendor || "").toString().trim().slice(0, 80);
+		const vendorNormalized = normalizeVendor(safeVendor);
+		const result = db.prepare("UPDATE expenses SET vendor = ?, vendor_normalized = ? WHERE id = ?").run(safeVendor, vendorNormalized, id);
+		if (result.changes === 0) return res.status(404).json({ error: "Expense not found" });
+		logAudit(req, "update_expense_vendor", "expense", id, `vendor -> ${safeVendor || "(cleared)"}`);
+		notifyChange("expenses");
+		res.json({ success: true, vendor: safeVendor, vendorNormalized });
+	} catch (err) {
+		console.error("Error updating expense vendor:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -17903,6 +18033,156 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 	} catch (error) {
 		console.error("Error fetching fuel analytics:", error.message);
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/expenses/analytics — Expense Intelligence aggregates (all types,
+// not just fuel). The heavy lifting (grouping, totals, trends) lives in
+// lib/expense-analytics; this route validates/normalizes every filter so the
+// lib can trust its inputs. Filters: from/to (YYYY-MM-DD), types (CSV,
+// intersected with the canonical EXPENSE_TYPES), states (CSV of 2-letter
+// codes), region (Census division → unioned into states), driver, truck,
+// q, vendor (free text, <=80).
+app.get("/api/expenses/analytics", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const { from, to, types, states, region, driver, truck, q, vendor } = req.query;
+		const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+		if ((from && !dateRe.test(String(from))) || (to && !dateRe.test(String(to)))) {
+			return res.status(400).json({ error: "Invalid date format (YYYY-MM-DD)" });
+		}
+		if (from && to && String(to) < String(from)) {
+			return res.status(400).json({ error: "'to' must be on or after 'from'" });
+		}
+		// types: CSV intersected with the canonical list (case-insensitive,
+		// unknown values silently dropped, canonical casing kept for the lib).
+		let typeList = [];
+		if (types) {
+			const wanted = String(types).split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+			typeList = EXPENSE_TYPES.filter((t) => wanted.includes(t.toLowerCase()));
+		}
+		// states: CSV of 2-letter codes; invalid entries silently dropped.
+		let stateList = [];
+		if (states) {
+			stateList = String(states).split(",").map((s) => s.trim().toUpperCase()).filter((s) => /^[A-Z]{2}$/.test(s));
+		}
+		if (region) {
+			const regionStates = resolveRegionToStates(String(region));
+			if (!regionStates) return res.status(400).json({ error: "Unknown region" });
+			stateList = [...new Set([...stateList, ...regionStates.map((s) => String(s).toUpperCase())])];
+		}
+		const clip = (v) => (v == null ? "" : String(v).trim().slice(0, 80));
+		const filters = {
+			from: from ? String(from) : undefined,
+			to: to ? String(to) : undefined,
+			types: typeList.length ? typeList : undefined,
+			states: stateList.length ? stateList : undefined,
+			driver: clip(driver) || undefined,
+			truck: clip(truck) || undefined,
+			q: clip(q) || undefined,
+			vendor: clip(vendor) || undefined,
+		};
+		res.json(aggregateExpenses(db, filters));
+	} catch (err) {
+		console.error("Error computing expense analytics:", err.message);
+		res.status(500).json({ error: "Failed to compute analytics" });
+	}
+});
+
+// Shared limiter for BOTH Expense-AI routes below — caps Gemini spend the same
+// way expenseOcrLimiter caps vision OCR.
+const expenseAiLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 20,
+	message: { error: "Too many AI requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// POST /api/expenses/ai/query — natural-language question over the company's
+// expense data. lib/expense-ai turns the question into a bounded query spec
+// (never raw SQL from the model); lib/expense-analytics executes the spec with
+// parameterized queries; the model then narrates the result table. If the
+// narration call fails we still return the table with a deterministic answer.
+app.post("/api/expenses/ai/query", requireRole("Super Admin", "Dispatcher"), expenseAiLimiter, async (req, res) => {
+	try {
+		const question = ((req.body || {}).question ?? "").toString().trim();
+		if (question.length < 3 || question.length > 300) {
+			return res.status(400).json({ error: "Question must be 3-300 characters" });
+		}
+		logAudit(req, "expense_ai_query", "expense", 0, question.slice(0, 200));
+		let spec;
+		try {
+			spec = await expenseAi.querySpecFromQuestion(question);
+		} catch (err) {
+			if (err && err.code === "AI_NO_KEY") return res.status(503).json({ error: "AI is not configured" });
+			if (err && err.code === "AI_BAD_INPUT") return res.status(400).json({ error: "Invalid question" });
+			console.error("Expense AI query-spec failed:", err && err.message);
+			return res.status(502).json({ error: "AI request failed" });
+		}
+		if (!spec || !spec.supported) {
+			return res.json({
+				answer: "I can only answer questions about this company's expense data (vendors, fuel, repairs, states, drivers, trucks, dates).",
+				unsupported: true,
+				spec: null,
+				columns: [],
+				rows: [],
+				chartHint: "none",
+			});
+		}
+		const table = runQuerySpec(db, spec);
+		let answer;
+		try {
+			answer = await expenseAi.answerFromResults(question, spec, table);
+		} catch {
+			// Deterministic fallback — the result table is still useful without
+			// AI prose. Label = first column, metric = first numeric column.
+			const cols = table.columns || [];
+			const rows = table.rows || [];
+			if (rows.length) {
+				const cell = (row, i) => (Array.isArray(row) ? row[i] : row ? row[(cols[i] || {}).key] : undefined);
+				let metricIdx = cols.length > 1 ? 1 : 0;
+				for (let i = 1; i < cols.length; i++) {
+					if (typeof cell(rows[0], i) === "number") { metricIdx = i; break; }
+				}
+				answer = `Top result: ${cell(rows[0], 0)} — ${(cols[metricIdx] || {}).label || "value"}: ${cell(rows[0], metricIdx)}.`;
+			} else {
+				answer = "No matching expense data was found for that question.";
+			}
+		}
+		res.json({ answer, unsupported: false, spec, columns: table.columns, rows: table.rows, chartHint: table.chartHint });
+	} catch (err) {
+		console.error("Expense AI query error:", err.message);
+		res.status(500).json({ error: "Failed to answer question" });
+	}
+});
+
+// GET /api/expenses/ai/insights — AI-generated spending insights, cached for
+// up to 6h. The cache key folds in MAX(id) + COUNT(*) + the current business
+// day (America/Chicago — same zone the invoice weeks use), so any expense
+// insert/delete or a day rollover regenerates without needing a timer.
+let expenseInsightsCache = { key: "", at: 0, data: null };
+app.get("/api/expenses/ai/insights", requireRole("Super Admin", "Dispatcher"), expenseAiLimiter, async (req, res) => {
+	try {
+		const stat = db.prepare("SELECT COALESCE(MAX(id),0) AS m, COUNT(*) AS c FROM expenses").get();
+		const key = `${stat.m}:${stat.c}:${localDayInTz(Date.now(), "America/Chicago")}`;
+		if (expenseInsightsCache.key === key && expenseInsightsCache.data && Date.now() - expenseInsightsCache.at < 6 * 3600e3) {
+			return res.json({ ...expenseInsightsCache.data, cached: true });
+		}
+		const aggregates = buildInsightsAggregates(db);
+		let insights;
+		try {
+			insights = await expenseAi.generateInsights(aggregates);
+		} catch (err) {
+			if (err && err.code === "AI_NO_KEY") return res.status(503).json({ error: "AI is not configured" });
+			console.error("Expense AI insights failed:", err && err.message);
+			return res.status(502).json({ error: "AI request failed" });
+		}
+		const data = { insights, generatedAt: new Date().toISOString(), cached: false };
+		expenseInsightsCache = { key, at: Date.now(), data };
+		logAudit(req, "expense_ai_insights", "expense", 0, `generated ${insights.length} insights`);
+		res.json(data);
+	} catch (err) {
+		console.error("Expense AI insights error:", err.message);
+		res.status(500).json({ error: "Failed to generate insights" });
 	}
 });
 
