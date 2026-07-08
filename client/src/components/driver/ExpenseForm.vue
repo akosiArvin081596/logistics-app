@@ -67,6 +67,13 @@
       </template>
 
       <van-field
+        v-model="form.vendor"
+        label="Vendor"
+        placeholder="e.g. Pilot Travel Center"
+        :maxlength="80"
+      />
+
+      <van-field
         v-model="form.description"
         type="textarea"
         label="Description"
@@ -147,6 +154,7 @@ const form = reactive({
   amount: '',
   date: new Date().toLocaleDateString('en-CA'),
   loadId: '',
+  vendor: '',
   description: '',
   city: '',
   state: '',
@@ -241,6 +249,7 @@ async function runReceiptOcr() {
     amount: form.amount,
     date: form.date,
     type: form.type,
+    vendor: form.vendor,
     description: form.description,
     city: form.city,
     state: form.state,
@@ -268,7 +277,7 @@ async function runReceiptOcr() {
     // picked something other than the default Fuel.
     if (data.amount != null) form.amount = String(data.amount)
     if (data.date) form.date = data.date
-    if (data.vendor && !form.description) form.description = data.vendor
+    if (data.vendor) form.vendor = String(data.vendor).slice(0, 80)
     if (data.gallons != null) form.gallons = String(data.gallons)
     if (data.odometer != null) form.odometer = String(data.odometer)
     if (data.city != null) form.city = String(data.city)
@@ -289,6 +298,7 @@ function undoAutofill() {
   form.amount = preOcrSnapshot.value.amount
   form.date = preOcrSnapshot.value.date
   form.type = preOcrSnapshot.value.type
+  form.vendor = preOcrSnapshot.value.vendor
   form.description = preOcrSnapshot.value.description
   form.city = preOcrSnapshot.value.city
   form.state = preOcrSnapshot.value.state
@@ -315,6 +325,7 @@ function handleSubmit() {
       loadId: form.loadId,
       type: form.type,
       amount: form.amount,
+      vendor: form.vendor,
       description: form.description,
       city: form.city,
       state: form.state,
@@ -325,6 +336,7 @@ function handleSubmit() {
     })
 
     form.amount = ''
+    form.vendor = ''
     form.description = ''
     form.city = ''
     form.state = ''

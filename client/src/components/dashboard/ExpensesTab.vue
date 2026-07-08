@@ -102,6 +102,13 @@
       </template>
       <template v-else>
         <div class="filter-row">
+          <input
+            v-model="allQ"
+            type="search"
+            class="filter-search"
+            placeholder="Search vendor, description, city…"
+            aria-label="Search expenses"
+          />
           <select v-model="allFilter.driver" class="filter-select" @change="loadAll">
             <option value="">All Drivers</option>
             <option v-for="d in allDrivers" :key="d" :value="d">{{ d }}</option>
@@ -120,6 +127,26 @@
             <option>Approved</option>
             <option>Rejected</option>
           </select>
+          <select v-model="allFilter.state" class="filter-select" aria-label="Filter by state" @change="loadAll">
+            <option value="">All States</option>
+            <option v-for="s in US_STATES" :key="s.code" :value="s.code">{{ s.code }} — {{ s.name }}</option>
+          </select>
+          <input
+            v-model="allFilter.from"
+            type="date"
+            class="filter-select"
+            :max="allFilter.to || undefined"
+            aria-label="From date"
+            @change="loadAll"
+          />
+          <input
+            v-model="allFilter.to"
+            type="date"
+            class="filter-select"
+            :min="allFilter.from || undefined"
+            aria-label="To date"
+            @change="loadAll"
+          />
           <span class="filter-count">{{ allExpenses.length }} expenses</span>
         </div>
 
@@ -152,6 +179,7 @@
                 <div class="mobile-exp-date">{{ fmtDate(e.date) }}</div>
                 <div class="mobile-exp-driver">{{ e.driver }}<span v-if="e.truck_unit" class="mobile-exp-truck"> · #{{ e.truck_unit }}</span></div>
                 <div v-if="e.location_city || e.location_state" class="mobile-exp-location">{{ fmtLocation(e) }}</div>
+                <div v-if="e.vendor" class="mobile-exp-vendor" :title="e.vendor_normalized || ''">{{ e.vendor }}</div>
               </div>
               <span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span>
             </div>
@@ -196,6 +224,7 @@
               <th>Driver</th>
               <th>Truck</th>
               <th>City / State</th>
+              <th>Vendor</th>
               <th>Type</th>
               <th>Description</th>
               <th>Amount</th>
@@ -219,13 +248,14 @@
               <td>{{ e.driver }}</td>
               <td class="mono-sm">{{ e.truck_unit ? '#' + e.truck_unit : '\u2014' }}</td>
               <td class="mono-sm">{{ fmtLocation(e) }}</td>
+              <td class="desc-cell" :title="e.vendor_normalized || ''">{{ e.vendor || '—' }}</td>
               <td><span :class="['type-pill', 'type-' + e.type.toLowerCase()]">{{ e.type }}</span></td>
               <td class="desc-cell">{{ e.description || '\u2014' }}</td>
               <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
               <td @click.stop>
                 <a v-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener">PDF</a>
                 <img v-else-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
-                <span v-else class="dim">\u2014</span>
+                <span v-else class="dim">&mdash;</span>
               </td>
               <td>
                 <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
@@ -298,6 +328,28 @@
               <div v-if="selectedExpense.truck_unit" class="exp-stat">
                 <span class="exp-stat-label">Truck</span>
                 <span class="exp-stat-value">#{{ selectedExpense.truck_unit }}</span>
+              </div>
+              <div class="exp-stat exp-stat-location">
+                <span class="exp-stat-label">Vendor</span>
+                <template v-if="editingVendor">
+                  <div class="loc-edit-row">
+                    <input
+                      v-model="vendorDraft"
+                      type="text"
+                      class="loc-input"
+                      placeholder="Vendor (e.g., Pilot Flying J)"
+                      aria-label="Vendor"
+                    />
+                  </div>
+                  <div class="loc-edit-actions">
+                    <button class="loc-save" :disabled="savingVendor" @click="saveVendor">{{ savingVendor ? '…' : 'Save' }}</button>
+                    <button class="loc-cancel" :disabled="savingVendor" @click="editingVendor = false">Cancel</button>
+                  </div>
+                </template>
+                <span v-else class="exp-stat-value exp-stat-value-loc">
+                  <span :title="selectedExpense.vendor_normalized || ''">{{ selectedExpense.vendor || '—' }}</span>
+                  <button class="loc-edit-btn" @click="startEditVendor" aria-label="Edit vendor">Edit</button>
+                </span>
               </div>
               <div class="exp-stat exp-stat-location">
                 <span class="exp-stat-label">City / State</span>
@@ -455,6 +507,17 @@
           No fuel data yet. Drivers log fuel expenses in their app.
         </div>
       </template>
+    </div>
+
+    <!-- ANALYTICS (Expense Intelligence) — v-if (not v-show) so the panel only
+         fetches when opened; driver/truck lists are reused from this tab so the
+         panel doesn't refetch them. -->
+    <div v-if="activeSubTab === 'analytics'" class="sub-panel">
+      <ExpenseAnalyticsPanel
+        ref="analyticsPanel"
+        :driver-options="allDrivers"
+        :truck-options="truckList"
+      />
     </div>
 
     <!-- MAINTENANCE SINKING FUND (Super Admin only) -->
@@ -708,6 +771,8 @@ import { useAuthStore } from '../../stores/auth'
 import { useViewport } from '../../composables/useViewport'
 import { useSocketRefresh } from '../../composables/useSocketRefresh'
 import ZoomableImage from '../shared/ZoomableImage.vue'
+import ExpenseAnalyticsPanel from './expenses/ExpenseAnalyticsPanel.vue'
+import { US_STATES } from '../../utils/usStates'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -718,6 +783,8 @@ const { isMobile } = useViewport()
 const allSubTabs = [
   { key: 'all', label: 'All Expenses' },
   { key: 'fuel', label: 'Fuel Logs' },
+  // No adminOnly flag: Analytics is visible to Super Admin AND Dispatcher.
+  { key: 'analytics', label: 'Analytics' },
   { key: 'maintenance', label: 'Maintenance Fund', adminOnly: true },
   { key: 'ifta', label: 'IFTA / Compliance', adminOnly: true },
 ]
@@ -785,6 +852,11 @@ const approveLoading = ref(false)
 const editingLocation = ref(false)
 const savingLocation = ref(false)
 const locDraft = reactive({ city: '', state: '' })
+
+// Inline vendor edit — same lifecycle as the city/state editor above.
+const editingVendor = ref(false)
+const savingVendor = ref(false)
+const vendorDraft = ref('')
 
 function openExpenseDetail(e) {
   selectedId.value = e.id
@@ -876,7 +948,19 @@ function pricePerGallon(e) {
   return (amt / g).toFixed(3)
 }
 const expenseTypes = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
-const allFilter = reactive({ driver: '', type: '', status: '', truck: '' })
+const allFilter = reactive({ driver: '', type: '', status: '', truck: '', state: '', from: '', to: '' })
+// Text search across vendor/description/city — debounced 300ms so we don't
+// refetch per keystroke.
+const allQ = ref('')
+let allQTimer = null
+watch(allQ, () => {
+  clearTimeout(allQTimer)
+  allQTimer = setTimeout(loadAll, 300)
+})
+
+// Analytics sub-tab panel (v-if mounted) — exposes reload() for the
+// expenses:changed socket handler below.
+const analyticsPanel = ref(null)
 
 // Keyboard nav for the detail modal. Listener attaches only while the
 // modal is open so we don't leak global handlers.
@@ -895,6 +979,7 @@ watch(selectedExpense, (cur, prev) => {
   else if (!cur && prev) window.removeEventListener('keydown', onModalKeydown)
   // Drop edit mode on open/close/navigate so a stale draft never leaks across rows.
   editingLocation.value = false
+  editingVendor.value = false
 })
 
 function startEditLocation() {
@@ -922,7 +1007,37 @@ async function saveLocation() {
     savingLocation.value = false
   }
 }
-onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
+
+function startEditVendor() {
+  vendorDraft.value = selectedExpense.value?.vendor || ''
+  editingVendor.value = true
+}
+async function saveVendor() {
+  const e = selectedExpense.value
+  if (!e || savingVendor.value) return
+  savingVendor.value = true
+  try {
+    const vendor = vendorDraft.value.trim()
+    const res = await api.patch(`/api/expenses/${e.id}/vendor`, { vendor })
+    // Reflect on the live row so the table + modal update immediately. The
+    // server echoes the canonical vendor + normalized key back.
+    const row = allExpenses.value.find(x => x.id === e.id)
+    if (row) {
+      row.vendor = res?.vendor ?? vendor
+      row.vendor_normalized = res?.vendorNormalized ?? row.vendor_normalized
+    }
+    toast('Vendor updated', 'success')
+    editingVendor.value = false
+  } catch (err) {
+    toast(err?.message || 'Failed to update vendor', 'error')
+  } finally {
+    savingVendor.value = false
+  }
+}
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onModalKeydown)
+  clearTimeout(allQTimer)
+})
 
 // Add Expense form (Super Admin / Dispatcher only)
 const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
@@ -1136,19 +1251,28 @@ async function submitExpense() {
   }
 }
 
+// Shared query-string builder for /api/expenses/all — used by loadAll AND
+// quietReload so a socket-driven refresh always respects the active filters.
+function buildAllExpensesQuery() {
+  const params = new URLSearchParams()
+  if (allFilter.driver) params.set('driver', allFilter.driver)
+  if (allFilter.type) params.set('type', allFilter.type)
+  if (allFilter.status) params.set('status', allFilter.status)
+  if (allFilter.truck) params.set('truck', allFilter.truck)
+  if (allFilter.state) params.set('state', allFilter.state)
+  if (allFilter.from) params.set('from', allFilter.from)
+  if (allFilter.to) params.set('to', allFilter.to)
+  if (allQ.value.trim()) params.set('q', allQ.value.trim())
+  return params.toString() ? `?${params.toString()}` : ''
+}
+
 async function loadAll() {
   allLoading.value = true
   // Full reload = filters (or data set) changed — a carried-over selection
   // could silently target rows that are no longer on screen.
   clearSelection()
   try {
-    const params = new URLSearchParams()
-    if (allFilter.driver) params.set('driver', allFilter.driver)
-    if (allFilter.type) params.set('type', allFilter.type)
-    if (allFilter.status) params.set('status', allFilter.status)
-    if (allFilter.truck) params.set('truck', allFilter.truck)
-    const qs = params.toString() ? `?${params.toString()}` : ''
-    const data = await api.get(`/api/expenses/all${qs}`)
+    const data = await api.get(`/api/expenses/all${buildAllExpensesQuery()}`)
     allExpenses.value = data.expenses || []
     // Build driver list from drivers directory (not from expenses — new drivers with no expenses would be missing)
     if (allDrivers.value.length === 0) {
@@ -1172,13 +1296,7 @@ async function loadAll() {
 // selectedExpense resolves by id against the freshly-swapped array.
 async function quietReload() {
   try {
-    const params = new URLSearchParams()
-    if (allFilter.driver) params.set('driver', allFilter.driver)
-    if (allFilter.type) params.set('type', allFilter.type)
-    if (allFilter.status) params.set('status', allFilter.status)
-    if (allFilter.truck) params.set('truck', allFilter.truck)
-    const qs = params.toString() ? `?${params.toString()}` : ''
-    const data = await api.get(`/api/expenses/all${qs}`)
+    const data = await api.get(`/api/expenses/all${buildAllExpensesQuery()}`)
     allExpenses.value = data.expenses || []
     pruneSelection()
   } catch { /* empty — leave existing data in place */ }
@@ -1446,8 +1564,12 @@ async function markFeePaid(id) {
 
 // Refresh data quietly when the server emits expenses:changed (this tab's
 // own approvals, or another admin's actions). NOT a key-remount — the open
-// detail modal must survive.
-useSocketRefresh('expenses:changed', quietReload)
+// detail modal must survive. The Analytics panel (when open) re-pulls its
+// aggregates too, also without a skeleton flash.
+useSocketRefresh('expenses:changed', () => {
+  quietReload()
+  if (activeSubTab.value === 'analytics') analyticsPanel.value?.reload()
+})
 
 onMounted(() => {
   loadAll()
@@ -1771,6 +1893,12 @@ tr:hover td { background: var(--surface-hover); }
   padding: 0.35rem 0.6rem; border: 1px solid var(--border); border-radius: 6px;
   font-family: inherit; font-size: 0.78rem; background: var(--bg); color: var(--text);
 }
+.filter-search {
+  padding: 0.35rem 0.6rem; border: 1px solid var(--border); border-radius: 6px;
+  font-family: inherit; font-size: 0.78rem; background: var(--bg); color: var(--text);
+  min-width: 220px; flex: 1 1 220px;
+}
+.filter-search:focus { outline: none; border-color: var(--accent); }
 .filter-count {
   margin-left: auto; font-size: 0.72rem; color: var(--text-dim);
   font-family: 'JetBrains Mono', monospace;
@@ -2219,6 +2347,14 @@ tr:hover td { background: var(--surface-hover); }
   .mobile-exp-location {
     font-size: 0.78rem;
     color: #64748b;
+  }
+  .mobile-exp-vendor {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #475569;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .mobile-exp-truck {
     font-weight: 500;
