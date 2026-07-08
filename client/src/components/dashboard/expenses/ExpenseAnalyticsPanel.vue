@@ -36,8 +36,8 @@
 
       <!-- Data-quality chip -->
       <div v-if="data.summary.unknownVendorCount > 0" class="quality-chip" role="status">
-        {{ data.summary.unknownVendorCount }} expense{{ data.summary.unknownVendorCount === 1 ? ' has' : 's have' }}
-        no vendor yet &mdash; run the vendor backfill
+        {{ data.summary.unknownVendorCount }} fuel or repair expense{{ data.summary.unknownVendorCount === 1 ? '' : 's' }}
+        {{ data.summary.unknownVendorCount === 1 ? "doesn't" : "don't" }} have a store name yet &mdash; open the expense to add one
       </div>
 
       <!-- Empty state -->
