@@ -22,7 +22,7 @@ const results = [];
 function test(name, pass) { results.push({ name, pass }); }
 
 (async () => {
-  console.log("=== RUNNING 33 TESTS ===\n");
+  console.log("=== RUNNING 46 TESTS ===\n");
 
   // 1. Server health
   const health = await req("GET", "/api/auth/setup-check");
@@ -182,6 +182,76 @@ function test(name, pass) { results.push({ name, pass }); }
   const up2xx = up.status === 200 && up.body && typeof up.body === "object" && up.body.error === undefined;
   const upClean4xx = up.status >= 400 && up.status < 500 && up.body && typeof up.body === "object" && "error" in up.body;
   test("33. Documents upload fast-return responds 200 (or clean 4xx, never 5xx)", up2xx || upClean4xx);
+
+  // ---- Expense Intelligence (analytics + AI + vendor normalization) ----
+
+  // 34. Expense analytics requires auth
+  const ea1 = await req("GET", "/api/expenses/analytics");
+  test("34. Expense analytics blocked without auth", ea1.status === 401);
+
+  // 35. Expense analytics is admin/dispatcher-only — Investor forbidden
+  const ea2 = await req("GET", "/api/expenses/analytics", null, ic);
+  test("35. Expense analytics blocked for Investor", ea2.status === 403);
+
+  // 36. Expense analytics returns the full aggregate contract for admin:
+  //     summary object + the six aggregate arrays lib/expense-analytics produces.
+  const ea3 = await req("GET", "/api/expenses/analytics", null, ac);
+  const eab = (ea3 && ea3.body) || {};
+  const eaArrays = ["byVendor", "byState", "byMonth", "byType", "byDriver", "locations"]
+    .every(k => Array.isArray(eab[k]));
+  test("36. Expense analytics returns summary + aggregate arrays", ea3.status === 200 && !!eab.summary && eaArrays);
+
+  // 37. Expense analytics validates date filters (YYYY-MM-DD only)
+  const ea4 = await req("GET", "/api/expenses/analytics?from=notadate", null, ac);
+  test("37. Expense analytics rejects malformed 'from' date", ea4.status === 400);
+
+  // 38. Expense analytics accepts region (Census division) + CSV types filters
+  const ea5 = await req("GET", "/api/expenses/analytics?region=Pacific&types=Fuel,Repair", null, ac);
+  test("38. Expense analytics accepts region+types filters", ea5.status === 200);
+
+  // 39. GET /api/expenses/all supports the new q/from/to/state filters and
+  //     keeps the { expenses: [...] } shape.
+  const exAll = await req("GET", "/api/expenses/all?q=zz&from=2026-01-01&to=2026-12-31&state=CA", null, ac);
+  test("39. Expenses list supports q/from/to/state filters", exAll.status === 200 && Array.isArray(exAll.body?.expenses));
+
+  // 40. AI expense query requires auth
+  const aiq1 = await req("POST", "/api/expenses/ai/query", { question: "which gas station do we frequent the most" });
+  test("40. AI expense query blocked without auth", aiq1.status === 401);
+
+  // 41. AI expense query is admin/dispatcher-only — Investor forbidden
+  const aiq2 = await req("POST", "/api/expenses/ai/query", { question: "which gas station do we frequent the most" }, ic);
+  test("41. AI expense query blocked for Investor", aiq2.status === 403);
+
+  // 42. AI expense query validates the question before touching Gemini
+  const aiq3 = await req("POST", "/api/expenses/ai/query", {}, ac);
+  test("42. AI expense query rejects empty body", aiq3.status === 400);
+
+  // 43. AI expense query answers (key configured) or degrades to a clean 503
+  //     (AI_NO_KEY → "AI is not configured") — never a 5xx crash.
+  const aiq4 = await req("POST", "/api/expenses/ai/query", { question: "which gas station do we frequent the most" }, ac);
+  test("43. AI expense query answers or 503 when unconfigured",
+    aiq4.status === 503 || (aiq4.status === 200 && typeof aiq4.body?.answer === "string"));
+
+  // 44. AI insights requires auth and is admin/dispatcher-only
+  const ins1 = await req("GET", "/api/expenses/ai/insights");
+  const ins2 = await req("GET", "/api/expenses/ai/insights", null, ic);
+  test("44. AI insights blocked without auth (401) and for Investor (403)", ins1.status === 401 && ins2.status === 403);
+
+  // 45. AI insights returns cards (key configured) or a clean 503 when not
+  const ins3 = await req("GET", "/api/expenses/ai/insights", null, ac);
+  test("45. AI insights returns array or 503 when unconfigured",
+    ins3.status === 503 || (ins3.status === 200 && Array.isArray(ins3.body?.insights)));
+
+  // 46. Vendor normalization round-trip: log an expense with a raw merchant
+  //     string (same seeded driver "test" the harness already uses in test 22),
+  //     then find it via the q filter with the canonical brand stamped on it.
+  const ve = await req("POST", "/api/expenses",
+    { driver: "test", type: "Fuel", amount: 10, date: "2026-04-11", vendor: "Pilot Travel Center #123" }, ac);
+  const veList = await req("GET", "/api/expenses/all?q=pilot", null, ac);
+  const veRows = (veList.body && veList.body.expenses) || [];
+  const veNormalized = veRows.some(r => r && r.vendor_normalized === "PILOT FLYING J");
+  test("46. Vendor normalization round-trip (Pilot → PILOT FLYING J)",
+    ve.status === 200 && ve.body?.success === true && veList.status === 200 && veNormalized);
 
   // Results
   console.log("");
