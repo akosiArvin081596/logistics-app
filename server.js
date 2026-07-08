@@ -18214,17 +18214,31 @@ app.post("/api/expenses/ai/query", requireRole("Super Admin", "Dispatcher"), exp
 // day (America/Chicago — same zone the invoice weeks use), so any expense
 // insert/delete or a day rollover regenerates without needing a timer.
 let expenseInsightsCache = { key: "", at: 0, data: null };
-app.get("/api/expenses/ai/insights", requireRole("Super Admin", "Dispatcher"), expenseAiLimiter, async (req, res) => {
+// Key folds in MAX(id) + COUNT + Pending/Rejected counts + the business day
+// (America/Chicago), so any insert/delete, approve/reject, or day rollover
+// regenerates without a timer.
+function computeInsightsCacheKey() {
+	const stat = db.prepare(
+		"SELECT COALESCE(MAX(id),0) AS m, COUNT(*) AS c, COALESCE(SUM(status = 'Pending'), 0) AS p, COALESCE(SUM(status = 'Rejected'), 0) AS r FROM expenses"
+	).get();
+	return `${stat.m}:${stat.c}:${stat.p}:${stat.r}:${localDayInTz(Date.now(), "America/Chicago")}`;
+}
+// Serve a fresh cache hit BEFORE the rate limiter, so a tab-open that hits the
+// 6h cache costs neither a Gemini call nor an expenseAiLimiter token (cached
+// hits would otherwise burn the budget shared with real AI questions).
+function insightsCacheGate(req, res, next) {
 	try {
-		const stat = db.prepare(
-			"SELECT COALESCE(MAX(id),0) AS m, COUNT(*) AS c, COALESCE(SUM(status = 'Pending'), 0) AS p, COALESCE(SUM(status = 'Rejected'), 0) AS r FROM expenses"
-		).get();
-		// p/r fold status-only changes (approve/reject) into the key — without
-		// them the "pending approvals" insight goes stale until the next insert.
-		const key = `${stat.m}:${stat.c}:${stat.p}:${stat.r}:${localDayInTz(Date.now(), "America/Chicago")}`;
+		const key = computeInsightsCacheKey();
+		req._insightsKey = key;
 		if (expenseInsightsCache.key === key && expenseInsightsCache.data && Date.now() - expenseInsightsCache.at < 6 * 3600e3) {
 			return res.json({ ...expenseInsightsCache.data, cached: true });
 		}
+	} catch { /* fall through — the handler recomputes the key defensively */ }
+	next();
+}
+app.get("/api/expenses/ai/insights", requireRole("Super Admin", "Dispatcher"), insightsCacheGate, expenseAiLimiter, async (req, res) => {
+	try {
+		const key = req._insightsKey || computeInsightsCacheKey();
 		const aggregates = buildInsightsAggregates(db);
 		let insights;
 		try {

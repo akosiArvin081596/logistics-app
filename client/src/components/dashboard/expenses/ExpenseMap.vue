@@ -116,6 +116,13 @@ function clearOverlays() {
   if (infoWindow) infoWindow.close()
 }
 
+// Signature of the plotted set — lets a socket-driven reload that returns the
+// SAME locations skip re-rendering (and re-fitting), so the admin's manual
+// pan/zoom isn't reset out from under them mid-inspection.
+let lastRenderedSig = ''
+const locSignature = () =>
+  validLocations.value.map((l) => `${l.id}:${l.lat}:${l.lng}:${l.type}`).join('|')
+
 function render() {
   if (!map) return
   clearOverlays()
@@ -145,6 +152,7 @@ function render() {
     map.setCenter(bounds.getCenter())
     map.setZoom(8)
   }
+  lastRenderedSig = locSignature()
 }
 
 async function initMap() {
@@ -165,6 +173,9 @@ async function initMap() {
 watch(
   () => props.locations,
   () => {
+    // Identical data (e.g. a socket-driven quiet reload) → leave the map alone
+    // so the viewport isn't yanked out from under the user.
+    if (map && locSignature() === lastRenderedSig) return
     if (map) render()
     else if (validLocations.value.length && props.visible) nextTick(() => initMap())
   }
