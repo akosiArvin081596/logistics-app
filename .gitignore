@@ -1,6 +1,11 @@
 node_modules/
 service-account-key.json
 .env
+.env.local
+
+# Extracted secrets saved to local files (never commit)
+*-api-key.txt
+google-maps-api-key.txt
 
 # Vue / Vite
 client/dist/
@@ -14,6 +19,7 @@ app.db.bak*
 app.db.docgen*
 app.db.production*
 app.db.prod-capture*
+app.db*.backup-*
 logisxdb.db
 
 # Production/staging DB snapshots pulled down for screenshot capture
