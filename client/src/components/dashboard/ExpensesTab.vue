@@ -94,6 +94,14 @@
             :disabled="addLoading"
             @click="clearPhoto"
           >Remove</button>
+          <span
+            v-if="ocrApplied && !photoProcessing"
+            class="add-ocr-chip"
+            :class="`add-ocr-${ocrConfidence || 'medium'}`"
+          >
+            ✓ Autofilled from receipt<span v-if="ocrConfidence"> · {{ ocrConfidence }} confidence</span>
+            <button type="button" class="add-ocr-undo" @click="undoAddAutofill">Undo</button>
+          </span>
         </div>
       </div>
 
@@ -408,6 +416,19 @@
           </div>
         </div>
       </Teleport>
+    </div>
+
+    <!-- BULK RECEIPT UPLOAD — Super Admin / Dispatcher.
+         v-show (not v-if) so an in-progress batch — uploaded receipts, OCR
+         reads, hand-corrections — survives the admin flipping to another
+         sub-tab and back. Unmounting here would silently discard all of it. -->
+    <div v-show="activeSubTab === 'bulk'" class="sub-panel">
+      <BulkReceiptScan
+        v-if="canAddExpense"
+        :drivers="allDrivers"
+        :expense-types="expenseTypes"
+        @saved="onBulkSaved"
+      />
     </div>
 
     <!-- FUEL LOGS -->
@@ -772,6 +793,7 @@ import { useViewport } from '../../composables/useViewport'
 import { useSocketRefresh } from '../../composables/useSocketRefresh'
 import ZoomableImage from '../shared/ZoomableImage.vue'
 import ExpenseAnalyticsPanel from './expenses/ExpenseAnalyticsPanel.vue'
+import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import { US_STATES } from '../../utils/usStates'
 
 const api = useApi()
@@ -782,6 +804,9 @@ const { isMobile } = useViewport()
 
 const allSubTabs = [
   { key: 'all', label: 'All Expenses' },
+  // Bulk receipt upload — Super Admin + Dispatcher (both reach this route and
+  // can log expenses). No adminOnly flag so Dispatchers see it too.
+  { key: 'bulk', label: 'Bulk Upload' },
   { key: 'fuel', label: 'Fuel Logs' },
   // No adminOnly flag: Analytics is visible to Super Admin AND Dispatcher.
   { key: 'analytics', label: 'Analytics' },
@@ -1053,6 +1078,15 @@ const pdfName = ref('')
 const photoIsPdf = computed(() => photoBase64.value.startsWith('data:application/pdf'))
 const MAX_PDF_FILE_BYTES = 15 * 1024 * 1024 // matches the server-side cap
 
+// Receipt OCR autofill on the single Log Expense form — mirrors the driver
+// ExpenseForm. After a photo is enhanced, Gemini reads it and prefills the
+// fields; the admin confirms/edits before Add. Undo restores what was typed.
+// (No separate ocrLoading spinner — the OCR round-trip runs inside the existing
+// photoProcessing "Processing file…" state, so that hint already covers it.)
+const ocrApplied = ref(false)
+const ocrConfidence = ref('')
+const preOcrSnapshot = ref(null)
+
 // Download Receipts (Super Admin only) — ZIP bundle endpoint
 const truckList = ref([])
 // Computed so a long-lived tab that crosses midnight still clamps correctly.
@@ -1188,8 +1222,10 @@ async function handleFileInput(event) {
     photoBase64.value = canvas.toDataURL('image/jpeg', 0.8)
     canvas.width = 0; canvas.height = 0
     // Enhance the receipt via ScanKit (crop + flatten lighting) for a cleaner
-    // stored image. Best-effort — failure keeps the raw photo.
+    // stored image, then OCR it to prefill the form. Both best-effort — any
+    // failure keeps the raw photo and leaves manual entry intact.
     await enhanceReceiptPhoto()
+    await runAddFormOcr()
   } catch {
     photoBase64.value = ''
     if (fileInputRef.value) fileInputRef.value.value = ''
@@ -1211,10 +1247,67 @@ async function enhanceReceiptPhoto() {
   }
 }
 
+// Read the enhanced receipt with Gemini and prefill the Log Expense fields.
+// Mirrors the driver form: only fills empty/default fields, snapshots first so
+// Undo can restore, and stays silent when OCR is disabled (503) so manual
+// entry is never blocked. Images only — PDFs never reach here.
+async function runAddFormOcr() {
+  if (!photoBase64.value || photoIsPdf.value) return
+  ocrApplied.value = false
+  ocrConfidence.value = ''
+  preOcrSnapshot.value = {
+    type: addForm.type,
+    amount: addForm.amount,
+    date: addForm.date,
+    description: addForm.description,
+    city: addForm.city,
+    state: addForm.state,
+  }
+  try {
+    const data = await api.post('/api/expenses/ocr', { photoData: photoBase64.value })
+    if (data.amount != null) addForm.amount = String(data.amount)
+    if (data.date) addForm.date = data.date
+    if (data.city != null) addForm.city = String(data.city)
+    if (data.state != null) addForm.state = String(data.state).toUpperCase().slice(0, 2)
+    if (data.suggestedType && addForm.type === 'Fuel') addForm.type = data.suggestedType
+    // No dedicated vendor field on this form — fold the vendor into the
+    // description only when the admin left it blank, so the info isn't lost.
+    if (data.vendor && !addForm.description.trim()) addForm.description = String(data.vendor).slice(0, 80)
+    ocrApplied.value = true
+    ocrConfidence.value = data.confidence || ''
+  } catch (err) {
+    // 503 = OCR key unset: silent manual-entry fallback. Anything else is a
+    // soft failure — keep the photo, don't nag, admin fills the fields.
+    if (err?.status !== 503) toast('Couldn\'t read the receipt — enter the fields manually', 'error')
+    preOcrSnapshot.value = null
+  }
+}
+
+function undoAddAutofill() {
+  if (!preOcrSnapshot.value) return
+  addForm.type = preOcrSnapshot.value.type
+  addForm.amount = preOcrSnapshot.value.amount
+  addForm.date = preOcrSnapshot.value.date
+  addForm.description = preOcrSnapshot.value.description
+  addForm.city = preOcrSnapshot.value.city
+  addForm.state = preOcrSnapshot.value.state
+  ocrApplied.value = false
+}
+
+// Bulk upload saved ≥1 expense — refresh the underlying list in the background
+// so the "All Expenses" tab is current, without yanking the admin off the bulk
+// tab (failed/unfixed rows stay visible there).
+async function onBulkSaved() {
+  await loadAll()
+}
+
 function clearPhoto() {
   photoBase64.value = ''
   pdfName.value = ''
   if (fileInputRef.value) fileInputRef.value.value = ''
+  ocrApplied.value = false
+  ocrConfidence.value = ''
+  preOcrSnapshot.value = null
 }
 
 async function submitExpense() {
@@ -2232,6 +2325,21 @@ tr:hover td { background: var(--surface-hover); }
 }
 .add-photo-clear:hover { opacity: 0.75; }
 .add-photo-clear:disabled { opacity: 0.5; cursor: default; }
+
+/* Receipt OCR autofill status on the single Log Expense form */
+.add-ocr-chip {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.2rem 0.55rem; font-size: 0.72rem; border-radius: 999px;
+  background: rgba(34, 197, 94, 0.12); color: #16a34a;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.add-ocr-low { background: rgba(245, 158, 11, 0.12); color: #d97706; border-color: rgba(245, 158, 11, 0.3); }
+.add-ocr-undo {
+  background: transparent; border: none; padding: 0; cursor: pointer;
+  font-family: inherit; font-size: 0.72rem; color: inherit;
+  text-decoration: underline; opacity: 0.85;
+}
+.add-ocr-undo:hover { opacity: 1; }
 
 /* Download Receipts (Super Admin) */
 .download-receipts-card {

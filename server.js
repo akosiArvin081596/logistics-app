@@ -11755,9 +11755,18 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 //   treated as untrusted data and never passes through to SQL. The existing
 //   amount < 1,000,000 guard on POST /api/expenses is the second line of
 //   defense against prompt injection or hallucinated totals.
+// Role-aware cap. Admin/Dispatcher get 100/15min because the bulk-receipt
+// upload fires one OCR call per receipt (a ~25 batch from a shared office IP
+// needs headroom); Drivers stay at the original tight 20 (a phone should never
+// need more, and it keeps the abuse surface small). requireAuth runs before
+// this middleware, so req.session.user is populated. Still a firm per-IP cap on
+// Gemini vision spend; endpoint is auth+role gated (no Investors).
 const expenseOcrLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
-	max: 20,
+	max: (req) => {
+		const role = req.session?.user?.role;
+		return role === "Super Admin" || role === "Dispatcher" ? 100 : 20;
+	},
 	message: { error: "Too many OCR requests. Try again later." },
 	standardHeaders: true,
 });

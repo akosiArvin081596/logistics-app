@@ -117,7 +117,7 @@ Session store also in SQLite.
 - **express-rate-limit**: Per-endpoint limiters; see the rate-limiting section below.
 
 **AI / vision services**:
-- **Gemini 2.5 Flash vision** — expense receipt OCR (`POST /api/expenses/ocr`). Called via `fetch` (no SDK) with `responseSchema` enforcing the JSON shape. Requires `GEMINI_API_KEY`; falls back to 503 + silent manual-entry in the driver form when unset. Key is shared across Alchemy projects (rotate in one place). Retry (2 retries, exp backoff, 15 s `AbortController` timeout) mirrors the Google Routes integration.
+- **Gemini 2.5 Flash vision** — expense receipt OCR (`POST /api/expenses/ocr`). Called via `fetch` (no SDK) with `responseSchema` enforcing the JSON shape. Requires `GEMINI_API_KEY`; falls back to 503 + silent manual-entry when unset. Key is shared across Alchemy projects (rotate in one place). Retry (2 retries, exp backoff, 15 s `AbortController` timeout) mirrors the Google Routes integration. **Autofill surfaces:** the driver `ExpenseForm`, the admin/dispatcher single "Log Expense" form in `ExpensesTab` (enhance→OCR→prefill, with Undo), and the **Bulk Upload** sub-tab (`components/dashboard/expenses/BulkReceiptScan.vue`) — pick a default driver, drop N receipts (≤25/batch), each image is OCR'd (concurrency 3; bulk skips the ScanKit enhance pass to save credits) into an editable review grid, then one create per row via `POST /api/expenses`. Write-timeouts (ambiguous re: whether the insert landed) are parked in a non-auto-retried `timeout` state to avoid double-booking the P&L, since `POST /api/expenses` is not idempotent.
 - **ScanKit.io document scanning** — server-side crop / deskew / lighting-correction (and optional searchable-PDF with OCR layer) via `POST /api/documents/scan`, backed by the `lib/scankit-client.js` adapter (single point of contact; `Authorization: Bearer`, multipart upload, retry/timeout mirror the Routemate/Gemini pattern). **Replaced** the old client-side jscanify + OpenCV-WASM (~9 MB) scanner in `DocumentUpload.vue`. Used by driver POD/BOL scanning, the admin dashboard upload (`ActiveLoadsTab` reuses the same component), and receipt enhancement before Gemini OCR (`ExpenseForm`, `ExpensesTab`). Requires `SCANKIT_API_KEY` + `SCANKIT_ENABLED=true`; returns 503 (client falls back to attaching the raw photo) when unset. Credit-billed (`scanKitLimiter` caps spend) — **rotate the key if it is ever exposed**.
 
 REST endpoints (grouped by domain):
@@ -270,7 +270,7 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 | `driverFilesLimiter` | 15 min | 30 | `GET /api/trucks/:id/driver-files` |
 | `truckDocViewLimiter` | 15 min | 30 | `GET /api/driver/truck-documents/:id/view` |
 | `trackPublicLimiter` | 15 min | 60 | `GET /api/public/track/:loadId` (customers refresh often) |
-| `expenseOcrLimiter` | 15 min | 20 | `POST /api/expenses/ocr` (caps Gemini spend) |
+| `expenseOcrLimiter` | 15 min | 100 (Super Admin/Dispatcher) · 20 (Driver) | `POST /api/expenses/ocr` (caps Gemini spend; role-aware `max` so the admin/dispatcher bulk-receipt upload — 1 OCR call/receipt — has headroom while drivers stay tight) |
 
 The 60s in-memory Job Tracking cache (`getJobTrackingCached()`) is the other core throttle — it absorbs bursty dashboard traffic so the Sheets 300 req/min quota isn't a real constraint day-to-day.
 
