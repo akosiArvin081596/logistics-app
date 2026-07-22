@@ -51,6 +51,11 @@
             <button v-if="isBisonLoad" type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Generate the Bison invoice, attach the POD + rate-con, and save a Gmail draft for you to verify then send.">{{ drafting ? 'Drafting…' : '✉ Draft Invoice Email' }}</button>
           </div>
           <div v-if="draftResult" :style="draftMsgStyle">{{ draftResult.msg }}</div>
+          <div v-if="canAttachRatecon" style="margin-top:0.4rem;display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+            <button type="button" :disabled="drafting" :style="attachBtnStyle" @click="pickRatecon">📎 Attach rate-con PDF</button>
+            <span style="font-size:0.72rem;color:#6b7280;">Upload the broker's rate-con PDF to draft the invoice.</span>
+            <input ref="rateconInput" type="file" accept="application/pdf,.pdf" style="display:none" @change="onRateconPicked" />
+          </div>
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
@@ -190,7 +195,7 @@ const reviewBadgeStyle = {
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(sortedJobs)
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
 async function openDetail(job) {
-  selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null
+  selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null; canAttachRatecon.value = false
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
@@ -276,6 +281,12 @@ const isBisonLoad = computed(() => {
 })
 const drafting = ref(false)
 const draftResult = ref(null) // { ok: boolean, msg: string } | null
+// When the backend can't read the rate-con it returns canAttach:true alongside a
+// specific code (RATECON_NOT_FOUND / NO_TEXT_NO_OCR / OCR_FAILED / ORDER_NOT_FOUND).
+// We then offer an "Attach rate-con PDF" control so the dispatcher can upload the
+// broker's PDF and re-run the draft without leaving the modal.
+const canAttachRatecon = ref(false)
+const rateconInput = ref(null)
 const draftBtnStyle = computed(() => ({
   marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
   padding: '0.4rem 0.8rem', fontSize: '0.78rem', fontWeight: '700', borderRadius: '6px',
@@ -283,6 +294,12 @@ const draftBtnStyle = computed(() => ({
   fontFamily: 'inherit', whiteSpace: 'nowrap', cursor: drafting.value ? 'not-allowed' : 'pointer',
   opacity: drafting.value ? 0.85 : 1, transition: 'all 0.15s',
 }))
+const attachBtnStyle = {
+  display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
+  padding: '0.35rem 0.7rem', fontSize: '0.75rem', fontWeight: '700', borderRadius: '6px',
+  border: '1px solid #0f2847', background: '#ffffff', color: '#0f2847',
+  fontFamily: 'inherit', whiteSpace: 'nowrap', cursor: 'pointer',
+}
 const draftMsgStyle = computed(() => ({
   marginTop: '0.5rem', fontSize: '0.78rem', fontWeight: '600',
   padding: '0.4rem 0.6rem', borderRadius: '6px',
@@ -290,11 +307,13 @@ const draftMsgStyle = computed(() => ({
   color: draftResult.value && draftResult.value.ok ? '#166534' : '#991b1b',
   border: '1px solid ' + (draftResult.value && draftResult.value.ok ? '#bbf7d0' : '#fecaca'),
 }))
-async function draftInvoice() {
+// Shared POST path for both the one-click draft and the manual rate-con attach.
+// extraBody carries { rateconPdfBase64 } when the dispatcher uploads a PDF.
+async function submitInvoice(extraBody = {}) {
   if (!loadIdValue.value || drafting.value) return
   drafting.value = true; draftResult.value = null
   try {
-    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-bison-invoice`, {})
+    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-bison-invoice`, extraBody)
     draftResult.value = {
       ok: true,
       msg: r.via
@@ -303,11 +322,47 @@ async function draftInvoice() {
           ? `Invoice ${r.invoiceId} generated (preview) — no Gmail draft target is configured, so no draft was saved.`
           : `Invoice ${r.invoiceId} generated.`),
     }
+    canAttachRatecon.value = false
   } catch (e) {
     draftResult.value = { ok: false, msg: (e && e.message) || 'Failed to draft the invoice.' }
+    // The backend flags every remediable rate-con failure with canAttach:true.
+    canAttachRatecon.value = !!(e && e.data && e.data.canAttach)
   } finally {
     drafting.value = false
   }
+}
+function draftInvoice() { return submitInvoice({}) }
+function pickRatecon() { if (rateconInput.value) rateconInput.value.click() }
+async function onRateconPicked(ev) {
+  const file = ev.target && ev.target.files && ev.target.files[0]
+  if (ev.target) ev.target.value = '' // let the dispatcher re-pick the same file
+  if (!file) return
+  if (!/pdf$/i.test(file.type) && !/\.pdf$/i.test(file.name || '')) {
+    draftResult.value = { ok: false, msg: 'Please choose a PDF rate-con file.' }
+    return
+  }
+  let base64
+  try {
+    base64 = await fileToBase64(file)
+  } catch {
+    draftResult.value = { ok: false, msg: 'Could not read that file — please try again.' }
+    return
+  }
+  await submitInvoice({ rateconPdfBase64: base64 })
+}
+// Resolve to raw base64 (no data: prefix). The endpoint accepts either form,
+// but raw is safe regardless of the browser-detected MIME type.
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = String(reader.result || '')
+      const comma = result.indexOf(',')
+      resolve(comma >= 0 ? result.slice(comma + 1) : result)
+    }
+    reader.onerror = () => reject(reader.error || new Error('read failed'))
+    reader.readAsDataURL(file)
+  })
 }
 const detailSections = computed(() => {
   if (!selectedJob.value) return []; const used = new Set(); const secs = []
