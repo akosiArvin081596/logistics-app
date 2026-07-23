@@ -6226,7 +6226,8 @@ async function generateInvoiceHandler(req, res) {
 // passed; a boot-time run covers a restart across the trigger. On first-ever
 // startup a baseline marker is seeded so the feature never retroactively bills
 // past weeks — the first real run is the NEXT Friday. Kill switch:
-// INVOICE_AUTOGEN_ENABLED (default on; set "false" to disable without a deploy).
+// INVOICE_AUTOGEN_ENABLED (DEFAULT OFF — this moves money; enable with
+// true/1/yes/on in production; see the authoritative note on the const below).
 db.exec(`
 	CREATE TABLE IF NOT EXISTS invoice_autogen_runs (
 		week_end TEXT PRIMARY KEY,
