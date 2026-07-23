@@ -54,6 +54,7 @@ GEMINI_OCR_MODEL=<optional — override the default gemini-2.5-flash model>
 SCANKIT_BASE_URL=<optional — ScanKit.io API base; defaults to https://api.scankit.io>
 SCANKIT_API_KEY=<optional — ScanKit.io key (sk_...) for document scanning; scanner returns 503 + raw-photo fallback when unset>
 SCANKIT_ENABLED=<optional — set "true" to enable; defaults off so the feature ships dormant>
+INVOICE_AUTOGEN_ENABLED=<optional — set "true" to enable the Friday 4 PM ET auto-generate-and-submit invoice batch; defaults off (moves money) so it ships dormant>
 PORT=3000  # optional, defaults to 3000
 ```
 
@@ -185,7 +186,8 @@ REST endpoints (grouped by domain):
 - `/api/compliance/fees`, `/api/compliance/ifta` — compliance fee tracking, IFTA mileage
 
 **Invoices**:
-- `POST /api/invoices/generate` — weekly (Sat–Fri) invoice PDF from completed loads. Fixed-driver pay uses the completed-loads ∩ ELD-travel active-day basis (see "Driver active days"), clipped to the billing week, at the truck's `driver_pay_daily`; soft-deleted loads are filtered out. Owner-op/percentage drivers bill `(week revenue − fuel/maintenance) × pct` instead.
+- `POST /api/invoices/generate` — weekly (Sat–Fri) invoice PDF from completed loads. Fixed-driver pay uses the completed-loads ∩ ELD-travel active-day basis (see "Driver active days"), clipped to the billing week, at the truck's `driver_pay_daily`; soft-deleted loads are filtered out. Owner-op/percentage drivers bill `(week revenue − fuel/maintenance) × pct` instead. The handler is the named `generateInvoiceHandler(req, res)` so the auto-gen batch (below) can invoke the **same** pay math in-process — one source of truth.
+- **Auto-invoice batch** (`INVOICE_AUTOGEN_ENABLED`, default off): a per-minute `setInterval` fires once the current week's **Friday 4:00 PM America/New_York** (DST-aware via `Intl`, `mostRecentInvoiceFridayET()`) has passed, then loops every `drivers_directory` driver, runs `generateInvoiceHandler` in-process (mock req/res, system actor), and **auto-submits** each fresh Draft → `Submitted` (drivers kept forgetting to submit; approval stays manual). Idempotent per week via the `invoice_autogen_runs` marker (keyed on the billing Friday); a boot-time run covers a restart across 4 PM; first-enable seeds a baseline so it never retroactively bills a pre-feature week. It pre-reads the sheet once and **aborts without a marker** if empty (never closes a payroll week on a transient Sheets glitch), cross-checks that every driver who worked got billed (worked-but-unbilled → bounded throttled retry, then an ACTION-NEEDED alert), and sends **one** batch summary (dispatch notification + email to `GMAIL_USER`) instead of N per-invoice submit emails.
 - `GET /api/invoices`, `GET /api/invoices/:id/pdf` — list and download invoices
 - `PUT /api/invoices/:id/submit` — submit an invoice (driver/dispatcher)
 - `PUT /api/invoices/:id/approve` — approve submitted invoice (Super Admin only)

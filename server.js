@@ -5795,7 +5795,11 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 }
 
 // POST /api/invoices/generate — driver generates weekly invoice
-app.post("/api/invoices/generate", requireAuth, async (req, res) => {
+app.post("/api/invoices/generate", requireAuth, generateInvoiceHandler);
+// Named (not an inline arrow) so the Friday auto-invoice batch can invoke this
+// EXACT per-driver weekly pay math in-process — mock req/res, system actor —
+// with zero duplicated logic. See the invoice-autogen scheduler below.
+async function generateInvoiceHandler(req, res) {
 	try {
 		const user = req.session.user;
 		const driverName = user.role === "Driver" ? user.driverName : (req.body.driver || "");
@@ -6206,7 +6210,309 @@ app.post("/api/invoices/generate", requireAuth, async (req, res) => {
 		console.error("Invoice generation error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
-});
+}
+
+// ============================================================
+// Automatic weekly invoice generation — Fridays 4:00 PM Eastern
+// ============================================================
+// Client (Deshorn) request: drivers/staff forget to submit invoices, so the
+// system generates AND submits each driver's weekly invoice automatically. It
+// reuses generateInvoiceHandler in-process (no duplicated pay math), then flips
+// each fresh Draft -> Submitted so it lands in the admin approval queue.
+// Approval stays 100% manual — nothing is ever auto-approved or auto-paid.
+//
+// Idempotent per week via the invoice_autogen_runs marker (keyed on the billing
+// Friday). A per-minute tick fires once the current week's Friday 4 PM ET has
+// passed; a boot-time run covers a restart across the trigger. On first-ever
+// startup a baseline marker is seeded so the feature never retroactively bills
+// past weeks — the first real run is the NEXT Friday. Kill switch:
+// INVOICE_AUTOGEN_ENABLED (default on; set "false" to disable without a deploy).
+db.exec(`
+	CREATE TABLE IF NOT EXISTS invoice_autogen_runs (
+		week_end TEXT PRIMARY KEY,
+		ran_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		attempts INTEGER DEFAULT 0,
+		created INTEGER DEFAULT 0,
+		submitted INTEGER DEFAULT 0,
+		skipped INTEGER DEFAULT 0,
+		failed INTEGER DEFAULT 0,
+		summary TEXT DEFAULT ''
+	)
+`);
+try { db.exec("ALTER TABLE invoice_autogen_runs ADD COLUMN attempts INTEGER DEFAULT 0"); } catch {}
+
+// Kill switch. DEFAULT OFF — this MOVES MONEY (auto-submits payroll invoices), so
+// it stays dormant until production enables it deliberately via .env, matching
+// this repo's convention for side-effectful integrations (ROUTEMATE_ENABLED /
+// SCANKIT_ENABLED both default off). Enable with true/1/yes/on.
+const INVOICE_AUTOGEN_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.INVOICE_AUTOGEN_ENABLED ?? "").trim());
+const INVOICE_AUTOGEN_MAX_ATTEMPTS = 3;              // retries for a week with unbilled drivers
+const INVOICE_AUTOGEN_RETRY_MS = 15 * 60 * 1000;     // min gap between attempts
+
+// Most recent Friday (YYYY-MM-DD, America/New_York) whose 4:00 PM ET has passed.
+// Identifies the billing week to run: on Friday >= 16:00 ET it's today; any
+// other time it's the previous Friday. DST-aware via Intl (always 4 PM in NY).
+function mostRecentInvoiceFridayET() {
+	const parts = {};
+	for (const p of new Intl.DateTimeFormat("en-US", {
+		timeZone: "America/New_York", weekday: "short",
+		year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false,
+	}).formatToParts(new Date())) parts[p.type] = p.value;
+	const WD = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+	const wd = WD[parts.weekday];
+	const hour = parseInt(parts.hour, 10);
+	let daysAgo = (wd - 5 + 7) % 7;                 // 0 when today is Friday
+	if (daysAgo === 0 && hour < 16) daysAgo = 7;    // Friday before 4 PM -> last Friday
+	// Date-only arithmetic on the ET calendar day (noon UTC dodges DST edges).
+	const d = new Date(`${parts.year}-${parts.month}-${parts.day}T12:00:00Z`);
+	d.setUTCDate(d.getUTCDate() - daysAgo);
+	return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+// Invoke the real generate handler in-process for one driver as a system actor.
+// Returns { statusCode, body } — no HTTP round-trip, no session needed.
+function generateInvoiceInProcess(driverName, weekEnd) {
+	return new Promise((resolve) => {
+		const req = { session: { user: { role: "Super Admin", username: "auto-invoice" } }, body: { driver: driverName, weekEnd } };
+		let statusCode = 200;
+		const res = {
+			status(c) { statusCode = c; return this; },
+			json(obj) { resolve({ statusCode, body: obj || {} }); return this; },
+		};
+		Promise.resolve(generateInvoiceHandler(req, res)).catch((err) =>
+			resolve({ statusCode: 500, body: { error: err && err.message } }),
+		);
+	});
+}
+
+const submitDraftInvoiceStmt = db.prepare(
+	"UPDATE invoices SET status = 'Submitted', submitted_at = ? WHERE id = ? AND status = 'Draft'",
+);
+
+// Normalized set of drivers with a completed, non-deleted load INSIDE the billing
+// week — the roster the batch must end up billing. Mirrors the handler's
+// completed/in-week/deleted filters against the same cached sheet snapshot, so a
+// driver who worked can be cross-checked against who actually got billed.
+function driversWithCompletedLoadsInWeek(data, headers, weekStart, weekEnd) {
+	// getJobTrackingCached() rows are header-keyed OBJECTS (parseSheet), so index
+	// by column NAME — exactly as generateInvoiceHandler does.
+	const col = (re) => headers.find((h) => re.test(h));
+	const dCol = col(/driver/i);
+	const sCol = col(/^(job[\s._-]?)?status$/i);
+	const lCol = col(/load.?id|job.?id/i);
+	const dtCol = col(/status.*update.*date|completion.*date|drop.?off.*date|deliv.*date/i) || col(/date/i);
+	const completedRe = /delivered|completed|pod received/i;
+	const deletedIds = getDeletedLoadIds();
+	const out = new Set();
+	if (!dCol || !sCol) return out;
+	for (const row of data) {
+		const name = normalizeDriverName(row[dCol]);
+		if (!name) continue;
+		if (!completedRe.test(row[sCol] || "")) continue;
+		const lid = lCol ? String(row[lCol] || "").trim().toLowerCase() : "";
+		if (lid && deletedIds.has(lid)) continue;
+		if (dtCol) {
+			const raw = String(row[dtCol] || "").replace(/^date:\s*/i, "").trim();
+			if (raw) {
+				const p = new Date(raw);
+				if (!isNaN(p.getTime())) {
+					const ds = p.toISOString().split("T")[0];
+					if (ds < weekStart || ds > weekEnd) continue;
+				}
+			}
+		}
+		out.add(name);
+	}
+	return out;
+}
+
+// Aborting a run leaves NO marker so it retries — but a *persistent* Sheets
+// outage would otherwise be silent (the whole point of this feature is to never
+// silently skip). Track consecutive aborts and alert ONCE after the sheet stays
+// unreadable past the trigger, so a total outage surfaces instead of no-op'ing.
+let invoiceAutogenAbortStreak = 0;
+let invoiceAutogenAbortAlerted = false;
+function abortAutogenRun(range, reason) {
+	invoiceAutogenAbortStreak++;
+	console.error(`[invoice-autogen] aborting (${reason}) — will retry [streak ${invoiceAutogenAbortStreak}]`);
+	if (invoiceAutogenAbortStreak >= 8 && !invoiceAutogenAbortAlerted) {
+		invoiceAutogenAbortAlerted = true;
+		const title = `Weekly invoices — ACTION NEEDED · ${range.weekStart} to ${range.weekEnd}`;
+		const body = `Auto-invoice can't read Job Tracking (${reason}). No invoices generated yet — check the sheet + service-account access, then generate manually if needed.`;
+		try {
+			insertDispatchNotification.run("invoices-autogen", title, body, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, aborted: true }));
+			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body });
+		} catch (e) { console.error("[invoice-autogen] abort alert notify failed:", e.message); }
+		const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
+		sendEmail(adminEmail, title, invoiceEmailHtml({ heading: "Weekly Invoices — Sheet Unreadable", bodyHtml: `<p style="margin:0;color:#b91c1c;line-height:1.6">${escHtml(body)}</p>`, ctaText: "Open Invoices", ctaHref: "https://app.logisx.com/invoices" }))
+			.catch((e) => console.error("[invoice-autogen] abort alert email failed:", e.message));
+	}
+	return { aborted: true };
+}
+
+async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
+	const range = getWeekRange(weekEnd);
+
+	// Pre-read the sheet ONCE (cached). If it's unreadable or empty, ABORT WITHOUT
+	// a marker so the next tick retries — never close a payroll week on a transient
+	// Sheets glitch (which would otherwise 400 every driver as "no loads" and, with
+	// a marker written, silently leave the whole fleet unpaid for the week).
+	let jt;
+	try {
+		jt = await getJobTrackingCached();
+	} catch (e) {
+		return abortAutogenRun(range, `read failed: ${e.message}`);
+	}
+	if (!jt || !Array.isArray(jt.data) || !Array.isArray(jt.headers) || jt.data.length === 0 || jt.headers.length === 0) {
+		return abortAutogenRun(range, "returned empty");
+	}
+	invoiceAutogenAbortStreak = 0;          // sheet is readable again
+	invoiceAutogenAbortAlerted = false;
+	const expected = driversWithCompletedLoadsInWeek(jt.data, jt.headers, range.weekStart, range.weekEnd);
+
+	const rosterDrivers = db
+		.prepare("SELECT driver_name FROM drivers_directory WHERE TRIM(COALESCE(driver_name, '')) != '' ORDER BY driver_name")
+		.all().map((r) => r.driver_name);
+	let created = 0, submitted = 0, skipped = 0;
+	const billed = new Set();   // normalized names successfully billed OR already legitimately invoiced
+	const errors = [];
+	const zeroPay = [];         // generated but $0 (bad data) — left as Draft, never auto-submitted
+	for (const driver of rosterDrivers) {
+		const norm = normalizeDriverName(driver);
+		try {
+			// Per-driver timeout guard so a hung await can't wedge the batch (and
+			// leave invoiceAutogenRunning stuck) — resolve as an error after 90s.
+			const { statusCode, body } = await Promise.race([
+				generateInvoiceInProcess(driver, weekEnd),
+				new Promise((r) => setTimeout(() => r({ statusCode: 504, body: { error: "timed out" } }), 90 * 1000)),
+			]);
+			if (statusCode === 200 && body.invoice) {
+				created++;
+				billed.add(norm); // it was generated — covered, not "unbilled"
+				// NEVER auto-submit a $0 invoice (e.g. all pickup dates unparseable →
+				// 0 active days). Leave it Draft and surface it for a human.
+				if (Number(body.invoice.total_earnings || 0) > 0) {
+					const info = submitDraftInvoiceStmt.run(new Date().toISOString(), body.invoice.id);
+					if (info.changes > 0) submitted++;
+				} else {
+					zeroPay.push(driver);
+				}
+			} else if (statusCode === 409) {
+				skipped++; billed.add(norm);   // already has a non-Draft invoice → legitimate
+			} else if (statusCode === 400) {
+				skipped++;                     // handler found no completed loads for this driver
+			} else {
+				errors.push(`${driver}: ${body.error || statusCode}`);
+			}
+		} catch (e) {
+			errors.push(`${driver}: ${e.message}`);
+		}
+	}
+	if (submitted > 0) notifyChange("invoices");
+
+	// Coverage: every driver who WORKED this week must have been billed (or already
+	// had an invoice). Anyone left is a real gap — a transient per-driver read, a
+	// driver missing from the directory, or a name mismatch — surfaced, never
+	// silently skipped. `unbilled` is the retry signal (stored in the marker).
+	const unbilled = [...expected].filter((n) => !billed.has(n));
+	const problem = unbilled.length > 0;                 // retry signal (transient/coverage)
+	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0;
+	const summary =
+		`${submitted} generated & submitted · ${skipped} skipped (no loads)` +
+		(zeroPay.length ? ` · ${zeroPay.length} ZERO-PAY left as Draft (${zeroPay.slice(0, 6).join(", ")})` : "") +
+		(unbilled.length ? ` · ${unbilled.length} WORKED-BUT-UNBILLED (${unbilled.slice(0, 8).join(", ")})` : "") +
+		(errors.length ? ` · ${errors.length} errored` : "");
+
+	try {
+		db.prepare(
+			"INSERT OR REPLACE INTO invoice_autogen_runs (week_end, ran_at, attempts, created, submitted, skipped, failed, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		).run(weekEnd, new Date().toISOString(), attemptNum, created, submitted, skipped, unbilled.length, summary);
+	} catch (e) { console.error("[invoice-autogen] marker write failed:", e.message); }
+	console.log(`[invoice-autogen] week ${range.weekStart}–${range.weekEnd} (attempt ${attemptNum}): ${summary}`);
+
+	// Notify AT MOST ONCE per week: on a terminal run (no pending retry) that
+	// actually did something, or on the final attempt when unbilled remain. Silent
+	// on quiet weeks + interim retries. `problem` (unbilled) drives retry; zeroPay
+	// and errors don't retry but still make the one notification action-needed.
+	const isFinalAttempt = attemptNum >= INVOICE_AUTOGEN_MAX_ATTEMPTS;
+	if ((!problem && needsAttention) || (!problem && submitted > 0) || (problem && isFinalAttempt)) {
+		const detail = errors.length ? ` · Errors: ${errors.slice(0, 5).join("; ")}` : "";
+		try {
+			const title = `Weekly invoices ${needsAttention ? "— ACTION NEEDED" : "generated"} · ${range.weekStart} to ${range.weekEnd}`;
+			insertDispatchNotification.run("invoices-autogen", title, summary + detail, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, submitted, skipped, zeroPay: zeroPay.length, unbilled: unbilled.length, errored: errors.length }));
+			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body: summary + detail });
+		} catch (e) { console.error("[invoice-autogen] notification failed:", e.message); }
+		try {
+			const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
+			const html = invoiceEmailHtml({
+				heading: needsAttention ? "Weekly Invoices — Action Needed" : "Weekly Invoices Generated",
+				bodyHtml: `
+					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Automatic weekly run for <b>${range.weekStart} — ${range.weekEnd}</b>. Review and approve on the dashboard.</p>
+					<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;margin:16px 0">
+						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Generated &amp; submitted</span><b>${submitted}</b></div>
+						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Skipped (no loads)</span><b>${skipped}</b></div>
+						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:${zeroPay.length ? "#b45309" : "#64748b"}">$0 — left as Draft</span><b style="color:${zeroPay.length ? "#b45309" : "#0f172a"}">${zeroPay.length}</b></div>
+						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:${unbilled.length ? "#b91c1c" : "#64748b"}">Worked but NOT billed</span><b style="color:${unbilled.length ? "#b91c1c" : "#0f172a"}">${unbilled.length}</b></div>
+					</div>
+					${zeroPay.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>$0 invoices (not submitted — check dates):</b> ${escHtml(zeroPay.slice(0, 20).join(", "))}.</p>` : ""}
+					${unbilled.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Needs manual review:</b> ${escHtml(unbilled.slice(0, 20).join(", "))}. Generate these from the Invoices page.</p>` : ""}
+					${errors.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:12px">Errors: ${escHtml(errors.slice(0, 10).join("; "))}</p>` : ""}
+				`,
+				ctaText: "Review Invoices",
+				ctaHref: "https://app.logisx.com/invoices",
+			});
+			await sendEmail(adminEmail, `Weekly Invoices ${needsAttention ? "— ACTION NEEDED " : ""}— ${range.weekStart} to ${range.weekEnd}`, html);
+		} catch (e) { console.error("[invoice-autogen] email failed:", e.message); }
+	}
+
+	return { created, submitted, skipped, unbilled: unbilled.length, problem };
+}
+
+let invoiceAutogenRunning = false;
+async function maybeRunWeeklyInvoiceBatch() {
+	if (!INVOICE_AUTOGEN_ENABLED || invoiceAutogenRunning) return;
+	const weekEnd = mostRecentInvoiceFridayET();
+	const marker = db.prepare("SELECT attempts, failed, ran_at FROM invoice_autogen_runs WHERE week_end = ?").get(weekEnd);
+	let attemptNum = 1;
+	if (marker) {
+		if ((marker.failed || 0) === 0) return;                          // clean run — week is done
+		if ((marker.attempts || 0) >= INVOICE_AUTOGEN_MAX_ATTEMPTS) return; // exhausted retries (already alerted)
+		// Throttle retries so a persistent gap doesn't re-run every minute.
+		const last = Date.parse(marker.ran_at);
+		if (Number.isFinite(last) && Date.now() - last < INVOICE_AUTOGEN_RETRY_MS) return;
+		attemptNum = (marker.attempts || 0) + 1;
+	}
+	invoiceAutogenRunning = true;
+	try {
+		await runWeeklyInvoiceBatch(weekEnd, attemptNum);
+	} catch (e) {
+		console.error("[invoice-autogen] batch error:", e.message);
+	} finally {
+		invoiceAutogenRunning = false;
+	}
+}
+
+if (INVOICE_AUTOGEN_ENABLED) {
+	// First-ever startup: seed a baseline marker (recorded as a clean, exhausted
+	// run) for the most recent billing Friday so the feature NEVER retroactively
+	// bills a pre-feature week. First real run is the next Friday 4 PM ET.
+	try {
+		const hasRuns = db.prepare("SELECT 1 FROM invoice_autogen_runs LIMIT 1").get();
+		if (!hasRuns) {
+			db.prepare(
+				"INSERT OR IGNORE INTO invoice_autogen_runs (week_end, ran_at, attempts, failed, summary) VALUES (?, ?, ?, 0, ?)",
+			).run(mostRecentInvoiceFridayET(), new Date().toISOString(), INVOICE_AUTOGEN_MAX_ATTEMPTS, "baseline (feature enabled — no retroactive run)");
+			console.log("[invoice-autogen] baseline seeded; first run is the next Friday 4 PM ET");
+		}
+	} catch (e) { console.error("[invoice-autogen] baseline seed failed:", e.message); }
+
+	// Tick every minute; the marker (clean run, or exhausted attempts) guarantees
+	// the week runs to a resolution without re-running every minute.
+	setInterval(() => { maybeRunWeeklyInvoiceBatch().catch(() => {}); }, 60 * 1000);
+	// Boot catch-up (delayed so the app finishes initializing first).
+	setTimeout(() => { maybeRunWeeklyInvoiceBatch().catch(() => {}); }, 90 * 1000);
+	console.log("[invoice-autogen] enabled — Fridays 4:00 PM America/New_York");
+}
 
 // Validate + normalize the line-item/deduction rows of a manual invoice.
 // Returns { items } on success or { error } with a user-facing message.
