@@ -1831,6 +1831,16 @@ db.exec(`
 	)
 `);
 
+// Manual settlement adjustment — Super Admin corrects a payout period AFTER it
+// was settled/paid (e.g. receipts uploaded late that should have reduced the
+// investor's share). A signed delta + reason recorded on the row; the reconcile
+// only ever touches `amount`, so these manual fields survive live recomputes.
+// Effective payout = amount + adjustment. Mirrors the invoices adjust columns.
+try { db.exec("ALTER TABLE investor_payouts ADD COLUMN adjustment REAL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE investor_payouts ADD COLUMN adjustment_note TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investor_payouts ADD COLUMN adjusted_by TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investor_payouts ADD COLUMN adjusted_at TEXT DEFAULT ''"); } catch {}
+
 // --- Driver Onboarding ---
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_onboarding (
@@ -15432,20 +15442,37 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	});
 	reconcile(monthlyEarnings);
 
-	// Read back the settled rows (period DESC).
+	// Live-recomputed earnings per period — what the month WOULD settle at now
+	// (e.g. after late receipts were logged), so the admin console can show the
+	// gap vs the frozen `amount`. Keyed period → rounded investorEarnings.
+	const recomputedByPeriod = {};
+	for (const m of monthlyEarnings) recomputedByPeriod[m.month] = Math.round(m.investorEarnings);
+
+	// Read back the settled rows (period DESC). effectiveAmount = amount +
+	// adjustment is the corrected figure everything downstream (totals, display)
+	// keys on; `amount` is preserved as the original auto-computed settlement.
 	const rows = db.prepare(
-		"SELECT id, owner_id, period, amount, due_date, status, paid_at FROM investor_payouts WHERE owner_id = ? ORDER BY period DESC"
+		"SELECT id, owner_id, period, amount, due_date, status, paid_at, adjustment, adjustment_note, adjusted_by, adjusted_at FROM investor_payouts WHERE owner_id = ? ORDER BY period DESC"
 	).all(ownerId);
-	const payouts = rows.map((r) => ({
-		id: r.id,
-		ownerId: r.owner_id,
-		period: r.period,
-		periodLabel: periodLabel(r.period),
-		amount: r.amount,
-		dueDate: r.due_date,
-		status: r.status,
-		paidAt: r.paid_at || null,
-	}));
+	const payouts = rows.map((r) => {
+		const adjustment = Number(r.adjustment || 0);
+		return {
+			id: r.id,
+			ownerId: r.owner_id,
+			period: r.period,
+			periodLabel: periodLabel(r.period),
+			amount: r.amount,
+			adjustment,
+			effectiveAmount: Math.round((r.amount || 0) + adjustment),
+			adjustmentNote: r.adjustment_note || "",
+			adjustedBy: r.adjusted_by || "",
+			adjustedAt: r.adjusted_at || "",
+			recomputedAmount: recomputedByPeriod[r.period] != null ? recomputedByPeriod[r.period] : null,
+			dueDate: r.due_date,
+			status: r.status,
+			paidAt: r.paid_at || null,
+		};
+	});
 
 	// Current, in-progress month — shown but NOT a payable row.
 	const cur = monthlyEarnings.find((m) => m.month === currentMonthKey);
@@ -15456,9 +15483,9 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	};
 
 	const totals = payouts.reduce((acc, p) => {
-		if (p.status === "owed") acc.totalOwed += p.amount;
-		else if (p.status === "processing") acc.totalProcessing += p.amount;
-		else if (p.status === "paid") acc.totalPaid += p.amount;
+		if (p.status === "owed") acc.totalOwed += p.effectiveAmount;
+		else if (p.status === "processing") acc.totalProcessing += p.effectiveAmount;
+		else if (p.status === "paid") acc.totalPaid += p.effectiveAmount;
 		return acc;
 	}, { totalOwed: 0, totalProcessing: 0, totalPaid: 0 });
 	totals.totalOwed = Math.round(totals.totalOwed);
@@ -16265,10 +16292,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// view (investorOwnerId null). investor_payouts.owner_id === users.id.
 		// Read-only SUM over already-settled rows: no reconcile here (that would
 		// recompute monthlyEarnings a second time).
+		// Sum the EFFECTIVE amount (amount + manual adjustment) so this banner
+		// reconciles with the Payouts statement's "Total Paid" (which also keys on
+		// effectiveAmount). A post-settlement clawback/credit is reflected here too.
 		const investorPaidToDate = Math.round(
 			investorOwnerId != null
-				? db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM investor_payouts WHERE owner_id = ? AND status = 'paid'").get(investorOwnerId).s
-				: db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM investor_payouts WHERE status = 'paid'").get().s
+				? db.prepare("SELECT COALESCE(SUM(amount + COALESCE(adjustment,0)),0) AS s FROM investor_payouts WHERE owner_id = ? AND status = 'paid'").get(investorOwnerId).s
+				: db.prepare("SELECT COALESCE(SUM(amount + COALESCE(adjustment,0)),0) AS s FROM investor_payouts WHERE status = 'paid'").get().s
 		);
 		// What's genuinely still owed = lifetime net earned - already paid out (clamp >= 0).
 		const investorStillOwed = Math.max(0, investorNetToDate - investorPaidToDate);
@@ -16576,6 +16606,12 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 					period: p.period,
 					periodLabel: p.periodLabel,
 					amount: p.amount,
+					adjustment: p.adjustment,
+					effectiveAmount: p.effectiveAmount,
+					adjustmentNote: p.adjustmentNote,
+					adjustedBy: p.adjustedBy,
+					adjustedAt: p.adjustedAt,
+					recomputedAmount: p.recomputedAmount,
 					dueDate: p.dueDate,
 					status: p.status,
 					paidAt: p.paidAt,
@@ -16597,10 +16633,10 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 					bucket = { period: p.period, periodLabel: p.periodLabel, owed: 0, processing: 0, paid: 0, total: 0 };
 					monthly.set(p.period, bucket);
 				}
-				if (p.status === "owed") bucket.owed += p.amount;
-				else if (p.status === "processing") bucket.processing += p.amount;
-				else if (p.status === "paid") bucket.paid += p.amount;
-				bucket.total += p.amount;
+				if (p.status === "owed") bucket.owed += p.effectiveAmount;
+				else if (p.status === "processing") bucket.processing += p.effectiveAmount;
+				else if (p.status === "paid") bucket.paid += p.effectiveAmount;
+				bucket.total += p.effectiveAmount;
 			}
 		}
 
@@ -16667,6 +16703,69 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 	} catch (err) {
 		console.error("POST /api/investor/payouts/:id/status error:", err.message);
 		res.status(500).json({ error: "Failed to update payout status" });
+	}
+});
+
+// PUT /api/investor/payouts/:id/adjust — Super Admin records a signed correction
+// on ANY payout period, including one already processing/paid. The canonical use
+// case: receipts uploaded AFTER the month settled that should have reduced the
+// investor's share (a negative adjustment claws it back on the record); a
+// positive adjustment credits the investor. Effective payout = amount +
+// adjustment. The reconcile only ever writes `amount`, so this manual delta
+// persists across live recomputes. Mirrors PUT /api/invoices/:id/adjust.
+app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = parseInt(req.params.id, 10);
+		if (!Number.isFinite(id) || id <= 0) {
+			return res.status(400).json({ error: "Invalid payout id" });
+		}
+		const payout = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
+		if (!payout) return res.status(404).json({ error: "Payout not found" });
+
+		const adjustment = Number(req.body?.adjustment);
+		if (!Number.isFinite(adjustment)) {
+			return res.status(400).json({ error: "adjustment must be a finite number" });
+		}
+		// Conservative cap — matches the invoices adjust endpoint. Late-receipt
+		// corrections are small; raise if a real case needs more headroom.
+		if (Math.abs(adjustment) > 10000) {
+			return res.status(400).json({ error: "adjustment magnitude capped at $10,000 — contact engineering if you need more" });
+		}
+		const note = (req.body?.adjustmentNote || "").toString().trim().slice(0, 500);
+		// Whole dollars — payout amounts are whole-dollar throughout (investorEarnings
+		// is Math.round'd), so keeping the adjustment whole makes amount+adjustment
+		// exact and avoids a cents mismatch between the stored delta and effectiveAmount.
+		const rounded = Math.round(adjustment);
+		const nowIso = new Date().toISOString();
+		const actor = req.session.user.username || "";
+		const oldAdjustment = Number(payout.adjustment || 0);
+
+		db.prepare(
+			"UPDATE investor_payouts SET adjustment = ?, adjustment_note = ?, adjusted_by = ?, adjusted_at = ? WHERE id = ?"
+		).run(rounded, note, actor, nowIso, id);
+
+		// Flag corrections to an already-settled row explicitly in the audit trail.
+		const settledTag = (payout.status === "paid" || payout.status === "processing")
+			? `POST-SETTLEMENT EDIT (status ${payout.status}): ` : "";
+		logAudit(
+			req,
+			"investor_payout_adjust",
+			"investor_payout",
+			id,
+			`${settledTag}owner ${payout.owner_id} ${payout.period}: adjustment ${oldAdjustment.toFixed(2)} -> ${rounded.toFixed(2)} (${note || "no reason given"})`
+		);
+
+		const updated = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
+		res.json({
+			success: true,
+			payout: {
+				...updated,
+				effectiveAmount: Math.round((updated.amount || 0) + Number(updated.adjustment || 0)),
+			},
+		});
+	} catch (err) {
+		console.error("PUT /api/investor/payouts/:id/adjust error:", err.message);
+		res.status(500).json({ error: "Failed to adjust payout" });
 	}
 });
 

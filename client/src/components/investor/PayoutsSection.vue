@@ -49,7 +49,7 @@
         <thead>
           <tr>
             <th>Period</th>
-            <th>Amount</th>
+            <th>Payout</th>
             <th>Due date</th>
             <th>Status</th>
             <th v-if="isSuperAdmin"></th>
@@ -58,7 +58,13 @@
         <tbody>
           <tr v-for="p in payouts" :key="p.id">
             <td>{{ p.periodLabel }}</td>
-            <td class="mono-sm">{{ fmt(p.amount) }}</td>
+            <td class="mono-sm">
+              <div>{{ fmt(effective(p)) }}</div>
+              <div v-if="p.adjustment" class="inv-adj">
+                adj {{ p.adjustment > 0 ? '+' : '−' }}{{ fmt(Math.abs(p.adjustment)) }}
+                <span v-if="p.adjustmentNote" class="inv-adj-note">· {{ p.adjustmentNote }}</span>
+              </div>
+            </td>
             <td class="mono-sm">{{ fmtDate(p.dueDate) }}</td>
             <td><span :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span></td>
             <td v-if="isSuperAdmin" class="action-cell">
@@ -126,6 +132,12 @@ function statusClass(s) {
 function fmtDate(d) {
   if (!d) return '—'
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// effectiveAmount = amount + adjustment (server-computed). Fall back to amount
+// for any legacy/absent field so the statement never renders blank.
+function effective(p) {
+  return p.effectiveAmount != null ? p.effectiveAmount : (p.amount || 0)
 }
 
 async function loadPayouts() {
@@ -316,6 +328,10 @@ onMounted(loadPayouts)
 .mono, .mono-sm { font-family: 'JetBrains Mono', monospace; }
 .mono-sm { font-size: 0.78rem; }
 .dim { color: #cbd5e1; }
+
+/* Adjustment line shown to the investor under the effective amount */
+.inv-adj { font-size: 0.7rem; color: #b45309; margin-top: 0.1rem; font-family: inherit; }
+.inv-adj-note { color: #64748b; }
 
 .status-pill {
   display: inline-block;

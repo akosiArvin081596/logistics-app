@@ -109,7 +109,7 @@
           <thead>
             <tr>
               <th>Period</th>
-              <th class="num">Amount</th>
+              <th class="num">Payout</th>
               <th>Due date</th>
               <th>Status</th>
               <th class="action-head"></th>
@@ -118,7 +118,10 @@
           <tbody>
             <tr v-for="p in inv.payouts" :key="p.id">
               <td class="mono">{{ p.periodLabel }}</td>
-              <td class="num">{{ fmt(p.amount) }}</td>
+              <td class="num">
+                <span class="amt-main">{{ fmt(effective(p)) }}</span>
+                <span v-if="p.adjustment" class="adj-badge" :title="adjTitle(p)">adj {{ p.adjustment > 0 ? '+' : '−' }}{{ fmt(Math.abs(p.adjustment)) }}</span>
+              </td>
               <td class="dim">{{ fmtDate(p.dueDate) }}</td>
               <td><span :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span></td>
               <td class="action-cell">
@@ -138,18 +141,67 @@
                   title="Mark this payout as paid"
                   @click="advance(inv, p, 'paid')"
                 >Mark Paid</button>
-                <span v-if="p.status === 'paid'" class="dim">&mdash;</span>
+                <!-- Adjust only frozen (processing/paid) rows. An 'owed' row's
+                     amount still auto-refreshes from live expenses, so a manual
+                     adjustment there would double-count and drift on each reconcile. -->
+                <button
+                  v-if="p.status !== 'owed'"
+                  type="button"
+                  class="action-btn act-adjust"
+                  :disabled="busyId === p.id"
+                  title="Add or edit a settlement adjustment (e.g. receipts uploaded after this month was paid)"
+                  @click="openAdjust(inv, p)"
+                >{{ p.adjustment ? 'Edit Adj.' : 'Adjust' }}</button>
               </td>
             </tr>
           </tbody>
         </table>
       </section>
     </template>
+
+    <!-- Settlement adjustment modal -->
+    <div v-if="adjustTarget" class="adj-overlay" @click.self="closeAdjust">
+      <div class="adj-modal">
+        <div class="adj-modal-title">Adjust payout</div>
+        <div class="adj-modal-sub">
+          {{ adjustTarget.investorName }} · {{ adjustTarget.payout.periodLabel }}
+          <span :class="['status-pill', statusClass(adjustTarget.payout.status)]">{{ adjustTarget.payout.status }}</span>
+        </div>
+
+        <div class="adj-facts">
+          <div class="adj-fact"><span>Settled amount</span><span class="mono">{{ fmt(adjustTarget.payout.amount) }}</span></div>
+          <div v-if="hasGap" class="adj-fact gap">
+            <span>Recomputed now</span>
+            <span class="mono">{{ fmt(adjustTarget.payout.recomputedAmount) }} <em>(gap {{ gapDelta > 0 ? '+' : '−' }}{{ fmt(Math.abs(gapDelta)) }})</em></span>
+          </div>
+        </div>
+        <p v-if="hasGap" class="adj-hint">
+          This period now recomputes {{ gapDelta < 0 ? 'lower' : 'higher' }} than what was settled — likely the late
+          receipts. Use the suggested adjustment to bring the record in line.
+          <button type="button" class="adj-suggest" @click="applySuggestion">Use {{ gapDelta > 0 ? '+' : '−' }}{{ fmt(Math.abs(gapDelta)) }}</button>
+        </p>
+
+        <label class="adj-label">Adjustment (+ credits investor, − claws back)</label>
+        <input v-model="adjustAmount" type="number" step="0.01" class="adj-input" placeholder="0.00" />
+
+        <label class="adj-label">Reason (shown to the investor)</label>
+        <textarea v-model="adjustNote" class="adj-textarea" rows="2" maxlength="500" placeholder="e.g. Late June fuel receipts uploaded after settlement"></textarea>
+
+        <div class="adj-preview">
+          New effective payout: <strong class="mono">{{ fmt(previewEffective) }}</strong>
+        </div>
+
+        <div class="adj-actions">
+          <button type="button" class="btn-ghost" :disabled="adjustSaving" @click="closeAdjust">Cancel</button>
+          <button type="button" class="btn btn-primary" :disabled="adjustSaving" @click="saveAdjust">{{ adjustSaving ? 'Saving…' : 'Save adjustment' }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { formatCurrency as fmt } from '../utils/format'
 import { useApi } from '../composables/useApi'
 import { useAuthStore } from '../stores/auth'
@@ -220,6 +272,78 @@ async function advance(investor, payout, status) {
     toast(err.message || 'Failed to update payout', 'error')
   } finally {
     busyId.value = null
+  }
+}
+
+// --- Settlement adjustments (e.g. receipts uploaded after a month settled) ---
+const adjustTarget = ref(null)   // { investorName, payout }
+const adjustAmount = ref('')
+const adjustNote = ref('')
+const adjustSaving = ref(false)
+
+// effectiveAmount is amount + adjustment (server-computed); fall back defensively.
+function effective(p) {
+  return p.effectiveAmount != null ? p.effectiveAmount : (p.amount || 0)
+}
+function adjTitle(p) {
+  const who = p.adjustedBy ? ` — ${p.adjustedBy}` : ''
+  return `${p.adjustmentNote || 'Adjustment'}${who}`
+}
+
+// Gap between what the period recomputes at now and what was settled — the
+// signal that late receipts moved the number after the fact.
+const gapDelta = computed(() => {
+  const p = adjustTarget.value?.payout
+  if (!p || p.recomputedAmount == null) return 0
+  return p.recomputedAmount - p.amount
+})
+const hasGap = computed(() => gapDelta.value !== 0)
+const previewEffective = computed(() => {
+  const p = adjustTarget.value?.payout
+  if (!p) return 0
+  const amt = Number(adjustAmount.value)
+  return (p.amount || 0) + (Number.isFinite(amt) ? amt : 0)
+})
+
+function openAdjust(inv, p) {
+  adjustTarget.value = { investorName: inv.name, payout: p }
+  if (p.adjustment) {
+    // Editing an existing adjustment.
+    adjustAmount.value = String(p.adjustment)
+    adjustNote.value = p.adjustmentNote || ''
+  } else {
+    // Suggest the recompute gap as a starting delta; admin confirms/edits.
+    adjustAmount.value = (p.recomputedAmount != null && p.recomputedAmount !== p.amount)
+      ? String(p.recomputedAmount - p.amount) : ''
+    adjustNote.value = ''
+  }
+}
+function closeAdjust() {
+  adjustTarget.value = null
+  adjustSaving.value = false
+}
+function applySuggestion() {
+  adjustAmount.value = String(gapDelta.value)
+}
+async function saveAdjust() {
+  const t = adjustTarget.value
+  if (!t) return
+  const amt = Number(adjustAmount.value)
+  if (!Number.isFinite(amt)) { toast('Enter a valid adjustment amount', 'error'); return }
+  if (Math.abs(amt) > 10000) { toast('Adjustment is capped at $10,000', 'error'); return }
+  adjustSaving.value = true
+  try {
+    await api.put(`/api/investor/payouts/${t.payout.id}/adjust`, {
+      adjustment: amt,
+      adjustmentNote: adjustNote.value,
+    })
+    toast('Adjustment saved')
+    adjustTarget.value = null
+    await loadPayouts()
+  } catch (err) {
+    toast(err.message || 'Failed to save adjustment', 'error')
+  } finally {
+    adjustSaving.value = false
   }
 }
 
@@ -454,6 +578,53 @@ onMounted(loadPayouts)
 .act-processing:hover:not(:disabled) { background: #bfdbfe; }
 .act-paid { background: #dcfce7; color: #166534; }
 .act-paid:hover:not(:disabled) { background: #bbf7d0; }
+.act-adjust { background: #ede9fe; color: #5b21b6; }
+.act-adjust:hover:not(:disabled) { background: #ddd6fe; }
+
+/* Adjustment indicator on the amount cell */
+.amt-main { font-weight: 600; }
+.adj-badge {
+  display: inline-block; margin-left: 0.4rem; padding: 0.1rem 0.4rem;
+  font-size: 0.66rem; font-weight: 700; border-radius: 5px;
+  background: #fef3c7; color: #92400e; cursor: help; white-space: nowrap;
+}
+
+/* Adjustment modal */
+.adj-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 1rem;
+}
+.adj-modal {
+  background: var(--surface, #fff); border: 1px solid var(--border, #e5e7eb);
+  border-radius: 12px; padding: 1.25rem; width: 100%; max-width: 440px;
+  display: flex; flex-direction: column; gap: 0.55rem;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+}
+.adj-modal-title { font-size: 1.05rem; font-weight: 700; }
+.adj-modal-sub { font-size: 0.82rem; color: var(--text-dim, #6b7280); display: flex; align-items: center; gap: 0.5rem; }
+.adj-facts { display: flex; flex-direction: column; gap: 0.3rem; padding: 0.5rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.adj-fact { display: flex; justify-content: space-between; font-size: 0.82rem; }
+.adj-fact.gap { color: #b45309; }
+.adj-fact em { font-style: normal; opacity: 0.8; }
+.adj-hint { font-size: 0.78rem; color: var(--text-dim); margin: 0; line-height: 1.45; }
+.adj-suggest {
+  background: none; border: none; color: var(--accent, #6d28d9); font: inherit;
+  font-size: 0.78rem; font-weight: 700; text-decoration: underline; cursor: pointer; padding: 0; margin-left: 0.2rem;
+}
+.adj-label { font-size: 0.74rem; font-weight: 600; color: var(--text-dim); margin-top: 0.25rem; }
+.adj-input, .adj-textarea {
+  font: inherit; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg, #fff); color: var(--text, inherit); width: 100%; box-sizing: border-box; resize: vertical;
+}
+.adj-preview { font-size: 0.85rem; padding-top: 0.3rem; }
+.adj-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.4rem; }
+.btn-ghost {
+  font: inherit; font-weight: 600; font-size: 0.82rem; padding: 0.45rem 0.9rem;
+  border-radius: 8px; border: 1px solid var(--border); background: transparent;
+  color: var(--text-dim); cursor: pointer;
+}
+.btn-ghost:hover:not(:disabled) { color: var(--text); }
+.btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 
 @media (max-width: 768px) {
   .totals-grid { grid-template-columns: 1fr; }
