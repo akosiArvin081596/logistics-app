@@ -222,6 +222,10 @@ function fmtK(n) {
 async function loadData() {
   try {
     await store.load()
+    // Payout ledger — the Load Reports banner reads owed/paid/accruing from it,
+    // so it must be fetched even though PayoutsSection also asks on mount (the
+    // store dedupes concurrent calls into one request). Never throws.
+    store.loadPayouts()
     try {
       const trucksUrl = store.isPreview
         ? `/api/trucks?as_user_id=${store.previewUserId}`

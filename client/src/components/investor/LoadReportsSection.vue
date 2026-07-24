@@ -7,10 +7,18 @@
   of that month's net — so every figure reconciles with EarningsSection / the rest
   of the portal. Weekly has no monthly-net mapping, so it shows loads + gross only.
   Exports pass the same net back as ?net=YYYY-MM:amount so the PDF/CSV reconcile too.
-  The banner shows what's STILL owed = lifetime net earned (investorNetToDate) −
-  already paid out (investorPaidToDate), with earned/paid shown as context, so it
-  reconciles with the Payouts section. Honors Super-Admin "view as investor"
-  through the :preview-user-id prop (threaded as ?as_user_id=).
+
+  The banner reads the PAYOUT LEDGER (investorStore's payouts slice, from GET
+  /api/investor/payouts) — the exact same source the Payouts section renders, so
+  the two can never disagree. It previously derived its own "still owed" as
+  netToDate − paidToDate, which swept the STILL-OPEN current month into "owed"
+  and told the investor "$6,389 still owed" while the Payouts section directly
+  below read "Total Owed $0 · July in progress". Owed means *payable now*: only
+  closed months that haven't been settled. The open month is shown on its own
+  line as accruing. Every non-zero component is rendered so the four always sum
+  back to Earned — otherwise a reader subtracts Earned − Paid and lands right
+  back on the wrong number. Honors Super-Admin "view as investor" through the
+  :preview-user-id prop (threaded as ?as_user_id=).
 -->
 <template>
   <div class="lr-section">
@@ -22,12 +30,29 @@
       </div>
     </div>
 
-    <div class="lr-owed">
+    <!-- Ledger unavailable (e.g. Super Admin on /investor previewing nobody —
+         payouts are per-owner and 400 there). Show earnings only; never render
+         a $0 "owed" we can't stand behind. -->
+    <div class="lr-owed" v-if="ledgerFailed">
+      <div class="lr-owed-row">
+        <span class="lr-owed-label">Earned to date</span>
+        <span class="lr-owed-value">{{ fmtMoney(earnedToDate) }}</span>
+      </div>
+      <span class="lr-owed-context">Net investor share across every month</span>
+    </div>
+    <!-- While the ledger is still loading, hold the label and dash the amount
+         rather than flashing a $0 owed or a different heading. -->
+    <div class="lr-owed" v-else>
       <div class="lr-owed-row">
         <span class="lr-owed-label">Still owed to you</span>
-        <span class="lr-owed-value">{{ fmtMoney(stillOwed) }}</span>
+        <span class="lr-owed-value">{{ ledgerLoading ? '—' : fmtMoney(owedNow) }}</span>
       </div>
-      <span class="lr-owed-context">Earned {{ fmtMoney(earnedToDate) }} · Paid out {{ fmtMoney(paidToDate) }}</span>
+      <template v-if="!ledgerLoading">
+        <span class="lr-owed-context">Earned {{ fmtMoney(earnedToDate) }} · Paid out {{ fmtMoney(paidToDate) }}<template v-if="processingNow"> · Processing {{ fmtMoney(processingNow) }}</template></span>
+        <span class="lr-owed-accruing" v-if="accruing">
+          {{ accruingLabel }} accruing: {{ fmtMoney(accruing) }} — not payable until the month closes
+        </span>
+      </template>
     </div>
 
     <div v-if="loading" class="lr-msg">Loading load reports…</div>
@@ -47,13 +72,18 @@
       </div>
 
       <div class="lr-cards" v-if="sel">
+        <!-- Delivered count, not total: Gross Revenue only sums delivered loads,
+             so pairing it with the full count read as "12 loads made $20,623"
+             when 3 of them were still rolling. -->
         <div class="lr-card">
           <div class="lr-card-label">Loads</div>
-          <div class="lr-card-value">{{ sel.loadCount }}</div>
+          <div class="lr-card-value">{{ deliveredCount }}</div>
+          <div class="lr-card-note" v-if="inTransitCount">{{ inTransitCount }} in transit</div>
         </div>
         <div class="lr-card">
           <div class="lr-card-label">Gross Revenue</div>
           <div class="lr-card-value">{{ fmtMoney(sel.grossRevenue) }}</div>
+          <div class="lr-card-note" v-if="inTransitCount">delivered loads only</div>
         </div>
         <div class="lr-card" v-if="monthlyNet != null">
           <div class="lr-card-label">Your Share (net)</div>
@@ -92,6 +122,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
+import { useInvestorStore } from '../../stores/investor'
 
 const props = defineProps({
   production: { type: Object, default: () => ({}) },
@@ -100,6 +131,7 @@ const props = defineProps({
 })
 
 const api = useApi()
+const investorStore = useInvestorStore()
 
 const period = ref('monthly')
 const periods = ref([])
@@ -107,14 +139,31 @@ const selectedIdx = ref(0)
 const loading = ref(false)
 const error = ref(false)
 
-// Lifetime net earned (before payouts), what's already been paid out, and the
-// real outstanding = earned − paid. Falls back to earned − paid client-side if
-// the API payload predates these fields (e.g. a stale cache mid-deploy).
+// Lifetime net earned across every month — the only banner figure that comes
+// from /api/investor. Everything else is the payout ledger, so "owed" here means
+// exactly what the Payouts section means by it.
 const earnedToDate = computed(() => props.production?.investorNetToDate || 0)
-const paidToDate = computed(() => props.production?.investorPaidToDate || 0)
-const stillOwed = computed(() =>
-  props.production?.investorStillOwed ?? Math.max(0, earnedToDate.value - paidToDate.value))
+const ledgerLoading = computed(() => investorStore.payoutsLoading)
+const ledgerFailed = computed(() => investorStore.payoutsFailed)
+const owedNow = computed(() => investorStore.payoutTotals.totalOwed || 0)
+const processingNow = computed(() => investorStore.payoutTotals.totalProcessing || 0)
+const paidToDate = computed(() => investorStore.payoutTotals.totalPaid || 0)
+const accruing = computed(() => investorStore.accruingThisMonth)
+const accruingLabel = computed(() => investorStore.currentMonth?.periodLabel || 'This month')
 const sel = computed(() => periods.value[selectedIdx.value] || null)
+// Gross Revenue counts delivered loads only, so the Loads tile must too.
+// completedCount/inTransitCount are newer server fields — fall back to deriving
+// them from the load rows so a stale cached payload still renders sensibly.
+const deliveredCount = computed(() => {
+  const s = sel.value
+  if (!s) return 0
+  return s.completedCount ?? s.loads.filter((l) => l.completed).length
+})
+const inTransitCount = computed(() => {
+  const s = sel.value
+  if (!s) return 0
+  return s.inTransitCount ?? s.loads.filter((l) => !l.completed).length
+})
 // Authoritative monthly net share, reused from the dashboard's monthlyEarnings
 // so this section reconciles with EarningsSection / the rest of the portal.
 const monthlyNet = computed(() => {
@@ -239,6 +288,7 @@ fetchReport()
 .lr-sub { font-weight: 400; color: #4d7c5a; }
 .lr-owed-value { font-size: 1.35rem; font-weight: 800; color: #15803d; }
 .lr-owed-context { font-size: 0.74rem; font-weight: 500; color: #4d7c5a; }
+.lr-owed-accruing { font-size: 0.74rem; font-weight: 500; color: #4d7c5a; font-style: italic; }
 
 .lr-msg { color: #64748b; font-size: 0.88rem; padding: 0.8rem 0; }
 
@@ -255,6 +305,7 @@ fetchReport()
 .lr-card-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: #94a3b8; }
 .lr-card-value { font-size: 1.2rem; font-weight: 700; color: #0f172a; margin-top: 2px; }
 .lr-card-value.accent { color: #15803d; }
+.lr-card-note { font-size: 0.68rem; font-weight: 500; color: #94a3b8; margin-top: 1px; }
 .lr-note { font-size: 0.74rem; color: #94a3b8; margin: 0.1rem 0 0.5rem; }
 
 .lr-table-wrap { overflow-x: auto; margin-top: 0.4rem; }

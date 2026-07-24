@@ -94,10 +94,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
+import { useInvestorStore } from '../../stores/investor'
 import { useToast } from '../../composables/useToast'
 
 const props = defineProps({
@@ -108,19 +109,23 @@ const props = defineProps({
 
 const api = useApi()
 const auth = useAuthStore()
+const investorStore = useInvestorStore()
 const { show: toast } = useToast()
 
-const loading = ref(true)
-// A failure shouldn't crash the dashboard — we flip loadFailed and render a
-// graceful fallback. notFound distinguishes a 404 (show the empty-state copy)
-// from any other error (show a generic, retryable message).
-const loadFailed = ref(false)
-const notFound = ref(false)
-const busyId = ref(null)
+// The ledger lives in the investor store so this section and the Load Reports
+// banner render the SAME owed/paid/accruing numbers off one fetch. They used to
+// disagree, because the banner computed its own "still owed" independently.
+// A failure shouldn't crash the dashboard — loadFailed renders a graceful
+// fallback; notFound distinguishes a 404 (empty-state copy) from any other
+// error (generic, retryable message).
+const loading = computed(() => investorStore.payoutsLoading)
+const loadFailed = computed(() => investorStore.payoutsFailed)
+const notFound = computed(() => investorStore.payoutsNotFound)
+const payouts = computed(() => investorStore.payouts)
+const currentMonth = computed(() => investorStore.currentMonth)
+const totals = computed(() => investorStore.payoutTotals)
 
-const payouts = ref([])
-const currentMonth = ref(null)
-const totals = ref({ totalOwed: 0, totalProcessing: 0, totalPaid: 0 })
+const busyId = ref(null)
 
 const isSuperAdmin = auth.isSuperAdmin
 
@@ -140,30 +145,10 @@ function effective(p) {
   return p.effectiveAmount != null ? p.effectiveAmount : (p.amount || 0)
 }
 
-async function loadPayouts() {
-  loading.value = true
-  try {
-    const params = new URLSearchParams()
-    if (props.previewUserId) params.set('as_user_id', String(props.previewUserId))
-    const qs = params.toString() ? `?${params.toString()}` : ''
-    const data = await api.get(`/api/investor/payouts${qs}`)
-    payouts.value = data.payouts || []
-    currentMonth.value = data.currentMonth || null
-    totals.value = data.totals || { totalOwed: 0, totalProcessing: 0, totalPaid: 0 }
-    loadFailed.value = false
-    notFound.value = false
-  } catch (err) {
-    // Degrade gracefully rather than throwing. A 404 means the endpoint isn't
-    // serving this investor yet (empty state); any other failure is a genuine
-    // load error and gets a distinct, retryable message.
-    payouts.value = []
-    currentMonth.value = null
-    totals.value = { totalOwed: 0, totalProcessing: 0, totalPaid: 0 }
-    loadFailed.value = true
-    notFound.value = err.status === 404
-  }
-  loading.value = false
-}
+// Refetch through the store so both surfaces update together after a mutation.
+// Scope explicitly from the prop: this section also renders standalone on
+// /my-payouts, where the store holds no previewUserId.
+const loadPayouts = () => investorStore.loadPayouts(props.previewUserId)
 
 async function advance(payout, status) {
   if (busyId.value) return
