@@ -1,5 +1,13 @@
 <template>
   <div>
+    <!-- Manual rate-con ingestion. Loads normally only exist because a rate-con
+         email fired the n8n workflow; when that email never arrives, this is how
+         a dispatcher gets the load in without retyping it. Drop → review → create,
+         and the new load lands in this very list (Unassigned). -->
+    <div class="ratecon-slot">
+      <RateConDropzone compact @extracted="onRateConExtracted" />
+    </div>
+
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
         <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
@@ -188,6 +196,15 @@
       @confirm="confirmQueueAssign"
       @cancel="pendingAssignment = null"
     />
+
+    <RateConReviewModal
+      v-model:open="rateConOpen"
+      :fields="rateConFields"
+      :warnings="rateConWarnings"
+      :pdf-base64="rateConPdf"
+      :file-name="rateConFileName"
+      @created="onRateConCreated"
+    />
   </div>
 </template>
 
@@ -207,6 +224,8 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import SkeletonLoader from '../shared/SkeletonLoader.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+import RateConDropzone from '../shared/RateConDropzone.vue'
+import RateConReviewModal from '../shared/RateConReviewModal.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
@@ -445,6 +464,34 @@ async function runDelete() {
   }
 }
 
+// Rate-con drop → review → create. Mirrors the receipt-OCR flow in
+// BulkReceiptScan: extract, let a human correct it, then write.
+const rateConOpen = ref(false)
+const rateConFields = ref({})
+const rateConWarnings = ref([])
+const rateConPdf = ref('')
+const rateConFileName = ref('')
+
+function onRateConExtracted(fields, warnings, pdfBase64, fileName) {
+  rateConFields.value = fields || {}
+  rateConWarnings.value = warnings || []
+  rateConPdf.value = pdfBase64 || ''
+  rateConFileName.value = fileName || ''
+  rateConOpen.value = true
+}
+
+async function onRateConCreated(loadId, res) {
+  rateConPdf.value = '' // release the base64 blob once the server has it
+  // Refresh before toasting so the new (Unassigned) row is already on screen
+  // when the confirmation appears.
+  try { await dashStore.refresh() } catch { /* the socket refresh will catch up */ }
+  const warns = (res && res.warnings) || []
+  toast(
+    warns.length ? `Load ${loadId} created — ${warns.length} thing${warns.length === 1 ? '' : 's'} to check` : `Load ${loadId} created`,
+    warns.length ? 'info' : 'success',
+  )
+}
+
 // Inline styles for the two header buttons (copy + delete). Consistent with
 // ActiveLoadsTab's approach of computed style objects — the file already uses
 // inline styling throughout so this keeps the house style.
@@ -470,6 +517,16 @@ const deleteBtnStyle = computed(() => ({
 </script>
 
 <style scoped>
+/* Sits directly above .dash-search-bar and matches its gutters so the two
+   strips read as one toolbar. */
+.ratecon-slot {
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid #f1f5f9;
+  background: #fafafa;
+}
+@media (max-width: 640px) {
+  .ratecon-slot { padding: 0.6rem 0.85rem; }
+}
 .mobile-job-list {
   display: flex;
   flex-direction: column;

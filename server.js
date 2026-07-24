@@ -21,7 +21,7 @@ const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
 const scankit = require("./lib/scankit-client");
-const bisonInvoice = require("./lib/bison-invoice");
+const brokerInvoice = require("./lib/broker-invoice");
 const { appendGmailDraft } = require("./lib/imap-draft");
 const { runReceiptOcr } = require("./lib/receipt-ocr");
 const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDetailed, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
@@ -2435,9 +2435,11 @@ const RATECON_PDF_RESPONSE_SCHEMA = {
 		"Rate": { type: "STRING", nullable: true },
 		"BOL Number": { type: "STRING", nullable: true },
 		"Details": { type: "STRING", nullable: true },
-		// Bison Billing-Information identifiers — additive, nullable so the
-		// existing n8n Information-Extractor consumers ignore them. Used by
-		// the Draft Bison Invoice route's Gemini fallback (lib/bison-invoice).
+		// Billing-Information identifiers — additive, nullable so the existing
+		// n8n Information-Extractor consumers ignore them. Used by the Draft
+		// Invoice route's Gemini fallback (lib/broker-invoice). Bison labels
+		// these explicitly; most other brokers leave them null and the route
+		// falls back to the load ID for the order number.
 		"Order Number": { type: "STRING", nullable: true },
 		"PO Number": { type: "STRING", nullable: true },
 		"Move Number": { type: "STRING", nullable: true },
@@ -12257,6 +12259,457 @@ async function extractReceiptText(imageBuffer) {
 	}
 }
 
+// ============================================================
+// Rate-con drag-and-drop → load creation
+// ============================================================
+// Server-side replica of the n8n "Dispatch v2 (Fixed)" ingestion path (see
+// Dispatch-v2-fixed.json — Validate Load ID · Check Existing Load · RATE
+// UPDATE · JOB DETAILS ENTRY · Google Maps Distance · Calculate Rate Per Mile
+// · Google Sheets2). Today a load can enter LogisX ONLY via a rate-con email
+// landing in info@logisx.com; when a broker sends the details over WhatsApp
+// instead there is zero signal and the dispatcher retypes the whole load.
+// Dropping the PDF here produces the same rows the email pipeline writes.
+//
+// Deliberately two steps so the dispatcher reviews Gemini's output before
+// anything is written — the same interaction as the receipt-OCR prefill:
+//   POST /api/loads/ratecon/extract  — read-only, writes nothing anywhere
+//   POST /api/loads/from-ratecon     — the reviewed fields become sheet rows
+//
+// The field mapping, the rate-per-mile math (ported from the n8n code node)
+// and the upsert row-building are pure and live in lib/ratecon-load.js;
+// everything network/Sheets/Drive/SQLite stays here.
+const rateconLoad = require("./lib/ratecon-load");
+
+// Caps Gemini spend on PDF extraction the way expenseOcrLimiter caps vision
+// OCR. 60 / 15 min is roomy for a human dropping files one at a time (and for
+// a shared office IP) while still being a firm per-IP ceiling. The endpoints
+// are auth + role gated on top, so this is purely an abuse/cost backstop.
+//
+// Applied to BOTH routes on one shared budget (a real drop costs 1 extract +
+// 1 create = 2 tokens, so ~30 loads per IP per 15 min). The create route is
+// the more expensive of the two despite spending no Gemini credits: it fans
+// out to 3 full-tab Sheets reads + up to 3 Sheets writes + 1 Distance Matrix
+// + 2 geocodes + 1 Drive upload per call. Sheets is the primary database on a
+// 300 req/min quota, so an unthrottled loop there would take the dashboard,
+// driver app and invoices down with it.
+const rateConLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	message: { error: "Too many rate-con uploads. Try again later." },
+	standardHeaders: true,
+});
+
+// Load IDs with a create in flight. The dedupe read and the sheet append are
+// seconds apart (a Distance Matrix call and two geocodes sit between them), so
+// two concurrent submits of the same PDF — an impatient double-click, or a
+// client retry on a slow response — would both pass the 409 check and both
+// append. Sheets has no unique constraint to lean on, so hold the ID here for
+// the duration of the write.
+const rateConCreateInFlight = new Set();
+
+// POST /api/loads/ratecon/extract — PDF → the 23-field rate-con object.
+// Read-only: no sheet, no DB, no Drive write happens here, so a dispatcher can
+// drop the wrong file and simply close the modal. Reuses runRateConGemini()
+// (the same extractor the n8n webhook and the invoice fallback call) so all
+// three paths stay on one prompt/schema.
+app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {
+	try {
+		const { pdfBase64 } = req.body || {};
+		if (!pdfBase64 || typeof pdfBase64 !== "string") {
+			return res.status(400).json({ error: "pdfBase64 required" });
+		}
+		const base64 = pdfBase64.replace(/^data:application\/pdf;base64,/, "").trim();
+		// PDF magic bytes "%PDF-" → base64 "JVBERi". The client-side accept=
+		// filter and the mime type are both trivially bypassed; the decoded
+		// bytes are the only trustworthy signal.
+		if (!/^JVBERi/.test(base64)) {
+			return res.status(400).json({ error: "Not a valid PDF (missing %PDF- header)" });
+		}
+		// 15 MB decoded. base64 inflates ~4/3, so measure the decoded size.
+		if (Math.floor((base64.length * 3) / 4) > 15 * 1024 * 1024) {
+			return res.status(400).json({ error: "PDF too large (15 MB max)" });
+		}
+		if (!GEMINI_API_KEY) return res.status(503).json({ error: "ratecon_extract_unavailable" });
+
+		try {
+			const fields = await runRateConGemini(base64);
+			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields) });
+		} catch (err) {
+			console.error("Rate-con extract failed after retries:", err && err.message);
+			return res.status(502).json({ error: "ratecon_extract_failed" });
+		}
+	} catch (err) {
+		console.error("Rate-con extract error:", err.message);
+		res.status(500).json({ error: "ratecon_extract_failed" });
+	}
+});
+
+// POST /api/loads/from-ratecon — the reviewed fields become a live load.
+// `fields` is what the dispatcher confirmed in the review modal (Gemini output
+// is treated as a draft, never as truth). Order of operations mirrors the n8n
+// workflow; everything after the Job Tracking append is best-effort and
+// degrades to a warning, because the load row is already committed and a
+// dispatcher "fixing" a hard error by re-dropping the PDF would create a twin.
+app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {
+	try {
+		const { fields, pdfBase64, fileName } = req.body || {};
+		if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+			return res.status(400).json({ error: "fields required" });
+		}
+
+		// ---- 1) Validate Load ID (n8n "Validate Load ID" filter) ----
+		const loadId = String(fields["Load Number"] == null ? "" : fields["Load Number"]).trim();
+		if (!loadId) {
+			return res.status(400).json({ error: "Load Number is required — fill it in before creating the load." });
+		}
+		// Same whitelist the public tracker uses. Keeps the Load ID safe to
+		// interpolate into a Drive file name and an A1 range.
+		if (!/^[A-Za-z0-9\-_.#]{1,40}$/.test(loadId)) {
+			return res.status(400).json({ error: "Load Number contains unsupported characters." });
+		}
+		// Re-validate every field's shape. These arrive hand-edited from the
+		// review modal, so runRateConGemini's own 500-char-per-field cap no
+		// longer applies and nothing else stands between a stray paste (or a
+		// crafted client) and a sheet cell.
+		for (const fieldName of Object.keys(fields)) {
+			const v = fields[fieldName];
+			if (v == null) continue;
+			if (typeof v !== "string" && typeof v !== "number") {
+				return res.status(400).json({ error: `Field "${fieldName}" must be text.` });
+			}
+			if (String(v).length > 1000) {
+				return res.status(400).json({ error: `Field "${fieldName}" is too long (1000 characters max).` });
+			}
+		}
+
+		// Claim this Load ID for the duration of the write so a double-submit
+		// can't slip a twin past the dedupe check below. Released on response
+		// close, which covers the error paths and a client abort too.
+		const loadKey = rateconLoad.normalizeLoadId(loadId);
+		if (rateConCreateInFlight.has(loadKey)) {
+			return res.status(409).json({
+				error: `Load ${loadId} is already being created — wait for that request to finish.`,
+				code: "DUPLICATE_LOAD",
+				existingRowIndex: null,
+			});
+		}
+		rateConCreateInFlight.add(loadKey);
+		res.on("close", () => rateConCreateInFlight.delete(loadKey));
+
+		const warnings = [];
+		const sheets = await getSheets();
+
+		// ---- 2) Dedupe against Job Tracking (n8n "Check Existing Load") ----
+		const jtResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+		});
+		const { headers, data } = parseSheet(jtResp.data);
+		if (!headers.length) {
+			return res.status(502).json({ error: "Could not read the Job Tracking sheet. Try again." });
+		}
+		const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+		if (!loadIdCol) {
+			return res.status(502).json({ error: "Job Tracking has no Load ID column." });
+		}
+		const existing = deduplicateLoads(data, headers).find(
+			(r) => rateconLoad.normalizeLoadId(r[loadIdCol]) === loadKey,
+		);
+		if (existing) {
+			// Soft-deleted loads keep their sheet row, so "already exists" would
+			// otherwise be baffling — the dispatcher can't see the load anywhere.
+			const softDeleted = getDeletedLoadIds().has(loadKey);
+			return res.status(409).json({
+				error: softDeleted
+					? `Load ${loadId} already exists (row ${existing._rowIndex}) but was deleted. Restore it instead of re-creating it.`
+					: `Load ${loadId} already exists (row ${existing._rowIndex}).`,
+				code: "DUPLICATE_LOAD",
+				existingRowIndex: existing._rowIndex,
+			});
+		}
+
+		// ---- 3) Distance Matrix → rate per mile (n8n "Google Maps Distance"
+		// → "Calculate Rate Per Mile"). Never fatal: a missing key, a quota
+		// error, a timeout or ZERO_RESULTS all arrive at calculateRatePerMile()
+		// as a non-OK element and take the node's own zeros / "N/A" branch. A
+		// Maps outage must not stop a dispatcher from booking a load. ----
+		const pickupAddress = String(fields["Pickup Address"] || "").trim();
+		const dropoffAddress = String(fields["Drop-off Address"] || "").trim();
+		let distanceMatrix = null;
+		if (GOOGLE_MAPS_API_KEY && pickupAddress && dropoffAddress) {
+			try {
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), 8000);
+				const dmUrl =
+					"https://maps.googleapis.com/maps/api/distancematrix/json" +
+					`?origins=${encodeURIComponent(pickupAddress)}` +
+					`&destinations=${encodeURIComponent(dropoffAddress)}` +
+					`&units=imperial&key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}`;
+				const dmResp = await fetch(dmUrl, { signal: controller.signal });
+				clearTimeout(timer);
+				distanceMatrix = await dmResp.json();
+			} catch (e) {
+				console.error("Rate-con load: Distance Matrix failed:", e.message);
+			}
+		}
+		const rpm = rateconLoad.calculateRatePerMile(distanceMatrix, fields);
+		if (rpm.distance_miles === 0) {
+			warnings.push("Distance could not be calculated — Job Details shows 0 miles. Check the pickup and drop-off addresses.");
+		}
+
+		// Geocode both ends (served from geocode_cache when already seen) so the
+		// dashboard map + ETA pipeline have coordinates the moment the load
+		// lands, exactly like the map-picker path in NewJobView.
+		let pickupCoords = null;
+		let dropoffCoords = null;
+		try { pickupCoords = pickupAddress ? await geocodeAddress(pickupAddress) : null; } catch { /* non-critical */ }
+		try { dropoffCoords = dropoffAddress ? await geocodeAddress(dropoffAddress) : null; } catch { /* non-critical */ }
+
+		// ---- 4) Append the Job Tracking row (n8n "JOB DETAILS ENTRY") ----
+		const today = new Date().toISOString().split("T")[0];
+		const values = rateconLoad.buildJobTrackingRow(headers, fields, {
+			today,
+			ownerId: 0,
+			pickupLat: pickupCoords ? pickupCoords.lat : null,
+			pickupLng: pickupCoords ? pickupCoords.lng : null,
+			dropoffLat: dropoffCoords ? dropoffCoords.lat : null,
+			dropoffLng: dropoffCoords ? dropoffCoords.lng : null,
+		});
+		const ownerErr = validateOwnerIdCell("Job Tracking", headers, values);
+		if (ownerErr) return res.status(400).json({ error: ownerErr.error });
+
+		const appendResp = await sheets.spreadsheets.values.append({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+			valueInputOption: "USER_ENTERED",
+			requestBody: { values: [values] },
+		});
+		// "Job Tracking!A742:Z742" → 742
+		const updatedRange = (appendResp.data.updates && appendResp.data.updates.updatedRange) || "";
+		const rowMatch = updatedRange.match(/![A-Z]+(\d+)/);
+		const rowIndex = rowMatch ? parseInt(rowMatch[1], 10) : null;
+		jtCacheInvalidate();
+
+		// ---- 5/6) Payments Table + Job Details upserts ----
+		// Sheets v4 has no native appendOrUpdate (the n8n node fakes it the same
+		// way): read the tab, values.update the matching row, else values.append.
+		// Unmapped columns keep whatever the existing row held, so an update
+		// never blanks Invoice Number / Payment Status.
+		//
+		// `preserveFilled` additionally refuses to overwrite an already-populated
+		// *mapped* cell — see the Payments Table call below.
+		const upsertByKey = async (tabName, keyColumn, mapping, opts) => {
+			const preserveFilled = !!(opts && opts.preserveFilled);
+			const resp = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: tabName,
+				// Round-trip formulas as formulas. An update rewrites the WHOLE
+				// row, and the default FORMATTED_VALUE render would hand back a
+				// formula cell as its computed text — writing that back would
+				// flatten a live formula in a column this feature doesn't own.
+				valueRenderOption: "FORMULA",
+			});
+			const rows = resp.data.values || [];
+			const tabHeaders = rows[0] || [];
+			if (!tabHeaders.length) throw new Error(`${tabName} has no header row`);
+			const matchRow = rateconLoad.findRowIndexByColumn(rows, keyColumn, loadId);
+			const existingRow = matchRow > 0 ? rows[matchRow - 1] : null;
+			let rowValues;
+			let conflicts = [];
+			if (matchRow > 0 && preserveFilled) {
+				const built = rateconLoad.buildMappedRowPreservingFilled(tabHeaders, mapping, existingRow);
+				rowValues = built.values;
+				conflicts = built.conflicts;
+			} else {
+				rowValues = rateconLoad.buildMappedRow(tabHeaders, mapping, existingRow);
+			}
+			// Anchor every write to column A explicitly. values.append with a
+			// bare tab range lets Sheets auto-detect the table's anchor column
+			// from existing data, and when a tab's leading column is empty
+			// (Job Details' column A is blank; Payments Table's early columns are
+			// sparse) the appended row lands SHIFTED right into the wrong columns.
+			// A new row goes to A{lastRow+1} — rows already excludes trailing
+			// empties, so its length is the last populated row (1-based incl. the
+			// header). Both branches therefore write starting at column A.
+			const targetRow = matchRow > 0 ? matchRow : rows.length + 1;
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `${tabName}!A${targetRow}`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: { values: [rowValues] },
+			});
+			return { action: matchRow > 0 ? "updated" : "appended", row: targetRow, conflicts };
+		};
+
+		// n8n "RATE UPDATE" — the key column really is named " Job ID"
+		// (leading space); matching is done on the trimmed header.
+		//
+		// preserveFilled because the dedupe above only proves the LOAD is new,
+		// not that the payment row is: a matched Payments Table row can belong
+		// to an older load whose Job Tracking row was archived or removed, and
+		// that row may already carry a booked Payment Amount / Invoice Number.
+		// Filling its blanks is the point of an upsert; silently rewriting a
+		// settled figure from a load-creation flow is not. Conflicts surface as
+		// a warning naming the columns so a human reconciles them.
+		try {
+			const payResult = await upsertByKey("Payments Table", " Job ID", {
+				" Job ID": loadId,
+				"Contract ID": String(fields["Broker Name"] || "").trim(),
+				"Payment Amount": String(fields["Rate"] || "").trim(),
+			}, { preserveFilled: true });
+			if (payResult.conflicts.length) {
+				warnings.push(
+					`The Payments Table already had a row for ${loadId} with a different ` +
+					`${payResult.conflicts.join(" and ")} — the existing value was kept. Reconcile it manually.`,
+				);
+			}
+		} catch (e) {
+			console.error("Rate-con load: Payments Table upsert failed:", e.message);
+			warnings.push("The Payments Table row was not written — add the payment amount manually.");
+		}
+
+		// n8n "Google Sheets2"
+		try {
+			await upsertByKey("Job Details", "Load ID", {
+				"Load ID": loadId,
+				"Rate Per Mile": `$${rpm.rate_per_mile}`,
+				"Distance": `${rpm.distance_miles} Miles`,
+				"Details": rpm.details,
+				"Payment": rpm.payment,
+			});
+		} catch (e) {
+			console.error("Rate-con load: Job Details upsert failed:", e.message);
+			warnings.push("The Job Details row was not written — distance and rate-per-mile are missing for this load.");
+		}
+
+		// ---- 7) Archive the rate-con PDF so invoice drafting can find it later.
+		// getRateConBytes() resolves a load's rate-con from THREE sources, in
+		// order: (a) the Drive folder, (b) a `documents` row of type RATECON, and
+		// (c) a base64 in the request body. The Drive folder is a *My Drive*
+		// folder owned by info@logisx.com — the app's service account is
+		// read-only there and has no storage quota, so a service-account upload
+		// ALWAYS fails in production (n8n only manages it via OAuth delegation).
+		// So the reliable path is (b): write the PDF under /uploads and register
+		// a `documents` row, exactly like PODs. That row is what makes a dropped
+		// load invoiceable. Drive is then attempted best-effort for parity with
+		// the email pipeline, but its failure is silent — (b) already covers us.
+		let rateconArchived = false;
+		const rawPdf = typeof pdfBase64 === "string"
+			? pdfBase64.replace(/^data:application\/pdf;base64,/, "").trim()
+			: "";
+		if (!rawPdf) {
+			warnings.push(`No rate-con PDF was attached, so invoice drafting will not find one for load ${loadId}.`);
+		} else if (!/^JVBERi/.test(rawPdf)) {
+			warnings.push("The attached file was not a PDF, so the rate-con was not archived.");
+		} else if (Math.floor((rawPdf.length * 3) / 4) > 15 * 1024 * 1024) {
+			// Same 15 MB decoded cap the extract route enforces — without it this
+			// route would accept anything up to the 50 MB global body limit.
+			// Warn rather than fail: the load row is already committed.
+			warnings.push(`The rate-con PDF is larger than 15 MB, so it was not archived. Attach it to load ${loadId} manually before drafting an invoice.`);
+		} else {
+			const pdfBuffer = Buffer.from(rawPdf, "base64");
+			// (b) PRIMARY — local /uploads + a documents row. This is what
+			// getRateConBytes() step 2 reads, and it needs no Drive quota.
+			try {
+				const rcDir = path.join(__dirname, "uploads", "rate-cons");
+				if (!fs.existsSync(rcDir)) fs.mkdirSync(rcDir, { recursive: true });
+				const safeLoad = String(loadId).replace(/[^A-Za-z0-9._-]/g, "_");
+				const fileNameOut = `${safeLoad}.pdf`;
+				fs.writeFileSync(path.join(rcDir, fileNameOut), pdfBuffer);
+				// Replace any prior rate-con for this load so a re-create can't
+				// leave two RATECON rows racing in getRateConBytes' ORDER BY.
+				db.prepare("DELETE FROM documents WHERE load_id = ? AND UPPER(type) = 'RATECON'").run(loadId);
+				db.prepare(
+					`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url)
+					 VALUES (?, ?, 'RATECON', ?, '', ?)`,
+				).run(loadId, "", fileNameOut, `/uploads/rate-cons/${fileNameOut}`);
+				rateconArchived = true;
+			} catch (e) {
+				console.error("Rate-con load: local rate-con archive failed:", e.message);
+				warnings.push(`The rate-con PDF could not be saved, so invoice drafting will not find one for load ${loadId}. Attach it manually.`);
+			}
+			// (a) BEST-EFFORT — mirror into the Drive folder too, for parity with
+			// the n8n email pipeline. Expected to fail under the service account
+			// in production; that's fine, (b) is authoritative. Silent on error.
+			try {
+				const { Readable } = require("stream");
+				const drive = await getDrive();
+				await drive.files.create({
+					requestBody: {
+						name: `${loadId}.pdf`,
+						parents: [RATECON_DRIVE_FOLDER_ID],
+						mimeType: "application/pdf",
+					},
+					media: { mimeType: "application/pdf", body: Readable.from(pdfBuffer) },
+					fields: "id,name",
+					supportsAllDrives: true,
+				});
+			} catch (e) {
+				// No warning to the dispatcher — the local copy already made the
+				// load invoiceable. Log for observability only.
+				console.error("Rate-con load: Drive mirror failed (non-fatal):", e.message);
+			}
+		}
+
+		// ---- 8) load_coordinates + audit trail + dispatch notification ----
+		if (pickupCoords || dropoffCoords) {
+			try {
+				db.prepare(`INSERT OR REPLACE INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+					.run(
+						loadKey,
+						pickupCoords ? pickupCoords.lat : null,
+						pickupCoords ? pickupCoords.lng : null,
+						dropoffCoords ? dropoffCoords.lat : null,
+						dropoffCoords ? dropoffCoords.lng : null,
+						pickupAddress,
+						dropoffAddress,
+					);
+			} catch { /* non-critical */ }
+		}
+
+		logAudit(
+			req,
+			"create_load_ratecon",
+			"load",
+			loadId,
+			`Created load ${loadId} from a dropped rate-con${fileName ? ` (${String(fileName).slice(0, 120)})` : ""}; ` +
+				`${rpm.distance_miles} mi @ $${rpm.rate_per_mile}/mi; rate-con ${rateconArchived ? "archived to Drive" : "NOT archived"}`,
+		);
+
+		// Same "new-load" notification the n8n webhook raises, so a dropped load
+		// surfaces identically to an email-ingested one. loadId lives inside
+		// metadata for the NotificationsView click-routing convention.
+		const route = rpm.details && rpm.details !== "Distance unavailable"
+			? rpm.details
+			: [pickupAddress, dropoffAddress].filter(Boolean).join(" → ");
+		insertDispatchNotification.run(
+			"new-load",
+			`New Load ${loadId}`,
+			route,
+			JSON.stringify({ loadId, rowIndex, source: "ratecon-drop" }),
+		);
+		io.to("dispatch").emit("new-load", { timestamp: Date.now() });
+		io.to("dispatch").emit("dispatch-notification", {
+			type: "new-load",
+			title: `New Load ${loadId}`,
+			body: route,
+		});
+		notifyChange("dashboard");
+
+		res.json({
+			success: true,
+			loadId,
+			rowIndex,
+			distanceMiles: rpm.distance_miles,
+			ratePerMile: rpm.rate_per_mile,
+			warnings,
+		});
+	} catch (error) {
+		console.error("Error creating load from rate-con:", error.message);
+		res.status(500).json({ error: "Failed to create the load. Check the Job Tracking sheet before retrying." });
+	}
+});
+
 // GET /api/documents/:loadId — Fetch all documents for a load
 app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 	try {
@@ -12282,9 +12735,10 @@ app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 });
 
 // ============================================================
-// Draft Bison Invoice — assemble invoice + supporting docs, POST to n8n
-// which creates a Gmail draft. LogisX does ALL the data work; n8n only
-// turns the assembled payload into a draft. See lib/bison-invoice.js.
+// Draft Invoice — assemble invoice + supporting docs for ANY broker and
+// write a Gmail draft (IMAP), falling back to n8n. LogisX does ALL the data
+// work; n8n only turns the assembled payload into a draft. Bison is no
+// longer a gate, only a branch (its own AP inbox). See lib/broker-invoice.js.
 // ============================================================
 
 // Lazily-created Drive client. Reuses the same service-account `auth` as
@@ -12316,7 +12770,7 @@ async function fetchDocumentBytes(doc) {
 		try {
 			if (fs.existsSync(localPath)) return fs.readFileSync(localPath);
 		} catch (e) {
-			console.error("Bison invoice: local doc read failed:", e.message);
+			console.error("Draft invoice: local doc read failed:", e.message);
 		}
 	}
 	// 2) Drive API (files.get alt=media) by drive_file_id.
@@ -12329,7 +12783,7 @@ async function fetchDocumentBytes(doc) {
 			);
 			return Buffer.from(resp.data);
 		} catch (e) {
-			console.error("Bison invoice: Drive doc fetch failed:", e.message);
+			console.error("Draft invoice: Drive doc fetch failed:", e.message);
 		}
 	}
 	return null;
@@ -12372,7 +12826,7 @@ async function getRateConBytes(loadId, body) {
 				if (buffer && buffer.length) return { buffer, fileName: `${orderNumber}.pdf` };
 			}
 		} catch (e) {
-			console.error("Bison invoice: rate-con Drive fetch failed:", e.message);
+			console.error("Draft invoice: rate-con Drive fetch failed:", e.message);
 		}
 	}
 
@@ -12400,10 +12854,12 @@ async function getRateConBytes(loadId, body) {
 	return { buffer: null, fileName: `${orderNumber || "ratecon"}.pdf` };
 }
 
-// POST /api/loads/:loadId/draft-bison-invoice
+// POST /api/loads/:loadId/draft-invoice  (alias: .../draft-bison-invoice)
 // Restricted to Super Admin + Dispatcher (the roles that run dispatch ops).
+// The legacy Bison-specific path stays registered so any external caller
+// (bookmarks, n8n, a cached SPA bundle) keeps working — same handler.
 app.post(
-	"/api/loads/:loadId/draft-bison-invoice",
+	["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],
 	requireRole("Super Admin", "Dispatcher"),
 	async (req, res) => {
 		try {
@@ -12436,17 +12892,26 @@ app.post(
 				headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) ||
 				headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint/i.test(h));
 			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
+			const brokerNameCol = findCol(headers, /broker.*(contact|name)/i);
+			// The money column is literally "  Payment  " (real surrounding
+			// spaces) — matched on the trimmed header inside the helper.
+			const paymentCol = brokerInvoice.findPaymentColumn(headers);
 
 			const brokerEmail = emailCol ? (load[emailCol] || "").toString().trim() : "";
+			const brokerContactName = brokerNameCol ? (load[brokerNameCol] || "").toString().trim() : "";
 			const status = statusCol ? (load[statusCol] || "").toString().trim() : "";
 			const sheetTrailer = trailerCol ? (load[trailerCol] || "").toString().trim() : "";
 
-			// 2) Guard: must be a Bison load AND delivered/completed.
-			if (!bisonInvoice.isBisonLoad({ email: brokerEmail })) {
-				return res.status(400).json({
-					error: "This load is not a Bison Transport load (broker email is not @bisontransport.com).",
-				});
-			}
+			// 2) Broker identity. Every broker can be invoiced now — the Bison
+			//    check is a BRANCH (it picks the AP inbox), no longer a gate.
+			//    The sheet has no brokerage-company column, so the name is
+			//    resolved from the email domain; see lib/broker-invoice.js.
+			const brokerCtx = { brokerEmail, brokerContactName };
+			const isBison = brokerInvoice.isBisonLoad({ email: brokerEmail });
+			const brokerName = brokerInvoice.resolveBrokerName(brokerCtx);
+			const invoiceTo = brokerInvoice.resolveInvoiceTo(brokerCtx);
+
+			//    The delivered/completed gate is unchanged.
 			if (!/delivered|completed|pod received/i.test(status)) {
 				return res.status(400).json({
 					error: `Load must be delivered/completed to draft an invoice (current status: "${status || "unknown"}").`,
@@ -12466,10 +12931,12 @@ app.post(
 			const { buffer: rateconBuffer, fileName: rateconFileName } = await getRateConBytes(loadId, req.body);
 
 			// 4) Extract the rate-con fields (deterministic text scan → Gemini fallback).
-			//    The Gemini fallback reuses the shared runRateConGemini() helper; it
-			//    only fires when the rate-con has no usable text layer AND the API key
-			//    is configured.
-			const rcFields = await bisonInvoice.extractRateConFields(rateconBuffer, {
+			//    The Gemini fallback reuses the shared runRateConGemini() helper.
+			//    NOTE: only the Bison rate-con has the "Billing Information" block
+			//    the deterministic scan understands — every OTHER broker takes the
+			//    Gemini path, so it is the primary path now, not an edge case
+			//    (verified against real C.H. Robinson / Navisphere rate-cons).
+			const rcFields = await brokerInvoice.extractRateConFields(rateconBuffer, {
 				geminiExtract: GEMINI_API_KEY
 					? async (buf) => {
 							const b64 = Buffer.from(buf).toString("base64");
@@ -12477,21 +12944,28 @@ app.post(
 							return runRateConGemini(b64);
 					  }
 					: null,
-				onGeminiError: (e) => console.error("Bison invoice: Gemini fallback failed:", e.message),
+				onGeminiError: (e) => console.error("Draft invoice: Gemini fallback failed:", e.message),
 			});
 
+			// 4b) Order number: the rate-con's when we got one, else the load ID
+			//     (which IS the order number for Bison, and is the reference the
+			//     broker booked under for everyone else). No longer a hard stop.
+			const orderNumber = rcFields.orderNumber || loadId.replace(/^#/, "").trim();
 			if (!rcFields.orderNumber) {
-				return res.status(422).json({
-					error:
-						"Could not read the rate-con. Order #, PO #, Move # and Trailer could not be extracted (no text layer and Gemini fallback unavailable or failed).",
-					code: "RATECON_UNREADABLE",
-				});
+				console.log(
+					`Draft invoice ${loadId}: no order # from the rate-con (gemini=${GEMINI_API_KEY ? "on" : "off"}) — falling back to the load ID.`,
+				);
 			}
 
 			// 5) Validation: rate-con trailer must match the load's stored trailer.
 			//    On mismatch, do NOT call n8n — return 409 so the frontend can alert.
+			//    Only compare when the extracted trailer actually looks like a
+			//    trailer id (contains a digit): a guard that blocks on garbage is
+			//    worse than no guard, and prose like "Trailer Required" has been
+			//    seen leaking out of loosely-labelled rate-cons.
 			const normTrailer = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-			if (sheetTrailer && rcFields.trailerNumber && normTrailer(sheetTrailer) !== normTrailer(rcFields.trailerNumber)) {
+			const rcTrailerUsable = /\d/.test(String(rcFields.trailerNumber || ""));
+			if (sheetTrailer && rcTrailerUsable && normTrailer(sheetTrailer) !== normTrailer(rcFields.trailerNumber)) {
 				return res.status(409).json({
 					error: `Trailer mismatch: rate-con says ${rcFields.trailerNumber} but the load is on trailer ${sheetTrailer}. Invoice not drafted.`,
 					code: "TRAILER_MISMATCH",
@@ -12499,23 +12973,43 @@ app.post(
 				});
 			}
 
-			// 6) Invoice identifiers + dates. invoiceId/invoiceDate use the
+			// 6) Invoice total: the rate-con's Total Rate, else the load's
+			//    "  Payment  " cell from the sheet. HARD STOP when neither
+			//    yields a positive number — this endpoint moves money, and a
+			//    $0.00 invoice mailed to a broker is worse than an error.
+			const rcTotal = brokerInvoice.parseMoney(rcFields.totalRate);
+			const sheetTotal = paymentCol ? brokerInvoice.parseMoney(load[paymentCol]) : 0;
+			const totalAmount = rcTotal > 0 ? rcTotal : sheetTotal;
+			if (!(totalAmount > 0)) {
+				return res.status(422).json({
+					error:
+						`Invoice total is unknown for load ${loadId} — the rate-con had no readable Total Rate` +
+						(paymentCol ? ` and the sheet's ${paymentCol.trim()} column is empty` : " and the sheet has no payment column") +
+						". Refusing to draft a $0.00 invoice. Add the rate to the load, then retry." +
+						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
+					code: "INVOICE_TOTAL_UNKNOWN",
+				});
+			}
+
+			// 6b) Invoice identifiers + dates. invoiceId/invoiceDate use the
 			//    button-click date (today, server local). deliveryDate is the
 			//    load's ACTUAL delivery/completion date from the sheet — never
 			//    today, never the rate-con scheduled date.
 			const today = new Date();
 			// dryRun previews the next number without consuming it; a real draft commits it.
 			const invoiceId = dryRun ? peekInvoiceNumber(today) : nextInvoiceNumber(today);
-			const invoiceDate = bisonInvoice.formatDate(today);
+			const invoiceDate = brokerInvoice.formatDate(today);
 			const rawDeliveryDate = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
-			const deliveryDate = bisonInvoice.formatDate(rawDeliveryDate);
-			const total = rcFields.totalRate || "";
+			const deliveryDate = brokerInvoice.formatDate(rawDeliveryDate);
+			const total = brokerInvoice.formatMoney(totalAmount);
 
 			// 7) Render the invoice PDF.
-			const invoiceHtml = bisonInvoice.buildInvoiceHtml({
+			const invoiceHtml = brokerInvoice.buildInvoiceHtml({
 				invoiceId,
 				invoiceDate,
-				orderNumber: rcFields.orderNumber,
+				brokerName,
+				invoiceTo,
+				orderNumber,
 				poNumber: rcFields.poNumber,
 				deliveryDate,
 				total,
@@ -12523,25 +13017,49 @@ app.post(
 			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
 			const invoicePdfBase64 = Buffer.from(invoicePdf).toString("base64");
 
-			// 7b) Build the standard Bison email (body + signature) — the same
-			//     content the draft carries.
-			const draftSubject = `Bison Transport Order #${rcFields.orderNumber}`;
-			const draftHtml = bisonInvoice.buildBisonEmailHtml({
-				orderNumber: rcFields.orderNumber,
+			// 7b) Build the standard invoice email (body + signature) — the same
+			//     content the draft carries. For a Bison load brokerName is
+			//     "Bison Transport", so the subject renders exactly as before.
+			const draftSubject = brokerName
+				? `${brokerName} Order #${orderNumber}`
+				: `Order #${orderNumber}`;
+			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({
+				brokerName,
+				orderNumber,
 				moveNumber: rcFields.moveNumber,
 				poNumber: rcFields.poNumber,
 			});
+			// Bison's attachment name is left byte-identical; other brokers get
+			// their own name (a broker filing "Bison Invoice ..." would be odd).
+			const safeName = String(brokerName || "").replace(/[\\/:*?"<>|]+/g, " ").trim();
+			const invoiceFileName = isBison
+				? `Bison Invoice Order #${orderNumber}.pdf`
+				: `${safeName ? safeName + " " : ""}Invoice Order #${orderNumber}.pdf`;
 			const draftAttachments = [
-				{ filename: `Bison Invoice Order #${rcFields.orderNumber}.pdf`, content: invoicePdf, contentType: "application/pdf" },
+				{ filename: invoiceFileName, content: invoicePdf, contentType: "application/pdf" },
 				{ filename: podDoc.file_name || `${loadId}_POD.pdf`, content: podBuffer, contentType: "application/pdf" },
 			];
 			if (rateconBuffer && rateconBuffer.length) {
-				draftAttachments.push({ filename: `${rcFields.orderNumber}.pdf`, content: rateconBuffer, contentType: "application/pdf" });
+				draftAttachments.push({ filename: `${orderNumber}.pdf`, content: rateconBuffer, contentType: "application/pdf" });
 			}
 
-			// Dry-run / preview: generate everything but create no draft.
+			// Dry-run / preview: generate everything but create no draft. Echo
+			// the resolved routing so a reviewer can verify recipient/subject/
+			// total without opening the PDF.
 			if (dryRun) {
-				return res.json({ success: true, preview: true, dryRun: true, invoiceId, invoicePdfBase64 });
+				return res.json({
+					success: true,
+					preview: true,
+					dryRun: true,
+					invoiceId,
+					brokerName,
+					to: invoiceTo.email,
+					subject: draftSubject,
+					orderNumber,
+					total,
+					totalSource: rcTotal > 0 ? "ratecon" : "sheet",
+					invoicePdfBase64,
+				});
 			}
 
 			// PRIMARY: create the Gmail draft directly via IMAP APPEND using the
@@ -12556,7 +13074,7 @@ app.post(
 						user: gmailUser,
 						pass: gmailPass,
 						from: `LogisX Inc. <${gmailUser}>`,
-						to: "QPinvoicesUSA@bisontransport.com",
+						to: invoiceTo.email,
 						subject: draftSubject,
 						html: draftHtml,
 						attachments: draftAttachments,
@@ -12564,7 +13082,7 @@ app.post(
 					return res.json({ success: true, invoiceId, via: "imap", draftMailbox: "[Gmail]/Drafts" });
 				} catch (e) {
 					imapError = e;
-					console.error("Bison invoice: IMAP draft failed:", e.message);
+					console.error("Draft invoice: IMAP draft failed:", e.message);
 					// fall through to the n8n fallback (if configured), else surface the error below
 				}
 			}
@@ -12575,16 +13093,17 @@ app.post(
 			if (webhookUrl && webhookSecret) {
 				const payload = {
 					loadId,
-					orderNumber: rcFields.orderNumber,
+					brokerName,
+					orderNumber,
 					moveNumber: rcFields.moveNumber,
 					poNumber: rcFields.poNumber,
-					to: "QPinvoicesUSA@bisontransport.com",
+					to: invoiceTo.email,
 					invoicePdfBase64,
-					invoiceFileName: `Bison Invoice Order #${rcFields.orderNumber}.pdf`,
+					invoiceFileName,
 					podPdfBase64: Buffer.from(podBuffer).toString("base64"),
 					podFileName: podDoc.file_name || `${loadId}_POD.pdf`,
 					rateconPdfBase64: rateconBuffer ? Buffer.from(rateconBuffer).toString("base64") : "",
-					rateconFileName: `${rcFields.orderNumber}.pdf`,
+					rateconFileName: `${orderNumber}.pdf`,
 				};
 				try {
 					const controller = new AbortController();
@@ -12602,7 +13121,7 @@ app.post(
 					if (!r.ok) return res.status(502).json({ error: `n8n webhook returned ${r.status}`, details: n8nResponse });
 					return res.json({ success: true, invoiceId, via: "n8n", draftId: n8nResponse && (n8nResponse.draftId || n8nResponse.id), n8n: n8nResponse });
 				} catch (e) {
-					console.error("Bison invoice: n8n webhook call failed:", e.message);
+					console.error("Draft invoice: n8n webhook call failed:", e.message);
 					return res.status(502).json({ error: "Failed to reach the invoice-draft webhook." });
 				}
 			}
@@ -12620,8 +13139,8 @@ app.post(
 			// call still yields something useful.
 			return res.json({ success: true, preview: true, invoiceId, invoicePdfBase64, note: "No Gmail/n8n draft target configured — invoice generated (preview only)." });
 		} catch (err) {
-			console.error("Draft Bison invoice error:", err.message);
-			return res.status(500).json({ error: "Failed to draft Bison invoice." });
+			console.error("Draft invoice error:", err.message);
+			return res.status(500).json({ error: "Failed to draft the invoice." });
 		}
 	},
 );

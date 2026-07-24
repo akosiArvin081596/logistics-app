@@ -6,6 +6,32 @@
     </div>
 
     <div class="form-card">
+      <!-- Rate-con prefill. No review modal here on purpose: this form IS the
+           review step, so the extracted fields drop straight in and the map
+           picker / geocode / duplicate warning all come along free. Never
+           auto-submits — the dispatcher still clicks Create Job. -->
+      <div class="ratecon-banner">
+        <RateConDropzone
+          hint="or click to browse. We read the PDF and fill in the fields below — you check them, then click Create Job."
+          @extracted="onRateConExtracted"
+        />
+        <div v-if="prefillNote" class="prefill-note">
+          <div class="prefill-note-body">
+            <strong>Prefilled from {{ prefillNote.fileName }}</strong> — check every field before creating; the read isn't always perfect.
+            <ul v-if="prefillNote.warnings.length" class="prefill-list">
+              <li v-for="(w, i) in prefillNote.warnings" :key="'w' + i">{{ w }}</li>
+            </ul>
+            <div v-if="prefillNote.blanks.length" class="prefill-blanks">
+              Still blank: {{ prefillNote.blanks.join(', ') }}.
+            </div>
+            <div v-else-if="!prefillNote.warnings.length" class="prefill-blanks">
+              {{ prefillNote.filledCount }} field{{ prefillNote.filledCount === 1 ? '' : 's' }} filled in.
+            </div>
+          </div>
+          <button type="button" class="prefill-dismiss" aria-label="Dismiss this note" @click="prefillNote = null">&times;</button>
+        </div>
+      </div>
+
       <!-- Load Info -->
       <div class="form-section">
         <div class="section-label">Load Information</div>
@@ -175,6 +201,7 @@ import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useGeocode } from '../composables/useGeocode'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
+import RateConDropzone from '../components/shared/RateConDropzone.vue'
 
 const api = useApi()
 const router = useRouter()
@@ -247,6 +274,132 @@ function selectDropoffSuggestion(s) {
 
 function generateId() {
   form.loadId = `LD-${Date.now().toString(36).toUpperCase()}`
+}
+
+// ---- Rate-con prefill -------------------------------------------------------
+const prefillNote = ref(null)
+
+function txt(value) {
+  return value == null ? '' : String(value).trim()
+}
+
+// Rate-cons hand back "M/D/YYYY HH:MM" (and occasionally ISO, or a bare date).
+// The pickup/delivery inputs are type="date", which silently discards anything
+// that isn't YYYY-MM-DD — so normalize, or leave the field alone.
+function toDateInput(value) {
+  const s = txt(value)
+  if (!s) return ''
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`
+  const us = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/)
+  if (us) {
+    const year = us[3].length === 2 ? `20${us[3]}` : us[3].padStart(4, '0')
+    return `${year}-${us[1].padStart(2, '0')}-${us[2].padStart(2, '0')}`
+  }
+  const parsed = new Date(s) // "Apr 3 2026 14:00" and friends
+  // en-CA yields YYYY-MM-DD in local time — not toISOString(), which is UTC and
+  // rolls an evening appointment to the next day across US zones.
+  return isNaN(parsed.getTime()) ? '' : parsed.toLocaleDateString('en-CA')
+}
+
+// "$2,450.00" / "2450 USD" → 2450. Blank when there's no number at all.
+function toAmount(value) {
+  const n = parseFloat(txt(value).replace(/[^0-9.-]/g, ''))
+  return isNaN(n) ? '' : n
+}
+
+function onRateConExtracted(fields, warnings, pdfBase64, fileName) {
+  const f = fields || {}
+  errorMsg.value = ''
+  duplicateWarning.value = ''
+
+  let filledCount = 0
+  const set = (key, value) => {
+    if (value === '' || value == null) return
+    form[key] = value
+    filledCount++
+  }
+
+  const brokerName = txt(f['Broker Name'])
+  set('loadId', txt(f['Load Number']))
+  // Deliberately NOT prefilling Contract ID. The n8n "RATE UPDATE" node writes
+  // Contract ID = Broker Name only on the *Payments Table* tab, never on Job
+  // Tracking — verified against production, where Job Tracking's Contract ID is
+  // blank for email-ingested loads and holds a numeric reference when set at
+  // all. Putting an agent's name ("Danna Garcia") here would make a dropped
+  // load diverge from an email-ingested one, which is the opposite of the goal.
+  set('rate', toAmount(txt(f['Rate']) || txt(f['Total Rate'])))
+  set('trailerNumber', txt(f['Trailer Number']))
+  set('brokerContact', brokerName)
+  set('brokerPhone', txt(f['Broker Phone']))
+  set('brokerEmail', txt(f['Broker Email']))
+  set('pickupInfo', txt(f['Pickup Company Information']))
+  set('pickupDate', toDateInput(f['Pickup Appointment Time']))
+  set('dropoffInfo', txt(f['Drop-off Company Information']))
+  set('deliveryDate', toDateInput(f['Delivery Appointment Time']))
+  set('details', txt(f['Details']))
+
+  // Addresses invalidate any coordinates already on the form (a leftover pin
+  // from a previous rate-con would silently mis-map the new load).
+  const pickupAddress = txt(f['Pickup Address'])
+  if (pickupAddress) {
+    set('pickupAddress', pickupAddress)
+    form.pickupLat = ''
+    form.pickupLng = ''
+    pickupResolvedAddress.value = ''
+    pickupSuggestions.value = []
+  }
+  const dropoffAddress = txt(f['Drop-off Address'])
+  if (dropoffAddress) {
+    set('dropoffAddress', dropoffAddress)
+    form.dropoffLat = ''
+    form.dropoffLng = ''
+    dropoffResolvedAddress.value = ''
+    dropoffSuggestions.value = []
+  }
+
+  const blanks = []
+  if (!txt(form.loadId)) blanks.push('Load ID')
+  if (form.rate === '' || form.rate == null) blanks.push('Rate')
+  if (!txt(form.pickupAddress)) blanks.push('Pickup Address')
+  if (!txt(form.dropoffAddress)) blanks.push('Drop-off Address')
+
+  prefillNote.value = {
+    fileName: fileName || 'the rate-con',
+    warnings: warnings || [],
+    blanks,
+    filledCount,
+  }
+
+  resolvePrefilledCoords()
+}
+
+// Best-effort geocode of the prefilled addresses so the load carries
+// coordinates (map + public tracker) without the dispatcher opening the picker.
+// The address text stays as the rate-con wrote it; only the resolved match is
+// shown underneath, so nothing is silently rewritten.
+async function resolvePrefilledCoords() {
+  const jobs = []
+  if (form.pickupAddress && !form.pickupLat) {
+    jobs.push(geocode.searchAddress(form.pickupAddress).then(r => {
+      if (r && r[0]) {
+        form.pickupLat = r[0].lat
+        form.pickupLng = r[0].lng
+        pickupResolvedAddress.value = r[0].displayName
+      }
+    }))
+  }
+  if (form.dropoffAddress && !form.dropoffLat) {
+    jobs.push(geocode.searchAddress(form.dropoffAddress).then(r => {
+      if (r && r[0]) {
+        form.dropoffLat = r[0].lat
+        form.dropoffLng = r[0].lng
+        dropoffResolvedAddress.value = r[0].displayName
+      }
+    }))
+  }
+  // searchAddress swallows its own failures; a miss just leaves the pin unset.
+  await Promise.all(jobs)
 }
 
 // Map picker state
@@ -426,6 +579,43 @@ onMounted(() => {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 1.5rem;
 }
+
+/* Rate-con banner sits above the first form section and shares its divider. */
+.ratecon-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--bg);
+}
+.prefill-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  color: #92400e;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.prefill-note-body { flex: 1; min-width: 0; }
+.prefill-list { margin: 0.3rem 0 0; padding-left: 1.1rem; }
+.prefill-blanks { margin-top: 0.25rem; font-weight: 600; }
+.prefill-dismiss {
+  flex-shrink: 0;
+  padding: 0 0.25rem;
+  background: none;
+  border: none;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+}
+.prefill-dismiss:hover { opacity: 1; }
 
 .form-section {
   margin-bottom: 1.5rem;
