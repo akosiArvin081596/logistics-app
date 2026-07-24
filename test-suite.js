@@ -95,8 +95,18 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   const fd = Object.values(dpd)[0];
   test("12. driverPayDetails dates stripped", fd ? !fd.dates : true);
 
-  // 13. investorEarnings field
-  test("13. investorEarnings computed", typeof inv.body?.production?.investorEarnings === "number");
+  // 13. Earnings to date has ONE definition. `investorEarnings` used to sit
+  //     alongside it computed off a different expense basis, disagreeing by $165
+  //     on live data. investorNetToDate is authoritative — the payout ledger,
+  //     EarningsSection and driver pay all settle on it — so assert both that
+  //     the rival is gone and that the survivor equals its own components,
+  //     rather than the old vacuous typeof check.
+  const p13 = inv.body?.production || {};
+  const sum13 = (p13.monthlyEarnings || []).reduce((s, m) => s + (m.investorEarnings || 0), 0);
+  test("13. investorNetToDate === sum(monthlyEarnings), with no rival field",
+    typeof p13.investorNetToDate === "number" &&
+    !("investorEarnings" in p13) &&
+    Math.round(sum13) === Math.round(p13.investorNetToDate));
 
   // 14. paidRevenue removed
   test("14. paidRevenue removed from response", inv.body?.production?.paidRevenue === undefined);
