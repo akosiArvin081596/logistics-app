@@ -99,7 +99,7 @@ async function handleUpdateTruck({ id, data }) {
 async function handleLinkageChanged() {
   try {
     await store.loadTrucks()
-    toast('Routemate link updated')
+    toast('Apollo ELD link updated')
   } catch (err) {
     toast(err.message || 'Failed to refresh trucks', 'error')
   }

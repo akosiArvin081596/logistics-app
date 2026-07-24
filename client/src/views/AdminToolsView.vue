@@ -209,7 +209,7 @@
       <div class="card-header">
         <div class="card-title">
           <div class="section-dot" style="background: #16a34a;"></div>
-          Routemate ELD Integration
+          Apollo ELD Integration
         </div>
         <button
           class="btn btn-primary btn-sm"
@@ -260,7 +260,7 @@
           </div>
           <p class="rm-help">
             Sync pulls the company vehicle inventory into LogisX so trucks can be linked
-            to Routemate devices on the <code>/trucks</code> page. Live GPS auto-syncs every 60s
+            to Apollo ELD devices on the <code>/trucks</code> page. Live GPS auto-syncs every 60s
             once the kill switch is on.
           </p>
         </div>
@@ -356,7 +356,7 @@ const skHealthLoading = ref(true)
 async function loadRoutemateHealth() {
   rmHealthLoading.value = true
   try {
-    rmHealth.value = await api.get('/api/routemate/health')
+    rmHealth.value = await api.get('/api/eld/health')
   } catch {
     rmHealth.value = null
   } finally {
@@ -378,11 +378,11 @@ async function runRoutemateSync() {
   if (rmSyncBusy.value) return
   rmSyncBusy.value = true
   try {
-    const r = await api.post('/api/admin/routemate/sync-now', {})
-    toast(`Synced ${r.vehiclesSynced} Routemate vehicle${r.vehiclesSynced === 1 ? '' : 's'}`)
+    const r = await api.post('/api/admin/eld/sync-now', {})
+    toast(`Synced ${r.vehiclesSynced} Apollo ELD vehicle${r.vehiclesSynced === 1 ? '' : 's'}`)
     await loadRoutemateHealth()
   } catch (err) {
-    toast(err?.message || 'Routemate sync failed', 'error')
+    toast(err?.message || 'Apollo ELD sync failed', 'error')
     await loadRoutemateHealth()
   } finally {
     rmSyncBusy.value = false

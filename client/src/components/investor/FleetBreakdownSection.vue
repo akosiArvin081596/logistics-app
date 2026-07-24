@@ -171,7 +171,7 @@
       <template v-if="detailType === 'miles'">
         <div class="modal-breakdown">
           <div class="modal-explain">
-            Total miles each truck has driven since odometer data started being captured. Sourced from Routemate ELD telemetry.
+            Total miles each truck has driven since odometer data started being captured. Sourced from Apollo ELD telemetry.
           </div>
           <div class="step-label">How It's Computed</div>
           <div class="modal-explain-sm">

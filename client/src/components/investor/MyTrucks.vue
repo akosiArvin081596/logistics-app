@@ -117,7 +117,7 @@
           </div>
           <div class="step-label">How It's Computed</div>
           <div class="modal-explain-sm">
-            We pull odometer readings and fuel-tank level estimates from Routemate ELD telemetry over the last 7 days. Tank capacity is assumed at 200 gallons. The result is miles driven divided by gallons inferred consumed.
+            We pull odometer readings and fuel-tank level estimates from Apollo ELD telemetry over the last 7 days. Tank capacity is assumed at 200 gallons. The result is miles driven divided by gallons inferred consumed.
           </div>
           <div class="step-label">Why It's Approximate</div>
           <div class="modal-explain-sm">
@@ -137,7 +137,7 @@
           </div>
           <div class="step-label">Where They Come From</div>
           <div class="modal-explain-sm">
-            Routemate ELD reads the truck's OBD-II / J1939 bus continuously and forwards any active fault codes to us. We store them in <code>routemate_fault_codes</code> and surface a count here.
+            Apollo ELD reads the truck's OBD-II / J1939 bus continuously and forwards any active fault codes to us. We store them in <code>eld_fault_codes</code> and surface a count here.
           </div>
           <div class="step-label">How To Clear A Fault</div>
           <div class="modal-explain-sm">
@@ -188,7 +188,7 @@ const fuelByTruck = ref({})
 const faultCountByTruck = ref({})
 async function loadFuel() {
   try {
-    const r = await useApi().get(`/api/routemate/fuel/summary?days=7${previewQs('&')}`)
+    const r = await useApi().get(`/api/eld/fuel/summary?days=7${previewQs('&')}`)
     const map = {}
     for (const f of (r.trucks || [])) map[f.truckId] = f
     fuelByTruck.value = map
@@ -198,7 +198,7 @@ async function loadFuel() {
 }
 async function loadFaults() {
   try {
-    const r = await useApi().get(`/api/routemate/fault-codes/summary${previewQs('?')}`)
+    const r = await useApi().get(`/api/eld/fault-codes/summary${previewQs('?')}`)
     const map = {}
     for (const t of (r.trucks || [])) map[t.truckId] = t.openFaults || 0
     faultCountByTruck.value = map

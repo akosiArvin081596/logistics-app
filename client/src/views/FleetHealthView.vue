@@ -3,8 +3,8 @@
     <div class="page-header">
       <h2>Fleet Health</h2>
       <p class="page-desc">
-        Per-truck telemetry from Routemate ELD devices. Speed, idle time, and fuel level
-        update every 60 seconds. Trucks without a linked Routemate device or with no recent
+        Per-truck telemetry from Apollo ELD devices. Speed, idle time, and fuel level
+        update every 60 seconds. Trucks without a linked Apollo ELD device or with no recent
         ping appear as <span class="src-pill src-stale">stale</span> or
         <span class="src-pill src-unlinked">unlinked</span>.
       </p>
@@ -148,8 +148,8 @@ async function refresh() {
     // are cheap (one per-truck SQL count) so doing them every 30s is fine.
     const [fleet, fuel, faults] = await Promise.all([
       api.get('/api/admin/fleet-health'),
-      api.get('/api/routemate/fuel/summary?days=7').catch(() => ({ trucks: [] })),
-      api.get('/api/routemate/fault-codes/summary').catch(() => ({ trucks: [] })),
+      api.get('/api/eld/fuel/summary?days=7').catch(() => ({ trucks: [] })),
+      api.get('/api/eld/fault-codes/summary').catch(() => ({ trucks: [] })),
     ])
     trucks.value = fleet.trucks || []
     const fuelMap = {}
@@ -182,7 +182,7 @@ async function openFaultsModal(truck) {
   faultsForModal.value = []
   faultsLoading.value = true
   try {
-    const r = await api.get('/api/routemate/fault-codes')
+    const r = await api.get('/api/eld/fault-codes')
     faultsForModal.value = (r.faults || []).filter(f => f.truckId === truck.truckId)
   } catch {
     faultsForModal.value = []
@@ -201,7 +201,7 @@ function closeFaultsModal() {
 async function ackFault(faultId) {
   ackBusy.value = faultId
   try {
-    await api.post(`/api/routemate/fault-codes/${faultId}/ack`, {})
+    await api.post(`/api/eld/fault-codes/${faultId}/ack`, {})
     // Drop from the modal list immediately + decrement the per-truck count.
     faultsForModal.value = faultsForModal.value.filter(f => f.id !== faultId)
     if (faultsModalTruck.value) {

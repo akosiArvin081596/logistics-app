@@ -723,7 +723,7 @@
         </div>
 
         <div v-if="!ifta.trucks?.length" class="empty-msg">
-          No ELD mileage in this window. Try widening the date range, or link a truck to its Routemate vehicle on the Trucks page.
+          No ELD mileage in this window. Try widening the date range, or link a truck to its Apollo ELD vehicle on the Trucks page.
         </div>
 
         <!-- Compliance Fees -->

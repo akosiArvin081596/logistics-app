@@ -19,7 +19,7 @@
           <th>Current Driver</th>
           <th>Driver Pay</th>
           <th>Loads</th>
-          <th>Routemate</th>
+          <th>ELD</th>
           <th v-if="showOwner">Owner</th>
           <th v-if="canEdit"></th>
         </tr>
@@ -46,7 +46,7 @@
             <span
               v-if="truck.RoutemateVehicleId"
               class="rm-linked"
-              :title="`Routemate vehicle ID: ${truck.RoutemateVehicleId}`"
+              :title="`Apollo ELD vehicle ID: ${truck.RoutemateVehicleId}`"
             ><span class="rm-dot"></span>Linked</span>
             <button
               v-else-if="canEdit"
@@ -57,7 +57,7 @@
             <button
               v-if="truck.RoutemateVehicleId && canEdit"
               class="btn-unlink-rm"
-              title="Clear the Routemate device link"
+              title="Clear the Apollo ELD device link"
               @click.stop="handleUnlink(truck)"
             >&times;</button>
           </td>
@@ -80,9 +80,9 @@
     <Teleport to="body">
       <div v-if="showLinkRm" class="confirm-overlay" @click.self="closeLinkModal">
         <div class="confirm-dialog" style="max-width:560px;">
-          <h3>Link Truck {{ linkTruck?.UnitNumber || '' }} to a Routemate device</h3>
+          <h3>Link Truck {{ linkTruck?.UnitNumber || '' }} to an Apollo ELD device</h3>
           <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.85rem;">
-            Pick a Routemate vehicle from the company inventory. After linking, live GPS,
+            Pick an Apollo ELD vehicle from the company inventory. After linking, live GPS,
             fault codes, and fuel data flow against this truck.
           </p>
 
@@ -94,10 +94,10 @@
             >Auto-match by VIN ({{ linkTruck.VIN }})</button>
           </div>
 
-          <div v-if="linkLoading" class="rm-pick-empty">Loading Routemate vehicles...</div>
+          <div v-if="linkLoading" class="rm-pick-empty">Loading Apollo ELD vehicles...</div>
           <div v-else-if="linkError" class="rm-pick-error">{{ linkError }}</div>
           <div v-else-if="unlinkedVehicles.length === 0" class="rm-pick-empty">
-            No unlinked Routemate vehicles available. Run sync from Admin Tools to refresh.
+            No unlinked Apollo ELD vehicles available. Run sync from Admin Tools to refresh.
           </div>
           <div v-else class="rm-pick-list">
             <div
@@ -480,10 +480,10 @@ async function openLinkModal(truck) {
   showLinkRm.value = true
   linkLoading.value = true
   try {
-    const r = await api.get('/api/routemate/vehicles/unlinked')
+    const r = await api.get('/api/eld/vehicles/unlinked')
     unlinkedVehicles.value = r.vehicles || []
   } catch (err) {
-    linkError.value = err?.message || 'Failed to load Routemate vehicles.'
+    linkError.value = err?.message || 'Failed to load Apollo ELD vehicles.'
   } finally {
     linkLoading.value = false
   }
@@ -503,7 +503,7 @@ async function handleLink() {
   linkBusy.value = true
   linkError.value = ''
   try {
-    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, {
+    await api.post(`/api/trucks/${linkTruck.value.id}/link-eld`, {
       routemateVehicleId: pickedRoutemateId.value,
     })
     showLinkRm.value = false
@@ -512,7 +512,7 @@ async function handleLink() {
     // sends a PUT to /api/trucks for actual field edits).
     emit('linkage-changed', { id: linkTruck.value.id })
   } catch (err) {
-    linkError.value = err?.message || 'Failed to link Routemate vehicle.'
+    linkError.value = err?.message || 'Failed to link Apollo ELD vehicle.'
   } finally {
     linkBusy.value = false
   }
@@ -523,11 +523,11 @@ async function handleAutoLink() {
   linkBusy.value = true
   linkError.value = ''
   try {
-    await api.post(`/api/trucks/${linkTruck.value.id}/link-routemate`, { auto: true })
+    await api.post(`/api/trucks/${linkTruck.value.id}/link-eld`, { auto: true })
     showLinkRm.value = false
     emit('linkage-changed', { id: linkTruck.value.id })
   } catch (err) {
-    linkError.value = err?.message || 'No Routemate vehicle matches this VIN.'
+    linkError.value = err?.message || 'No Apollo ELD vehicle matches this VIN.'
   } finally {
     linkBusy.value = false
   }
@@ -536,7 +536,7 @@ async function handleAutoLink() {
 async function handleUnlink(truck) {
   // No confirm modal — unlink is reversible (admin can re-link any time).
   try {
-    await api.del(`/api/trucks/${truck.id}/link-routemate`)
+    await api.del(`/api/trucks/${truck.id}/link-eld`)
     emit('linkage-changed', { id: truck.id })
   } catch (err) {
     console.error('Routemate unlink failed:', err)
