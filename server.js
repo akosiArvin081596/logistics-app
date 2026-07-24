@@ -15822,7 +15822,14 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			lossCarriedIn: carry.carriedIn,   // earlier losses absorbed by this month
 			lossDeferred: carry.deferred,     // this month's own loss pushed forward
 			adjustment,
-			effectiveAmount: Math.round((r.amount || 0) + adjustment),
+			// A payout can be reduced to nothing but never inverted — a negative
+			// adjusted total is a debt the investor can't settle. The adjust
+			// endpoint rejects one outright; this clamp is the backstop for rows
+			// written before that guard existed. adjustmentApplied is the delta
+			// that ACTUALLY landed, so amount + adjustmentApplied === effectiveAmount
+			// always holds on a statement row, and the totals stay exact.
+			effectiveAmount: Math.max(0, Math.round((r.amount || 0) + adjustment)),
+			adjustmentApplied: Math.max(0, Math.round((r.amount || 0) + adjustment)) - Math.round(r.amount || 0),
 			adjustmentNote: r.adjustment_note || "",
 			adjustedBy: r.adjusted_by || "",
 			adjustedAt: r.adjusted_at || "",
@@ -15845,7 +15852,9 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		if (p.status === "owed") acc.totalOwed += p.effectiveAmount;
 		else if (p.status === "processing") acc.totalProcessing += p.effectiveAmount;
 		else if (p.status === "paid") acc.totalPaid += p.effectiveAmount;
-		acc.totalAdjustments += Number(p.adjustment || 0);
+		// Sum what LANDED, not what was requested — a clamped deduction only
+		// moved the row as far as $0, so the banner identity stays exact.
+		acc.totalAdjustments += Number(p.adjustmentApplied || 0);
 		return acc;
 	}, { totalOwed: 0, totalProcessing: 0, totalPaid: 0, totalAdjustments: 0 });
 	totals.totalOwed = Math.round(totals.totalOwed);
@@ -17110,6 +17119,16 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), (req, re
 		// is Math.round'd), so keeping the adjustment whole makes amount+adjustment
 		// exact and avoids a cents mismatch between the stored delta and effectiveAmount.
 		const rounded = Math.round(adjustment);
+		// A payout can be reduced to nothing but never inverted: a negative adjusted
+		// total is a debt the investor cannot settle, the same nonsense the loss
+		// carry-forward removed. Reject rather than silently clamp, so the admin
+		// sees the ceiling and can decide, instead of having their number altered.
+		const base = Math.round(payout.amount || 0);
+		if (base + rounded < 0) {
+			return res.status(400).json({
+				error: `Deduction exceeds the payout. This period is ${base < 0 ? "$0" : "$" + base.toLocaleString()}, so the largest deduction is ${base <= 0 ? "$0" : "−$" + base.toLocaleString()}.`,
+			});
+		}
 		const nowIso = new Date().toISOString();
 		const actor = req.session.user.username || "";
 		const oldAdjustment = Number(payout.adjustment || 0);
@@ -17134,7 +17153,7 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), (req, re
 			success: true,
 			payout: {
 				...updated,
-				effectiveAmount: Math.round((updated.amount || 0) + Number(updated.adjustment || 0)),
+				effectiveAmount: Math.max(0, Math.round((updated.amount || 0) + Number(updated.adjustment || 0))),
 			},
 		});
 	} catch (err) {
