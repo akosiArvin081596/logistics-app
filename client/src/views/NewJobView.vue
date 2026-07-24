@@ -322,10 +322,12 @@ function onRateConExtracted(fields, warnings, pdfBase64, fileName) {
 
   const brokerName = txt(f['Broker Name'])
   set('loadId', txt(f['Load Number']))
-  // The email pipeline stores the brokerage in Contract ID (n8n "RATE UPDATE"
-  // node sets Contract ID = Broker Name), so a hand-dropped load matches one
-  // that arrived by email.
-  set('contractId', brokerName)
+  // Deliberately NOT prefilling Contract ID. The n8n "RATE UPDATE" node writes
+  // Contract ID = Broker Name only on the *Payments Table* tab, never on Job
+  // Tracking — verified against production, where Job Tracking's Contract ID is
+  // blank for email-ingested loads and holds a numeric reference when set at
+  // all. Putting an agent's name ("Danna Garcia") here would make a dropped
+  // load diverge from an email-ingested one, which is the opposite of the goal.
   set('rate', toAmount(txt(f['Rate']) || txt(f['Total Rate'])))
   set('trailerNumber', txt(f['Trailer Number']))
   set('brokerContact', brokerName)
