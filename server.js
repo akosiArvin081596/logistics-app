@@ -21,7 +21,7 @@ const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
 const scankit = require("./lib/scankit-client");
-const bisonInvoice = require("./lib/bison-invoice");
+const brokerInvoice = require("./lib/broker-invoice");
 const { appendGmailDraft } = require("./lib/imap-draft");
 const { runReceiptOcr } = require("./lib/receipt-ocr");
 const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDetailed, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
@@ -12282,9 +12282,10 @@ app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 });
 
 // ============================================================
-// Draft Bison Invoice — assemble invoice + supporting docs, POST to n8n
-// which creates a Gmail draft. LogisX does ALL the data work; n8n only
-// turns the assembled payload into a draft. See lib/bison-invoice.js.
+// Draft Invoice — assemble invoice + supporting docs for ANY broker and
+// write a Gmail draft (IMAP), falling back to n8n. LogisX does ALL the data
+// work; n8n only turns the assembled payload into a draft. Bison is no
+// longer a gate, only a branch (its own AP inbox). See lib/broker-invoice.js.
 // ============================================================
 
 // Lazily-created Drive client. Reuses the same service-account `auth` as
@@ -12316,7 +12317,7 @@ async function fetchDocumentBytes(doc) {
 		try {
 			if (fs.existsSync(localPath)) return fs.readFileSync(localPath);
 		} catch (e) {
-			console.error("Bison invoice: local doc read failed:", e.message);
+			console.error("Draft invoice: local doc read failed:", e.message);
 		}
 	}
 	// 2) Drive API (files.get alt=media) by drive_file_id.
@@ -12329,7 +12330,7 @@ async function fetchDocumentBytes(doc) {
 			);
 			return Buffer.from(resp.data);
 		} catch (e) {
-			console.error("Bison invoice: Drive doc fetch failed:", e.message);
+			console.error("Draft invoice: Drive doc fetch failed:", e.message);
 		}
 	}
 	return null;
@@ -12372,7 +12373,7 @@ async function getRateConBytes(loadId, body) {
 				if (buffer && buffer.length) return { buffer, fileName: `${orderNumber}.pdf` };
 			}
 		} catch (e) {
-			console.error("Bison invoice: rate-con Drive fetch failed:", e.message);
+			console.error("Draft invoice: rate-con Drive fetch failed:", e.message);
 		}
 	}
 
@@ -12400,10 +12401,12 @@ async function getRateConBytes(loadId, body) {
 	return { buffer: null, fileName: `${orderNumber || "ratecon"}.pdf` };
 }
 
-// POST /api/loads/:loadId/draft-bison-invoice
+// POST /api/loads/:loadId/draft-invoice  (alias: .../draft-bison-invoice)
 // Restricted to Super Admin + Dispatcher (the roles that run dispatch ops).
+// The legacy Bison-specific path stays registered so any external caller
+// (bookmarks, n8n, a cached SPA bundle) keeps working — same handler.
 app.post(
-	"/api/loads/:loadId/draft-bison-invoice",
+	["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],
 	requireRole("Super Admin", "Dispatcher"),
 	async (req, res) => {
 		try {
@@ -12436,17 +12439,26 @@ app.post(
 				headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) ||
 				headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint/i.test(h));
 			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
+			const brokerNameCol = findCol(headers, /broker.*(contact|name)/i);
+			// The money column is literally "  Payment  " (real surrounding
+			// spaces) — matched on the trimmed header inside the helper.
+			const paymentCol = brokerInvoice.findPaymentColumn(headers);
 
 			const brokerEmail = emailCol ? (load[emailCol] || "").toString().trim() : "";
+			const brokerContactName = brokerNameCol ? (load[brokerNameCol] || "").toString().trim() : "";
 			const status = statusCol ? (load[statusCol] || "").toString().trim() : "";
 			const sheetTrailer = trailerCol ? (load[trailerCol] || "").toString().trim() : "";
 
-			// 2) Guard: must be a Bison load AND delivered/completed.
-			if (!bisonInvoice.isBisonLoad({ email: brokerEmail })) {
-				return res.status(400).json({
-					error: "This load is not a Bison Transport load (broker email is not @bisontransport.com).",
-				});
-			}
+			// 2) Broker identity. Every broker can be invoiced now — the Bison
+			//    check is a BRANCH (it picks the AP inbox), no longer a gate.
+			//    The sheet has no brokerage-company column, so the name is
+			//    resolved from the email domain; see lib/broker-invoice.js.
+			const brokerCtx = { brokerEmail, brokerContactName };
+			const isBison = brokerInvoice.isBisonLoad({ email: brokerEmail });
+			const brokerName = brokerInvoice.resolveBrokerName(brokerCtx);
+			const invoiceTo = brokerInvoice.resolveInvoiceTo(brokerCtx);
+
+			//    The delivered/completed gate is unchanged.
 			if (!/delivered|completed|pod received/i.test(status)) {
 				return res.status(400).json({
 					error: `Load must be delivered/completed to draft an invoice (current status: "${status || "unknown"}").`,
@@ -12466,10 +12478,12 @@ app.post(
 			const { buffer: rateconBuffer, fileName: rateconFileName } = await getRateConBytes(loadId, req.body);
 
 			// 4) Extract the rate-con fields (deterministic text scan → Gemini fallback).
-			//    The Gemini fallback reuses the shared runRateConGemini() helper; it
-			//    only fires when the rate-con has no usable text layer AND the API key
-			//    is configured.
-			const rcFields = await bisonInvoice.extractRateConFields(rateconBuffer, {
+			//    The Gemini fallback reuses the shared runRateConGemini() helper.
+			//    NOTE: only the Bison rate-con has the "Billing Information" block
+			//    the deterministic scan understands — every OTHER broker takes the
+			//    Gemini path, so it is the primary path now, not an edge case
+			//    (verified against real C.H. Robinson / Navisphere rate-cons).
+			const rcFields = await brokerInvoice.extractRateConFields(rateconBuffer, {
 				geminiExtract: GEMINI_API_KEY
 					? async (buf) => {
 							const b64 = Buffer.from(buf).toString("base64");
@@ -12477,21 +12491,28 @@ app.post(
 							return runRateConGemini(b64);
 					  }
 					: null,
-				onGeminiError: (e) => console.error("Bison invoice: Gemini fallback failed:", e.message),
+				onGeminiError: (e) => console.error("Draft invoice: Gemini fallback failed:", e.message),
 			});
 
+			// 4b) Order number: the rate-con's when we got one, else the load ID
+			//     (which IS the order number for Bison, and is the reference the
+			//     broker booked under for everyone else). No longer a hard stop.
+			const orderNumber = rcFields.orderNumber || loadId.replace(/^#/, "").trim();
 			if (!rcFields.orderNumber) {
-				return res.status(422).json({
-					error:
-						"Could not read the rate-con. Order #, PO #, Move # and Trailer could not be extracted (no text layer and Gemini fallback unavailable or failed).",
-					code: "RATECON_UNREADABLE",
-				});
+				console.log(
+					`Draft invoice ${loadId}: no order # from the rate-con (gemini=${GEMINI_API_KEY ? "on" : "off"}) — falling back to the load ID.`,
+				);
 			}
 
 			// 5) Validation: rate-con trailer must match the load's stored trailer.
 			//    On mismatch, do NOT call n8n — return 409 so the frontend can alert.
+			//    Only compare when the extracted trailer actually looks like a
+			//    trailer id (contains a digit): a guard that blocks on garbage is
+			//    worse than no guard, and prose like "Trailer Required" has been
+			//    seen leaking out of loosely-labelled rate-cons.
 			const normTrailer = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-			if (sheetTrailer && rcFields.trailerNumber && normTrailer(sheetTrailer) !== normTrailer(rcFields.trailerNumber)) {
+			const rcTrailerUsable = /\d/.test(String(rcFields.trailerNumber || ""));
+			if (sheetTrailer && rcTrailerUsable && normTrailer(sheetTrailer) !== normTrailer(rcFields.trailerNumber)) {
 				return res.status(409).json({
 					error: `Trailer mismatch: rate-con says ${rcFields.trailerNumber} but the load is on trailer ${sheetTrailer}. Invoice not drafted.`,
 					code: "TRAILER_MISMATCH",
@@ -12499,23 +12520,43 @@ app.post(
 				});
 			}
 
-			// 6) Invoice identifiers + dates. invoiceId/invoiceDate use the
+			// 6) Invoice total: the rate-con's Total Rate, else the load's
+			//    "  Payment  " cell from the sheet. HARD STOP when neither
+			//    yields a positive number — this endpoint moves money, and a
+			//    $0.00 invoice mailed to a broker is worse than an error.
+			const rcTotal = brokerInvoice.parseMoney(rcFields.totalRate);
+			const sheetTotal = paymentCol ? brokerInvoice.parseMoney(load[paymentCol]) : 0;
+			const totalAmount = rcTotal > 0 ? rcTotal : sheetTotal;
+			if (!(totalAmount > 0)) {
+				return res.status(422).json({
+					error:
+						`Invoice total is unknown for load ${loadId} — the rate-con had no readable Total Rate` +
+						(paymentCol ? ` and the sheet's ${paymentCol.trim()} column is empty` : " and the sheet has no payment column") +
+						". Refusing to draft a $0.00 invoice. Add the rate to the load, then retry." +
+						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
+					code: "INVOICE_TOTAL_UNKNOWN",
+				});
+			}
+
+			// 6b) Invoice identifiers + dates. invoiceId/invoiceDate use the
 			//    button-click date (today, server local). deliveryDate is the
 			//    load's ACTUAL delivery/completion date from the sheet — never
 			//    today, never the rate-con scheduled date.
 			const today = new Date();
 			// dryRun previews the next number without consuming it; a real draft commits it.
 			const invoiceId = dryRun ? peekInvoiceNumber(today) : nextInvoiceNumber(today);
-			const invoiceDate = bisonInvoice.formatDate(today);
+			const invoiceDate = brokerInvoice.formatDate(today);
 			const rawDeliveryDate = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
-			const deliveryDate = bisonInvoice.formatDate(rawDeliveryDate);
-			const total = rcFields.totalRate || "";
+			const deliveryDate = brokerInvoice.formatDate(rawDeliveryDate);
+			const total = brokerInvoice.formatMoney(totalAmount);
 
 			// 7) Render the invoice PDF.
-			const invoiceHtml = bisonInvoice.buildInvoiceHtml({
+			const invoiceHtml = brokerInvoice.buildInvoiceHtml({
 				invoiceId,
 				invoiceDate,
-				orderNumber: rcFields.orderNumber,
+				brokerName,
+				invoiceTo,
+				orderNumber,
 				poNumber: rcFields.poNumber,
 				deliveryDate,
 				total,
@@ -12523,25 +12564,49 @@ app.post(
 			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
 			const invoicePdfBase64 = Buffer.from(invoicePdf).toString("base64");
 
-			// 7b) Build the standard Bison email (body + signature) — the same
-			//     content the draft carries.
-			const draftSubject = `Bison Transport Order #${rcFields.orderNumber}`;
-			const draftHtml = bisonInvoice.buildBisonEmailHtml({
-				orderNumber: rcFields.orderNumber,
+			// 7b) Build the standard invoice email (body + signature) — the same
+			//     content the draft carries. For a Bison load brokerName is
+			//     "Bison Transport", so the subject renders exactly as before.
+			const draftSubject = brokerName
+				? `${brokerName} Order #${orderNumber}`
+				: `Order #${orderNumber}`;
+			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({
+				brokerName,
+				orderNumber,
 				moveNumber: rcFields.moveNumber,
 				poNumber: rcFields.poNumber,
 			});
+			// Bison's attachment name is left byte-identical; other brokers get
+			// their own name (a broker filing "Bison Invoice ..." would be odd).
+			const safeName = String(brokerName || "").replace(/[\\/:*?"<>|]+/g, " ").trim();
+			const invoiceFileName = isBison
+				? `Bison Invoice Order #${orderNumber}.pdf`
+				: `${safeName ? safeName + " " : ""}Invoice Order #${orderNumber}.pdf`;
 			const draftAttachments = [
-				{ filename: `Bison Invoice Order #${rcFields.orderNumber}.pdf`, content: invoicePdf, contentType: "application/pdf" },
+				{ filename: invoiceFileName, content: invoicePdf, contentType: "application/pdf" },
 				{ filename: podDoc.file_name || `${loadId}_POD.pdf`, content: podBuffer, contentType: "application/pdf" },
 			];
 			if (rateconBuffer && rateconBuffer.length) {
-				draftAttachments.push({ filename: `${rcFields.orderNumber}.pdf`, content: rateconBuffer, contentType: "application/pdf" });
+				draftAttachments.push({ filename: `${orderNumber}.pdf`, content: rateconBuffer, contentType: "application/pdf" });
 			}
 
-			// Dry-run / preview: generate everything but create no draft.
+			// Dry-run / preview: generate everything but create no draft. Echo
+			// the resolved routing so a reviewer can verify recipient/subject/
+			// total without opening the PDF.
 			if (dryRun) {
-				return res.json({ success: true, preview: true, dryRun: true, invoiceId, invoicePdfBase64 });
+				return res.json({
+					success: true,
+					preview: true,
+					dryRun: true,
+					invoiceId,
+					brokerName,
+					to: invoiceTo.email,
+					subject: draftSubject,
+					orderNumber,
+					total,
+					totalSource: rcTotal > 0 ? "ratecon" : "sheet",
+					invoicePdfBase64,
+				});
 			}
 
 			// PRIMARY: create the Gmail draft directly via IMAP APPEND using the
@@ -12556,7 +12621,7 @@ app.post(
 						user: gmailUser,
 						pass: gmailPass,
 						from: `LogisX Inc. <${gmailUser}>`,
-						to: "QPinvoicesUSA@bisontransport.com",
+						to: invoiceTo.email,
 						subject: draftSubject,
 						html: draftHtml,
 						attachments: draftAttachments,
@@ -12564,7 +12629,7 @@ app.post(
 					return res.json({ success: true, invoiceId, via: "imap", draftMailbox: "[Gmail]/Drafts" });
 				} catch (e) {
 					imapError = e;
-					console.error("Bison invoice: IMAP draft failed:", e.message);
+					console.error("Draft invoice: IMAP draft failed:", e.message);
 					// fall through to the n8n fallback (if configured), else surface the error below
 				}
 			}
@@ -12575,16 +12640,17 @@ app.post(
 			if (webhookUrl && webhookSecret) {
 				const payload = {
 					loadId,
-					orderNumber: rcFields.orderNumber,
+					brokerName,
+					orderNumber,
 					moveNumber: rcFields.moveNumber,
 					poNumber: rcFields.poNumber,
-					to: "QPinvoicesUSA@bisontransport.com",
+					to: invoiceTo.email,
 					invoicePdfBase64,
-					invoiceFileName: `Bison Invoice Order #${rcFields.orderNumber}.pdf`,
+					invoiceFileName,
 					podPdfBase64: Buffer.from(podBuffer).toString("base64"),
 					podFileName: podDoc.file_name || `${loadId}_POD.pdf`,
 					rateconPdfBase64: rateconBuffer ? Buffer.from(rateconBuffer).toString("base64") : "",
-					rateconFileName: `${rcFields.orderNumber}.pdf`,
+					rateconFileName: `${orderNumber}.pdf`,
 				};
 				try {
 					const controller = new AbortController();
@@ -12602,7 +12668,7 @@ app.post(
 					if (!r.ok) return res.status(502).json({ error: `n8n webhook returned ${r.status}`, details: n8nResponse });
 					return res.json({ success: true, invoiceId, via: "n8n", draftId: n8nResponse && (n8nResponse.draftId || n8nResponse.id), n8n: n8nResponse });
 				} catch (e) {
-					console.error("Bison invoice: n8n webhook call failed:", e.message);
+					console.error("Draft invoice: n8n webhook call failed:", e.message);
 					return res.status(502).json({ error: "Failed to reach the invoice-draft webhook." });
 				}
 			}
@@ -12620,8 +12686,8 @@ app.post(
 			// call still yields something useful.
 			return res.json({ success: true, preview: true, invoiceId, invoicePdfBase64, note: "No Gmail/n8n draft target configured — invoice generated (preview only)." });
 		} catch (err) {
-			console.error("Draft Bison invoice error:", err.message);
-			return res.status(500).json({ error: "Failed to draft Bison invoice." });
+			console.error("Draft invoice error:", err.message);
+			return res.status(500).json({ error: "Failed to draft the invoice." });
 		}
 	},
 );
