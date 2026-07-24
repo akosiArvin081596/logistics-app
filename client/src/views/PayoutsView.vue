@@ -109,7 +109,9 @@
           <thead>
             <tr>
               <th>Period</th>
-              <th class="num">Payout</th>
+              <th class="num">Amount</th>
+              <th class="num">Adjustment</th>
+              <th class="num">Adjusted total</th>
               <th>Due date</th>
               <th>Status</th>
               <th class="action-head"></th>
@@ -118,10 +120,14 @@
           <tbody>
             <tr v-for="p in inv.payouts" :key="p.id">
               <td class="mono">{{ p.periodLabel }}</td>
+              <!-- Amount / Adjustment / Adjusted total broken out, mirroring the
+                   investor statement so both read the same arithmetic. -->
+              <td class="num">{{ fmt(p.amount) }}</td>
               <td class="num">
-                <span class="amt-main">{{ fmt(effective(p)) }}</span>
-                <span v-if="p.adjustment" class="adj-badge" :title="adjTitle(p)">adj {{ p.adjustment > 0 ? '+' : '−' }}{{ fmt(Math.abs(p.adjustment)) }}</span>
+                <span v-if="p.adjustment" class="adj-badge" :title="adjTitle(p)">{{ p.adjustment > 0 ? '+' : '−' }}{{ fmt(Math.abs(p.adjustment)) }}</span>
+                <span v-else class="dim">&mdash;</span>
               </td>
+              <td class="num"><span class="amt-main">{{ fmt(effective(p)) }}</span></td>
               <td class="dim">{{ fmtDate(p.dueDate) }}</td>
               <td><span :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span></td>
               <td class="action-cell">

@@ -58,11 +58,17 @@
       <!-- Past months -->
       <div class="table-label">Past Months</div>
       <div v-if="visiblePayouts.length === 0" class="empty-msg">No past payouts yet.</div>
-      <table v-else class="data-table">
+      <!-- Amount / Adjustment / Adjusted total are broken out as their own
+           columns rather than collapsed into one figure with a badge, so a
+           corrected month shows its full arithmetic on the statement. -->
+      <div v-else class="table-wrap">
+      <table class="data-table">
         <thead>
           <tr>
             <th>Period</th>
-            <th>Payout</th>
+            <th class="num">Amount</th>
+            <th class="num">Adjustment</th>
+            <th class="num">Adjusted total</th>
             <th>Due date</th>
             <th>Status</th>
             <th v-if="isSuperAdmin"></th>
@@ -71,9 +77,9 @@
         <tbody>
           <tr v-for="p in visiblePayouts" :key="p.id">
             <td>{{ p.periodLabel }}</td>
-            <td class="mono-sm">
-              <div>{{ fmt(effective(p)) }}</div>
-              <!-- Explain a month that paid out less than it earned, so a reduced
+            <td class="mono-sm num">
+              <div>{{ fmt(p.amount) }}</div>
+              <!-- Explain a month that pays out less than it earned, so a reduced
                    figure never looks like money went missing. -->
               <div v-if="p.lossDeferred" class="inv-carry">
                 {{ fmt(p.lossDeferred) }} loss carried to later months
@@ -81,10 +87,20 @@
               <div v-else-if="p.lossCarriedIn" class="inv-carry">
                 earned {{ fmt(p.monthEarnings) }} · {{ fmt(p.lossCarriedIn) }} applied to an earlier loss
               </div>
-              <div v-if="p.adjustment" class="inv-adj">
-                adj {{ p.adjustment > 0 ? '+' : '−' }}{{ fmt(Math.abs(p.adjustment)) }}
-                <span v-if="p.adjustmentNote" class="inv-adj-note">· {{ p.adjustmentNote }}</span>
-              </div>
+            </td>
+            <td class="mono-sm num">
+              <template v-if="p.adjustment">
+                <div class="inv-adj-amt">{{ p.adjustment > 0 ? '+' : '−' }}{{ fmt(Math.abs(p.adjustment)) }}</div>
+                <div v-if="p.adjustmentNote" class="inv-adj-note">{{ p.adjustmentNote }}</div>
+              </template>
+              <span v-else class="dim">&mdash;</span>
+            </td>
+            <!-- A negative adjusted total shouldn't read as a normal figure. The
+                 adjust API accepts any period (server.js: no status guard), so a
+                 large enough deduction can still invert a row even though loss
+                 months no longer can. Flag it rather than let it blend in. -->
+            <td class="mono-sm num">
+              <strong :class="{ 'amt-negative': effective(p) < 0 }">{{ fmt(effective(p)) }}</strong>
             </td>
             <td class="mono-sm">{{ settleable(p) ? fmtDate(p.dueDate) : '—' }}</td>
             <td>
@@ -117,6 +133,7 @@
           </tr>
         </tbody>
       </table>
+      </div>
     </template>
   </div>
 </template>
@@ -361,6 +378,14 @@ onMounted(loadPayouts)
 
 /* Adjustment line shown to the investor under the effective amount */
 .inv-adj { font-size: 0.7rem; color: #b45309; margin-top: 0.1rem; font-family: inherit; }
+.inv-adj-amt { color: #b45309; }
+.amt-negative { color: #b91c1c; }
+/* Seven columns don't fit a phone — scroll the table, never the page. Dates and
+   period labels get nowrap so they don't shred into three lines under pressure. */
+.table-wrap { overflow-x: auto; }
+.data-table .num { text-align: right; white-space: nowrap; }
+.data-table th, .data-table td { white-space: nowrap; }
+.data-table .inv-carry, .data-table .inv-adj-note { white-space: normal; }
 .inv-carry { font-size: 0.7rem; color: #64748b; margin-top: 0.1rem; font-family: inherit; font-style: italic; }
 .totals-note { display: flex; flex-direction: column; gap: 0.15rem; margin: 0.5rem 0 0.9rem; font-size: 0.74rem; color: var(--text-dim); }
 .inv-adj-note { color: #64748b; }
