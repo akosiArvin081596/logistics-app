@@ -1,8 +1,13 @@
 const http = require("http");
 
+// Target port. Defaults to 3000 (local dev), but MUST be overridable: on the
+// VPS 3000 is PRODUCTION and this suite writes (it logs an expense in test 46).
+// Run against staging with TEST_PORT=3003.
+const PORT = Number(process.env.TEST_PORT) || 3000;
+
 function req(method, path, body, cookies) {
   return new Promise((resolve, reject) => {
-    const opts = { hostname: "localhost", port: 3000, path, method, headers: { "Content-Type": "application/json" } };
+    const opts = { hostname: "localhost", port: PORT, path, method, headers: { "Content-Type": "application/json" } };
     if (cookies) opts.headers.Cookie = cookies;
     const r = http.request(opts, res => {
       let d = ""; res.on("data", c => d += c);
@@ -20,9 +25,14 @@ function req(method, path, body, cookies) {
 
 const results = [];
 function test(name, pass) { results.push({ name, pass }); }
+// Some payout guards need a specific row shape (a $0 period, a payable period)
+// that seeded data may not contain. Mark those SKIP rather than passing them
+// vacuously — a green run that silently never exercised the guard is how the
+// regressions these tests exist for got shipped in the first place.
+function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
 (async () => {
-  console.log("=== RUNNING 46 TESTS ===\n");
+  console.log("=== RUNNING 58 TESTS against localhost:" + PORT + " ===\n");
 
   // 1. Server health
   const health = await req("GET", "/api/auth/setup-check");
@@ -253,13 +263,140 @@ function test(name, pass) { results.push({ name, pass }); }
   test("46. Vendor normalization round-trip (Pilot → PILOT FLYING J)",
     ve.status === 200 && ve.body?.success === true && veList.status === 200 && veNormalized);
 
+  // ==========================================================================
+  // 47-58. Investor payout ledger.
+  //
+  // Every case here is a REGRESSION that reached a client, not a hypothetical:
+  //   - the Load Reports banner said "$6,389 still owed" while the Payouts card
+  //     on the same page said "Total Owed $0" (the open month was being counted
+  //     as owed), and that was itself a re-break of an earlier fix
+  //   - loss months were stored as NEGATIVE payout rows ("-$970 owed", with a
+  //     due date and a Mark Paid button)
+  //   - manual adjustments silently broke the banner's add-up property
+  // The identity in 53 is the load-bearing one: it is what makes "the numbers
+  // on this page reconcile" a testable property instead of a hope.
+  // ==========================================================================
+
+  // Investor-scoped: the ledger and the earnings figure must describe the SAME
+  // owner, so use the Investor session rather than an admin preview.
+  const invSelf = await req("GET", "/api/investor", null, ic);
+  const pay = await req("GET", "/api/investor/payouts", null, ic);
+  const P = pay.body || {};
+  const rows = Array.isArray(P.payouts) ? P.payouts : [];
+  const T = P.totals || {};
+
+  // 47. /api/investor must NOT publish a "still owed" figure. It used to return
+  //     investorStillOwed = netToDate - paid, which swept the still-open month
+  //     into "owed". Owed is the payout ledger's answer, and only its.
+  const prod47 = invSelf.body?.production || {};
+  test("47. /api/investor publishes no rival 'still owed' figure",
+    invSelf.status === 200 && !("investorStillOwed" in prod47) && !("investorPaidToDate" in prod47));
+
+  // 48. Ledger shape, including the fields the banner needs to explain itself.
+  test("48. Payout ledger returns payouts/currentMonth/totals with adjustment + carried-loss totals",
+    pay.status === 200 && Array.isArray(P.payouts) && !!P.currentMonth &&
+    typeof T.totalOwed === "number" && typeof T.totalProcessing === "number" &&
+    typeof T.totalPaid === "number" && typeof T.totalAdjustments === "number" &&
+    typeof T.carriedLossOutstanding === "number");
+
+  // 49. Payouts are per-owner: a Super Admin previewing nobody has no single
+  //     ledger to return. The banner depends on this failing cleanly (it
+  //     degrades to earnings-only rather than rendering a $0 owed).
+  const payNoOwner = await req("GET", "/api/investor/payouts", null, ac);
+  test("49. Payouts require an owner — Super Admin without ?as_user_id gets 400",
+    payNoOwner.status === 400);
+
+  // 50. No negative payout row, ever. Losses carry forward; adjustments clamp.
+  test("50. No payout row has a negative effective amount",
+    rows.every(r => Number(r.effectiveAmount) >= 0));
+
+  // 51. Row arithmetic holds: Amount + Adjustment = Adjusted total, using the
+  //     adjustment that ACTUALLY landed (an over-deduction clamps at $0).
+  test("51. Every row: amount + adjustmentApplied === effectiveAmount",
+    rows.every(r => Math.round(r.amount || 0) + Number(r.adjustmentApplied || 0) === Number(r.effectiveAmount)));
+
+  // 52. A month that deferred a loss pays nothing that month (the loss moves to
+  //     later months instead of inverting this row).
+  test("52. A loss-deferring month pays $0",
+    rows.every(r => !(Number(r.lossDeferred) > 0) || Number(r.amount) === 0));
+
+  // 53. THE reconciliation identity. Every dollar earned sits in exactly one
+  //     bucket, and the two quantities that live between earnings and payable
+  //     (manual adjustments, still-unabsorbed carried loss) are accounted for:
+  //
+  //       paid + processing + owed + accruing == earned + adjustments + carriedLoss
+  //
+  //     Breaking this is precisely what the client reported, twice.
+  const earned53 = Number(prod47.investorNetToDate || 0);
+  const accruing53 = Number(P.currentMonth?.amountInProgress || 0);
+  const lhs53 = Number(T.totalPaid || 0) + Number(T.totalProcessing || 0) + Number(T.totalOwed || 0) + accruing53;
+  const rhs53 = earned53 + Number(T.totalAdjustments || 0) + Number(T.carriedLossOutstanding || 0);
+  test("53. Ledger reconciles: paid+processing+owed+accruing === earned+adjustments+carriedLoss",
+    invSelf.status === 200 && pay.status === 200 && lhs53 === rhs53);
+
+  // 54. The still-open month is never a settleable row — it is reported only as
+  //     currentMonth.amountInProgress. This is the root cause of the original
+  //     "$6,389 owed" report.
+  test("54. Current in-progress month is not a payout row",
+    !!P.currentMonth?.period && !rows.some(r => r.period === P.currentMonth.period));
+
+  // 55. A $0 period cannot be settled — "paid $0" is not a settlement.
+  const zeroRow = rows.find(r => Number(r.effectiveAmount) === 0 && r.status === "owed");
+  if (!zeroRow) {
+    skip("55. Cannot settle a $0 payout (409)", "no $0 owed row in seeded data");
+  } else {
+    const s55 = await req("POST", `/api/investor/payouts/${zeroRow.id}/status`, { status: "paid" }, ac);
+    test("55. Cannot settle a $0 payout (409)", s55.status === 409);
+  }
+
+  // 56. A deduction cannot exceed the payout it comes off. Kept inside the
+  //     pre-existing $10,000 magnitude cap, or that older guard fires first and
+  //     this ceiling is never reached.
+  const payableRow = rows.find(r => Number(r.effectiveAmount) > 0 && Number(r.amount) < 10000);
+  if (!payableRow) {
+    skip("56. Cannot over-deduct a payout (400)", "no payable row under the $10k cap in seeded data");
+  } else {
+    const over = -(Math.round(payableRow.amount) + 1);
+    const s56 = await req("PUT", `/api/investor/payouts/${payableRow.id}/adjust`,
+      { adjustment: over, adjustmentNote: "test-suite: must be rejected" }, ac);
+    test("56. Cannot over-deduct a payout (400)",
+      s56.status === 400 && /exceeds the payout/i.test(s56.body?.error || ""));
+  }
+
+  // 57. Rejected guards must not mutate. Re-read and compare the whole ledger.
+  const payAfter = await req("GET", "/api/investor/payouts", null, ic);
+  test("57. Rejected settle/adjust attempts leave the ledger unchanged",
+    payAfter.status === 200 && JSON.stringify(payAfter.body) === JSON.stringify(P));
+
+  // 58. Load report: gross revenue sums DELIVERED loads only, so the count
+  //     shown beside it must share that basis. "12 loads / $20,623" when 3 were
+  //     still in transit was the second defect in the reported screenshot.
+  const lr = await req("GET", "/api/investor/load-report?period=monthly", null, ic);
+  const periods = (lr.body && lr.body.periods) || [];
+  if (lr.status === 200 && periods.length === 0) {
+    // An investor with no loads legitimately has no periods — say so rather
+    // than passing an invariant that never ran.
+    skip("58. Load report splits completed vs in-transit and grosses only completed",
+      "investor has no load periods");
+  } else {
+    test("58. Load report splits completed vs in-transit and grosses only completed",
+      lr.status === 200 && periods.every(p =>
+        typeof p.completedCount === "number" && typeof p.inTransitCount === "number" &&
+        p.completedCount + p.inTransitCount === p.loadCount &&
+        p.completedCount === (p.loads || []).filter(l => l.completed).length &&
+        Math.round(p.grossRevenue) === Math.round((p.loads || []).filter(l => l.completed)
+          .reduce((s, l) => s + (l.rate || 0), 0))));
+  }
+
   // Results
   console.log("");
-  let p = 0, f = 0;
+  let p = 0, f = 0, s = 0;
   results.forEach(r => {
+    if (r.skipped) { console.log("  [SKIP] " + r.name + " — " + r.skipped); s++; p++; return; }
     console.log((r.pass ? "  [PASS]" : "  [FAIL]") + " " + r.name);
     if (r.pass) p++; else f++;
   });
-  console.log("\n" + p + " passed, " + f + " failed out of " + results.length + " tests");
+  console.log("\n" + p + " passed, " + f + " failed out of " + results.length + " tests"
+    + (s > 0 ? " (" + s + " skipped — see above)" : ""));
   if (f > 0) process.exit(1);
 })();
