@@ -48,7 +48,7 @@
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
             <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
             <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Open in Active Loads → Edit to fill the gaps.">⚠ Needs Review</span>
-            <button v-if="isBisonLoad" type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Generate the Bison invoice, attach the POD + rate-con, and save a Gmail draft for you to verify then send.">{{ drafting ? 'Drafting…' : '✉ Draft Invoice Email' }}</button>
+            <button type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Generate the invoice, attach the POD + rate-con, and save a Gmail draft for you to verify then send.">{{ drafting ? 'Drafting…' : '✉ Draft Invoice Email' }}</button>
           </div>
           <div v-if="draftResult" :style="draftMsgStyle">{{ draftResult.msg }}</div>
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
@@ -261,19 +261,12 @@ const sectionPatterns = [
 const hiddenCols = /broker|phone|email|contact|contract|address/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
 
-// --- Draft Invoice Email (Bison loads only) --------------------------------
+// --- Draft Invoice Email (every broker) ------------------------------------
 // One-click: the backend pulls the rate-con from Drive, generates the invoice,
-// attaches the POD, validates the trailer, and saves a Gmail draft via n8n.
-// Show the button only on Bison loads (broker email ends @bisontransport.com —
-// the same rule the endpoint enforces); the backend is the real authority.
-const brokerEmailCol = computed(() =>
-  props.headers.find(h => /^email$/i.test(h)) || props.headers.find(h => /broker.*email|email/i.test(h)) || null
-)
-const isBisonLoad = computed(() => {
-  if (!selectedJob.value || !brokerEmailCol.value) return false
-  const e = String(selectedJob.value[brokerEmailCol.value] || '').trim().toLowerCase()
-  return /bisontransport\.com$/.test(e)
-})
+// attaches the POD, validates the trailer, and saves a Gmail draft. The button
+// shows on every completed load — the broker (and therefore the recipient and
+// the "Invoice To" block) is resolved server-side, which stays the authority
+// on whether a given load can actually be invoiced.
 const drafting = ref(false)
 const draftResult = ref(null) // { ok: boolean, msg: string } | null
 const draftBtnStyle = computed(() => ({
@@ -294,7 +287,7 @@ async function draftInvoice() {
   if (!loadIdValue.value || drafting.value) return
   drafting.value = true; draftResult.value = null
   try {
-    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-bison-invoice`, {})
+    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-invoice`, {})
     draftResult.value = {
       ok: true,
       msg: r.via
