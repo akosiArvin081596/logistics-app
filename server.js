@@ -15737,6 +15737,38 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		user, isSuperAdmin: false, investorDriverSet, investorOwnerId: ownerId, config,
 	});
 
+	// ---- Loss carry-forward -------------------------------------------------
+	// A month where costs outran revenue (e.g. driver pay $12,250 on $10,310 of
+	// revenue) yields NEGATIVE investorEarnings. Storing that verbatim produced a
+	// "-$970 owed" payout row with a due date and a "mark paid" action — a debt
+	// the investor cannot settle and nonsense to show on a statement.
+	//
+	// Instead the loss carries forward as a deficit and is absorbed by later
+	// profitable months, which is where it belongs economically. Payable is never
+	// negative, and the lifetime total is unchanged: a month's shortfall reduces
+	// what later months pay out rather than inverting a single row.
+	//
+	// Walks oldest → newest (monthlyEarnings is ordered that way), so the result
+	// is deterministic and the reconcile stays idempotent.
+	const carryByPeriod = {};
+	{
+		let deficit = 0;
+		for (const m of monthlyEarnings) {
+			const raw = Math.round(m.investorEarnings);
+			let payable, carriedIn = 0, deferred = 0;
+			if (raw < 0) {
+				deferred = -raw;      // this month's loss joins the running deficit
+				deficit += deferred;
+				payable = 0;
+			} else {
+				carriedIn = Math.min(deficit, raw); // earlier losses eat into this month
+				payable = raw - carriedIn;
+				deficit -= carriedIn;
+			}
+			carryByPeriod[m.month] = { raw, payable, carriedIn, deferred };
+		}
+	}
+
 	// Reconcile completed PAST months into investor_payouts (idempotent).
 	const findRow = db.prepare("SELECT * FROM investor_payouts WHERE owner_id = ? AND period = ?");
 	const insertRow = db.prepare(
@@ -15748,24 +15780,25 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	const reconcile = db.transaction((months) => {
 		for (const m of months) {
 			if (m.isCurrentMonth || m.month >= currentMonthKey) continue; // only completed past months
-			const amount = Math.round(m.investorEarnings);
+			const amount = carryByPeriod[m.month].payable;
 			const existing = findRow.get(ownerId, m.month);
 			if (!existing) {
 				insertRow.run(ownerId, m.month, amount, lastFridayOfFollowingMonth(m.month));
 			} else if (existing.status === "owed" && existing.amount !== amount) {
 				// Refresh amount ONLY for still-owed rows — never overwrite a
 				// processing/paid settlement's amount when live earnings recompute.
+				// This is also what heals rows written before carry-forward existed.
 				refreshAmount.run(amount, ownerId, m.month);
 			}
 		}
 	});
 	reconcile(monthlyEarnings);
 
-	// Live-recomputed earnings per period — what the month WOULD settle at now
+	// Live-recomputed PAYABLE per period — what the month would settle at now
 	// (e.g. after late receipts were logged), so the admin console can show the
-	// gap vs the frozen `amount`. Keyed period → rounded investorEarnings.
+	// gap vs the frozen `amount`. Post-carry-forward, so it compares like for like.
 	const recomputedByPeriod = {};
-	for (const m of monthlyEarnings) recomputedByPeriod[m.month] = Math.round(m.investorEarnings);
+	for (const m of monthlyEarnings) recomputedByPeriod[m.month] = carryByPeriod[m.month].payable;
 
 	// Read back the settled rows (period DESC). effectiveAmount = amount +
 	// adjustment is the corrected figure everything downstream (totals, display)
@@ -15775,12 +15808,19 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	).all(ownerId);
 	const payouts = rows.map((r) => {
 		const adjustment = Number(r.adjustment || 0);
+		const carry = carryByPeriod[r.period] || { raw: r.amount || 0, carriedIn: 0, deferred: 0 };
 		return {
 			id: r.id,
 			ownerId: r.owner_id,
 			period: r.period,
 			periodLabel: periodLabel(r.period),
 			amount: r.amount,
+			// What the month itself earned before carry-forward (may be negative),
+			// plus how the deficit moved, so a statement can explain why a
+			// profitable month paid out less than it earned.
+			monthEarnings: carry.raw,
+			lossCarriedIn: carry.carriedIn,   // earlier losses absorbed by this month
+			lossDeferred: carry.deferred,     // this month's own loss pushed forward
 			adjustment,
 			effectiveAmount: Math.round((r.amount || 0) + adjustment),
 			adjustmentNote: r.adjustment_note || "",
@@ -16985,6 +17025,16 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 		};
 		if (!allowed[status].includes(payout.status)) {
 			return res.status(409).json({ error: `Cannot move a '${payout.status}' payout to '${status}'.` });
+		}
+
+		// Nothing to settle: a month with no activity, or one whose earnings were
+		// fully absorbed by an earlier loss (see the carry-forward in
+		// reconcileInvestorPayouts). Losses no longer produce negative rows, but
+		// an adjustment can still zero one out — either way there is no payment to
+		// make, so don't let it be stamped paid.
+		const settleable = Math.round((payout.amount || 0) + Number(payout.adjustment || 0));
+		if (settleable <= 0) {
+			return res.status(409).json({ error: "Nothing to settle for this period — the payable amount is $0." });
 		}
 
 		const nowIso = new Date().toISOString();

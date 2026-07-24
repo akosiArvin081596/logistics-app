@@ -44,7 +44,7 @@
 
       <!-- Past months -->
       <div class="table-label">Past Months</div>
-      <div v-if="payouts.length === 0" class="empty-msg">No past payouts yet.</div>
+      <div v-if="visiblePayouts.length === 0" class="empty-msg">No past payouts yet.</div>
       <table v-else class="data-table">
         <thead>
           <tr>
@@ -56,35 +56,50 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="p in payouts" :key="p.id">
+          <tr v-for="p in visiblePayouts" :key="p.id">
             <td>{{ p.periodLabel }}</td>
             <td class="mono-sm">
               <div>{{ fmt(effective(p)) }}</div>
+              <!-- Explain a month that paid out less than it earned, so a reduced
+                   figure never looks like money went missing. -->
+              <div v-if="p.lossDeferred" class="inv-carry">
+                {{ fmt(p.lossDeferred) }} loss carried to later months
+              </div>
+              <div v-else-if="p.lossCarriedIn" class="inv-carry">
+                earned {{ fmt(p.monthEarnings) }} · {{ fmt(p.lossCarriedIn) }} applied to an earlier loss
+              </div>
               <div v-if="p.adjustment" class="inv-adj">
                 adj {{ p.adjustment > 0 ? '+' : '−' }}{{ fmt(Math.abs(p.adjustment)) }}
                 <span v-if="p.adjustmentNote" class="inv-adj-note">· {{ p.adjustmentNote }}</span>
               </div>
             </td>
-            <td class="mono-sm">{{ fmtDate(p.dueDate) }}</td>
-            <td><span :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span></td>
+            <td class="mono-sm">{{ settleable(p) ? fmtDate(p.dueDate) : '—' }}</td>
+            <td>
+              <span v-if="settleable(p)" :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span>
+              <span v-else class="status-pill st-none">nothing due</span>
+            </td>
             <td v-if="isSuperAdmin" class="action-cell">
-              <button
-                v-if="p.status === 'owed'"
-                type="button"
-                class="action-btn act-processing"
-                :disabled="busyId === p.id"
-                title="Move this payout from owed to processing"
-                @click="advance(p, 'processing')"
-              >Mark Processing</button>
-              <button
-                v-if="p.status !== 'paid'"
-                type="button"
-                class="action-btn act-paid"
-                :disabled="busyId === p.id"
-                title="Mark this payout as paid"
-                @click="advance(p, 'paid')"
-              >Mark Paid</button>
-              <span v-if="p.status === 'paid'" class="dim">&mdash;</span>
+              <!-- Only rows with a positive payable can be settled; the server
+                   rejects the rest (409) and the buttons would be dead ends. -->
+              <template v-if="settleable(p)">
+                <button
+                  v-if="p.status === 'owed'"
+                  type="button"
+                  class="action-btn act-processing"
+                  :disabled="busyId === p.id"
+                  title="Move this payout from owed to processing"
+                  @click="advance(p, 'processing')"
+                >Mark Processing</button>
+                <button
+                  v-if="p.status !== 'paid'"
+                  type="button"
+                  class="action-btn act-paid"
+                  :disabled="busyId === p.id"
+                  title="Mark this payout as paid"
+                  @click="advance(p, 'paid')"
+                >Mark Paid</button>
+              </template>
+              <span v-if="p.status === 'paid' || !settleable(p)" class="dim">&mdash;</span>
             </td>
           </tr>
         </tbody>
@@ -144,6 +159,23 @@ function fmtDate(d) {
 function effective(p) {
   return p.effectiveAmount != null ? p.effectiveAmount : (p.amount || 0)
 }
+
+// A row is settleable only when there is actually money to pay. Loss months no
+// longer go negative (the server carries them forward), but a month can still
+// land on $0 — no activity, fully absorbed by an earlier loss, or adjusted out.
+function settleable(p) {
+  return effective(p) > 0
+}
+
+// Hide months with nothing to say: no earnings, no loss movement, nothing due.
+// Rows that ARE $0 because a loss was carried stay visible — otherwise a later
+// month paying less than it earned has no visible explanation. Nothing is
+// deleted; the admin console still lists every row.
+const visiblePayouts = computed(() =>
+  payouts.value.filter(
+    (p) => effective(p) !== 0 || p.lossDeferred || p.lossCarriedIn || p.adjustment
+  )
+)
 
 // Refetch through the store so both surfaces update together after a mutation.
 // Scope explicitly from the prop: this section also renders standalone on
@@ -316,6 +348,7 @@ onMounted(loadPayouts)
 
 /* Adjustment line shown to the investor under the effective amount */
 .inv-adj { font-size: 0.7rem; color: #b45309; margin-top: 0.1rem; font-family: inherit; }
+.inv-carry { font-size: 0.7rem; color: #64748b; margin-top: 0.1rem; font-family: inherit; font-style: italic; }
 .inv-adj-note { color: #64748b; }
 
 .status-pill {
@@ -331,6 +364,7 @@ onMounted(loadPayouts)
 .status-pill.st-owed { background: #fef3c7; color: #92400e; }
 .status-pill.st-processing { background: #dbeafe; color: #1e40af; }
 .status-pill.st-paid { background: #dcfce7; color: #166534; }
+.status-pill.st-none { background: #f1f5f9; color: #64748b; }
 .status-pill.st-progress { background: #dbeafe; color: #1e40af; }
 
 .action-cell {
