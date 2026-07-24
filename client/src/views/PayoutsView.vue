@@ -4,7 +4,8 @@
       <h2>Payouts</h2>
       <p class="page-sub">
         Monthly investor settlements across the whole fleet &mdash; what's owed, what's processing,
-        and how much you pay out each month. Advance a payout from owed &rarr; processing &rarr; paid.
+        and how much you pay out each month. Advance a payout from owed &rarr; processing &rarr; paid,
+        or <strong>Reopen</strong> one that was advanced by mistake.
       </p>
     </div>
 
@@ -130,7 +131,13 @@
               </td>
               <td class="num"><span class="amt-main">{{ fmt(effective(p)) }}</span></td>
               <td class="dim">{{ fmtDate(p.dueDate) }}</td>
-              <td><span :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span></td>
+              <td>
+                <span :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span>
+                <!-- A row walked back out of a settled state reads identically to
+                     one that was never advanced. Mark it so the correction is
+                     visible without digging through the audit trail. -->
+                <span v-if="p.reopenedAt" class="reopened-flag" :title="reopenTitle(p)">reopened</span>
+              </td>
               <td class="action-cell">
                 <button
                   v-if="p.status === 'owed'"
@@ -138,7 +145,7 @@
                   class="action-btn act-processing"
                   :disabled="busyId === p.id"
                   title="Move this payout from owed to processing"
-                  @click="advance(inv, p, 'processing')"
+                  @click="advance(p, 'processing')"
                 >Mark Processing</button>
                 <button
                   v-if="p.status !== 'paid'"
@@ -146,8 +153,19 @@
                   class="action-btn act-paid"
                   :disabled="busyId === p.id"
                   title="Mark this payout as paid"
-                  @click="advance(inv, p, 'paid')"
+                  @click="confirmPaid(inv, p)"
                 >Mark Paid</button>
+                <!-- Reopen a settled row. The correction path for a payout
+                     advanced by mistake — without it, "Mark Paid" is one click
+                     and permanently books money that may never have been sent. -->
+                <button
+                  v-if="p.status !== 'owed'"
+                  type="button"
+                  class="action-btn act-reopen"
+                  :disabled="busyId === p.id"
+                  title="Move this payout back — it was advanced by mistake"
+                  @click="openReopen(inv, p)"
+                >Reopen</button>
                 <!-- Adjust only frozen (processing/paid) rows. An 'owed' row's
                      amount still auto-refreshes from live expenses, so a manual
                      adjustment there would double-count and drift on each reconcile. -->
@@ -165,6 +183,81 @@
         </table>
       </section>
     </template>
+
+    <!-- "Mark Paid" confirm. Paid is the one status that asserts money actually
+         left the account, and it sits one click away from every unsettled row —
+         so it asks first instead of booking a payment on a slip. -->
+    <div v-if="payConfirm" class="adj-overlay" @click.self="closePayConfirm">
+      <div class="adj-modal">
+        <div class="adj-modal-title">Mark this payout as paid?</div>
+        <div class="adj-modal-sub">
+          {{ payConfirm.investorName }} · {{ payConfirm.payout.periodLabel }}
+          <span :class="['status-pill', statusClass(payConfirm.payout.status)]">{{ payConfirm.payout.status }}</span>
+        </div>
+        <div class="adj-facts">
+          <div class="adj-fact"><span>Amount</span><span class="mono">{{ fmt(effective(payConfirm.payout)) }}</span></div>
+        </div>
+        <p class="adj-hint pay-warn">
+          Confirm the {{ fmt(effective(payConfirm.payout)) }} has actually been sent. This moves it into
+          <strong>Total Paid</strong> and reports it to the investor as settled.
+          <span v-if="payConfirm.payout.status === 'owed'">
+            It also skips <strong>processing</strong> &mdash; if the transfer is only in flight, use
+            <strong>Mark Processing</strong> instead.
+          </span>
+        </p>
+        <div class="adj-actions">
+          <button type="button" class="btn-ghost" :disabled="busyId" @click="closePayConfirm">Cancel</button>
+          <button type="button" class="btn btn-primary" :disabled="busyId" @click="doPayConfirm">
+            {{ busyId ? 'Saving…' : 'Yes, it was paid' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reopen modal — walk a settled payout backwards with a stated reason. -->
+    <div v-if="reopenTarget" class="adj-overlay" @click.self="closeReopen">
+      <div class="adj-modal">
+        <div class="adj-modal-title">Reopen payout</div>
+        <div class="adj-modal-sub">
+          {{ reopenTarget.investorName }} · {{ reopenTarget.payout.periodLabel }}
+          <span :class="['status-pill', statusClass(reopenTarget.payout.status)]">{{ reopenTarget.payout.status }}</span>
+        </div>
+
+        <div class="adj-facts">
+          <div class="adj-fact"><span>Settled amount</span><span class="mono">{{ fmt(effective(reopenTarget.payout)) }}</span></div>
+          <div v-if="reopenTarget.payout.paidAt" class="adj-fact">
+            <span>Marked paid</span><span class="mono">{{ fmtDate(reopenTarget.payout.paidAt) }}</span>
+          </div>
+        </div>
+
+        <label class="adj-label">Move it back to</label>
+        <div class="reopen-choices">
+          <label v-for="opt in reopenOptions" :key="opt.value" class="reopen-choice">
+            <input type="radio" :value="opt.value" v-model="reopenStatus" />
+            <span>
+              <strong>{{ opt.label }}</strong>
+              <em>{{ opt.hint }}</em>
+            </span>
+          </label>
+        </div>
+
+        <label class="adj-label">Reason (required)</label>
+        <textarea
+          v-model="reopenReason"
+          class="adj-textarea"
+          rows="2"
+          maxlength="500"
+          placeholder="e.g. Marked paid in error — transfer was never sent, still processing"
+        ></textarea>
+
+        <div class="adj-actions">
+          <button type="button" class="btn-ghost" :disabled="reopenSaving" @click="closeReopen">Cancel</button>
+          <button type="button" class="btn btn-primary" :disabled="reopenSaving || !reopenReason.trim()" @click="saveReopen">
+            {{ reopenSaving ? 'Saving…' : 'Reopen payout' }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- Settlement adjustment modal -->
     <div v-if="adjustTarget" class="adj-overlay" @click.self="closeAdjust">
@@ -272,7 +365,7 @@ async function loadPayouts() {
   loading.value = false
 }
 
-async function advance(investor, payout, status) {
+async function advance(payout, status) {
   if (busyId.value) return
   busyId.value = payout.id
   try {
@@ -283,6 +376,80 @@ async function advance(investor, payout, status) {
     toast(err.message || 'Failed to update payout', 'error')
   } finally {
     busyId.value = null
+  }
+}
+
+// --- "Mark Paid" confirm -----------------------------------------------------
+// Paid is the only status that claims money actually moved, and it renders one
+// click away on every unsettled row. A slip here books a payment that never
+// happened and reports it to the investor as settled, so it confirms first.
+const payConfirm = ref(null)   // { investorName, payout }
+
+function confirmPaid(inv, p) {
+  payConfirm.value = { investorName: inv.name, payout: p }
+}
+function closePayConfirm() {
+  payConfirm.value = null
+}
+async function doPayConfirm() {
+  const t = payConfirm.value
+  if (!t) return
+  await advance(t.payout, 'paid')
+  payConfirm.value = null
+}
+
+// --- Reopen ------------------------------------------------------------------
+// The correction path for a payout advanced by mistake. Reopening to
+// 'processing' keeps the settled amount frozen; going back to 'owed' re-links
+// the row to live earnings, so the server will refresh its amount on the next
+// reconcile — surfaced in the option hints so the choice is informed.
+const reopenTarget = ref(null)   // { investorName, payout }
+const reopenStatus = ref('processing')
+const reopenReason = ref('')
+const reopenSaving = ref(false)
+
+const reopenOptions = computed(() => {
+  const opts = []
+  if (reopenTarget.value?.payout.status === 'paid') {
+    opts.push({ value: 'processing', label: 'Processing', hint: 'Payment is in flight but not settled. Amount stays frozen.' })
+  }
+  opts.push({ value: 'owed', label: 'Owed', hint: 'Back to unsettled. Amount re-links to live earnings and will refresh.' })
+  return opts
+})
+
+function reopenTitle(p) {
+  const who = p.reopenedBy ? ` by ${p.reopenedBy}` : ''
+  const when = p.reopenedAt ? ` on ${fmtDate(p.reopenedAt)}` : ''
+  return `Reopened${who}${when}${p.reopenReason ? ` — ${p.reopenReason}` : ''}`
+}
+
+function openReopen(inv, p) {
+  reopenTarget.value = { investorName: inv.name, payout: p }
+  // Default to the smallest walk-back: paid → processing, processing → owed.
+  reopenStatus.value = p.status === 'paid' ? 'processing' : 'owed'
+  reopenReason.value = ''
+}
+function closeReopen() {
+  reopenTarget.value = null
+  reopenSaving.value = false
+}
+async function saveReopen() {
+  const t = reopenTarget.value
+  const reason = reopenReason.value.trim()
+  if (!t || !reason || reopenSaving.value) return
+  reopenSaving.value = true
+  try {
+    await api.post(`/api/investor/payouts/${t.payout.id}/status`, {
+      status: reopenStatus.value,
+      reason,
+    })
+    toast(`Payout reopened as ${reopenStatus.value}`)
+    reopenTarget.value = null
+    await loadPayouts()
+  } catch (err) {
+    toast(err.message || 'Failed to reopen payout', 'error')
+  } finally {
+    reopenSaving.value = false
   }
 }
 
@@ -602,6 +769,46 @@ onMounted(loadPayouts)
 .act-paid:hover:not(:disabled) { background: #bbf7d0; }
 .act-adjust { background: #ede9fe; color: #5b21b6; }
 .act-adjust:hover:not(:disabled) { background: #ddd6fe; }
+/* Amber — a correction, not a normal step forward through the lifecycle. */
+.act-reopen { background: #fef3c7; color: #92400e; }
+.act-reopen:hover:not(:disabled) { background: #fde68a; }
+
+.reopened-flag {
+  margin-left: 0.4rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.3rem;
+  cursor: help;
+}
+
+.reopen-choices { display: flex; flex-direction: column; gap: 0.5rem; }
+.reopen-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+.reopen-choice:hover { background: #f9fafb; }
+.reopen-choice input { margin-top: 0.15rem; }
+.reopen-choice strong { display: block; font-weight: 600; }
+.reopen-choice em {
+  display: block;
+  font-style: normal;
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  margin-top: 0.1rem;
+}
+
+.pay-warn { color: #92400e; background: #fffbeb; border-radius: 0.4rem; padding: 0.5rem 0.6rem; }
 
 /* Adjustment indicator on the amount cell */
 .amt-main { font-weight: 600; }

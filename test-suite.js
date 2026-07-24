@@ -436,6 +436,78 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
           .reduce((s, l) => s + (l.rate || 0), 0))));
   }
 
+  // ==========================================================================
+  // 59-62. Reopening a settled payout.
+  //
+  // The regression: $8,703 was booked as PAID on a load that had never been
+  // sent — "Mark Paid" sat one click away on every unsettled row and the
+  // lifecycle only ran forward, so the money could not be un-booked. The
+  // client's words: "we never paid out 12965 we only paid out 3992 ... I need
+  // control to reopen and edit everything until we get it right."
+  //
+  // Two properties are load-bearing here: a reversal is always REASONED (money
+  // never moves backwards anonymously), and it un-stamps what it undoes (a
+  // paid_at must not outlive the paid status, or the row lies about itself).
+  // ==========================================================================
+
+  // 59. A reversal without a stated reason is refused. Non-mutating, so it also
+  //     proves the guard fires before any write.
+  const settledRow = rows.find(r => r.status === "paid" || r.status === "processing");
+  if (!settledRow) {
+    skip("59. Reopening without a reason is rejected (400)", "no settled row in seeded data");
+    skip("60. Reopen round-trip un-stamps and re-stamps correctly", "no settled row in seeded data");
+  } else {
+    const s59 = await req("POST", `/api/investor/payouts/${settledRow.id}/status`,
+      { status: "owed" }, ac);
+    const s59b = await req("POST", `/api/investor/payouts/${settledRow.id}/status`,
+      { status: "owed", reason: "   " }, ac);
+    test("59. Reopening without a reason is rejected (400)",
+      s59.status === 400 && s59b.status === 400 &&
+      /reason is required/i.test(s59.body?.error || ""));
+
+    // 60. The round-trip. MUTATES, then restores — the suite is meant to run
+    //     against a seeded DB (scripts/truncate-and-seed.js), and the reopen
+    //     trail it leaves on the row is the point of the feature, not debris.
+    const back = settledRow.status === "paid" ? "processing" : "owed";
+    const r60 = await req("POST", `/api/investor/payouts/${settledRow.id}/status`,
+      { status: back, reason: "test-suite: reopen round-trip" }, ac);
+    const after60 = await req("GET", "/api/investor/payouts", null, ic);
+    const moved = (after60.body?.payouts || []).find(r => r.id === settledRow.id);
+    // Restore the original status so the ledger ends where it started.
+    const restore = await req("POST", `/api/investor/payouts/${settledRow.id}/status`,
+      { status: settledRow.status }, ac);
+    test("60. Reopen round-trip un-stamps and re-stamps correctly",
+      r60.status === 200 && r60.body?.reopened === true &&
+      moved?.status === back &&
+      // Dropping out of 'paid' must clear paid_at — a stale stamp would leave
+      // the row claiming a payment date it no longer has.
+      (back !== "processing" || !moved?.paidAt) &&
+      !!moved?.reopenReason && !!moved?.reopenedBy &&
+      restore.status === 200 && restore.body?.reopened === false);
+  }
+
+  // 61. A transition to the status a row already holds is a no-op, not a
+  //     silent re-stamp — re-clicking Mark Paid must not overwrite paid_at.
+  const anyRow = rows[0];
+  if (!anyRow) {
+    skip("61. A no-op status transition is rejected (409)", "no payout rows in seeded data");
+  } else {
+    const s61 = await req("POST", `/api/investor/payouts/${anyRow.id}/status`,
+      { status: anyRow.status, reason: "test-suite: no-op" }, ac);
+    test("61. A no-op status transition is rejected (409)",
+      s61.status === 409 && /already/i.test(s61.body?.error || ""));
+  }
+
+  // 62. Reopening rewrites settled financial history — Super Admin only. An
+  //     Investor must not be able to un-book their own payout.
+  if (!anyRow) {
+    skip("62. Non-Super-Admin cannot reopen a payout (403)", "no payout rows in seeded data");
+  } else {
+    const s62 = await req("POST", `/api/investor/payouts/${anyRow.id}/status`,
+      { status: "owed", reason: "test-suite: must be refused" }, ic);
+    test("62. Non-Super-Admin cannot reopen a payout (403)", s62.status === 403);
+  }
+
   // Results
   console.log("");
   let p = 0, f = 0, s = 0;
