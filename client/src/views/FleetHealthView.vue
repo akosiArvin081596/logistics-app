@@ -242,7 +242,7 @@ const filteredTrucks = computed(() => {
   )
 })
 
-const liveCount = computed(() => trucks.value.filter(t => t.source === 'routemate').length)
+const liveCount = computed(() => trucks.value.filter(t => t.source === 'eld').length)
 const staleCount = computed(() => trucks.value.filter(t => t.source === 'stale').length)
 const unlinkedCount = computed(() => trucks.value.filter(t => t.source === 'unlinked').length)
 

@@ -61,7 +61,7 @@
                 <span class="driver-name">
                   {{ loc.driver }}
                   <span
-                    v-if="loc.source === 'routemate'"
+                    v-if="loc.source === 'eld'"
                     class="src-badge src-eld"
                     title="Live position sourced from the truck's Apollo ELD device"
                   >ELD</span>

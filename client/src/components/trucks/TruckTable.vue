@@ -44,9 +44,9 @@
           <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
           <td>
             <span
-              v-if="truck.RoutemateVehicleId"
+              v-if="truck.EldVehicleId"
               class="rm-linked"
-              :title="`Apollo ELD vehicle ID: ${truck.RoutemateVehicleId}`"
+              :title="`Apollo ELD vehicle ID: ${truck.EldVehicleId}`"
             ><span class="rm-dot"></span>Linked</span>
             <button
               v-else-if="canEdit"
@@ -55,7 +55,7 @@
             >Link</button>
             <span v-else class="rm-unlinked">&mdash;</span>
             <button
-              v-if="truck.RoutemateVehicleId && canEdit"
+              v-if="truck.EldVehicleId && canEdit"
               class="btn-unlink-rm"
               title="Clear the Apollo ELD device link"
               @click.stop="handleUnlink(truck)"
@@ -102,12 +102,12 @@
           <div v-else class="rm-pick-list">
             <div
               v-for="rv in unlinkedVehicles"
-              :key="rv.routemate_vehicle_id"
-              :class="['rm-pick-item', { selected: pickedRoutemateId === rv.routemate_vehicle_id }]"
-              @click="pickedRoutemateId = rv.routemate_vehicle_id"
+              :key="rv.eld_vehicle_id"
+              :class="['rm-pick-item', { selected: pickedRoutemateId === rv.eld_vehicle_id }]"
+              @click="pickedRoutemateId = rv.eld_vehicle_id"
             >
               <div class="rm-pick-line1">
-                <span class="rm-pick-id">{{ rv.vehicle_id || rv.routemate_vehicle_id }}</span>
+                <span class="rm-pick-id">{{ rv.vehicle_id || rv.eld_vehicle_id }}</span>
                 <span v-if="rv.vin" class="rm-pick-vin">VIN {{ rv.vin }}</span>
               </div>
               <div class="rm-pick-line2">
@@ -504,11 +504,11 @@ async function handleLink() {
   linkError.value = ''
   try {
     await api.post(`/api/trucks/${linkTruck.value.id}/link-eld`, {
-      routemateVehicleId: pickedRoutemateId.value,
+      eldVehicleId: pickedRoutemateId.value,
     })
     showLinkRm.value = false
     // Reload-only signal: the parent should refetch trucks so the row's
-    // RoutemateVehicleId flips to "Linked". Distinct from `update` (which
+    // EldVehicleId flips to "Linked". Distinct from `update` (which
     // sends a PUT to /api/trucks for actual field edits).
     emit('linkage-changed', { id: linkTruck.value.id })
   } catch (err) {

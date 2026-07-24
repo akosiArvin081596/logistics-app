@@ -75,7 +75,7 @@ Shared server-side modules live in `lib/` (required from `server.js`):
 - `ifta-states.js` — US state bounding-box lookup used by the IFTA mileage classifier.
 - `pdf-browser.js` — Puppeteer HTML→PDF renderer for onboarding/investor docs (why `puppeteer` is a top-level dep alongside `pdfkit`/`pdf-lib`).
 - `policy-field-maps.js`, `policy-renderer.js` — field mapping + template rendering for onboarding legal documents.
-- `routemate-client.js` — Routemate ELD/telematics API adapter (single point of contact).
+- `eld/` — provider-neutral ELD/telematics adapter layer (single point of contact). `index.js` selects the active provider from `ELD_PROVIDER`; `routemate.js` (the former `routemate-client.js`) and `apollo.js` are the concrete adapters, each returning identical neutral shapes. See the "ELD / telematics integration" section below.
 - `ratecon-load.js` — pure helpers for drag-and-drop rate-con ingestion: `buildJobTrackingRow()` (header-order mapping + creation defaults), `calculateRatePerMile()` / `cityStateZip()` (ported from the n8n "Calculate Rate Per Mile" node), `extractionWarnings()`, `upsert`-support helpers. No network or DB access. See "Load ingestion" below.
 - `scankit-client.js` — ScanKit.io document-scanning API adapter (single point of contact; `POST /scan/crop`). See the AI/vision services note below.
 - `broker-invoice.js` — invoice assembly for **every** broker: `resolveInvoiceTo()` / `resolveBrokerName()` recipient + naming, `isBisonLoad()` (now a recipient *branch*, not a gate), deterministic rate-con field extraction, and the payload shape for the Draft Invoice route. See the "Invoice drafting — all brokers" section below.
@@ -120,7 +120,7 @@ Session store also in SQLite.
 
 **AI / vision services**:
 - **Gemini 2.5 Flash vision** — expense receipt OCR (`POST /api/expenses/ocr`). Called via `fetch` (no SDK) with `responseSchema` enforcing the JSON shape. Requires `GEMINI_API_KEY`; falls back to 503 + silent manual-entry when unset. Key is shared across Alchemy projects (rotate in one place). Retry (2 retries, exp backoff, 15 s `AbortController` timeout) mirrors the Google Routes integration. **Autofill surfaces:** the driver `ExpenseForm`, the admin/dispatcher single "Log Expense" form in `ExpensesTab` (enhance→OCR→prefill, with Undo), and the **Bulk Upload** sub-tab (`components/dashboard/expenses/BulkReceiptScan.vue`) — pick a default driver, drop N receipts (≤25/batch), each image is OCR'd (concurrency 3; bulk skips the ScanKit enhance pass to save credits) into an editable review grid, then one create per row via `POST /api/expenses`. Write-timeouts (ambiguous re: whether the insert landed) are parked in a non-auto-retried `timeout` state to avoid double-booking the P&L, since `POST /api/expenses` is not idempotent.
-- **ScanKit.io document scanning** — server-side crop / deskew / lighting-correction (and optional searchable-PDF with OCR layer) via `POST /api/documents/scan`, backed by the `lib/scankit-client.js` adapter (single point of contact; `Authorization: Bearer`, multipart upload, retry/timeout mirror the Routemate/Gemini pattern). **Replaced** the old client-side jscanify + OpenCV-WASM (~9 MB) scanner in `DocumentUpload.vue`. Used by driver POD/BOL scanning, the admin dashboard upload (`ActiveLoadsTab` reuses the same component), and receipt enhancement before Gemini OCR (`ExpenseForm`, `ExpensesTab`). Requires `SCANKIT_API_KEY` + `SCANKIT_ENABLED=true`; returns 503 (client falls back to attaching the raw photo) when unset. Credit-billed (`scanKitLimiter` caps spend) — **rotate the key if it is ever exposed**.
+- **ScanKit.io document scanning** — server-side crop / deskew / lighting-correction (and optional searchable-PDF with OCR layer) via `POST /api/documents/scan`, backed by the `lib/scankit-client.js` adapter (single point of contact; `Authorization: Bearer`, multipart upload, retry/timeout mirror the ELD/Gemini pattern). **Replaced** the old client-side jscanify + OpenCV-WASM (~9 MB) scanner in `DocumentUpload.vue`. Used by driver POD/BOL scanning, the admin dashboard upload (`ActiveLoadsTab` reuses the same component), and receipt enhancement before Gemini OCR (`ExpenseForm`, `ExpensesTab`). Requires `SCANKIT_API_KEY` + `SCANKIT_ENABLED=true`; returns 503 (client falls back to attaching the raw photo) when unset. Credit-billed (`scanKitLimiter` caps spend) — **rotate the key if it is ever exposed**.
 
 REST endpoints (grouped by domain):
 
@@ -326,7 +326,7 @@ Key directories:
 
 **Composable singletons**: `useApi()`, `useSocket()`, `useToast()` are module-level singletons (not per-component). Each Pinia store does `const api = useApi()` at module scope; `useSocket` keeps one global socket connection.
 
-**Phone GPS retired**: As of 2026-05-13, Routemate ELD is the sole location source. `useGeolocation` was deleted; the driver app no longer requests location permission or reports pings, and the "Location Access Required" gate was removed from `DriverView`. `POST /api/location` is a 410 Gone stub so cached old clients get a clear error, not a 404. See `routemateSyncTelemetry()` for the live-position pipeline.
+**Phone GPS retired**: As of 2026-05-13, the ELD integration is the sole location source. `useGeolocation` was deleted; the driver app no longer requests location permission or reports pings, and the "Location Access Required" gate was removed from `DriverView`. `POST /api/location` is a 410 Gone stub so cached old clients get a clear error, not a 404. See `eldSyncTelemetry()` (the live-position pipeline) and the "ELD / telematics integration" section.
 
 **useGoogleMaps**: Loads the Google Maps JS API via `@googlemaps/js-api-loader`, fetches the API key from `GET /api/config/maps-key`.
 
@@ -364,7 +364,7 @@ Key directories:
 | `/investor-applications` | Super Admin | Investor applications review |
 | `/admin/tools` | Super Admin | Admin data tools |
 | `/admin/financials` | Super Admin | Company P&L view |
-| `/admin/fleet-health` | Super Admin, Dispatcher | Routemate ELD fleet health — fault codes, DVIR, telemetry status |
+| `/admin/fleet-health` | Super Admin, Dispatcher | ELD fleet health — fault codes, DVIR, telemetry status |
 | `/archive` | Super Admin | Archived data viewer |
 
 Auth guard calls `checkSession()` on first navigation only (blocks until resolved); later navigations use cached `isAuthenticated`. Unauthorized users redirect to `auth.roleHome` (Driver → `/driver`, Dispatcher → `/dashboard`, Investor → `/investor`).
@@ -382,7 +382,7 @@ Original vanilla HTML/CSS/JS pages, kept as the `public/` fallback (see Static f
 - **Column detection via regex**: Both backend and frontend match headers dynamically with regex patterns — `/driver/i` for driver columns, `/rate|amount|revenue|pay|charge|price|cost/i` for financial columns (hidden from Driver role), `/status/i` for status, `/load.?id|job.?id/i` for load IDs, `/origin.*lat|pickup.*lat/i` and `/dest.*lat|delivery.*lat/i` for coordinates. This makes the system flexible to different sheet column names.
 - **Driver fields**: Any column matching `/driver/i` renders as a `<select>` populated from the first driver-like column in "Carrier Database".
 - **Role-based routing**: Super Admin sees all, Dispatcher sees dashboard+data (no broker/financial info), Driver sees driver app (no sidebar), Investor sees financial view + truck fleet.
-- **Geofence logic**: `tryGeofenceAdvance()` (from `routemateSyncTelemetry()`) uses `geolib.isPointWithinRadius()` with a **1000m threshold** on each ELD ping. Auto-advances only when current status matches the expected predecessor (Dispatched/Assigned/Heading to Shipper → At Shipper, In Transit → At Receiver); never auto-writes a completion status. Errors caught silently; emits `geofence-trigger` + `dispatch-notification`. Phone-GPS path (`POST /api/location`) is retired (see above).
+- **Geofence logic**: `tryGeofenceAdvance()` (from `eldSyncTelemetry()`) uses `geolib.isPointWithinRadius()` with a **1000m threshold** on each ELD ping. Auto-advances only when current status matches the expected predecessor (Dispatched/Assigned/Heading to Shipper → At Shipper, In Transit → At Receiver); never auto-writes a completion status. Errors caught silently; emits `geofence-trigger` + `dispatch-notification`. Phone-GPS path (`POST /api/location`) is retired (see above).
 - **ETA calculation**: Uses `geolib.getDistance()` to destination. Default speed: 24.587 m/s (~55 mph) when GPS speed is unreliable. Compares ETA vs scheduled delivery to flag "on-time" / "delayed".
 - **IFTA state matching**: Hardcoded bounding boxes for ~24 US states to classify driver GPS pings by state.
 - **Sheet ID caching**: Google Sheet tab GIDs are cached in a `Map` in memory to avoid repeated API lookups. Lazy-initialized via `getSheetId()`.
@@ -391,7 +391,7 @@ Original vanilla HTML/CSS/JS pages, kept as the `public/` fallback (see Static f
 - **Onboarding documents**: driver and investor onboarding use seeded lists (`ONBOARDING_DOCS`, `INVESTOR_ONBOARDING_DOCS`) with PDF generation + e-signature capture.
 - **Audit trail**: Admin actions (user creation, driver rename, etc.) are logged to the `audit_trail` table.
 - **Load exclusion is centralized**: every load-revenue aggregator (`/api/dashboard`, `/api/financials`, `/api/investor`) runs sheet data through `excludeDroppedLoads(rows, headers)` before any math. It drops (a) rows whose status matches `CANCELED_STATUS_RE = /^(cancel|canceled|cancelled)$/i` and (b) rows whose `load_id` is in the `deleted_loads` table. Keep this the single place deciding "is this load live?" so dashboard/financials/investor stay consistent. `POST /api/invoices/generate` reads the sheet directly (not via this helper), so it applies its own `getDeletedLoadIds()` filter to avoid billing soft-deleted loads — keep in sync.
-- **Driver "active days" = completed loads ∩ ELD travel** (driver-pay basis, shared by `/api/investor`, `/api/financials`, `POST /api/invoices/generate`): an *active day* counts only when the assigned truck **traveled** that day **and** the day is inside a **completed** load's pickup→delivery window. "Traveled" = a clean `routemate_telemetry` ping (`dropped_reason=''`) with `speed > 2.235` m/s (~5 mph). Computed by the module-scope helper `getEldTravelDaysByVehicle(vehicleIds, minMs, maxMs)` → `{ vid: { travel: Set<"YYYY-MM-DD">, coverage: Set } }`; each ping is bucketed into the **truck's local day** (zone derived per-ping from longitude via `usTzForLongitude` → continental-US IANA zone, DST-aware via `Intl`), so late trips land on the worked day, not the server's UTC day. Window days are bare wall-clock dates from the sheet (`fmtDate`/`expandDateRange`), matching the truck-local travel days. (US-centric; falls back to Central when longitude is missing.) Load truck→vehicle map: `trucks.routemate_vehicle_id` (matched on `LOWER(unit_number)`). **Coverage-aware fallback**: a window with *no* ELD pings (truck unlinked or load predates the feed) falls back to the full scheduled window so historical/un-instrumented pay is never zeroed; a covered-but-*parked* window yields 0. Daily rate = the truck's `trucks.driver_pay_daily` (falls back to `$250`; invoices used to hardcode `$250`). Only `completedStatuses` (`/^(delivered|completed|pod received)$/i`) count — the old broad `activeWorkStatuses` is gone, so deadhead, in-progress, and parked days are excluded. `parseSheetDate` (investor/financials) accepts ISO `YYYY-MM-DD` and US `M/D/Y`. Each driver-month is tagged `source: eld | mixed | estimated`; `EarningsSection.vue` renders an "ELD-verified / partly / estimated" badge. **Keep all three endpoints in lockstep** so investor portal, Financials P&L, and weekly invoice reconcile. (Invoices clip the window to the Sat–Fri billing week.)
+- **Driver "active days" = completed loads ∩ ELD travel** (driver-pay basis, shared by `/api/investor`, `/api/financials`, `POST /api/invoices/generate`): an *active day* counts only when the assigned truck **traveled** that day **and** the day is inside a **completed** load's pickup→delivery window. "Traveled" = a clean `eld_telemetry` ping (`dropped_reason=''`) with `speed > 2.235` m/s (~5 mph). Computed by the module-scope helper `getEldTravelDaysByVehicle(vehicleIds, minMs, maxMs)` → `{ vid: { travel: Set<"YYYY-MM-DD">, coverage: Set } }`; each ping is bucketed into the **truck's local day** (zone derived per-ping from longitude via `usTzForLongitude` → continental-US IANA zone, DST-aware via `Intl`), so late trips land on the worked day, not the server's UTC day. Window days are bare wall-clock dates from the sheet (`fmtDate`/`expandDateRange`), matching the truck-local travel days. (US-centric; falls back to Central when longitude is missing.) Load truck→vehicle map: `trucks.eld_vehicle_id` (matched on `LOWER(unit_number)`). **Coverage-aware fallback**: a window with *no* ELD pings (truck unlinked or load predates the feed) falls back to the full scheduled window so historical/un-instrumented pay is never zeroed; a covered-but-*parked* window yields 0. Daily rate = the truck's `trucks.driver_pay_daily` (falls back to `$250`; invoices used to hardcode `$250`). Only `completedStatuses` (`/^(delivered|completed|pod received)$/i`) count — the old broad `activeWorkStatuses` is gone, so deadhead, in-progress, and parked days are excluded. `parseSheetDate` (investor/financials) accepts ISO `YYYY-MM-DD` and US `M/D/Y`. Each driver-month is tagged `source: eld | mixed | estimated`; `EarningsSection.vue` renders an "ELD-verified / partly / estimated" badge. **Keep all three endpoints in lockstep** so investor portal, Financials P&L, and weekly invoice reconcile. (Invoices clip the window to the Sat–Fri billing week.)
 - **Two soft-delete patterns coexist**, by design — pick the right one for new tables:
   - **Separate `deleted_loads` table** (load_id keyed): the canonical row lives in Sheets, not SQLite. Query: `LEFT JOIN deleted_loads ... WHERE deleted_loads.load_id IS NULL`. Recovery: `DELETE FROM deleted_loads WHERE load_id = ?`.
   - **`deleted_at` timestamp column** on the source table: used by `job_applications` (listings filter `WHERE deleted_at IS NULL`; `?include_deleted=true` for admin recovery). Cheaper (no join), but only works when the table lives in SQLite.
@@ -408,44 +408,72 @@ Original vanilla HTML/CSS/JS pages, kept as the `public/` fallback (see Static f
 - Spreadsheet and Drive folder must be shared with this email as Editor.
 - API clients (`sheetsClient`, `driveClient`) are lazy-initialized singletons via `getSheets()` / `getDrive()`.
 
-## Routemate ELD / telematics integration
+## ELD / telematics integration (provider-neutral)
 
-Replaces phone-based driver GPS. Routemate is FMCSA-certified ELD hardware in trucks; LogisX pulls from their cloud REST API.
+Replaces phone-based driver GPS with FMCSA-certified ELD hardware. This is the **third** location source (phone GPS → Routemate → Apollo ELD), so the integration is **provider-neutral**: `server.js` consumes normalized shapes from a single adapter layer and never talks to a vendor API directly. Switching providers is a one-flag flip, with the previous provider kept as instant rollback.
 
-**Adapter:** `lib/routemate-client.js` — single point of contact. Auth via `X-Api-Key`. Retry/backoff + 15s `AbortController` timeout mirror the Gemini OCR pattern. Returns normalized objects so a future API change ripples through one file. Every server-side caller goes through it; no other module talks to Routemate directly.
+**Adapter layer** (`lib/eld/` — single point of contact):
+- `index.js` — selector. Reads `ELD_PROVIDER` and re-exports the active adapter's unified interface: `getCompany`, `listLiveLocations`, `getVehicleLocation`, `listVehicles`, `listFaultCodes`, `listDvirs`, `listIftaMileage`, `listDrivers`, `listHosClocks`, plus `activeProvider()`.
+- `routemate.js` — the former `lib/routemate-client.js`, moved verbatim. Auth via `X-Api-Key`.
+- `apollo.js` — the Apollo ELD adapter (see subsection below). ALL Apollo field-mapping lives here in normalizers, so a wire-format change ripples through one file.
+
+Each adapter returns identical **neutral shapes**; the neutral telemetry contract is `{ eld_vehicle_id, latitude, longitude, speed (m/s), bearing, odometer, engine_hours, fuel_pct, geocoded_location, location_date_ms }`. The neutral vehicle id key is `eld_vehicle_id`. Retry/backoff + 15s `AbortController` timeout mirror the Gemini OCR pattern.
+
+**Provider selection & cutover:** `ELD_PROVIDER` (`routemate` | `apollo`, **default `routemate`**) picks the adapter. Deploy with Apollo dormant; **cutover** = flip `ELD_PROVIDER=apollo` + re-link trucks to Apollo AssetIds via the link-eld UI; **rollback** = flip back (Routemate history is preserved by the rename migration below). Caveat: `trucks.eld_vehicle_id` holds the *active* provider's vehicle ID, so flipping providers requires re-linking trucks.
 
 **Env vars** (defined in `.env.example`):
-- `ROUTEMATE_BASE_URL` (default `https://cloud.routemate.ai`)
-- `ROUTEMATE_API_KEY` — sent as `X-Api-Key`
-- `ROUTEMATE_ENABLED` — master kill switch. When `false`, all sync intervals are dormant and the manual probe returns 503. **Default off** until the key is wired in production.
-- `ROUTEMATE_POLL_LIVE_SEC` (default 60) — used by Phase 2 live-telemetry sync
-- `ROUTEMATE_POLL_FAULTS_SEC` (default 300) — Phase 5 fault-code sync
-- `ROUTEMATE_POLL_DAILY_HOUR` (default 4) — Phase 3+ daily rollups
+- `ELD_PROVIDER` — `routemate` (default, current prod) | `apollo`.
+- Shared cadences `ELD_POLL_LIVE_SEC` (60), `ELD_POLL_FAULTS_SEC` (300), `ELD_POLL_DAILY_HOUR` (4) — each falls back to the matching `ROUTEMATE_POLL_*` (then the built-in default) when unset.
+- Routemate: `ROUTEMATE_BASE_URL` (default `https://cloud.routemate.ai`), `ROUTEMATE_API_KEY` (sent as `X-Api-Key`), `ROUTEMATE_ENABLED` master kill switch, `ROUTEMATE_POLL_LIVE_SEC/FAULTS_SEC/DAILY_HOUR`.
+- Apollo: `APOLLO_BASE_URL` (default `https://content.eldroadmap.com:9103`), `APOLLO_API_KEY` (kept in the server `.env` only — **never in the repo**), `APOLLO_ENABLED` master kill switch. **Default off** so Apollo ships dormant.
 
-**SQLite tables** (Phase 1, all `IF NOT EXISTS` — additive, reversible):
+**SQLite tables** (all `IF NOT EXISTS` — additive, reversible). Renamed `routemate_*` → `eld_*` provider-neutrally; a boot-time `ALTER TABLE routemate_* RENAME TO eld_*` migration (guarded by the repo's try/catch + existence-probe pattern) **preserves existing prod history** so the Routemate provider keeps working after deploy:
 
 | Table | Purpose |
 |---|---|
-| `routemate_vehicles` | Local mirror of Routemate vehicle inventory (synced via `POST /api/admin/routemate/sync-now`). Fields: `routemate_vehicle_id` (UNIQUE), `vehicle_id`, `vin`, `make`, `model`, `year`, `fuel_type`, `eld_id`, `gps_ids` (JSON), `license_num`, `state`, `active`, `raw_json`, `last_synced_at`. |
-| `routemate_telemetry` | Live GPS feed, append-only. Fields: `routemate_vehicle_id`, `latitude`, `longitude`, `speed`, `bearing`, `odometer`, `engine_hours`, `fuel_pct`, `geocoded_location`, `location_date_ms` (epoch ms from Routemate), `fetched_at`. Also the driver-pay "active days" source — see that convention. |
-| `routemate_fault_codes` | One row per active code per vehicle, UNIQUE on `(routemate_vehicle_id, code)`. Fields: `code`, `status`, `first_seen`, `last_seen`, `ack_by_user_id`, `ack_at`. |
-| `routemate_dvir` | DVIR inspection reports per vehicle, UNIQUE on `dvir_id`. |
-| `routemate_fuel_daily` | Telemetry-derived MPG rollup, UNIQUE on `(routemate_vehicle_id, date)`. Phase 4. |
-| `routemate_hos_daily` | Driver duty-time rollup, UNIQUE on `(driver_id, date)`. Phase 3. |
+| `eld_vehicles` | Local mirror of the active provider's vehicle inventory (synced via `POST /api/admin/eld/sync-now`). Fields: `eld_vehicle_id` (UNIQUE), `vehicle_id`, `vin`, `make`, `model`, `year`, `fuel_type`, `eld_id`, `gps_ids` (JSON), `license_num`, `state`, `active`, `raw_json`, `last_synced_at`. |
+| `eld_telemetry` | Live GPS feed, append-only. Fields: `eld_vehicle_id`, `latitude`, `longitude`, `speed`, `bearing`, `odometer`, `engine_hours`, `fuel_pct`, `geocoded_location`, `location_date_ms` (epoch ms from the provider), `fetched_at`. Also the driver-pay "active days" source — see that convention. |
+| `eld_fault_codes` | One row per active code per vehicle, UNIQUE on `(eld_vehicle_id, code)`. Fields: `code`, `status`, `first_seen`, `last_seen`, `ack_by_user_id`, `ack_at`. |
+| `eld_dvir` | DVIR inspection reports per vehicle, UNIQUE on `dvir_id`. |
+| `eld_fuel_daily` | Telemetry-derived MPG rollup, UNIQUE on `(eld_vehicle_id, date)`. |
+| `eld_hos_daily` | Driver duty-time rollup, UNIQUE on `(driver_id, date)`. |
 
-**`trucks` table** gains one additive column via the existing try/catch ALTER pattern: `routemate_vehicle_id TEXT DEFAULT ''`. Set by admins via the Trucks UI (Phase 2) to link a LogisX truck to a Routemate vehicle.
+**`trucks` table** column `routemate_vehicle_id` is renamed `eld_vehicle_id` via a boot-time `ALTER TABLE trucks RENAME COLUMN routemate_vehicle_id TO eld_vehicle_id` (SQLite ≥3.25), guarded by the same try/catch + existence-probe pattern. Set by admins via the Trucks UI to link a LogisX truck to the active provider's vehicle.
 
-**`driver_locations`** retains historical rows but is no longer written or read by any endpoint as of 2026-05-13. `GET /api/locations/latest` and `/api/locations/trail` now source exclusively from `routemate_telemetry`; responses tag `source: 'routemate'` with an ELD fix, else `'none'`. The 90-day purge job still ages the legacy data out.
+**`driver_locations`** retains historical rows but is no longer written or read by any endpoint as of 2026-05-13. `GET /api/locations/latest` and `/api/locations/trail` now source exclusively from `eld_telemetry`; responses tag `source: 'routemate'`/`'apollo'` with an ELD fix, else `'none'`. The 90-day purge job still ages the legacy data out.
 
-**Phase 1 endpoints** (only ones live as of foundation):
-- `POST /api/admin/routemate/sync-now` — Super Admin only. 503 when `ROUTEMATE_ENABLED=false` or key unset; else `getCompany()` smoke test, then paginates `listVehicles()` and upserts into `routemate_vehicles`. Logs `audit_trail` action `routemate_sync`.
-- `GET /api/routemate/health` — Super Admin only. Returns `{enabled, hasKey, baseUrl, lastSync, lastError, errorsLast24h}`.
+**Endpoints** — renamed `/api/routemate/*` → `/api/eld/*`; the OLD paths are kept as back-compat aliases so cached SPA bundles / bookmarks / n8n keep working:
+- `POST /api/admin/eld/sync-now` (alias `POST /api/admin/routemate/sync-now`) — Super Admin only. 503 when the active provider is disabled or its key is unset; else a `getCompany()` smoke test, then paginates `listVehicles()` and upserts into `eld_vehicles`. Logs `audit_trail` action `eld_sync`.
+- `GET /api/eld/health` (alias `GET /api/routemate/health`) — Super Admin only. Returns `{provider, enabled, hasKey, baseUrl, lastSync, lastError, errorsLast24h}`.
+- `GET /api/eld/vehicles` — Super Admin only. Lists the mirrored `eld_vehicles`.
+- `POST /api/trucks/:id/link-eld` (alias `…/link-routemate`) — link a truck to the active provider's vehicle ID.
+- `GET /api/admin/fleet-health` — **unchanged**. Backs the Fleet Health view (fault codes, DVIR, telemetry status).
 
-**No webhooks in Routemate v0** — pull-only. Phase 2+ uses `setInterval` patterns like `setInterval(purgeOldDriverLocations, ...)` (server.js:726). All gated by `ROUTEMATE_ENABLED`.
+**No webhooks** — pull-only for both providers. Sync uses `setInterval` patterns like `setInterval(purgeOldDriverLocations, ...)`, all gated by the active provider's kill switch. The **Demo viewer** is blocked from `POST /api/admin/eld/sync-now` by the global write-lockdown middleware.
 
-**Demo viewer** is blocked from `/api/admin/routemate/sync-now` by the global write-lockdown middleware (server.js:~1630).
+### Apollo ELD provider
 
-**Spec reference:** OpenAPI 3.0.1 at `https://cloud.routemate.ai/v3/api-docs` (public, no auth). Doc viewer `https://cloud.routemate.ai/open-api.html` is JS-rendered Redocly. Path prefix `/api/v0/`.
+Apollo ELD resells the ATCompass / ELD Roadmap platform. The adapter (`lib/eld/apollo.js`) maps Apollo's .NET-style RPC responses into the neutral shapes above.
+
+- **Base URL:** `https://content.eldroadmap.com:9103` (standard HTTPS, valid Let's Encrypt cert — no custom TLS agent; note the `:9103` port). JSON.
+- **Auth:** `HOSClientApiKey` — **query param on GETs, body field on POSTs**. The key can contain URL-reserved characters (e.g. a literal `?`), so it MUST be `encodeURIComponent`'d in query strings (a raw `?` becomes `%3F`, or it truncates the key server-side).
+- **Response envelope:** most endpoints return `{ "code": <int>, "data": <obj|null> }` where `code:1` = OK and `code:7` = `HOSCLIENT_API_KEY_INVALID`; the adapter treats `code !== 1` as an error carrying the enum name (never a crash). **`GetDashboards` is the exception — it returns a bare array** (`[]` when empty), so the adapter handles both shapes.
+- **Units:** miles/mph (`UnitCode` MILES_GALLONS=1); the adapter converts speed mph → m/s at the boundary, matching Routemate's `MPH_TO_MPS` (0.44704).
+- **Endpoint → feature map:**
+
+| Feature | Apollo endpoint |
+|---|---|
+| Company smoke-test | `POST /HOSClient/GetHOSClient` (body `{HOSClientApiKey}`) |
+| Vehicles / inventory | `GET /HOSAsset/GetHOSAssetForClient` (filter Type=0 tractors; `eld_vehicle_id` = AssetId) |
+| Live telemetry | `GET /HOSDashboard/GetDashboards` (bare array; closest analog to Routemate's live-locations feed) |
+| DVIR | `POST /DVIR/GetDVIRReports` |
+| Fault codes (DTC) | `ECM/*` (exact method confirmed on live capture) |
+| IFTA / mileage | `IFTA/*` → `IFTAReportDTO` (real per-state miles + TaxPaidGallons + MPG) |
+| Drivers | `GET /HOSDriver/GetHOSDrivers` |
+| HOS records | `GET /HOSRecord/GetDriverRecords` |
+
+- **Driver-pay speed-signal caveat:** the ELD-verified "active days" basis (which underpins invoices + investor payouts) counts a paid travel day only when a telemetry ping shows `speed > 2.235 m/s`. **Whether `GetDashboards` rows carry speed is UNVERIFIED** (the initial key returned `code:7`, so no live row was ever seen). If speed is absent, the Apollo adapter must synthesize the motion signal from `HOSEvents` (`DrivenMiles > 0` / duty status "Driving") or successive-position deltas — isolated to `apollo.js`. **Resolve this the moment an activated key lets us see a real `GetDashboards` row.**
+- **Key status:** the initial reseller key returned `code:7` (invalid / not-yet-activated); an activated `HOSClientApiKey` from the reseller is required before Apollo can pull live data. Apollo ships dormant (`ELD_PROVIDER=routemate`, `APOLLO_ENABLED=false`) until then. **Docs:** `apidocu.reseller.apolloeld.com` (JS-rendered SPA, interactive) + `apidoc.reseller.apolloeld.com` (KB / reference).
 
 ## House rules (`.claude/rules/`)
 

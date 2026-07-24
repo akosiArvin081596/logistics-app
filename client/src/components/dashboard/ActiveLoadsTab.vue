@@ -259,7 +259,7 @@
             <div class="dash-section-title" style="display:flex;align-items:center;gap:0.5rem;">
               <span>Route Map</span>
               <span
-                v-if="selectedDriverPosition && selectedDriverPosition.source === 'routemate'"
+                v-if="selectedDriverPosition && selectedDriverPosition.source === 'eld'"
                 style="font-size:0.6rem;font-weight:700;letter-spacing:0.05em;padding:1px 6px;border-radius:4px;background:#dcfce7;color:#166534;border:1px solid #bbf7d0;"
                 :title="`Live position from the truck's Apollo ELD device${selectedDriverPosition.lastPingAge != null ? ' — ' + formatPingAge(selectedDriverPosition.lastPingAge) + ' ago' : ''}`"
               >ELD</span>

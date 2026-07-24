@@ -67,7 +67,7 @@ function test(name, pass) { results.push({ name, pass }); }
 function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
 (async () => {
-  console.log("=== RUNNING 91 TESTS against localhost:" + PORT + " ===\n");
+  console.log("=== RUNNING 102 TESTS against localhost:" + PORT + " ===\n");
 
   // 1. Server health
   const health = await req("GET", "/api/auth/setup-check");
@@ -984,6 +984,225 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     }
     test("91. Real non-Bison rate-cons yield no phantom trailer number", allClean && sawTrailerProse);
   }
+
+  // ==========================================================================
+  // 92-96. ELD provider migration — renamed routes + back-compat aliases.
+  //
+  // The Routemate→Apollo swap made telematics provider-neutral: tables, the
+  // trucks column, env and ROUTES were renamed routemate_*→eld_* and
+  // /api/routemate/*→/api/eld/*, with the OLD paths kept as aliases so cached
+  // SPA bundles / bookmarks / n8n keep working. These are LIVE-SERVER tests
+  // (they need a running server, like every /api test above) and assert two
+  // things: the new routes carry the SAME Super-Admin-only gating the Routemate
+  // routes had, and the aliases did NOT become an unauthenticated back door.
+  // ==========================================================================
+
+  // 92. /api/eld/health is Super Admin only — no anonymous access.
+  const eh1 = await req("GET", "/api/eld/health");
+  test("92. ELD health blocked without auth (401)", eh1.status === 401);
+
+  // 93. ...works for Super Admin (reports provider status; the original
+  //     Routemate contract keys survive the rename) and is forbidden to the
+  //     Investor session (ic, created in test 3).
+  const eh2 = await req("GET", "/api/eld/health", null, ac);
+  const eh2b = await req("GET", "/api/eld/health", null, ic);
+  const ehBody = (eh2 && eh2.body) || {};
+  const ehKeys = eh2.status === 200 && typeof ehBody === "object" &&
+    "enabled" in ehBody && "hasKey" in ehBody && "baseUrl" in ehBody;
+  test("93. ELD health works for Super Admin & blocked for Investor (403)",
+    ehKeys && eh2b.status === 403);
+
+  // 94. /api/eld/vehicles (the mirrored inventory listing) — same gating.
+  const ev1 = await req("GET", "/api/eld/vehicles");
+  const ev2 = await req("GET", "/api/eld/vehicles", null, ic);
+  test("94. ELD vehicles blocked without auth (401) and for Investor (403)",
+    ev1.status === 401 && ev2.status === 403);
+
+  // 95. POST /api/admin/eld/sync-now — Super Admin only. Auth/role are checked
+  //     before the provider-enabled check, so these hold whether or not any ELD
+  //     provider is live (an unauth/Investor caller never reaches the 503).
+  const es1 = await req("POST", "/api/admin/eld/sync-now", {});
+  const es2 = await req("POST", "/api/admin/eld/sync-now", {}, ic);
+  test("95. ELD sync-now blocked without auth (401) and for Investor (403)",
+    es1.status === 401 && es2.status === 403);
+
+  // 96. Back-compat aliases must carry IDENTICAL gating — an alias that skips
+  //     auth is a back door. The legacy Routemate paths still answer, same rules.
+  const al1 = await req("GET", "/api/routemate/health");
+  const al2 = await req("GET", "/api/routemate/health", null, ic);
+  const al3 = await req("POST", "/api/admin/routemate/sync-now", {});
+  const al4 = await req("POST", "/api/admin/routemate/sync-now", {}, ic);
+  test("96. Legacy /api/routemate/* aliases still gated the same (401 unauth, 403 Investor)",
+    al1.status === 401 && al2.status === 403 && al3.status === 401 && al4.status === 403);
+
+  // ==========================================================================
+  // 97-102. ELD adapter (lib/eld) — PURE unit assertions: no server, no network.
+  //
+  // The whole migration hinges on lib/eld/apollo.js producing the SAME neutral
+  // shapes lib/eld/routemate.js always did, so server.js stays provider-blind.
+  // These require the module directly and stub global.fetch — no Apollo key or
+  // connectivity needed. lib/eld is authored in a SEPARATE worktree, so when it
+  // is absent from THIS checkout every case below SKIPs (same defensive pattern
+  // as the broker-invoice guard at the top of this file); they execute for real
+  // once the branches are integrated.
+  //
+  // The inline Apollo fixtures encode our BEST UNDERSTANDING of Apollo's wire
+  // shape from the docs (like the synthetic rate-cons in tests 86/87) and are
+  // THE thing to reconcile against apollo.js's normalizers at integration —
+  // adjust the fixture field names there if the finalized normalizers differ.
+  // ==========================================================================
+
+  // Env the adapter reads at require time; save and restore it exactly.
+  const eldEnvKeys = ["ELD_PROVIDER", "APOLLO_ENABLED", "APOLLO_API_KEY", "APOLLO_BASE_URL"];
+  const eldEnvSaved = {};
+  eldEnvKeys.forEach((k) => { eldEnvSaved[k] = process.env[k]; });
+  const restoreEldEnv = () => eldEnvKeys.forEach((k) => {
+    if (eldEnvSaved[k] === undefined) delete process.env[k]; else process.env[k] = eldEnvSaved[k];
+  });
+
+  // A minimal fetch Response stand-in. Apollo returns HTTP 200 even for code:7,
+  // so the adapter must key on the ENVELOPE, not res.status.
+  function fakeFetchResponse(bodyObj, status) {
+    const s = status || 200;
+    const text = JSON.stringify(bodyObj);
+    return {
+      ok: s >= 200 && s < 300, status: s, statusText: "OK",
+      json: async () => bodyObj, text: async () => text,
+      headers: { get: () => "application/json" },
+    };
+  }
+
+  // ONE global.fetch delegate, installed BEFORE the adapter is required so it is
+  // used whether apollo.js resolves fetch at load or at call time. Each test
+  // sets `fetchImpl`; `fetchUrls` records every requested URL (encoding test).
+  const eldRealFetch = global.fetch;
+  let fetchImpl = async () => fakeFetchResponse({ code: 1, data: [] });
+  const fetchUrls = [];
+  global.fetch = async (url, opts) => { fetchUrls.push(String(url)); return fetchImpl(url, opts); };
+
+  // Route the next adapter call: GetDashboards → bare array (its documented
+  // exception), everything else → the { code, data } envelope in `body`.
+  function serve(body, dashBody) {
+    fetchImpl = async (url) => {
+      if (String(url).includes("GetDashboards")) return fakeFetchResponse(dashBody !== undefined ? dashBody : []);
+      return fakeFetchResponse(body);
+    };
+  }
+
+  // Fresh-require lib/eld under a given env (so a selector that reads
+  // ELD_PROVIDER at load time is re-evaluated). Returns null if not in this
+  // checkout.
+  const eldCacheMarker = path.sep + "lib" + path.sep + "eld" + path.sep;
+  function freshEld(env) {
+    eldEnvKeys.forEach((k) => {
+      if (env && k in env) { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; }
+    });
+    Object.keys(require.cache).filter((k) => k.includes(eldCacheMarker)).forEach((k) => delete require.cache[k]);
+    try { return require("./lib/eld"); } catch { return null; }
+  }
+
+  const APOLLO_TEST_KEY = "abc?def";        // deliberately contains a URL-reserved '?'
+  const APOLLO_TEST_BASE = "https://content.eldroadmap.com:9103";
+  const apolloEnv = { ELD_PROVIDER: "apollo", APOLLO_ENABLED: "true", APOLLO_API_KEY: APOLLO_TEST_KEY, APOLLO_BASE_URL: APOLLO_TEST_BASE };
+  const apolloCreds = { baseUrl: APOLLO_TEST_BASE, apiKey: APOLLO_TEST_KEY };
+
+  const DASH_MPH = 60;                       // 60 mph → 26.8224 m/s (MPH_TO_MPS 0.44704)
+  const dashboardsBare = [
+    { AssetId: 4021, Latitude: 41.8781, Longitude: -87.6298, Speed: DASH_MPH, Bearing: 90, Odometer: 123456, LocationDateUtc: 1737000000000 },
+  ];
+  const vehiclesEnvelope = { code: 1, data: [
+    { AssetId: 4021, Number: "TRK-21", VIN: "1FUJA6C8", Plate: "ABC123", RegistrationState: "IL", Description: "Freightliner", Type: 0, ECMId: 55 },
+  ] };
+  const invalidKeyEnvelope = { code: 7, data: null };
+
+  const eldUnitNames = [
+    "97. activeProvider() defaults to routemate, honors ELD_PROVIDER=apollo",
+    "98. Apollo listVehicles parses a {code:1,data:[...]} envelope → neutral vehicles",
+    "99. Apollo listLiveLocations parses a bare-array GetDashboards → neutral telemetry",
+    "100. Apollo converts mph → m/s at the adapter boundary",
+    "101. Apollo URL-encodes the HOSClientApiKey ('?' → '%3F') on GETs",
+    "102. A {code:7} INVALID_KEY response surfaces as error/empty, never a crash",
+  ];
+
+  const eldProbe = freshEld({});             // load with ELD_PROVIDER unset
+  if (!eldProbe) {
+    for (const n of eldUnitNames) skip(n, "lib/eld not present in this checkout (built in a separate worktree)");
+  } else {
+    // 97. The selector default is the safety property: an un-migrated / unset
+    //     deployment must keep behaving as Routemate, never silently flip.
+    const provDefault = typeof eldProbe.activeProvider === "function" ? eldProbe.activeProvider() : null;
+    const eldApollo = freshEld({ ELD_PROVIDER: "apollo" });
+    const provApollo = eldApollo && typeof eldApollo.activeProvider === "function" ? eldApollo.activeProvider() : null;
+    test("97. activeProvider() defaults to routemate, honors ELD_PROVIDER=apollo",
+      provDefault === "routemate" && provApollo === "apollo");
+
+    // Load the Apollo-flavored interface once for the wire tests.
+    const apollo = freshEld(apolloEnv);
+    const canList = !!(apollo && typeof apollo.listVehicles === "function");
+    const canLive = !!(apollo && typeof apollo.listLiveLocations === "function");
+
+    // 98. Enveloped path: GetHOSAssetForClient → { code:1, data:[...] } parsed
+    //     into neutral vehicles carrying the neutral id key `eld_vehicle_id`.
+    if (!canList) {
+      skip("98. Apollo listVehicles parses a {code:1,data:[...]} envelope → neutral vehicles",
+        apollo ? "listVehicles not exported by lib/eld" : "apollo adapter not loadable");
+    } else {
+      serve(vehiclesEnvelope);
+      let vehicles = null, err = null;
+      try { vehicles = await apollo.listVehicles(apolloCreds); } catch (e) { err = e; }
+      const list = Array.isArray(vehicles) ? vehicles : (vehicles && Array.isArray(vehicles.data) ? vehicles.data : null);
+      test("98. Apollo listVehicles parses a {code:1,data:[...]} envelope → neutral vehicles",
+        !err && Array.isArray(list) && list.length === 1 && String(list[0].eld_vehicle_id) === "4021");
+    }
+
+    // 99/100/101. Bare-array path: GetDashboards → live telemetry. One captured
+    //     call feeds the neutral-shape, the mph→m/s conversion, and the key
+    //     URL-encoding assertions.
+    if (!canLive) {
+      skip("99. Apollo listLiveLocations parses a bare-array GetDashboards → neutral telemetry",
+        apollo ? "listLiveLocations not exported by lib/eld" : "apollo adapter not loadable");
+      skip("100. Apollo converts mph → m/s at the adapter boundary", "listLiveLocations not exported by lib/eld");
+      skip("101. Apollo URL-encodes the HOSClientApiKey ('?' → '%3F') on GETs", "listLiveLocations not exported by lib/eld");
+    } else {
+      fetchUrls.length = 0;
+      serve(null, dashboardsBare);
+      let telem = null, err = null;
+      try { telem = await apollo.listLiveLocations(apolloCreds); } catch (e) { err = e; }
+      const list = Array.isArray(telem) ? telem : null;
+      const row0 = list && list[0];
+      test("99. Apollo listLiveLocations parses a bare-array GetDashboards → neutral telemetry",
+        !err && Array.isArray(list) && list.length === 1 && !!row0 &&
+        String(row0.eld_vehicle_id) === "4021" && Math.round(Number(row0.latitude)) === 42 &&
+        typeof row0.speed === "number" && Number(row0.location_date_ms) === 1737000000000);
+
+      const expectedMs = DASH_MPH * 0.44704;   // 26.8224
+      test("100. Apollo converts mph → m/s at the adapter boundary",
+        !err && !!row0 && typeof row0.speed === "number" && Math.abs(Number(row0.speed) - expectedMs) < 0.01);
+
+      const dashUrl = fetchUrls.find((u) => u.includes("GetDashboards")) || "";
+      test("101. Apollo URL-encodes the HOSClientApiKey ('?' → '%3F') on GETs",
+        dashUrl.includes("HOSClientApiKey=") && dashUrl.includes("abc%3Fdef") && !/HOSClientApiKey=abc\?def/.test(dashUrl));
+    }
+
+    // 102. code:7 = INVALID_KEY. Must surface as a thrown error OR an empty
+    //      result — never crash the caller with a TypeError on missing data.
+    if (!canList) {
+      skip("102. A {code:7} INVALID_KEY response surfaces as error/empty, never a crash",
+        apollo ? "listVehicles not exported by lib/eld" : "apollo adapter not loadable");
+    } else {
+      serve(invalidKeyEnvelope);
+      let out = null, threw = false;
+      try { out = await apollo.listVehicles(apolloCreds); } catch { threw = true; }
+      const empty = out == null || (Array.isArray(out) && out.length === 0) ||
+        (out && Array.isArray(out.data) && out.data.length === 0);
+      test("102. A {code:7} INVALID_KEY response surfaces as error/empty, never a crash", threw || empty);
+    }
+  }
+
+  // Restore global state regardless of which branch ran.
+  global.fetch = eldRealFetch;
+  restoreEldEnv();
+  Object.keys(require.cache).filter((k) => k.includes(eldCacheMarker)).forEach((k) => delete require.cache[k]);
 
   // Results
   console.log("");
