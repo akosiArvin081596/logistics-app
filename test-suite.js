@@ -63,8 +63,9 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   const d1 = await req("GET", "/api/debug/user/admin");
   test("4. Debug blocked without auth", d1.status === 401);
 
-  // 5. Debug endpoints work for Super Admin
-  const d2 = await req("GET", "/api/debug/user/admin", null, ac);
+  // 5. Debug endpoints work for Super Admin. Look up the account we actually
+  //     logged in as — hardcoding "admin" 404s anywhere that user doesn't exist.
+  const d2 = await req("GET", "/api/debug/user/" + encodeURIComponent(ADMIN_USER), null, ac);
   test("5. Debug works for Super Admin", d2.status === 200);
 
   // 6. Webhook blocked without secret
@@ -157,20 +158,47 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   const robotsHeader = (unknownTrack.headers && unknownTrack.headers["x-robots-tag"]) || "";
   test("28. Public tracker sets noindex header", /noindex/i.test(robotsHeader));
 
-  // 29. Public tracker payload exposes pickup/delivery date-time keys
-  const okTrack = await req("GET", "/api/public/track/554954475");
+  // 29/30 need a load that actually exists in THIS environment. The suite used
+  // to hardcode 554954475, a production load ID — which 404s on staging or any
+  // fresh DB, failing two tests for reasons unrelated to the tracker. Take a
+  // real ID from the dashboard payload already fetched in test 8 instead.
+  function firstLoadId(rows) {
+    if (!Array.isArray(rows)) return null;
+    for (const r of rows) {
+      if (!r) continue;
+      const k = Object.keys(r).find(x => /load.?id|job.?id/i.test(x));
+      const v = k ? String(r[k]).trim() : "";
+      if (v && /^[A-Za-z0-9\-_.#]{1,40}$/.test(v)) return v;
+    }
+    return null;
+  }
+  const trackId = firstLoadId(dash.body?.activeJobs)
+    || firstLoadId(dash.body?.completedJobs)
+    || firstLoadId(dash.body?.unassignedJobs);
+
+  const okTrack = trackId ? await req("GET", "/api/public/track/" + encodeURIComponent(trackId)) : null;
   const tb = (okTrack && okTrack.body) || {};
-  test("29. Track payload exposes pickup/delivery date-time keys",
-    okTrack.status === 200 && "scheduledPickup" in tb && "scheduledDelivery" in tb && "actualPickup" in tb && "actualDelivery" in tb);
+
+  // 29. Public tracker payload exposes pickup/delivery date-time keys
+  if (!trackId) {
+    skip("29. Track payload exposes pickup/delivery date-time keys", "no load in dashboard data");
+  } else {
+    test("29. Track payload exposes pickup/delivery date-time keys",
+      okTrack.status === 200 && "scheduledPickup" in tb && "scheduledDelivery" in tb && "actualPickup" in tb && "actualDelivery" in tb);
+  }
 
   // 30. Public tracker status timeline is an array and never leaks the per-transition actor
-  const phases = tb.phases;
-  const phasesIsArray = Array.isArray(phases);
-  const phasesShaped = phasesIsArray && phases.every(p => p && "status" in p && "startedAt" in p);
-  const noActorKey = phasesIsArray && phases.every(p => !p || !("actor" in p));
-  const noActorString = !/actor/i.test(JSON.stringify(phases || []));
-  test("30. Track phases is array and exposes no actor",
-    okTrack.status === 200 && phasesIsArray && phasesShaped && noActorKey && noActorString);
+  if (!trackId) {
+    skip("30. Track phases is array and exposes no actor", "no load in dashboard data");
+  } else {
+    const phases = tb.phases;
+    const phasesIsArray = Array.isArray(phases);
+    const phasesShaped = phasesIsArray && phases.every(p => p && "status" in p && "startedAt" in p);
+    const noActorKey = phasesIsArray && phases.every(p => !p || !("actor" in p));
+    const noActorString = !/actor/i.test(JSON.stringify(phases || []));
+    test("30. Track phases is array and exposes no actor",
+      okTrack.status === 200 && phasesIsArray && phasesShaped && noActorKey && noActorString);
+  }
 
   // 31. ScanKit health probe — Super Admin gets the contract keys and the API key is NEVER echoed.
   //     Contract: { enabled, hasKey, baseUrl, lastScan, noCreditsSince, errorsLast24h, lastError }.
