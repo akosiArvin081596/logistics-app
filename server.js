@@ -15845,11 +15845,25 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		if (p.status === "owed") acc.totalOwed += p.effectiveAmount;
 		else if (p.status === "processing") acc.totalProcessing += p.effectiveAmount;
 		else if (p.status === "paid") acc.totalPaid += p.effectiveAmount;
+		acc.totalAdjustments += Number(p.adjustment || 0);
 		return acc;
-	}, { totalOwed: 0, totalProcessing: 0, totalPaid: 0 });
+	}, { totalOwed: 0, totalProcessing: 0, totalPaid: 0, totalAdjustments: 0 });
 	totals.totalOwed = Math.round(totals.totalOwed);
 	totals.totalProcessing = Math.round(totals.totalProcessing);
 	totals.totalPaid = Math.round(totals.totalPaid);
+	// Manual settlement adjustments are NOT part of investorNetToDate (that stays
+	// the untouched operational earnings figure, so it keeps reconciling with the
+	// Earnings section and the P&L). They land in the three status totals via
+	// effectiveAmount, which would silently break the "everything adds up to
+	// Earned" property the banner relies on. Reporting the sum lets the banner
+	// name the difference instead of leaving an unexplained gap.
+	totals.totalAdjustments = Math.round(totals.totalAdjustments);
+	// Loss deficit still unabsorbed after the last COMPLETED month — a carried
+	// loss with no later profit to eat it yet. Like adjustments it sits between
+	// earnings and payable, so the banner has to account for it to balance.
+	totals.carriedLossOutstanding = Object.entries(carryByPeriod)
+		.filter(([period]) => period < currentMonthKey)
+		.reduce((d, [, c]) => d + c.deferred - c.carriedIn, 0);
 
 	return { payouts, currentMonth, totals };
 }

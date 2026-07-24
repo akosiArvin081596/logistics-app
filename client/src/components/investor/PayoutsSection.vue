@@ -42,6 +42,19 @@
         </div>
       </div>
 
+      <!-- The three totals above are net of manual adjustments and of any loss
+           still carried. Name them here too, so this card and the Load Reports
+           banner explain the same difference rather than one of them alone. -->
+      <div v-if="totals.totalAdjustments || totals.carriedLossOutstanding" class="totals-note">
+        <span v-if="totals.totalAdjustments">
+          Includes manual adjustments of
+          <strong>{{ totals.totalAdjustments < 0 ? '−' : '+' }}{{ fmt(Math.abs(totals.totalAdjustments)) }}</strong>
+        </span>
+        <span v-if="totals.carriedLossOutstanding">
+          {{ fmt(totals.carriedLossOutstanding) }} of earlier losses is still carried against future months
+        </span>
+      </div>
+
       <!-- Past months -->
       <div class="table-label">Past Months</div>
       <div v-if="visiblePayouts.length === 0" class="empty-msg">No past payouts yet.</div>
@@ -349,6 +362,7 @@ onMounted(loadPayouts)
 /* Adjustment line shown to the investor under the effective amount */
 .inv-adj { font-size: 0.7rem; color: #b45309; margin-top: 0.1rem; font-family: inherit; }
 .inv-carry { font-size: 0.7rem; color: #64748b; margin-top: 0.1rem; font-family: inherit; font-style: italic; }
+.totals-note { display: flex; flex-direction: column; gap: 0.15rem; margin: 0.5rem 0 0.9rem; font-size: 0.74rem; color: var(--text-dim); }
 .inv-adj-note { color: #64748b; }
 
 .status-pill {
