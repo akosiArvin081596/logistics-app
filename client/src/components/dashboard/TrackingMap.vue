@@ -63,7 +63,7 @@
                   <span
                     v-if="loc.source === 'routemate'"
                     class="src-badge src-eld"
-                    title="Live position sourced from the truck's Routemate ELD device"
+                    title="Live position sourced from the truck's Apollo ELD device"
                   >ELD</span>
                   <span
                     v-else-if="loc.source === 'phone'"
@@ -73,7 +73,7 @@
                   <span
                     v-else-if="loc.assignedTruck && !loc.assignedTruck.hasEld"
                     class="src-badge src-no-eld"
-                    title="Truck is assigned to this driver but has no Routemate ELD linked"
+                    title="Truck is assigned to this driver but has no Apollo ELD linked"
                   >No ELD</span>
                 </span>
                 <span v-if="loc.noGps && loc.assignedTruck" class="driver-meta">

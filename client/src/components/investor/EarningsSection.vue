@@ -271,7 +271,7 @@
         <template v-if="detailType === 'driverPay' && selected">
           <div class="modal-breakdown">
             <div class="modal-explain">
-              Driver pay counts <strong>unique calendar days worked</strong>, not loads. A day counts when the truck actually traveled (Routemate ELD) while running a completed load. Percentage drivers earn a share of revenue after deductible trip expenses instead.
+              Driver pay counts <strong>unique calendar days worked</strong>, not loads. A day counts when the truck actually traveled (Apollo ELD) while running a completed load. Percentage drivers earn a share of revenue after deductible trip expenses instead.
             </div>
 
             <template v-if="selected.driverDetails && Object.keys(selected.driverDetails).length">

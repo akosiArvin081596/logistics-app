@@ -88,7 +88,7 @@
             <span class="val accent">{{ (asset.totalMiles || 0).toLocaleString() }} mi</span>
           </div>
           <div class="modal-callout info">
-            Odometer readings come from Routemate ELD telemetry. If the truck wasn't on the road yet (no telemetry), this will read 0 until the first ping arrives.
+            Odometer readings come from Apollo ELD telemetry. If the truck wasn't on the road yet (no telemetry), this will read 0 until the first ping arrives.
           </div>
         </div>
       </template>
