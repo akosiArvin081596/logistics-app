@@ -13056,13 +13056,22 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 				key = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0");
 				start = key + "-01"; end = ""; label = key;
 			}
-			if (!periodsMap.has(key)) periodsMap.set(key, { key, label, start, end, loadCount: 0, grossRevenue: 0, loads: [] });
+			if (!periodsMap.has(key)) periodsMap.set(key, { key, label, start, end, loadCount: 0, completedCount: 0, inTransitCount: 0, grossRevenue: 0, loads: [] });
 			const bucket = periodsMap.get(key);
 			const status = statusCol ? (r[statusCol] || "").trim() : "";
 			const gross = parseFloat(String(rateCol ? r[rateCol] : "0").replace(/[$,]/g, "")) || 0;
 			const isCompleted = completedStatuses.test(status);
+			// loadCount = every load bucketed here (kept for back-compat / CSV).
+			// completedCount is the count that shares grossRevenue's basis: gross
+			// only sums DELIVERED loads, so surfacing loadCount next to it read as
+			// "12 loads earned $20,623" when 3 of those were still in transit.
 			bucket.loadCount++;
-			if (isCompleted) bucket.grossRevenue += gross;
+			if (isCompleted) {
+				bucket.completedCount++;
+				bucket.grossRevenue += gross;
+			} else {
+				bucket.inTransitCount++;
+			}
 			bucket.loads.push({
 				loadId: lid, status,
 				pickup: resolveCityState(r, "pickup", lid, originCol ? r[originCol] : ""),
@@ -13193,7 +13202,10 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			if (doc.y + 46 > bottom()) doc.addPage();
 			doc.moveDown(0.5).font("Helvetica-Bold").fontSize(12).fillColor("#0f172a").text(p.label, L);
 			const shareTxt = net == null ? "" : `   ·   Your share (net) ${money(net)}`;
-			doc.font("Helvetica").fontSize(9).fillColor("#475569").text(`${p.loadCount} loads   ·   Gross ${money(p.grossRevenue)}${shareTxt}`, L);
+			// Count the DELIVERED loads next to Gross — they share the same basis.
+			// In-transit loads are listed in the rows below but earn nothing yet.
+			const transitTxt = p.inTransitCount ? ` (+${p.inTransitCount} in transit)` : "";
+			doc.font("Helvetica").fontSize(9).fillColor("#475569").text(`${p.completedCount} delivered${transitTxt}   ·   Gross ${money(p.grossRevenue)}${shareTxt}`, L);
 			doc.moveDown(0.4);
 			row({ load: "LOAD", status: "STATUS", route: "ROUTE", rate: "RATE", share: "YOUR SHARE" }, { color: "#94a3b8", size: 7, bold: true });
 			if (!p.loads.length) { doc.fontSize(8).fillColor("#94a3b8").text("No loads in this period.", L); continue; }
@@ -16593,22 +16605,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const investorNetToDate = Math.round(
 			(monthlyEarnings || []).reduce((s, m) => s + (m.investorEarnings || 0), 0)
 		);
-		// Payouts already settled for the SAME investor(s) this banner sums.
-		// Scoped by owner when viewing one investor (real login or ?as_user_id
-		// preview); summed across all owners for the Super-Admin all-investors
-		// view (investorOwnerId null). investor_payouts.owner_id === users.id.
-		// Read-only SUM over already-settled rows: no reconcile here (that would
-		// recompute monthlyEarnings a second time).
-		// Sum the EFFECTIVE amount (amount + manual adjustment) so this banner
-		// reconciles with the Payouts statement's "Total Paid" (which also keys on
-		// effectiveAmount). A post-settlement clawback/credit is reflected here too.
-		const investorPaidToDate = Math.round(
-			investorOwnerId != null
-				? db.prepare("SELECT COALESCE(SUM(amount + COALESCE(adjustment,0)),0) AS s FROM investor_payouts WHERE owner_id = ? AND status = 'paid'").get(investorOwnerId).s
-				: db.prepare("SELECT COALESCE(SUM(amount + COALESCE(adjustment,0)),0) AS s FROM investor_payouts WHERE status = 'paid'").get().s
-		);
-		// What's genuinely still owed = lifetime net earned - already paid out (clamp >= 0).
-		const investorStillOwed = Math.max(0, investorNetToDate - investorPaidToDate);
+		// NOTE: this endpoint deliberately does NOT publish a "still owed" figure.
+		// It used to return investorPaidToDate + investorStillOwed = netToDate −
+		// paid, which counted the STILL-OPEN current month as already owed. The
+		// payout ledger is stricter on purpose — reconcileInvestorPayouts() only
+		// settles COMPLETED past months and reports the open month separately as
+		// currentMonth.amountInProgress — so the Load Reports banner claimed
+		// "$6,389 still owed" while the Payouts section on the same page read
+		// "Total Owed $0 · July in progress". One ledger, one answer: the banner
+		// now sources GET /api/investor/payouts like the Payouts section does.
 		// Trailing 3-month average investor take-home. Uses the most recent
 		// 3 entries from monthlyEarnings (which is ordered oldest → newest).
 		// Falls back to all-time avg if fewer than 3 months exist.
@@ -16712,8 +16717,6 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalExpenses: Math.round(totalExpenses),
 				investorEarnings: Math.round((totalRevenue - totalExpenses) * investorSplit),
 				investorNetToDate,
-				investorPaidToDate,
-				investorStillOwed,
 				totalDriverPay: Math.round(totalDriverPay),
 				driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(([k, v]) => [k, { activeDays: v.activeDays, dailyRate: v.dailyRate, totalPay: v.totalPay }])),
 				netRevenueToDate,
