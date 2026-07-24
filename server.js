@@ -2435,9 +2435,11 @@ const RATECON_PDF_RESPONSE_SCHEMA = {
 		"Rate": { type: "STRING", nullable: true },
 		"BOL Number": { type: "STRING", nullable: true },
 		"Details": { type: "STRING", nullable: true },
-		// Bison Billing-Information identifiers — additive, nullable so the
-		// existing n8n Information-Extractor consumers ignore them. Used by
-		// the Draft Bison Invoice route's Gemini fallback (lib/bison-invoice).
+		// Billing-Information identifiers — additive, nullable so the existing
+		// n8n Information-Extractor consumers ignore them. Used by the Draft
+		// Invoice route's Gemini fallback (lib/broker-invoice). Bison labels
+		// these explicitly; most other brokers leave them null and the route
+		// falls back to the load ID for the order number.
 		"Order Number": { type: "STRING", nullable: true },
 		"PO Number": { type: "STRING", nullable: true },
 		"Move Number": { type: "STRING", nullable: true },
