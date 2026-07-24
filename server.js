@@ -19,7 +19,7 @@ const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
 const { renderPolicy } = require("./lib/policy-renderer");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
-const routemate = require("./lib/routemate-client");
+const eld = require("./lib/eld");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
 const { appendGmailDraft } = require("./lib/imap-draft");
@@ -984,15 +984,76 @@ function purgeOldDriverLocations() {
 purgeOldDriverLocations();
 setInterval(purgeOldDriverLocations, 7 * 24 * 60 * 60 * 1000); // weekly
 
-// --- Routemate ELD/telematics tables (Phase 1 — additive) ---
-// All six tables follow the existing IF NOT EXISTS migration style.
-// driver_locations is intentionally untouched; Routemate gets its own table
-// so phone-GPS and ELD streams can coexist (hybrid source priority added in
-// Phase 2 inside GET /api/locations/latest).
+// --- Provider-neutral rename migration (Routemate → ELD, 2026-07) ---
+// The integration was originally named routemate_*; it is now provider-neutral
+// (eld_*) so a second provider (Apollo) can slot in behind ELD_PROVIDER. On an
+// existing prod DB the old tables/column still exist and hold live history, so
+// RENAME them in place BEFORE the CREATE TABLE IF NOT EXISTS below (which would
+// otherwise create empty eld_* tables alongside the populated routemate_* ones).
+// Idempotent: a table only renames when the old exists and the new does not; a
+// fresh install skips straight to the creates. Reversible (RENAME back).
+(function migrateRoutemateToEld() {
+	const tableExists = (name) =>
+		!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?").get(name);
+	const renames = [
+		["routemate_vehicles", "eld_vehicles"],
+		["routemate_telemetry", "eld_telemetry"],
+		["routemate_fault_codes", "eld_fault_codes"],
+		["routemate_dvir", "eld_dvir"],
+		["routemate_fuel_daily", "eld_fuel_daily"],
+		["routemate_hos_daily", "eld_hos_daily"],
+	];
+	for (const [oldName, newName] of renames) {
+		try {
+			if (tableExists(oldName) && !tableExists(newName)) {
+				db.exec(`ALTER TABLE ${oldName} RENAME TO ${newName}`);
+				console.log(`[migration] renamed ${oldName} → ${newName}`);
+			}
+		} catch (e) {
+			console.error(`[migration] rename ${oldName} → ${newName} failed:`, e.message);
+		}
+	}
+	// ALTER TABLE ... RENAME TO renames the table but NOT its columns, so the
+	// migrated tables still carry the internal column `routemate_vehicle_id`.
+	// Rename it to `eld_vehicle_id` in every table that has it (SQLite ≥3.25
+	// updates dependent indexes/constraints automatically). Fresh installs
+	// created the column as eld_vehicle_id already, so this is a no-op there.
+	const colTables = ["eld_vehicles", "eld_telemetry", "eld_fault_codes", "eld_dvir", "eld_fuel_daily"];
+	for (const t of colTables) {
+		try {
+			if (!tableExists(t)) continue;
+			const cols = db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+			if (cols.includes("routemate_vehicle_id") && !cols.includes("eld_vehicle_id")) {
+				db.exec(`ALTER TABLE ${t} RENAME COLUMN routemate_vehicle_id TO eld_vehicle_id`);
+				console.log(`[migration] renamed ${t}.routemate_vehicle_id → eld_vehicle_id`);
+			}
+		} catch (e) {
+			console.error(`[migration] column rename on ${t} failed:`, e.message);
+		}
+	}
+	// trucks.routemate_vehicle_id → trucks.eld_vehicle_id (SQLite ≥3.25).
+	try {
+		const cols = db.prepare("PRAGMA table_info(trucks)").all().map((c) => c.name);
+		if (cols.includes("routemate_vehicle_id") && !cols.includes("eld_vehicle_id")) {
+			db.exec("ALTER TABLE trucks RENAME COLUMN routemate_vehicle_id TO eld_vehicle_id");
+			console.log("[migration] renamed trucks.routemate_vehicle_id → eld_vehicle_id");
+		}
+	} catch (e) {
+		console.error("[migration] trucks column rename failed:", e.message);
+	}
+})();
+
+// --- ELD/telematics tables (provider-neutral; additive IF NOT EXISTS) ---
+// All six tables follow the existing IF NOT EXISTS migration style, and the
+// RENAME migration above preserves any existing Routemate history. The active
+// provider (ELD_PROVIDER) writes into these same neutral tables.
+// driver_locations is intentionally untouched; the ELD feed gets its own table
+// so phone-GPS and ELD streams can coexist (hybrid source priority lives in
+// GET /api/locations/latest).
 db.exec(`
-	CREATE TABLE IF NOT EXISTS routemate_vehicles (
+	CREATE TABLE IF NOT EXISTS eld_vehicles (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		routemate_vehicle_id TEXT NOT NULL UNIQUE,
+		eld_vehicle_id TEXT NOT NULL UNIQUE,
 		vehicle_id TEXT DEFAULT '',
 		vin TEXT DEFAULT '',
 		make TEXT DEFAULT '',
@@ -1008,12 +1069,12 @@ db.exec(`
 		last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_routemate_vehicles_vin ON routemate_vehicles(vin)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_vehicles_vin ON eld_vehicles(vin)`); } catch {}
 
 db.exec(`
-	CREATE TABLE IF NOT EXISTS routemate_telemetry (
+	CREATE TABLE IF NOT EXISTS eld_telemetry (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		routemate_vehicle_id TEXT NOT NULL,
+		eld_vehicle_id TEXT NOT NULL,
 		latitude REAL,
 		longitude REAL,
 		speed REAL DEFAULT 0,
@@ -1026,36 +1087,36 @@ db.exec(`
 		fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_vid_date ON routemate_telemetry(routemate_vehicle_id, location_date_ms DESC)`); } catch {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_fetched ON routemate_telemetry(fetched_at)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_vid_date ON eld_telemetry(eld_vehicle_id, location_date_ms DESC)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_fetched ON eld_telemetry(fetched_at)`); } catch {}
 // Additive 2026-05-15 (GPS accuracy plan, Tier 1). Telemetry rows that fail
 // quality gates (impossible-speed jumps, NULL/zero coords) are still
 // INSERTed so we keep a full audit trail, but tagged here so every read
 // path can filter them out. Empty string = clean; values like
 // 'speed_outlier' / 'invalid_coords' = forensics.
-try { db.exec(`ALTER TABLE routemate_telemetry ADD COLUMN dropped_reason TEXT DEFAULT ''`); } catch {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_clean ON routemate_telemetry(routemate_vehicle_id, dropped_reason, id DESC)`); } catch {}
+try { db.exec(`ALTER TABLE eld_telemetry ADD COLUMN dropped_reason TEXT DEFAULT ''`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_tel_clean ON eld_telemetry(eld_vehicle_id, dropped_reason, id DESC)`); } catch {}
 
 db.exec(`
-	CREATE TABLE IF NOT EXISTS routemate_fault_codes (
+	CREATE TABLE IF NOT EXISTS eld_fault_codes (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		routemate_vehicle_id TEXT NOT NULL,
+		eld_vehicle_id TEXT NOT NULL,
 		code TEXT NOT NULL,
 		status TEXT DEFAULT '',
 		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
 		last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
 		ack_by_user_id INTEGER DEFAULT 0,
 		ack_at DATETIME,
-		UNIQUE (routemate_vehicle_id, code)
+		UNIQUE (eld_vehicle_id, code)
 	)
 `);
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_vid ON routemate_fault_codes(routemate_vehicle_id)`); } catch {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_ack ON routemate_fault_codes(ack_at)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_vid ON eld_fault_codes(eld_vehicle_id)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fault_ack ON eld_fault_codes(ack_at)`); } catch {}
 
 db.exec(`
-	CREATE TABLE IF NOT EXISTS routemate_dvir (
+	CREATE TABLE IF NOT EXISTS eld_dvir (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		routemate_vehicle_id TEXT NOT NULL,
+		eld_vehicle_id TEXT NOT NULL,
 		dvir_id TEXT NOT NULL UNIQUE,
 		date_ms INTEGER DEFAULT 0,
 		driver_name TEXT DEFAULT '',
@@ -1066,24 +1127,24 @@ db.exec(`
 		fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_dvir_vid ON routemate_dvir(routemate_vehicle_id)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_dvir_vid ON eld_dvir(eld_vehicle_id)`); } catch {}
 
 db.exec(`
-	CREATE TABLE IF NOT EXISTS routemate_fuel_daily (
+	CREATE TABLE IF NOT EXISTS eld_fuel_daily (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		routemate_vehicle_id TEXT NOT NULL,
+		eld_vehicle_id TEXT NOT NULL,
 		date TEXT NOT NULL,
 		miles REAL DEFAULT 0,
 		gallons_est REAL DEFAULT 0,
 		mpg REAL DEFAULT 0,
 		derivation_notes TEXT DEFAULT '',
-		UNIQUE (routemate_vehicle_id, date)
+		UNIQUE (eld_vehicle_id, date)
 	)
 `);
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fuel_vid ON routemate_fuel_daily(routemate_vehicle_id)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fuel_vid ON eld_fuel_daily(eld_vehicle_id)`); } catch {}
 
 db.exec(`
-	CREATE TABLE IF NOT EXISTS routemate_hos_daily (
+	CREATE TABLE IF NOT EXISTS eld_hos_daily (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		driver_id TEXT NOT NULL,
 		driver_name TEXT DEFAULT '',
@@ -1094,22 +1155,22 @@ db.exec(`
 		UNIQUE (driver_id, date)
 	)
 `);
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_hos_driver ON routemate_hos_daily(driver_id)`); } catch {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_hos_driver ON eld_hos_daily(driver_id)`); } catch {}
 
 // trucks gets a single additive column for the Routemate vehicle linkage.
 // Pattern matches the existing ALTER TABLE migration style at server.js:257.
-try { db.prepare("SELECT routemate_vehicle_id FROM trucks LIMIT 1").get(); }
-catch { db.exec(`ALTER TABLE trucks ADD COLUMN routemate_vehicle_id TEXT DEFAULT ''`); }
+try { db.prepare("SELECT eld_vehicle_id FROM trucks LIMIT 1").get(); }
+catch { db.exec(`ALTER TABLE trucks ADD COLUMN eld_vehicle_id TEXT DEFAULT ''`); }
 
-// routemate_telemetry grows ~1 row/min/vehicle when ROUTEMATE_ENABLED. Mirror
+// eld_telemetry grows ~1 row/min/vehicle when ROUTEMATE_ENABLED. Mirror
 // the driver_locations purge: drop rows older than 90 days on a weekly tick.
 function purgeOldRoutemateTelemetry() {
 	try {
 		const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
-		const r = db.prepare("DELETE FROM routemate_telemetry WHERE location_date_ms < ?").run(cutoff);
-		if (r.changes > 0) console.log(`[cleanup] Purged ${r.changes} old routemate_telemetry rows`);
+		const r = db.prepare("DELETE FROM eld_telemetry WHERE location_date_ms < ?").run(cutoff);
+		if (r.changes > 0) console.log(`[cleanup] Purged ${r.changes} old eld_telemetry rows`);
 	} catch (err) {
-		console.error("[cleanup] routemate_telemetry purge failed:", err.message);
+		console.error("[cleanup] eld_telemetry purge failed:", err.message);
 	}
 }
 purgeOldRoutemateTelemetry();
@@ -1117,16 +1178,16 @@ setInterval(purgeOldRoutemateTelemetry, 7 * 24 * 60 * 60 * 1000); // weekly
 
 // --- Routemate sync helpers ---
 // Both helpers are no-ops when the kill switch is off or the key is unset.
-// They update routemateHealth in place so the /api/routemate/health endpoint
+// They update eldHealth in place so the /api/eld/health endpoint
 // always reports the current state to admins. Called by:
-//   1. POST /api/admin/routemate/sync-now (vehicles only, manual probe)
+//   1. POST /api/admin/eld/sync-now (vehicles only, manual probe)
 //   2. setInterval at boot (vehicles 1×/day, telemetry every 60s)
 
-const routemateUpsertVehicleStmt = db.prepare(`
-	INSERT INTO routemate_vehicles
-		(routemate_vehicle_id, vehicle_id, vin, make, model, year, fuel_type, license_num, eld_id, gps_ids, state, active, raw_json, last_synced_at)
-	VALUES (@routemate_vehicle_id, @vehicle_id, @vin, @make, @model, @year, @fuel_type, @license_num, @eld_id, @gps_ids, @state, @active, @raw_json, CURRENT_TIMESTAMP)
-	ON CONFLICT(routemate_vehicle_id) DO UPDATE SET
+const eldUpsertVehicleStmt = db.prepare(`
+	INSERT INTO eld_vehicles
+		(eld_vehicle_id, vehicle_id, vin, make, model, year, fuel_type, license_num, eld_id, gps_ids, state, active, raw_json, last_synced_at)
+	VALUES (@eld_vehicle_id, @vehicle_id, @vin, @make, @model, @year, @fuel_type, @license_num, @eld_id, @gps_ids, @state, @active, @raw_json, CURRENT_TIMESTAMP)
+	ON CONFLICT(eld_vehicle_id) DO UPDATE SET
 		vehicle_id = excluded.vehicle_id,
 		vin = excluded.vin,
 		make = excluded.make,
@@ -1142,19 +1203,19 @@ const routemateUpsertVehicleStmt = db.prepare(`
 		last_synced_at = CURRENT_TIMESTAMP
 `);
 
-const routemateInsertTelemetryStmt = db.prepare(`
-	INSERT INTO routemate_telemetry
-		(routemate_vehicle_id, latitude, longitude, speed, bearing, odometer, engine_hours, fuel_pct, geocoded_location, location_date_ms, dropped_reason)
-	VALUES (@routemate_vehicle_id, @latitude, @longitude, @speed, @bearing, @odometer, @engine_hours, @fuel_pct, @geocoded_location, @location_date_ms, @dropped_reason)
+const eldInsertTelemetryStmt = db.prepare(`
+	INSERT INTO eld_telemetry
+		(eld_vehicle_id, latitude, longitude, speed, bearing, odometer, engine_hours, fuel_pct, geocoded_location, location_date_ms, dropped_reason)
+	VALUES (@eld_vehicle_id, @latitude, @longitude, @speed, @bearing, @odometer, @engine_hours, @fuel_pct, @geocoded_location, @location_date_ms, @dropped_reason)
 `);
 
 // Last accepted (non-dropped, valid coords) fix for a vehicle. Used by the
 // ingest path to compute implied speed vs. the new ping, and by the geofence
 // dwell check (Tier 1 of the GPS-accuracy plan).
-const routemateLastCleanFixStmt = db.prepare(`
+const eldLastCleanFixStmt = db.prepare(`
 	SELECT latitude, longitude, location_date_ms
-	FROM routemate_telemetry
-	WHERE routemate_vehicle_id = ?
+	FROM eld_telemetry
+	WHERE eld_vehicle_id = ?
 	  AND dropped_reason = ''
 	  AND latitude IS NOT NULL
 	  AND longitude IS NOT NULL
@@ -1174,33 +1235,33 @@ const SPEED_OUTLIER_MPS = 53.6;
 const SPEED_CHECK_MIN_DT_MS = 5 * 1000;
 const SPEED_CHECK_MAX_DT_MS = 10 * 60 * 1000;
 
-// Minimal vehicle upsert used by the telemetry sync to keep routemate_vehicles
+// Minimal vehicle upsert used by the telemetry sync to keep eld_vehicles
 // populated with at least the IDs even when the upstream vehicles-list endpoint
 // is unavailable (Routemate's /api/v0/assets/vehicles returns 500 for some
 // accounts as of 2026-05-06). COALESCE preserves richer fields (VIN, make,
-// model) if they were ever populated by routemateSyncVehicles.
-const routemateUpsertVehicleMinimalStmt = db.prepare(`
-	INSERT INTO routemate_vehicles (routemate_vehicle_id, vehicle_id, last_synced_at)
+// model) if they were ever populated by eldSyncVehicles.
+const eldUpsertVehicleMinimalStmt = db.prepare(`
+	INSERT INTO eld_vehicles (eld_vehicle_id, vehicle_id, last_synced_at)
 	VALUES (?, ?, CURRENT_TIMESTAMP)
-	ON CONFLICT(routemate_vehicle_id) DO UPDATE SET
-		vehicle_id = COALESCE(NULLIF(excluded.vehicle_id, ''), routemate_vehicles.vehicle_id),
+	ON CONFLICT(eld_vehicle_id) DO UPDATE SET
+		vehicle_id = COALESCE(NULLIF(excluded.vehicle_id, ''), eld_vehicles.vehicle_id),
 		last_synced_at = CURRENT_TIMESTAMP
 `);
 
-async function routemateSyncVehicles() {
-	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return { skipped: true, reason: "disabled" };
-	const creds = routemateCreds();
+async function eldSyncVehicles() {
+	if (!eldEnabled()) return { skipped: true, reason: "disabled" };
+	const creds = eldCreds();
 	const HARD_PAGE_CAP = 50;
 	let page = 0;
 	let total = 0;
 	try {
 		while (page < HARD_PAGE_CAP) {
-			const batch = await routemate.listVehicles(creds, { page, elements: 200 });
+			const batch = await eld.listVehicles(creds, { page, elements: 200 });
 			if (!batch || batch.length === 0) break;
 			const txn = db.transaction((rows) => {
 				for (const v of rows) {
-					routemateUpsertVehicleStmt.run({
-						routemate_vehicle_id: v.routemate_vehicle_id,
+					eldUpsertVehicleStmt.run({
+						eld_vehicle_id: v.eld_vehicle_id,
 						vehicle_id: v.vehicle_id,
 						vin: v.vin,
 						make: v.make,
@@ -1221,32 +1282,32 @@ async function routemateSyncVehicles() {
 			if (batch.length < 200) break;
 			page += 1;
 		}
-		routemateHealth.lastSync.vehicles = new Date().toISOString();
-		routemateHealth.lastError = null;
+		eldHealth.lastSync.vehicles = new Date().toISOString();
+		eldHealth.lastError = null;
 		clearRoutemateLogState("vehicles");
 		return { synced: total };
 	} catch (err) {
-		routemateHealth.lastError = { at: new Date().toISOString(), source: "vehicles", message: err.message, status: err.status || null };
-		routemateHealth.errorsLast24h += 1;
+		eldHealth.lastError = { at: new Date().toISOString(), source: "vehicles", message: err.message, status: err.status || null };
+		eldHealth.errorsLast24h += 1;
 		logRoutemateSyncFailure("vehicles", err);
 		// Routemate's /api/v0/assets/vehicles endpoint has been returning HTTP 500
 		// (their bug, confirmed against a direct probe). The telemetry endpoint
-		// still works, so derive a minimal vehicle row from any unique routemate
-		// vehicle IDs we've seen in /routemate_telemetry/ — this keeps the Link
+		// still works, so derive a minimal vehicle row from any unique eld
+		// vehicle IDs we've seen in /eld_telemetry/ — this keeps the Link
 		// modal in /trucks usable for vehicles that are actually reporting GPS,
 		// even when Routemate's vehicle-inventory endpoint is unreachable.
 		try {
 			const telemetryVehicles = db.prepare(`
-				SELECT routemate_vehicle_id,
-				       MAX(routemate_vehicle_id) AS keep
-				FROM routemate_telemetry
-				WHERE routemate_vehicle_id <> ''
-				GROUP BY routemate_vehicle_id
+				SELECT eld_vehicle_id,
+				       MAX(eld_vehicle_id) AS keep
+				FROM eld_telemetry
+				WHERE eld_vehicle_id <> ''
+				GROUP BY eld_vehicle_id
 			`).all();
 			let fallbackSynced = 0;
 			const txn = db.transaction((rows) => {
 				for (const r of rows) {
-					routemateUpsertVehicleMinimalStmt.run(r.routemate_vehicle_id, "");
+					eldUpsertVehicleMinimalStmt.run(r.eld_vehicle_id, "");
 					fallbackSynced += 1;
 				}
 			});
@@ -1256,7 +1317,7 @@ async function routemateSyncVehicles() {
 				err.fallbackSource = "telemetry";
 			}
 		} catch (fallbackErr) {
-			console.error("[routemate] vehicle-fallback also failed:", fallbackErr.message);
+			console.error("[eld] vehicle-fallback also failed:", fallbackErr.message);
 		}
 		throw err;
 	}
@@ -1283,31 +1344,31 @@ function parseRoutemateBearing(raw) {
 	return null;
 }
 
-async function routemateSyncTelemetry() {
-	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return;
+async function eldSyncTelemetry() {
+	if (!eldEnabled()) return;
 	try {
-		const rows = await routemate.listLiveLocations(routemateCreds());
+		const rows = await eld.listLiveLocations(eldCreds());
 		if (!rows || rows.length === 0) {
-			routemateHealth.lastSync.telemetry = new Date().toISOString();
+			eldHealth.lastSync.telemetry = new Date().toISOString();
 			return;
 		}
-		// Build a one-shot lookup of routemate_vehicle_id → driver_name so each
+		// Build a one-shot lookup of eld_vehicle_id → driver_name so each
 		// telemetry row can fan out a Socket.IO location-update to dispatch
 		// viewers. Without this, the /tracking map only refreshes on page-load
 		// — ELD positions would appear frozen until the user F5s.
 		const driverByVehicle = {};
 		for (const r of db.prepare(`
-			SELECT t.routemate_vehicle_id, ta.driver_name
+			SELECT t.eld_vehicle_id, ta.driver_name
 			FROM truck_assignments ta
 			JOIN trucks t ON t.id = ta.truck_id
-			WHERE ta.end_date = '' AND COALESCE(t.routemate_vehicle_id, '') <> ''
+			WHERE ta.end_date = '' AND COALESCE(t.eld_vehicle_id, '') <> ''
 		`).all()) {
-			driverByVehicle[r.routemate_vehicle_id] = r.driver_name;
+			driverByVehicle[r.eld_vehicle_id] = r.driver_name;
 		}
 
 		const txn = db.transaction((items) => {
 			for (const t of items) {
-				if (!t.routemate_vehicle_id) continue;
+				if (!t.eld_vehicle_id) continue;
 				// Quality gates (Tier 1, 2026-05-15). Both gates still INSERT the
 				// row — we never silently lose data — but tag dropped_reason so
 				// every read path filters them out and the audit trail survives.
@@ -1317,7 +1378,7 @@ async function routemateSyncTelemetry() {
 				if (!hasValidCoords) {
 					droppedReason = 'invalid_coords';
 				} else {
-					const prev = routemateLastCleanFixStmt.get(t.routemate_vehicle_id);
+					const prev = eldLastCleanFixStmt.get(t.eld_vehicle_id);
 					if (prev && Number.isFinite(prev.location_date_ms)) {
 						const dtMs = (t.location_date_ms || Date.now()) - prev.location_date_ms;
 						if (dtMs >= SPEED_CHECK_MIN_DT_MS && dtMs <= SPEED_CHECK_MAX_DT_MS) {
@@ -1335,8 +1396,8 @@ async function routemateSyncTelemetry() {
 				// Tag the in-memory item so the socket-emit + geofence loops
 				// downstream can skip dropped rows without re-querying.
 				t._droppedReason = droppedReason;
-				routemateInsertTelemetryStmt.run({
-					routemate_vehicle_id: t.routemate_vehicle_id,
+				eldInsertTelemetryStmt.run({
+					eld_vehicle_id: t.eld_vehicle_id,
 					latitude: t.latitude,
 					longitude: t.longitude,
 					speed: t.speed || 0,
@@ -1348,15 +1409,15 @@ async function routemateSyncTelemetry() {
 					location_date_ms: t.location_date_ms || Date.now(),
 					dropped_reason: droppedReason,
 				});
-				// Also keep routemate_vehicles fresh with at least the IDs. This
+				// Also keep eld_vehicles fresh with at least the IDs. This
 				// covers us when the upstream vehicles-list endpoint is broken.
-				routemateUpsertVehicleMinimalStmt.run(t.routemate_vehicle_id, t.vehicle_id || "");
+				eldUpsertVehicleMinimalStmt.run(t.eld_vehicle_id, t.vehicle_id || "");
 			}
 		});
 		txn(rows);
-		routemateHealth.lastSync.telemetry = new Date().toISOString();
-		routemateHealth.lastSync.vehicles = routemateHealth.lastSync.vehicles || new Date().toISOString();
-		routemateHealth.lastError = null;
+		eldHealth.lastSync.telemetry = new Date().toISOString();
+		eldHealth.lastSync.vehicles = eldHealth.lastSync.vehicles || new Date().toISOString();
+		eldHealth.lastError = null;
 		clearRoutemateLogState("telemetry");
 
 		// Build a {driver_lower → loadId} lookup from the cached Job Tracking
@@ -1387,10 +1448,10 @@ async function routemateSyncTelemetry() {
 		// Fan out per-driver location-update events. Same payload shape as
 		// POST /api/location uses for phone GPS so the frontend handler
 		// (TrackingMap onLocationUpdate) doesn't need to know the source.
-		// `source: 'routemate'` lets the client flip the badge to ELD live.
+		// `source: 'eld'` lets the client flip the badge to ELD live.
 		for (const t of rows) {
 			if (t._droppedReason) continue; // Tier 1: don't push outlier/invalid fixes to UI
-			const driverName = driverByVehicle[t.routemate_vehicle_id];
+			const driverName = driverByVehicle[t.eld_vehicle_id];
 			if (!driverName) continue;
 			const driverLower = driverName.trim().toLowerCase();
 			const activeLoadId = loadIdByDriver[driverLower] || "";
@@ -1404,7 +1465,7 @@ async function routemateSyncTelemetry() {
 				heading: headingDeg != null ? headingDeg : 0,
 				loadId: activeLoadId,
 				timestamp,
-				source: "routemate",
+				source: "eld",
 				// Latest fuel level (0-100, null when the ELD doesn't report it)
 				// so the tracking popup/panel stays current between page loads.
 				fuelPct: Number.isFinite(t.fuel_pct) ? t.fuel_pct : null,
@@ -1432,7 +1493,7 @@ async function routemateSyncTelemetry() {
 		// the radius a silent no-op until the load advances.
 		for (const t of rows) {
 			if (t._droppedReason) continue; // Tier 1: outlier/invalid fixes never fire geofence
-			const driverName = driverByVehicle[t.routemate_vehicle_id];
+			const driverName = driverByVehicle[t.eld_vehicle_id];
 			if (!driverName) continue;
 			if (!Number.isFinite(t.latitude) || !Number.isFinite(t.longitude)) continue;
 			if (t.latitude === 0 && t.longitude === 0) continue;
@@ -1444,21 +1505,21 @@ async function routemateSyncTelemetry() {
 					longitude: t.longitude,
 					driverName,
 					loadId: activeLoadId,
-					routemateVehicleId: t.routemate_vehicle_id,
+					eldVehicleId: t.eld_vehicle_id,
 				});
 			} catch (geoErr) {
-				console.error("routemate geofence error:", geoErr.message);
+				console.error("eld geofence error:", geoErr.message);
 			}
 		}
 	} catch (err) {
-		routemateHealth.lastError = { at: new Date().toISOString(), source: "telemetry", message: err.message, status: err.status || null };
-		routemateHealth.errorsLast24h += 1;
+		eldHealth.lastError = { at: new Date().toISOString(), source: "telemetry", message: err.message, status: err.status || null };
+		eldHealth.errorsLast24h += 1;
 		logRoutemateSyncFailure("telemetry", err);
 	}
 }
 
 // Reset 24h error counter daily at boot-aligned hour.
-setInterval(() => { routemateHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
+setInterval(() => { eldHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
 
 // --- Phase 4: telemetry-derived MPG rollup ---
 // Routemate's IFTA endpoint returns mileage only (no gallons), and live
@@ -1470,13 +1531,13 @@ setInterval(() => { routemateHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
 // tanks. If a fleet drifts from that, MPG values stay useful as TRENDS
 // even if the absolute number is off; absolute precision would require
 // a per-truck override which Phase 4 doesn't include.
-const ROUTEMATE_DEFAULT_TANK_GALLONS = 200;
+const ELD_DEFAULT_TANK_GALLONS = 200;
 
-const routemateUpsertFuelDailyStmt = db.prepare(`
-	INSERT INTO routemate_fuel_daily
-		(routemate_vehicle_id, date, miles, gallons_est, mpg, derivation_notes)
-	VALUES (@routemate_vehicle_id, @date, @miles, @gallons_est, @mpg, @derivation_notes)
-	ON CONFLICT(routemate_vehicle_id, date) DO UPDATE SET
+const eldUpsertFuelDailyStmt = db.prepare(`
+	INSERT INTO eld_fuel_daily
+		(eld_vehicle_id, date, miles, gallons_est, mpg, derivation_notes)
+	VALUES (@eld_vehicle_id, @date, @miles, @gallons_est, @mpg, @derivation_notes)
+	ON CONFLICT(eld_vehicle_id, date) DO UPDATE SET
 		miles = excluded.miles,
 		gallons_est = excluded.gallons_est,
 		mpg = excluded.mpg,
@@ -1498,16 +1559,16 @@ function medianFilter3(arr) {
 	return out;
 }
 
-function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
+function rollupOneDay(eldVehicleId, dayStartMs, dayEndMs) {
 	const rows = db.prepare(`
 		SELECT odometer, fuel_pct, location_date_ms
-		FROM routemate_telemetry
-		WHERE routemate_vehicle_id = ?
+		FROM eld_telemetry
+		WHERE eld_vehicle_id = ?
 		  AND location_date_ms >= ?
 		  AND location_date_ms < ?
 		  AND dropped_reason = ''
 		ORDER BY location_date_ms ASC
-	`).all(routemateVehicleId, dayStartMs, dayEndMs);
+	`).all(eldVehicleId, dayStartMs, dayEndMs);
 
 	if (rows.length < 2) return null;
 
@@ -1537,7 +1598,7 @@ function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 		if (delta < 0) consumptionPct += -delta;
 	}
 
-	const gallons = consumptionPct * ROUTEMATE_DEFAULT_TANK_GALLONS / 100;
+	const gallons = consumptionPct * ELD_DEFAULT_TANK_GALLONS / 100;
 	if (gallons < 0.5) {
 		return { miles: round1(miles), gallons_est: round1(gallons), mpg: 0, derivation_notes: "negligible_fuel_change" };
 	}
@@ -1553,12 +1614,12 @@ function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 
 function round1(n) { return Math.round(n * 10) / 10; }
 
-function routemateRollupFuelDaily(daysBack = 7) {
+function eldRollupFuelDaily(daysBack = 7) {
 	try {
 		const linkedVehicles = db.prepare(`
-			SELECT DISTINCT routemate_vehicle_id FROM trucks
-			WHERE COALESCE(routemate_vehicle_id, '') <> ''
-		`).all().map(r => r.routemate_vehicle_id);
+			SELECT DISTINCT eld_vehicle_id FROM trucks
+			WHERE COALESCE(eld_vehicle_id, '') <> ''
+		`).all().map(r => r.eld_vehicle_id);
 		if (linkedVehicles.length === 0) return { rolledUp: 0 };
 
 		const now = new Date();
@@ -1573,8 +1634,8 @@ function routemateRollupFuelDaily(daysBack = 7) {
 				for (const vid of linkedVehicles) {
 					const r = rollupOneDay(vid, dayStartMs, dayEndMs);
 					if (!r) continue;
-					routemateUpsertFuelDailyStmt.run({
-						routemate_vehicle_id: vid,
+					eldUpsertFuelDailyStmt.run({
+						eld_vehicle_id: vid,
 						date: dateStr,
 						miles: r.miles,
 						gallons_est: r.gallons_est,
@@ -1586,46 +1647,46 @@ function routemateRollupFuelDaily(daysBack = 7) {
 			}
 		});
 		txn();
-		routemateHealth.lastSync.fuelDaily = new Date().toISOString();
+		eldHealth.lastSync.fuelDaily = new Date().toISOString();
 		return { rolledUp };
 	} catch (err) {
-		routemateHealth.lastError = { at: new Date().toISOString(), source: "fuelDaily", message: err.message };
-		console.error("[routemate] fuel daily rollup failed:", err.message);
+		eldHealth.lastError = { at: new Date().toISOString(), source: "fuelDaily", message: err.message };
+		console.error("[eld] fuel daily rollup failed:", err.message);
 		return { rolledUp: 0, error: err.message };
 	}
 }
 
 // Run at boot (5min delay so telemetry has had time to ingest) and every 6h.
-setTimeout(() => routemateRollupFuelDaily(7), 5 * 60 * 1000);
-setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
+setTimeout(() => eldRollupFuelDaily(7), 5 * 60 * 1000);
+setInterval(() => eldRollupFuelDaily(7), 6 * 60 * 60 * 1000);
 
 // --- Phase 5: fault codes (DTC) + DVIR sync ---
 // Routemate's /dtc/{vehicleId} returns {code, status} pairs per vehicle.
-// We diff against routemate_fault_codes: existing rows get last_seen
+// We diff against eld_fault_codes: existing rows get last_seen
 // bumped; brand-new codes raise a dispatch_notifications entry so
 // dispatchers see "ELD Fault" alerts in their notifications panel.
 // Acked codes stop counting toward the open-fault badge.
 
-const routemateSelectFaultStmt = db.prepare(`
-	SELECT id, ack_at FROM routemate_fault_codes
-	WHERE routemate_vehicle_id = ? AND code = ?
+const eldSelectFaultStmt = db.prepare(`
+	SELECT id, ack_at FROM eld_fault_codes
+	WHERE eld_vehicle_id = ? AND code = ?
 `);
-const routemateInsertFaultStmt = db.prepare(`
-	INSERT INTO routemate_fault_codes (routemate_vehicle_id, code, status, first_seen, last_seen)
+const eldInsertFaultStmt = db.prepare(`
+	INSERT INTO eld_fault_codes (eld_vehicle_id, code, status, first_seen, last_seen)
 	VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 `);
-const routemateBumpFaultStmt = db.prepare(`
-	UPDATE routemate_fault_codes SET last_seen = CURRENT_TIMESTAMP, status = ? WHERE id = ?
+const eldBumpFaultStmt = db.prepare(`
+	UPDATE eld_fault_codes SET last_seen = CURRENT_TIMESTAMP, status = ? WHERE id = ?
 `);
 
-async function routemateSyncFaultCodes() {
-	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return;
+async function eldSyncFaultCodes() {
+	if (!eldEnabled()) return;
 	try {
 		const linkedVehicles = db.prepare(`
-			SELECT t.routemate_vehicle_id, t.unit_number, ta.driver_name
+			SELECT t.eld_vehicle_id, t.unit_number, ta.driver_name
 			FROM trucks t
 			LEFT JOIN truck_assignments ta ON ta.truck_id = t.id AND ta.end_date = ''
-			WHERE COALESCE(t.routemate_vehicle_id, '') <> ''
+			WHERE COALESCE(t.eld_vehicle_id, '') <> ''
 		`).all();
 		if (linkedVehicles.length === 0) return;
 
@@ -1633,22 +1694,22 @@ async function routemateSyncFaultCodes() {
 		for (const v of linkedVehicles) {
 			let codes;
 			try {
-				codes = await routemate.listFaultCodes(routemateCreds(), v.routemate_vehicle_id);
+				codes = await eld.listFaultCodes(eldCreds(), v.eld_vehicle_id);
 			} catch (err) {
 				// Per-vehicle failures shouldn't kill the whole sync.
-				routemateHealth.lastError = { at: new Date().toISOString(), source: "faultCodes:" + v.unit_number, message: err.message, status: err.status || null };
-				routemateHealth.errorsLast24h += 1;
+				eldHealth.lastError = { at: new Date().toISOString(), source: "faultCodes:" + v.unit_number, message: err.message, status: err.status || null };
+				eldHealth.errorsLast24h += 1;
 				continue;
 			}
 			if (!codes || codes.length === 0) continue;
 			const txn = db.transaction((items) => {
 				for (const f of items) {
 					if (!f.code) continue;
-					const existing = routemateSelectFaultStmt.get(v.routemate_vehicle_id, f.code);
+					const existing = eldSelectFaultStmt.get(v.eld_vehicle_id, f.code);
 					if (existing) {
-						routemateBumpFaultStmt.run(f.status || "", existing.id);
+						eldBumpFaultStmt.run(f.status || "", existing.id);
 					} else {
-						const r = routemateInsertFaultStmt.run(v.routemate_vehicle_id, f.code, f.status || "");
+						const r = eldInsertFaultStmt.run(v.eld_vehicle_id, f.code, f.status || "");
 						newCount += 1;
 						// Notify dispatch about brand-new codes only. Acked codes that
 						// re-appear later won't re-notify — admins re-review the panel.
@@ -1658,7 +1719,7 @@ async function routemateSyncFaultCodes() {
 							'eld-fault',
 							title,
 							body,
-							JSON.stringify({ truckUnit: v.unit_number, code: f.code, status: f.status || "", routemateVehicleId: v.routemate_vehicle_id, faultId: r.lastInsertRowid })
+							JSON.stringify({ truckUnit: v.unit_number, code: f.code, status: f.status || "", eldVehicleId: v.eld_vehicle_id, faultId: r.lastInsertRowid })
 						);
 						io.to("dispatch").emit("dispatch-notification", {
 							type: 'eld-fault',
@@ -1670,19 +1731,19 @@ async function routemateSyncFaultCodes() {
 			});
 			txn(codes);
 		}
-		routemateHealth.lastSync.faultCodes = new Date().toISOString();
-		if (newCount === 0) routemateHealth.lastError = null;
+		eldHealth.lastSync.faultCodes = new Date().toISOString();
+		if (newCount === 0) eldHealth.lastError = null;
 		clearRoutemateLogState("fault-codes");
 	} catch (err) {
-		routemateHealth.lastError = { at: new Date().toISOString(), source: "faultCodes", message: err.message, status: err.status || null };
-		routemateHealth.errorsLast24h += 1;
+		eldHealth.lastError = { at: new Date().toISOString(), source: "faultCodes", message: err.message, status: err.status || null };
+		eldHealth.errorsLast24h += 1;
 		logRoutemateSyncFailure("fault-codes", err);
 	}
 }
 
-const routemateUpsertDvirStmt = db.prepare(`
-	INSERT INTO routemate_dvir
-		(routemate_vehicle_id, dvir_id, date_ms, driver_name, report_type, status, unresolved_defects, corrected_defects, fetched_at)
+const eldUpsertDvirStmt = db.prepare(`
+	INSERT INTO eld_dvir
+		(eld_vehicle_id, dvir_id, date_ms, driver_name, report_type, status, unresolved_defects, corrected_defects, fetched_at)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	ON CONFLICT(dvir_id) DO UPDATE SET
 		date_ms = excluded.date_ms,
@@ -1694,29 +1755,29 @@ const routemateUpsertDvirStmt = db.prepare(`
 		fetched_at = CURRENT_TIMESTAMP
 `);
 
-async function routemateSyncDvirs() {
-	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) return;
+async function eldSyncDvirs() {
+	if (!eldEnabled()) return;
 	try {
 		const linkedVehicles = db.prepare(`
-			SELECT routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> ''
+			SELECT eld_vehicle_id FROM trucks WHERE COALESCE(eld_vehicle_id, '') <> ''
 		`).all();
 		if (linkedVehicles.length === 0) return;
 		let totalRows = 0;
 		for (const v of linkedVehicles) {
 			let dvirs;
 			try {
-				dvirs = await routemate.listDvirs(routemateCreds(), v.routemate_vehicle_id);
+				dvirs = await eld.listDvirs(eldCreds(), v.eld_vehicle_id);
 			} catch (err) {
-				routemateHealth.lastError = { at: new Date().toISOString(), source: "dvir", message: err.message, status: err.status || null };
-				routemateHealth.errorsLast24h += 1;
+				eldHealth.lastError = { at: new Date().toISOString(), source: "dvir", message: err.message, status: err.status || null };
+				eldHealth.errorsLast24h += 1;
 				continue;
 			}
 			if (!dvirs || dvirs.length === 0) continue;
 			const txn = db.transaction((items) => {
 				for (const d of items) {
 					if (!d.dvir_id) continue;
-					routemateUpsertDvirStmt.run(
-						v.routemate_vehicle_id,
+					eldUpsertDvirStmt.run(
+						v.eld_vehicle_id,
 						d.dvir_id,
 						d.date_ms || 0,
 						d.driver_name || "",
@@ -1730,39 +1791,39 @@ async function routemateSyncDvirs() {
 			txn(dvirs);
 			totalRows += dvirs.length;
 		}
-		routemateHealth.lastSync.dvirs = new Date().toISOString();
+		eldHealth.lastSync.dvirs = new Date().toISOString();
 		clearRoutemateLogState("dvir");
 	} catch (err) {
-		routemateHealth.lastError = { at: new Date().toISOString(), source: "dvir", message: err.message, status: err.status || null };
-		routemateHealth.errorsLast24h += 1;
+		eldHealth.lastError = { at: new Date().toISOString(), source: "dvir", message: err.message, status: err.status || null };
+		eldHealth.errorsLast24h += 1;
 		logRoutemateSyncFailure("dvir", err);
 	}
 }
 
 // Fault codes poll every ROUTEMATE_POLL_FAULTS_SEC (default 5min).
 const ROUTEMATE_POLL_FAULTS_MS = (parseInt(process.env.ROUTEMATE_POLL_FAULTS_SEC || "300", 10) || 300) * 1000;
-setTimeout(() => routemateSyncFaultCodes(), 7 * 60 * 1000);
-setInterval(routemateSyncFaultCodes, ROUTEMATE_POLL_FAULTS_MS);
+setTimeout(() => eldSyncFaultCodes(), 7 * 60 * 1000);
+setInterval(eldSyncFaultCodes, ROUTEMATE_POLL_FAULTS_MS);
 
 // DVIR sync once per 6h. Inspections are added a few times a day max.
-setTimeout(() => routemateSyncDvirs(), 8 * 60 * 1000);
-setInterval(routemateSyncDvirs, 6 * 60 * 60 * 1000);
+setTimeout(() => eldSyncDvirs(), 8 * 60 * 1000);
+setInterval(eldSyncDvirs, 6 * 60 * 60 * 1000);
 
 // Live telemetry: poll every ROUTEMATE_POLL_LIVE_SEC (default 60s).
 const ROUTEMATE_POLL_LIVE_MS = (parseInt(process.env.ROUTEMATE_POLL_LIVE_SEC || "60", 10) || 60) * 1000;
-setInterval(routemateSyncTelemetry, ROUTEMATE_POLL_LIVE_MS);
+setInterval(eldSyncTelemetry, ROUTEMATE_POLL_LIVE_MS);
 
 // Vehicle inventory: refresh once per day. Cheap (one paginated call) and the
 // list rarely changes — admins shouldn't need to manually re-sync.
-setInterval(() => { routemateSyncVehicles().catch(() => {}); }, 24 * 60 * 60 * 1000);
+setInterval(() => { eldSyncVehicles().catch(() => {}); }, 24 * 60 * 60 * 1000);
 
-// Boot-time vehicle sync — populates routemate_vehicles shortly after start
+// Boot-time vehicle sync — populates eld_vehicles shortly after start
 // so the truck-link UI has data without waiting 24h for the daily interval
 // or requiring an admin to click "Sync Now". 5s delay lets Express finish
 // binding before any outbound HTTP. The helper itself no-ops when the kill
 // switch is off; we don't gate here because ROUTEMATE_ENABLED is declared
 // later in the file (TDZ would crash the boot).
-setTimeout(() => { routemateSyncVehicles().catch(() => {}); }, 5000);
+setTimeout(() => { eldSyncVehicles().catch(() => {}); }, 5000);
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_config (
@@ -2709,17 +2770,36 @@ const SCANKIT_BASE_URL = process.env.SCANKIT_BASE_URL || "https://api.scankit.io
 const SCANKIT_API_KEY = process.env.SCANKIT_API_KEY || "";
 const SCANKIT_ENABLED = String(process.env.SCANKIT_ENABLED || "").toLowerCase() === "true";
 
-// Routemate AI ELD/telematics integration. Phase 1 deploys with the kill
-// switch off (ROUTEMATE_ENABLED=false) so the foundation lands before the
-// API key is wired. Sync intervals (live GPS, fault codes, daily rollups)
-// added in later phases also gate on ROUTEMATE_ENABLED.
+// ELD/telematics integration — provider-neutral behind ELD_PROVIDER.
+// Two adapters live in lib/eld (routemate | apollo); the active one is chosen
+// at boot by ELD_PROVIDER (default "routemate" = existing prod behavior).
+// Each provider keeps its own BASE_URL/API_KEY/ENABLED env so cutover is a
+// single flag flip with instant rollback (see lib/eld/index.js selector).
+const ELD_PROVIDER = String(process.env.ELD_PROVIDER || "routemate").trim().toLowerCase();
+// Routemate (legacy provider). Kept so ELD_PROVIDER=routemate is unchanged.
 const ROUTEMATE_BASE_URL = process.env.ROUTEMATE_BASE_URL || "https://cloud.routemate.ai";
 const ROUTEMATE_API_KEY = process.env.ROUTEMATE_API_KEY || "";
 const ROUTEMATE_ENABLED = String(process.env.ROUTEMATE_ENABLED || "").toLowerCase() === "true";
-function routemateCreds() { return { apiKey: ROUTEMATE_API_KEY, baseUrl: ROUTEMATE_BASE_URL }; }
-// Last-sync tracker for /api/routemate/health. Updated by the manual probe
+// Apollo ELD (ATCompass / ELD Roadmap platform). Ships dormant until a valid
+// HOSClientApiKey is wired and APOLLO_ENABLED=true. Auth is the api key as a
+// query param (GET) / body field (POST) — handled inside lib/eld/apollo.js.
+const APOLLO_BASE_URL = process.env.APOLLO_BASE_URL || "https://content.eldroadmap.com:9103";
+const APOLLO_API_KEY = process.env.APOLLO_API_KEY || "";
+const APOLLO_ENABLED = String(process.env.APOLLO_ENABLED || "").toLowerCase() === "true";
+// Active-provider resolvers. Every sync/endpoint gates on these so neither
+// provider's data flows unless ITS own enabled flag + key are set.
+function eldCreds() {
+	return ELD_PROVIDER === "apollo"
+		? { apiKey: APOLLO_API_KEY, baseUrl: APOLLO_BASE_URL }
+		: { apiKey: ROUTEMATE_API_KEY, baseUrl: ROUTEMATE_BASE_URL };
+}
+function eldApiKey() { return ELD_PROVIDER === "apollo" ? APOLLO_API_KEY : ROUTEMATE_API_KEY; }
+function eldEnabledFlag() { return ELD_PROVIDER === "apollo" ? APOLLO_ENABLED : ROUTEMATE_ENABLED; }
+function eldEnabled() { return eldEnabledFlag() && !!eldApiKey(); }
+function eldBaseUrl() { return ELD_PROVIDER === "apollo" ? APOLLO_BASE_URL : ROUTEMATE_BASE_URL; }
+// Last-sync tracker for /api/eld/health. Updated by the manual probe
 // endpoint and (later phases) by interval sync jobs.
-const routemateHealth = {
+const eldHealth = {
 	lastSync: { vehicles: null, telemetry: null, faultCodes: null, dvirs: null, hosDaily: null, fuelDaily: null },
 	lastError: null,
 	errorsLast24h: 0,
@@ -2738,29 +2818,29 @@ setInterval(() => { scanKitHealth.errorsLast24h = 0; scanKitHealth.scans24h = { 
 // occurrence + every 50th repeat, not every poll cycle. Cleared when the
 // sync recovers or the error message changes — recovery emits a single
 // summary line so we know the outage ended.
-const routemateLogState = {};
+const eldLogState = {};
 function logRoutemateSyncFailure(source, err) {
 	const msg = err.message || String(err);
-	const state = routemateLogState[source];
+	const state = eldLogState[source];
 	if (!state || state.message !== msg) {
 		if (state && state.count > 1) {
-			console.error(`[routemate] ${source} prior error cleared (${state.count}x): ${state.message}`);
+			console.error(`[eld] ${source} prior error cleared (${state.count}x): ${state.message}`);
 		}
-		console.error(`[routemate] ${source} sync failed:`, msg);
-		routemateLogState[source] = { message: msg, count: 1, firstSeen: new Date().toISOString() };
+		console.error(`[eld] ${source} sync failed:`, msg);
+		eldLogState[source] = { message: msg, count: 1, firstSeen: new Date().toISOString() };
 	} else {
 		state.count += 1;
 		if (state.count % 50 === 0) {
-			console.error(`[routemate] ${source} sync still failing (${state.count}x since ${state.firstSeen}):`, msg);
+			console.error(`[eld] ${source} sync still failing (${state.count}x since ${state.firstSeen}):`, msg);
 		}
 	}
 }
 function clearRoutemateLogState(source) {
-	const state = routemateLogState[source];
+	const state = eldLogState[source];
 	if (state && state.count > 1) {
-		console.log(`[routemate] ${source} sync recovered after ${state.count} consecutive failures`);
+		console.log(`[eld] ${source} sync recovered after ${state.count} consecutive failures`);
 	}
-	delete routemateLogState[source];
+	delete eldLogState[source];
 }
 
 async function getSheets() {
@@ -4576,13 +4656,13 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 					SELECT rt.latitude, rt.longitude, rt.speed, rt.location_date_ms
 					FROM truck_assignments ta
 					JOIN trucks t ON t.id = ta.truck_id
-					JOIN routemate_telemetry rt ON rt.routemate_vehicle_id = t.routemate_vehicle_id
+					JOIN eld_telemetry rt ON rt.eld_vehicle_id = t.eld_vehicle_id
 					WHERE ta.end_date = ''
-					  AND COALESCE(t.routemate_vehicle_id, '') <> ''
+					  AND COALESCE(t.eld_vehicle_id, '') <> ''
 					  AND TRIM(LOWER(ta.driver_name)) = ?
 					  AND rt.id = (
-						SELECT MAX(rt2.id) FROM routemate_telemetry rt2
-						WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+						SELECT MAX(rt2.id) FROM eld_telemetry rt2
+						WHERE rt2.eld_vehicle_id = t.eld_vehicle_id
 						  AND rt2.dropped_reason = ''
 					  )
 					LIMIT 1
@@ -5620,7 +5700,7 @@ function localDayInTz(ms, tz) {
 	return `${y}-${m}-${d}`; // "YYYY-MM-DD" in the given zone
 }
 
-// Returns { [routemate_vehicle_id]: { travel: Set<"YYYY-MM-DD">, coverage: Set<...> } }.
+// Returns { [eld_vehicle_id]: { travel: Set<"YYYY-MM-DD">, coverage: Set<...> } }.
 //   • coverage = days the ELD reported ANY clean ping (the truck was being tracked).
 //   • travel   = days with ≥1 clean ping faster than ~5 mph (the truck actually moved).
 // Day strings are bucketed in the TRUCK'S LOCAL timezone (derived per-ping from the
@@ -5639,9 +5719,9 @@ function getEldTravelDaysByVehicle(vehicleIds, minMs, maxMs) {
 	if (!ids.length || !(maxMs > minMs)) return out;
 	const ph = ids.map(() => "?").join(",");
 	const rows = db.prepare(
-		`SELECT routemate_vehicle_id AS vid, location_date_ms AS ms, speed, longitude AS lng
-		 FROM routemate_telemetry
-		 WHERE routemate_vehicle_id IN (${ph})
+		`SELECT eld_vehicle_id AS vid, location_date_ms AS ms, speed, longitude AS lng
+		 FROM eld_telemetry
+		 WHERE eld_vehicle_id IN (${ph})
 		   AND dropped_reason = ''
 		   AND location_date_ms >= ? AND location_date_ms < ?`
 	).all(...ids, minMs, maxMs);
@@ -5959,7 +6039,7 @@ async function generateInvoiceHandler(req, res) {
 		// data falls back to the scheduled window (coverage-aware) so pay isn't zeroed.
 		const truckCol = headers.find(h => /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i.test(h));
 		const unitToVid = {};
-		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''")
+		db.prepare("SELECT LOWER(unit_number) AS u, eld_vehicle_id AS vid FROM trucks WHERE COALESCE(eld_vehicle_id, '') != ''")
 			.all().forEach(t => { unitToVid[t.u] = t.vid; });
 		const weekStartMs = new Date(weekStart + "T00:00:00").getTime();
 		const weekEndMs = new Date(computedWeekEnd + "T00:00:00").getTime() + 24 * 3600 * 1000;
@@ -7836,7 +7916,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			TitleState: t.title_state || '',
 			MaintenanceFundMonthly: t.maintenance_fund_monthly || 0,
 			LoadCount: loadCount,
-			RoutemateVehicleId: t.routemate_vehicle_id || '',
+			EldVehicleId: t.eld_vehicle_id || '',
 		};
 	});
 	res.json({ trucks });
@@ -7977,7 +8057,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		params.push(id);
 		db.prepare(`UPDATE trucks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
 		// Audit pay-rate changes — the rate drives invoices and P&L. Reuses the
-		// established truck-entity logAudit pattern (see routemate_link/unlink).
+		// established truck-entity logAudit pattern (see eld_link/unlink).
 		if (driverPayParsed && driverPayParsed.value !== (truck.driver_pay_daily || 0)) {
 			const fmtRate = (v) => (v > 0 ? `$${v}/day` : "default ($250/day)");
 			logAudit(req, "update_driver_pay", "truck", String(id),
@@ -8250,8 +8330,8 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		sqlFixes.documents = db.prepare("UPDATE documents SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
 		sqlFixes.driver_locations = db.prepare("UPDATE driver_locations SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
 		sqlFixes.invoices = db.prepare("UPDATE invoices SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.routemate_dvir = db.prepare("UPDATE routemate_dvir SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.routemate_hos_daily = db.prepare("UPDATE routemate_hos_daily SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.eld_dvir = db.prepare("UPDATE eld_dvir SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
+		sqlFixes.eld_hos_daily = db.prepare("UPDATE eld_hos_daily SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
 		sqlFixes.dispatch_notif_title = db.prepare("UPDATE dispatch_notifications SET title = REPLACE(title, ?, ?) WHERE title LIKE ?").run(oldName.trim(), newName.trim(), `%${oldName.trim()}%`).changes;
 		sqlFixes.dispatch_notif_body = db.prepare("UPDATE dispatch_notifications SET body = REPLACE(body, ?, ?) WHERE body LIKE ?").run(oldName.trim(), newName.trim(), `%${oldName.trim()}%`).changes;
 
@@ -11202,68 +11282,86 @@ app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 	}
 });
 
-// --- Routemate ELD/telematics probe endpoints (Phase 1) ---
-// The sync intervals come in Phase 2+. For now these two endpoints validate
-// that the API key works and mirror the vehicle list into routemate_vehicles
-// so admins can link trucks → Routemate devices in TrucksView (Phase 2).
+// --- Back-compat: rewrite legacy /api/routemate/* paths to /api/eld/* ---
+// The ELD routes were renamed provider-neutrally (routemate → eld). Any cached
+// client, bookmark, or external caller (n8n) still hitting the old paths is
+// transparently rewritten here BEFORE the route handlers, so nothing 404s /
+// falls through to the SPA catch-all. req.url is swapped (query string kept).
+app.use((req, res, next) => {
+	const u = req.url;
+	if (u.startsWith("/api/routemate/")) {
+		req.url = "/api/eld/" + u.slice("/api/routemate/".length);
+	} else if (u.startsWith("/api/admin/routemate/")) {
+		req.url = "/api/admin/eld/" + u.slice("/api/admin/routemate/".length);
+	} else if (/^\/api\/trucks\/[^/]+\/link-routemate(\?|$)/.test(u)) {
+		req.url = u.replace("/link-routemate", "/link-eld");
+	}
+	next();
+});
 
-// POST /api/admin/routemate/sync-now — Manual probe + vehicle list mirror.
+// --- ELD/telematics probe endpoints (provider-neutral) ---
+// These two endpoints validate that the active provider's API key works and
+// mirror the vehicle list into eld_vehicles so admins can link trucks → ELD
+// devices in TrucksView. The active provider is chosen by ELD_PROVIDER.
+
+// POST /api/admin/eld/sync-now — Manual probe + vehicle list mirror.
 // Super Admin only. No-ops with a clean 503 when ROUTEMATE_ENABLED is false
 // or the key is unset; that keeps the kill switch usable from the UI.
 // Method guard — without this, a stray GET to this URL falls through to the
 // SPA catch-all and serves index.html, which looks like the endpoint is
 // world-readable. POST is properly auth-gated below; this just keeps the
 // 405 error explicit for any tooling that probes both verbs.
-app.all("/api/admin/routemate/sync-now", (req, res, next) => {
+app.all("/api/admin/eld/sync-now", (req, res, next) => {
 	if (req.method === "POST") return next();
 	res.set("Allow", "POST");
 	res.status(405).json({ error: "Method not allowed", expected: "POST" });
 });
-app.post("/api/admin/routemate/sync-now", requireRole("Super Admin"), async (req, res) => {
-	if (!ROUTEMATE_ENABLED) {
-		return res.status(503).json({ error: "Routemate integration disabled (set ROUTEMATE_ENABLED=true)" });
+app.post("/api/admin/eld/sync-now", requireRole("Super Admin"), async (req, res) => {
+	if (!eldEnabledFlag()) {
+		return res.status(503).json({ error: `ELD integration disabled (set ${ELD_PROVIDER === "apollo" ? "APOLLO_ENABLED" : "ROUTEMATE_ENABLED"}=true)` });
 	}
-	if (!ROUTEMATE_API_KEY) {
-		return res.status(503).json({ error: "Routemate API key not configured (set ROUTEMATE_API_KEY)" });
+	if (!eldApiKey()) {
+		return res.status(503).json({ error: `ELD API key not configured (set ${ELD_PROVIDER === "apollo" ? "APOLLO_API_KEY" : "ROUTEMATE_API_KEY"})` });
 	}
 	try {
 		// Smoke test first via the lightest call before paginating vehicles.
-		await routemate.getCompany(routemateCreds());
-		const result = await routemateSyncVehicles();
+		await eld.getCompany(eldCreds());
+		const result = await eldSyncVehicles();
 		// Trigger one telemetry pull so the operator sees fresh data immediately.
-		routemateSyncTelemetry().catch(() => {});
-		logAudit(req, 'routemate_sync', 'vehicles', '', `Synced ${result.synced} Routemate vehicles`);
-		res.json({ success: true, vehiclesSynced: result.synced });
+		eldSyncTelemetry().catch(() => {});
+		logAudit(req, 'eld_sync', 'vehicles', '', `Synced ${result.synced} ${ELD_PROVIDER} vehicles`);
+		res.json({ success: true, vehiclesSynced: result.synced, provider: ELD_PROVIDER });
 	} catch (err) {
-		console.error("Routemate sync-now error:", err.message);
-		// Pull telemetry anyway — that endpoint isn't affected by the
-		// /assets/vehicles outage and is what dispatchers actually care about.
-		routemateSyncTelemetry().catch(() => {});
+		console.error(`ELD (${ELD_PROVIDER}) sync-now error:`, err.message);
+		// Pull telemetry anyway — that feed isn't affected by the vehicle-list
+		// outage and is what dispatchers actually care about.
+		eldSyncTelemetry().catch(() => {});
 		const upstream500 = err.status === 500;
 		const fellBackToTelemetry = Number.isFinite(err.fallbackSynced);
 		res.status(err.status === 401 || err.status === 403 ? err.status : 502).json({
-			error: err.message || "Routemate sync failed",
-			code: err.code || "ROUTEMATE_SYNC_FAILED",
+			error: err.message || "ELD sync failed",
+			code: err.code || "ELD_SYNC_FAILED",
 			upstreamStatus: err.status || null,
-			// Helpful breadcrumb for support — explains *what* Routemate broke.
+			// Helpful breadcrumb for support — explains *what* the provider broke.
 			hint: upstream500
-				? "Routemate's /api/v0/assets/vehicles endpoint is returning HTTP 500. Telemetry (live GPS) is unaffected. Contact Routemate support — this is upstream."
+				? "The ELD provider's vehicle-list endpoint is returning HTTP 500. Telemetry (live GPS) is unaffected. Contact the ELD provider — this is upstream."
 				: undefined,
 			fallbackSynced: fellBackToTelemetry ? err.fallbackSynced : undefined,
 		});
 	}
 });
 
-// GET /api/routemate/health — Last-sync timestamps + recent error count.
+// GET /api/eld/health — Last-sync timestamps + recent error count.
 // Super Admin only. Used by the manual probe UI in TrucksView (Phase 2).
-app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
+app.get("/api/eld/health", requireRole("Super Admin"), (req, res) => {
 	res.json({
-		enabled: ROUTEMATE_ENABLED,
-		hasKey: !!ROUTEMATE_API_KEY,
-		baseUrl: ROUTEMATE_BASE_URL,
-		lastSync: routemateHealth.lastSync,
-		lastError: routemateHealth.lastError,
-		errorsLast24h: routemateHealth.errorsLast24h,
+		provider: ELD_PROVIDER,
+		enabled: eldEnabledFlag(),
+		hasKey: !!eldApiKey(),
+		baseUrl: eldBaseUrl(),
+		lastSync: eldHealth.lastSync,
+		lastError: eldHealth.lastError,
+		errorsLast24h: eldHealth.errorsLast24h,
 	});
 });
 
@@ -11281,104 +11379,104 @@ app.get("/api/scankit/health", requireRole("Super Admin"), (req, res) => {
 	});
 });
 
-// GET /api/routemate/vehicles — Mirrored Routemate vehicle inventory.
+// GET /api/eld/vehicles — Mirrored Routemate vehicle inventory.
 // Used by the truck-linkage UI in /trucks. Super Admin + Dispatcher.
-app.get("/api/routemate/vehicles", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+app.get("/api/eld/vehicles", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const rows = db.prepare(`
-			SELECT rv.id, rv.routemate_vehicle_id, rv.vehicle_id, rv.vin, rv.make, rv.model,
+			SELECT rv.id, rv.eld_vehicle_id, rv.vehicle_id, rv.vin, rv.make, rv.model,
 			       rv.year, rv.fuel_type, rv.license_num, rv.eld_id, rv.state, rv.active,
 			       rv.last_synced_at,
-			       (SELECT t.id FROM trucks t WHERE t.routemate_vehicle_id = rv.routemate_vehicle_id LIMIT 1) AS linked_truck_id,
-			       (SELECT t.unit_number FROM trucks t WHERE t.routemate_vehicle_id = rv.routemate_vehicle_id LIMIT 1) AS linked_truck_unit
-			FROM routemate_vehicles rv
-			ORDER BY rv.vin, rv.routemate_vehicle_id
+			       (SELECT t.id FROM trucks t WHERE t.eld_vehicle_id = rv.eld_vehicle_id LIMIT 1) AS linked_truck_id,
+			       (SELECT t.unit_number FROM trucks t WHERE t.eld_vehicle_id = rv.eld_vehicle_id LIMIT 1) AS linked_truck_unit
+			FROM eld_vehicles rv
+			ORDER BY rv.vin, rv.eld_vehicle_id
 		`).all();
 		res.json({ vehicles: rows });
 	} catch (err) {
-		console.error("routemate vehicles list error:", err.message);
+		console.error("eld vehicles list error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
 
-// GET /api/routemate/vehicles/unlinked — Routemate vehicles not yet linked
+// GET /api/eld/vehicles/unlinked — Routemate vehicles not yet linked
 // to any LogisX truck. Used to populate the link modal in TrucksView.
-app.get("/api/routemate/vehicles/unlinked", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+app.get("/api/eld/vehicles/unlinked", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const rows = db.prepare(`
-			SELECT rv.id, rv.routemate_vehicle_id, rv.vehicle_id, rv.vin, rv.make, rv.model,
+			SELECT rv.id, rv.eld_vehicle_id, rv.vehicle_id, rv.vin, rv.make, rv.model,
 			       rv.year, rv.fuel_type, rv.license_num, rv.eld_id, rv.state
-			FROM routemate_vehicles rv
-			WHERE rv.routemate_vehicle_id NOT IN (
-				SELECT routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> ''
+			FROM eld_vehicles rv
+			WHERE rv.eld_vehicle_id NOT IN (
+				SELECT eld_vehicle_id FROM trucks WHERE COALESCE(eld_vehicle_id, '') <> ''
 			)
-			ORDER BY rv.vin, rv.routemate_vehicle_id
+			ORDER BY rv.vin, rv.eld_vehicle_id
 		`).all();
 		res.json({ vehicles: rows });
 	} catch (err) {
-		console.error("routemate unlinked-vehicles error:", err.message);
+		console.error("eld unlinked-vehicles error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
 
-// POST /api/trucks/:truckId/link-routemate — Link a LogisX truck to a Routemate
-// vehicle. Body accepts either {routemateVehicleId} for explicit selection or
+// POST /api/trucks/:truckId/link-eld — Link a LogisX truck to a Routemate
+// vehicle. Body accepts either {eldVehicleId} for explicit selection or
 // {auto:true} to attempt VIN-based auto-match. Super Admin only.
-app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req, res) => {
+app.post("/api/trucks/:truckId/link-eld", requireRole("Super Admin"), (req, res) => {
 	try {
 		const truckId = parseInt(req.params.truckId, 10);
 		if (!truckId) return res.status(400).json({ error: "Invalid truck id" });
-		const truck = db.prepare("SELECT id, unit_number, vin, routemate_vehicle_id FROM trucks WHERE id = ?").get(truckId);
+		const truck = db.prepare("SELECT id, unit_number, vin, eld_vehicle_id FROM trucks WHERE id = ?").get(truckId);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
-		let target = (req.body && req.body.routemateVehicleId) || "";
+		let target = (req.body && req.body.eldVehicleId) || "";
 		const auto = req.body && req.body.auto === true;
 
 		if (auto) {
 			if (!truck.vin) return res.status(400).json({ error: "Truck has no VIN to auto-match" });
 			const match = db.prepare(
-				"SELECT routemate_vehicle_id FROM routemate_vehicles WHERE UPPER(vin) = UPPER(?) LIMIT 1"
+				"SELECT eld_vehicle_id FROM eld_vehicles WHERE UPPER(vin) = UPPER(?) LIMIT 1"
 			).get(truck.vin.trim());
 			if (!match) return res.status(404).json({ error: `No Routemate vehicle matches VIN ${truck.vin}` });
-			target = match.routemate_vehicle_id;
+			target = match.eld_vehicle_id;
 		}
 
-		if (!target) return res.status(400).json({ error: "routemateVehicleId or {auto:true} required" });
+		if (!target) return res.status(400).json({ error: "eldVehicleId or {auto:true} required" });
 
 		// Verify the target exists and isn't already linked to a different truck.
-		const rv = db.prepare("SELECT routemate_vehicle_id FROM routemate_vehicles WHERE routemate_vehicle_id = ?").get(target);
-		if (!rv) return res.status(404).json({ error: "Routemate vehicle not found in mirror — run sync-now first" });
+		const rv = db.prepare("SELECT eld_vehicle_id FROM eld_vehicles WHERE eld_vehicle_id = ?").get(target);
+		if (!rv) return res.status(404).json({ error: "ELD vehicle not found in mirror — run sync-now first" });
 		const otherTruck = db.prepare(
-			"SELECT id, unit_number FROM trucks WHERE routemate_vehicle_id = ? AND id <> ?"
+			"SELECT id, unit_number FROM trucks WHERE eld_vehicle_id = ? AND id <> ?"
 		).get(target, truckId);
 		if (otherTruck) {
 			return res.status(409).json({ error: `Already linked to truck ${otherTruck.unit_number} (#${otherTruck.id}). Unlink first.` });
 		}
 
-		db.prepare("UPDATE trucks SET routemate_vehicle_id = ? WHERE id = ?").run(target, truckId);
-		logAudit(req, 'routemate_link', 'truck', String(truckId), `Linked truck ${truck.unit_number} → Routemate ${target}`);
-		res.json({ success: true, truckId, routemateVehicleId: target });
+		db.prepare("UPDATE trucks SET eld_vehicle_id = ? WHERE id = ?").run(target, truckId);
+		logAudit(req, 'eld_link', 'truck', String(truckId), `Linked truck ${truck.unit_number} → Routemate ${target}`);
+		res.json({ success: true, truckId, eldVehicleId: target });
 	} catch (err) {
-		console.error("routemate link error:", err.message);
+		console.error("eld link error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
 
-// DELETE /api/trucks/:truckId/link-routemate — Clear the Routemate link.
+// DELETE /api/trucks/:truckId/link-eld — Clear the Routemate link.
 // Telemetry continues to be ingested for the underlying device but stops
 // being attributed to this truck in /api/locations/latest. Super Admin only.
-app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (req, res) => {
+app.delete("/api/trucks/:truckId/link-eld", requireRole("Super Admin"), (req, res) => {
 	try {
 		const truckId = parseInt(req.params.truckId, 10);
 		if (!truckId) return res.status(400).json({ error: "Invalid truck id" });
-		const truck = db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE id = ?").get(truckId);
+		const truck = db.prepare("SELECT id, unit_number, eld_vehicle_id FROM trucks WHERE id = ?").get(truckId);
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
-		const prev = truck.routemate_vehicle_id || "";
-		db.prepare("UPDATE trucks SET routemate_vehicle_id = '' WHERE id = ?").run(truckId);
-		logAudit(req, 'routemate_unlink', 'truck', String(truckId), `Unlinked truck ${truck.unit_number} (was ${prev || 'none'})`);
+		const prev = truck.eld_vehicle_id || "";
+		db.prepare("UPDATE trucks SET eld_vehicle_id = '' WHERE id = ?").run(truckId);
+		logAudit(req, 'eld_unlink', 'truck', String(truckId), `Unlinked truck ${truck.unit_number} (was ${prev || 'none'})`);
 		res.json({ success: true, truckId });
 	} catch (err) {
-		console.error("routemate unlink error:", err.message);
+		console.error("eld unlink error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -11390,49 +11488,49 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), (r
 app.get("/api/admin/fleet-health", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const trucks = db.prepare(`
-			SELECT id, unit_number, vin, status, assigned_driver, routemate_vehicle_id
+			SELECT id, unit_number, vin, status, assigned_driver, eld_vehicle_id
 			FROM trucks
 			ORDER BY unit_number ASC
 		`).all();
 
 		// Pre-fetch latest telemetry per linked vehicle and the latest "moving"
 		// timestamp in one pass so we don't N+1 the DB.
-		const linkedIds = trucks.map(t => t.routemate_vehicle_id).filter(Boolean);
+		const linkedIds = trucks.map(t => t.eld_vehicle_id).filter(Boolean);
 		const latestByVehicle = {};
 		const lastMovingByVehicle = {};
 		if (linkedIds.length > 0) {
 			const placeholders = linkedIds.map(() => "?").join(",");
 			const latestRows = db.prepare(`
-				SELECT rt.routemate_vehicle_id, rt.latitude, rt.longitude, rt.speed,
+				SELECT rt.eld_vehicle_id, rt.latitude, rt.longitude, rt.speed,
 				       rt.fuel_pct, rt.odometer, rt.engine_hours, rt.geocoded_location,
 				       rt.location_date_ms
-				FROM routemate_telemetry rt
+				FROM eld_telemetry rt
 				INNER JOIN (
-					SELECT routemate_vehicle_id, MAX(id) AS max_id
-					FROM routemate_telemetry
-					WHERE routemate_vehicle_id IN (${placeholders})
+					SELECT eld_vehicle_id, MAX(id) AS max_id
+					FROM eld_telemetry
+					WHERE eld_vehicle_id IN (${placeholders})
 					  AND dropped_reason = ''
-					GROUP BY routemate_vehicle_id
+					GROUP BY eld_vehicle_id
 				) latest ON rt.id = latest.max_id
 			`).all(...linkedIds);
-			for (const r of latestRows) latestByVehicle[r.routemate_vehicle_id] = r;
+			for (const r of latestRows) latestByVehicle[r.eld_vehicle_id] = r;
 
 			const MOVING_MPH_M_PER_S = 2.235; // ~5 mph
 			const movingRows = db.prepare(`
-				SELECT routemate_vehicle_id, MAX(location_date_ms) AS last_moving_ms
-				FROM routemate_telemetry
-				WHERE routemate_vehicle_id IN (${placeholders})
+				SELECT eld_vehicle_id, MAX(location_date_ms) AS last_moving_ms
+				FROM eld_telemetry
+				WHERE eld_vehicle_id IN (${placeholders})
 				  AND speed > ?
 				  AND dropped_reason = ''
-				GROUP BY routemate_vehicle_id
+				GROUP BY eld_vehicle_id
 			`).all(...linkedIds, MOVING_MPH_M_PER_S);
-			for (const r of movingRows) lastMovingByVehicle[r.routemate_vehicle_id] = r.last_moving_ms;
+			for (const r of movingRows) lastMovingByVehicle[r.eld_vehicle_id] = r.last_moving_ms;
 		}
 
 		const FRESH_MS = 5 * 60 * 1000;
 		const now = Date.now();
 		const result = trucks.map((t) => {
-			const rmId = t.routemate_vehicle_id || "";
+			const rmId = t.eld_vehicle_id || "";
 			const tel = rmId ? latestByVehicle[rmId] : null;
 			const isFresh = !!(tel && tel.location_date_ms && (now - tel.location_date_ms) < FRESH_MS);
 			let idleSeconds = null;
@@ -11454,8 +11552,8 @@ app.get("/api/admin/fleet-health", requireRole("Super Admin", "Dispatcher"), (re
 				vin: t.vin || "",
 				truckStatus: t.status,
 				assignedDriver: t.assigned_driver || "",
-				routemateVehicleId: rmId,
-				source: rmId && isFresh ? "routemate" : (rmId ? "stale" : "unlinked"),
+				eldVehicleId: rmId,
+				source: rmId && isFresh ? "eld" : (rmId ? "stale" : "unlinked"),
 				latitude: tel ? tel.latitude : null,
 				longitude: tel ? tel.longitude : null,
 				speedMph: tel ? Math.round((tel.speed || 0) * 2.237) : null,
@@ -11476,10 +11574,10 @@ app.get("/api/admin/fleet-health", requireRole("Super Admin", "Dispatcher"), (re
 	}
 });
 
-// GET /api/routemate/fuel/summary?days=7 — Per-truck rolling MPG. Available
+// GET /api/eld/fuel/summary?days=7 — Per-truck rolling MPG. Available
 // to Super Admin / Dispatcher (full fleet) and Investor (own trucks only,
 // scoped by trucks.owner_id like /api/trucks does).
-app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
+app.get("/api/eld/fuel/summary", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
 	try {
 		const days = Math.max(1, Math.min(parseInt(req.query.days, 10) || 7, 30));
 		const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -11489,10 +11587,10 @@ app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", 
 		const preview = resolvePreviewUser(req);
 
 		const trucks = preview.isPreview
-			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
+			? db.prepare("SELECT id, unit_number, eld_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
 			: (user.role === "Investor")
-				? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
-				: db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks").all();
+				? db.prepare("SELECT id, unit_number, eld_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
+				: db.prepare("SELECT id, unit_number, eld_vehicle_id FROM trucks").all();
 
 		const fuelStmt = db.prepare(`
 			SELECT
@@ -11500,15 +11598,15 @@ app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", 
 				SUM(gallons_est) AS gallons_total,
 				COUNT(*) AS day_count,
 				MAX(date) AS latest_date
-			FROM routemate_fuel_daily
-			WHERE routemate_vehicle_id = ?
+			FROM eld_fuel_daily
+			WHERE eld_vehicle_id = ?
 			  AND date >= ?
 		`);
 
 		const result = trucks.map(t => {
 			let miles_total = 0, gallons_total = 0, day_count = 0, latest_date = null, mpg_avg = null;
-			if (t.routemate_vehicle_id) {
-				const r = fuelStmt.get(t.routemate_vehicle_id, fromDate);
+			if (t.eld_vehicle_id) {
+				const r = fuelStmt.get(t.eld_vehicle_id, fromDate);
 				miles_total = r.miles_total || 0;
 				gallons_total = r.gallons_total || 0;
 				day_count = r.day_count || 0;
@@ -11518,7 +11616,7 @@ app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", 
 			return {
 				truckId: t.id,
 				unitNumber: t.unit_number,
-				routemateVehicleId: t.routemate_vehicle_id || "",
+				eldVehicleId: t.eld_vehicle_id || "",
 				milesTotal: round1(miles_total),
 				gallonsTotal: round1(gallons_total),
 				dayCount: day_count,
@@ -11529,7 +11627,7 @@ app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", 
 
 		res.json({
 			days,
-			tankAssumptionGallons: ROUTEMATE_DEFAULT_TANK_GALLONS,
+			tankAssumptionGallons: ELD_DEFAULT_TANK_GALLONS,
 			derivedFromTelemetry: true,
 			trucks: result,
 		});
@@ -11539,29 +11637,29 @@ app.get("/api/routemate/fuel/summary", requireRole("Super Admin", "Dispatcher", 
 	}
 });
 
-// GET /api/routemate/fault-codes — Open ELD fault codes per truck. "Open"
+// GET /api/eld/fault-codes — Open ELD fault codes per truck. "Open"
 // means last_seen within 24h AND not acked. Investor sees only own trucks.
-app.get("/api/routemate/fault-codes", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
+app.get("/api/eld/fault-codes", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
 	try {
 		const user = req.session.user;
 		const trucksFilter = (user.role === "Investor")
-			? db.prepare("SELECT id, unit_number, routemate_vehicle_id, assigned_driver FROM trucks WHERE owner_id = ? AND COALESCE(routemate_vehicle_id, '') <> ''").all(user.id)
-			: db.prepare("SELECT id, unit_number, routemate_vehicle_id, assigned_driver FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> ''").all();
+			? db.prepare("SELECT id, unit_number, eld_vehicle_id, assigned_driver FROM trucks WHERE owner_id = ? AND COALESCE(eld_vehicle_id, '') <> ''").all(user.id)
+			: db.prepare("SELECT id, unit_number, eld_vehicle_id, assigned_driver FROM trucks WHERE COALESCE(eld_vehicle_id, '') <> ''").all();
 		if (trucksFilter.length === 0) return res.json({ faults: [] });
 		const placeholders = trucksFilter.map(() => "?").join(",");
-		const args = trucksFilter.map(t => t.routemate_vehicle_id);
+		const args = trucksFilter.map(t => t.eld_vehicle_id);
 		const faults = db.prepare(`
-			SELECT id, routemate_vehicle_id, code, status, first_seen, last_seen, ack_by_user_id, ack_at
-			FROM routemate_fault_codes
-			WHERE routemate_vehicle_id IN (${placeholders})
+			SELECT id, eld_vehicle_id, code, status, first_seen, last_seen, ack_by_user_id, ack_at
+			FROM eld_fault_codes
+			WHERE eld_vehicle_id IN (${placeholders})
 			  AND ack_at IS NULL
 			  AND last_seen > datetime('now', '-1 day')
 			ORDER BY last_seen DESC
 		`).all(...args);
 		const byVehicle = {};
-		for (const t of trucksFilter) byVehicle[t.routemate_vehicle_id] = t;
+		for (const t of trucksFilter) byVehicle[t.eld_vehicle_id] = t;
 		const enriched = faults.map(f => {
-			const t = byVehicle[f.routemate_vehicle_id] || {};
+			const t = byVehicle[f.eld_vehicle_id] || {};
 			return { ...f, truckId: t.id || null, unitNumber: t.unit_number || "", assignedDriver: t.assigned_driver || "" };
 		});
 		res.json({ faults: enriched });
@@ -11571,27 +11669,27 @@ app.get("/api/routemate/fault-codes", requireRole("Super Admin", "Dispatcher", "
 	}
 });
 
-// GET /api/routemate/fault-codes/summary — Open fault count per truck.
+// GET /api/eld/fault-codes/summary — Open fault count per truck.
 // Used by FleetHealthView and InvestorView for the badge.
-app.get("/api/routemate/fault-codes/summary", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
+app.get("/api/eld/fault-codes/summary", requireRole("Super Admin", "Dispatcher", "Investor"), (req, res) => {
 	try {
 		const user = req.session.user;
 		const preview = resolvePreviewUser(req);
 		const trucks = preview.isPreview
-			? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
+			? db.prepare("SELECT id, unit_number, eld_vehicle_id FROM trucks WHERE owner_id = ?").all(preview.effectiveUserId)
 			: (user.role === "Investor")
-				? db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
-				: db.prepare("SELECT id, unit_number, routemate_vehicle_id FROM trucks").all();
+				? db.prepare("SELECT id, unit_number, eld_vehicle_id FROM trucks WHERE owner_id = ?").all(user.id)
+				: db.prepare("SELECT id, unit_number, eld_vehicle_id FROM trucks").all();
 		const countStmt = db.prepare(`
-			SELECT COUNT(*) AS n FROM routemate_fault_codes
-			WHERE routemate_vehicle_id = ?
+			SELECT COUNT(*) AS n FROM eld_fault_codes
+			WHERE eld_vehicle_id = ?
 			  AND ack_at IS NULL
 			  AND last_seen > datetime('now', '-1 day')
 		`);
 		const result = trucks.map(t => ({
 			truckId: t.id,
 			unitNumber: t.unit_number,
-			openFaults: t.routemate_vehicle_id ? (countStmt.get(t.routemate_vehicle_id).n || 0) : 0,
+			openFaults: t.eld_vehicle_id ? (countStmt.get(t.eld_vehicle_id).n || 0) : 0,
 		}));
 		res.json({ trucks: result });
 	} catch (err) {
@@ -11600,19 +11698,19 @@ app.get("/api/routemate/fault-codes/summary", requireRole("Super Admin", "Dispat
 	}
 });
 
-// POST /api/routemate/fault-codes/:id/ack — Mark a fault as acknowledged.
+// POST /api/eld/fault-codes/:id/ack — Mark a fault as acknowledged.
 // Sets ack_at + ack_by_user_id; the row stays in the table for audit but
 // stops counting toward the open-fault badge. Super Admin + Dispatcher.
-app.post("/api/routemate/fault-codes/:id/ack", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+app.post("/api/eld/fault-codes/:id/ack", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const id = parseInt(req.params.id, 10);
 		if (!id) return res.status(400).json({ error: "Invalid fault id" });
-		const fault = db.prepare("SELECT id, routemate_vehicle_id, code, ack_at FROM routemate_fault_codes WHERE id = ?").get(id);
+		const fault = db.prepare("SELECT id, eld_vehicle_id, code, ack_at FROM eld_fault_codes WHERE id = ?").get(id);
 		if (!fault) return res.status(404).json({ error: "Fault not found" });
 		if (fault.ack_at) return res.status(409).json({ error: "Already acknowledged" });
 		const userId = req.session?.user?.id || 0;
-		db.prepare("UPDATE routemate_fault_codes SET ack_at = CURRENT_TIMESTAMP, ack_by_user_id = ? WHERE id = ?").run(userId, id);
-		logAudit(req, 'routemate_fault_ack', 'fault_code', String(id), `Acknowledged ELD fault ${fault.code} (vehicle ${fault.routemate_vehicle_id})`);
+		db.prepare("UPDATE eld_fault_codes SET ack_at = CURRENT_TIMESTAMP, ack_by_user_id = ? WHERE id = ?").run(userId, id);
+		logAudit(req, 'eld_fault_ack', 'fault_code', String(id), `Acknowledged ELD fault ${fault.code} (vehicle ${fault.eld_vehicle_id})`);
 		res.json({ success: true });
 	} catch (err) {
 		console.error("fault-codes ack error:", err.message);
@@ -11994,7 +12092,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 
 		const timestamp = new Date().toISOString();
 		// Look up truck/owner for this driver to stamp on expense
-		const driverTruck = db.prepare("SELECT unit_number, owner_id, routemate_vehicle_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
+		const driverTruck = db.prepare("SELECT unit_number, owner_id, eld_vehicle_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
 		// Receipt: images keep the legacy path (silent drop on bad format —
@@ -12023,17 +12121,17 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			if (safeCity && safeState && GEOCODE_CITY_RE.test(safeCity) && spendGeocodeBudget()) {
 				const g = await geocodeAddress(`${safeCity}, ${safeState}`);
 				if (g) { locLat = g.lat; locLng = g.lng; locSource = "geocode"; }
-			} else if (!safeState && driverTruck?.routemate_vehicle_id) {
+			} else if (!safeState && driverTruck?.eld_vehicle_id) {
 				// Window = user-entered day: [00:00Z − 6h, 00:00Z + 30h] covers the
 				// full local day in every US zone; pick the ping closest to 18:00Z
 				// (≈ noon Central) as the "midday" position.
 				const dayMs = Date.parse(`${date}T00:00:00Z`);
 				if (Number.isFinite(dayMs)) {
 					const pings = db.prepare(
-						`SELECT latitude, longitude, location_date_ms FROM routemate_telemetry
-						 WHERE routemate_vehicle_id = ? AND dropped_reason = ''
+						`SELECT latitude, longitude, location_date_ms FROM eld_telemetry
+						 WHERE eld_vehicle_id = ? AND dropped_reason = ''
 						   AND location_date_ms BETWEEN ? AND ?`
-					).all(driverTruck.routemate_vehicle_id, dayMs - 6 * 3600e3, dayMs + 30 * 3600e3);
+					).all(driverTruck.eld_vehicle_id, dayMs - 6 * 3600e3, dayMs + 30 * 3600e3);
 					const targetMs = Date.parse(`${date}T18:00:00Z`);
 					let best = null;
 					for (const p of pings) {
@@ -14400,7 +14498,7 @@ function checkGeofence(lat, lng, loadData, headers) {
 // status, only transitions from a valid predecessor status, AND requires the
 // previous (non-dropped) telemetry fix to also be inside the same geofence
 // trigger so a single noisy ping can't flip status mid-highway-pass.
-async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId }) {
+async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, eldVehicleId }) {
 	if (!latitude || !longitude || !driverName || !loadId) return null;
 	try {
 		const jt = await getJobTrackingCached();
@@ -14434,17 +14532,17 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 			// drop a fix 150m sideways into the 1000m radius; demanding two
 			// consecutive fixes (≈30s at 15s polling) rules that out without
 			// adding meaningful latency to legitimate arrivals.
-			if (routemateVehicleId) {
+			if (eldVehicleId) {
 				const prevFix = db.prepare(`
 					SELECT latitude, longitude
-					FROM routemate_telemetry
-					WHERE routemate_vehicle_id = ?
+					FROM eld_telemetry
+					WHERE eld_vehicle_id = ?
 					  AND dropped_reason = ''
 					  AND latitude IS NOT NULL
 					  AND longitude IS NOT NULL
 					ORDER BY id DESC
 					LIMIT 1 OFFSET 1
-				`).get(routemateVehicleId);
+				`).get(eldVehicleId);
 				// OFFSET 1 because the CURRENT ping was already INSERTed by
 				// the txn above us; OFFSET 0 would just hand back our own row.
 				if (!prevFix) return null;
@@ -14506,11 +14604,11 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 }
 
 // POST /api/location — Retired. Phone GPS was superseded by Routemate ELD
-// (see lib/routemate-client.js + routemateSyncTelemetry). Route kept so cached
+// (see lib/eld.js + eldSyncTelemetry). Route kept so cached
 // driver clients on old phones receive a clear 410 instead of 404.
 app.post("/api/location", requireAuth, locationLimiter, (req, res) => {
 	res.status(410).json({
-		error: "Phone GPS is discontinued. Location is now sourced from Routemate ELD.",
+		error: "Phone GPS is discontinued. Location is now sourced from the ELD provider.",
 	});
 });
 
@@ -14553,12 +14651,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		// Overlay Routemate telemetry. When a driver's currently-assigned truck
 		// is linked to a Routemate device AND we have a fresh telemetry row
 		// (<5 min old), fill in lat/lng/speed/timestamp from the ELD and tag
-		// source: 'routemate'. Drivers with no linked truck or stale ELD ping
+		// source: 'eld'. Drivers with no linked truck or stale ELD ping
 		// stay as noGps placeholders.
 		try {
 			const FRESH_MS = 5 * 60 * 1000;
 			const cutoff = Date.now() - FRESH_MS;
-			const routemateRows = db.prepare(`
+			const eldRows = db.prepare(`
 				SELECT
 					LOWER(ta.driver_name) AS driver_lc,
 					rt.latitude, rt.longitude, rt.speed, rt.bearing,
@@ -14566,38 +14664,38 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					rt.location_date_ms,
 					-- Prior telemetry row's coords, used as a fallback heading source
 					-- when rt.bearing is missing or non-numeric. Index idx_rm_tel_vid_date
-					-- covers (routemate_vehicle_id, location_date_ms DESC) so this stays cheap.
-					(SELECT rt2.latitude  FROM routemate_telemetry rt2
-					   WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+					-- covers (eld_vehicle_id, location_date_ms DESC) so this stays cheap.
+					(SELECT rt2.latitude  FROM eld_telemetry rt2
+					   WHERE rt2.eld_vehicle_id = t.eld_vehicle_id
 					     AND rt2.id < rt.id
 					     AND rt2.dropped_reason = ''
 					   ORDER BY rt2.id DESC LIMIT 1) AS prev_lat,
-					(SELECT rt2.longitude FROM routemate_telemetry rt2
-					   WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+					(SELECT rt2.longitude FROM eld_telemetry rt2
+					   WHERE rt2.eld_vehicle_id = t.eld_vehicle_id
 					     AND rt2.id < rt.id
 					     AND rt2.dropped_reason = ''
 					   ORDER BY rt2.id DESC LIMIT 1) AS prev_lng
 				FROM truck_assignments ta
 				JOIN trucks t ON t.id = ta.truck_id
-				JOIN routemate_telemetry rt
-				  ON rt.routemate_vehicle_id = t.routemate_vehicle_id
+				JOIN eld_telemetry rt
+				  ON rt.eld_vehicle_id = t.eld_vehicle_id
 				WHERE ta.end_date = ''
-				  AND COALESCE(t.routemate_vehicle_id, '') <> ''
+				  AND COALESCE(t.eld_vehicle_id, '') <> ''
 				  AND rt.id = (
-					SELECT MAX(rt2.id) FROM routemate_telemetry rt2
-					WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+					SELECT MAX(rt2.id) FROM eld_telemetry rt2
+					WHERE rt2.eld_vehicle_id = t.eld_vehicle_id
 					  AND rt2.dropped_reason = ''
 				  )
 				  AND rt.location_date_ms > ?
 			`).all(cutoff);
-			const routemateByDriver = {};
-			for (const r of routemateRows) {
-				routemateByDriver[r.driver_lc] = r;
+			const eldByDriver = {};
+			for (const r of eldRows) {
+				eldByDriver[r.driver_lc] = r;
 			}
 			const now = Date.now();
 			for (const loc of locations) {
 				const key = (loc.driver || "").toLowerCase();
-				const rm = routemateByDriver[key];
+				const rm = eldByDriver[key];
 				// Only overlay Routemate when telemetry has a valid fix.
 				// A linked truck whose ELD lost GPS sends NULL/0 lat/lng — letting that
 				// through would clobber phone GPS and pin the truck at the equator.
@@ -14610,7 +14708,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					loc.longitude = rm.longitude;
 					loc.speed = rm.speed || 0;
 					loc.timestamp = new Date(rm.location_date_ms).toISOString();
-					loc.source = "routemate";
+					loc.source = "eld";
 					loc.lastPingAge = now - rm.location_date_ms;
 					// Latest ELD fuel level (0-100). Same convention as
 					// /api/admin/fleet-health: fuelPct, null when the device
@@ -14636,7 +14734,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				}
 			}
 		} catch (rmErr) {
-			console.error("Routemate source overlay error:", rmErr.message);
+			console.error("ELD source overlay error:", rmErr.message);
 		}
 
 		// Active truck-assignment overlay. Surfaces every actively-assigned
@@ -14653,7 +14751,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				SELECT LOWER(ta.driver_name) AS driver_lc,
 				       t.id AS truck_id,
 				       t.unit_number,
-				       CASE WHEN COALESCE(t.routemate_vehicle_id, '') = ''
+				       CASE WHEN COALESCE(t.eld_vehicle_id, '') = ''
 				            THEN 0 ELSE 1 END AS has_eld
 				FROM truck_assignments ta
 				JOIN trucks t ON t.id = ta.truck_id
@@ -14852,11 +14950,11 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 // drivers, pulled on demand from Routemate's /api/v0/drivers/hos (no sync
 // interval — dispatchers only need this while /tracking is open). Each row
 // carries the remaining drive/shift/cycle/break countdowns in milliseconds
-// (see lib/routemate-client.js listHosClocks for the unit rationale) plus
+// (see lib/eld.js listHosClocks for the unit rationale) plus
 // dutyStatus, and is resolved to a LogisX driver name where possible so the
 // tracking panel can match rows to its driver list:
 //   1. Routemate driverName vs active truck_assignments.driver_name
-//   2. Routemate vehicleId label → routemate_vehicles → trucks link → driver
+//   2. Routemate vehicleId label → eld_vehicles → trucks link → driver
 //   3. Routemate vehicleId label vs trucks.unit_number directly
 // A 60s in-memory cache absorbs dispatcher refreshes; on upstream failure the
 // last good snapshot is served (tagged stale:true) so clocks don't blink out
@@ -14866,11 +14964,11 @@ const HOS_CACHE_TTL_MS = 60 * 1000;
 let hosClockCache = { at: 0, payload: null };
 
 app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
-	if (!ROUTEMATE_ENABLED) {
-		return res.status(503).json({ error: "Routemate integration disabled (set ROUTEMATE_ENABLED=true)" });
+	if (!eldEnabledFlag()) {
+		return res.status(503).json({ error: `ELD integration disabled (set ${ELD_PROVIDER === "apollo" ? "APOLLO_ENABLED" : "ROUTEMATE_ENABLED"}=true)` });
 	}
-	if (!ROUTEMATE_API_KEY) {
-		return res.status(503).json({ error: "Routemate API key not configured (set ROUTEMATE_API_KEY)" });
+	if (!eldApiKey()) {
+		return res.status(503).json({ error: `ELD API key not configured (set ${ELD_PROVIDER === "apollo" ? "APOLLO_API_KEY" : "ROUTEMATE_API_KEY"})` });
 	}
 	try {
 		const now = Date.now();
@@ -14884,7 +14982,7 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 		const PAGE_SIZE = 200;
 		let rows = [];
 		for (let page = 0; page < HARD_PAGE_CAP; page++) {
-			const batch = await routemate.listHosClocks(routemateCreds(), { page, elements: PAGE_SIZE });
+			const batch = await eld.listHosClocks(eldCreds(), { page, elements: PAGE_SIZE });
 			rows = rows.concat(batch.rows);
 			if (batch.rows.length < PAGE_SIZE || rows.length >= batch.total) break;
 		}
@@ -14896,7 +14994,7 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 		try {
 			const assignRows = db.prepare(`
 				SELECT ta.driver_name, t.unit_number,
-				       COALESCE(t.routemate_vehicle_id, '') AS rvid
+				       COALESCE(t.eld_vehicle_id, '') AS rvid
 				FROM truck_assignments ta
 				JOIN trucks t ON t.id = ta.truck_id
 				WHERE ta.end_date = ''
@@ -14914,10 +15012,10 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 		const rvidByLabel = {};
 		try {
 			const rvRows = db.prepare(
-				"SELECT routemate_vehicle_id, vehicle_id FROM routemate_vehicles WHERE COALESCE(vehicle_id, '') <> ''"
+				"SELECT eld_vehicle_id, vehicle_id FROM eld_vehicles WHERE COALESCE(vehicle_id, '') <> ''"
 			).all();
 			for (const rv of rvRows) {
-				rvidByLabel[String(rv.vehicle_id).trim().toLowerCase()] = rv.routemate_vehicle_id;
+				rvidByLabel[String(rv.vehicle_id).trim().toLowerCase()] = rv.eld_vehicle_id;
 			}
 		} catch (rvErr) {
 			console.error("HOS vehicle-map error:", rvErr.message);
@@ -14941,7 +15039,7 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 			};
 		});
 
-		const payload = { clocks, fetchedAt: new Date().toISOString(), source: "routemate" };
+		const payload = { clocks, fetchedAt: new Date().toISOString(), source: "eld" };
 		hosClockCache = { at: now, payload };
 		res.json(payload);
 	} catch (err) {
@@ -14950,7 +15048,7 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 			return res.json({ ...hosClockCache.payload, stale: true });
 		}
 		res.status(err.status === 401 || err.status === 403 ? err.status : 502).json({
-			error: err.message || "Routemate HOS fetch failed",
+			error: err.message || "ELD HOS fetch failed",
 		});
 	}
 });
@@ -15490,26 +15588,26 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 		// historical loadId is requested we still scope to the same truck — older
 		// trips off this truck aren't recoverable from ELD alone.
 		const assignment = db.prepare(
-			`SELECT ta.truck_id, t.routemate_vehicle_id
+			`SELECT ta.truck_id, t.eld_vehicle_id
 			 FROM truck_assignments ta
 			 JOIN trucks t ON t.id = ta.truck_id
 			 WHERE LOWER(TRIM(ta.driver_name)) = LOWER(TRIM(?))
-			   AND COALESCE(t.routemate_vehicle_id, '') <> ''
+			   AND COALESCE(t.eld_vehicle_id, '') <> ''
 			 ORDER BY ta.end_date = '' DESC, ta.start_date DESC
 			 LIMIT 1`
 		).get(driver);
 
 		let rawPoints = [];
-		if (assignment && assignment.routemate_vehicle_id) {
+		if (assignment && assignment.eld_vehicle_id) {
 			const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
 			const rows = db.prepare(
 				`SELECT latitude, longitude, speed, location_date_ms
-				 FROM routemate_telemetry
-				 WHERE routemate_vehicle_id = ?
+				 FROM eld_telemetry
+				 WHERE eld_vehicle_id = ?
 				   AND location_date_ms > ?
 				   AND dropped_reason = ''
 				 ORDER BY location_date_ms ASC`
-			).all(assignment.routemate_vehicle_id, cutoffMs);
+			).all(assignment.eld_vehicle_id, cutoffMs);
 			rawPoints = rows.map((r) => ({
 				latitude: r.latitude,
 				longitude: r.longitude,
@@ -16019,8 +16117,8 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const unitToVid = {};
 	{
 		const vidQuery = investorDriverSet
-			? "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE owner_id = ? AND COALESCE(routemate_vehicle_id, '') != ''"
-			: "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''";
+			? "SELECT LOWER(unit_number) AS u, eld_vehicle_id AS vid FROM trucks WHERE owner_id = ? AND COALESCE(eld_vehicle_id, '') != ''"
+			: "SELECT LOWER(unit_number) AS u, eld_vehicle_id AS vid FROM trucks WHERE COALESCE(eld_vehicle_id, '') != ''";
 		db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
 	}
 	const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), 0, Date.now() + 86400000);
@@ -16612,8 +16710,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const unitToVid = {};
 		{
 			const vidQuery = investorDriverSet
-				? "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE owner_id = ? AND COALESCE(routemate_vehicle_id, '') != ''"
-				: "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''";
+				? "SELECT LOWER(unit_number) AS u, eld_vehicle_id AS vid FROM trucks WHERE owner_id = ? AND COALESCE(eld_vehicle_id, '') != ''"
+				: "SELECT LOWER(unit_number) AS u, eld_vehicle_id AS vid FROM trucks WHERE COALESCE(eld_vehicle_id, '') != ''";
 			db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
 		}
 		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), 0, Date.now() + 86400000);
@@ -17909,7 +18007,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// no ELD link fall back to the full window. Keeps this P&L reconciled with
 		// the investor view (the CLAUDE.md consistency invariant).
 		const unitToVid = {};
-		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''").all()
+		db.prepare("SELECT LOWER(unit_number) AS u, eld_vehicle_id AS vid FROM trucks WHERE COALESCE(eld_vehicle_id, '') != ''").all()
 			.forEach(t => { unitToVid[t.u] = t.vid; });
 		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), 0, Date.now() + 86400000);
 
@@ -19513,10 +19611,10 @@ app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, 
 		const eldRows = db.prepare(
 			`SELECT rt.latitude, rt.longitude, rt.location_date_ms,
 			        t.id AS truck_id, t.unit_number
-			 FROM routemate_telemetry rt
-			 JOIN trucks t ON t.routemate_vehicle_id = rt.routemate_vehicle_id
+			 FROM eld_telemetry rt
+			 JOIN trucks t ON t.eld_vehicle_id = rt.eld_vehicle_id
 			 WHERE rt.location_date_ms >= ? AND rt.location_date_ms <= ?
-			   AND t.routemate_vehicle_id != ''
+			   AND t.eld_vehicle_id != ''
 			   AND rt.dropped_reason = ''
 			 ORDER BY t.id, rt.location_date_ms ASC`
 		).all(startMs, endMs);
@@ -19638,10 +19736,10 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 		}
 
 		const truck = db.prepare(
-			"SELECT id, unit_number, routemate_vehicle_id FROM trucks WHERE id = ?"
+			"SELECT id, unit_number, eld_vehicle_id FROM trucks WHERE id = ?"
 		).get(truckId);
-		if (!truck || !truck.routemate_vehicle_id) {
-			return res.status(404).json({ error: "Truck not found or not linked to Routemate" });
+		if (!truck || !truck.eld_vehicle_id) {
+			return res.status(404).json({ error: "Truck not found or not linked to an ELD device" });
 		}
 
 		const startDate = req.query.start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();
@@ -19655,12 +19753,12 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 
 		const rows = db.prepare(
 			`SELECT latitude, longitude, location_date_ms
-			 FROM routemate_telemetry
-			 WHERE routemate_vehicle_id = ?
+			 FROM eld_telemetry
+			 WHERE eld_vehicle_id = ?
 			   AND location_date_ms >= ? AND location_date_ms <= ?
 			   AND dropped_reason = ''
 			 ORDER BY location_date_ms ASC`
-		).all(truck.routemate_vehicle_id, startMs, endMs);
+		).all(truck.eld_vehicle_id, startMs, endMs);
 
 		const days = {};
 		let totalMiles = 0;
