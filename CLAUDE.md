@@ -76,6 +76,7 @@ Shared server-side modules live in `lib/` (required from `server.js`):
 - `pdf-browser.js` — Puppeteer HTML→PDF renderer for onboarding/investor docs (why `puppeteer` is a top-level dep alongside `pdfkit`/`pdf-lib`).
 - `policy-field-maps.js`, `policy-renderer.js` — field mapping + template rendering for onboarding legal documents.
 - `routemate-client.js` — Routemate ELD/telematics API adapter (single point of contact).
+- `ratecon-load.js` — pure helpers for drag-and-drop rate-con ingestion: `buildJobTrackingRow()` (header-order mapping + creation defaults), `calculateRatePerMile()` / `cityStateZip()` (ported from the n8n "Calculate Rate Per Mile" node), `extractionWarnings()`, `upsert`-support helpers. No network or DB access. See "Load ingestion" below.
 - `scankit-client.js` — ScanKit.io document-scanning API adapter (single point of contact; `POST /scan/crop`). See the AI/vision services note below.
 - `broker-invoice.js` — invoice assembly for **every** broker: `resolveInvoiceTo()` / `resolveBrokerName()` recipient + naming, `isBisonLoad()` (now a recipient *branch*, not a gate), deterministic rate-con field extraction, and the payload shape for the Draft Invoice route. See the "Invoice drafting — all brokers" section below.
 - `imap-draft.js` — `appendGmailDraft()`: writes an assembled invoice email straight into the Gmail Drafts folder over IMAP (no send), using `GMAIL_USER` / `GMAIL_APP_PASSWORD`.
@@ -136,6 +137,8 @@ REST endpoints (grouped by domain):
 - `POST /api/dispatch/reassign` — reassign load to different driver
 - `POST /api/dispatch/cancel` — **Super Admin only**. Sets status `Cancelled` (not `Unassigned`) so the load drops from every KPI via `excludeDroppedLoads()`. Per 2026-04-19 client decision, dispatchers lost this; use the Driver reassign dropdown for swaps.
 - `DELETE /api/loads/:loadId` — **Super Admin only**. Soft-delete via the `deleted_loads` table; row stays in the Sheet for audit but is filtered from all admin lists + KPIs. Reversible via `DELETE FROM deleted_loads WHERE load_id = ?`.
+- `POST /api/loads/ratecon/extract` — Super Admin/Dispatcher. `{pdfBase64, fileName}` → `{fields, warnings}` via the shared `runRateConGemini()`. **Writes nothing** (no sheet, no DB, no Drive) — it exists so the dispatcher can review before committing. Rejects non-PDFs on the `JVBERi` magic prefix, caps size, 503s without `GEMINI_API_KEY`. Rate-limited by `rateConLimiter`.
+- `POST /api/loads/from-ratecon` — Super Admin/Dispatcher. `{fields, pdfBase64, fileName}` (fields = what the dispatcher reviewed/edited) → creates the load. See "Load ingestion" below.
 - `POST /api/driver/respond` — driver accepts/declines a load assignment
 - `GET /api/load/:loadId` — single load details
 - `PUT /api/load/:loadId` — update load fields
@@ -281,6 +284,21 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 | `expenseOcrLimiter` | 15 min | 100 (Super Admin/Dispatcher) · 20 (Driver) | `POST /api/expenses/ocr` (caps Gemini spend; role-aware `max` so the admin/dispatcher bulk-receipt upload — 1 OCR call/receipt — has headroom while drivers stay tight) |
 
 The 60s in-memory Job Tracking cache (`getJobTrackingCached()`) is the other core throttle — it absorbs bursty dashboard traffic so the Sheets 300 req/min quota isn't a real constraint day-to-day.
+
+### Load ingestion — two paths, one shape
+A load reaches Job Tracking two ways. **They must stay in lockstep** — a load that arrived one way has to be indistinguishable from one that arrived the other.
+
+1. **Rate-con email (original, unattended).** `info@logisx.com` receives the rate con → a Gmail filter **stars** it + applies the **`RATECONs`** label → n8n "Dispatch v2 (Fixed)" (`ydFgTSFpKTyyZbXW`, see `Dispatch-v2-fixed.json`) fires → Drive upload, Gemini parse, dedupe, then writes **three tabs**. Blind spot: if the email never arrives, or arrives from a sender the filter doesn't match, there is **zero signal** — no execution, no alert, no row.
+2. **Drag-and-drop (added 2026-07-25, attended).** Dispatcher drops the rate-con PDF on the Job Board, Active Loads, or the New Job form. `POST /api/loads/ratecon/extract` parses it and **returns without writing**; the dispatcher reviews/corrects; `POST /api/loads/from-ratecon` then replicates the n8n steps server-side. This exists because dispatchers regularly learn about a load from the driver while the app has nothing.
+
+`POST /api/loads/from-ratecon` runs the n8n sequence in order: validate Load Number (400 if blank) → dedupe against Job Tracking (**409 `DUPLICATE_LOAD`**) → Distance Matrix + rate-per-mile → append **Job Tracking** → upsert **Payments Table** (key `" Job ID"`, leading space is real) → upsert **Job Details** → **upload the PDF to the rate-con Drive folder as `<loadId>.pdf`** → `load_coordinates` + `audit_trail` + `dispatch-notification`, then `jtCacheInvalidate()` so the load shows up before the 60s cache expires.
+
+Gotchas worth knowing before you touch this:
+- **The Drive upload is not optional.** Invoice drafting finds a rate-con by listing that folder for a filename *containing* the load ID. A load whose PDF never lands there can never be invoiced. A failed upload still returns success but pushes a warning naming the exact filename to add manually — losing the created load would be worse.
+- **`Contract ID` on Job Tracking stays blank.** n8n writes `Contract ID = Broker Name` on the *Payments Table* tab only. Verified against production: Job Tracking's `Contract ID` is blank for email-ingested loads and holds a numeric reference when set at all. Do **not** prefill it with the broker/agent name — that makes a dropped load diverge from an email one.
+- **`Driver` is left blank** even when the rate-con names one. Dispatching from the dashboard is what emits the driver socket event and notification; writing the name directly would create a silently-assigned load.
+- **Every step after the Job Tracking append is best-effort** and degrades to a `warnings[]` entry rather than failing the request — the row already exists at that point, and there are no transactions.
+- Steps 3-8 are ported into `lib/ratecon-load.js` as pure functions; `buildJobTrackingRow` mirrors `NewJobView.vue`'s mapping. One deliberate deviation from n8n: an unparseable rate coerces to `0` instead of writing the literal string `"NaN"` into the sheet.
 
 ### Invoice drafting — all brokers (IMAP + rate-cons)
 One-click "Draft Invoice Email" on any **delivered/completed** load, distinct from the generic `/api/invoices/generate` flow. Originally Bison-only; generalized to every broker 2026-07-25.
