@@ -5,6 +5,16 @@ const http = require("http");
 // Run against staging with TEST_PORT=3003.
 const PORT = Number(process.env.TEST_PORT) || 3000;
 
+// Accounts the suite logs in with. No seed script in this repo creates
+// "admin"/"max.range.inv.llc." — they only exist in whichever local DB the
+// suite was first written against, which makes the whole harness unrunnable
+// anywhere else. Defaults preserve the original local behaviour; override to
+// run against staging.
+const ADMIN_USER = process.env.TEST_ADMIN_USER || "admin";
+const ADMIN_PASS = process.env.TEST_ADMIN_PASS || "Password123!";
+const INVESTOR_USER = process.env.TEST_INVESTOR_USER || "max.range.inv.llc.";
+const INVESTOR_PASS = process.env.TEST_INVESTOR_PASS || "Password123!";
+
 function req(method, path, body, cookies) {
   return new Promise((resolve, reject) => {
     const opts = { hostname: "localhost", port: PORT, path, method, headers: { "Content-Type": "application/json" } };
@@ -39,14 +49,14 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   test("1. Server is running", health.status === 200);
 
   // 2. Super Admin login
-  const adminLogin = await req("POST", "/api/auth/login", { username: "admin", password: "Password123!" });
-  test("2. Super Admin login", adminLogin.status === 200 && adminLogin.body.success);
+  const adminLogin = await req("POST", "/api/auth/login", { username: ADMIN_USER, password: ADMIN_PASS });
+  test("2. Super Admin login (" + ADMIN_USER + ")", adminLogin.status === 200 && adminLogin.body.success);
   const ac = adminLogin.cookies;
   if (!ac) { console.log("WARN: No cookies returned. Secure+SameSite blocks test cookies."); }
 
   // 3. Investor login
-  const invLogin = await req("POST", "/api/auth/login", { username: "max.range.inv.llc.", password: "Password123!" });
-  test("3. Investor login", invLogin.status === 200 && invLogin.body.success);
+  const invLogin = await req("POST", "/api/auth/login", { username: INVESTOR_USER, password: INVESTOR_PASS });
+  test("3. Investor login (" + INVESTOR_USER + ")", invLogin.status === 200 && invLogin.body.success);
   const ic = invLogin.cookies;
 
   // 4. Debug endpoints blocked without auth
