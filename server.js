@@ -16778,7 +16778,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalJobs,
 				completedJobs: completedJobCount,
 				totalExpenses: Math.round(totalExpenses),
-				investorEarnings: Math.round((totalRevenue - totalExpenses) * investorSplit),
+				// NOTE: `investorEarnings` used to sit here as
+				// round((totalRevenue - totalExpenses) * investorSplit) — a SECOND
+				// answer to "what has this investor earned", off by $165 from
+				// investorNetToDate on live data. The two used different expense
+				// bases: the aggregate totalExpenses ($31,199) vs the sum of each
+				// month's driverPay + fixedCosts + tripExpenses ($31,531).
+				// investorNetToDate is the authoritative one — it is the basis the
+				// payout ledger, EarningsSection and driver pay all settle on — so
+				// the rival is gone rather than reconciled. Nothing rendered it.
 				investorNetToDate,
 				totalDriverPay: Math.round(totalDriverPay),
 				driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(([k, v]) => [k, { activeDays: v.activeDays, dailyRate: v.dailyRate, totalPay: v.totalPay }])),
