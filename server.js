@@ -12523,22 +12523,22 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			} else {
 				rowValues = rateconLoad.buildMappedRow(tabHeaders, mapping, existingRow);
 			}
-			if (matchRow > 0) {
-				await sheets.spreadsheets.values.update({
-					spreadsheetId: SPREADSHEET_ID,
-					range: `${tabName}!A${matchRow}`,
-					valueInputOption: "USER_ENTERED",
-					requestBody: { values: [rowValues] },
-				});
-			} else {
-				await sheets.spreadsheets.values.append({
-					spreadsheetId: SPREADSHEET_ID,
-					range: tabName,
-					valueInputOption: "USER_ENTERED",
-					requestBody: { values: [rowValues] },
-				});
-			}
-			return { action: matchRow > 0 ? "updated" : "appended", row: matchRow, conflicts };
+			// Anchor every write to column A explicitly. values.append with a
+			// bare tab range lets Sheets auto-detect the table's anchor column
+			// from existing data, and when a tab's leading column is empty
+			// (Job Details' column A is blank; Payments Table's early columns are
+			// sparse) the appended row lands SHIFTED right into the wrong columns.
+			// A new row goes to A{lastRow+1} — rows already excludes trailing
+			// empties, so its length is the last populated row (1-based incl. the
+			// header). Both branches therefore write starting at column A.
+			const targetRow = matchRow > 0 ? matchRow : rows.length + 1;
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `${tabName}!A${targetRow}`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: { values: [rowValues] },
+			});
+			return { action: matchRow > 0 ? "updated" : "appended", row: targetRow, conflicts };
 		};
 
 		// n8n "RATE UPDATE" — the key column really is named " Job ID"
@@ -12582,11 +12582,17 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			warnings.push("The Job Details row was not written — distance and rate-per-mile are missing for this load.");
 		}
 
-		// ---- 7) Archive the rate-con PDF to the Drive folder as "<loadId>.pdf".
-		// CRITICAL: getRateConBytes() locates a load's rate-con by listing this
-		// folder for a file name CONTAINING the load ID, so a load created
-		// without this step can never draft an invoice. Still only a warning —
-		// losing a created load over a Drive hiccup would be far worse. ----
+		// ---- 7) Archive the rate-con PDF so invoice drafting can find it later.
+		// getRateConBytes() resolves a load's rate-con from THREE sources, in
+		// order: (a) the Drive folder, (b) a `documents` row of type RATECON, and
+		// (c) a base64 in the request body. The Drive folder is a *My Drive*
+		// folder owned by info@logisx.com — the app's service account is
+		// read-only there and has no storage quota, so a service-account upload
+		// ALWAYS fails in production (n8n only manages it via OAuth delegation).
+		// So the reliable path is (b): write the PDF under /uploads and register
+		// a `documents` row, exactly like PODs. That row is what makes a dropped
+		// load invoiceable. Drive is then attempted best-effort for parity with
+		// the email pipeline, but its failure is silent — (b) already covers us.
 		let rateconArchived = false;
 		const rawPdf = typeof pdfBase64 === "string"
 			? pdfBase64.replace(/^data:application\/pdf;base64,/, "").trim()
@@ -12594,17 +12600,39 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		if (!rawPdf) {
 			warnings.push(`No rate-con PDF was attached, so invoice drafting will not find one for load ${loadId}.`);
 		} else if (!/^JVBERi/.test(rawPdf)) {
-			warnings.push("The attached file was not a PDF, so the rate-con was not archived to Drive.");
+			warnings.push("The attached file was not a PDF, so the rate-con was not archived.");
 		} else if (Math.floor((rawPdf.length * 3) / 4) > 15 * 1024 * 1024) {
 			// Same 15 MB decoded cap the extract route enforces — without it this
-			// route would accept anything up to the 50 MB global body limit and
-			// push it into shared Drive storage. Warn rather than fail: the load
-			// row is already committed.
-			warnings.push(`The rate-con PDF is larger than 15 MB, so it was not archived. Upload it to the Rate Confirmations folder as ${loadId}.pdf.`);
+			// route would accept anything up to the 50 MB global body limit.
+			// Warn rather than fail: the load row is already committed.
+			warnings.push(`The rate-con PDF is larger than 15 MB, so it was not archived. Attach it to load ${loadId} manually before drafting an invoice.`);
 		} else {
+			const pdfBuffer = Buffer.from(rawPdf, "base64");
+			// (b) PRIMARY — local /uploads + a documents row. This is what
+			// getRateConBytes() step 2 reads, and it needs no Drive quota.
+			try {
+				const rcDir = path.join(__dirname, "uploads", "rate-cons");
+				if (!fs.existsSync(rcDir)) fs.mkdirSync(rcDir, { recursive: true });
+				const safeLoad = String(loadId).replace(/[^A-Za-z0-9._-]/g, "_");
+				const fileNameOut = `${safeLoad}.pdf`;
+				fs.writeFileSync(path.join(rcDir, fileNameOut), pdfBuffer);
+				// Replace any prior rate-con for this load so a re-create can't
+				// leave two RATECON rows racing in getRateConBytes' ORDER BY.
+				db.prepare("DELETE FROM documents WHERE load_id = ? AND UPPER(type) = 'RATECON'").run(loadId);
+				db.prepare(
+					`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url)
+					 VALUES (?, ?, 'RATECON', ?, '', ?)`,
+				).run(loadId, "", fileNameOut, `/uploads/rate-cons/${fileNameOut}`);
+				rateconArchived = true;
+			} catch (e) {
+				console.error("Rate-con load: local rate-con archive failed:", e.message);
+				warnings.push(`The rate-con PDF could not be saved, so invoice drafting will not find one for load ${loadId}. Attach it manually.`);
+			}
+			// (a) BEST-EFFORT — mirror into the Drive folder too, for parity with
+			// the n8n email pipeline. Expected to fail under the service account
+			// in production; that's fine, (b) is authoritative. Silent on error.
 			try {
 				const { Readable } = require("stream");
-				const pdfBuffer = Buffer.from(rawPdf, "base64");
 				const drive = await getDrive();
 				await drive.files.create({
 					requestBody: {
@@ -12616,12 +12644,10 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 					fields: "id,name",
 					supportsAllDrives: true,
 				});
-				rateconArchived = true;
 			} catch (e) {
-				// Log the upstream detail; hand the dispatcher an actionable line
-				// without echoing Google's error text back to the browser.
-				console.error("Rate-con load: Drive upload failed:", e.message);
-				warnings.push(`The rate-con PDF could not be saved to Drive. Upload it to the Rate Confirmations folder as ${loadId}.pdf, or invoice drafting will not find it.`);
+				// No warning to the dispatcher — the local copy already made the
+				// load invoiceable. Log for observability only.
+				console.error("Rate-con load: Drive mirror failed (non-fatal):", e.message);
 			}
 		}
 
