@@ -12257,6 +12257,367 @@ async function extractReceiptText(imageBuffer) {
 	}
 }
 
+// ============================================================
+// Rate-con drag-and-drop → load creation
+// ============================================================
+// Server-side replica of the n8n "Dispatch v2 (Fixed)" ingestion path (see
+// Dispatch-v2-fixed.json — Validate Load ID · Check Existing Load · RATE
+// UPDATE · JOB DETAILS ENTRY · Google Maps Distance · Calculate Rate Per Mile
+// · Google Sheets2). Today a load can enter LogisX ONLY via a rate-con email
+// landing in info@logisx.com; when a broker sends the details over WhatsApp
+// instead there is zero signal and the dispatcher retypes the whole load.
+// Dropping the PDF here produces the same rows the email pipeline writes.
+//
+// Deliberately two steps so the dispatcher reviews Gemini's output before
+// anything is written — the same interaction as the receipt-OCR prefill:
+//   POST /api/loads/ratecon/extract  — read-only, writes nothing anywhere
+//   POST /api/loads/from-ratecon     — the reviewed fields become sheet rows
+//
+// The field mapping, the rate-per-mile math (ported from the n8n code node)
+// and the upsert row-building are pure and live in lib/ratecon-load.js;
+// everything network/Sheets/Drive/SQLite stays here.
+const rateconLoad = require("./lib/ratecon-load");
+
+// Caps Gemini spend on PDF extraction the way expenseOcrLimiter caps vision
+// OCR. 60 / 15 min is roomy for a human dropping files one at a time (and for
+// a shared office IP) while still being a firm per-IP ceiling. The endpoint is
+// auth + role gated on top, so this is purely an abuse/cost backstop.
+const rateConLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	message: { error: "Too many rate-con uploads. Try again later." },
+	standardHeaders: true,
+});
+
+// POST /api/loads/ratecon/extract — PDF → the 23-field rate-con object.
+// Read-only: no sheet, no DB, no Drive write happens here, so a dispatcher can
+// drop the wrong file and simply close the modal. Reuses runRateConGemini()
+// (the same extractor the n8n webhook and the invoice fallback call) so all
+// three paths stay on one prompt/schema.
+app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {
+	try {
+		const { pdfBase64 } = req.body || {};
+		if (!pdfBase64 || typeof pdfBase64 !== "string") {
+			return res.status(400).json({ error: "pdfBase64 required" });
+		}
+		const base64 = pdfBase64.replace(/^data:application\/pdf;base64,/, "").trim();
+		// PDF magic bytes "%PDF-" → base64 "JVBERi". The client-side accept=
+		// filter and the mime type are both trivially bypassed; the decoded
+		// bytes are the only trustworthy signal.
+		if (!/^JVBERi/.test(base64)) {
+			return res.status(400).json({ error: "Not a valid PDF (missing %PDF- header)" });
+		}
+		// 15 MB decoded. base64 inflates ~4/3, so measure the decoded size.
+		if (Math.floor((base64.length * 3) / 4) > 15 * 1024 * 1024) {
+			return res.status(400).json({ error: "PDF too large (15 MB max)" });
+		}
+		if (!GEMINI_API_KEY) return res.status(503).json({ error: "ratecon_extract_unavailable" });
+
+		try {
+			const fields = await runRateConGemini(base64);
+			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields) });
+		} catch (err) {
+			console.error("Rate-con extract failed after retries:", err && err.message);
+			return res.status(502).json({ error: "ratecon_extract_failed" });
+		}
+	} catch (err) {
+		console.error("Rate-con extract error:", err.message);
+		res.status(500).json({ error: "ratecon_extract_failed" });
+	}
+});
+
+// POST /api/loads/from-ratecon — the reviewed fields become a live load.
+// `fields` is what the dispatcher confirmed in the review modal (Gemini output
+// is treated as a draft, never as truth). Order of operations mirrors the n8n
+// workflow; everything after the Job Tracking append is best-effort and
+// degrades to a warning, because the load row is already committed and a
+// dispatcher "fixing" a hard error by re-dropping the PDF would create a twin.
+app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const { fields, pdfBase64, fileName } = req.body || {};
+		if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+			return res.status(400).json({ error: "fields required" });
+		}
+
+		// ---- 1) Validate Load ID (n8n "Validate Load ID" filter) ----
+		const loadId = String(fields["Load Number"] == null ? "" : fields["Load Number"]).trim();
+		if (!loadId) {
+			return res.status(400).json({ error: "Load Number is required — fill it in before creating the load." });
+		}
+		// Same whitelist the public tracker uses. Keeps the Load ID safe to
+		// interpolate into a Drive file name and an A1 range.
+		if (!/^[A-Za-z0-9\-_.#]{1,40}$/.test(loadId)) {
+			return res.status(400).json({ error: "Load Number contains unsupported characters." });
+		}
+		// Re-validate every field's shape. These arrive hand-edited from the
+		// review modal, so runRateConGemini's own 500-char-per-field cap no
+		// longer applies and nothing else stands between a stray paste (or a
+		// crafted client) and a sheet cell.
+		for (const fieldName of Object.keys(fields)) {
+			const v = fields[fieldName];
+			if (v == null) continue;
+			if (typeof v !== "string" && typeof v !== "number") {
+				return res.status(400).json({ error: `Field "${fieldName}" must be text.` });
+			}
+			if (String(v).length > 1000) {
+				return res.status(400).json({ error: `Field "${fieldName}" is too long (1000 characters max).` });
+			}
+		}
+
+		const warnings = [];
+		const sheets = await getSheets();
+
+		// ---- 2) Dedupe against Job Tracking (n8n "Check Existing Load") ----
+		const jtResp = await sheets.spreadsheets.values.get({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+		});
+		const { headers, data } = parseSheet(jtResp.data);
+		if (!headers.length) {
+			return res.status(502).json({ error: "Could not read the Job Tracking sheet. Try again." });
+		}
+		const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+		if (!loadIdCol) {
+			return res.status(502).json({ error: "Job Tracking has no Load ID column." });
+		}
+		const loadKey = rateconLoad.normalizeLoadId(loadId);
+		const existing = deduplicateLoads(data, headers).find(
+			(r) => rateconLoad.normalizeLoadId(r[loadIdCol]) === loadKey,
+		);
+		if (existing) {
+			// Soft-deleted loads keep their sheet row, so "already exists" would
+			// otherwise be baffling — the dispatcher can't see the load anywhere.
+			const softDeleted = getDeletedLoadIds().has(loadKey);
+			return res.status(409).json({
+				error: softDeleted
+					? `Load ${loadId} already exists (row ${existing._rowIndex}) but was deleted. Restore it instead of re-creating it.`
+					: `Load ${loadId} already exists (row ${existing._rowIndex}).`,
+				code: "DUPLICATE_LOAD",
+				existingRowIndex: existing._rowIndex,
+			});
+		}
+
+		// ---- 3) Distance Matrix → rate per mile (n8n "Google Maps Distance"
+		// → "Calculate Rate Per Mile"). Never fatal: a missing key, a quota
+		// error, a timeout or ZERO_RESULTS all arrive at calculateRatePerMile()
+		// as a non-OK element and take the node's own zeros / "N/A" branch. A
+		// Maps outage must not stop a dispatcher from booking a load. ----
+		const pickupAddress = String(fields["Pickup Address"] || "").trim();
+		const dropoffAddress = String(fields["Drop-off Address"] || "").trim();
+		let distanceMatrix = null;
+		if (GOOGLE_MAPS_API_KEY && pickupAddress && dropoffAddress) {
+			try {
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), 8000);
+				const dmUrl =
+					"https://maps.googleapis.com/maps/api/distancematrix/json" +
+					`?origins=${encodeURIComponent(pickupAddress)}` +
+					`&destinations=${encodeURIComponent(dropoffAddress)}` +
+					`&units=imperial&key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}`;
+				const dmResp = await fetch(dmUrl, { signal: controller.signal });
+				clearTimeout(timer);
+				distanceMatrix = await dmResp.json();
+			} catch (e) {
+				console.error("Rate-con load: Distance Matrix failed:", e.message);
+			}
+		}
+		const rpm = rateconLoad.calculateRatePerMile(distanceMatrix, fields);
+		if (rpm.distance_miles === 0) {
+			warnings.push("Distance could not be calculated — Job Details shows 0 miles. Check the pickup and drop-off addresses.");
+		}
+
+		// Geocode both ends (served from geocode_cache when already seen) so the
+		// dashboard map + ETA pipeline have coordinates the moment the load
+		// lands, exactly like the map-picker path in NewJobView.
+		let pickupCoords = null;
+		let dropoffCoords = null;
+		try { pickupCoords = pickupAddress ? await geocodeAddress(pickupAddress) : null; } catch { /* non-critical */ }
+		try { dropoffCoords = dropoffAddress ? await geocodeAddress(dropoffAddress) : null; } catch { /* non-critical */ }
+
+		// ---- 4) Append the Job Tracking row (n8n "JOB DETAILS ENTRY") ----
+		const today = new Date().toISOString().split("T")[0];
+		const values = rateconLoad.buildJobTrackingRow(headers, fields, {
+			today,
+			ownerId: 0,
+			pickupLat: pickupCoords ? pickupCoords.lat : null,
+			pickupLng: pickupCoords ? pickupCoords.lng : null,
+			dropoffLat: dropoffCoords ? dropoffCoords.lat : null,
+			dropoffLng: dropoffCoords ? dropoffCoords.lng : null,
+		});
+		const ownerErr = validateOwnerIdCell("Job Tracking", headers, values);
+		if (ownerErr) return res.status(400).json({ error: ownerErr.error });
+
+		const appendResp = await sheets.spreadsheets.values.append({
+			spreadsheetId: SPREADSHEET_ID,
+			range: "Job Tracking",
+			valueInputOption: "USER_ENTERED",
+			requestBody: { values: [values] },
+		});
+		// "Job Tracking!A742:Z742" → 742
+		const updatedRange = (appendResp.data.updates && appendResp.data.updates.updatedRange) || "";
+		const rowMatch = updatedRange.match(/![A-Z]+(\d+)/);
+		const rowIndex = rowMatch ? parseInt(rowMatch[1], 10) : null;
+		jtCacheInvalidate();
+
+		// ---- 5/6) Payments Table + Job Details upserts ----
+		// Sheets v4 has no native appendOrUpdate (the n8n node fakes it the same
+		// way): read the tab, values.update the matching row, else values.append.
+		// Unmapped columns keep whatever the existing row held, so an update
+		// never blanks Invoice Number / Payment Status.
+		const upsertByKey = async (tabName, keyColumn, mapping) => {
+			const resp = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: tabName,
+			});
+			const rows = resp.data.values || [];
+			const tabHeaders = rows[0] || [];
+			if (!tabHeaders.length) throw new Error(`${tabName} has no header row`);
+			const matchRow = rateconLoad.findRowIndexByColumn(rows, keyColumn, loadId);
+			const rowValues = rateconLoad.buildMappedRow(
+				tabHeaders,
+				mapping,
+				matchRow > 0 ? rows[matchRow - 1] : null,
+			);
+			if (matchRow > 0) {
+				await sheets.spreadsheets.values.update({
+					spreadsheetId: SPREADSHEET_ID,
+					range: `${tabName}!A${matchRow}`,
+					valueInputOption: "USER_ENTERED",
+					requestBody: { values: [rowValues] },
+				});
+			} else {
+				await sheets.spreadsheets.values.append({
+					spreadsheetId: SPREADSHEET_ID,
+					range: tabName,
+					valueInputOption: "USER_ENTERED",
+					requestBody: { values: [rowValues] },
+				});
+			}
+		};
+
+		// n8n "RATE UPDATE" — the key column really is named " Job ID"
+		// (leading space); matching is done on the trimmed header.
+		try {
+			await upsertByKey("Payments Table", " Job ID", {
+				" Job ID": loadId,
+				"Contract ID": String(fields["Broker Name"] || "").trim(),
+				"Payment Amount": String(fields["Rate"] || "").trim(),
+			});
+		} catch (e) {
+			console.error("Rate-con load: Payments Table upsert failed:", e.message);
+			warnings.push("The Payments Table row was not written — add the payment amount manually.");
+		}
+
+		// n8n "Google Sheets2"
+		try {
+			await upsertByKey("Job Details", "Load ID", {
+				"Load ID": loadId,
+				"Rate Per Mile": `$${rpm.rate_per_mile}`,
+				"Distance": `${rpm.distance_miles} Miles`,
+				"Details": rpm.details,
+				"Payment": rpm.payment,
+			});
+		} catch (e) {
+			console.error("Rate-con load: Job Details upsert failed:", e.message);
+			warnings.push("The Job Details row was not written — distance and rate-per-mile are missing for this load.");
+		}
+
+		// ---- 7) Archive the rate-con PDF to the Drive folder as "<loadId>.pdf".
+		// CRITICAL: getRateConBytes() locates a load's rate-con by listing this
+		// folder for a file name CONTAINING the load ID, so a load created
+		// without this step can never draft an invoice. Still only a warning —
+		// losing a created load over a Drive hiccup would be far worse. ----
+		let rateconArchived = false;
+		const rawPdf = typeof pdfBase64 === "string"
+			? pdfBase64.replace(/^data:application\/pdf;base64,/, "").trim()
+			: "";
+		if (!rawPdf) {
+			warnings.push(`No rate-con PDF was attached, so invoice drafting will not find one for load ${loadId}.`);
+		} else if (!/^JVBERi/.test(rawPdf)) {
+			warnings.push("The attached file was not a PDF, so the rate-con was not archived to Drive.");
+		} else {
+			try {
+				const { Readable } = require("stream");
+				const pdfBuffer = Buffer.from(rawPdf, "base64");
+				const drive = await getDrive();
+				await drive.files.create({
+					requestBody: {
+						name: `${loadId}.pdf`,
+						parents: [RATECON_DRIVE_FOLDER_ID],
+						mimeType: "application/pdf",
+					},
+					media: { mimeType: "application/pdf", body: Readable.from(pdfBuffer) },
+					fields: "id,name",
+					supportsAllDrives: true,
+				});
+				rateconArchived = true;
+			} catch (e) {
+				// Log the upstream detail; hand the dispatcher an actionable line
+				// without echoing Google's error text back to the browser.
+				console.error("Rate-con load: Drive upload failed:", e.message);
+				warnings.push(`The rate-con PDF could not be saved to Drive. Upload it to the Rate Confirmations folder as ${loadId}.pdf, or invoice drafting will not find it.`);
+			}
+		}
+
+		// ---- 8) load_coordinates + audit trail + dispatch notification ----
+		if (pickupCoords || dropoffCoords) {
+			try {
+				db.prepare(`INSERT OR REPLACE INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+					.run(
+						loadKey,
+						pickupCoords ? pickupCoords.lat : null,
+						pickupCoords ? pickupCoords.lng : null,
+						dropoffCoords ? dropoffCoords.lat : null,
+						dropoffCoords ? dropoffCoords.lng : null,
+						pickupAddress,
+						dropoffAddress,
+					);
+			} catch { /* non-critical */ }
+		}
+
+		logAudit(
+			req,
+			"create_load_ratecon",
+			"load",
+			loadId,
+			`Created load ${loadId} from a dropped rate-con${fileName ? ` (${String(fileName).slice(0, 120)})` : ""}; ` +
+				`${rpm.distance_miles} mi @ $${rpm.rate_per_mile}/mi; rate-con ${rateconArchived ? "archived to Drive" : "NOT archived"}`,
+		);
+
+		// Same "new-load" notification the n8n webhook raises, so a dropped load
+		// surfaces identically to an email-ingested one. loadId lives inside
+		// metadata for the NotificationsView click-routing convention.
+		const route = rpm.details && rpm.details !== "Distance unavailable"
+			? rpm.details
+			: [pickupAddress, dropoffAddress].filter(Boolean).join(" → ");
+		insertDispatchNotification.run(
+			"new-load",
+			`New Load ${loadId}`,
+			route,
+			JSON.stringify({ loadId, rowIndex, source: "ratecon-drop" }),
+		);
+		io.to("dispatch").emit("new-load", { timestamp: Date.now() });
+		io.to("dispatch").emit("dispatch-notification", {
+			type: "new-load",
+			title: `New Load ${loadId}`,
+			body: route,
+		});
+		notifyChange("dashboard");
+
+		res.json({
+			success: true,
+			loadId,
+			rowIndex,
+			distanceMiles: rpm.distance_miles,
+			ratePerMile: rpm.rate_per_mile,
+			warnings,
+		});
+	} catch (error) {
+		console.error("Error creating load from rate-con:", error.message);
+		res.status(500).json({ error: "Failed to create the load. Check the Job Tracking sheet before retrying." });
+	}
+});
+
 // GET /api/documents/:loadId — Fetch all documents for a load
 app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 	try {
