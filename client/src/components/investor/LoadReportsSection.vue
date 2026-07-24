@@ -48,7 +48,7 @@
         <span class="lr-owed-value">{{ ledgerLoading ? '—' : fmtMoney(owedNow) }}</span>
       </div>
       <template v-if="!ledgerLoading">
-        <span class="lr-owed-context">Earned {{ fmtMoney(earnedToDate) }} · Paid out {{ fmtMoney(paidToDate) }}<template v-if="processingNow"> · Processing {{ fmtMoney(processingNow) }}</template></span>
+        <span class="lr-owed-context">Earned {{ fmtMoney(earnedToDate) }}<template v-if="adjustments"> · Adjustments {{ signedMoney(adjustments) }}</template> · Paid out {{ fmtMoney(paidToDate) }}<template v-if="processingNow"> · Processing {{ fmtMoney(processingNow) }}</template><template v-if="carriedLoss"> · {{ fmtMoney(carriedLoss) }} loss carried forward</template></span>
         <span class="lr-owed-accruing" v-if="accruing">
           {{ accruingLabel }} accruing: {{ fmtMoney(accruing) }} — not payable until the month closes
         </span>
@@ -148,6 +148,13 @@ const ledgerFailed = computed(() => investorStore.payoutsFailed)
 const owedNow = computed(() => investorStore.payoutTotals.totalOwed || 0)
 const processingNow = computed(() => investorStore.payoutTotals.totalProcessing || 0)
 const paidToDate = computed(() => investorStore.payoutTotals.totalPaid || 0)
+// Manual settlement adjustments and any still-unabsorbed carried loss sit
+// BETWEEN earnings and what gets paid, so the banner names them explicitly.
+// Without them the components silently stop summing to Earned — the exact
+// "these numbers don't add up" complaint this banner exists to answer:
+//   paid + processing + owed + accruing == earned + adjustments + carriedLoss
+const adjustments = computed(() => investorStore.payoutTotals.totalAdjustments || 0)
+const carriedLoss = computed(() => investorStore.payoutTotals.carriedLossOutstanding || 0)
 const accruing = computed(() => investorStore.accruingThisMonth)
 const accruingLabel = computed(() => investorStore.currentMonth?.periodLabel || 'This month')
 const sel = computed(() => periods.value[selectedIdx.value] || null)
@@ -263,6 +270,13 @@ function exportReport(format) {
 function fmtMoney(n) {
   const v = Math.round(Number(n) || 0)
   return (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString()
+}
+
+// Adjustments cut both ways, so always carry an explicit sign — "-$500" reads
+// as a deduction, "+$250" as a credit, neither as an ambiguous balance.
+function signedMoney(n) {
+  const v = Math.round(Number(n) || 0)
+  return (v < 0 ? '−$' : '+$') + Math.abs(v).toLocaleString()
 }
 
 fetchReport()
