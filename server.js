@@ -1841,6 +1841,17 @@ try { db.exec("ALTER TABLE investor_payouts ADD COLUMN adjustment_note TEXT DEFA
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN adjusted_by TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE investor_payouts ADD COLUMN adjusted_at TEXT DEFAULT ''"); } catch {}
 
+// Reopen trail — a settlement wrongly advanced (e.g. "Mark Paid" clicked on a
+// payout that was never actually sent) has to be walkable BACKWARDS, and the
+// reversal is the kind of thing an investor will ask about later. The status
+// endpoint stamps who reopened it, when, and why; the reason is REQUIRED on
+// every backward move so a paid→owed never happens without a stated cause.
+// audit_trail records it too — these columns put it on the row itself so the
+// payouts console can show provenance inline.
+try { db.exec("ALTER TABLE investor_payouts ADD COLUMN reopened_at TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investor_payouts ADD COLUMN reopened_by TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE investor_payouts ADD COLUMN reopen_reason TEXT DEFAULT ''"); } catch {}
+
 // --- Driver Onboarding ---
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_onboarding (
@@ -15804,7 +15815,7 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	// adjustment is the corrected figure everything downstream (totals, display)
 	// keys on; `amount` is preserved as the original auto-computed settlement.
 	const rows = db.prepare(
-		"SELECT id, owner_id, period, amount, due_date, status, paid_at, adjustment, adjustment_note, adjusted_by, adjusted_at FROM investor_payouts WHERE owner_id = ? ORDER BY period DESC"
+		"SELECT id, owner_id, period, amount, due_date, status, paid_at, adjustment, adjustment_note, adjusted_by, adjusted_at, reopened_at, reopened_by, reopen_reason FROM investor_payouts WHERE owner_id = ? ORDER BY period DESC"
 	).all(ownerId);
 	const payouts = rows.map((r) => {
 		const adjustment = Number(r.adjustment || 0);
@@ -15837,6 +15848,12 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			dueDate: r.due_date,
 			status: r.status,
 			paidAt: r.paid_at || null,
+			// Set only when this row was walked BACKWARDS out of a settled state.
+			// Surfaced so the console can mark a corrected row instead of it
+			// silently looking like it was never advanced in the first place.
+			reopenedAt: r.reopened_at || "",
+			reopenedBy: r.reopened_by || "",
+			reopenReason: r.reopen_reason || "",
 		};
 	});
 
@@ -16996,6 +17013,9 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 					dueDate: p.dueDate,
 					status: p.status,
 					paidAt: p.paidAt,
+					reopenedAt: p.reopenedAt,
+					reopenedBy: p.reopenedBy,
+					reopenReason: p.reopenReason,
 				})),
 				currentMonth,
 				totalOwed: totals.totalOwed,
@@ -17031,10 +17051,25 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 	}
 });
 
-// POST /api/investor/payouts/:id/status — Super Admin advances a payout's
-// lifecycle: owed → processing → paid (owed → paid is also allowed). Stamps
-// processed_at/by when entering 'processing' and paid_at/by when entering
-// 'paid', using the session admin's username. Amount/period are immutable here.
+// POST /api/investor/payouts/:id/status — Super Admin moves a payout along its
+// lifecycle in EITHER direction:
+//   forward  owed → processing → paid (owed → paid also allowed)
+//   backward paid → processing → owed (paid → owed also allowed)
+//
+// Forward stamps processed_at/by and paid_at/by from the session admin.
+// Backward ("reopen") is the correction path for a settlement advanced by
+// mistake — the real case that motivated it: "Mark Paid" clicked on a payout
+// that was never actually sent, leaving $8,703 booked as paid with no way to
+// walk it back. A reopen REQUIRES a reason, un-stamps the milestones it undoes
+// (so paid_at never survives a row that is no longer paid), and records who did
+// it on the row + in audit_trail. Amount/period stay immutable here — use
+// PUT /api/investor/payouts/:id/adjust to change the money.
+//
+// One consequence worth knowing: reconcileInvestorPayouts refreshes `amount`
+// ONLY while a row is 'owed'. Reopening to 'processing' keeps the settled
+// figure frozen; reopening all the way to 'owed' re-links the row to live
+// earnings, so its amount will track recomputes again on the next read.
+const PAYOUT_STATUS_RANK = { owed: 0, processing: 1, paid: 2 };
 app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, res) => {
 	try {
 		const id = parseInt(req.params.id, 10);
@@ -17042,35 +17077,66 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 			return res.status(400).json({ error: "Invalid payout id" });
 		}
 		const status = typeof req.body?.status === "string" ? req.body.status.trim() : "";
-		if (status !== "processing" && status !== "paid") {
-			return res.status(400).json({ error: "status must be 'processing' or 'paid'" });
+		if (!Object.prototype.hasOwnProperty.call(PAYOUT_STATUS_RANK, status)) {
+			return res.status(400).json({ error: "status must be 'owed', 'processing' or 'paid'" });
 		}
 
 		const payout = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
 		if (!payout) return res.status(404).json({ error: "Payout not found" });
 
-		// Allowed transitions: owed→processing, processing→paid, owed→paid.
-		const allowed = {
-			processing: ["owed"],
-			paid: ["owed", "processing"],
-		};
-		if (!allowed[status].includes(payout.status)) {
-			return res.status(409).json({ error: `Cannot move a '${payout.status}' payout to '${status}'.` });
+		const fromRank = PAYOUT_STATUS_RANK[payout.status];
+		const toRank = PAYOUT_STATUS_RANK[status];
+		if (fromRank === undefined) {
+			return res.status(409).json({ error: `Payout is in an unrecognized state ('${payout.status}').` });
+		}
+		if (fromRank === toRank) {
+			return res.status(409).json({ error: `This payout is already '${status}'.` });
+		}
+		const isReopen = toRank < fromRank;
+
+		// A backward move rewrites settled financial history, so it never happens
+		// silently — the reason is mandatory and lands on the row + audit trail.
+		let reason = "";
+		if (isReopen) {
+			reason = (req.body?.reason || "").toString().trim().slice(0, 500);
+			if (!reason) {
+				return res.status(400).json({ error: "A reason is required to reopen a settled payout." });
+			}
 		}
 
 		// Nothing to settle: a month with no activity, or one whose earnings were
 		// fully absorbed by an earlier loss (see the carry-forward in
 		// reconcileInvestorPayouts). Losses no longer produce negative rows, but
 		// an adjustment can still zero one out — either way there is no payment to
-		// make, so don't let it be stamped paid.
+		// make, so don't let it be stamped paid. Reopening is exempt: a $0 row
+		// advanced by mistake still has to be walkable back.
 		const settleable = Math.round((payout.amount || 0) + Number(payout.adjustment || 0));
-		if (settleable <= 0) {
+		if (!isReopen && settleable <= 0) {
 			return res.status(409).json({ error: "Nothing to settle for this period — the payable amount is $0." });
 		}
 
 		const nowIso = new Date().toISOString();
 		const actor = req.session.user.username;
-		if (status === "processing") {
+
+		if (isReopen) {
+			// Clear the milestones being undone so no stale stamp outlives the
+			// status it belonged to: dropping out of 'paid' clears paid_at/by,
+			// and going all the way back to 'owed' clears the processing pair too.
+			if (status === "owed") {
+				db.prepare(
+					`UPDATE investor_payouts SET status = 'owed',
+						processed_at = NULL, processed_by = NULL, paid_at = NULL, paid_by = NULL,
+						reopened_at = ?, reopened_by = ?, reopen_reason = ? WHERE id = ?`
+				).run(nowIso, actor, reason, id);
+			} else {
+				db.prepare(
+					`UPDATE investor_payouts SET status = 'processing',
+						paid_at = NULL, paid_by = NULL,
+						processed_at = COALESCE(processed_at, ?), processed_by = COALESCE(processed_by, ?),
+						reopened_at = ?, reopened_by = ?, reopen_reason = ? WHERE id = ?`
+				).run(nowIso, actor, nowIso, actor, reason, id);
+			}
+		} else if (status === "processing") {
 			db.prepare(
 				"UPDATE investor_payouts SET status = 'processing', processed_at = ?, processed_by = ? WHERE id = ?"
 			).run(nowIso, actor, id);
@@ -17088,9 +17154,19 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 			}
 		}
 
-		logAudit(req, "investor_payout_status", "investor_payout", id, `${payout.status} -> ${status}`);
+		// Tag reversals distinctly — scanning the trail for money that was
+		// un-booked should not mean eyeballing every status line.
+		logAudit(
+			req,
+			"investor_payout_status",
+			"investor_payout",
+			id,
+			isReopen
+				? `REOPENED ${payout.status} -> ${status} (owner ${payout.owner_id} ${payout.period}): ${reason}`
+				: `${payout.status} -> ${status}`
+		);
 		const updated = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
-		res.json({ success: true, payout: updated });
+		res.json({ success: true, reopened: isReopen, payout: updated });
 	} catch (err) {
 		console.error("POST /api/investor/payouts/:id/status error:", err.message);
 		res.status(500).json({ error: "Failed to update payout status" });
