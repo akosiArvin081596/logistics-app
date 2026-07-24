@@ -12282,14 +12282,30 @@ const rateconLoad = require("./lib/ratecon-load");
 
 // Caps Gemini spend on PDF extraction the way expenseOcrLimiter caps vision
 // OCR. 60 / 15 min is roomy for a human dropping files one at a time (and for
-// a shared office IP) while still being a firm per-IP ceiling. The endpoint is
-// auth + role gated on top, so this is purely an abuse/cost backstop.
+// a shared office IP) while still being a firm per-IP ceiling. The endpoints
+// are auth + role gated on top, so this is purely an abuse/cost backstop.
+//
+// Applied to BOTH routes on one shared budget (a real drop costs 1 extract +
+// 1 create = 2 tokens, so ~30 loads per IP per 15 min). The create route is
+// the more expensive of the two despite spending no Gemini credits: it fans
+// out to 3 full-tab Sheets reads + up to 3 Sheets writes + 1 Distance Matrix
+// + 2 geocodes + 1 Drive upload per call. Sheets is the primary database on a
+// 300 req/min quota, so an unthrottled loop there would take the dashboard,
+// driver app and invoices down with it.
 const rateConLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 60,
 	message: { error: "Too many rate-con uploads. Try again later." },
 	standardHeaders: true,
 });
+
+// Load IDs with a create in flight. The dedupe read and the sheet append are
+// seconds apart (a Distance Matrix call and two geocodes sit between them), so
+// two concurrent submits of the same PDF — an impatient double-click, or a
+// client retry on a slow response — would both pass the 409 check and both
+// append. Sheets has no unique constraint to lean on, so hold the ID here for
+// the duration of the write.
+const rateConCreateInFlight = new Set();
 
 // POST /api/loads/ratecon/extract — PDF → the 23-field rate-con object.
 // Read-only: no sheet, no DB, no Drive write happens here, so a dispatcher can
@@ -12334,7 +12350,7 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 // workflow; everything after the Job Tracking append is best-effort and
 // degrades to a warning, because the load row is already committed and a
 // dispatcher "fixing" a hard error by re-dropping the PDF would create a twin.
-app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {
 	try {
 		const { fields, pdfBase64, fileName } = req.body || {};
 		if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
@@ -12366,6 +12382,20 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), as
 			}
 		}
 
+		// Claim this Load ID for the duration of the write so a double-submit
+		// can't slip a twin past the dedupe check below. Released on response
+		// close, which covers the error paths and a client abort too.
+		const loadKey = rateconLoad.normalizeLoadId(loadId);
+		if (rateConCreateInFlight.has(loadKey)) {
+			return res.status(409).json({
+				error: `Load ${loadId} is already being created — wait for that request to finish.`,
+				code: "DUPLICATE_LOAD",
+				existingRowIndex: null,
+			});
+		}
+		rateConCreateInFlight.add(loadKey);
+		res.on("close", () => rateConCreateInFlight.delete(loadKey));
+
 		const warnings = [];
 		const sheets = await getSheets();
 
@@ -12382,7 +12412,6 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), as
 		if (!loadIdCol) {
 			return res.status(502).json({ error: "Job Tracking has no Load ID column." });
 		}
-		const loadKey = rateconLoad.normalizeLoadId(loadId);
 		const existing = deduplicateLoads(data, headers).find(
 			(r) => rateconLoad.normalizeLoadId(r[loadIdCol]) === loadKey,
 		);
@@ -12466,20 +12495,34 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), as
 		// way): read the tab, values.update the matching row, else values.append.
 		// Unmapped columns keep whatever the existing row held, so an update
 		// never blanks Invoice Number / Payment Status.
-		const upsertByKey = async (tabName, keyColumn, mapping) => {
+		//
+		// `preserveFilled` additionally refuses to overwrite an already-populated
+		// *mapped* cell — see the Payments Table call below.
+		const upsertByKey = async (tabName, keyColumn, mapping, opts) => {
+			const preserveFilled = !!(opts && opts.preserveFilled);
 			const resp = await sheets.spreadsheets.values.get({
 				spreadsheetId: SPREADSHEET_ID,
 				range: tabName,
+				// Round-trip formulas as formulas. An update rewrites the WHOLE
+				// row, and the default FORMATTED_VALUE render would hand back a
+				// formula cell as its computed text — writing that back would
+				// flatten a live formula in a column this feature doesn't own.
+				valueRenderOption: "FORMULA",
 			});
 			const rows = resp.data.values || [];
 			const tabHeaders = rows[0] || [];
 			if (!tabHeaders.length) throw new Error(`${tabName} has no header row`);
 			const matchRow = rateconLoad.findRowIndexByColumn(rows, keyColumn, loadId);
-			const rowValues = rateconLoad.buildMappedRow(
-				tabHeaders,
-				mapping,
-				matchRow > 0 ? rows[matchRow - 1] : null,
-			);
+			const existingRow = matchRow > 0 ? rows[matchRow - 1] : null;
+			let rowValues;
+			let conflicts = [];
+			if (matchRow > 0 && preserveFilled) {
+				const built = rateconLoad.buildMappedRowPreservingFilled(tabHeaders, mapping, existingRow);
+				rowValues = built.values;
+				conflicts = built.conflicts;
+			} else {
+				rowValues = rateconLoad.buildMappedRow(tabHeaders, mapping, existingRow);
+			}
 			if (matchRow > 0) {
 				await sheets.spreadsheets.values.update({
 					spreadsheetId: SPREADSHEET_ID,
@@ -12495,16 +12538,31 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), as
 					requestBody: { values: [rowValues] },
 				});
 			}
+			return { action: matchRow > 0 ? "updated" : "appended", row: matchRow, conflicts };
 		};
 
 		// n8n "RATE UPDATE" — the key column really is named " Job ID"
 		// (leading space); matching is done on the trimmed header.
+		//
+		// preserveFilled because the dedupe above only proves the LOAD is new,
+		// not that the payment row is: a matched Payments Table row can belong
+		// to an older load whose Job Tracking row was archived or removed, and
+		// that row may already carry a booked Payment Amount / Invoice Number.
+		// Filling its blanks is the point of an upsert; silently rewriting a
+		// settled figure from a load-creation flow is not. Conflicts surface as
+		// a warning naming the columns so a human reconciles them.
 		try {
-			await upsertByKey("Payments Table", " Job ID", {
+			const payResult = await upsertByKey("Payments Table", " Job ID", {
 				" Job ID": loadId,
 				"Contract ID": String(fields["Broker Name"] || "").trim(),
 				"Payment Amount": String(fields["Rate"] || "").trim(),
-			});
+			}, { preserveFilled: true });
+			if (payResult.conflicts.length) {
+				warnings.push(
+					`The Payments Table already had a row for ${loadId} with a different ` +
+					`${payResult.conflicts.join(" and ")} — the existing value was kept. Reconcile it manually.`,
+				);
+			}
 		} catch (e) {
 			console.error("Rate-con load: Payments Table upsert failed:", e.message);
 			warnings.push("The Payments Table row was not written — add the payment amount manually.");
@@ -12537,6 +12595,12 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), as
 			warnings.push(`No rate-con PDF was attached, so invoice drafting will not find one for load ${loadId}.`);
 		} else if (!/^JVBERi/.test(rawPdf)) {
 			warnings.push("The attached file was not a PDF, so the rate-con was not archived to Drive.");
+		} else if (Math.floor((rawPdf.length * 3) / 4) > 15 * 1024 * 1024) {
+			// Same 15 MB decoded cap the extract route enforces — without it this
+			// route would accept anything up to the 50 MB global body limit and
+			// push it into shared Drive storage. Warn rather than fail: the load
+			// row is already committed.
+			warnings.push(`The rate-con PDF is larger than 15 MB, so it was not archived. Upload it to the Rate Confirmations folder as ${loadId}.pdf.`);
 		} else {
 			try {
 				const { Readable } = require("stream");
