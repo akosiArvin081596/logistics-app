@@ -123,8 +123,9 @@
               <!-- Amount / Adjustment / Adjusted total broken out, mirroring the
                    investor statement so both read the same arithmetic. -->
               <td class="num">{{ fmt(p.amount) }}</td>
+              <!-- Applied delta, so Amount + Adjustment = Adjusted total holds. -->
               <td class="num">
-                <span v-if="p.adjustment" class="adj-badge" :title="adjTitle(p)">{{ p.adjustment > 0 ? '+' : '−' }}{{ fmt(Math.abs(p.adjustment)) }}</span>
+                <span v-if="applied(p)" class="adj-badge" :title="adjTitle(p)">{{ applied(p) > 0 ? '+' : '−' }}{{ fmt(Math.abs(applied(p))) }}</span>
                 <span v-else class="dim">&mdash;</span>
               </td>
               <td class="num"><span class="amt-main">{{ fmt(effective(p)) }}</span></td>
@@ -194,12 +195,16 @@
         <textarea v-model="adjustNote" class="adj-textarea" rows="2" maxlength="500" placeholder="e.g. Late June fuel receipts uploaded after settlement"></textarea>
 
         <div class="adj-preview">
-          New effective payout: <strong class="mono">{{ fmt(previewEffective) }}</strong>
+          New effective payout: <strong class="mono" :class="{ 'adj-over': overDeducted }">{{ fmt(previewEffective) }}</strong>
+        </div>
+        <div v-if="overDeducted" class="adj-warn">
+          A payout can be reduced to $0 but not below. The largest deduction for this
+          period is <strong class="mono">−{{ fmt(maxDeduction) }}</strong>.
         </div>
 
         <div class="adj-actions">
           <button type="button" class="btn-ghost" :disabled="adjustSaving" @click="closeAdjust">Cancel</button>
-          <button type="button" class="btn btn-primary" :disabled="adjustSaving" @click="saveAdjust">{{ adjustSaving ? 'Saving…' : 'Save adjustment' }}</button>
+          <button type="button" class="btn btn-primary" :disabled="adjustSaving || overDeducted" @click="saveAdjust">{{ adjustSaving ? 'Saving…' : 'Save adjustment' }}</button>
         </div>
       </div>
     </div>
@@ -291,6 +296,12 @@ const adjustSaving = ref(false)
 function effective(p) {
   return p.effectiveAmount != null ? p.effectiveAmount : (p.amount || 0)
 }
+
+// The delta that actually landed. A payout clamps at $0, so an over-deduction
+// (only possible on rows written before the guard) shows what really applied.
+function applied(p) {
+  return p.adjustmentApplied != null ? p.adjustmentApplied : (p.adjustment || 0)
+}
 function adjTitle(p) {
   const who = p.adjustedBy ? ` — ${p.adjustedBy}` : ''
   return `${p.adjustmentNote || 'Adjustment'}${who}`
@@ -310,6 +321,11 @@ const previewEffective = computed(() => {
   const amt = Number(adjustAmount.value)
   return (p.amount || 0) + (Number.isFinite(amt) ? amt : 0)
 })
+// A payout can be reduced to nothing but never inverted — the server rejects an
+// over-deduction (400), so warn in the modal instead of letting the admin type a
+// number, hit Save and only then find out.
+const overDeducted = computed(() => previewEffective.value < 0)
+const maxDeduction = computed(() => Math.max(0, Number(adjustTarget.value?.payout?.amount || 0)))
 
 function openAdjust(inv, p) {
   adjustTarget.value = { investorName: inv.name, payout: p }
@@ -623,6 +639,8 @@ onMounted(loadPayouts)
   background: var(--bg, #fff); color: var(--text, inherit); width: 100%; box-sizing: border-box; resize: vertical;
 }
 .adj-preview { font-size: 0.85rem; padding-top: 0.3rem; }
+.adj-over { color: #b91c1c; }
+.adj-warn { font-size: 0.78rem; color: #b91c1c; padding-top: 0.35rem; line-height: 1.4; }
 .adj-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.4rem; }
 .btn-ghost {
   font: inherit; font-weight: 600; font-size: 0.82rem; padding: 0.45rem 0.9rem;

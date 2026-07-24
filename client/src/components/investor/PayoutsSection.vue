@@ -88,9 +88,12 @@
                 earned {{ fmt(p.monthEarnings) }} · {{ fmt(p.lossCarriedIn) }} applied to an earlier loss
               </div>
             </td>
+            <!-- Show the delta that ACTUALLY landed, so Amount + Adjustment always
+                 equals Adjusted total on the row. They differ only for a legacy
+                 over-deduction the server clamps at $0. -->
             <td class="mono-sm num">
-              <template v-if="p.adjustment">
-                <div class="inv-adj-amt">{{ p.adjustment > 0 ? '+' : '−' }}{{ fmt(Math.abs(p.adjustment)) }}</div>
+              <template v-if="applied(p)">
+                <div class="inv-adj-amt">{{ applied(p) > 0 ? '+' : '−' }}{{ fmt(Math.abs(applied(p))) }}</div>
                 <div v-if="p.adjustmentNote" class="inv-adj-note">{{ p.adjustmentNote }}</div>
               </template>
               <span v-else class="dim">&mdash;</span>
@@ -188,6 +191,14 @@ function fmtDate(d) {
 // for any legacy/absent field so the statement never renders blank.
 function effective(p) {
   return p.effectiveAmount != null ? p.effectiveAmount : (p.amount || 0)
+}
+
+// The adjustment that actually landed. A payout can be reduced to $0 but never
+// inverted, so an over-deduction is clamped; showing the clamped delta keeps
+// Amount + Adjustment = Adjusted total true on every row. Falls back to the raw
+// adjustment for payloads that predate the field.
+function applied(p) {
+  return p.adjustmentApplied != null ? p.adjustmentApplied : (p.adjustment || 0)
 }
 
 // A row is settleable only when there is actually money to pay. Loss months no
