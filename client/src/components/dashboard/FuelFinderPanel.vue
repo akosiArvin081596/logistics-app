@@ -72,10 +72,10 @@
         <template v-else-if="stops.length">
           <div class="ff-price-note" :class="{ live: livePriceCount > 0 }">
             <template v-if="livePriceCount > 0">
-              Live diesel pump prices where available — cheapest first. Others show a regional estimate.
+              Live diesel pump prices, cheapest first. Stations without a published price show “price n/a.”
             </template>
             <template v-else>
-              Regional average diesel — no live pump prices published on this route yet.
+              No live diesel prices published for stops on this route yet.
             </template>
           </div>
           <ul class="ff-stop-list">
@@ -91,14 +91,14 @@
                   <span v-if="s.aboutMilesFromRoute != null" class="ff-stop-dist">~{{ round1(s.aboutMilesFromRoute) }} mi off route</span>
                 </span>
                 <span class="ff-stop-price">
-                  <span class="ff-price-row">
-                    <span v-if="priceOf(s) != null" class="ff-price" :class="{ live: isLive(s) }">${{ priceOf(s) }}</span>
-                    <span v-else class="ff-price muted">—</span>
-                    <span class="ff-price-unit">/gal</span>
-                  </span>
-                  <span v-if="priceOf(s) != null" class="ff-price-tag" :class="isLive(s) ? 'tag-live' : 'tag-est'">
-                    {{ isLive(s) ? 'live' : 'est' }}
-                  </span>
+                  <template v-if="priceOf(s) != null">
+                    <span class="ff-price-row">
+                      <span class="ff-price live">${{ priceOf(s) }}</span>
+                      <span class="ff-price-unit">/gal</span>
+                    </span>
+                    <span class="ff-price-tag tag-live">live</span>
+                  </template>
+                  <span v-else class="ff-price-na">price n/a</span>
                 </span>
               </button>
             </li>
@@ -147,7 +147,8 @@ function isLive(s) {
   return s && s.priceSource === 'station'
 }
 function priceOf(s) {
-  const p = Number(s && (s.effectivePrice != null ? s.effectivePrice : s.regionalDieselPrice))
+  // Only real per-station pump prices are shown; no regional-estimate fallback.
+  const p = Number(s && s.effectivePrice)
   return Number.isFinite(p) ? p.toFixed(2) : null
 }
 
@@ -537,7 +538,7 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
   border-radius: 3px;
 }
 .tag-live { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
-.tag-est { background: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
+.ff-price-na { font-size: 0.62rem; color: #b0b8c4; font-weight: 600; font-style: italic; }
 
 @media (max-width: 640px) {
   .fuel-finder { width: 220px; }

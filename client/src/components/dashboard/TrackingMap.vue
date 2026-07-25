@@ -541,10 +541,10 @@ function buildFuelStopPopup(s) {
   if (s.address) html += `<div style="color:#555;font-size:0.78rem;margin-top:2px">${escHtml(s.address)}</div>`
   const bits = []
   if (Number.isFinite(Number(s.aboutMilesFromRoute))) bits.push(`~${Math.round(Number(s.aboutMilesFromRoute) * 10) / 10} mi off route`)
-  // Prefer the live per-station pump price; fall back to the regional average.
+  // Live per-station pump price only — no regional-average fallback (a coarse
+  // regional number would look misleadingly like the cheapest stop).
   const live = s.priceSource === 'station' && Number.isFinite(Number(s.dieselPrice))
-  const shown = live ? Number(s.dieselPrice) : (Number.isFinite(Number(s.effectivePrice)) ? Number(s.effectivePrice) : (Number.isFinite(Number(s.regionalDieselPrice)) ? Number(s.regionalDieselPrice) : null))
-  if (shown != null) bits.push(`$${shown.toFixed(2)}/gal ${live ? 'live diesel' : 'regional avg'}`)
+  if (live) bits.push(`$${Number(s.dieselPrice).toFixed(2)}/gal live diesel`)
   if (bits.length) html += `<div style="color:#555;font-size:0.75rem;margin-top:3px">${bits.join(' &middot; ')}</div>`
   html += '</div>'
   return html

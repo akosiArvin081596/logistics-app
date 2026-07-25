@@ -28,7 +28,6 @@ const { runReceiptOcr } = require("./lib/receipt-ocr");
 const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDetailed, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
 const expenseAi = require("./lib/expense-ai");
 const fuelModel = require("./lib/fuel-model");
-const fuelPrices = require("./lib/fuel-prices");
 const poiFuelStops = require("./lib/poi-fuel-stops");
 const rateconNormalize = require("./lib/ratecon-normalize");
 
@@ -15986,20 +15985,6 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher"), (req, res) 
 	}
 });
 
-// GET /api/fuel/price?lat=&lng= — regional average diesel price (EIA v2, gated by
-// EIA_API_KEY; falls back to a national average when unset — ships dormant).
-app.get("/api/fuel/price", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
-	try {
-		const lat = parseFloat(req.query.lat), lng = parseFloat(req.query.lng);
-		if (!Number.isFinite(lat) || !Number.isFinite(lng)) return res.status(400).json({ ok: false, error: "lat/lng required" });
-		const p = await fuelPrices.getRegionalDieselPrice(lat, lng, { db });
-		res.json({ ok: true, ...p });
-	} catch (err) {
-		console.error("[fuel/price]", err.message);
-		res.json({ ok: false, pricePerGallon: null, region: "", source: "fallback", asOf: new Date().toISOString() });
-	}
-});
-
 // Each request fans out to several billed Places calls → cap spend (mirrors scanKitLimiter).
 const poiLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
@@ -16029,29 +16014,22 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher"), poiLimi
 			originLat: oLat, originLng: oLng, destLat: dLat, destLng: dLng,
 			apiKey: GOOGLE_MAPS_API_KEY, limit,
 		});
-		// Merge live per-station diesel pump prices (Google `fuelOptions`, already
-		// attached to each stop where Google has coverage) with a regional-average
-		// fallback (EIA/national, cached ~1 call/region/day) so a stop without live
-		// data still shows a usable number. `effectivePrice` is what the UI shows;
-		// `priceSource` says whether it's a real pump price or a regional estimate.
-		const priced = await Promise.all((stops || []).map(async (s) => {
-			let regional = null, regionalSrc = null, regionalAsOf = null;
-			try {
-				const rp = await fuelPrices.getRegionalDieselPrice(s.lat, s.lng, { db });
-				regional = rp.pricePerGallon; regionalSrc = rp.source; regionalAsOf = rp.asOf;
-			} catch { /* regional is best-effort */ }
+		// Attach the live per-station diesel pump price (Google `fuelOptions`) where
+		// Google has coverage. Stations with no price data get effectivePrice: null
+		// → the UI shows "price n/a". We deliberately do NOT substitute a regional
+		// average: a coarse regional number would sort as if it were the cheapest
+		// stop and mislead the driver. Real pump price or nothing.
+		const priced = (stops || []).map((s) => {
 			const hasLive = Number.isFinite(s.dieselPrice);
 			return {
 				...s,
-				priceSource: hasLive ? "station" : (regional != null ? "regional" : null),
-				effectivePrice: hasLive ? s.dieselPrice : regional,
-				regionalDieselPrice: regional,
-				regionalPriceSource: regionalSrc,           // 'eia' | 'fallback'
-				priceAsOf: hasLive ? (s.dieselPriceUpdated || null) : regionalAsOf,
+				priceSource: hasLive ? "station" : null,
+				effectivePrice: hasLive ? s.dieselPrice : null,
+				priceAsOf: hasLive ? (s.dieselPriceUpdated || null) : null,
 			};
-		}));
-		// True-cheapest ranking: live-priced stations first (cheapest → dearest),
-		// then stations with only a regional estimate, nearest-to-route first.
+		});
+		// True-cheapest first: live-priced stations by price ascending, then the
+		// no-price stations nearest-to-route.
 		priced.sort((a, b) => {
 			const al = a.priceSource === "station", bl = b.priceSource === "station";
 			if (al && bl) return a.effectivePrice - b.effectivePrice;
@@ -16059,17 +16037,11 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher"), poiLimi
 			return (a.aboutMilesFromRoute || 0) - (b.aboutMilesFromRoute || 0);
 		});
 		const liveStops = priced.filter((s) => s.priceSource === "station");
-		let regionalDieselPrice = null, priceSource = null, priceAsOf = null;
-		try {
-			const mid = await fuelPrices.getRegionalDieselPrice((oLat + dLat) / 2, (oLng + dLng) / 2, { db });
-			regionalDieselPrice = mid.pricePerGallon; priceSource = mid.source; priceAsOf = mid.asOf;
-		} catch { /* route-level regional context is best-effort */ }
 		res.json({
 			ok: true,
 			stops: priced,
 			cheapest: liveStops[0] || null,     // true-cheapest station with a live pump price
 			livePriceCount: liveStops.length,
-			regionalDieselPrice, priceSource, priceAsOf,   // route-level regional context
 		});
 	} catch (err) {
 		if (err && err.code === "POI_NO_KEY") return res.status(503).json({ ok: false, error: "maps_key_unset", stops: [] });
