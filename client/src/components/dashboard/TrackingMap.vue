@@ -242,14 +242,27 @@ const hosByDriver = ref({})
 const hosAvailable = ref(false)
 let hosFetchedAt = 0
 let hosFetchInFlight = false
+// Set once we learn the current GPS provider doesn't include HOS (Linxup is
+// GPS-only; the endpoint returns available:false). We then hide the HOS block
+// entirely AND stop polling a provider that isn't wired — a page reload
+// re-checks in case an HOS provider is added later.
+let hosDisabled = false
 const HOS_REFRESH_MS = 60 * 1000
 
 async function fetchHos() {
-  if (hosFetchInFlight || Date.now() - hosFetchedAt < HOS_REFRESH_MS) return
+  if (hosDisabled || hosFetchInFlight || Date.now() - hosFetchedAt < HOS_REFRESH_MS) return
   hosFetchInFlight = true
   hosFetchedAt = Date.now()
   try {
     const data = await api.get('/api/tracking/hos')
+    if (data && data.available === false) {
+      // HOS isn't part of our current provider — don't show it at all, and stop
+      // polling. No pills, no indicator.
+      hosByDriver.value = {}
+      hosAvailable.value = false
+      hosDisabled = true
+      return
+    }
     const byDriver = {}
     for (const c of (data.clocks || [])) {
       const key = (c.logisxDriver || c.driverName || '').trim().toLowerCase()
@@ -258,7 +271,8 @@ async function fetchHos() {
     hosByDriver.value = byDriver
     hosAvailable.value = true
   } catch {
-    // 503 (integration off) or upstream failure — hide the HOS block.
+    // Transient upstream failure — hide the block but keep polling in case it
+    // recovers. A permanent "not included" is handled by available:false above.
     hosByDriver.value = {}
     hosAvailable.value = false
   } finally {
