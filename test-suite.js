@@ -18,6 +18,18 @@ try {
 	brokerInvoice = null;
 }
 
+// lib/linxup-push.js is likewise pure (Linxup Push-API message-shape mapping,
+// no network/DB), so the Linxup unit assertions (92-99) exercise it directly —
+// the highest-value coverage in this file since they need no server. Loaded
+// defensively for the same reason as broker-invoice: a rename must not take out
+// the HTTP suite; the unit block skips wholesale if it fails to load.
+let linxupPush = null;
+try {
+	linxupPush = require("./lib/linxup-push");
+} catch {
+	linxupPush = null;
+}
+
 // Optional directory of REAL rate-con PDFs (they contain broker pricing, so
 // they are deliberately NOT committed). Point at a local folder to run the
 // fixture-backed extraction tests 91-92; unset, they skip.
@@ -67,7 +79,7 @@ function test(name, pass) { results.push({ name, pass }); }
 function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
 (async () => {
-  console.log("=== RUNNING 91 TESTS against localhost:" + PORT + " ===\n");
+  console.log("=== RUNNING 102 TESTS against localhost:" + PORT + " ===\n");
 
   // 1. Server health
   const health = await req("GET", "/api/auth/setup-check");
@@ -984,6 +996,106 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     }
     test("91. Real non-Bison rate-cons yield no phantom trailer number", allClean && sawTrailerProse);
   }
+
+  // ==========================================================================
+  // 92-102. Linxup Push API v3 — inbound GPS webhook receiver.
+  //
+  // Linxup is the fleet GPS provider (replacing the Routemate poller). Unlike a
+  // pull API it PUSHES telemetry to POST /api/eld/linxup/webhook; the receiver
+  // token-gates, maps each Position into routemate_telemetry (source:'linxup',
+  // speed mph→m/s) and ships DORMANT — it writes only when LINXUP_ENABLED=true.
+  //
+  // 92-99 are PURE UNIT assertions on lib/linxup-push.js — no server, no
+  // fixtures, deterministic — so they are the highest-value coverage here: they
+  // pin the mph→m/s conversion the driver-pay travel gate depends on and the
+  // message-shape mapping the live ingest reads. 100-102 are server-gated (token
+  // + role) and run at integration against a booted server.
+  // ==========================================================================
+
+  const LX = linxupPush;
+  if (!LX) {
+    for (const n of [
+      "92. detectMessageType classifies a Position message",
+      "93. detectMessageType classifies a Trip message",
+      "94. detectMessageType classifies a Stop message",
+      "95. speedToMps converts 60 mph to ~26.82 m/s",
+      "96. speedToMps converts 100 km/h to ~27.78 m/s",
+      "97. speedToMps passes 10 m/s through unchanged",
+      "98. normalizePosition yields the neutral telemetry keys",
+      "99. vehicleIdCandidates returns [trackerId, deviceNumber, serial, vin]",
+    ]) skip(n, "lib/linxup-push.js not loadable from this checkout");
+  } else {
+    // A Position push (real-time GPS): lat/long + speed + heading/direction, the
+    // stable vehicle ids on tracker/asset, and a reverse-geocoded address.
+    const positionMsg = {
+      tracker: { trackerId: "T-1", deviceNumber: "D-2", deviceSerialNumber: "S-3" },
+      asset: { vin: "VIN-4" },
+      latitude: 40.4406, longitude: -79.9959,
+      speed: 60, heading: "NE", direction: 45,
+      address: { street: "5th Ave", city: "Pittsburgh", stateCode: "PA" },
+      date: 1719000000000, odometer: 123456, fuelLevel: 75, engineOn: true,
+    };
+    const tripMsg = { startDateTime: "2026-07-25T10:00:00Z", endDateTime: "2026-07-25T12:00:00Z", distanceMiles: 120 };
+    const stopMsg = { stopType: "CUSTOMER", durationMinutes: 30 };
+
+    // 92-94. Structural classification — the Push API carries no explicit type
+    // field, so the receiver detects by shape. Each fixture must land on exactly
+    // one type (Position is tested first, so Trip/Stop must not carry lat/long).
+    test("92. detectMessageType classifies a Position message", LX.detectMessageType(positionMsg) === "position");
+    test("93. detectMessageType classifies a Trip message", LX.detectMessageType(tripMsg) === "trip");
+    test("94. detectMessageType classifies a Stop message", LX.detectMessageType(stopMsg) === "stop");
+
+    // 95-97. Speed normalization. Downstream (tracking + the driver-pay travel
+    // gate, speed > 2.235 m/s) reads m/s, so the mph→m/s conversion is
+    // load-bearing — a unit mistake silently mis-pays drivers.
+    test("95. speedToMps converts 60 mph to ~26.82 m/s", Math.abs(LX.speedToMps(60, "mph") - 26.82) < 0.01);
+    test("96. speedToMps converts 100 km/h to ~27.78 m/s", Math.abs(LX.speedToMps(100, "kmh") - 27.78) < 0.01);
+    test("97. speedToMps passes 10 m/s through unchanged", LX.speedToMps(10, "mps") === 10);
+
+    // 98. Position → the neutral telemetry shape server.js inserts into
+    // routemate_telemetry. Pins the keys the ingest reads: vehicle_id (first id
+    // candidate), latitude, speed (m/s), bearing (from `direction` degrees),
+    // geocoded_location ("City, ST"), and location_date_ms (from `date`).
+    const pos = LX.normalizePosition(positionMsg, { speedUnit: "mph" });
+    test("98. normalizePosition yields the neutral telemetry keys",
+      pos.vehicle_id === "T-1" &&
+      pos.latitude === 40.4406 &&
+      Math.abs(pos.speed - 26.8224) < 1e-6 &&
+      pos.bearing === "45" &&
+      pos.geocoded_location === "Pittsburgh, PA" &&
+      pos.location_date_ms === 1719000000000);
+
+    // 99. A truck links by ANY Linxup id (trucks.routemate_vehicle_id matched
+    // against these), so the candidate list + its order is the contract: the
+    // receiver tries them all. tracker.trackerId → deviceNumber → serial → vin.
+    test("99. vehicleIdCandidates returns [trackerId, deviceNumber, serial, vin]",
+      JSON.stringify(LX.vehicleIdCandidates(positionMsg)) === JSON.stringify(["T-1", "D-2", "S-3", "VIN-4"]));
+  }
+
+  // 100. The token gate is ALWAYS enforced. With no token presented the webhook
+  //      returns 401 when LINXUP_WEBHOOK_TOKEN is configured, or 503 when it is
+  //      unset (feature not configured) — both are correct "not authorized to
+  //      ingest" outcomes. A 200 here would mean an open GPS write endpoint.
+  const lw = await req("POST", "/api/eld/linxup/webhook", { latitude: 1, longitude: 1, speed: 0, heading: "N" });
+  test("100. Linxup webhook rejects a push with no token (401 configured / 503 unset)",
+    [401, 503].includes(lw.status));
+
+  // 101. Health is Super Admin only: no session → 401, wrong role (Investor) →
+  //      403. Mirrors the ScanKit/Routemate health gating (tests 31-32, 44).
+  const lh1 = await req("GET", "/api/eld/linxup/health");
+  const lh2 = await req("GET", "/api/eld/linxup/health", null, ic);
+  test("101. Linxup health blocked without auth (401) and for Investor (403)",
+    lh1.status === 401 && lh2.status === 403);
+
+  // 102. Super Admin gets the health contract, stamped provider:'linxup', and it
+  //      never echoes the shared secret (hasToken boolean only — assert no raw
+  //      token/webhookToken field, defense-in-depth like the ScanKit test 31).
+  const lh3 = await req("GET", "/api/eld/linxup/health", null, ac);
+  const lhb = (lh3 && lh3.body) || {};
+  test("102. Linxup health returns provider:'linxup' for Super Admin (token never echoed)",
+    lh3.status === 200 && lhb.provider === "linxup" &&
+    "enabled" in lhb && "hasToken" in lhb && "speedUnit" in lhb &&
+    !("token" in lhb) && !("webhookToken" in lhb) && !("LINXUP_WEBHOOK_TOKEN" in lhb));
 
   // Results
   console.log("");
