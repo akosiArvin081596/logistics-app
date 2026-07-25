@@ -76,6 +76,7 @@ Shared server-side modules live in `lib/` (required from `server.js`):
 - `pdf-browser.js` — Puppeteer HTML→PDF renderer for onboarding/investor docs (why `puppeteer` is a top-level dep alongside `pdfkit`/`pdf-lib`).
 - `policy-field-maps.js`, `policy-renderer.js` — field mapping + template rendering for onboarding legal documents.
 - `routemate-client.js` — Routemate ELD/telematics API adapter (single point of contact).
+- `linxup-push.js` — Linxup Push API v3 message mapping (pure, no network/DB): `detectMessageType()`, `normalizePosition()` (→ neutral telemetry shape), `vehicleIdCandidates()`, `speedToMps()`. server.js owns the webhook, token gate, DB insert, and geofence fan-out. See "Linxup GPS ingestion" below.
 - `ratecon-load.js` — pure helpers for drag-and-drop rate-con ingestion: `buildJobTrackingRow()` (header-order mapping + creation defaults), `calculateRatePerMile()` / `cityStateZip()` (ported from the n8n "Calculate Rate Per Mile" node), `extractionWarnings()`, `upsert`-support helpers. No network or DB access. See "Load ingestion" below.
 - `scankit-client.js` — ScanKit.io document-scanning API adapter (single point of contact; `POST /scan/crop`). See the AI/vision services note below.
 - `broker-invoice.js` — invoice assembly for **every** broker: `resolveInvoiceTo()` / `resolveBrokerName()` recipient + naming, `isBisonLoad()` (now a recipient *branch*, not a gate), deterministic rate-con field extraction, and the payload shape for the Draft Invoice route. See the "Invoice drafting — all brokers" section below.
@@ -446,6 +447,25 @@ Replaces phone-based driver GPS. Routemate is FMCSA-certified ELD hardware in tr
 **Demo viewer** is blocked from `/api/admin/routemate/sync-now` by the global write-lockdown middleware (server.js:~1630).
 
 **Spec reference:** OpenAPI 3.0.1 at `https://cloud.routemate.ai/v3/api-docs` (public, no auth). Doc viewer `https://cloud.routemate.ai/open-api.html` is JS-rendered Redocly. Path prefix `/api/v0/`.
+
+## Linxup GPS ingestion (webhook push)
+
+**Linxup is the fleet GPS/telematics provider going forward, replacing the Routemate *poll* model.** (Apollo ELD — the `feat/eld-apollo-migration` provider-neutral effort — was evaluated for driver **HOS only** and dropped for GPS; Linxup won live tracking.) The defining difference from Routemate: **Linxup PUSHES** telemetry to us — there is no base URL, no poll cadence, and no `setInterval`. Linxup POSTs each message to our webhook; we validate a shared secret and ingest.
+
+**Endpoints:**
+- `POST /api/eld/linxup/webhook` — inbound push. **Token-gated** (`safeEqual` constant-time compare against `LINXUP_WEBHOOK_TOKEN`): the token is read from `Authorization: Bearer`, `X-Api-Key`, `X-Webhook-Token`, or `X-Linxup-Token` headers, or `?token=`. Returns **503** when the token is unset (not configured), **401** on mismatch, **200** `{ok, received, enabled}` on success. **ACKs fast, ingests async** (`res.json()` then `setImmediate`) so a slow sheet/geofence read never makes Linxup time out and re-deliver. Accepts a single message OR an array (`body`, `body.messages`, or `[body]`).
+- `GET /api/eld/linxup/health` — **Super Admin only**. Returns `{provider:'linxup', enabled, hasToken, speedUnit, lastReceived, lastWritten, lastError, messageCounts, unlinkedPositions}`. **Never echoes the token** (`hasToken` boolean only).
+
+**Mapping & storage:** `lib/linxup-push.js` is pure message-shape mapping. Each pushed message is classified structurally by `detectMessageType()` (the Push API carries no explicit type field) — Position, Trip, Stop, Usage, Geofence, Alert, Media, etc. **Only `Position` feeds tracking in v1**; other types are recognized + counted (`messageCounts`) so the receiver can ACK, but not written. A Position → `normalizePosition()` → the neutral telemetry shape, which server.js inserts into **`routemate_telemetry`** (the existing live table that tracking **and** the driver-pay "active days" basis already read) with `source:'linxup'` and **speed converted mph→m/s** (`speedToMps`, unit from `LINXUP_SPEED_UNIT`). It reuses the poller's quality gates (invalid-coords / speed-outlier tagged via `dropped_reason`) and the same `location-update` + `tryGeofenceAdvance()` fan-out, so tracking/pay/geofence behave identically to the Routemate path.
+
+**Truck linkage:** a Position carries several stable ids (`tracker.trackerId`, `tracker.deviceNumber`, `tracker.deviceSerialNumber`, `asset.vin`); `vehicleIdCandidates()` returns them in that preference order and the receiver matches **any** of them against **`trucks.routemate_vehicle_id`** (the existing link column — unchanged) to resolve the truck + active driver. Unmatched positions are still stored (first candidate) so no data is lost; they just don't map to a truck until it's linked, and increment `unlinkedPositions`.
+
+**Env vars** (in `.env.example`):
+- `LINXUP_ENABLED` — master write switch. **Default off.** When false the token gate is still enforced but positions are recognized/counted only, never written → ships **dormant** (matches `ROUTEMATE_ENABLED` / `SCANKIT_ENABLED`).
+- `LINXUP_WEBHOOK_TOKEN` — shared secret Linxup presents on every push. Unset → webhook 503.
+- `LINXUP_SPEED_UNIT` — `mph` | `kmh` | `mps`, default `mph`.
+
+**⚠️ LIVE-CAPTURE (confirm against the first real push):** two fields are inferred from the Push API V3 doc, not a real payload — the **speed unit** (assumed mph; a wrong guess silently mis-pays drivers via the `speed > 2.235 m/s` travel gate) and the **exact auth header** Linxup uses (we accept several defensively). Both are flagged in `lib/linxup-push.js`; lock them down once a live push is seen. **Docs:** Push API V3 PDF (`PushAPIV3.pdf`, 25-page message catalog: Position/Trip/Stop/Usage/Geofence/Alert/Media).
 
 ## House rules (`.claude/rules/`)
 
