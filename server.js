@@ -78,6 +78,17 @@ function isValidImageMagic(buf) {
 		(buf[4] === 0x37 || buf[4] === 0x39) && buf[5] === 0x61) return true;
 	return false;
 }
+// Classify a base64 payload as a rate-con we can hand to Gemini: PDF or a photo
+// (PNG/JPEG). Matches on the base64 prefix, which maps 1:1 to the leading magic
+// bytes — no decode needed and not spoofable via a forged data-URI mime.
+// Returns the mime string, or null when it's neither.
+function detectRateConMime(base64) {
+	const b = String(base64 || "").trim();
+	if (/^JVBERi/.test(b)) return "application/pdf";   // "%PDF-"
+	if (/^iVBORw0KGgo/.test(b)) return "image/png";     // PNG signature 89 50 4E 47 …
+	if (/^\/9j\//.test(b)) return "image/jpeg";         // JPEG SOI FF D8 FF
+	return null;
+}
 // Cross-origin support for the driver-mobile-view client (separate Next.js
 // app at a different origin). Only the env-allowlisted origins get permissive
 // CORS headers; everything else falls through with no Access-Control-* headers
@@ -2463,16 +2474,21 @@ const RATECON_GEMINI_FIELDS = [
 	"Rate","BOL Number","Details",
 	"Order Number","PO Number","Move Number","Trailer Number","Total Rate",
 ];
-async function runRateConGemini(base64) {
+async function runRateConGemini(base64, mimeType = "application/pdf") {
 	const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_OCR_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+	// mimeType lets callers pass an image (image/png, image/jpeg) — a dispatcher
+	// can drop a PHOTO of a rate-con, not just a PDF. Gemini 2.5 Flash reads both
+	// natively (same as the expense-receipt OCR path). Default stays PDF so the
+	// n8n webhook caller is unchanged.
+	const isImg = /^image\//i.test(mimeType);
 	const body = {
 		system_instruction: { parts: [{ text: RATECON_PDF_SYSTEM_PROMPT }] },
 		contents: [
 			{
 				role: "user",
 				parts: [
-					{ inline_data: { mime_type: "application/pdf", data: base64 } },
-					{ text: "Extract the rate-confirmation fields from this PDF." },
+					{ inline_data: { mime_type: isImg ? mimeType : "application/pdf", data: base64 } },
+					{ text: `Extract the rate-confirmation fields from this ${isImg ? "image" : "PDF"}.` },
 				],
 			},
 		],
@@ -12318,21 +12334,24 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 		if (!pdfBase64 || typeof pdfBase64 !== "string") {
 			return res.status(400).json({ error: "pdfBase64 required" });
 		}
-		const base64 = pdfBase64.replace(/^data:application\/pdf;base64,/, "").trim();
-		// PDF magic bytes "%PDF-" → base64 "JVBERi". The client-side accept=
-		// filter and the mime type are both trivially bypassed; the decoded
-		// bytes are the only trustworthy signal.
-		if (!/^JVBERi/.test(base64)) {
-			return res.status(400).json({ error: "Not a valid PDF (missing %PDF- header)" });
+		// Accept a PDF or a photo (PNG/JPEG) — a dispatcher can drop a phone
+		// picture of a rate-con. Strip any data-URI prefix (generic, not just
+		// PDF) and classify from the DECODED magic bytes — the client accept=
+		// filter and the declared mime are both trivially bypassed, so the bytes
+		// are the only trustworthy signal.
+		const base64 = pdfBase64.replace(/^data:[^;]+;base64,/, "").trim();
+		const mimeType = detectRateConMime(base64);
+		if (!mimeType) {
+			return res.status(400).json({ error: "Unsupported file — drop a PDF, PNG, or JPG rate-con." });
 		}
 		// 15 MB decoded. base64 inflates ~4/3, so measure the decoded size.
 		if (Math.floor((base64.length * 3) / 4) > 15 * 1024 * 1024) {
-			return res.status(400).json({ error: "PDF too large (15 MB max)" });
+			return res.status(400).json({ error: "File too large (15 MB max)" });
 		}
 		if (!GEMINI_API_KEY) return res.status(503).json({ error: "ratecon_extract_unavailable" });
 
 		try {
-			const fields = await runRateConGemini(base64);
+			const fields = await runRateConGemini(base64, mimeType);
 			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields) });
 		} catch (err) {
 			console.error("Rate-con extract failed after retries:", err && err.message);
@@ -12594,23 +12613,40 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// load invoiceable. Drive is then attempted best-effort for parity with
 		// the email pipeline, but its failure is silent — (b) already covers us.
 		let rateconArchived = false;
-		const rawPdf = typeof pdfBase64 === "string"
-			? pdfBase64.replace(/^data:application\/pdf;base64,/, "").trim()
+		// Accept a PDF or a photo (PNG/JPEG). Strip any data-URI prefix generically
+		// and classify from the decoded magic bytes (same trust model as extract).
+		const rawFile = typeof pdfBase64 === "string"
+			? pdfBase64.replace(/^data:[^;]+;base64,/, "").trim()
 			: "";
-		if (!rawPdf) {
-			warnings.push(`No rate-con PDF was attached, so invoice drafting will not find one for load ${loadId}.`);
-		} else if (!/^JVBERi/.test(rawPdf)) {
-			warnings.push("The attached file was not a PDF, so the rate-con was not archived.");
-		} else if (Math.floor((rawPdf.length * 3) / 4) > 15 * 1024 * 1024) {
+		const rcMime = detectRateConMime(rawFile);
+		if (!rawFile) {
+			warnings.push(`No rate-con file was attached, so invoice drafting will not find one for load ${loadId}.`);
+		} else if (!rcMime) {
+			warnings.push("The attached file was not a PDF or image, so the rate-con was not archived.");
+		} else if (Math.floor((rawFile.length * 3) / 4) > 15 * 1024 * 1024) {
 			// Same 15 MB decoded cap the extract route enforces — without it this
 			// route would accept anything up to the 50 MB global body limit.
 			// Warn rather than fail: the load row is already committed.
-			warnings.push(`The rate-con PDF is larger than 15 MB, so it was not archived. Attach it to load ${loadId} manually before drafting an invoice.`);
+			warnings.push(`The rate-con file is larger than 15 MB, so it was not archived. Attach it to load ${loadId} manually before drafting an invoice.`);
 		} else {
-			const pdfBuffer = Buffer.from(rawPdf, "base64");
+			// Always archive a PDF so the invoice packet attaches a PDF rate-con.
+			// A dropped image is flattened to a single-page PDF via imageToPdf()
+			// (the same helper the POD upload uses).
+			let pdfBuffer;
+			try {
+				if (rcMime === "application/pdf") {
+					pdfBuffer = Buffer.from(rawFile, "base64");
+				} else {
+					pdfBuffer = await imageToPdf([Buffer.from(rawFile, "base64")]);
+				}
+			} catch (convErr) {
+				console.error("Rate-con load: image→PDF conversion failed:", convErr.message);
+				warnings.push(`The rate-con image could not be converted to PDF for load ${loadId}. Attach it manually before drafting an invoice.`);
+				pdfBuffer = null;
+			}
 			// (b) PRIMARY — local /uploads + a documents row. This is what
 			// getRateConBytes() step 2 reads, and it needs no Drive quota.
-			try {
+			if (pdfBuffer) try {
 				const rcDir = path.join(__dirname, "uploads", "rate-cons");
 				if (!fs.existsSync(rcDir)) fs.mkdirSync(rcDir, { recursive: true });
 				const safeLoad = String(loadId).replace(/[^A-Za-z0-9._-]/g, "_");
@@ -12631,7 +12667,7 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			// (a) BEST-EFFORT — mirror into the Drive folder too, for parity with
 			// the n8n email pipeline. Expected to fail under the service account
 			// in production; that's fine, (b) is authoritative. Silent on error.
-			try {
+			if (pdfBuffer) try {
 				const { Readable } = require("stream");
 				const drive = await getDrive();
 				await drive.files.create({
@@ -12854,19 +12890,29 @@ async function getRateConBytes(loadId, body) {
 	return { buffer: null, fileName: `${orderNumber || "ratecon"}.pdf` };
 }
 
-// POST /api/loads/:loadId/draft-invoice  (alias: .../draft-bison-invoice)
-// Restricted to Super Admin + Dispatcher (the roles that run dispatch ops).
-// The legacy Bison-specific path stays registered so any external caller
-// (bookmarks, n8n, a cached SPA bundle) keeps working — same handler.
-app.post(
-	["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],
-	requireRole("Super Admin", "Dispatcher"),
-	async (req, res) => {
-		try {
-			const loadId = decodeURIComponent(req.params.loadId || "").trim();
-			if (!loadId) return res.status(400).json({ error: "loadId is required" });
-			const dryRun = String(req.query.dryRun || "") === "1" || req.query.dryRun === "true";
+// assembleAndDraftInvoice — the shared core behind BOTH the manual
+// "Draft Invoice Email" button and the automatic post-BOL-upload trigger, so
+// they run byte-identical logic (same pattern as generateInvoiceHandler for the
+// Friday payroll batch). Returns a plain result object; the caller maps it to an
+// HTTP response and/or a load_billing record. Never calls res.* itself.
+//
+// opts:
+//   dryRun               — preview the invoice + routing, burn no number, no draft
+//   bypassDeliveredGuard — treat the load as billable even if the sheet status
+//                          isn't "delivered" yet (a signed-BOL upload IS the
+//                          completion signal — the auto-trigger sets this)
+//   body                 — the request body (for getRateConBytes' base64 fallback)
+//
+// Returns one of:
+//   { ok:false, status, code, error, details? }
+//   { ok:true, dryRun:true, payload, meta }
+//   { ok:true, payload, meta }   (meta feeds the load_billing record)
+async function assembleAndDraftInvoice(loadId, opts = {}) {
+	const { dryRun = false, bypassDeliveredGuard = false, body = {} } = opts;
+	loadId = String(loadId == null ? "" : loadId).trim();
+	if (!loadId) return { ok: false, status: 400, error: "loadId is required" };
 
+	try {
 			// 1) Look up the load in the Job Tracking sheet by loadId.
 			const sheets = await getSheets();
 			const resp = await sheets.spreadsheets.values.get({
@@ -12877,12 +12923,12 @@ app.post(
 			const rows = deduplicateLoads(parsed.data, parsed.headers);
 			const headers = parsed.headers;
 			const loadIdCol = findCol(headers, /load.?id|job.?id/i);
-			if (!loadIdCol) return res.status(500).json({ error: "Sheet misconfigured" });
+			if (!loadIdCol) return { ok: false, status: 500, error: "Sheet misconfigured" };
 			const target = loadId.toLowerCase().replace(/^#/, "");
 			const load = rows.find(
 				(r) => (r[loadIdCol] || "").toString().trim().toLowerCase().replace(/^#/, "") === target,
 			);
-			if (!load) return res.status(404).json({ error: "Load not found" });
+			if (!load) return { ok: false, status: 404, error: "Load not found" };
 
 			// Resolve the columns we need from the sheet.
 			const emailCol = findCol(headers, /^email$/i) || findCol(headers, /broker.*email|email/i);
@@ -12906,16 +12952,33 @@ app.post(
 			//    check is a BRANCH (it picks the AP inbox), no longer a gate.
 			//    The sheet has no brokerage-company column, so the name is
 			//    resolved from the email domain; see lib/broker-invoice.js.
-			const brokerCtx = { brokerEmail, brokerContactName };
 			const isBison = brokerInvoice.isBisonLoad({ email: brokerEmail });
+			// Per the client decision, a non-Bison invoice is addressed To: the
+			// broker's own billing email parsed from the rate-con (the sheet's
+			// Email column) — NOT the fixed quickpay inbox. Bison keeps its
+			// dedicated AP inbox, so we only pass brokerBillingEmail when NOT Bison
+			// (resolveInvoiceTo prefers it, then falls back to Bison-AP / quickpay).
+			const brokerCtx = {
+				brokerEmail,
+				brokerContactName,
+				brokerBillingEmail: isBison ? "" : brokerEmail,
+			};
 			const brokerName = brokerInvoice.resolveBrokerName(brokerCtx);
 			const invoiceTo = brokerInvoice.resolveInvoiceTo(brokerCtx);
+			// A short pickup → drop-off summary for the billing queue display.
+			const pickupAddrCol = findCol(headers, /pickup.*addr|origin.*addr/i);
+			const dropAddrCol = findCol(headers, /drop.*addr|dest.*addr|deliv.*addr/i);
+			const routeStr = [pickupAddrCol ? load[pickupAddrCol] : "", dropAddrCol ? load[dropAddrCol] : ""]
+				.map((s) => String(s || "").trim()).filter(Boolean).join("  →  ").slice(0, 160);
 
-			//    The delivered/completed gate is unchanged.
-			if (!/delivered|completed|pod received/i.test(status)) {
-				return res.status(400).json({
+			//    The delivered/completed gate — bypassed by the auto-trigger, since
+			//    a driver uploading a signed BOL/POD IS the completion signal even
+			//    if the sheet status hasn't flipped to "Delivered" yet.
+			if (!bypassDeliveredGuard && !/delivered|completed|pod received/i.test(status)) {
+				return {
+					ok: false, status: 400, code: "NOT_DELIVERED",
 					error: `Load must be delivered/completed to draft an invoice (current status: "${status || "unknown"}").`,
-				});
+				};
 			}
 
 			// 3) Get the POD + rate-con bytes (server-side).
@@ -12924,11 +12987,11 @@ app.post(
 					"SELECT * FROM documents WHERE load_id = ? AND UPPER(type) = 'POD' ORDER BY uploaded_at DESC LIMIT 1",
 				)
 				.get(loadId);
-			if (!podDoc) return res.status(400).json({ error: "POD not found for this load" });
+			if (!podDoc) return { ok: false, status: 400, code: "POD_MISSING", error: "POD not found for this load" };
 			const podBuffer = await fetchDocumentBytes(podDoc);
-			if (!podBuffer) return res.status(400).json({ error: "POD not found for this load" });
+			if (!podBuffer) return { ok: false, status: 400, code: "POD_MISSING", error: "POD not found for this load" };
 
-			const { buffer: rateconBuffer, fileName: rateconFileName } = await getRateConBytes(loadId, req.body);
+			const { buffer: rateconBuffer, fileName: rateconFileName } = await getRateConBytes(loadId, body);
 
 			// 4) Extract the rate-con fields (deterministic text scan → Gemini fallback).
 			//    The Gemini fallback reuses the shared runRateConGemini() helper.
@@ -12966,11 +13029,11 @@ app.post(
 			const normTrailer = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 			const rcTrailerUsable = /\d/.test(String(rcFields.trailerNumber || ""));
 			if (sheetTrailer && rcTrailerUsable && normTrailer(sheetTrailer) !== normTrailer(rcFields.trailerNumber)) {
-				return res.status(409).json({
+				return {
+					ok: false, status: 409, code: "TRAILER_MISMATCH",
 					error: `Trailer mismatch: rate-con says ${rcFields.trailerNumber} but the load is on trailer ${sheetTrailer}. Invoice not drafted.`,
-					code: "TRAILER_MISMATCH",
 					details: { rateconTrailer: rcFields.trailerNumber, loadTrailer: sheetTrailer },
-				});
+				};
 			}
 
 			// 6) Invoice total: the rate-con's Total Rate, else the load's
@@ -12981,14 +13044,14 @@ app.post(
 			const sheetTotal = paymentCol ? brokerInvoice.parseMoney(load[paymentCol]) : 0;
 			const totalAmount = rcTotal > 0 ? rcTotal : sheetTotal;
 			if (!(totalAmount > 0)) {
-				return res.status(422).json({
+				return {
+					ok: false, status: 422, code: "INVOICE_TOTAL_UNKNOWN",
 					error:
 						`Invoice total is unknown for load ${loadId} — the rate-con had no readable Total Rate` +
 						(paymentCol ? ` and the sheet's ${paymentCol.trim()} column is empty` : " and the sheet has no payment column") +
 						". Refusing to draft a $0.00 invoice. Add the rate to the load, then retry." +
 						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
-					code: "INVOICE_TOTAL_UNKNOWN",
-				});
+				};
 			}
 
 			// 6b) Invoice identifiers + dates. invoiceId/invoiceDate use the
@@ -13016,6 +13079,21 @@ app.post(
 			});
 			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
 			const invoicePdfBase64 = Buffer.from(invoicePdf).toString("base64");
+			// Persist the invoice PDF (real drafts only, not dryRun) so the billing
+			// queue has a durable artifact for the [✓ Invoice] checklist and a
+			// reviewer can re-open it. Best-effort — never blocks the draft.
+			let invoiceFilePath = "";
+			if (!dryRun) {
+				try {
+					const invDir = path.join(__dirname, "uploads", "invoices");
+					if (!fs.existsSync(invDir)) fs.mkdirSync(invDir, { recursive: true });
+					const invFile = `${String(invoiceId).replace(/[^A-Za-z0-9._-]/g, "_")}.pdf`;
+					fs.writeFileSync(path.join(invDir, invFile), invoicePdf);
+					invoiceFilePath = `/uploads/invoices/${invFile}`;
+				} catch (e) {
+					console.error("Draft invoice: invoice PDF persist failed:", e.message);
+				}
+			}
 
 			// 7b) Build the standard invoice email (body + signature) — the same
 			//     content the draft carries. For a Bison load brokerName is
@@ -13047,19 +13125,22 @@ app.post(
 			// the resolved routing so a reviewer can verify recipient/subject/
 			// total without opening the PDF.
 			if (dryRun) {
-				return res.json({
-					success: true,
-					preview: true,
-					dryRun: true,
-					invoiceId,
-					brokerName,
-					to: invoiceTo.email,
-					subject: draftSubject,
-					orderNumber,
-					total,
-					totalSource: rcTotal > 0 ? "ratecon" : "sheet",
-					invoicePdfBase64,
-				});
+				return {
+					ok: true, dryRun: true,
+					payload: {
+						success: true,
+						preview: true,
+						dryRun: true,
+						invoiceId,
+						brokerName,
+						to: invoiceTo.email,
+						subject: draftSubject,
+						orderNumber,
+						total,
+						totalSource: rcTotal > 0 ? "ratecon" : "sheet",
+						invoicePdfBase64,
+					},
+				};
 			}
 
 			// PRIMARY: create the Gmail draft directly via IMAP APPEND using the
@@ -13079,7 +13160,11 @@ app.post(
 						html: draftHtml,
 						attachments: draftAttachments,
 					});
-					return res.json({ success: true, invoiceId, via: "imap", draftMailbox: "[Gmail]/Drafts" });
+					return {
+						ok: true,
+						payload: { success: true, invoiceId, via: "imap", draftMailbox: "[Gmail]/Drafts" },
+						meta: { invoiceId, invoiceFile: invoiceFilePath, draftSubject, to: invoiceTo.email, broker: brokerName, route: routeStr, via: "imap", drafted: true },
+					};
 				} catch (e) {
 					imapError = e;
 					console.error("Draft invoice: IMAP draft failed:", e.message);
@@ -13118,32 +13203,186 @@ app.post(
 					const txt = await r.text().catch(() => "");
 					let n8nResponse;
 					try { n8nResponse = txt ? JSON.parse(txt) : {}; } catch { n8nResponse = { raw: txt.slice(0, 500) }; }
-					if (!r.ok) return res.status(502).json({ error: `n8n webhook returned ${r.status}`, details: n8nResponse });
-					return res.json({ success: true, invoiceId, via: "n8n", draftId: n8nResponse && (n8nResponse.draftId || n8nResponse.id), n8n: n8nResponse });
+					if (!r.ok) return { ok: false, status: 502, error: `n8n webhook returned ${r.status}`, details: n8nResponse };
+					return {
+						ok: true,
+						payload: { success: true, invoiceId, via: "n8n", draftId: n8nResponse && (n8nResponse.draftId || n8nResponse.id), n8n: n8nResponse },
+						meta: { invoiceId, invoiceFile: invoiceFilePath, draftSubject, to: invoiceTo.email, broker: brokerName, route: routeStr, via: "n8n", drafted: true },
+					};
 				} catch (e) {
 					console.error("Draft invoice: n8n webhook call failed:", e.message);
-					return res.status(502).json({ error: "Failed to reach the invoice-draft webhook." });
+					return { ok: false, status: 502, error: "Failed to reach the invoice-draft webhook." };
 				}
 			}
 
 			// IMAP was configured but failed, and no n8n fallback handled it →
 			// surface the failure instead of pretending it worked.
 			if (imapError) {
-				return res.status(502).json({
+				return {
+					ok: false, status: 502, code: "DRAFT_SAVE_FAILED", invoiceId,
 					error: `Invoice ${invoiceId} was generated, but saving the Gmail draft failed (${imapError.message}). No draft was created — please retry.`,
-					code: "DRAFT_SAVE_FAILED",
-					invoiceId,
-				});
+				};
 			}
 			// Nothing configured: return the generated invoice for preview so the
-			// call still yields something useful.
-			return res.json({ success: true, preview: true, invoiceId, invoicePdfBase64, note: "No Gmail/n8n draft target configured — invoice generated (preview only)." });
+			// call still yields something useful. Not counted as "drafted".
+			return {
+				ok: true,
+				payload: { success: true, preview: true, invoiceId, invoicePdfBase64, note: "No Gmail/n8n draft target configured — invoice generated (preview only)." },
+				meta: { invoiceId, invoiceFile: invoiceFilePath, draftSubject, to: invoiceTo.email, broker: brokerName, route: routeStr, via: "preview", drafted: false },
+			};
 		} catch (err) {
-			console.error("Draft invoice error:", err.message);
+			console.error("assembleAndDraftInvoice error:", err.message);
+			return { ok: false, status: 500, error: "Failed to draft the invoice." };
+		}
+}
+
+// --- load_billing: the Post-Trip billing lane (SQLite, one row per load) ---
+// A signed-BOL upload auto-drafts a Quick-Pay invoice; this table tracks that so
+// the "Ready for Billing" queue has data AND the draft is idempotent (never
+// re-burn an invoice number for a load already 'drafted'). Separate from the
+// operational Job Status in the sheet — this is the billing lane only.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS load_billing (
+		load_id TEXT PRIMARY KEY,
+		status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','drafted')),
+		invoice_number TEXT DEFAULT '',
+		invoice_file TEXT DEFAULT '',
+		draft_mailbox TEXT DEFAULT '',
+		draft_subject TEXT DEFAULT '',
+		draft_to TEXT DEFAULT '',
+		broker TEXT DEFAULT '',
+		route TEXT DEFAULT '',
+		drafted_at TEXT DEFAULT '',
+		last_error TEXT DEFAULT '',
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+const upsertBillingPendingStmt = db.prepare(`
+	INSERT INTO load_billing (load_id, status, last_error, updated_at)
+	VALUES (?, 'pending', ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(load_id) DO UPDATE SET last_error = excluded.last_error, updated_at = CURRENT_TIMESTAMP
+`);
+const upsertBillingDraftedStmt = db.prepare(`
+	INSERT INTO load_billing (load_id, status, invoice_number, invoice_file, draft_mailbox, draft_subject, draft_to, broker, route, drafted_at, last_error, updated_at)
+	VALUES (@load_id, 'drafted', @invoice_number, @invoice_file, @draft_mailbox, @draft_subject, @draft_to, @broker, @route, @drafted_at, '', CURRENT_TIMESTAMP)
+	ON CONFLICT(load_id) DO UPDATE SET
+		status='drafted', invoice_number=excluded.invoice_number, invoice_file=excluded.invoice_file,
+		draft_mailbox=excluded.draft_mailbox, draft_subject=excluded.draft_subject, draft_to=excluded.draft_to,
+		broker=excluded.broker, route=excluded.route,
+		drafted_at=excluded.drafted_at, last_error='', updated_at=CURRENT_TIMESTAMP
+`);
+const getBillingStmt = db.prepare("SELECT * FROM load_billing WHERE load_id = ?");
+// Record the outcome of an assembleAndDraftInvoice() result into load_billing.
+function recordBillingResult(loadId, result) {
+	try {
+		if (result && result.ok && result.meta && result.meta.drafted) {
+			const m = result.meta;
+			upsertBillingDraftedStmt.run({
+				load_id: loadId,
+				invoice_number: m.invoiceId || "",
+				invoice_file: m.invoiceFile || "",
+				draft_mailbox: (result.payload && result.payload.draftMailbox) || "[Gmail]/Drafts",
+				draft_subject: m.draftSubject || "",
+				draft_to: m.to || "",
+				broker: m.broker || "",
+				route: m.route || "",
+				drafted_at: new Date().toISOString(),
+			});
+		} else if (result && !result.ok) {
+			upsertBillingPendingStmt.run(loadId, String(result.error || "").slice(0, 500));
+		}
+	} catch (e) {
+		console.error("recordBillingResult failed:", e.message);
+	}
+}
+
+// POST /api/loads/:loadId/draft-invoice  (alias: .../draft-bison-invoice)
+// Restricted to Super Admin + Dispatcher. Thin wrapper over the shared core;
+// also records the billing-queue row so a manual draft shows up there too.
+app.post(
+	["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],
+	requireRole("Super Admin", "Dispatcher"),
+	async (req, res) => {
+		try {
+			const loadId = decodeURIComponent(req.params.loadId || "").trim();
+			const dryRun = String(req.query.dryRun || "") === "1" || req.query.dryRun === "true";
+			const result = await assembleAndDraftInvoice(loadId, { dryRun, body: req.body });
+			if (!dryRun) recordBillingResult(loadId, result);
+			if (!result.ok) {
+				return res.status(result.status || 500).json({
+					error: result.error, ...(result.code ? { code: result.code } : {}),
+					...(result.details ? { details: result.details } : {}),
+					...(result.invoiceId ? { invoiceId: result.invoiceId } : {}),
+				});
+			}
+			return res.json(result.payload);
+		} catch (err) {
+			console.error("Draft invoice route error:", err.message);
 			return res.status(500).json({ error: "Failed to draft the invoice." });
 		}
 	},
 );
+
+// GET /api/billing/queue — the "Ready for Billing" dispatcher queue. Lists every
+// load in the billing lane with the [Rate Con][BOL][Invoice] checklist derived
+// from the documents table + load_billing. Super Admin / Dispatcher only.
+const billingHasDocStmt = db.prepare("SELECT 1 FROM documents WHERE load_id = ? AND UPPER(type) = ? LIMIT 1");
+const billingHasRateConStmt = db.prepare("SELECT 1 FROM documents WHERE load_id = ? AND UPPER(type) IN ('RATECON','RATE CON','RATE_CON') LIMIT 1");
+app.get("/api/billing/queue", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const rows = db.prepare("SELECT * FROM load_billing ORDER BY datetime(updated_at) DESC").all();
+		const loads = rows.map((r) => {
+			const hasBol = !!(billingHasDocStmt.get(r.load_id, "POD") || billingHasDocStmt.get(r.load_id, "BOL"));
+			const hasRateCon = !!billingHasRateConStmt.get(r.load_id);
+			return {
+				loadId: r.load_id,
+				status: r.status,
+				broker: r.broker || "",
+				route: r.route || "",
+				hasRateCon,
+				hasBol,
+				hasInvoice: !!r.invoice_file,
+				invoiceNumber: r.invoice_number || "",
+				draftSubject: r.draft_subject || "",
+				draftTo: r.draft_to || "",
+				draftedAt: r.drafted_at || "",
+				lastError: r.last_error || "",
+			};
+		});
+		res.json({ loads });
+	} catch (err) {
+		console.error("Billing queue error:", err.message);
+		res.status(500).json({ error: "Failed to load the billing queue." });
+	}
+});
+
+// POST /api/billing/:loadId/draft — manually (re)generate the draft for one
+// load (covers 'pending' rows the auto-trigger couldn't complete). Shares the
+// exact draft core, and records the result back into the queue.
+app.post("/api/billing/:loadId/draft", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const loadId = decodeURIComponent(req.params.loadId || "").trim();
+		if (!loadId) return res.status(400).json({ error: "loadId is required" });
+		// A signed BOL/POD already exists for a queued load, so bypass the
+		// sheet-status delivered gate here too (same as the auto-trigger).
+		const result = await assembleAndDraftInvoice(loadId, { bypassDeliveredGuard: true, body: req.body });
+		recordBillingResult(loadId, result);
+		if (!result.ok) {
+			return res.status(result.status || 500).json({
+				error: result.error, ...(result.code ? { code: result.code } : {}),
+				...(result.details ? { details: result.details } : {}),
+			});
+		}
+		return res.json({
+			success: true,
+			invoiceId: (result.meta && result.meta.invoiceId) || (result.payload && result.payload.invoiceId),
+			draftSubject: (result.meta && result.meta.draftSubject) || "",
+		});
+	} catch (err) {
+		console.error("Billing draft error:", err.message);
+		res.status(500).json({ error: "Failed to generate the draft." });
+	}
+});
 
 // GET /api/legal-documents — Legal docs for investor's trucks or driver shared docs
 app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, res) => {
@@ -14292,6 +14531,38 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 
 		res.json({ success: true, driveUrl, ocrText });
 		console.log(`[upload] 200 sent; deferring POD sheet update row ${rowIndex}`);
+
+		// Post-Trip Draft Engine — a signed BOL/POD upload flags the load for
+		// billing and (idempotently) auto-assembles the Quick-Pay invoice + packet
+		// + Gmail draft, staged for a dispatcher to review in the "Ready for
+		// Billing" queue. Runs AFTER the response so it never delays the driver's
+		// upload; any failure parks the load as 'pending' with an error rather than
+		// surfacing to the driver. Idempotent: a re-upload never re-drafts / re-
+		// burns an invoice number for a load already 'drafted'.
+		if (docType === "POD" || docType === "BOL") {
+			setImmediate(async () => {
+				try {
+					const existing = getBillingStmt.get(loadId);
+					if (existing && existing.status === "drafted") return;
+					upsertBillingPendingStmt.run(loadId, "");
+					const result = await assembleAndDraftInvoice(loadId, { actor: "auto", bypassDeliveredGuard: true });
+					recordBillingResult(loadId, result);
+					if (result.ok && result.meta && result.meta.drafted) {
+						io.to("dispatch").emit("dispatch-notification", {
+							type: "billing-drafted",
+							title: `Invoice draft ready — load ${loadId}`,
+							body: result.meta.draftSubject || "",
+						});
+						console.log(`[billing] auto-drafted invoice ${result.meta.invoiceId} for load ${loadId} → ${result.meta.to}`);
+					} else if (!result.ok) {
+						console.log(`[billing] load ${loadId} parked pending: ${result.error}`);
+					}
+				} catch (e) {
+					console.error(`[billing] auto-draft failed for load ${loadId}:`, e.message);
+					try { upsertBillingPendingStmt.run(loadId, String(e.message || "").slice(0, 500)); } catch {}
+				}
+			});
+		}
 
 		// Mark the POD column in the sheet AFTER the response is sent. This Sheets
 		// get+update adds 2–3s+ and used to block the response long enough that
