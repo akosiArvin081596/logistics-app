@@ -42,7 +42,7 @@
     <input
       ref="inputRef"
       type="file"
-      accept="application/pdf,.pdf"
+      accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg"
       class="rc-file"
       tabindex="-1"
       aria-hidden="true"
@@ -67,19 +67,22 @@ const props = defineProps({
   // Full (default) = a taller banner for the top of a form.
   compact: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false },
-  label: { type: String, default: 'Drop a rate-con PDF here' },
+  label: { type: String, default: 'Drop a rate-con (PDF or photo) here' },
   // Blank falls back to a variant-appropriate default (see hintText).
   hint: { type: String, default: '' },
 })
 
 // Deliberately positional so the review modal / form can be wired in one line.
+// Signature: extracted(fields, warnings, fileBase64, fileName, kind)
+//   kind is 'pdf' | 'image' — drives the review modal's document preview.
 const emit = defineEmits(['extracted'])
 
 const api = useApi()
 
 // Server caps the upload around 15 MB; reject client-side so a 40 MB scan
-// doesn't spend a minute uploading only to come back a 400.
-const MAX_PDF_BYTES = 15 * 1024 * 1024
+// doesn't spend a minute uploading only to come back a 400. Applies to PDFs
+// and photos alike.
+const MAX_FILE_BYTES = 15 * 1024 * 1024
 // Gemini reads the whole PDF: 2 retries x 15s server-side timeout plus backoff.
 // The 20s useApi default would abort a request that was going to succeed.
 const EXTRACT_TIMEOUT_MS = 90000
@@ -98,7 +101,7 @@ const hintText = computed(() => {
   if (props.hint) return props.hint
   return props.compact
     ? 'or click to browse — you review everything before the load is created'
-    : 'or click to browse. We read the PDF and prefill the form below — nothing is created until you say so.'
+    : 'or click to browse. We read the PDF or photo and prefill the form below — nothing is created until you say so.'
 })
 
 // Missing the zone by a few pixels must not cost the dispatcher their page:
@@ -154,8 +157,23 @@ function onPicked(e) {
   handleFiles(files)
 }
 
-function isPdf(file) {
-  return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')
+// Accept a rate-con as a PDF or a photo (PNG/JPG). Match on MIME first, then
+// fall back to the extension — a dragged file, or one picked on some mobile
+// browsers, can arrive with an empty `type`.
+const ACCEPTED_EXT_RE = /\.(pdf|png|jpe?g)$/i
+const IMAGE_TYPE_RE = /^image\/(png|jpe?g|jpg)$/i
+function isAcceptedType(file) {
+  const type = (file.type || '').toLowerCase()
+  if (type === 'application/pdf' || IMAGE_TYPE_RE.test(type)) return true
+  return ACCEPTED_EXT_RE.test(file.name || '')
+}
+// 'pdf' | 'image' — emitted alongside the base64 so the review modal knows
+// which renderer to use for the side-by-side preview.
+function kindOf(file) {
+  const type = (file.type || '').toLowerCase()
+  if (type === 'application/pdf') return 'pdf'
+  if (type.startsWith('image/')) return 'image'
+  return /\.(png|jpe?g)$/i.test(file.name || '') ? 'image' : 'pdf'
 }
 
 function handleFiles(files) {
@@ -170,12 +188,12 @@ function handleFiles(files) {
     notice.value = `${files.length} files dropped — only "${file.name}" was read. Drop one rate-con at a time.`
   }
 
-  if (!isPdf(file)) {
-    error.value = `"${file.name}" isn't a PDF. Rate-cons must be dropped as a PDF file.`
+  if (!isAcceptedType(file)) {
+    error.value = `"${file.name}" isn't a PDF or image. Drop a rate-con as a PDF, PNG, or JPG.`
     return
   }
-  if (file.size > MAX_PDF_BYTES) {
-    error.value = `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is 15 MB. Try re-saving or splitting the PDF.`
+  if (file.size > MAX_FILE_BYTES) {
+    error.value = `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is 15 MB. Try re-saving it smaller.`
     return
   }
   extract(file)
@@ -183,20 +201,24 @@ function handleFiles(files) {
 
 async function extract(file) {
   busy.value = true
-  busyFileName.value = file.name || 'rate-con.pdf'
+  busyFileName.value = file.name || 'rate-con'
+  const kind = kindOf(file)
   try {
     const dataUrl = await readFileAsDataURL(file)
     if (!dataUrl) {
       error.value = "Couldn't read that file off disk. Try dropping it again."
       return
     }
-    const pdfBase64 = String(dataUrl).replace(/^data:[^;]*;base64,/, '')
+    // Generic strip — a PDF or a photo. The server strips any data:<mime>;base64,
+    // prefix too, so sending the bare base64 keeps both ends format-agnostic.
+    const fileBase64 = String(dataUrl).replace(/^data:[^;]+;base64,/, '')
     const res = await api.post(
       '/api/loads/ratecon/extract',
-      { pdfBase64, fileName: busyFileName.value },
+      // Body key stays `pdfBase64` — the server reads that field for any format.
+      { pdfBase64: fileBase64, fileName: busyFileName.value },
       { timeout: EXTRACT_TIMEOUT_MS },
     )
-    emit('extracted', res.fields || {}, res.warnings || [], pdfBase64, busyFileName.value)
+    emit('extracted', res.fields || {}, res.warnings || [], fileBase64, busyFileName.value, kind)
   } catch (err) {
     error.value = messageFor(err)
   } finally {
@@ -213,8 +235,8 @@ function messageFor(err) {
   if (status === 503) return 'Rate-con reading is switched off on the server. Enter this load manually for now.'
   if (status === 429) return 'Too many rate-cons read in the last few minutes. Wait a bit, then try again.'
   if (status === 403) return "Your account can't read rate-cons. Ask a Super Admin."
-  if (status === 400) return err.message || 'That file was rejected — it must be a PDF under 15 MB.'
-  if (status === 502) return err.message || "Couldn't read that rate-con. Try a clearer PDF, or enter the load manually."
+  if (status === 400) return err.message || 'That file was rejected — it must be a PDF, PNG, or JPG under 15 MB.'
+  if (status === 502) return err.message || "Couldn't read that rate-con. Try a clearer scan or photo, or enter the load manually."
   if (status === 0) return err.code === 'ABORT' ? 'Cancelled.' : 'Reading the rate-con timed out. Try again, or enter the load manually.'
   return err?.message || 'Failed to read the rate-con.'
 }

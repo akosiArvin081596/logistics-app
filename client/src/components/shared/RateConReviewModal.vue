@@ -1,69 +1,90 @@
 <template>
   <Dialog :open="open" @update:open="onOpenChange">
-    <DialogContent class="max-w-[820px] max-h-[90vh] flex flex-col overflow-hidden" style="padding:0;">
+    <DialogContent class="max-w-[1040px] max-h-[90vh] flex flex-col overflow-hidden" style="padding:0;">
       <!-- Extra right padding clears DialogContent's absolutely-positioned close X. -->
       <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1rem 2.5rem 1rem 1.25rem;">
         <DialogTitle>Review rate-con</DialogTitle>
         <DialogDescription>
-          Read from <span class="rc-filename">{{ fileName || 'the rate-con PDF' }}</span>. Fix anything wrong &mdash;
+          Read from <span class="rc-filename">{{ fileName || 'the rate-con' }}</span>. Fix anything wrong &mdash;
           nothing is created until you click Create Load.
         </DialogDescription>
       </DialogHeader>
 
-      <div class="rc-body">
-        <!-- Server-side warnings, verbatim. The per-field flags below are derived
-             client-side so they stay honest as the dispatcher edits. -->
-        <div v-if="warnings.length" class="rc-callout rc-callout-warn" role="status">
-          <strong>Check these before creating:</strong>
-          <ul>
-            <li v-for="(w, i) in warnings" :key="i">{{ w }}</li>
-          </ul>
+      <!-- Two panes: the original document (left) beside the editable extract
+           (right). Stacks to a single column below md — see the scoped styles. -->
+      <div class="rc-split">
+        <!-- LEFT: live preview of the dropped rate-con. PDFs render via a blob
+             URL (a data: URI is unreliable inside an <iframe>); photos use the
+             data URI directly. Both are built by buildPreview(). -->
+        <div class="rc-preview">
+          <div v-if="!previewUrl" class="rc-preview-empty">No preview available.</div>
+          <iframe
+            v-else-if="previewIsPdf"
+            :src="previewUrl"
+            class="rc-preview-frame"
+            title="Rate-con document preview"
+          ></iframe>
+          <div v-else class="rc-preview-imgwrap">
+            <img :src="previewUrl" class="rc-preview-img" alt="Rate-con document preview" />
+          </div>
         </div>
 
-        <div v-if="submitError" class="rc-callout rc-callout-error" role="alert">{{ submitError }}</div>
-
-        <section v-for="section in visibleSections" :key="section.title" class="rc-section">
-          <div class="rc-section-title">{{ section.title }}</div>
-          <div class="rc-grid">
-            <div
-              v-for="field in section.fields"
-              :key="field.key"
-              class="rc-field"
-              :class="{ 'rc-field-wide': field.wide }"
-            >
-              <label class="rc-label" :for="inputId(field.key)">
-                {{ field.label }}
-                <span v-if="field.required" class="rc-req" aria-hidden="true">*</span>
-                <span v-if="flags[field.key]" class="rc-chip" :class="`rc-chip-${flags[field.key].level}`">
-                  {{ flags[field.key].label }}
-                </span>
-              </label>
-              <textarea
-                v-if="field.multiline"
-                :id="inputId(field.key)"
-                v-model="form[field.key]"
-                rows="2"
-                class="rc-input"
-                :class="flags[field.key] ? `is-${flags[field.key].level}` : ''"
-                :disabled="submitting"
-              />
-              <input
-                v-else
-                :id="inputId(field.key)"
-                v-model="form[field.key]"
-                :type="field.type || 'text'"
-                :inputmode="field.inputmode"
-                class="rc-input"
-                :class="[flags[field.key] ? `is-${flags[field.key].level}` : '', field.mono ? 'rc-input-mono' : '']"
-                :disabled="submitting"
-              />
-            </div>
+        <!-- RIGHT: the editable fields — unchanged behavior. -->
+        <div class="rc-body">
+          <!-- Server-side warnings, verbatim. The per-field flags below are derived
+               client-side so they stay honest as the dispatcher edits. -->
+          <div v-if="warnings.length" class="rc-callout rc-callout-warn" role="status">
+            <strong>Check these before creating:</strong>
+            <ul>
+              <li v-for="(w, i) in warnings" :key="i">{{ w }}</li>
+            </ul>
           </div>
-        </section>
 
-        <button type="button" class="rc-more" :aria-expanded="showMore" @click="showMore = !showMore">
-          {{ showMore ? 'Hide' : 'Show' }} reference numbers &amp; notes ({{ extraFieldCount }})
-        </button>
+          <div v-if="submitError" class="rc-callout rc-callout-error" role="alert">{{ submitError }}</div>
+
+          <section v-for="section in visibleSections" :key="section.title" class="rc-section">
+            <div class="rc-section-title">{{ section.title }}</div>
+            <div class="rc-grid">
+              <div
+                v-for="field in section.fields"
+                :key="field.key"
+                class="rc-field"
+                :class="{ 'rc-field-wide': field.wide }"
+              >
+                <label class="rc-label" :for="inputId(field.key)">
+                  {{ field.label }}
+                  <span v-if="field.required" class="rc-req" aria-hidden="true">*</span>
+                  <span v-if="flags[field.key]" class="rc-chip" :class="`rc-chip-${flags[field.key].level}`">
+                    {{ flags[field.key].label }}
+                  </span>
+                </label>
+                <textarea
+                  v-if="field.multiline"
+                  :id="inputId(field.key)"
+                  v-model="form[field.key]"
+                  rows="2"
+                  class="rc-input"
+                  :class="flags[field.key] ? `is-${flags[field.key].level}` : ''"
+                  :disabled="submitting"
+                />
+                <input
+                  v-else
+                  :id="inputId(field.key)"
+                  v-model="form[field.key]"
+                  :type="field.type || 'text'"
+                  :inputmode="field.inputmode"
+                  class="rc-input"
+                  :class="[flags[field.key] ? `is-${flags[field.key].level}` : '', field.mono ? 'rc-input-mono' : '']"
+                  :disabled="submitting"
+                />
+              </div>
+            </div>
+          </section>
+
+          <button type="button" class="rc-more" :aria-expanded="showMore" @click="showMore = !showMore">
+            {{ showMore ? 'Hide' : 'Show' }} reference numbers &amp; notes ({{ extraFieldCount }})
+          </button>
+        </div>
       </div>
 
       <div class="rc-footer">
@@ -82,7 +103,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { useApi } from '../../composables/useApi'
 
@@ -91,8 +112,12 @@ const props = defineProps({
   // Shape returned by POST /api/loads/ratecon/extract. Any value may be null.
   fields: { type: Object, default: () => ({}) },
   warnings: { type: Array, default: () => [] },
+  // Base64 of the dropped document (raw base64 or a full data: URI — both are
+  // handled). Named pdfBase64 for back-compat; also carries images now.
   pdfBase64: { type: String, default: '' },
   fileName: { type: String, default: '' },
+  // 'pdf' | 'image' — from the dropzone; picks the preview renderer.
+  kind: { type: String, default: 'pdf' },
 })
 
 const emit = defineEmits(['update:open', 'created'])
@@ -168,6 +193,13 @@ const showMore = ref(false)
 const submitting = ref(false)
 const submitError = ref('')
 
+// --- Document preview (left pane) -----------------------------------------
+// previewUrl is a blob: URL for PDFs (a data: URI is unreliable inside an
+// <iframe>) or a data: URI for images. Rebuilt on open, released on close.
+const previewUrl = ref('')
+const previewIsPdf = computed(() => props.kind !== 'image')
+let previewBlobUrl = ''
+
 const extraFieldCount = computed(() => SECTIONS.find(s => s.extra)?.fields.length || 0)
 const visibleSections = computed(() => SECTIONS.filter(s => !s.extra || showMore.value))
 const loadNumber = computed(() => (form['Load Number'] || '').toString().trim())
@@ -198,11 +230,58 @@ function reset() {
   submitError.value = ''
 }
 
+// The prop may be raw base64 or a full data: URI — normalize to raw base64.
+function rawBase64() {
+  return String(props.pdfBase64 || '').replace(/^data:[^;]+;base64,/, '')
+}
+
+// Only PNG/JPG reach here; sniff the base64 magic so a bare-base64 image still
+// gets a real mime on its data: URI (default jpeg — the common phone photo).
+function imageMime(b64) {
+  if (b64.startsWith('iVBOR')) return 'image/png'
+  if (b64.startsWith('/9j/')) return 'image/jpeg'
+  return 'image/jpeg'
+}
+
+function buildPreview() {
+  releasePreview()
+  const src = String(props.pdfBase64 || '')
+  if (!src) return
+  if (props.kind === 'image') {
+    // <img> renders a data: URI reliably, so no blob needed here.
+    previewUrl.value = /^data:/i.test(src) ? src : `data:${imageMime(rawBase64())};base64,${rawBase64()}`
+    return
+  }
+  // PDF: hand the <iframe> a blob URL (a data: URI is unreliable there). Mirrors
+  // DocumentUpload.vue's preview.
+  try {
+    const b64 = rawBase64()
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    previewBlobUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
+    previewUrl.value = previewBlobUrl
+  } catch {
+    previewUrl.value = /^data:/i.test(src) ? src : `data:application/pdf;base64,${rawBase64()}`
+  }
+}
+
+function releasePreview() {
+  if (previewBlobUrl) { URL.revokeObjectURL(previewBlobUrl); previewBlobUrl = '' }
+  previewUrl.value = ''
+}
+
 watch(
-  () => [props.open, props.fields],
-  ([isOpen]) => { if (isOpen) reset() },
+  () => [props.open, props.fields, props.pdfBase64, props.kind],
+  ([isOpen]) => {
+    if (isOpen) { reset(); buildPreview() }
+    else releasePreview()
+  },
   { immediate: true },
 )
+
+// Revoke any live blob URL if the modal is torn down while open.
+onBeforeUnmount(releasePreview)
 
 function inputId(key) {
   return 'rc-' + key.toLowerCase().replace(/[^a-z0-9]+/g, '-')
@@ -270,8 +349,73 @@ function messageFor(err) {
 <style scoped>
 .rc-filename { font-weight: 600; color: var(--text, #1a1d27); }
 
+/* Two-pane split: stacked (preview on top) by default, side-by-side at md+.
+   min-height:0 lets each pane scroll instead of overflowing the dialog. */
+.rc-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+@media (min-width: 768px) {
+  .rc-split { flex-direction: row; }
+}
+
+/* Preview pane. Stacked: a capped height so the fields stay reachable and the
+   pane scrolls on its own. Side-by-side: a fixed-width column, full height. */
+.rc-preview {
+  flex: 0 0 auto;
+  height: 38vh;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  background: #f5f5f5;
+  border-bottom: 1px solid #e5e7eb;
+}
+@media (min-width: 768px) {
+  .rc-preview {
+    flex: 0 0 46%;
+    height: auto;
+    min-height: 0;
+    border-bottom: none;
+    border-right: 1px solid #e5e7eb;
+  }
+}
+.rc-preview-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: none;
+  display: block;
+}
+.rc-preview-imgwrap {
+  padding: 0.75rem;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+.rc-preview-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+.rc-preview-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  font-size: 0.8rem;
+  color: var(--text-dim, #6b7085);
+}
+
 .rc-body {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding: 1.1rem 1.25rem;
   display: flex;

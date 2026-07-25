@@ -12,7 +12,7 @@
            auto-submits — the dispatcher still clicks Create Job. -->
       <div class="ratecon-banner">
         <RateConDropzone
-          hint="or click to browse. We read the PDF and fill in the fields below — you check them, then click Create Job."
+          hint="or click to browse. We read the PDF or photo and fill in the fields below — you check them, then click Create Job."
           @extracted="onRateConExtracted"
         />
         <div v-if="prefillNote" class="prefill-note">

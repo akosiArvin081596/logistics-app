@@ -67,7 +67,7 @@ function test(name, pass) { results.push({ name, pass }); }
 function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
 (async () => {
-  console.log("=== RUNNING 91 TESTS against localhost:" + PORT + " ===\n");
+  console.log("=== RUNNING 99 TESTS against localhost:" + PORT + " ===\n");
 
   // 1. Server health
   const health = await req("GET", "/api/auth/setup-check");
@@ -984,6 +984,102 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     }
     test("91. Real non-Bison rate-cons yield no phantom trailer number", allClean && sawTrailerProse);
   }
+
+  // ==========================================================================
+  // 92-99. Billing automation — per-load broker-billing-email recipient + the
+  // "Ready for Billing" queue + image rate-con ingestion.
+  //
+  // Confirmed client decision: bill the broker's OWN AP/billing address, parsed
+  // from the rate-con per load, instead of the fixed quickpay factoring inbox
+  // that shipped first. resolveInvoiceTo() now prefers ctx.brokerBillingEmail.
+  // 92-95 are PURE units (no server, no fixtures) that pin the new precedence;
+  // 96-99 are SERVER-GATED (billing-queue route gating + image-extract accept)
+  // and run at integration — this checkout has no service-account key, so the
+  // server can't boot here.
+  // ==========================================================================
+
+  // ---- 92-95. resolveInvoiceTo broker-billing-email override (pure) ----
+  if (!BI) {
+    for (const n of [
+      "92. resolveInvoiceTo prefers a per-load broker billing email",
+      "93. A blank/garbage broker billing email falls back to the prior default",
+      "94. Bison with no billing email still routes to its AP inbox",
+      "95. A broker billing email outranks the Bison AP inbox",
+    ]) skip(n, "lib/broker-invoice.js not loadable from this checkout");
+  } else {
+    // 92. THE change: when the server passes the rate-con's billing email, THAT
+    //     is the To: address — not the quickpay factoring inbox. The printed
+    //     name is independent and still resolves from the broker domain.
+    const to92 = BI.resolveInvoiceTo({ brokerEmail: "x@acme-freight.com", brokerBillingEmail: "ap@acme.com" });
+    test("92. resolveInvoiceTo prefers a per-load broker billing email",
+      to92.email === "ap@acme.com" && to92.name === "Acme Freight");
+
+    // 93. A missing/blank/garbage billing email is IGNORED — the result is
+    //     byte-for-byte the pre-feature behavior (non-Bison → quickpay), so no
+    //     existing caller changes and the printed name is untouched.
+    const to93a = BI.resolveInvoiceTo({ brokerEmail: "x@acme-freight.com", brokerBillingEmail: "   " });
+    const to93b = BI.resolveInvoiceTo({ brokerEmail: "x@acme-freight.com", brokerBillingEmail: "not-an-email" });
+    test("93. A blank/garbage broker billing email falls back to the prior default",
+      to93a.email === "quickpay@megacorplogistics.com" && to93a.name === "Acme Freight" &&
+      to93b.email === "quickpay@megacorplogistics.com" && to93b.name === "Acme Freight");
+
+    // 94. Backward compat for Bison: with no billing email supplied it still
+    //     routes to its dedicated AP inbox, exactly as before.
+    const to94 = BI.resolveInvoiceTo({ brokerEmail: "ops@bisontransport.com" });
+    test("94. Bison with no billing email still routes to its AP inbox",
+      to94.email === "QPinvoicesUSA@bisontransport.com" && to94.name === "Bison Transport");
+
+    // 95. Precedence asserted explicitly: brokerBillingEmail is priority 1, so
+    //     it outranks even Bison's AP inbox. The NAME still prints "Bison
+    //     Transport" — recipient address and printed name are independent.
+    const to95 = BI.resolveInvoiceTo({ brokerEmail: "ops@bisontransport.com", brokerBillingEmail: "billing@bisonbroker.com" });
+    test("95. A broker billing email outranks the Bison AP inbox",
+      to95.email === "billing@bisonbroker.com" && to95.name === "Bison Transport");
+  }
+
+  // ---- 96-98. "Ready for Billing" queue route gating (server-gated) ----
+  // Needs a booted server; runs at integration. Follows the gated pattern of
+  // tests 34/35 (401 no-auth, 403 wrong-role, 200 admin). Only admin + investor
+  // sessions exist in this harness, so Dispatcher parity (same 200 as Super
+  // Admin, per the shared requireRole) is enforced server-side and noted here
+  // rather than re-proven with a third session.
+
+  // 96. The queue is dispatch-desk tooling — no anonymous read, and an Investor
+  //     (authenticated but wrong role) is forbidden.
+  const bq1 = await req("GET", "/api/billing/queue");
+  const bq2 = await req("GET", "/api/billing/queue", null, ic);
+  test("96. Billing queue blocked without auth (401) and for Investor (403)",
+    bq1.status === 401 && bq2.status === 403);
+
+  // 97. Super Admin gets the queue. The exact envelope key is server-owned;
+  //     assert the contract loosely — a 200 with a JSON object/array body (an
+  //     empty queue is legitimate on a seeded DB with no billing rows yet).
+  const bq3 = await req("GET", "/api/billing/queue", null, ac);
+  test("97. Billing queue loads for Super Admin (200, JSON payload)",
+    bq3.status === 200 && !!bq3.body && typeof bq3.body === "object");
+
+  // 98. Manual (re)generate is equally gated on both paths. A bogus loadId is
+  //     fine — the role guard fires before any assembly/Drive/Gemini work, so
+  //     this leaves nothing behind.
+  const bq4 = await req("POST", "/api/billing/SUITE-NO-AUTH/draft", {});
+  const bq5 = await req("POST", "/api/billing/SUITE-NO-ROLE/draft", {}, ic);
+  test("98. Billing draft (re)generate blocked without auth (401) and for Investor (403)",
+    bq4.status === 401 && bq5.status === 403);
+
+  // ---- 99. Rate-con extract now accepts images (server-gated) ----
+  // Gap A: ingestion was PDF-only; it now takes PNG/JPG too (Gemini reads images
+  // natively). A valid PNG must NOT hit the old "not a valid PDF" 400. With
+  // GEMINI possibly unconfigured here the outcome may legitimately be 200
+  // (parsed), 502 (Gemini error) or 503 (no key) — the ONLY failure asserted is
+  // a PDF-magic 400. Deliberately robust (task contract). Writes nothing.
+  const tinyPngB64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  const rxImg = await req("POST", "/api/loads/ratecon/extract",
+    { pdfBase64: "data:image/png;base64," + tinyPngB64, fileName: "ratecon.png" }, ac);
+  const imgErr = String((rxImg.body && rxImg.body.error) || "");
+  const rejectedAsPdf = rxImg.status === 400 && /pdf|not a valid|magic|jvberi/i.test(imgErr);
+  test("99. Rate-con extract accepts a PNG image (not the old 'not a PDF' 400)",
+    !rejectedAsPdf);
 
   // Results
   console.log("");

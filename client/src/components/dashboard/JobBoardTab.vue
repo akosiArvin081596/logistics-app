@@ -203,6 +203,7 @@
       :warnings="rateConWarnings"
       :pdf-base64="rateConPdf"
       :file-name="rateConFileName"
+      :kind="rateConKind"
       @created="onRateConCreated"
     />
   </div>
@@ -471,12 +472,14 @@ const rateConFields = ref({})
 const rateConWarnings = ref([])
 const rateConPdf = ref('')
 const rateConFileName = ref('')
+const rateConKind = ref('pdf')
 
-function onRateConExtracted(fields, warnings, pdfBase64, fileName) {
+function onRateConExtracted(fields, warnings, fileBase64, fileName, kind) {
   rateConFields.value = fields || {}
   rateConWarnings.value = warnings || []
-  rateConPdf.value = pdfBase64 || ''
+  rateConPdf.value = fileBase64 || ''
   rateConFileName.value = fileName || ''
+  rateConKind.value = kind || 'pdf'
   rateConOpen.value = true
 }
 
