@@ -15025,24 +15025,39 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					if (!loc.loadId || !loadMap[loc.loadId]) continue;
 					const load = loadMap[loc.loadId];
 
+					let oLat = NaN, oLng = NaN, dLat = NaN, dLng = NaN;
 					if (originLatCol && originLngCol) {
-						const oLat = parseFloat(load[originLatCol]);
-						const oLng = parseFloat(load[originLngCol]);
-						if (!isNaN(oLat) && !isNaN(oLng)) {
-							loc.originLat = oLat;
-							loc.originLng = oLng;
-						}
+						oLat = parseFloat(load[originLatCol]);
+						oLng = parseFloat(load[originLngCol]);
+					}
+					if (destLatCol && destLngCol) {
+						dLat = parseFloat(load[destLatCol]);
+						dLng = parseFloat(load[destLngCol]);
+					}
+					// Fallback: many loads carry coordinates only in the load_coordinates
+					// table (drag-drop / geocoded loads), not in the sheet's lat/lng
+					// columns — the tracking panel's activeLoads already resolves them
+					// this way. Do the same here so ETA + distance still compute.
+					if (isNaN(oLat) || isNaN(oLng) || isNaN(dLat) || isNaN(dLng)) {
+						try {
+							const lc = db.prepare("SELECT origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE load_id = ?")
+								.get(String(loc.loadId).toLowerCase().replace(/^#/, ""));
+							if (lc) {
+								if ((isNaN(oLat) || isNaN(oLng)) && Number.isFinite(lc.origin_lat) && Number.isFinite(lc.origin_lng)) { oLat = lc.origin_lat; oLng = lc.origin_lng; }
+								if ((isNaN(dLat) || isNaN(dLng)) && Number.isFinite(lc.dest_lat) && Number.isFinite(lc.dest_lng)) { dLat = lc.dest_lat; dLng = lc.dest_lng; }
+							}
+						} catch { /* coord fallback is best-effort */ }
 					}
 
-					if (destLatCol && destLngCol) {
-						const dLat = parseFloat(load[destLatCol]);
-						const dLng = parseFloat(load[destLngCol]);
-						if (!isNaN(dLat) && !isNaN(dLng)) {
-							loc.destLat = dLat;
-							loc.destLng = dLng;
-							if (loc.latitude == null || loc.longitude == null) continue;
-							etaTasks.push({ loc, dLat, dLng, load });
-						}
+					if (!isNaN(oLat) && !isNaN(oLng)) {
+						loc.originLat = oLat;
+						loc.originLng = oLng;
+					}
+					if (!isNaN(dLat) && !isNaN(dLng)) {
+						loc.destLat = dLat;
+						loc.destLng = dLng;
+						if (loc.latitude == null || loc.longitude == null) continue;
+						etaTasks.push({ loc, dLat, dLng, load });
 					}
 				}
 

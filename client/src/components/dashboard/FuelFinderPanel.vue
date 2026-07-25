@@ -148,8 +148,12 @@ function isLive(s) {
 }
 function priceOf(s) {
   // Only real per-station pump prices are shown; no regional-estimate fallback.
-  const p = Number(s && s.effectivePrice)
-  return Number.isFinite(p) ? p.toFixed(2) : null
+  // Guard null/undefined explicitly — Number(null) is 0, which would render a
+  // no-price station as a bogus "$0.00". Also treat 0/negative as no price.
+  const v = s == null ? null : s.effectivePrice
+  if (v == null) return null
+  const p = Number(v)
+  return Number.isFinite(p) && p > 0 ? p.toFixed(2) : null
 }
 
 const hasFuelData = computed(() => !!(range.value && range.value.hasFuelData))
