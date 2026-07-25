@@ -112,6 +112,18 @@
       </div>
       <div class="form-row">
         <div class="form-group">
+          <label class="form-label">Fuel Tank (gallons)</label>
+          <input v-model.number="form.fuelTankGallons" class="form-input" type="number" min="0" max="500" step="any" placeholder="200 (default)" />
+          <div class="field-hint">Usable diesel capacity — powers the Live Tracking fuel-range estimate. Blank uses the 200 gal default.</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Avg MPG (optional)</label>
+          <input v-model.number="form.avgMpg" class="form-input" type="number" min="0" max="20" step="any" placeholder="6.5 (default)" />
+          <div class="field-hint">Average miles per gallon. Leave blank to auto-derive from ELD fuel + odometer.</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
           <label class="form-label">Insurance ($/mo)</label>
           <input v-model.number="form.insuranceMonthly" class="form-input" type="number" min="0" placeholder="0" />
         </div>
@@ -200,6 +212,10 @@ const form = reactive({
   purchasePrice: 0,
   titleStatus: 'Clean',
   maintenanceFundMonthly: 0,
+  // '' so the default placeholders show until a value is entered; sent as
+  // snake_case fuel_tank_gallons / avg_mpg (0 = unset → server uses its default)
+  fuelTankGallons: '',
+  avgMpg: '',
 })
 
 const modelOptions = computed(() => truckModels[form.make] || [])
@@ -244,6 +260,10 @@ function handleSubmit() {
     purchasePrice: form.purchasePrice,
     titleStatus: form.titleStatus,
     maintenanceFundMonthly: form.maintenanceFundMonthly,
+    // Fuel-model inputs (snake_case per the wave contract). Blank → 0 = unset,
+    // server falls back to its DEFAULT_TANK_GALLONS / DEFAULT_MPG.
+    fuel_tank_gallons: form.fuelTankGallons === '' ? 0 : form.fuelTankGallons,
+    avg_mpg: form.avgMpg === '' ? 0 : form.avgMpg,
   })
 
   form.unitNumber = ''
@@ -266,6 +286,8 @@ function handleSubmit() {
   form.purchasePrice = 0
   form.titleStatus = 'Clean'
   form.maintenanceFundMonthly = 0
+  form.fuelTankGallons = ''
+  form.avgMpg = ''
 }
 </script>
 
