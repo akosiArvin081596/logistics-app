@@ -2797,6 +2797,20 @@ function eldApiKey() { return ELD_PROVIDER === "apollo" ? APOLLO_API_KEY : ROUTE
 function eldEnabledFlag() { return ELD_PROVIDER === "apollo" ? APOLLO_ENABLED : ROUTEMATE_ENABLED; }
 function eldEnabled() { return eldEnabledFlag() && !!eldApiKey(); }
 function eldBaseUrl() { return ELD_PROVIDER === "apollo" ? APOLLO_BASE_URL : ROUTEMATE_BASE_URL; }
+// Startup guard: an Apollo key with a URL-reserved character (e.g. '?') is
+// still a *valid* key, but Apollo's GET endpoints (live tracking, drivers)
+// won't accept it in the query string and answer a misleading "invalid key".
+// Surface it loudly at boot so it's diagnosed instantly, not chased as an auth
+// bug. Warn-only — POST-based calls still work, and we never log the key value.
+if (ELD_PROVIDER === "apollo" && APOLLO_API_KEY && eld.apollo && typeof eld.apollo.keyIsGetSafe === "function"
+	&& !eld.apollo.keyIsGetSafe(APOLLO_API_KEY)) {
+	const bad = eld.apollo.unsafeGetKeyChars(APOLLO_API_KEY).map((c) => `'${c}'`).join(", ");
+	console.warn(
+		`[eld] WARNING: APOLLO_API_KEY contains ${bad}, which Apollo's GET endpoints ` +
+		`(live tracking, drivers) reject — they will fail as "invalid key" despite the key being valid. ` +
+		`Ask the reseller to regenerate a key with only letters and numbers.`,
+	);
+}
 // Last-sync tracker for /api/eld/health. Updated by the manual probe
 // endpoint and (later phases) by interval sync jobs.
 const eldHealth = {

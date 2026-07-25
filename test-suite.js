@@ -1101,7 +1101,7 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     try { return require("./lib/eld"); } catch { return null; }
   }
 
-  const APOLLO_TEST_KEY = "abc?def";        // deliberately contains a URL-reserved '?'
+  const APOLLO_TEST_KEY = "abcDEF123456";   // clean alphanumeric (a '?'-key is rejected on GET — see test 101)
   const APOLLO_TEST_BASE = "https://content.eldroadmap.com:9103";
   const apolloEnv = { ELD_PROVIDER: "apollo", APOLLO_ENABLED: "true", APOLLO_API_KEY: APOLLO_TEST_KEY, APOLLO_BASE_URL: APOLLO_TEST_BASE };
   const apolloCreds = { baseUrl: APOLLO_TEST_BASE, apiKey: APOLLO_TEST_KEY };
@@ -1179,9 +1179,16 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       test("100. Apollo converts mph → m/s at the adapter boundary",
         !err && !!row0 && typeof row0.speed === "number" && Math.abs(Number(row0.speed) - expectedMs) < 0.01);
 
-      const dashUrl = fetchUrls.find((u) => u.includes("GetDashboards")) || "";
-      test("101. Apollo URL-encodes the HOSClientApiKey ('?' → '%3F') on GETs",
-        dashUrl.includes("HOSClientApiKey=") && dashUrl.includes("abc%3Fdef") && !/HOSClientApiKey=abc\?def/.test(dashUrl));
+      // 101. A key with a URL-reserved char (e.g. '?') can't be delivered on
+      //      Apollo's GET endpoints — its server doesn't decode query values, so
+      //      the key comes back "invalid" even though it's valid (verified live
+      //      2026-07). The adapter must reject it up front with a clear, distinct
+      //      error instead of firing a doomed request that looks like an auth bug.
+      let guardErr = null;
+      try { await apollo.listLiveLocations({ baseUrl: APOLLO_TEST_BASE, apiKey: "abc?def" }); }
+      catch (e) { guardErr = e; }
+      test("101. A '?'-containing key is rejected up front on GET (APOLLO_KEY_NOT_URL_SAFE)",
+        !!guardErr && guardErr.code === "APOLLO_KEY_NOT_URL_SAFE");
     }
 
     // 102. code:7 = INVALID_KEY. Must surface as a thrown error OR an empty
