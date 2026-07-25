@@ -27,6 +27,20 @@
         <span class="follow-label">{{ followTruck && !followSuppressed ? 'Following' : 'Follow' }}</span>
       </button>
 
+      <!-- Fuel Finder: range readout + diesel truck-stop map toggle + cheapest
+           along-route list. Only for a single focused driver. Self-fetches
+           /api/fuel/range + /api/poi/fuel-stops; emits the stops + toggle up so
+           this parent (which owns the map) can plot the POI markers. -->
+      <FuelFinderPanel
+        v-if="selectedDriver && selectedDriver !== '__all__'"
+        :driver="selectedDriver"
+        :load-id="expandedLoadId"
+        :active-load="selectedActiveLoad"
+        @stops="onFuelStops"
+        @show="onFuelShow"
+        @focus="onFuelFocus"
+      />
+
       <!-- Driver list panel -->
       <div class="driver-panel" :class="{ collapsed: panelCollapsed }">
         <button class="panel-toggle" @click="panelCollapsed = !panelCollapsed">
@@ -88,19 +102,25 @@
                 </span>
                 <span v-if="inTransitLoad(loc)" class="driver-load">{{ inTransitLoad(loc) }}</span>
                 <span v-if="driverOutOfRange(loc)" class="driver-warning">{{ driverOutOfRange(loc) }}</span>
+                <!-- Quick-glance metrics (no click): absolute ETA + countdown,
+                     MPH, distance remaining, fuel % — each degrading to "—". -->
+                <DriverGlanceMetrics
+                  v-if="!loc.noGps"
+                  :speed="numOrNull(loc.speed)"
+                  :distance-miles="numOrNull(loc.distanceMiles)"
+                  :fuel-pct="numOrNull(loc.fuelPct)"
+                  :eta-epoch-ms="numOrNull(loc._etaEpochMs)"
+                  :eta-minutes="numOrNull(loc.etaMinutes)"
+                  :eta-status="loc.etaStatus || 'unknown'"
+                  :now="now"
+                />
               </div>
-              <span v-if="loc.speed && isOnline(loc)" class="driver-speed">{{ Math.round(loc.speed * 2.237) }} mph</span>
             </div>
             <!-- Driver vitals (expands with the driver): latest ELD fuel level
                  + FMCSA hours-of-service clocks (remaining drive/shift/cycle).
                  The HOS pills hide themselves when /api/tracking/hos is
                  unavailable (Routemate disabled or upstream outage). -->
-            <div v-if="selectedDriver === loc.driver && (loc.fuelPct != null || hosFor(loc))" class="driver-vitals">
-              <span
-                v-if="loc.fuelPct != null"
-                :class="['vital-pill', 'fuel', { low: loc.fuelPct <= 25 }]"
-                title="Latest fuel level reported by the truck's ELD"
-              >Fuel {{ Math.round(loc.fuelPct) }}%</span>
+            <div v-if="selectedDriver === loc.driver && hosFor(loc)" class="driver-vitals">
               <template v-if="hosFor(loc)">
                 <span class="vital-pill hos" title="Drive time remaining (11h FMCSA clock)">Drive {{ formatClockMs(hosFor(loc).driveMs) || '—' }}</span>
                 <span class="vital-pill hos" title="On-duty shift time remaining (14h FMCSA clock)">Shift {{ formatClockMs(hosFor(loc).shiftMs) || '—' }}</span>
@@ -183,8 +203,10 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
-import { useGoogleMaps, createDotPin, createTruckArrow } from '../../composables/useGoogleMaps'
+import { useGoogleMaps, createDotPin, createTruckArrow, createFuelStopPin } from '../../composables/useGoogleMaps'
 import { formatMinutes, formatClockMs } from '../../lib/duration'
+import DriverGlanceMetrics from './DriverGlanceMetrics.vue'
+import FuelFinderPanel from './FuelFinderPanel.vue'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -260,6 +282,14 @@ let approachPolyline = null       // pre-pickup driver→pickup leg (amber dashe
 let approachAnim = null           // setInterval handle for the approach-leg animation
 let allRouteOverlays = []         // same shape, for "All Drivers" view
 let driverInfoWindows = new Map() // driver name -> google.maps.InfoWindow
+
+// Diesel truck-stop POI layer (fed by FuelFinderPanel). fuelStops holds the
+// current stop list; showFuelStops mirrors the panel's map toggle. Markers are
+// (re)built from these two by renderFuelStopMarkers().
+const fuelStops = ref([])
+const showFuelStops = ref(false)
+let fuelStopMarkers = []
+let fuelStopInfoWindow = null
 
 // Trail state (single driver)
 const trailPoints = ref([])
@@ -477,6 +507,83 @@ function clearAllRouteOverlays() {
     if (o.destMarker) o.destMarker.map = null
   }
   allRouteOverlays = []
+}
+
+// Coerce a possibly-string/undefined numeric field to a finite Number or null,
+// so typed props on child components never receive a bad value.
+function numOrNull(v) {
+  if (v == null) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+// ---- Diesel truck-stop POI markers ----
+function clearFuelStopMarkers() {
+  for (const m of fuelStopMarkers) m.map = null
+  fuelStopMarkers = []
+  if (fuelStopInfoWindow) { fuelStopInfoWindow.close(); fuelStopInfoWindow = null }
+}
+
+// Escape untrusted Places text (name/address/brand) before it goes into an
+// InfoWindow's innerHTML.
+function escHtml(v) {
+  return String(v == null ? '' : v).replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]),
+  )
+}
+
+function buildFuelStopPopup(s) {
+  let html = '<div style="font-family:DM Sans,sans-serif;font-size:0.85rem;max-width:220px">'
+  html += `<strong>${escHtml(s.name || s.brand || 'Truck stop')}</strong>`
+  if (s.brand && s.name && !String(s.name).toLowerCase().includes(String(s.brand).toLowerCase())) {
+    html += `<div style="color:#0f766e;font-size:0.72rem;font-weight:600">${escHtml(s.brand)}</div>`
+  }
+  if (s.address) html += `<div style="color:#555;font-size:0.78rem;margin-top:2px">${escHtml(s.address)}</div>`
+  const bits = []
+  if (Number.isFinite(Number(s.aboutMilesFromRoute))) bits.push(`~${Math.round(Number(s.aboutMilesFromRoute) * 10) / 10} mi off route`)
+  if (s.regionalDieselPrice != null && Number.isFinite(Number(s.regionalDieselPrice))) bits.push(`$${Number(s.regionalDieselPrice).toFixed(2)}/gal regional avg`)
+  if (bits.length) html += `<div style="color:#555;font-size:0.75rem;margin-top:3px">${bits.join(' &middot; ')}</div>`
+  html += '</div>'
+  return html
+}
+
+function renderFuelStopMarkers() {
+  clearFuelStopMarkers()
+  if (!map) return
+  if (!showFuelStops.value) return
+  if (!selectedDriver.value || selectedDriver.value === '__all__') return
+  for (const s of fuelStops.value) {
+    const lat = Number(s.lat)
+    const lng = Number(s.lng)
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
+    const marker = new google.maps.marker.AdvancedMarkerElement({
+      position: { lat, lng },
+      map,
+      content: createFuelStopPin(),
+      title: s.name || s.brand || 'Truck stop',
+      zIndex: 700,
+      gmpClickable: true,
+    })
+    marker.addEventListener('gmp-click', () => {
+      if (!fuelStopInfoWindow) fuelStopInfoWindow = new google.maps.InfoWindow()
+      fuelStopInfoWindow.setContent(buildFuelStopPopup(s))
+      fuelStopInfoWindow.open({ map, anchor: marker })
+    })
+    fuelStopMarkers.push(marker)
+  }
+}
+
+// ---- FuelFinderPanel event handlers ----
+function onFuelStops(stops) {
+  fuelStops.value = Array.isArray(stops) ? stops : []
+}
+function onFuelShow(v) {
+  showFuelStops.value = !!v
+}
+function onFuelFocus(s) {
+  if (s && Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))) {
+    focusPoint(Number(s.lat), Number(s.lng))
+  }
 }
 
 // ---- Build/rebuild Google Maps overlays from reactive state ----
@@ -940,6 +1047,19 @@ function buildDriverPopupContent(loc) {
       html += `<div style="color:#555;font-size:0.8rem">HOS: ${parts.join(' &middot; ')}</div>`
     }
   }
+  // Headline ETA (absolute time + countdown) and remaining distance from the
+  // enriched /api/locations/latest fields. Only Dates/Numbers interpolated here
+  // → injection-safe.
+  if (loc.etaMinutes != null && Number.isFinite(Number(loc.etaMinutes))) {
+    const epoch = loc._etaEpochMs || (Date.now() + Number(loc.etaMinutes) * 60000)
+    const clock = new Date(epoch).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    const dur = formatMinutes(Number(loc.etaMinutes))
+    const late = loc.etaStatus === 'delayed'
+    html += `<div style="color:${late ? '#b91c1c' : '#15803d'};font-size:0.8rem;font-weight:600">ETA ${clock}${dur ? ' &middot; ' + dur : ''}${late ? ' (delayed)' : ''}</div>`
+  }
+  if (loc.distanceMiles != null && Number.isFinite(Number(loc.distanceMiles))) {
+    html += `<div style="color:#555;font-size:0.8rem">${Math.round(Number(loc.distanceMiles))} mi remaining</div>`
+  }
   if (selectedDriver.value === loc.driver && originLatLng.value && expandedLoadId.value) {
     html += `<div style="font-weight:600;font-size:0.8rem">${driverToPickupMi(loc)} mi to Pickup</div>`
   }
@@ -997,6 +1117,10 @@ function collapseDriver() {
   fetchingRoute.value = false
   clearSingleLoadOverlays()
   clearAllRouteOverlays()
+  // Panel unmounts on deselect and can't emit — reset the POI layer here so
+  // its markers clear (via the [showFuelStops, fuelStops] watch).
+  showFuelStops.value = false
+  fuelStops.value = []
 }
 
 // Selecting a driver only re-centers the map on their current GPS — no route
@@ -1282,6 +1406,10 @@ async function focusAll() {
   selectedDriver.value = '__all__'
   expandedLoadId.value = ''
   clearSingleLoadOverlays()
+  // Panel unmounts in the "all drivers" view — reset the POI layer so its
+  // markers clear (via the [showFuelStops, fuelStops] watch).
+  showFuelStops.value = false
+  fuelStops.value = []
   // Clear single-driver state
   trailPoints.value = []
   routePoints.value = []
@@ -1434,6 +1562,15 @@ const selectedDriverSpeed = computed(() => {
   return loc?.speed ? Math.round(loc.speed * 2.237) : null
 })
 
+// The active load driving the FuelFinderPanel's POI query: the expanded load
+// when one is open, else the focused driver's first active load (its
+// origin/dest coords are the fallback when no loadId resolves server-side).
+const selectedActiveLoad = computed(() => {
+  const loc = locations.value.find(l => l.driver === selectedDriver.value)
+  if (!loc || !Array.isArray(loc.activeLoads) || loc.activeLoads.length === 0) return null
+  return loc.activeLoads.find(l => l.loadId === expandedLoadId.value) || loc.activeLoads[0] || null
+})
+
 function updateMarkerVisibility() {
   if (!map) return
   const sel = selectedDriver.value
@@ -1483,12 +1620,27 @@ watch(allRoutes, () => {
   renderAllRoutes()
 }, { deep: true })
 
+// Re-plot the diesel truck-stop layer whenever the toggle flips or the stop
+// list changes. Deselecting a driver resets these refs in the handlers below,
+// which clears the markers through this same watch.
+watch([showFuelStops, fuelStops], () => {
+  renderFuelStopMarkers()
+})
+
 let initialFetchDone = false
 
 async function fetchLocations() {
   try {
     const data = await api.get('/api/locations/latest')
     locations.value = data.locations || []
+    // Stamp an absolute arrival epoch from etaMinutes at fetch time so the
+    // glance ETA clock is stable (Date.now()+etaMinutes*60000 recomputed each
+    // render would drift the arrival time later as the clock ticks).
+    const nowMs = Date.now()
+    for (const l of locations.value) {
+      const em = Number(l.etaMinutes)
+      l._etaEpochMs = l.etaMinutes != null && Number.isFinite(em) ? nowMs + em * 60000 : null
+    }
     // Sync Google Maps markers
     await nextTick()
     syncDriverMarkers()
@@ -1670,6 +1822,10 @@ function onStatusUpdated(payload) {
 async function initMap() {
   if (!mapContainer.value || map) return
   await loadGoogleMaps()
+  // No custom `styles` array is passed (and none can be while a vector mapId is
+  // set), so Google's default road/transit/highway-exit labels stay ON — which
+  // is what the diesel truck-stop POI layer needs so exit numbers are visible.
+  // If a custom map style is ever introduced here, keep road + exit labels on.
   map = await createMap(mapContainer.value, {
     zoom: 5,
     center: { lat: 39.8283, lng: -98.5795 },
@@ -1737,6 +1893,7 @@ onUnmounted(() => {
   driverInfoWindows.clear()
   clearSingleLoadOverlays()
   clearAllRouteOverlays()
+  clearFuelStopMarkers()
   map = null
 })
 </script>

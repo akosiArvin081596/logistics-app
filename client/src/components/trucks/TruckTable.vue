@@ -240,6 +240,18 @@
             </div>
             <div class="edit-row">
               <div class="edit-field">
+                <label>Fuel Tank (gallons)</label>
+                <input v-model.number="editForm.fuelTankGallons" type="number" min="0" max="500" step="any" placeholder="200 (default)" />
+                <div class="field-hint">Diesel capacity for the Live Tracking fuel-range estimate. Blank = 200 gal default.</div>
+              </div>
+              <div class="edit-field">
+                <label>Avg MPG</label>
+                <input v-model.number="editForm.avgMpg" type="number" min="0" max="20" step="any" placeholder="6.5 (default)" />
+                <div class="field-hint">Blank auto-derives MPG from ELD fuel + odometer.</div>
+              </div>
+            </div>
+            <div class="edit-row">
+              <div class="edit-field">
                 <label>Insurance ($/mo)</label>
                 <input v-model.number="editForm.insuranceMonthly" type="number" min="0" />
               </div>
@@ -301,6 +313,8 @@
           <div class="view-row"><span class="view-label">Insurance</span><span>{{ viewTruck.InsuranceMonthly ? '$' + viewTruck.InsuranceMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '$250/day (default)' }}</span></div>
+          <div class="view-row"><span class="view-label">Fuel Tank</span><span>{{ viewTruck.FuelTankGallons ? viewTruck.FuelTankGallons + ' gal' : '200 gal (default)' }}</span></div>
+          <div class="view-row"><span class="view-label">Avg MPG</span><span>{{ viewTruck.AvgMpg ? viewTruck.AvgMpg + ' mpg' : 'Auto from ELD' }}</span></div>
         </div>
         <!-- Driver-personal files (CDL, medical, signed contracts) intentionally
              NOT shown here. They live with the driver, not the truck. Manage
@@ -373,6 +387,7 @@ const editForm = reactive({
   vin: '', licensePlate: '', status: 'Active', assignedDriver: '', ownerId: 0, notes: '',
   photo: '', insuranceMonthly: 0, eldMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50, driverPayDaily: 0,
   purchasePrice: 0, titleStatus: 'Clean', maintenanceFundMonthly: 0,
+  fuelTankGallons: '', avgMpg: '',
 })
 
 function openEdit(truck) {
@@ -399,6 +414,9 @@ function openEdit(truck) {
   editForm.purchasePrice = truck.PurchasePrice || 0
   editForm.titleStatus = truck.TitleStatus || 'Clean'
   editForm.maintenanceFundMonthly = truck.MaintenanceFundMonthly || 0
+  // '' when unset/0 so the default placeholder shows instead of a literal 0.
+  editForm.fuelTankGallons = truck.FuelTankGallons || ''
+  editForm.avgMpg = truck.AvgMpg || ''
   showEdit.value = true
 }
 
@@ -435,6 +453,9 @@ function handleSaveEdit() {
       purchasePrice: editForm.purchasePrice,
       titleStatus: editForm.titleStatus,
       maintenanceFundMonthly: editForm.maintenanceFundMonthly,
+      // Fuel-model inputs (snake_case per the wave contract); blank → 0 = unset.
+      fuel_tank_gallons: editForm.fuelTankGallons === '' ? 0 : editForm.fuelTankGallons,
+      avg_mpg: editForm.avgMpg === '' ? 0 : editForm.avgMpg,
     },
   })
   showEdit.value = false
