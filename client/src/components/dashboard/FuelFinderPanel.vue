@@ -70,14 +70,20 @@
         <div v-if="stopsLoading" class="ff-loading">Finding truck stops along the route…</div>
         <div v-else-if="stopsError" class="ff-muted">{{ stopsError }}</div>
         <template v-else-if="stops.length">
-          <div class="ff-price-note" title="Free regional-average pricing; per-station live prices are planned">
-            Regional avg diesel — per-station live pricing coming soon
+          <div class="ff-price-note" :class="{ live: livePriceCount > 0 }">
+            <template v-if="livePriceCount > 0">
+              Live diesel pump prices where available — cheapest first. Others show a regional estimate.
+            </template>
+            <template v-else>
+              Regional average diesel — no live pump prices published on this route yet.
+            </template>
           </div>
           <ul class="ff-stop-list">
             <li v-for="(s, i) in stops" :key="s.placeId || i">
               <button class="ff-stop" @click="$emit('focus', { lat: s.lat, lng: s.lng, name: s.name })">
                 <span class="ff-stop-main">
                   <span class="ff-stop-name">
+                    <span v-if="s.placeId && s.placeId === cheapestPlaceId" class="ff-cheapest">Cheapest</span>
                     <span v-if="s.brand && brandDiffersFromName(s)" class="ff-stop-brand">{{ s.brand }}</span>
                     {{ s.name || s.brand || 'Truck stop' }}
                   </span>
@@ -85,9 +91,14 @@
                   <span v-if="s.aboutMilesFromRoute != null" class="ff-stop-dist">~{{ round1(s.aboutMilesFromRoute) }} mi off route</span>
                 </span>
                 <span class="ff-stop-price">
-                  <span v-if="s.regionalDieselPrice != null" class="ff-price">${{ Number(s.regionalDieselPrice).toFixed(2) }}</span>
-                  <span v-else class="ff-price muted">—</span>
-                  <span class="ff-price-unit">/gal</span>
+                  <span class="ff-price-row">
+                    <span v-if="priceOf(s) != null" class="ff-price" :class="{ live: isLive(s) }">${{ priceOf(s) }}</span>
+                    <span v-else class="ff-price muted">—</span>
+                    <span class="ff-price-unit">/gal</span>
+                  </span>
+                  <span v-if="priceOf(s) != null" class="ff-price-tag" :class="isLive(s) ? 'tag-live' : 'tag-est'">
+                    {{ isLive(s) ? 'live' : 'est' }}
+                  </span>
                 </span>
               </button>
             </li>
@@ -124,6 +135,21 @@ const stopsLoading = ref(false)
 const stopsError = ref('')
 const showStops = ref(false)
 const collapsed = ref(false)
+const livePriceCount = ref(0)
+
+// The true-cheapest station is the first with a live pump price (the backend
+// returns stops already ranked cheapest-first). Badge it in the list.
+const cheapestPlaceId = computed(() => {
+  const c = stops.value.find((s) => s.priceSource === 'station')
+  return c ? c.placeId : null
+})
+function isLive(s) {
+  return s && s.priceSource === 'station'
+}
+function priceOf(s) {
+  const p = Number(s && (s.effectivePrice != null ? s.effectivePrice : s.regionalDieselPrice))
+  return Number.isFinite(p) ? p.toFixed(2) : null
+}
 
 const hasFuelData = computed(() => !!(range.value && range.value.hasFuelData))
 const fuelLow = computed(
@@ -188,15 +214,17 @@ async function fetchStops() {
   stopsError.value = ''
   try {
     const d = await api.get(`/api/poi/fuel-stops?${q}&limit=12`)
-    const list = Array.isArray(d.stops)
-      ? [...d.stops].sort(
-          (x, y) => (x.aboutMilesFromRoute ?? 1e9) - (y.aboutMilesFromRoute ?? 1e9),
-        )
-      : []
+    // Backend already ranks true-cheapest first (live pump prices ascending, then
+    // regional-estimate stops by distance) — preserve that order for the list.
+    const list = Array.isArray(d.stops) ? d.stops : []
     stops.value = list
+    livePriceCount.value = Number.isFinite(Number(d.livePriceCount))
+      ? Number(d.livePriceCount)
+      : list.filter((s) => s.priceSource === 'station').length
     emit('stops', list)
   } catch (e) {
     stops.value = []
+    livePriceCount.value = 0
     stopsError.value =
       e?.status === 404 ? 'Truck-stop finder is not available yet.' : 'Could not load truck stops.'
     emit('stops', [])
@@ -426,6 +454,24 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
   padding: 0.25rem 0.45rem;
   margin-bottom: 0.4rem;
 }
+.ff-price-note.live {
+  color: #065f46;
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+.ff-cheapest {
+  font-size: 0.52rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #166534;
+  background: #dcfce7;
+  border: 1px solid #bbf7d0;
+  border-radius: 4px;
+  padding: 0 0.28rem;
+  margin-right: 0.25rem;
+  vertical-align: 1px;
+}
 
 .ff-stop-list { list-style: none; margin: 0; padding: 0; }
 .ff-stop {
@@ -471,14 +517,27 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
 .ff-stop-dist { font-size: 0.62rem; color: #64748b; font-weight: 600; }
 .ff-stop-price {
   display: flex;
-  align-items: baseline;
-  gap: 0.1rem;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.08rem;
   flex-shrink: 0;
   white-space: nowrap;
 }
-.ff-price { font-size: 0.82rem; font-weight: 800; color: #0f766e; font-variant-numeric: tabular-nums; }
+.ff-price-row { display: flex; align-items: baseline; gap: 0.1rem; }
+.ff-price { font-size: 0.82rem; font-weight: 800; color: #64748b; font-variant-numeric: tabular-nums; }
+.ff-price.live { color: #0f766e; }
 .ff-price.muted { color: #cbd5e1; }
 .ff-price-unit { font-size: 0.58rem; color: #94a3b8; font-weight: 600; }
+.ff-price-tag {
+  font-size: 0.5rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0 0.24rem;
+  border-radius: 3px;
+}
+.tag-live { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+.tag-est { background: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
 
 @media (max-width: 640px) {
   .fuel-finder { width: 220px; }
