@@ -15128,11 +15128,13 @@ const HOS_CACHE_TTL_MS = 60 * 1000;
 let hosClockCache = { at: 0, payload: null };
 
 app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
-	if (!ROUTEMATE_ENABLED) {
-		return res.status(503).json({ error: "Routemate integration disabled (set ROUTEMATE_ENABLED=true)" });
-	}
-	if (!ROUTEMATE_API_KEY) {
-		return res.status(503).json({ error: "Routemate API key not configured (set ROUTEMATE_API_KEY)" });
+	// HOS is a supplementary overlay on the tracking panel. When its provider is
+	// off/unconfigured, return an empty set with 200 (not 503) so /tracking doesn't
+	// log a console error on every poll — the UI just shows no HOS pills. (HOS is
+	// currently Routemate-only, which is being phased out for Linxup GPS; real
+	// provider status is surfaced to admins via GET /api/routemate/health.)
+	if (!ROUTEMATE_ENABLED || !ROUTEMATE_API_KEY) {
+		return res.json({ clocks: [], available: false, reason: !ROUTEMATE_ENABLED ? "hos_disabled" : "hos_no_key", fetchedAt: new Date().toISOString() });
 	}
 	try {
 		const now = Date.now();
@@ -15211,9 +15213,11 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 		if (hosClockCache.payload) {
 			return res.json({ ...hosClockCache.payload, stale: true });
 		}
-		res.status(err.status === 401 || err.status === 403 ? err.status : 502).json({
-			error: err.message || "Routemate HOS fetch failed",
-		});
+		// Degrade to an empty 200 (not a 5xx) so a flapping/unreachable upstream
+		// doesn't spam the browser console on every /tracking poll; the UI hides the
+		// HOS pills on empty clocks either way. Admins see the real error via
+		// /api/routemate/health.
+		res.json({ clocks: [], available: false, reason: "hos_unavailable", fetchedAt: new Date().toISOString() });
 	}
 });
 
