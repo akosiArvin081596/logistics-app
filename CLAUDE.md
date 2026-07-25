@@ -55,6 +55,7 @@ SCANKIT_BASE_URL=<optional — ScanKit.io API base; defaults to https://api.scan
 SCANKIT_API_KEY=<optional — ScanKit.io key (sk_...) for document scanning; scanner returns 503 + raw-photo fallback when unset>
 SCANKIT_ENABLED=<optional — set "true" to enable; defaults off so the feature ships dormant>
 INVOICE_AUTOGEN_ENABLED=<optional — set "true" to enable the Friday 4 PM ET auto-generate-and-submit invoice batch; defaults off (moves money) so it ships dormant>
+EIA_API_KEY=<optional — free key from eia.gov/opendata; enables live regional diesel prices (EIA v2) for the fuel-stop layer + range panel. Unset = national-average fallback (~$3.70), so the fuel-price feature ships dormant.>
 PORT=3000  # optional, defaults to 3000
 ```
 
@@ -81,6 +82,10 @@ Shared server-side modules live in `lib/` (required from `server.js`):
 - `scankit-client.js` — ScanKit.io document-scanning API adapter (single point of contact; `POST /scan/crop`). See the AI/vision services note below.
 - `broker-invoice.js` — invoice assembly for **every** broker: `resolveInvoiceTo()` / `resolveBrokerName()` recipient + naming, `isBisonLoad()` (now a recipient *branch*, not a gate), deterministic rate-con field extraction, and the payload shape for the Draft Invoice route. See the "Invoice drafting — all brokers" section below.
 - `imap-draft.js` — `appendGmailDraft()`: writes an assembled invoice email straight into the Gmail Drafts folder over IMAP (no send), using `GMAIL_USER` / `GMAIL_APP_PASSWORD`.
+- `fuel-model.js` — pure fuel-range math (no network/DB): `computeRange()`, `deriveMpg()` (from ELD odometer/fuel deltas, guards refuels/tiny samples), `hasFuelSensor()` (distinguishes "no fuel sensor" from an empty tank), `estimateRangeForVehicle()`. Defaults `DEFAULT_TANK_GALLONS=200`, `DEFAULT_MPG=6.5`. Powers `GET /api/fuel/range`.
+- `fuel-prices.js` — US regional diesel average: `getRegionalDieselPrice(lat,lng,{db,fetchImpl,apiKey})` → EIA v2 (series `EMD_EPD2D_PTE_<AREA>_DPG`) behind `EIA_API_KEY`, else a national-avg fallback (~$3.70) — **ships dormant**. `paddRegionForLatLng()` maps lat/lng → PADD region. Caches live results in `fuel_price_cache` (lazy `CREATE TABLE IF NOT EXISTS`, 24h TTL). Powers `GET /api/fuel/price` + the price stamp on `/api/poi/fuel-stops`.
+- `poi-fuel-stops.js` — `findFuelStopsAlongRoute({originLat,originLng,destLat,destLng,apiKey,fetchImpl,limit})` → diesel truck stops along a route via Google Places (New) `places:searchNearby` (`includedTypes:['truck_stop','gas_station']`) at sampled waypoints; dedupes by placeId, ranks truck-stop/known-diesel-brand first, tags `aboutMilesFromRoute`. Powers `GET /api/poi/fuel-stops` (rate-limited by `poiLimiter`).
+- `ratecon-normalize.js` — pure post-extraction hardening for multi-broker rate-cons: `normalizeRateConFields()` (money→`$X,XXX.XX`, collapse multi-line addresses, tidy phones, `None`/`""`→null), `missingCriticalFields()`, `mergeExtractions()`. Wired into `POST /api/loads/ratecon/extract` with a second-pass Gemini nudge when a critical field is missing. Paired with the hardened `RATECON_PDF_SYSTEM_PROMPT` (multi-stop first-pickup/last-drop, total-pay vs line-haul/accessorial, agent-vs-brokerage, appointment windows, ref disambiguation, injection resistance).
 
 ## Architecture
 
@@ -223,6 +228,9 @@ REST endpoints (grouped by domain):
 - `GET /api/route` — route directions via Google Maps
 - `/api/geocode`, `/api/geocode/search`, `/api/geocode/bulk`, `/api/geocode/load/:loadId` — geocoding with SQLite cache
 - `GET /api/config/maps-key` — expose Google Maps API key to frontend
+- `GET /api/fuel/range?driver=|vehicleId=` — miles-left-in-tank from the assigned truck's latest ELD `fuel_pct` × `trucks.fuel_tank_gallons` (or 200 default) × MPG (ELD-derived, else `trucks.avg_mpg`/6.5). Returns `hasFuelData:false` (→ frontend hides the panel) when the device reports no fuel. Powers the tracking Fuel Finder.
+- `GET /api/fuel/price?lat=&lng=` — regional average diesel price (EIA v2 behind `EIA_API_KEY`, national-avg fallback when unset).
+- `GET /api/poi/fuel-stops?loadId=|originLat=&originLng=&destLat=&destLng=[&limit=]` — diesel truck stops along a load's route (Google Places), each stamped with its region's diesel average. `poiLimiter`-capped (several billed Places calls per request). Feeds the tracking-map POI layer + cheapest-diesel list.
 - `GET /api/weather` — weather data for coordinates
 
 **Admin tools**:
@@ -283,6 +291,7 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 | `truckDocViewLimiter` | 15 min | 30 | `GET /api/driver/truck-documents/:id/view` |
 | `trackPublicLimiter` | 15 min | 60 | `GET /api/public/track/:loadId` (customers refresh often) |
 | `expenseOcrLimiter` | 15 min | 100 (Super Admin/Dispatcher) · 20 (Driver) | `POST /api/expenses/ocr` (caps Gemini spend; role-aware `max` so the admin/dispatcher bulk-receipt upload — 1 OCR call/receipt — has headroom while drivers stay tight) |
+| `poiLimiter` | 15 min | 60 | `GET /api/poi/fuel-stops` (each request fans out to several billed Google Places calls) |
 
 The 60s in-memory Job Tracking cache (`getJobTrackingCached()`) is the other core throttle — it absorbs bursty dashboard traffic so the Sheets 300 req/min quota isn't a real constraint day-to-day.
 
@@ -290,7 +299,7 @@ The 60s in-memory Job Tracking cache (`getJobTrackingCached()`) is the other cor
 A load reaches Job Tracking two ways. **They must stay in lockstep** — a load that arrived one way has to be indistinguishable from one that arrived the other.
 
 1. **Rate-con email (original, unattended).** `info@logisx.com` receives the rate con → a Gmail filter **stars** it + applies the **`RATECONs`** label → n8n "Dispatch v2 (Fixed)" (`ydFgTSFpKTyyZbXW`, see `Dispatch-v2-fixed.json`) fires → Drive upload, Gemini parse, dedupe, then writes **three tabs**. Blind spot: if the email never arrives, or arrives from a sender the filter doesn't match, there is **zero signal** — no execution, no alert, no row.
-2. **Drag-and-drop (added 2026-07-25, attended).** Dispatcher drops the rate-con PDF on the Job Board, Active Loads, or the New Job form. `POST /api/loads/ratecon/extract` parses it and **returns without writing**; the dispatcher reviews/corrects; `POST /api/loads/from-ratecon` then replicates the n8n steps server-side. This exists because dispatchers regularly learn about a load from the driver while the app has nothing.
+2. **Drag-and-drop (added 2026-07-25, attended).** Dispatcher drops the rate-con PDF on the Job Board or the New Job form (scoped to the Job Board only — removed from Active Loads per client request, since a freshly-dropped load is Unassigned and lands on the Job Board anyway). `POST /api/loads/ratecon/extract` parses it and **returns without writing**; the dispatcher reviews/corrects; `POST /api/loads/from-ratecon` then replicates the n8n steps server-side. This exists because dispatchers regularly learn about a load from the driver while the app has nothing.
 
 `POST /api/loads/from-ratecon` runs the n8n sequence in order: validate Load Number (400 if blank) → dedupe against Job Tracking (**409 `DUPLICATE_LOAD`**) → Distance Matrix + rate-per-mile → append **Job Tracking** → upsert **Payments Table** (key `" Job ID"`, leading space is real) → upsert **Job Details** → **archive the PDF** (below) → `load_coordinates` + `audit_trail` + `dispatch-notification`, then `jtCacheInvalidate()` so the load shows up before the 60s cache expires.
 
