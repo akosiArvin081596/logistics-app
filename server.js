@@ -20,6 +20,7 @@ const { renderPolicy } = require("./lib/policy-renderer");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
+const linxupPush = require("./lib/linxup-push");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
 const { appendGmailDraft } = require("./lib/imap-draft");
@@ -11264,6 +11265,199 @@ app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
 		lastSync: routemateHealth.lastSync,
 		lastError: routemateHealth.lastError,
 		errorsLast24h: routemateHealth.errorsLast24h,
+	});
+});
+
+// ===================================================================
+// Linxup Push API v3 — inbound GPS webhook (replaces the Routemate poll)
+// ===================================================================
+// Linxup PUSHES telemetry to us. This receiver validates a shared-secret token,
+// maps each Position message into routemate_telemetry (the live table tracking +
+// driver-pay already read), and fans out the same location-update + geofence as
+// the poller. Ships DORMANT: the token gate is always enforced, but positions
+// are only WRITTEN when LINXUP_ENABLED=true — so nothing touches live tracking
+// or driver pay until we've verified real pushes.
+//   LINXUP_ENABLED        — master write switch (default false)
+//   LINXUP_WEBHOOK_TOKEN  — shared secret Linxup must present on every push
+//   LINXUP_SPEED_UNIT     — mph | kmh | mps (default mph → converted to m/s)
+const LINXUP_ENABLED = String(process.env.LINXUP_ENABLED || "").toLowerCase() === "true";
+const LINXUP_WEBHOOK_TOKEN = process.env.LINXUP_WEBHOOK_TOKEN || "";
+const LINXUP_SPEED_UNIT = process.env.LINXUP_SPEED_UNIT || "mph";
+const linxupHealth = { lastReceived: null, lastWritten: null, lastError: null, counts: {}, unlinked: 0 };
+
+// Resolve the LINXUP token from wherever Linxup places it. Until a real push
+// confirms the scheme, accept the common carriers: Authorization: Bearer <t>,
+// X-Api-Key / X-Webhook-Token header, or ?token= query. LIVE-CAPTURE: lock to
+// the actual header once the first push is seen.
+function linxupTokenFromReq(req) {
+	const auth = String(req.headers["authorization"] || "");
+	const bearer = /^Bearer\s+(.+)$/i.exec(auth);
+	return (
+		(bearer && bearer[1]) ||
+		req.headers["x-api-key"] ||
+		req.headers["x-webhook-token"] ||
+		req.headers["x-linxup-token"] ||
+		(req.query && (req.query.token || req.query.apiKey)) ||
+		""
+	).toString().trim();
+}
+// Constant-time-ish compare so the token check doesn't leak length via timing.
+function safeEqual(a, b) {
+	a = String(a || ""); b = String(b || "");
+	if (a.length !== b.length) return false;
+	let diff = 0;
+	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	return diff === 0;
+}
+
+// Insert one normalized Linxup position into routemate_telemetry with the same
+// quality gates + fan-out as the poller. Returns { written, dropped_reason }.
+async function ingestLinxupPosition(pos) {
+	// Link to a truck: match any candidate id against trucks.routemate_vehicle_id.
+	// Use the MATCHED value as the stored vehicle id so the existing read paths
+	// (which key on trucks.routemate_vehicle_id) line up regardless of which id
+	// the fleet linked by. Unmatched positions are still stored (first candidate)
+	// so no data is lost — they just won't map to a truck until it's linked.
+	let vehicleId = pos.vehicle_id;
+	let driverName = "";
+	if (pos.candidates && pos.candidates.length) {
+		const ph = pos.candidates.map(() => "?").join(",");
+		const row = db.prepare(
+			`SELECT ta.driver_name AS driver, t.routemate_vehicle_id AS vid
+			 FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id
+			 WHERE ta.end_date = '' AND t.routemate_vehicle_id IN (${ph}) LIMIT 1`,
+		).get(...pos.candidates);
+		if (row) { vehicleId = row.vid; driverName = row.driver || ""; }
+	}
+	if (!vehicleId) return { written: false, dropped_reason: "no_vehicle_id" };
+	if (!driverName) linxupHealth.unlinked++;
+
+	// Quality gates — mirror the poller: invalid coords / implied-speed outlier
+	// are still INSERTED but tagged so every read path filters them.
+	let droppedReason = "";
+	const hasValidCoords = Number.isFinite(pos.latitude) && Number.isFinite(pos.longitude)
+		&& (pos.latitude !== 0 || pos.longitude !== 0);
+	if (!hasValidCoords) {
+		droppedReason = "invalid_coords";
+	} else {
+		const prev = routemateLastCleanFixStmt.get(vehicleId);
+		if (prev && Number.isFinite(prev.location_date_ms)) {
+			const dtMs = (pos.location_date_ms || Date.now()) - prev.location_date_ms;
+			if (dtMs >= SPEED_CHECK_MIN_DT_MS && dtMs <= SPEED_CHECK_MAX_DT_MS) {
+				const distM = geolib.getDistance(
+					{ latitude: prev.latitude, longitude: prev.longitude },
+					{ latitude: pos.latitude, longitude: pos.longitude },
+				);
+				if (distM / (dtMs / 1000) > SPEED_OUTLIER_MPS) droppedReason = "speed_outlier";
+			}
+		}
+	}
+
+	routemateInsertTelemetryStmt.run({
+		routemate_vehicle_id: vehicleId,
+		latitude: pos.latitude,
+		longitude: pos.longitude,
+		speed: pos.speed || 0,
+		bearing: pos.bearing || "",
+		odometer: pos.odometer || 0,
+		engine_hours: pos.engine_hours || 0,
+		fuel_pct: pos.fuel_pct,
+		geocoded_location: pos.geocoded_location || "",
+		location_date_ms: pos.location_date_ms || Date.now(),
+		dropped_reason: droppedReason,
+	});
+	linxupHealth.lastWritten = new Date().toISOString();
+
+	// Fan out live UI + geofence only for clean, linked fixes (same as the poller).
+	if (!droppedReason && driverName) {
+		const driverLower = driverName.trim().toLowerCase();
+		let activeLoadId = "";
+		try {
+			const jt = await getJobTrackingCached();
+			const headers = jt.headers || [];
+			const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+			const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
+			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
+			const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
+			if (loadIdCol && statusCol && driverCol) {
+				for (const r of (jt.data || [])) {
+					if ((r[driverCol] || "").toString().trim().toLowerCase() !== driverLower) continue;
+					if (!activeRe.test((r[statusCol] || "").toString().trim())) continue;
+					activeLoadId = (r[loadIdCol] || "").toString().trim();
+					if (activeLoadId) break;
+				}
+			}
+		} catch { /* best-effort */ }
+		const headingDeg = parseRoutemateBearing(pos.bearing);
+		const locationPayload = {
+			driver: driverName,
+			latitude: pos.latitude,
+			longitude: pos.longitude,
+			speed: pos.speed || 0,
+			heading: headingDeg != null ? headingDeg : 0,
+			loadId: activeLoadId,
+			timestamp: new Date(pos.location_date_ms || Date.now()).toISOString(),
+			source: "linxup",
+			fuelPct: Number.isFinite(pos.fuel_pct) ? pos.fuel_pct : null,
+		};
+		io.to("dispatch").emit("location-update", locationPayload);
+		if (driverLower) io.to(driverLower).emit("location-update", locationPayload);
+		if (activeLoadId) {
+			try {
+				await tryGeofenceAdvance({
+					latitude: pos.latitude, longitude: pos.longitude,
+					driverName, loadId: activeLoadId, routemateVehicleId: vehicleId,
+				});
+			} catch (e) { console.error("[linxup] geofence error:", e.message); }
+		}
+	}
+	return { written: true, dropped_reason: droppedReason };
+}
+
+// POST /api/eld/linxup/webhook — inbound push. Token-gated; ACKs 200 quickly so
+// Linxup doesn't retry-storm. Handles a single message OR an array of messages.
+app.post("/api/eld/linxup/webhook", async (req, res) => {
+	// Token gate is ALWAYS enforced (even when writes are disabled) so a
+	// misconfigured/unauth caller can never reach the ingest path.
+	if (!LINXUP_WEBHOOK_TOKEN) return res.status(503).json({ error: "Linxup webhook not configured" });
+	if (!safeEqual(linxupTokenFromReq(req), LINXUP_WEBHOOK_TOKEN)) {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
+	linxupHealth.lastReceived = new Date().toISOString();
+	const body = req.body;
+	const messages = Array.isArray(body) ? body : (body && Array.isArray(body.messages) ? body.messages : [body]);
+	// ACK immediately; process after the response so a slow sheet/geofence read
+	// never makes Linxup time out and re-deliver.
+	res.json({ ok: true, received: messages.length, enabled: LINXUP_ENABLED });
+	setImmediate(async () => {
+		for (const msg of messages) {
+			try {
+				const type = linxupPush.detectMessageType(msg);
+				linxupHealth.counts[type] = (linxupHealth.counts[type] || 0) + 1;
+				if (type !== "position") continue;           // v1: only Position feeds tracking
+				if (!LINXUP_ENABLED) continue;                 // dormant — recognized + counted, not written
+				const pos = linxupPush.normalizePosition(msg, { speedUnit: LINXUP_SPEED_UNIT });
+				await ingestLinxupPosition(pos);
+			} catch (e) {
+				linxupHealth.lastError = e.message;
+				console.error("[linxup] ingest error:", e.message);
+			}
+		}
+	});
+});
+
+// GET /api/eld/linxup/health — Super Admin. Never echoes the token.
+app.get("/api/eld/linxup/health", requireRole("Super Admin"), (req, res) => {
+	res.json({
+		provider: "linxup",
+		enabled: LINXUP_ENABLED,
+		hasToken: !!LINXUP_WEBHOOK_TOKEN,
+		speedUnit: LINXUP_SPEED_UNIT,
+		lastReceived: linxupHealth.lastReceived,
+		lastWritten: linxupHealth.lastWritten,
+		lastError: linxupHealth.lastError,
+		messageCounts: linxupHealth.counts,
+		unlinkedPositions: linxupHealth.unlinked,
 	});
 });
 
