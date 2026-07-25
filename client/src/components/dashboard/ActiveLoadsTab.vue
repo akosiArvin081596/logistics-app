@@ -1,13 +1,5 @@
 <template>
   <div>
-    <!-- Same rate-con drop pairing as the Job Board — a dispatcher living in
-         Active Loads shouldn't have to switch tabs to log a load that never
-         came through the rate-con email pipeline. The created load is
-         Unassigned, so it lands on the Job Board (the toast says so). -->
-    <div class="ratecon-slot">
-      <RateConDropzone compact @extracted="onRateConExtracted" />
-    </div>
-
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
         <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
@@ -384,15 +376,6 @@
       @confirm="confirmQueueReassign"
       @cancel="pendingReassign = null"
     />
-
-    <RateConReviewModal
-      v-model:open="rateConOpen"
-      :fields="rateConFields"
-      :warnings="rateConWarnings"
-      :pdf-base64="rateConPdf"
-      :file-name="rateConFileName"
-      @created="onRateConCreated"
-    />
   </div>
 </template>
 
@@ -411,8 +394,6 @@ import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
-import RateConDropzone from '../shared/RateConDropzone.vue'
-import RateConReviewModal from '../shared/RateConReviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
 
 import { useAuthStore } from '../../stores/auth'
@@ -713,36 +694,6 @@ async function runDelete() {
   }
 }
 
-// Rate-con drop → review → create. Same pairing as JobBoardTab; see the
-// comment on the dropzone in the template for why it lives on both tabs.
-const rateConOpen = ref(false)
-const rateConFields = ref({})
-const rateConWarnings = ref([])
-const rateConPdf = ref('')
-const rateConFileName = ref('')
-
-function onRateConExtracted(fields, warnings, pdfBase64, fileName) {
-  rateConFields.value = fields || {}
-  rateConWarnings.value = warnings || []
-  rateConPdf.value = pdfBase64 || ''
-  rateConFileName.value = fileName || ''
-  rateConOpen.value = true
-}
-
-async function onRateConCreated(loadId, res) {
-  rateConPdf.value = '' // release the base64 blob once the server has it
-  try { await dashStore.refresh() } catch { /* the socket refresh will catch up */ }
-  const warns = (res && res.warnings) || []
-  // A fresh load has no driver, so it shows up under Job Board, not here —
-  // say where it went rather than leaving the dispatcher hunting this list.
-  toast(
-    warns.length
-      ? `Load ${loadId} created — in Job Board, ${warns.length} thing${warns.length === 1 ? '' : 's'} to check`
-      : `Load ${loadId} created — it's in the Job Board, ready to assign`,
-    warns.length ? 'info' : 'success',
-  )
-}
-
 // When the parent passes focusLoadId (e.g. /dashboard?load=LD-123 from a
 // notification click), auto-open that load's detail modal. Matches by Load
 // ID case-insensitively. Emits focus-consumed so the parent can clear the
@@ -861,16 +812,6 @@ const detailSections = computed(() => {
 </script>
 
 <style scoped>
-/* Sits directly above .dash-search-bar and matches its gutters so the two
-   strips read as one toolbar. */
-.ratecon-slot {
-  padding: 0.75rem 1.25rem;
-  border-bottom: 1px solid #f1f5f9;
-  background: #fafafa;
-}
-@media (max-width: 640px) {
-  .ratecon-slot { padding: 0.6rem 0.85rem; }
-}
 .mobile-load-list {
   display: flex;
   flex-direction: column;
