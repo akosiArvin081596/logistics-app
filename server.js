@@ -1493,6 +1493,16 @@ const routemateUpsertFuelDailyStmt = db.prepare(`
 		derivation_notes = excluded.derivation_notes
 `);
 
+// Per-truck usable tank size for the fuel%→gallons conversion in rollupOneDay().
+// Every truck holds a different amount (e.g. Unit 33 = 300 gal), so both
+// gallons_est and the derived MPG must use the truck's own tank rather than a
+// fleet-wide constant. Falls back to ROUTEMATE_DEFAULT_TANK_GALLONS when a
+// truck's fuel_tank_gallons is 0/unset. (fuel_tank_gallons is ALTERed onto
+// trucks earlier at boot, so this prepared statement is safe here.)
+const routemateTankByVehicleStmt = db.prepare(
+	`SELECT fuel_tank_gallons FROM trucks WHERE routemate_vehicle_id = ? LIMIT 1`
+);
+
 // 3-point median filter — kills single-sample sensor flicker (e.g.
 // 8% → 7% → 8% reads as 8% → 8% → 8%) without losing real consumption.
 // At array edges we just copy the original value.
@@ -1547,7 +1557,15 @@ function rollupOneDay(routemateVehicleId, dayStartMs, dayEndMs) {
 		if (delta < 0) consumptionPct += -delta;
 	}
 
-	const gallons = consumptionPct * ROUTEMATE_DEFAULT_TANK_GALLONS / 100;
+	// Per-truck tank: convert the consumed fuel-% into gallons using THIS truck's
+	// capacity (Unit 33 = 300 gal, etc.), falling back to the fleet default only
+	// when the truck has no configured tank size. This makes gallons_est and mpg
+	// per-truck-accurate instead of assuming every truck is a 200-gal tank.
+	const tankRow = routemateTankByVehicleStmt.get(routemateVehicleId);
+	const tankGallons = tankRow && tankRow.fuel_tank_gallons > 0
+		? tankRow.fuel_tank_gallons
+		: ROUTEMATE_DEFAULT_TANK_GALLONS;
+	const gallons = consumptionPct * tankGallons / 100;
 	if (gallons < 0.5) {
 		return { miles: round1(miles), gallons_est: round1(gallons), mpg: 0, derivation_notes: "negligible_fuel_change" };
 	}
@@ -1606,6 +1624,11 @@ function routemateRollupFuelDaily(daysBack = 7) {
 }
 
 // Run at boot (5min delay so telemetry has had time to ingest) and every 6h.
+// Intentionally NOT gated on ROUTEMATE_ENABLED: routemateRollupFuelDaily() only
+// reads the shared routemate_telemetry table — which the Linxup webhook now
+// fills — and the trucks link column, so it keeps producing per-truck daily MPG
+// on a live cadence regardless of which GPS provider is active (Routemate poll
+// or Linxup push). No provider poll is required for this to run.
 setTimeout(() => routemateRollupFuelDaily(7), 5 * 60 * 1000);
 setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
 
@@ -15988,12 +16011,57 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher"), (req, res) 
 			`SELECT odometer, fuel_pct, location_date_ms FROM routemate_telemetry
 			 WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 200`).all(vehicleId) : [];
 		const latest = rows[0] || null;
+
+		// MPG comes from the persisted ELD rollup (routemate_fuel_daily), not an
+		// on-the-fly derivation: average the recent CLEAN daily rows
+		// (derivation_notes = '' means no outlier/insufficient-sample flag). This is
+		// the same smoothed, per-truck economy the fuel dashboard shows. When the
+		// rollup has nothing for this vehicle we fall back to the truck's configured
+		// avg_mpg, then the model default.
+		let rollupMpg = 0;
+		if (vehicleId) {
+			const mpgRows = db.prepare(
+				`SELECT mpg FROM routemate_fuel_daily
+				 WHERE routemate_vehicle_id = ? AND derivation_notes = '' AND mpg > 0
+				 ORDER BY date DESC LIMIT 14`).all(vehicleId);
+			if (mpgRows.length) {
+				const sum = mpgRows.reduce((s, r) => s + r.mpg, 0);
+				rollupMpg = Math.round((sum / mpgRows.length) * 100) / 100;
+			}
+		}
+
 		const estimate = fuelModel.estimateRangeForVehicle({
 			fuelPct: latest ? latest.fuel_pct : null,
 			tankGallons: truck ? truck.fuel_tank_gallons : 0,
 			avgMpg: truck ? truck.avg_mpg : 0,
 			telemetryRows: rows,
 		});
+
+		// Authoritative MPG: ELD rollup → truck avg_mpg → model default. Overrides
+		// the module's on-the-fly derivation so the range panel matches the persisted
+		// fuel rollup. estimateRangeForVehicle still owns the fuel-sensor detection +
+		// tank/gallons resolution; we only re-pick MPG and (when there is a live fuel
+		// reading) recompute the range from it via the same computeRange() math.
+		const avgMpgCfg = truck && truck.avg_mpg > 0 ? Math.round(truck.avg_mpg * 100) / 100 : 0;
+		if (rollupMpg > 0) {
+			estimate.mpg = rollupMpg;
+			estimate.mpgSource = "eld";
+		} else if (avgMpgCfg > 0) {
+			estimate.mpg = avgMpgCfg;
+			estimate.mpgSource = "default";
+		} else {
+			estimate.mpg = fuelModel.DEFAULT_MPG;
+			estimate.mpgSource = "default";
+		}
+		if (estimate.hasFuelData) {
+			const r = fuelModel.computeRange({
+				fuelPct: estimate.fuelPct,
+				tankGallons: estimate.tankGallons,
+				mpg: estimate.mpg,
+			});
+			estimate.gallonsRemaining = r.gallonsRemaining;
+			estimate.rangeMiles = r.rangeMiles;
+		}
 		const updatedAt = latest && latest.location_date_ms
 			? new Date(latest.location_date_ms).toISOString() : new Date().toISOString();
 		res.json({ ok: true, driver: driver || null, vehicleId: vehicleId || null,
@@ -16029,9 +16097,23 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher"), poiLimi
 		}
 		if (!GOOGLE_MAPS_API_KEY) return res.status(503).json({ ok: false, error: "maps_key_unset", stops: [] });
 		const limit = Math.min(parseInt(req.query.limit) || 12, 25);
+		// Sample the search waypoints along the ACTUAL driving polyline (not the
+		// straight line) so stops land on the highway. Best-effort: getRoute()
+		// returns null on any Routes API failure, and we degrade to straight-line
+		// sampling (today's behavior) rather than failing the fuel-stop lookup.
+		let routePath = null;
+		try {
+			const route = await getRoute(
+				{ latitude: oLat, longitude: oLng },
+				{ latitude: dLat, longitude: dLng },
+			);
+			if (route && Array.isArray(route.points) && route.points.length >= 2) {
+				routePath = route.points; // [{ latitude, longitude }, …] — lib normalizes
+			}
+		} catch { /* degrade to straight-line sampling */ }
 		const stops = await poiFuelStops.findFuelStopsAlongRoute({
 			originLat: oLat, originLng: oLng, destLat: dLat, destLng: dLng,
-			apiKey: GOOGLE_MAPS_API_KEY, limit,
+			apiKey: GOOGLE_MAPS_API_KEY, limit, routePath,
 		});
 		// Attach the live per-station diesel pump price (Google `fuelOptions`) where
 		// Google has coverage. Stations with no price data get effectivePrice: null
@@ -19175,6 +19257,32 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 	} catch (error) {
 		console.error("GET /api/financials error:", error.message);
 		res.status(500).json({ error: "Failed to load financials" });
+	}
+});
+
+// GET /api/investor/config — merged investor config (global owner_id=0 rows
+// overlaid by this investor's own overrides). Super Admin may target a specific
+// investor via ?ownerId=N; an Investor is always scoped to their own id. Mirrors
+// the PUT handler's auth + ownerId resolution and the /api/investor read pattern
+// (per-investor rows override globals), so e.g. investor_split_pct returns the
+// per-investor value when set, else the seeded global "50".
+app.get("/api/investor/config", requireRole("Super Admin", "Investor"), (req, res) => {
+	try {
+		const user = req.session.user;
+		const targetOwnerId = user.role === "Super Admin"
+			? parseInt(req.query.ownerId) || 0
+			: user.id;
+		const config = {};
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0")
+			.all().forEach((r) => (config[r.key] = r.value));
+		if (targetOwnerId !== 0) {
+			db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?")
+				.all(targetOwnerId).forEach((r) => (config[r.key] = r.value)); // override globals
+		}
+		res.json(config);
+	} catch (error) {
+		console.error("Error reading investor config:", error.message);
+		res.status(500).json({ error: error.message });
 	}
 });
 
