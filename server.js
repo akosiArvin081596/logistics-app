@@ -16022,7 +16022,7 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher"), (req, res) 
 		if (vehicleId) {
 			const mpgRows = db.prepare(
 				`SELECT mpg FROM routemate_fuel_daily
-				 WHERE routemate_vehicle_id = ? AND derivation_notes = '' AND mpg > 0
+				 WHERE routemate_vehicle_id = ? AND derivation_notes = '' AND mpg > 0 AND miles >= 50
 				 ORDER BY date DESC LIMIT 14`).all(vehicleId);
 			if (mpgRows.length) {
 				const sum = mpgRows.reduce((s, r) => s + r.mpg, 0);
@@ -16043,7 +16043,10 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher"), (req, res) 
 		// tank/gallons resolution; we only re-pick MPG and (when there is a live fuel
 		// reading) recompute the range from it via the same computeRange() math.
 		const avgMpgCfg = truck && truck.avg_mpg > 0 ? Math.round(truck.avg_mpg * 100) / 100 : 0;
-		if (rollupMpg > 0) {
+		// Trust the ELD-derived MPG only in a plausible class-8 band (3–11 mpg);
+		// anything outside is contaminated telemetry (heavy idle, sensor noise) →
+		// fall back to the configured/default MPG rather than show a nonsense range.
+		if (rollupMpg >= 3 && rollupMpg <= 11) {
 			estimate.mpg = rollupMpg;
 			estimate.mpgSource = "eld";
 		} else if (avgMpgCfg > 0) {
