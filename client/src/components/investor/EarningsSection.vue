@@ -31,8 +31,8 @@
       >
         <div class="earn-label">Your Earnings</div>
         <div class="earn-value">{{ fmt(selected.investorEarnings) }}</div>
-        <div class="earn-sub">50% of net profit ({{ fmt(selected.netProfit) }})</div>
-        <div class="earn-formula">= (revenue - driverPay - fixedCosts - tripExpenses) / 2</div>
+        <div class="earn-sub">{{ investorSplitPct }}% of net profit ({{ fmt(selected.netProfit) }})</div>
+        <div class="earn-formula">= (revenue - driverPay - fixedCosts - tripExpenses) × {{ investorSplitPct }}%</div>
         <div class="click-hint">Click to see full breakdown</div>
       </div>
 
@@ -101,7 +101,7 @@
           <span class="breakdown-formula">= revenue - driverPay - fixedCosts - tripExpenses</span>
         </div>
         <div class="breakdown-row split">
-          <span class="breakdown-label">&#247; 2 (50/50 split)</span>
+          <span class="breakdown-label">× {{ investorSplitPct }}%</span>
           <span class="breakdown-value"></span>
           <span class="breakdown-formula"></span>
         </div>
@@ -115,7 +115,7 @@
         >
           <span class="breakdown-label">Your Share</span>
           <span class="breakdown-value" :style="{ color: selected.investorEarnings >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(selected.investorEarnings) }}</span>
-          <span class="breakdown-formula">= netProfit / 2</span>
+          <span class="breakdown-formula">= netProfit × {{ investorSplitPct }}%</span>
         </div>
       </div>
 
@@ -171,7 +171,7 @@
           >
             <span class="alltime-label">Your Earnings</span>
             <span class="alltime-value" :style="{ color: allTimeEarnings >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(allTimeEarnings) }}</span>
-            <span class="alltime-formula">= net / 2 (50/50 split)</span>
+            <span class="alltime-formula">= net × {{ investorSplitPct }}%</span>
           </div>
         </div>
       </div>
@@ -229,17 +229,17 @@
             </div>
             <div class="modal-math">{{ fmt(selected.revenue) }} - {{ fmt(selected.driverPay) }} - {{ fmt(selected.fixedCosts) }} - {{ fmt(selected.tripExpenses) }} = {{ fmt(selected.netProfit) }}</div>
 
-            <div class="step-label">Step 4: Apply the 50/50 Split</div>
-            <div class="modal-explain-sm">Per your agreement, net profit is split equally between you and LogisX.</div>
+            <div class="step-label">Step 4: Apply the {{ investorSplitPct }}% Split</div>
+            <div class="modal-explain-sm">Per your agreement, net profit is split {{ investorSplitPct }}% to you and {{ 100 - investorSplitPct }}% to LogisX.</div>
             <div class="modal-row split-row">
-              <span>&#247; 2 (50/50 split)</span>
+              <span>× {{ investorSplitPct }}%</span>
               <span></span>
             </div>
             <div class="modal-row bold result">
               <span>Your Earnings</span>
               <span class="val" :class="selected.investorEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(selected.investorEarnings) }}</span>
             </div>
-            <div class="modal-math">{{ fmt(selected.netProfit) }} / 2 = {{ fmt(selected.investorEarnings) }}</div>
+            <div class="modal-math">{{ fmt(selected.netProfit) }} × {{ investorSplitPct }}% = {{ fmt(selected.investorEarnings) }}</div>
           </div>
         </template>
 
@@ -513,7 +513,7 @@
         <template v-if="detailType === 'netProfit' && selected">
           <div class="modal-breakdown">
             <div class="modal-explain">
-              Net profit is what remains after all operating costs are subtracted from your truck's revenue. This is the number that gets split 50/50 between you and LogisX.
+              Net profit is what remains after all operating costs are subtracted from your truck's revenue. This is the number that gets split {{ investorSplitPct }}% to you and {{ 100 - investorSplitPct }}% to LogisX.
             </div>
 
             <div class="step-label">The Calculation</div>
@@ -644,7 +644,7 @@
         <template v-if="detailType === 'allEarnings'">
           <div class="modal-breakdown">
             <div class="modal-explain">
-              This is your cumulative 50% share of all profits since your first load. Per your agreement with LogisX, net profit is split equally &mdash; half goes to you, half goes to the company.
+              This is your cumulative {{ investorSplitPct }}% share of all profits since your first load. Per your agreement with LogisX, net profit is split {{ investorSplitPct }}% to you and {{ 100 - investorSplitPct }}% to the company.
             </div>
 
             <div class="step-label">The Calculation</div>
@@ -654,7 +654,7 @@
             </div>
             <div class="modal-explain-sm">Revenue ({{ fmt(allTimeRevenue) }}) minus all expenses ({{ fmt(allTimeExpenses) }}).</div>
             <div class="modal-row split-row">
-              <span>&#247; 2 (your 50% share)</span>
+              <span>× {{ investorSplitPct }}% (your share)</span>
               <span></span>
             </div>
             <div class="modal-divider"></div>
@@ -662,7 +662,7 @@
               <span>Your All-Time Earnings</span>
               <span class="val" :class="allTimeEarnings >= 0 ? 'accent' : 'danger'">{{ fmt(allTimeEarnings) }}</span>
             </div>
-            <div class="modal-math">{{ fmt(allTimeNet) }} / 2 = {{ fmt(allTimeEarnings) }}</div>
+            <div class="modal-math">{{ fmt(allTimeNet) }} × {{ investorSplitPct }}% = {{ fmt(allTimeEarnings) }}</div>
 
             <div class="step-label" style="margin-top:1rem;">Month-by-Month History</div>
             <div class="modal-monthly-list" v-if="months.length">
@@ -906,7 +906,9 @@ async function submitAdd() {
   }
 }
 
-const MODAL_CONFIG = {
+// Computed (not a static object) so the allEarnings subtitle tracks the live
+// investor split — a plain object literal would freeze it at the setup-time default.
+const MODAL_CONFIG = computed(() => ({
   earnings:     { title: 'How Your Earnings Are Calculated', subtitle: 'Step-by-step breakdown of your monthly earnings' },
   revenue:      { title: 'Revenue Explained', subtitle: 'Total income from completed loads' },
   driverPay:    { title: 'Driver Pay Explained', subtitle: 'Per calendar day worked (ELD-matched), not per load' },
@@ -916,17 +918,17 @@ const MODAL_CONFIG = {
   allRevenue:   { title: 'All-Time Revenue', subtitle: 'Cumulative income since your first load' },
   allExpenses:  { title: 'All-Time Expenses', subtitle: 'Total operating costs across all months' },
   allNet:       { title: 'All-Time Net Profit', subtitle: 'Your fleet\'s total profit to date' },
-  allEarnings:  { title: 'All-Time Your Earnings', subtitle: 'Your cumulative 50% share of profits' },
-}
+  allEarnings:  { title: 'All-Time Your Earnings', subtitle: `Your cumulative ${investorSplitPct.value}% share of profits` },
+}))
 
 const modalTitle = computed(() => {
-  const cfg = MODAL_CONFIG[detailType.value]
+  const cfg = MODAL_CONFIG.value[detailType.value]
   if (!cfg) return ''
   const isMonthly = !detailType.value.startsWith('all') && selected.value
   return isMonthly ? `${cfg.title}` : cfg.title
 })
 const modalSubtitle = computed(() => {
-  const cfg = MODAL_CONFIG[detailType.value]
+  const cfg = MODAL_CONFIG.value[detailType.value]
   if (!cfg) return ''
   const isMonthly = !detailType.value.startsWith('all') && selected.value
   return isMonthly ? `${monthLabel(selected.value.month)} — ${cfg.subtitle}` : cfg.subtitle
