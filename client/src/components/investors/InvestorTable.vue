@@ -12,6 +12,9 @@
         <tr>
           <th>Investor Name</th>
           <th>Trucks</th>
+          <th class="split-th">
+            Split %<span class="split-th-hint">% of net profit</span>
+          </th>
           <th>Status</th>
           <th>Notes</th>
           <th></th>
@@ -21,6 +24,9 @@
         <tr v-for="inv in investors" :key="inv.id" class="clickable-row" @click="viewDetail(inv)">
           <td class="name-cell">{{ inv.fullName }}</td>
           <td class="mono">{{ inv.truckCount }}</td>
+          <td class="split-td" @click.stop>
+            <InvestorSplitCell :owner-id="inv.userId || 0" :investor-name="inv.fullName" />
+          </td>
           <td>
             <span :class="['status-badge', inv.status === 'Active' ? 'status-active' : 'status-inactive']">{{ inv.status }}</span>
           </td>
@@ -201,6 +207,7 @@ import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
+import InvestorSplitCell from './InvestorSplitCell.vue'
 
 const props = defineProps({
   investors: { type: Array, default: () => [] },
@@ -413,6 +420,18 @@ function handleConfirmDelete() {
 
 .name-cell { font-weight: 600; }
 .mono { font-family: 'JetBrains Mono', monospace; }
+
+.split-th { white-space: nowrap; }
+.split-th-hint {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--text-dim);
+}
+.split-td { white-space: nowrap; }
 .notes-cell { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 0.78rem; }
 
 .status-badge {
