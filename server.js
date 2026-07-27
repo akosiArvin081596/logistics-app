@@ -5729,6 +5729,34 @@ function getEldTravelDaysByVehicle(vehicleIds, minMs, maxMs) {
 	return out;
 }
 
+// Short-TTL memo for getEldTravelDaysByVehicle. The raw compute pulls the full
+// telemetry history (~800k rows and growing) into JS and buckets every ping by
+// truck-local day — 2–5s per call — and /api/investor, /api/financials, and
+// computeInvestorMonthlyEarnings all invoke it with identical args within a
+// single request AND across page navigations, so the same work runs many times.
+// A past day's travel/coverage never changes (only the current day is still
+// forming), so a few-minute cache collapses the repeat cost with no pay impact:
+// the live day re-resolves within the TTL and historical days are immutable.
+// Callers only READ the returned Sets (.has/.size), so sharing the ref is safe.
+const _eldTravelMemo = new Map(); // key -> { at, value }
+const ELD_TRAVEL_MEMO_TTL_MS = 5 * 60 * 1000;
+function getEldTravelDaysByVehicleCached(vehicleIds, minMs, maxMs) {
+	const ids = (vehicleIds || []).filter(Boolean).map(String).sort();
+	if (!ids.length || !(maxMs > minMs)) return {};
+	// Bucket maxMs into TTL windows so calls seconds/minutes apart (one navigation
+	// session) share a key even though the callers pass maxMs = Date.now()+1d.
+	const key = ids.join(",") + "|" + minMs + "|" + Math.floor(maxMs / ELD_TRAVEL_MEMO_TTL_MS);
+	const hit = _eldTravelMemo.get(key);
+	if (hit && (Date.now() - hit.at) < ELD_TRAVEL_MEMO_TTL_MS) return hit.value;
+	const value = getEldTravelDaysByVehicle(ids, minMs, maxMs);
+	_eldTravelMemo.set(key, { at: Date.now(), value });
+	if (_eldTravelMemo.size > 256) { // bound memory: evict oldest half
+		const sorted = [..._eldTravelMemo.entries()].sort((a, b) => a[1].at - b[1].at);
+		for (let i = 0; i < Math.floor(sorted.length / 2); i++) _eldTravelMemo.delete(sorted[i][0]);
+	}
+	return value;
+}
+
 // Re-render an invoice PDF using the snapshot stored at generate time, with
 // the row's current adjustment fields. Used by PUT /api/invoices/:id/adjust
 // so a Super Admin can change the adjustment without re-fetching the sheet,
@@ -15287,7 +15315,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 // during a transient Routemate outage. Returns 503 when the integration is
 // disabled — the UI hides the HOS block entirely on any non-200.
 const HOS_CACHE_TTL_MS = 60 * 1000;
-let hosClockCache = { at: 0, payload: null };
+const HOS_FAIL_COOLDOWN_MS = 3 * 60 * 1000; // after a Routemate HOS failure, serve fast (skip the retry loop) for this long
+let hosClockCache = { at: 0, payload: null, failedAt: 0 };
 
 app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	// HOS is a supplementary overlay on the tracking panel. When its provider is
@@ -15302,6 +15331,14 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 		const now = Date.now();
 		if (hosClockCache.payload && now - hosClockCache.at < HOS_CACHE_TTL_MS) {
 			return res.json(hosClockCache.payload);
+		}
+		// Circuit breaker: Routemate HOS is flaky (frequent 5xx) and each cache miss
+		// costs a multi-second retry loop. After a failure, serve fast (stale/empty)
+		// for a cooldown instead of hammering the dead upstream on every /tracking
+		// poll; it retries once the cooldown passes and self-heals on the next success.
+		if (hosClockCache.failedAt && now - hosClockCache.failedAt < HOS_FAIL_COOLDOWN_MS) {
+			if (hosClockCache.payload) return res.json({ ...hosClockCache.payload, stale: true });
+			return res.json({ clocks: [], available: false, reason: "hos_unavailable", fetchedAt: new Date().toISOString() });
 		}
 
 		// Page through the clocks (required pagination params handled by the
@@ -15372,6 +15409,7 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 		res.json(payload);
 	} catch (err) {
 		console.error("tracking HOS error:", err.message);
+		hosClockCache.failedAt = Date.now();
 		if (hosClockCache.payload) {
 			return res.json({ ...hosClockCache.payload, stale: true });
 		}
@@ -16625,7 +16663,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			: "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''";
 		db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
 	}
-	const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), 0, Date.now() + 86400000);
+	const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
 	const driverDayOverrides = getAllExcludedDriverDays();
 
 	// Pass: monthly revenue, per-driver active days (ELD-intersected), earliest date.
@@ -17218,7 +17256,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				: "SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''";
 			db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
 		}
-		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), 0, Date.now() + 86400000);
+		const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
 		// Per-driver-per-month ELD-source flags for the UI badge: { driver: { "YYYY-MM": {eld,est} } }
 		const driverDaySource = {};
 		const daySrcLabel = (o) => o ? (o.eld && o.est ? "mixed" : o.eld ? "eld" : "estimated") : "estimated";
@@ -18514,7 +18552,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const unitToVid = {};
 		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''").all()
 			.forEach(t => { unitToVid[t.u] = t.vid; });
-		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), 0, Date.now() + 86400000);
+		const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
 
 		jobTracking.data.forEach((r) => {
 			const st = statusCol ? (r[statusCol] || "").trim() : "";
