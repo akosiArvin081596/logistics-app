@@ -70,7 +70,7 @@
               :class="['driver-item', { active: selectedDriver === loc.driver, 'no-gps': loc.noGps }]"
               @click="!loc.noGps && (selectedDriver === loc.driver ? collapseDriver() : focusDriver(loc))"
             >
-              <span :class="['driver-dot', loc.noGps ? 'no-gps' : isOnline(loc) ? 'online' : 'offline']"></span>
+              <span :class="['driver-dot', loc.noGps ? 'no-gps' : trackStatus(loc)]"></span>
               <div class="driver-info">
                 <span class="driver-name">
                   {{ loc.driver }}
@@ -97,7 +97,7 @@
                   <span class="status-text no-gps">No location data</span>
                 </span>
                 <span v-else class="driver-meta">
-                  <span :class="['status-text', isOnline(loc) ? 'online' : 'offline']">{{ isOnline(loc) ? 'Online' : 'Offline' }}</span>
+                  <span :class="['status-text', trackStatus(loc)]">{{ statusLabel(loc) }}</span>
                   <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
                 </span>
                 <span v-if="inTransitLoad(loc)" class="driver-load">{{ inTransitLoad(loc) }}</span>
@@ -957,7 +957,6 @@ function syncDriverMarkers() {
     let marker = driverMarkers.get(loc.driver)
     if (!marker) {
       // Create new marker for this driver
-      const isOn = isOnline(loc)
       const moving = (loc.speed || 0) > 0.5  // ~1 mph
       const heading = headingForMarker(loc)
       // Snap onto the route polyline if this driver's load is in focus.
@@ -969,7 +968,7 @@ function syncDriverMarkers() {
       marker = new google.maps.marker.AdvancedMarkerElement({
         position: initialPos,
         map,
-        content: createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving }),
+        content: createTruckArrow({ color: markerColor(loc), heading, moving }),
         title: loc.driver,
         zIndex: 1000,
         gmpClickable: true,
@@ -1532,6 +1531,48 @@ function isOnline(loc) {
   return now.value - new Date(loc.timestamp).getTime() < ONLINE_THRESHOLD
 }
 
+// Does this driver have a live load in progress? Mirrors the server's
+// activeLoads (workingRe) set; loc.loadId covers socket location-updates that
+// carry the active loadId but no activeLoads array.
+function hasActiveLoad(loc) {
+  return (Array.isArray(loc.activeLoads) && loc.activeLoads.length > 0) || !!loc.loadId
+}
+
+// A truck we can place on the map right now. The server only flips
+// noGps→false for a <5-min ELD fix, so this reads as "currently reporting a
+// live position" — true whether or not the driver is carrying a load. These
+// trucks are always shown + locatable (owner request 2026-07-27: the ELD
+// pings whenever the truck is powered, so every powered truck must be visible
+// — "I can't see where Rodney's truck is").
+function hasFix(loc) {
+  return !loc.noGps && loc.latitude != null && loc.longitude != null
+}
+
+// Three-state truck status for the tracking panel (owner request 2026-07-27):
+//   online  — recent ELD ping AND on an active load
+//   dormant — recent ELD ping, NO active load (truck powered + idle; still
+//             fully shown + locatable, just not hauling)
+//   offline — NO recent ping (ELD powered off / battery pulled / kill switch)
+// noGps rows (no fix at all) are handled by their own template branch and
+// never reach this function for the label/dot.
+function trackStatus(loc) {
+  if (!isOnline(loc)) return 'offline'
+  return hasActiveLoad(loc) ? 'online' : 'dormant'
+}
+
+const STATUS_LABELS = { online: 'Online', dormant: 'Dormant', offline: 'Offline' }
+function statusLabel(loc) {
+  return STATUS_LABELS[trackStatus(loc)] || 'Offline'
+}
+
+// Truck-arrow color mirrors the panel dot so the map and the list agree:
+// green = online, amber = dormant, grey = offline/stale. (Offline stays grey
+// rather than red on the map so it doesn't clash with the red drop-off pin.)
+function markerColor(loc) {
+  const s = trackStatus(loc)
+  return s === 'online' ? '#16a34a' : s === 'dormant' ? '#f59e0b' : '#9ca3af'
+}
+
 function timeAgo(ts) {
   if (!ts) return ''
   const diff = now.value - new Date(ts).getTime()
@@ -1554,11 +1595,17 @@ const locationsWithGps = computed(() => locations.value.filter(loc => !loc.noGps
 // sheet-only fallbacks.
 const activeLocations = computed(() => {
   const visible = locations.value.filter(loc => {
-    // activeLoads comes from /api/locations/latest (workingRe statuses);
-    // loadId covers drivers pushed mid-session by a socket location-update
-    // (payload carries the active loadId but no activeLoads array).
-    const hasLiveLoad = (loc.activeLoads && loc.activeLoads.length > 0) || !!loc.loadId
-    return showInactive.value ? (hasLiveLoad || loc.assignedTruck) : hasLiveLoad
+    // Always show — and always keep locatable — any truck reporting a live
+    // ELD position (hasFix), load or not. Owner request 2026-07-27: the ELD
+    // pings whenever the truck is powered, so a dormant (powered-but-idle)
+    // truck must never be hidden behind the toggle. Also always show any
+    // driver on a live load, even with no ELD fix, so an assigned-but-dark
+    // truck still surfaces for dispatch (it renders the "ELD offline / No
+    // ELD — unit" row).
+    if (hasFix(loc) || hasActiveLoad(loc)) return true
+    // "Show inactive" reveals the remainder: assigned-but-idle drivers with no
+    // current fix (no ELD, or ELD gone stale) — useful for dispatch triage.
+    return showInactive.value && !!loc.assignedTruck
   })
   const score = (l) => {
     if (!l.noGps && l.latitude != null) return 0
@@ -2066,6 +2113,10 @@ onUnmounted(() => {
   background: #22c55e;
   box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
 }
+.driver-dot.dormant {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+}
 .driver-dot.offline {
   background: #9ca3af;
 }
@@ -2141,6 +2192,9 @@ onUnmounted(() => {
 }
 .status-text.online {
   color: #16a34a;
+}
+.status-text.dormant {
+  color: #d97706;
 }
 .status-text.offline {
   color: #9ca3af;

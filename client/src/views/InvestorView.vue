@@ -60,7 +60,7 @@
     <template v-else-if="store.data">
       <EarningsSection
         :production="store.production"
-        :is-super-admin="authStore.user?.role === 'Super Admin'"
+        :is-super-admin="false"
         @changed="loadData"
       />
       <div class="sections-row">

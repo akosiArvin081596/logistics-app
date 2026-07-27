@@ -106,7 +106,7 @@
 
     <!-- Detail Modal -->
     <Dialog v-model:open="showDetail">
-      <DialogContent class="sm:max-w-[920px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden max-h-[92vh]">
+      <DialogContent :class="['sm:max-w-[1200px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden max-h-[92vh]', { 'inv-detail-full': pdfExpanded }]">
         <DialogHeader class="px-6 pt-5 pb-4 border-b border-[#e8edf2] bg-gradient-to-b from-gray-50/80 to-white">
           <DialogTitle class="text-[1.1rem] font-bold text-gray-900">{{ selectedInvoice?.invoice_number }}</DialogTitle>
           <DialogDescription class="text-[13px] text-gray-400">
@@ -117,6 +117,12 @@
         <div v-if="selectedInvoice" class="detail-body">
           <!-- Left: PDF preview -->
           <div class="detail-pdf">
+            <button
+              type="button"
+              class="pdf-expand-btn"
+              :title="pdfExpanded ? 'Exit fullscreen' : 'Expand the invoice to fill the screen'"
+              @click="pdfExpanded = !pdfExpanded"
+            >{{ pdfExpanded ? '✕ Close' : '⤢ Fullscreen' }}</button>
             <iframe :src="`/api/invoices/${selectedInvoice.id}/pdf`" class="pdf-frame" title="Invoice PDF"></iframe>
           </div>
 
@@ -360,6 +366,9 @@ useSocketRefresh('invoices:changed', () => store.load())
 
 const showDetail = ref(false)
 const selectedInvoice = ref(null)
+// Fullscreen toggle for the invoice PDF pane — lets the user blow the invoice up
+// to fill the screen (the default modal is roomy but a full page is easier at 1:1).
+const pdfExpanded = ref(false)
 const activeFilter = ref(null)
 const driverFilter = ref('')
 const weekFilter = ref('')
@@ -418,6 +427,7 @@ function clearFilters() {
 function openDetail(inv) {
   selectedInvoice.value = inv
   showDetail.value = true
+  pdfExpanded.value = false
   showRejectPrompt.value = false
   rejectionNote.value = ''
   showAdjustPrompt.value = false
@@ -721,13 +731,38 @@ onMounted(() => store.load())
   background: #f1f5f9;
   border-right: 1px solid #e8edf2;
   overflow: hidden;
+  position: relative;
 }
 .pdf-frame {
   width: 100%;
   height: 100%;
   border: 0;
-  min-height: 600px;
+  min-height: 640px;
 }
+.pdf-expand-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
+  height: 30px;
+  padding: 0 0.7rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #334155;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+.pdf-expand-btn:hover { background: #fff; border-color: #94a3b8; }
+
+/* Fullscreen: blow the modal + PDF up to fill the viewport, hide the meta panel
+   so a full invoice page reads at ~1:1 (client request — the panel was too small). */
+.inv-detail-full { width: 96vw !important; max-width: 96vw !important; height: 96vh !important; max-height: 96vh !important; }
+.inv-detail-full .detail-body { grid-template-columns: 1fr !important; min-height: 0 !important; max-height: calc(96vh - 76px) !important; }
+.inv-detail-full .detail-meta { display: none !important; }
+.inv-detail-full .detail-pdf { border-right: none !important; }
 .detail-meta {
   padding: 1.25rem 1.5rem;
   overflow-y: auto;
@@ -954,6 +989,6 @@ onMounted(() => store.load())
 
 @media (max-width: 900px) {
   .detail-body { grid-template-columns: 1fr; }
-  .detail-pdf { max-height: 400px; }
+  .detail-pdf { max-height: 62vh; min-height: 360px; }
 }
 </style>
