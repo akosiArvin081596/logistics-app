@@ -14935,13 +14935,18 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		}
 
 		// Overlay Routemate telemetry. When a driver's currently-assigned truck
-		// is linked to a Routemate device AND we have a fresh telemetry row
-		// (<5 min old), fill in lat/lng/speed/timestamp from the ELD and tag
-		// source: 'routemate'. Drivers with no linked truck or stale ELD ping
-		// stay as noGps placeholders.
+		// is linked to a Routemate/Linxup device AND we have its LAST KNOWN fix
+		// within the lookback window, fill in lat/lng/speed/timestamp from the ELD
+		// and tag the source. Owner request 2026-07-27: an ELD pings whenever the
+		// truck is powered, but a parked/idle truck pings intermittently (Rodney
+		// last pinged 4 h ago), so a 5-minute freshness gate was throwing the
+		// position away and hiding the truck ("I can't see where Rodney's truck
+		// is"). We now surface the last known position for up to 14 days; ping
+		// RECENCY (not visibility) is what the client turns into
+		// Online / Dormant / Offline. Trucks with no fix in the window stay noGps.
 		try {
-			const FRESH_MS = 5 * 60 * 1000;
-			const cutoff = Date.now() - FRESH_MS;
+			const STALE_SHOW_MS = 14 * 24 * 60 * 60 * 1000;
+			const cutoff = Date.now() - STALE_SHOW_MS;
 			const routemateRows = db.prepare(`
 				SELECT
 					LOWER(ta.driver_name) AS driver_lc,
