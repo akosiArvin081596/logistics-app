@@ -106,7 +106,7 @@
 
     <!-- Detail Modal -->
     <Dialog v-model:open="showDetail">
-      <DialogContent :class="['sm:max-w-[1200px] rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden max-h-[92vh]', { 'inv-detail-full': pdfExpanded }]">
+      <DialogContent :class="['rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden', pdfExpanded ? 'w-[97vw] max-w-[97vw] h-[96vh] max-h-[96vh] inv-detail-full' : 'sm:max-w-[1200px] max-h-[92vh]']">
         <DialogHeader class="px-6 pt-5 pb-4 border-b border-[#e8edf2] bg-gradient-to-b from-gray-50/80 to-white">
           <DialogTitle class="text-[1.1rem] font-bold text-gray-900">{{ selectedInvoice?.invoice_number }}</DialogTitle>
           <DialogDescription class="text-[13px] text-gray-400">
@@ -758,8 +758,9 @@ onMounted(() => store.load())
 .pdf-expand-btn:hover { background: #fff; border-color: #94a3b8; }
 
 /* Fullscreen: blow the modal + PDF up to fill the viewport, hide the meta panel
-   so a full invoice page reads at ~1:1 (client request — the panel was too small). */
-.inv-detail-full { width: 96vw !important; max-width: 96vw !important; height: 96vh !important; max-height: 96vh !important; }
+   so a full invoice page reads at ~1:1 (client request — the panel was too small).
+   The modal's 97vw/96vh sizing is set by Tailwind classes on DialogContent when
+   pdfExpanded; these rules just reflow its contents. */
 .inv-detail-full .detail-body { grid-template-columns: 1fr !important; min-height: 0 !important; max-height: calc(96vh - 76px) !important; }
 .inv-detail-full .detail-meta { display: none !important; }
 .inv-detail-full .detail-pdf { border-right: none !important; }
