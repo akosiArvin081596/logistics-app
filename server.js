@@ -290,6 +290,25 @@ try { db.exec("ALTER TABLE expenses ADD COLUMN location_source TEXT DEFAULT ''")
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_vendor_norm ON expenses(vendor_normalized)"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_loc_state ON expenses(location_state)"); } catch {}
 
+// Migration (bulk-receipt dedup): sha256 of the receipt's base64 payload so a
+// re-uploaded identical receipt is caught before a second insert double-books
+// the P&L. '' = legacy rows / no-photo expenses (never dedup-matched — the
+// lookup at POST /api/expenses requires a non-empty hash). Additive + reversible.
+try { db.exec("ALTER TABLE expenses ADD COLUMN receipt_hash TEXT DEFAULT ''"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_receipt_hash ON expenses(receipt_hash)"); } catch {}
+
+// Bulk receipt upload drafts — one in-progress batch per user so a stack a
+// dispatcher starts on a phone can be finished on a computer. draft_json holds
+// the full row array (photoData + parsed fields + per-row status); upserted on
+// every debounced client save, deleted once all rows are saved or Clear All.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS receipt_upload_drafts (
+		user_id INTEGER PRIMARY KEY,
+		draft_json TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL DEFAULT ''
+	)
+`);
+
 // Maintenance sinking fund: tracks $800/mo reserve contributions + PM services
 db.exec(`
 	CREATE TABLE IF NOT EXISTS maintenance_fund (
@@ -12250,6 +12269,30 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		const driverTruck = db.prepare("SELECT unit_number, owner_id, routemate_vehicle_id FROM trucks WHERE LOWER(assigned_driver) = LOWER(?)").get(driver.trim());
 		const expOwnerId = driverTruck ? driverTruck.owner_id : 0;
 		const expTruckUnit = driverTruck ? driverTruck.unit_number : '';
+		// DEDUP: Deshorn bulk-uploads receipts drivers text him, and the same
+		// photo routinely arrives twice. Hash the receipt payload (sha256 of the
+		// base64) and reject a re-upload before it double-books the P&L. Only a
+		// data-URI payload carries a receipt to hash; an already-stored URL/path
+		// does not. A hit on a non-empty hash → 409 so the client flags the row
+		// (a duplicate, not a retryable error). POST /api/expenses is not
+		// idempotent, so this is the server guard behind the client's in-batch
+		// file dedup. Checked before the file is written so a dup leaves no orphan.
+		let receiptHash = "";
+		if (typeof photoData === "string" && photoData.startsWith("data:")) {
+			const comma = photoData.indexOf(",");
+			const b64 = comma >= 0 ? photoData.slice(comma + 1) : "";
+			if (b64) {
+				receiptHash = crypto.createHash("sha256").update(b64).digest("hex");
+				const dup = db.prepare("SELECT id FROM expenses WHERE receipt_hash = ? LIMIT 1").get(receiptHash);
+				if (dup) {
+					return res.status(409).json({
+						error: `This receipt was already logged (expense #${dup.id})`,
+						code: "DUPLICATE_RECEIPT",
+						existingId: dup.id,
+					});
+				}
+			}
+		}
 		// Receipt: images keep the legacy path (silent drop on bad format —
 		// the driver flow is unchanged). PDFs are an admin/dispatcher-only
 		// addition (toll invoices etc.) and fail loudly on validation errors.
@@ -12309,17 +12352,93 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		}
 		const result = db
 			.prepare(
-				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_hash)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoUrlOrPath,
 				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit, enrichCity, enrichState,
-				safeVendor, vendorNormalized, locLat, locLng, locSource);
+				safeVendor, vendorNormalized, locLat, locLng, locSource, receiptHash);
 		notifyChange("expenses");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
 		console.error("Error logging expense:", error.message);
 		res.status(500).json({ error: "Failed to log expense" });
+	}
+});
+
+// ── Bulk receipt upload drafts ─────────────────────────────────────────────
+// Cross-device resume for the Bulk Receipt Upload tool: the in-progress batch
+// lives server-side (one row per user) so a stack started on the phone can be
+// finished on the computer. All three routes are requireAuth and hard-scoped to
+// req.session.user.id — a user only ever reads/writes/clears their own draft.
+const bulkDraftLimiter = rateLimit({
+	windowMs: 60 * 1000,
+	max: 120, // debounced client auto-save (~1.5s) + shared office-IP headroom
+	message: { error: "Too many draft saves. Please slow down." },
+	standardHeaders: true,
+	legacyHeaders: false,
+});
+const MAX_BULK_DRAFT_ROWS = 25; // mirrors MAX_BATCH client-side
+const MAX_BULK_DRAFT_BYTES = 40 * 1024 * 1024; // headroom under the 50 MB body cap
+
+// GET /api/expenses/bulk-draft — the caller's saved batch, or null.
+app.get("/api/expenses/bulk-draft", requireAuth, (req, res) => {
+	try {
+		const row = db
+			.prepare("SELECT draft_json, updated_at FROM receipt_upload_drafts WHERE user_id = ?")
+			.get(req.session.user.id);
+		if (!row || !row.draft_json) return res.json({ draft: null });
+		let rows = [];
+		try { rows = JSON.parse(row.draft_json).rows || []; } catch { rows = []; }
+		if (!Array.isArray(rows) || rows.length === 0) return res.json({ draft: null });
+		res.json({ draft: { rows, updatedAt: row.updated_at } });
+	} catch (error) {
+		console.error("Error reading bulk draft:", error.message);
+		res.status(500).json({ error: "Failed to read draft" });
+	}
+});
+
+// PUT /api/expenses/bulk-draft — upsert the caller's batch. Best-effort
+// convenience; the client auto-saves it debounced as the user works. An empty
+// rows[] clears the draft (mirrors DELETE) so the last save after everything is
+// logged leaves nothing stale behind.
+app.put("/api/expenses/bulk-draft", requireAuth, bulkDraftLimiter, (req, res) => {
+	try {
+		const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
+		if (!rows) return res.status(400).json({ error: "rows must be an array" });
+		if (rows.length === 0) {
+			db.prepare("DELETE FROM receipt_upload_drafts WHERE user_id = ?").run(req.session.user.id);
+			return res.json({ success: true, cleared: true });
+		}
+		if (rows.length > MAX_BULK_DRAFT_ROWS) {
+			return res.status(400).json({ error: `Too many rows (max ${MAX_BULK_DRAFT_ROWS})` });
+		}
+		const draftJson = JSON.stringify({ rows });
+		if (Buffer.byteLength(draftJson, "utf8") > MAX_BULK_DRAFT_BYTES) {
+			return res.status(413).json({ error: "Draft too large to save" });
+		}
+		const now = new Date().toISOString();
+		db.prepare(`
+			INSERT INTO receipt_upload_drafts (user_id, draft_json, updated_at)
+			VALUES (?, ?, ?)
+			ON CONFLICT(user_id) DO UPDATE SET draft_json = excluded.draft_json, updated_at = excluded.updated_at
+		`).run(req.session.user.id, draftJson, now);
+		res.json({ success: true, updatedAt: now });
+	} catch (error) {
+		console.error("Error saving bulk draft:", error.message);
+		res.status(500).json({ error: "Failed to save draft" });
+	}
+});
+
+// DELETE /api/expenses/bulk-draft — clear the caller's batch (all rows saved,
+// or Clear All).
+app.delete("/api/expenses/bulk-draft", requireAuth, (req, res) => {
+	try {
+		db.prepare("DELETE FROM receipt_upload_drafts WHERE user_id = ?").run(req.session.user.id);
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error clearing bulk draft:", error.message);
+		res.status(500).json({ error: "Failed to clear draft" });
 	}
 });
 

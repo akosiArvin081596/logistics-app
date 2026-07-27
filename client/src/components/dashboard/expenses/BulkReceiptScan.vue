@@ -9,6 +9,24 @@
       </p>
     </div>
 
+    <!-- Resume banner: an in-progress batch saved server-side (e.g. started on a
+         phone) is offered for pickup on this device. Suppresses auto-save until
+         the user resolves it so we never overwrite the saved draft. -->
+    <div v-if="pendingDraft" class="bulk-resume">
+      <div class="bulk-resume-text">
+        <strong>Resume in-progress upload?</strong>
+        <span>
+          {{ pendingDraft.rows.length }} receipt{{ pendingDraft.rows.length === 1 ? '' : 's' }}
+          in progress{{ pendingDraftWhen ? ` (saved ${pendingDraftWhen})` : '' }} — pick up where
+          you left off, e.g. from your phone.
+        </span>
+      </div>
+      <div class="bulk-resume-actions">
+        <button type="button" class="bulk-save bulk-resume-yes" @click="resumeDraft">Resume</button>
+        <button type="button" class="bulk-btn-ghost" @click="discardDraft">Discard</button>
+      </div>
+    </div>
+
     <!-- Controls: default driver + file picker -->
     <div class="bulk-controls">
       <div class="bulk-control">
@@ -65,8 +83,8 @@
       No receipts added yet. Choose a default driver and click <strong>+ Add receipts</strong>.
     </div>
 
-    <!-- Review grid -->
-    <div v-if="rows.length" class="bulk-grid-wrap">
+    <!-- Review grid (desktop) -->
+    <div v-if="rows.length && !isMobile" class="bulk-grid-wrap">
       <table class="bulk-grid">
         <thead>
           <tr>
@@ -105,7 +123,15 @@
               <input v-model="row.amount" type="number" step="0.01" min="0" placeholder="0.00" class="bulk-cell" :disabled="saving" />
             </td>
             <td class="col-date">
-              <input v-model="row.date" type="date" class="bulk-cell" :disabled="saving" />
+              <input
+                v-model="row.date"
+                type="date"
+                class="bulk-cell"
+                :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.date, 'cell-warn': !row.date && row.saveStatus !== 'invalid' }"
+                :disabled="saving"
+                :title="!row.date ? 'Verify the purchase date — it was not read from the receipt' : ''"
+              />
+              <span v-if="!row.date" class="cell-hint-warn">verify date</span>
             </td>
             <td class="col-type">
               <select v-model="row.type" class="bulk-cell" :disabled="saving">
@@ -139,6 +165,7 @@
               <span v-if="row.saveStatus === 'saving'" class="bulk-row-msg">…</span>
               <div v-else class="bulk-cell-actions">
                 <button v-if="row.saveStatus === 'timeout'" type="button" class="bulk-retry" :disabled="saving || processing" :title="row.saveError" @click="retryRow(row)">Retry</button>
+                <span v-else-if="row.saveStatus === 'duplicate'" class="bulk-row-msg dup" :title="row.saveError">dup</span>
                 <span v-else-if="row.saveStatus === 'error'" class="bulk-row-msg err" :title="row.saveError">!</span>
                 <span v-else-if="row.saveStatus === 'invalid'" class="bulk-row-msg err" :title="row.saveError">fix</span>
                 <button type="button" class="bulk-remove" :disabled="saving || processing" aria-label="Remove receipt" @click="removeRow(row.key)">&times;</button>
@@ -149,11 +176,97 @@
       </table>
     </div>
 
+    <!-- Review cards (mobile) — each receipt is a tappable card that clearly
+         shows its state + thumb, and expands to edit the fields. -->
+    <div v-if="rows.length && isMobile" class="bulk-cards">
+      <div v-for="row in rows" :key="row.key" class="bulk-card" :class="rowClass(row)">
+        <div class="bulk-card-head" @click="toggleExpand(row.key)">
+          <div class="bulk-card-thumb">
+            <img
+              v-if="row.thumb"
+              :src="row.thumb"
+              class="bulk-thumb"
+              :alt="row.fileName"
+              @click.stop="previewImg = row.thumb"
+            />
+            <span v-else-if="row.isPdf" class="bulk-pdf-chip">PDF</span>
+            <span v-else class="bulk-thumb-ph"></span>
+          </div>
+          <div class="bulk-card-summary">
+            <div class="bulk-card-line1">
+              <span class="bulk-status-badge" :class="`st-${statusBadge(row).tone}`">{{ statusBadge(row).label }}</span>
+              <span class="bulk-card-amount">{{ row.amount ? ('$' + row.amount) : '—' }}</span>
+            </div>
+            <div class="bulk-card-line2">
+              <span class="bulk-card-vendor">{{ row.vendor || row.fileName }}</span>
+              <span class="bulk-card-date" :class="{ 'date-missing': !row.date }">{{ row.date || 'verify purchase date' }}</span>
+            </div>
+            <div class="bulk-card-line3">
+              <span class="bulk-card-driver" :class="{ 'date-missing': !row.driver }">{{ row.driver || 'no driver' }}</span>
+            </div>
+          </div>
+          <span class="bulk-card-chevron">{{ expanded.has(row.key) ? '▴' : '▾' }}</span>
+        </div>
+
+        <div v-if="expanded.has(row.key)" class="bulk-card-body" @click.stop>
+          <div class="bulk-card-fields">
+            <label class="bulk-field">
+              <span class="bulk-field-label">Amount *</span>
+              <input v-model="row.amount" type="number" step="0.01" min="0" placeholder="0.00" class="bulk-cell" :class="{ 'cell-error': row.saveStatus === 'invalid' && !(parseFloat(row.amount) > 0) }" :disabled="saving" />
+            </label>
+            <label class="bulk-field bulk-field-wide">
+              <span class="bulk-field-label">Purchase date *</span>
+              <input
+                v-model="row.date"
+                type="date"
+                class="bulk-cell"
+                :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.date, 'cell-warn': !row.date && row.saveStatus !== 'invalid' }"
+                :disabled="saving"
+              />
+              <span v-if="!row.date" class="cell-hint-warn">Verify the purchase date — it was not read from the receipt.</span>
+            </label>
+            <label class="bulk-field">
+              <span class="bulk-field-label">Type</span>
+              <select v-model="row.type" class="bulk-cell" :disabled="saving">
+                <option v-for="t in expenseTypes" :key="t" :value="t">{{ t }}</option>
+              </select>
+            </label>
+            <label class="bulk-field">
+              <span class="bulk-field-label">Driver *</span>
+              <select v-model="row.driver" class="bulk-cell" :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.driver }" :disabled="saving">
+                <option value="">Driver…</option>
+                <option v-for="d in drivers" :key="d" :value="d">{{ d }}</option>
+              </select>
+            </label>
+            <label class="bulk-field bulk-field-wide">
+              <span class="bulk-field-label">Vendor</span>
+              <input v-model="row.vendor" type="text" placeholder="Vendor" class="bulk-cell" maxlength="80" :disabled="saving" />
+            </label>
+            <label class="bulk-field">
+              <span class="bulk-field-label">City</span>
+              <input v-model="row.city" type="text" placeholder="City" class="bulk-cell" maxlength="60" :disabled="saving" />
+            </label>
+            <label class="bulk-field">
+              <span class="bulk-field-label">State</span>
+              <input v-model="row.state" type="text" placeholder="ST" class="bulk-cell bulk-cell-st" maxlength="2" :disabled="saving" @input="row.state = row.state.toUpperCase()" />
+            </label>
+          </div>
+          <div v-if="row.saveError" class="bulk-card-err">{{ row.saveError }}</div>
+          <div class="bulk-card-actions">
+            <button v-if="row.saveStatus === 'timeout' || row.saveStatus === 'error'" type="button" class="bulk-retry" :disabled="saving || processing" @click="retryRow(row)">Retry</button>
+            <button type="button" class="bulk-btn-ghost bulk-clear" :disabled="saving || processing" @click="removeRow(row.key)">Remove</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Save bar -->
     <div v-if="rows.length" class="bulk-savebar">
-      <span v-if="anyInvalid" class="bulk-savehint err">Some rows need a driver, amount, or date.</span>
+      <span v-if="anyInvalid" class="bulk-savehint err">Some rows need a driver, amount, or purchase date.</span>
+      <span v-else-if="anyNeedsDate" class="bulk-savehint warn">{{ needsDateCount }} need a purchase date verified before saving.</span>
       <span v-else-if="anyTimeout" class="bulk-savehint warn">{{ timeoutCount }} timed out — check All Expenses, then Retry only if not saved.</span>
       <span v-else-if="anyFailed" class="bulk-savehint err">{{ failedCount }} failed to save — retry or remove.</span>
+      <span v-else-if="anyDuplicate" class="bulk-savehint info">{{ duplicateCount }} already logged (duplicate) — remove them.</span>
       <span v-else class="bulk-savehint">{{ savableCount }} ready to save.</span>
       <button
         type="button"
@@ -171,9 +284,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useApi } from '../../../composables/useApi'
 import { useToast } from '../../../composables/useToast'
+import { useViewport } from '../../../composables/useViewport'
 
 const props = defineProps({
   drivers: { type: Array, default: () => [] },
@@ -183,16 +297,25 @@ const emit = defineEmits(['saved'])
 
 const api = useApi()
 const { show: toast } = useToast()
+const { isMobile } = useViewport()
 
 const MAX_BATCH = 25
 const MAX_PDF_FILE_BYTES = 15 * 1024 * 1024 // matches the server-side cap
 const OCR_CONCURRENCY = 3 // parallel Gemini reads — modest so the limiter/credits last
 const IMG_MAX_EDGE = 1024
+// Skip persisting a draft this big — server caps at 40 MB, so stay under it.
+// A batch that can't be persisted just loses cross-device resume, nothing else.
+const MAX_DRAFT_PERSIST_BYTES = 38 * 1024 * 1024
 
 const OCR_LABEL = {
   queued: 'Queued', scanning: 'Scanning…', ok: 'Read',
   failed: 'Not read', ocr_off: 'Manual', skipped: 'PDF', limited: 'Retry',
 }
+
+// Rows that must NOT be re-sent by Save All: already saved, parked timeouts
+// (ambiguous — may have landed), and server-confirmed duplicates (a re-send
+// would just 409 again).
+const NON_SAVABLE = new Set(['saved', 'timeout', 'duplicate'])
 
 const defaultDriver = ref('')
 const rows = ref([])
@@ -201,25 +324,38 @@ const saving = ref(false)
 const progress = reactive({ done: 0, total: 0 })
 const fileInputRef = ref(null)
 const previewImg = ref(null)
+const pendingDraft = ref(null)      // fetched server draft awaiting resume/discard
+const expanded = reactive(new Set()) // mobile: keys of expanded cards
 let rowSeq = 0
+let draftTimer = null
+let hydrating = false // true while loading a draft, so the load doesn't re-save
 
 const atCapacity = computed(() => rows.value.length >= MAX_BATCH)
 const progressPct = computed(() => (progress.total ? Math.round((progress.done / progress.total) * 100) : 0))
 // Savable = everything not already saved and not parked awaiting a manual
-// decision (timeout rows). This is what Save All acts on and what the button counts.
-const savableCount = computed(() => rows.value.filter(r => r.saveStatus !== 'saved' && r.saveStatus !== 'timeout').length)
+// decision (timeouts) and not a confirmed duplicate. This is what Save All
+// acts on and what the button counts.
+const savableCount = computed(() => rows.value.filter(r => !NON_SAVABLE.has(r.saveStatus)).length)
 const anyInvalid = computed(() => rows.value.some(r => r.saveStatus === 'invalid'))
 const anyFailed = computed(() => rows.value.some(r => r.saveStatus === 'error'))
 const failedCount = computed(() => rows.value.filter(r => r.saveStatus === 'error').length)
 const anyTimeout = computed(() => rows.value.some(r => r.saveStatus === 'timeout'))
 const timeoutCount = computed(() => rows.value.filter(r => r.saveStatus === 'timeout').length)
+const anyDuplicate = computed(() => rows.value.some(r => r.saveStatus === 'duplicate'))
+const duplicateCount = computed(() => rows.value.filter(r => r.saveStatus === 'duplicate').length)
+// A row needs its purchase date verified when OCR couldn't read one (date left
+// blank on purpose — see makeRow) and it hasn't been saved yet.
+const anyNeedsDate = computed(() => rows.value.some(r => !r.date && r.saveStatus !== 'saved'))
+const needsDateCount = computed(() => rows.value.filter(r => !r.date && r.saveStatus !== 'saved').length)
 
-function todayIso() {
-  // Local calendar day (en-CA yields YYYY-MM-DD) — NOT toISOString(), which is
-  // UTC and rolls to "tomorrow" in the evening across US zones. Matches the
-  // driver ExpenseForm. OCR overrides this on a good read; PDFs/misreads keep it.
-  return new Date().toLocaleDateString('en-CA')
-}
+const pendingDraftWhen = computed(() => {
+  const ts = pendingDraft.value?.updatedAt
+  if (!ts) return ''
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return ''
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+})
+
 function isPdfFile(file) {
   return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')
 }
@@ -230,6 +366,21 @@ function readFileAsDataUrl(file) {
     reader.onerror = () => reject(new Error('read failed'))
     reader.readAsDataURL(file)
   })
+}
+
+// sha256 of the raw file bytes → used only for in-batch client-side dedup (skip
+// re-adding the identical file). The server independently hashes the payload it
+// receives and 409s a duplicate insert; these are two layers, not one hash.
+// Fails open ('' → not deduped) where SubtleCrypto is unavailable (e.g. non-HTTPS).
+async function hashFile(file) {
+  try {
+    if (!(file instanceof Blob) || !window.crypto?.subtle) return ''
+    const buf = await file.arrayBuffer()
+    const digest = await window.crypto.subtle.digest('SHA-256', buf)
+    return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
+  } catch {
+    return ''
+  }
 }
 
 // Decode + downscale in one createImageBitmap pass so a 12MP photo never
@@ -256,7 +407,7 @@ async function downscaleImage(blob) {
   }
 }
 
-function makeRow(file) {
+function makeRow(file, fileHash = '') {
   return {
     key: `r${rowSeq++}`,
     fileName: file.name || 'receipt',
@@ -265,7 +416,11 @@ function makeRow(file) {
     thumb: '',
     photoData: '',
     amount: '',
-    date: todayIso(),
+    // Purchase date, NOT upload date: left blank on purpose. OCR fills it from
+    // the receipt (processRow); when it can't, the row stays blank + flagged so
+    // the admin verifies it (required before save) rather than silently
+    // recording today's date.
+    date: '',
     type: 'Fuel',
     vendor: '',
     city: '',
@@ -275,6 +430,7 @@ function makeRow(file) {
     ocrStatus: 'queued',
     saveStatus: null,
     saveError: '',
+    fileHash,
   }
 }
 
@@ -316,6 +472,8 @@ async function processRow(row) {
     try {
       const data = await api.post('/api/expenses/ocr', { photoData: img }, { timeout: 30000 })
       if (data.amount != null) row.amount = String(data.amount)
+      // Only a real read sets the date. A blank leaves the row flagged so the
+      // recorded date is always the receipt's purchase date, never today.
       if (data.date) row.date = data.date
       if (data.vendor) row.vendor = String(data.vendor).slice(0, 80)
       if (data.city != null) row.city = String(data.city)
@@ -347,18 +505,32 @@ async function onFilesSelected(event) {
     toast('Pick a default driver first', 'error')
     return
   }
+  // Client-side dedup: skip any file whose exact bytes are already in the grid
+  // (hash of the raw file). Saves a wasted OCR call + a doomed save; the server
+  // still independently rejects a duplicate payload with 409.
+  const seen = new Set(rows.value.map(r => r.fileHash).filter(Boolean))
+  const accepted = []
+  let dupSkipped = 0
+  for (const f of picked) {
+    const h = await hashFile(f)
+    if (h && seen.has(h)) { dupSkipped++; continue }
+    if (h) seen.add(h)
+    accepted.push({ file: f, hash: h })
+  }
+  if (dupSkipped) toast(`Skipped ${dupSkipped} duplicate receipt${dupSkipped === 1 ? '' : 's'}`, 'error')
+  if (!accepted.length) return
   const remaining = MAX_BATCH - rows.value.length
   if (remaining <= 0) {
     toast(`Max ${MAX_BATCH} receipts per batch — save or clear first`, 'error')
     return
   }
-  let files = picked
-  if (picked.length > remaining) {
-    files = picked.slice(0, remaining)
+  let toAdd = accepted
+  if (accepted.length > remaining) {
+    toAdd = accepted.slice(0, remaining)
     toast(`Added ${remaining} — ${MAX_BATCH}-receipt limit reached`, 'error')
   }
   const start = rows.value.length
-  for (const f of files) rows.value.push(makeRow(f))
+  for (const item of toAdd) rows.value.push(makeRow(item.file, item.hash))
   const added = rows.value.slice(start) // reactive proxies for the new rows
   processing.value = true
   progress.done = 0
@@ -377,10 +549,18 @@ function applyDefaultToAll() {
 
 function removeRow(key) {
   rows.value = rows.value.filter(r => r.key !== key)
+  expanded.delete(key)
 }
 
 function clearAll() {
   rows.value = []
+  expanded.clear()
+  clearDraft()
+}
+
+function toggleExpand(key) {
+  if (expanded.has(key)) expanded.delete(key)
+  else expanded.add(key)
 }
 
 // Fill blanks when a default is chosen after some rows were already added.
@@ -388,6 +568,102 @@ watch(defaultDriver, (val) => {
   if (!val) return
   for (const r of rows.value) if (!r.driver) r.driver = val
 })
+
+// ── Server-side draft (cross-device resume) ────────────────────────────────
+// Persist only what's needed to rebuild the grid; drop the transient File and,
+// for images, the thumb (identical to photoData — rebuilt on load).
+function serializeRow(r) {
+  return {
+    key: r.key,
+    fileName: r.fileName,
+    isPdf: r.isPdf,
+    photoData: r.photoData,
+    amount: r.amount,
+    date: r.date,
+    type: r.type,
+    vendor: r.vendor,
+    city: r.city,
+    state: r.state,
+    driver: r.driver,
+    confidence: r.confidence,
+    ocrStatus: r.ocrStatus,
+    // A snapshot taken mid-save could catch 'saving' — normalize to pending so a
+    // resumed row is savable, never stuck.
+    saveStatus: r.saveStatus === 'saving' ? null : r.saveStatus,
+    saveError: r.saveError,
+    fileHash: r.fileHash,
+  }
+}
+
+function scheduleDraftSave() {
+  if (hydrating || pendingDraft.value) return
+  if (draftTimer) clearTimeout(draftTimer)
+  draftTimer = setTimeout(saveDraft, 1500)
+}
+
+async function saveDraft() {
+  draftTimer = null
+  if (pendingDraft.value) return // don't overwrite a draft the user hasn't resolved
+  const payloadRows = rows.value.filter(r => r.saveStatus !== 'saved').map(serializeRow)
+  try {
+    if (!payloadRows.length) { await api.del('/api/expenses/bulk-draft'); return }
+    const approxBytes = payloadRows.reduce((n, r) => n + (r.photoData ? r.photoData.length : 0) + 300, 0)
+    if (approxBytes > MAX_DRAFT_PERSIST_BYTES) {
+      console.warn('Bulk draft too large to persist — cross-device resume skipped for this batch')
+      return
+    }
+    await api.put('/api/expenses/bulk-draft', { rows: payloadRows })
+  } catch (err) {
+    // Draft persistence is a convenience; a failure must never disrupt the flow.
+    console.warn('Bulk draft save skipped:', err?.message || err)
+  }
+}
+
+async function clearDraft() {
+  if (draftTimer) { clearTimeout(draftTimer); draftTimer = null }
+  try { await api.del('/api/expenses/bulk-draft') } catch (err) { console.warn('Bulk draft clear skipped:', err?.message || err) }
+}
+
+function hydrateDraft(draftRows) {
+  hydrating = true
+  rows.value = (draftRows || []).map(r => ({
+    key: `r${rowSeq++}`, // re-key so restored rows never collide with new ones
+    fileName: r.fileName || 'receipt',
+    _blob: null,
+    isPdf: !!r.isPdf,
+    // Images stored photoData only; thumb is the same data URL, rebuilt here.
+    thumb: r.isPdf ? '' : (r.photoData || ''),
+    photoData: r.photoData || '',
+    amount: r.amount ?? '',
+    date: r.date || '',
+    type: r.type || 'Fuel',
+    vendor: r.vendor || '',
+    city: r.city || '',
+    state: r.state || '',
+    driver: r.driver || '',
+    confidence: r.confidence || '',
+    ocrStatus: r.ocrStatus || 'queued',
+    saveStatus: r.saveStatus === 'saving' ? null : (r.saveStatus || null),
+    saveError: r.saveError || '',
+    fileHash: r.fileHash || '',
+  }))
+  // Release the guard after the load-triggered watcher has flushed, so the very
+  // first change that re-saves the draft is a genuine user edit.
+  nextTick(() => { hydrating = false })
+}
+
+function resumeDraft() {
+  if (!pendingDraft.value) return
+  const dr = pendingDraft.value.rows || []
+  pendingDraft.value = null
+  hydrateDraft(dr)
+  toast(`Resumed ${dr.length} receipt${dr.length === 1 ? '' : 's'}`, 'success')
+}
+
+async function discardDraft() {
+  pendingDraft.value = null
+  await clearDraft()
+}
 
 async function saveOne(row) {
   row.saveStatus = 'saving'
@@ -412,16 +688,22 @@ async function saveOne(row) {
     }, { timeout: 30000 })
     row.saveStatus = 'saved'
   } catch (err) {
-    // A timeout/abort (status 0) is AMBIGUOUS — the server may have inserted the
-    // row before the response was lost. POST /api/expenses is not idempotent, so
-    // a blind retry double-books into the P&L. Park it in a distinct 'timeout'
-    // state that is excluded from auto-retry; the admin verifies in All Expenses
-    // and consciously hits per-row Retry only if it truly didn't land. A normal
-    // error (4xx/5xx) means the insert didn't happen, so it stays auto-retryable.
-    if (err?.status === 0) {
+    // 409 DUPLICATE_RECEIPT = the server already has this exact receipt. Park it
+    // as 'duplicate' (NOT retryable) so it's flagged, not double-booked.
+    if (err?.status === 409 && err?.code === 'DUPLICATE_RECEIPT') {
+      row.saveStatus = 'duplicate'
+      const existing = err?.data?.existingId
+      row.saveError = existing ? `Already logged as expense #${existing}` : 'This receipt was already logged'
+    } else if (err?.status === 0) {
+      // A timeout/abort (status 0) is AMBIGUOUS — the server may have inserted the
+      // row before the response was lost. POST /api/expenses is not idempotent, so
+      // a blind retry double-books into the P&L. Park it in a distinct 'timeout'
+      // state that is excluded from auto-retry; the admin verifies in All Expenses
+      // and consciously hits per-row Retry only if it truly didn't land.
       row.saveStatus = 'timeout'
       row.saveError = 'Timed out — it MAY have saved. Check All Expenses before retrying this row.'
     } else {
+      // A normal error (4xx/5xx) means the insert didn't happen, so it stays auto-retryable.
       row.saveStatus = 'error'
       row.saveError = err?.message || 'Failed to save'
     }
@@ -437,16 +719,17 @@ function retryRow(row) {
 }
 
 async function saveAll() {
-  // Exclude already-saved and parked 'timeout' rows — timeouts only re-enter via
-  // the conscious per-row Retry, never a blind Save All (would risk duplicates).
-  const pending = rows.value.filter(r => r.saveStatus !== 'saved' && r.saveStatus !== 'timeout')
+  // Exclude already-saved, parked 'timeout', and confirmed 'duplicate' rows —
+  // timeouts only re-enter via the conscious per-row Retry (blind resend risks
+  // duplicates); a duplicate would just 409 again.
+  const pending = rows.value.filter(r => !NON_SAVABLE.has(r.saveStatus))
   // Validate first — mark bad rows, don't send them.
   let invalid = 0
   for (const r of pending) {
     const amt = parseFloat(r.amount)
-    if (!r.driver) { r.saveStatus = 'invalid'; r.saveError = 'Pick a driver'; invalid++; continue }
-    if (!amt || amt <= 0) { r.saveStatus = 'invalid'; r.saveError = 'Amount must be > 0'; invalid++; continue }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(r.date || '')) { r.saveStatus = 'invalid'; r.saveError = 'Date required'; invalid++; continue }
+    if (!r.driver) { r.saveStatus = 'invalid'; r.saveError = 'Pick a driver'; invalid++; if (isMobile.value) expanded.add(r.key); continue }
+    if (!amt || amt <= 0) { r.saveStatus = 'invalid'; r.saveError = 'Amount must be > 0'; invalid++; if (isMobile.value) expanded.add(r.key); continue }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(r.date || '')) { r.saveStatus = 'invalid'; r.saveError = 'Verify the purchase date'; invalid++; if (isMobile.value) expanded.add(r.key); continue }
     r.saveStatus = null
     r.saveError = ''
   }
@@ -464,14 +747,19 @@ async function saveAll() {
   const saved = rows.value.filter(r => r.saveStatus === 'saved').length
   const failed = rows.value.filter(r => r.saveStatus === 'error').length
   const timedOut = rows.value.filter(r => r.saveStatus === 'timeout').length
+  const dup = rows.value.filter(r => r.saveStatus === 'duplicate').length
   if (saved > 0) emit('saved')
   const parts = [`${saved} saved`]
   if (failed) parts.push(`${failed} failed`)
   if (timedOut) parts.push(`${timedOut} timed out`)
+  if (dup) parts.push(`${dup} duplicate`)
   if (invalid) parts.push(`${invalid} need fixing`)
-  toast(parts.join(' · '), failed || timedOut || invalid ? 'error' : 'success')
-  // Drop the saved rows; keep failures/invalids in the grid for correction.
+  toast(parts.join(' · '), failed || timedOut || invalid ? 'error' : (dup ? 'error' : 'success'))
+  // Drop the saved rows; keep failures/invalids/timeouts/duplicates in the grid.
   rows.value = rows.value.filter(r => r.saveStatus !== 'saved')
+  // Persist the remaining state now (or clear the draft if the batch is done)
+  // so a device switch right after saving reflects reality.
+  saveDraft()
 }
 
 function rowClass(row) {
@@ -479,7 +767,8 @@ function rowClass(row) {
     'row-saving': row.saveStatus === 'saving',
     'row-error': row.saveStatus === 'error' || row.saveStatus === 'invalid',
     'row-warn': row.saveStatus === 'timeout',
-    'row-unread': row.ocrStatus === 'failed' && !row.saveStatus,
+    'row-dup': row.saveStatus === 'duplicate',
+    'row-unread': (row.ocrStatus === 'failed' || !row.date) && !row.saveStatus,
   }
 }
 function ocrTitle(row) {
@@ -489,6 +778,50 @@ function ocrTitle(row) {
   if (row.ocrStatus === 'skipped') return 'PDF attached — enter the fields manually'
   return ''
 }
+
+// Unified per-row status for the mobile card badge: the save state wins once a
+// save has been attempted, otherwise fall back to the scan state.
+function statusBadge(row) {
+  const s = row.saveStatus
+  if (s === 'saved') return { label: 'Saved', tone: 'good' }
+  if (s === 'saving') return { label: 'Saving…', tone: 'info' }
+  if (s === 'duplicate') return { label: 'Duplicate', tone: 'info' }
+  if (s === 'timeout') return { label: 'Timed out', tone: 'warn' }
+  if (s === 'error') return { label: 'Failed', tone: 'bad' }
+  if (s === 'invalid') return { label: 'Needs fix', tone: 'bad' }
+  const o = row.ocrStatus
+  if (o === 'ok') return { label: 'Read', tone: 'good' }
+  if (o === 'scanning') return { label: 'Scanning…', tone: 'neutral' }
+  if (o === 'queued') return { label: 'Queued', tone: 'neutral' }
+  if (o === 'failed') return { label: 'Not read', tone: 'warn' }
+  if (o === 'limited') return { label: 'Retry scan', tone: 'warn' }
+  if (o === 'ocr_off') return { label: 'Manual', tone: 'info' }
+  if (o === 'skipped') return { label: 'PDF', tone: 'info' }
+  return { label: o || '—', tone: 'neutral' }
+}
+
+// Auto-save the in-progress batch as the user works (debounced). Deep so a
+// field edit (v-model) or a status change schedules a save.
+watch(rows, () => scheduleDraftSave(), { deep: true })
+
+onMounted(async () => {
+  // On open, offer to resume a batch left in progress on another device/session.
+  // The grid starts empty, so a fetched draft is always eligible.
+  try {
+    const data = await api.get('/api/expenses/bulk-draft')
+    const draft = data?.draft
+    if (draft && Array.isArray(draft.rows) && draft.rows.length && !rows.value.length) {
+      pendingDraft.value = { rows: draft.rows, updatedAt: draft.updatedAt }
+    }
+  } catch (err) {
+    console.warn('Bulk draft check skipped:', err?.message || err)
+  }
+})
+
+onUnmounted(() => {
+  // Flush a pending debounced save so nothing is lost when navigating away.
+  if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; saveDraft() }
+})
 </script>
 
 <style scoped>
@@ -497,6 +830,16 @@ function ocrTitle(row) {
 .bulk-intro { display: flex; flex-direction: column; gap: 0.25rem; }
 .bulk-title { font-size: 1rem; font-weight: 700; color: var(--text); }
 .bulk-sub { font-size: 0.8rem; color: var(--text-dim); max-width: 60ch; line-height: 1.45; margin: 0; }
+
+.bulk-resume {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  flex-wrap: wrap; padding: 0.75rem 0.9rem; background: var(--blue-dim);
+  border: 1px solid var(--blue); border-radius: var(--radius);
+}
+.bulk-resume-text { display: flex; flex-direction: column; gap: 0.15rem; font-size: 0.82rem; color: var(--text); }
+.bulk-resume-text span { color: var(--text-dim); }
+.bulk-resume-actions { display: flex; align-items: center; gap: 0.5rem; }
+.bulk-resume-yes { padding: 0.45rem 0.9rem; }
 
 .bulk-controls {
   display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.6rem;
@@ -553,6 +896,7 @@ function ocrTitle(row) {
 .bulk-grid tbody tr.row-error { background: var(--danger-dim); }
 .bulk-grid tbody tr.row-warn { background: var(--amber-dim); }
 .bulk-grid tbody tr.row-unread { background: var(--amber-dim); }
+.bulk-grid tbody tr.row-dup { background: var(--blue-dim); }
 
 .col-thumb { width: 52px; }
 .col-status { width: 84px; }
@@ -583,6 +927,9 @@ function ocrTitle(row) {
 }
 .bulk-cell-st { text-transform: uppercase; }
 .bulk-cell.cell-error { border-color: var(--danger); }
+/* Purchase-date needs verifying (OCR couldn't read one) — amber, not a hard error. */
+.bulk-cell.cell-warn { border-color: var(--amber); background: var(--amber-dim); }
+.cell-hint-warn { display: block; margin-top: 0.15rem; font-size: 0.64rem; font-weight: 600; color: var(--amber); }
 
 .bulk-cell-actions { display: flex; align-items: center; justify-content: center; gap: 0.25rem; }
 .bulk-remove { background: transparent; border: none; color: var(--text-dim); font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 0 0.2rem; }
@@ -597,11 +944,58 @@ function ocrTitle(row) {
 .bulk-retry:disabled { opacity: 0.4; cursor: not-allowed; }
 .bulk-row-msg { font-size: 0.72rem; font-weight: 700; color: var(--text-dim); }
 .bulk-row-msg.err { color: var(--danger); }
+.bulk-row-msg.dup { color: var(--blue); }
 
-.bulk-savebar { display: flex; align-items: center; gap: 0.75rem; justify-content: flex-end; }
+/* ── Mobile cards ───────────────────────────────────────────────────────── */
+.bulk-cards { display: flex; flex-direction: column; gap: 0.6rem; }
+.bulk-card {
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+  overflow: hidden;
+}
+.bulk-card.row-error { border-color: var(--danger); }
+.bulk-card.row-warn { border-color: var(--amber); }
+.bulk-card.row-dup { border-color: var(--blue); }
+.bulk-card.row-unread { border-color: var(--amber); }
+.bulk-card.row-saving { opacity: 0.6; }
+.bulk-card-head {
+  display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0.7rem; cursor: pointer;
+}
+.bulk-card-thumb { flex: 0 0 auto; }
+.bulk-card-thumb .bulk-thumb { width: 46px; height: 46px; }
+.bulk-card-summary { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.bulk-card-line1 { display: flex; align-items: center; gap: 0.5rem; }
+.bulk-card-amount { font-weight: 700; font-size: 0.92rem; color: var(--text); margin-left: auto; }
+.bulk-card-line2 { display: flex; align-items: baseline; gap: 0.5rem; justify-content: space-between; }
+.bulk-card-vendor { font-size: 0.8rem; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bulk-card-date { font-size: 0.74rem; color: var(--text-dim); white-space: nowrap; }
+.bulk-card-line3 { font-size: 0.74rem; color: var(--text-dim); }
+.date-missing { color: var(--amber); font-weight: 600; }
+.bulk-card-chevron { flex: 0 0 auto; color: var(--text-dim); font-size: 0.8rem; }
+
+.bulk-status-badge {
+  display: inline-flex; align-items: center; font-size: 0.66rem; font-weight: 700;
+  padding: 0.15rem 0.45rem; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.st-good { color: var(--accent); background: var(--accent-dim); }
+.st-info { color: var(--blue); background: var(--blue-dim); }
+.st-warn { color: var(--amber); background: var(--amber-dim); }
+.st-bad { color: var(--danger); background: var(--danger-dim); }
+.st-neutral { color: var(--text-dim); background: var(--bg); }
+
+.bulk-card-body { padding: 0.2rem 0.7rem 0.7rem; border-top: 1px solid var(--border); }
+.bulk-card-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; margin-top: 0.6rem; }
+.bulk-field { display: flex; flex-direction: column; gap: 0.2rem; }
+.bulk-field-wide { grid-column: 1 / -1; }
+.bulk-field-label { font-size: 0.68rem; font-weight: 600; color: var(--text-dim); }
+.bulk-card-err { margin-top: 0.5rem; font-size: 0.72rem; font-weight: 600; color: var(--danger); }
+.bulk-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; margin-top: 0.6rem; }
+
+.bulk-savebar { display: flex; align-items: center; gap: 0.75rem; justify-content: flex-end; flex-wrap: wrap; }
 .bulk-savehint { font-size: 0.78rem; color: var(--text-dim); }
 .bulk-savehint.err { color: var(--danger); }
 .bulk-savehint.warn { color: var(--amber); }
+.bulk-savehint.info { color: var(--blue); }
 .bulk-save {
   padding: 0.55rem 1.1rem; background: var(--accent); color: #fff; font-weight: 700;
   font-size: 0.85rem; border: none; border-radius: 8px; cursor: pointer;
@@ -617,5 +1011,7 @@ function ocrTitle(row) {
 @media (max-width: 640px) {
   .bulk-input { min-width: 150px; }
   .bulk-count { margin-left: 0; }
+  .bulk-savebar { justify-content: stretch; }
+  .bulk-save { flex: 1; }
 }
 </style>
