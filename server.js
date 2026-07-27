@@ -409,6 +409,12 @@ try { db.exec("ALTER TABLE trucks ADD COLUMN title_state TEXT DEFAULT ''"); } ca
 try { db.prepare("SELECT maintenance_fund_monthly FROM trucks LIMIT 1").get(); }
 catch { try { db.exec("ALTER TABLE trucks ADD COLUMN maintenance_fund_monthly REAL DEFAULT 0"); } catch {} }
 
+// Migration: per-truck monthly truck payment (loan/lease). A fixed monthly cost
+// in the same family as insurance/ELD/IRP/HVUT. Split out from eld_monthly so the
+// ELD fee (~$50) and the truck payment (~$1,200) are separate, editable line
+// items; both are summed into each truck's monthly fixed cost everywhere.
+try { db.exec("ALTER TABLE trucks ADD COLUMN truck_payment_monthly REAL DEFAULT 0"); } catch {}
+
 // Trailers table
 db.exec(`
 	CREATE TABLE IF NOT EXISTS trailers (
@@ -7895,6 +7901,7 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			Photo: t.photo || '',
 			InsuranceMonthly: t.insurance_monthly || 0,
 			EldMonthly: t.eld_monthly || 0,
+			TruckPaymentMonthly: t.truck_payment_monthly || 0,
 			HvutAnnual: t.hvut_annual || 0,
 			IrpAnnual: t.irp_annual || 0,
 			AdminFeePct: t.admin_fee_pct ?? 50,
@@ -7997,7 +8004,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (!truck) return res.status(404).json({ error: "Truck not found" });
 
 		const { unitNumber, make, model, year, vin, licensePlate, status, assignedDriver, notes, ownerId,
-			photo, insuranceMonthly, eldMonthly, hvutAnnual, irpAnnual, adminFeePct, driverPayDaily,
+			photo, insuranceMonthly, eldMonthly, truckPaymentMonthly, hvutAnnual, irpAnnual, adminFeePct, driverPayDaily,
 			purchasePrice, titleStatus, maintenanceFundMonthly } = req.body;
 		// Accept snake_case (frontend) or camelCase for the fuel-range config.
 		const fuelTankGallons = req.body.fuel_tank_gallons ?? req.body.fuelTankGallons;
@@ -8042,6 +8049,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (photo !== undefined) { updates.push("photo = ?"); params.push(photo); }
 		if (insuranceMonthly !== undefined) { updates.push("insurance_monthly = ?"); params.push(parseFloat(insuranceMonthly) || 0); }
 		if (eldMonthly !== undefined) { updates.push("eld_monthly = ?"); params.push(parseFloat(eldMonthly) || 0); }
+		if (truckPaymentMonthly !== undefined) { updates.push("truck_payment_monthly = ?"); params.push(parseFloat(truckPaymentMonthly) || 0); }
 		if (hvutAnnual !== undefined) { updates.push("hvut_annual = ?"); params.push(parseFloat(hvutAnnual) || 0); }
 		if (irpAnnual !== undefined) { updates.push("irp_annual = ?"); params.push(parseFloat(irpAnnual) || 0); }
 		if (adminFeePct !== undefined) { updates.push("admin_fee_pct = ?"); params.push(parseFloat(adminFeePct) ?? 50); }
@@ -14276,7 +14284,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		}
 
 		let totalExpenses = 0;
-		let fuelExpenses = 0, maintenanceExpenses = 0, complianceExpenses = 0, otherExpenses = 0;
+		let fuelExpenses = 0, maintenanceExpenses = 0, complianceExpenses = 0, truckPaymentExpenses = 0, otherExpenses = 0;
 		// Parameterized date filters (avoid string interpolation in SQL)
 		let dateWhere = '';
 		const dateParams = [];
@@ -14338,13 +14346,18 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			// owns them); they just don't contribute compliance expense.
 			for (const t of ownedTrucks2) {
 				if (t.status !== "Active") continue;
+				const months = truckMonthsInPeriod(t);
 				const monthlyFixed = (t.eld_monthly || 0)
 					+ ((t.hvut_annual || 0) / 12)
 					+ ((t.irp_annual || 0) / 12);
-				const months = truckMonthsInPeriod(t);
 				const truckFixed = monthlyFixed * months;
 				complianceExpenses += truckFixed;
 				totalExpenses += truckFixed;
+				// Truck loan/lease payment — a fixed monthly cost, shown as its own
+				// P&L line (not lumped into Compliance). Split out of the ELD fee.
+				const truckPay = (t.truck_payment_monthly || 0) * months;
+				truckPaymentExpenses += truckPay;
+				totalExpenses += truckPay;
 			}
 			const compFees = (investorDriverSet
 				? db.prepare(`SELECT COALESCE(SUM(cf.amount),0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck)=LOWER(t.unit_number) WHERE t.owner_id=? AND t.status='Active' AND cf.status='Paid'`).get(user.id)
@@ -14360,8 +14373,9 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		fuelExpenses = Math.round(fuelExpenses);
 		maintenanceExpenses = Math.round(maintenanceExpenses);
 		complianceExpenses = Math.round(complianceExpenses);
+		truckPaymentExpenses = Math.round(truckPaymentExpenses);
 		otherExpenses = Math.round(otherExpenses);
-		totalExpenses = fuelExpenses + maintenanceExpenses + complianceExpenses + otherExpenses;
+		totalExpenses = fuelExpenses + maintenanceExpenses + complianceExpenses + truckPaymentExpenses + otherExpenses;
 
 		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
 		const netCashFlow = totalRevenue - totalExpenses;
@@ -14472,6 +14486,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			{ label: "  Fuel Expenses", value: `(${fmt(fuelExpenses)})`, indent: true, bold: false },
 			{ label: "  Maintenance & Repairs", value: `(${fmt(maintenanceExpenses)})`, indent: true, bold: false },
 			{ label: "  Compliance / Regulatory", value: `(${fmt(complianceExpenses)})`, indent: true, bold: false },
+			{ label: "  Truck Payment", value: `(${fmt(truckPaymentExpenses)})`, indent: true, bold: false },
 			{ label: "  Other Expenses", value: `(${fmt(otherExpenses)})`, indent: true, bold: false },
 			{ label: "Total Expenses", value: `(${fmt(totalExpenses)})`, indent: false, bold: false },
 			{ label: "Net Profit", value: fmt(netCashFlow), indent: false, bold: true },
@@ -16729,13 +16744,13 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 
 	// Monthly fixed costs — Active trucks only, charged from truck.created_at.
 	const truckFixedQuery = investorDriverSet
-		? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-		: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
+		? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+		: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
 	const fixedTrucks = db.prepare(truckFixedQuery).all(...(investorDriverSet ? [user.id] : []));
 	const getMonthlyFixedCosts = (monthKey) => {
 		let total = 0;
 		for (const t of fixedTrucks) {
-			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
+			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0) + ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 			if (t.created_at) {
 				const td = new Date(t.created_at);
 				const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
@@ -17442,12 +17457,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// truck is flipped off Active in the Trucks UI, its IRP/HVUT/ELD/
 			// insurance stops accruing on the investor bottom-line.
 			const truckQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
+				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
 			const truckArgs = investorDriverSet ? [user.id] : [];
 			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
 			for (const t of fleetTrucks) {
-				const fixedPerMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
+				const fixedPerMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
 					+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 				let truckMonths = monthsOfOperation;
 				if (t.created_at) {
@@ -17590,14 +17605,14 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// fix above. Reserve budget ≠ actual cost; actual maintenance
 			// flows through monthlyTripExp / maintByTruck.
 			const truckFixedQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-				: "SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
+				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
 			const truckFixedArgs = investorDriverSet ? [user.id] : [];
 			const fixedTrucks = db.prepare(truckFixedQuery).all(...truckFixedArgs);
 			function getMonthlyFixedCosts(monthKey) {
 				let total = 0;
 				for (const t of fixedTrucks) {
-					const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
+					const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
 						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 					// Only count if truck existed in this month
 					if (t.created_at) {
@@ -17678,6 +17693,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const fixedCostBreakdown = {
 			insurance: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.insurance_monthly || 0), 0)),
 			eld: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.eld_monthly || 0), 0)),
+			truckPayment: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.truck_payment_monthly || 0), 0)),
 			irp: Math.round(allOwnedTrucks.reduce((s, t) => s + ((t.irp_annual || 0) / 12), 0)),
 			hvut: Math.round(allOwnedTrucks.reduce((s, t) => s + ((t.hvut_annual || 0) / 12), 0)),
 			maintReserve: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.maintenance_fund_monthly || 0), 0)),
@@ -17715,7 +17731,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// maintenance_fund_monthly (reserve budget, not actual
 				// cost; actuals are in maintExp). Same fix applied to the
 				// fleet totalExpenses loop and /api/financials.
-				const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0)
+				const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0) + (truck.truck_payment_monthly || 0)
 					+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12);
 				let truckMonths = monthsOfOperation;
 				if (truck.created_at) {
@@ -18741,7 +18757,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const allTrucks = db.prepare("SELECT * FROM trucks WHERE status = 'Active'").all();
 		let totalFixedCosts = 0;
 		for (const t of allTrucks) {
-			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0)
+			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
 				+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 			const unitLower = (t.unit_number || "").toLowerCase();
 			let truckMonths = monthsOfOperation;
@@ -18821,7 +18837,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// already counted via maintExp service rows). Same rationale
 			// as the fleet totalFixedCosts loop above — keeps fleet and
 			// per-truck consistent.
-			const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0)
+			const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0) + (truck.truck_payment_monthly || 0)
 				+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12);
 
 			// Operating window: prefer the actual range of load dates for
@@ -19046,7 +19062,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// from its created_at onward (maintenance-fund reserve omitted, same
 			// as the fleet totals).
 			const fixedTrucks = db.prepare(
-				"SELECT insurance_monthly, eld_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'"
+				"SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'"
 			).all();
 			const monthlyFixedCosts = (mk) => {
 				let total = 0;
@@ -19058,7 +19074,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 							if (mk < truckKey) continue; // truck didn't exist yet
 						}
 					}
-					total += (t.insurance_monthly || 0) + (t.eld_monthly || 0)
+					total += (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
 						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 				}
 				return Math.round(total);

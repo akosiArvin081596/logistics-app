@@ -454,6 +454,11 @@
               </div>
               <div class="modal-hint">Electronic Logging Device &mdash; federally required to track driver hours.</div>
               <div class="modal-row">
+                <span>Truck Payment</span>
+                <span class="val danger">{{ fmt(fcb.truckPayment) }}</span>
+              </div>
+              <div class="modal-hint">Monthly truck loan / lease payment.</div>
+              <div class="modal-row">
                 <span>IRP Registration</span>
                 <span class="val danger">{{ fmt(fcb.irp) }}</span>
               </div>
@@ -469,7 +474,7 @@
                 <span>Total Fixed Costs</span>
                 <span class="val danger">{{ fmt(selected.fixedCosts) }}</span>
               </div>
-              <div class="modal-math">{{ fmt(fcb.insurance) }} + {{ fmt(fcb.eld) }} + {{ fmt(fcb.irp) }} + {{ fmt(fcb.hvut) }} = {{ fmt(selected.fixedCosts) }}/mo</div>
+              <div class="modal-math">{{ fmt(fcb.insurance) }} + {{ fmt(fcb.eld) }} + {{ fmt(fcb.truckPayment) }} + {{ fmt(fcb.irp) }} + {{ fmt(fcb.hvut) }} = {{ fmt(selected.fixedCosts) }}/mo</div>
             </template>
           </div>
         </template>
@@ -714,7 +719,7 @@ function monthLabel(mk) {
 
 // --- Detail modal ---
 const detailType = ref('')
-const fcb = computed(() => props.production?.fixedCostBreakdown || { insurance: 0, eld: 0, irp: 0, hvut: 0, maintReserve: 0, truckCount: 1 })
+const fcb = computed(() => props.production?.fixedCostBreakdown || { insurance: 0, eld: 0, truckPayment: 0, irp: 0, hvut: 0, maintReserve: 0, truckCount: 1 })
 
 function openDetail(type) {
   detailType.value = type

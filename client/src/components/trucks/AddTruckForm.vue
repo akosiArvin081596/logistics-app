@@ -144,6 +144,10 @@
       </div>
       <div class="form-row">
         <div class="form-group">
+          <label class="form-label">Truck Payment ($/mo)</label>
+          <input v-model.number="form.truckPaymentMonthly" class="form-input" type="number" min="0" placeholder="0" />
+        </div>
+        <div class="form-group">
           <label class="form-label">Admin Fee (%)</label>
           <input v-model.number="form.adminFeePct" class="form-input" type="number" min="0" max="100" placeholder="50" />
         </div>
@@ -204,6 +208,7 @@ const form = reactive({
   photo: '',
   insuranceMonthly: 0,
   eldMonthly: 0,
+  truckPaymentMonthly: 0,
   hvutAnnual: 0,
   irpAnnual: 0,
   adminFeePct: 50,
@@ -252,6 +257,7 @@ function handleSubmit() {
     photo: form.photo,
     insuranceMonthly: form.insuranceMonthly,
     eldMonthly: form.eldMonthly,
+    truckPaymentMonthly: form.truckPaymentMonthly,
     hvutAnnual: form.hvutAnnual,
     irpAnnual: form.irpAnnual,
     adminFeePct: form.adminFeePct,
@@ -279,6 +285,7 @@ function handleSubmit() {
   form.photo = ''
   form.insuranceMonthly = 0
   form.eldMonthly = 0
+  form.truckPaymentMonthly = 0
   form.hvutAnnual = 0
   form.irpAnnual = 0
   form.adminFeePct = 50

@@ -270,9 +270,15 @@
                 <input v-model.number="editForm.irpAnnual" type="number" min="0" />
               </div>
             </div>
-            <div class="edit-field">
-              <label>Admin Fee (%)</label>
-              <input v-model.number="editForm.adminFeePct" type="number" min="0" max="100" />
+            <div class="edit-row">
+              <div class="edit-field">
+                <label>Truck Payment ($/mo)</label>
+                <input v-model.number="editForm.truckPaymentMonthly" type="number" min="0" />
+              </div>
+              <div class="edit-field">
+                <label>Admin Fee (%)</label>
+                <input v-model.number="editForm.adminFeePct" type="number" min="0" max="100" />
+              </div>
             </div>
           </details>
 
@@ -312,6 +318,7 @@
           <div class="view-row"><span class="view-label">Maintenance Fund</span><span>{{ viewTruck.MaintenanceFundMonthly ? '$' + viewTruck.MaintenanceFundMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Insurance</span><span>{{ viewTruck.InsuranceMonthly ? '$' + viewTruck.InsuranceMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
+          <div class="view-row"><span class="view-label">Truck Payment</span><span>{{ viewTruck.TruckPaymentMonthly ? '$' + Number(viewTruck.TruckPaymentMonthly).toLocaleString() + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '$250/day (default)' }}</span></div>
           <div class="view-row"><span class="view-label">Fuel Tank</span><span>{{ viewTruck.FuelTankGallons ? viewTruck.FuelTankGallons + ' gal' : '200 gal (default)' }}</span></div>
           <div class="view-row"><span class="view-label">Avg MPG</span><span>{{ viewTruck.AvgMpg ? viewTruck.AvgMpg + ' mpg' : 'Auto from ELD' }}</span></div>
@@ -385,7 +392,7 @@ const showEdit = ref(false)
 const editForm = reactive({
   id: null, unitNumber: '', make: '', model: '', year: 0,
   vin: '', licensePlate: '', status: 'Active', assignedDriver: '', ownerId: 0, notes: '',
-  photo: '', insuranceMonthly: 0, eldMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50, driverPayDaily: 0,
+  photo: '', insuranceMonthly: 0, eldMonthly: 0, truckPaymentMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50, driverPayDaily: 0,
   purchasePrice: 0, titleStatus: 'Clean', maintenanceFundMonthly: 0,
   fuelTankGallons: '', avgMpg: '',
 })
@@ -405,6 +412,7 @@ function openEdit(truck) {
   editForm.photo = truck.Photo || ''
   editForm.insuranceMonthly = truck.InsuranceMonthly || 0
   editForm.eldMonthly = truck.EldMonthly || 0
+  editForm.truckPaymentMonthly = truck.TruckPaymentMonthly || 0
   editForm.hvutAnnual = truck.HvutAnnual || 0
   editForm.irpAnnual = truck.IrpAnnual || 0
   editForm.adminFeePct = truck.AdminFeePct ?? 50
@@ -445,6 +453,7 @@ function handleSaveEdit() {
       photo: editForm.photo,
       insuranceMonthly: editForm.insuranceMonthly,
       eldMonthly: editForm.eldMonthly,
+      truckPaymentMonthly: editForm.truckPaymentMonthly,
       hvutAnnual: editForm.hvutAnnual,
       irpAnnual: editForm.irpAnnual,
       adminFeePct: editForm.adminFeePct,
