@@ -14944,6 +14944,18 @@ app.post("/api/location", requireAuth, locationLimiter, (req, res) => {
 // (Legacy phone-GPS POST /api/location body removed 2026-05-13. Geofence logic
 //  now lives in tryGeofenceAdvance() above and runs from the Routemate sync.)
 
+// Movement state for the tracking panel (Moving / Idling / Parked). Derived from
+// live GPS — NOT FMCSA duty status. Per client: a moving truck means driving, a
+// stopped one means stopped. A fresh ELD ping (< 15 min old) above the ~5 mph
+// travel gate is "moving"; fresh but slower is "idling"; no recent ping is "parked".
+const MOVEMENT_MOVING_MPS = 2.235;         // ~5 mph — same gate as the ELD travel-day basis
+const MOVEMENT_ACTIVE_MS = 15 * 60 * 1000; // ELD ping within 15 min = truck active; older = parked
+function classifyMovement(loc) {
+	const age = loc ? loc.lastPingAge : null;
+	if (age == null || age >= MOVEMENT_ACTIVE_MS) return "parked";
+	return (loc.speed || 0) > MOVEMENT_MOVING_MPS ? "moving" : "idling";
+}
+
 // GET /api/locations/latest — Latest position per active driver with ETA
 app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
@@ -15292,6 +15304,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			console.error("ETA enrichment error:", etaErr.message);
 			// Still return locations without ETA
 		}
+
+		// Movement state (Moving / Idling / Parked) for the tracking panel — derived
+		// from live GPS, NOT FMCSA duty status (per client: a moving truck is driving,
+		// a stopped one is stopped). Fresh ELD ping above the ~5 mph travel gate =
+		// moving; fresh but slower = idling; no recent ping = parked.
+		locations.forEach((loc) => { loc.movement = classifyMovement(loc); });
 
 		res.json({ locations });
 	} catch (error) {

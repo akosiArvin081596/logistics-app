@@ -70,7 +70,7 @@
               :class="['driver-item', { active: selectedDriver === loc.driver, 'no-gps': loc.noGps }]"
               @click="!loc.noGps && (selectedDriver === loc.driver ? collapseDriver() : focusDriver(loc))"
             >
-              <span :class="['driver-dot', loc.noGps ? 'no-gps' : trackStatus(loc)]"></span>
+              <span :class="['driver-dot', loc.noGps ? 'no-gps' : movementState(loc)]"></span>
               <div class="driver-info">
                 <span class="driver-name">
                   {{ loc.driver }}
@@ -97,7 +97,7 @@
                   <span class="status-text no-gps">No location data</span>
                 </span>
                 <span v-else class="driver-meta">
-                  <span :class="['status-text', trackStatus(loc)]">{{ statusLabel(loc) }}</span>
+                  <span :class="['status-text', movementState(loc)]">{{ movementLabel(loc) }}</span>
                   <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
                 </span>
                 <span v-if="inTransitLoad(loc)" class="driver-load">{{ inTransitLoad(loc) }}</span>
@@ -1039,6 +1039,8 @@ function syncDriverMarkers() {
 
 function buildDriverPopupContent(loc) {
   let html = `<div style="font-family:DM Sans,sans-serif;font-size:0.85rem"><strong>${loc.driver}</strong>`
+  const mv = movementState(loc)
+  html += `<div style="color:${mv === 'moving' ? '#16a34a' : mv === 'idling' ? '#d97706' : '#6b7280'};font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;margin-top:1px">${MOVE_LABELS[mv]}</div>`
   const loadId = inTransitLoad(loc)
   if (loadId) html += `<div style="color:#555;font-size:0.8rem">Load: ${loadId}</div>`
   html += `<div style="color:#888;font-size:0.72rem;font-family:JetBrains Mono,monospace">${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}</div>`
@@ -1565,12 +1567,33 @@ function statusLabel(loc) {
   return STATUS_LABELS[trackStatus(loc)] || 'Offline'
 }
 
+// Movement state (Moving / Idling / Parked) — what the owner asked to see
+// (2026-07-28: "I just need to know when you're moving, idling and parked and the
+// location"). Pure live-GPS, NOT FMCSA duty status. Mirrors the server's
+// classifyMovement so the list, the map arrow, and the API all agree:
+//   moving — fresh ELD ping (<15 min) above the ~5 mph travel gate
+//   idling — fresh ELD ping at/under the gate (stopped but still reporting)
+//   parked — no recent ping (ELD off / parked) or no fix
+const MOVE_ACTIVE_MS = 15 * 60 * 1000
+const MOVE_MPS = 2.235 // ~5 mph
+function movementState(loc) {
+  if (!loc || loc.noGps || !hasFix(loc)) return 'parked'
+  const ts = loc.timestamp ? new Date(loc.timestamp).getTime() : null
+  const age = ts != null ? (now.value - ts) : (loc.lastPingAge ?? null)
+  if (age == null || age >= MOVE_ACTIVE_MS) return 'parked'
+  return (loc.speed || 0) > MOVE_MPS ? 'moving' : 'idling'
+}
+const MOVE_LABELS = { moving: 'Moving', idling: 'Idling', parked: 'Parked' }
+function movementLabel(loc) {
+  return MOVE_LABELS[movementState(loc)] || 'Parked'
+}
+
 // Truck-arrow color mirrors the panel dot so the map and the list agree:
-// green = online, amber = dormant, grey = offline/stale. (Offline stays grey
+// green = moving, amber = idling, grey = parked/stale. (Parked stays grey
 // rather than red on the map so it doesn't clash with the red drop-off pin.)
 function markerColor(loc) {
-  const s = trackStatus(loc)
-  return s === 'online' ? '#16a34a' : s === 'dormant' ? '#f59e0b' : '#9ca3af'
+  const s = movementState(loc)
+  return s === 'moving' ? '#16a34a' : s === 'idling' ? '#f59e0b' : '#9ca3af'
 }
 
 function timeAgo(ts) {
@@ -2120,6 +2143,18 @@ onUnmounted(() => {
 .driver-dot.offline {
   background: #9ca3af;
 }
+/* Movement state dots (Moving / Idling / Parked) — green / amber / grey. */
+.driver-dot.moving {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+}
+.driver-dot.idling {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+}
+.driver-dot.parked {
+  background: #9ca3af;
+}
 .driver-dot.no-gps {
   background: #d1d5db;
 }
@@ -2198,6 +2233,15 @@ onUnmounted(() => {
 }
 .status-text.offline {
   color: #9ca3af;
+}
+.status-text.moving {
+  color: #16a34a;
+}
+.status-text.idling {
+  color: #d97706;
+}
+.status-text.parked {
+  color: #6b7280;
 }
 .driver-ago {
   font-size: 0.6rem;
