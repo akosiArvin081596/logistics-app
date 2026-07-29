@@ -196,7 +196,7 @@
               <div class="mobile-exp-amount">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
               <div class="mobile-exp-bottom-right">
                 <a v-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener" @click.stop>PDF</a>
-                <img v-else-if="e.photo_data" :src="e.photo_data" class="receipt-thumb mobile-exp-thumb" @click.stop="previewImg = e.photo_data" alt="Receipt" />
+                <img v-else-if="e.photo_data" :src="`/api/expenses/${e.id}/receipt-thumbnail`" loading="lazy" decoding="async" class="receipt-thumb mobile-exp-thumb" @click.stop="previewImg = e.photo_data" alt="Receipt" />
                 <span :class="['status-pill', 'st-' + (e.status || 'Pending').toLowerCase()]">{{ e.status || 'Pending' }}</span>
               </div>
             </div>
@@ -262,7 +262,7 @@
               <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
               <td @click.stop>
                 <a v-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener">PDF</a>
-                <img v-else-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
+                <img v-else-if="e.photo_data" :src="`/api/expenses/${e.id}/receipt-thumbnail`" loading="lazy" decoding="async" class="receipt-thumb" @click="previewImg = e.photo_data" @mouseenter="showReceiptPreview(e, $event)" @mouseleave="hideReceiptPreview" />
                 <span v-else class="dim">&mdash;</span>
               </td>
               <td>
@@ -282,6 +282,19 @@
 
       <!-- Receipt preview overlay (zoom + pan) -->
       <ZoomableImage :src="previewImg" alt="Receipt" @close="previewImg = null" />
+
+      <!-- Hover-to-zoom: a large receipt preview that appears beside the hovered
+           row's thumbnail (no click needed). pointer-events:none so it never
+           steals the mouse; click still opens the full zoomable lightbox. -->
+      <Teleport to="body">
+        <div
+          v-if="hoverReceipt"
+          class="receipt-hover-preview"
+          :style="{ top: hoverReceipt.top + 'px', left: hoverReceipt.left + 'px', width: hoverReceipt.w + 'px', maxHeight: hoverReceipt.maxH + 'px' }"
+        >
+          <img :src="hoverReceipt.src" alt="Receipt preview" />
+        </div>
+      </Teleport>
 
       <!-- Expense breakdown modal. Opens on row click. Shows the same fields
            that live in the DB but aren't in the list (gallons, odometer,
@@ -871,6 +884,23 @@ const allExpenses = ref([])
 const allLoading = ref(true)
 const allDrivers = ref([])
 const previewImg = ref(null)
+
+// Hover-to-zoom for the list receipt thumbnails: a floating full-size preview
+// appears beside the hovered row (no click). Anchored to the thumbnail and
+// clamped to the viewport; clicking still opens the full zoomable lightbox.
+const hoverReceipt = ref(null) // { src, top, left, w, maxH }
+function showReceiptPreview(exp, evt) {
+  if (!exp || !exp.photo_data || isPdfReceipt(exp.photo_data)) return
+  const r = evt.currentTarget.getBoundingClientRect()
+  const w = 340
+  let left = r.left - w - 14 // prefer the left of the thumb (thumbs sit near the right edge)
+  if (left < 8) left = Math.min(r.right + 14, window.innerWidth - w - 8)
+  let top = Math.max(8, r.top - 20)
+  let maxH = window.innerHeight - top - 12
+  if (maxH < 260) { maxH = Math.min(560, window.innerHeight - 16); top = Math.max(8, window.innerHeight - maxH - 12) }
+  hoverReceipt.value = { src: exp.photo_data, top, left, w, maxH }
+}
+function hideReceiptPreview() { hoverReceipt.value = null }
 // Detail modal: track by expense id, not array index — robust if the list
 // refetches (socket event from another tab) while the modal is open. null
 // means closed.
@@ -1741,12 +1771,17 @@ useSocketRefresh('expenses:changed', () => {
 
 onMounted(() => {
   loadAll()
-  loadFuel()
   loadTruckList()
-  if (auth.isSuperAdmin) {
-    loadMaintenance()
-    loadIfta()
-  }
+})
+// Defer per-tab analytics until their sub-tab is first opened. The list view
+// doesn't need the fuel/maintenance/IFTA aggregates (IFTA especially crunches
+// the large telemetry table), so loading them on mount just slowed the initial
+// page. Each loads once, lazily, when its tab is first shown.
+const _tabLoaded = { fuel: false, maintenance: false, ifta: false }
+watch(activeSubTab, (tab) => {
+  if (tab === 'fuel' && !_tabLoaded.fuel) { _tabLoaded.fuel = true; loadFuel() }
+  if (tab === 'maintenance' && !_tabLoaded.maintenance && auth.isSuperAdmin) { _tabLoaded.maintenance = true; loadMaintenance() }
+  if (tab === 'ifta' && !_tabLoaded.ifta && auth.isSuperAdmin) { _tabLoaded.ifta = true; loadIfta() }
 })
 </script>
 
@@ -2099,7 +2134,27 @@ tr:hover td { background: var(--surface-hover); }
   border: 1px solid var(--border);
   background: #fafbfd;
 }
+.receipt-thumb { cursor: zoom-in; }
 .receipt-thumb:hover { opacity: 0.7; }
+.receipt-hover-preview {
+  position: fixed;
+  z-index: 4000;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  box-shadow: 0 14px 44px rgba(15, 23, 42, 0.28);
+  padding: 6px;
+  box-sizing: border-box;
+  pointer-events: none;
+  overflow: hidden;
+}
+.receipt-hover-preview img {
+  display: block;
+  width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
 
 /* PDF receipt chip — link out instead of an <img> (table cell, mobile card,
    add-form preview). */
