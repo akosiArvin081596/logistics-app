@@ -104,7 +104,7 @@
       <template v-if="detailType === 'netCashFlow'">
         <div class="modal-breakdown">
           <div class="modal-explain">
-            Net Cash Flow is the bottom-line number at the fleet level &mdash; total revenue minus every dollar spent on operating the fleet. This is calculated <strong>before</strong> the 50/50 investor/LogisX split.
+            Net Cash Flow is the bottom-line number at the fleet level &mdash; total revenue minus every dollar spent on operating the fleet. This is calculated <strong>before</strong> the {{ investorSplitPct }}%/{{ 100 - investorSplitPct }}% investor/LogisX split.
           </div>
           <div class="step-label">The Calculation</div>
           <div class="modal-row highlight">
@@ -122,7 +122,7 @@
           </div>
           <div class="modal-math">{{ fmt(totalRevenue) }} - {{ fmt(totalExpenses) }} = {{ fmt(netCashFlow) }}</div>
           <div class="modal-callout info">
-            Your share is roughly half of this number after each month is split. See "Your Earnings (to date)" for the cumulative investor figure.
+            Your share is {{ investorSplitPct }}% of this number after each month is split. See "Your Earnings (to date)" for the cumulative investor figure.
           </div>
         </div>
       </template>
@@ -131,7 +131,7 @@
       <template v-if="detailType === 'investorNetToDate'">
         <div class="modal-breakdown">
           <div class="modal-explain">
-            This is the cumulative take-home you have earned across every month since the truck started operating. It is the sum of each month's investor share (after driver pay, fixed costs, and trip expenses, divided by 2).
+            This is the cumulative take-home you have earned across every month since the truck started operating. It is the sum of each month's investor share (after driver pay, fixed costs, and trip expenses, times your {{ investorSplitPct }}% share).
           </div>
           <template v-if="monthlyEarnings.length">
             <div class="step-label">Month-by-Month History</div>
@@ -264,6 +264,9 @@ const totalPurchasePrice = computed(() => props.production?.totalPurchasePrice |
 const investorNetToDate = computed(() => props.production?.investorNetToDate || 0)
 const trailing3MonthInvestor = computed(() => props.production?.trailing3MonthInvestor || 0)
 const monthlyEarnings = computed(() => props.production?.monthlyEarnings || [])
+// Investor's share of net profit, driven by the configured split (server returns
+// investorSplitPct on the production payload). Defaults to 50 when absent.
+const investorSplitPct = computed(() => props.production?.investorSplitPct ?? 50)
 
 const netCashFlow = computed(() => totalRevenue.value - totalExpenses.value)
 

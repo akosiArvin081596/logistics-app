@@ -32,7 +32,7 @@
         <div class="earn-label">Your Earnings</div>
         <div class="earn-value">{{ fmt(selected.investorEarnings) }}</div>
         <div class="earn-sub">{{ investorSplitPct }}% of net profit ({{ fmt(selected.netProfit) }})</div>
-        <div class="earn-formula">= (revenue - driverPay - fixedCosts - tripExpenses) × {{ investorSplitPct }}%</div>
+        <div class="earn-formula">= (revenue - all costs) × {{ investorSplitPct }}%</div>
         <div class="click-hint">Click to see full breakdown</div>
       </div>
 
@@ -73,7 +73,7 @@
           <span class="breakdown-label">- Fixed Costs</span>
           <span class="breakdown-value">{{ fmt(-selected.fixedCosts) }}</span>
           <span class="breakdown-formula" v-if="selected.fixedCostsDeferred">not charged — truck inactive this month</span>
-          <span class="breakdown-formula" v-else>= insurance + ELD + IRP/12 + HVUT/12</span>
+          <span class="breakdown-formula" v-else>= insurance + ELD + truck payment + IRP/12 + HVUT/12</span>
         </div>
         <div
           class="breakdown-row deduct clickable"
@@ -87,6 +87,16 @@
           <span class="breakdown-value">{{ fmt(-selected.tripExpenses) }}</span>
           <span class="breakdown-formula">= fuel + tolls + repairs (from expenses table)</span>
         </div>
+        <div class="breakdown-row deduct" v-if="selected.maintFundCost > 0">
+          <span class="breakdown-label">- Maintenance Fund</span>
+          <span class="breakdown-value">{{ fmt(-selected.maintFundCost) }}</span>
+          <span class="breakdown-formula">= monthly maintenance reserve</span>
+        </div>
+        <div class="breakdown-row deduct" v-if="selected.complianceCost > 0">
+          <span class="breakdown-label">- Compliance / IFTA</span>
+          <span class="breakdown-value">{{ fmt(-selected.complianceCost) }}</span>
+          <span class="breakdown-formula">= IFTA + compliance fees</span>
+        </div>
         <div class="breakdown-divider"></div>
         <div
           class="breakdown-row total clickable"
@@ -98,7 +108,7 @@
         >
           <span class="breakdown-label">Net Profit</span>
           <span class="breakdown-value" :style="{ color: selected.netProfit >= 0 ? 'var(--accent)' : 'var(--danger)' }">{{ fmt(selected.netProfit) }}</span>
-          <span class="breakdown-formula">= revenue - driverPay - fixedCosts - tripExpenses</span>
+          <span class="breakdown-formula">= revenue - all costs</span>
         </div>
         <div class="breakdown-row split">
           <span class="breakdown-label">× {{ investorSplitPct }}%</span>

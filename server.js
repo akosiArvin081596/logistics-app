@@ -296,6 +296,9 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_loc_state ON expenses(loc
 // lookup at POST /api/expenses requires a non-empty hash). Additive + reversible.
 try { db.exec("ALTER TABLE expenses ADD COLUMN receipt_hash TEXT DEFAULT ''"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_receipt_hash ON expenses(receipt_hash)"); } catch {}
+// Dynamic OCR-extracted receipt fields as a JSON label/value list — populated by
+// runReceiptOcr's `details` + POST /api/expenses/:id/extract-details. '' = none/legacy.
+try { db.exec("ALTER TABLE expenses ADD COLUMN receipt_details TEXT DEFAULT ''"); } catch {}
 
 // Bulk receipt upload drafts — one in-progress batch per user so a stack a
 // dispatcher starts on a phone can be finished on a computer. draft_json holds
@@ -12280,10 +12283,33 @@ function spendGeocodeBudget() {
 }
 
 // POST /api/expenses — Log a new expense (SQLite)
+// Receipt "details" = the dynamic label/value pairs runReceiptOcr extracts from
+// a receipt (fuel: pump/grade/PPG; food: items/tax/tip; etc.), stored as a JSON
+// string in expenses.receipt_details. sanitize → store, parse → serve.
+function sanitizeReceiptDetails(v) {
+	let arr = v;
+	if (typeof arr === "string") { try { arr = JSON.parse(arr); } catch { return ""; } }
+	if (!Array.isArray(arr)) return "";
+	const clean = arr
+		.filter((d) => d && typeof d === "object" && typeof d.label === "string" && d.label.trim())
+		.slice(0, 40)
+		.map((d) => ({
+			label: d.label.trim().slice(0, 40),
+			value: (typeof d.value === "string" ? d.value : String(d.value == null ? "" : d.value)).trim().slice(0, 200),
+		}));
+	return clean.length ? JSON.stringify(clean) : "";
+}
+function parseReceiptDetails(s) {
+	if (!s || typeof s !== "string") return [];
+	try { const a = JSON.parse(s); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+
 app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
 		const { loadId, type, amount, description, date, photoData, gallons, odometer, city, state, vendor } =
 			req.body;
+		// Dynamic OCR-extracted receipt fields the client reviewed (editable). Optional.
+		const safeReceiptDetails = sanitizeReceiptDetails(req.body.receiptDetails != null ? req.body.receiptDetails : req.body.receipt_details);
 		// SECURITY: drivers must use their session identity; admin/dispatcher
 		// can pass driver in the body to log on behalf. Investors cannot log
 		// at all. resolveDriverActor returns null after sending the response.
@@ -12427,12 +12453,12 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		}
 		const result = db
 			.prepare(
-				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_hash)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_hash, receipt_details)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoUrlOrPath,
 				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit, enrichCity, enrichState,
-				safeVendor, vendorNormalized, locLat, locLng, locSource, receiptHash);
+				safeVendor, vendorNormalized, locLat, locLng, locSource, receiptHash, safeReceiptDetails);
 		notifyChange("expenses");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -12577,6 +12603,63 @@ app.post("/api/expenses/ocr", requireAuth, expenseOcrLimiter, async (req, res) =
 	} catch (err) {
 		console.error("Expense OCR error:", err.message);
 		res.status(500).json({ error: "ocr_failed" });
+	}
+});
+
+// POST /api/expenses/:id/extract-details — run Gemini vision on an ALREADY
+// stored receipt to (re)build its dynamic label/value details list, so the
+// expense modal can surface "all important info" for receipts logged before
+// details capture existed. Images only (PDFs → 415). Reuses runReceiptOcr;
+// expenseOcrLimiter caps Gemini spend. Super Admin / Dispatcher only (the admin
+// Expenses modal is the sole caller).
+app.post("/api/expenses/:id/extract-details", requireRole("Super Admin", "Dispatcher"), expenseOcrLimiter, async (req, res) => {
+	try {
+		if (!GEMINI_API_KEY) return res.status(503).json({ error: "ocr_unavailable" });
+		const id = parseInt(req.params.id, 10);
+		if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid expense id" });
+		const exp = db.prepare("SELECT id, photo_data FROM expenses WHERE id = ?").get(id);
+		if (!exp) return res.status(404).json({ error: "Expense not found" });
+		const photo = exp.photo_data || "";
+		if (!photo) return res.status(404).json({ error: "No receipt on file" });
+
+		// Build an image data URI from either an inline data URI or a stored file.
+		let dataUri = "";
+		if (photo.startsWith("data:image/")) {
+			dataUri = photo;
+		} else if (/^data:application\/pdf/i.test(photo) || /\.pdf$/i.test(photo)) {
+			return res.status(415).json({ error: "PDF receipts can't be auto-extracted" });
+		} else if (photo.startsWith("/uploads/expense-receipts/")) {
+			const fname = path.basename(photo); // strips any traversal segments
+			const abs = path.join(RECEIPTS_DIR, fname);
+			if (!abs.startsWith(RECEIPTS_DIR + path.sep)) return res.status(400).json({ error: "Invalid receipt path" });
+			let st;
+			try { st = fs.statSync(abs); } catch { return res.status(404).json({ error: "Receipt file missing" }); }
+			// Cap the disk read before base64 — receipts are canvas-compressed images;
+			// anything over 10 MB isn't a real receipt and would spike memory + Gemini cost.
+			if (st.size > 10 * 1024 * 1024) return res.status(413).json({ error: "Receipt too large to scan" });
+			let buf;
+			try { buf = fs.readFileSync(abs); } catch { return res.status(404).json({ error: "Receipt file missing" }); }
+			const ext = fname.split(".").pop().toLowerCase();
+			const mime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+			dataUri = `data:${mime};base64,${buf.toString("base64")}`;
+		} else {
+			return res.status(415).json({ error: "Receipt format not supported for extraction" });
+		}
+
+		let ocr;
+		try {
+			ocr = await runReceiptOcr(dataUri);
+		} catch (err) {
+			if (err && err.code === "OCR_NO_KEY") return res.status(503).json({ error: "ocr_unavailable" });
+			console.error("extract-details OCR failed:", err && err.message);
+			return res.status(502).json({ error: "ocr_failed" });
+		}
+		const json = sanitizeReceiptDetails(ocr.details || []);
+		db.prepare("UPDATE expenses SET receipt_details = ? WHERE id = ?").run(json, id);
+		return res.json({ receipt_details: parseReceiptDetails(json) });
+	} catch (err) {
+		console.error("extract-details error:", err.message);
+		res.status(500).json({ error: "extract_failed" });
 	}
 });
 
@@ -16830,11 +16913,34 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		const driverList = investorDriverSet ? [...investorDriverSet] : [];
 		const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
 		db.prepare(
-			`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
 		).all(investorOwnerId, ...driverList).forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
 	} else if (isSuperAdmin) {
-		db.prepare(`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
+		db.prepare(`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
 			.all().forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+	}
+
+	// Monthly maintenance-fund service disbursements + paid compliance fees,
+	// grouped by month — same owner/super-admin scoping as the all-time
+	// truck-level block in GET /api/investor. Puts per-month netProfit on the
+	// SAME expense basis as the aggregate (and therefore the payout ledger).
+	// Both tables are empty in prod today, so this is $0 — it unifies the basis.
+	const monthlyMaintFund = {};
+	const monthlyCompliance = {};
+	if (investorOwnerId) {
+		db.prepare(
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND mf.type = 'service' GROUP BY m`
+		).all(investorOwnerId).forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+		db.prepare(
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND cf.status = 'Paid' GROUP BY m`
+		).all(investorOwnerId).forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
+	} else if (isSuperAdmin) {
+		db.prepare(
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+		).all().forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+		db.prepare(
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+		).all().forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
 	}
 
 	// Monthly fixed costs — Active trucks only, charged from truck.created_at.
@@ -16869,14 +16975,16 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		const driverPay = monthlyDriverPay[mk] || 0;
 		const rawFixedCosts = getMonthlyFixedCosts(mk);
 		const tripExpenses = monthlyTripExp[mk] || 0;
+		const maintFundCost = monthlyMaintFund[mk] || 0;
+		const complianceCost = monthlyCompliance[mk] || 0;
 		// Zero-activity grace: defer fixed costs in months with no activity so
 		// onboarding months don't read as losses (matches GET /api/investor,
 		// including its driver-day-count guard for percentage drivers whose pay
 		// nets to $0 but who were still active that month).
 		const driverCount = Object.values(driverMonthlyDays).filter(m => m[mk] && m[mk].size).length;
-		const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && driverCount === 0;
+		const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && maintFundCost === 0 && complianceCost === 0 && driverCount === 0;
 		const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
-		const netProfit = revenue - driverPay - fixedCosts - tripExpenses;
+		const netProfit = revenue - driverPay - fixedCosts - tripExpenses - maintFundCost - complianceCost;
 		// Match GET /api/investor exactly: split is applied to the RAW netProfit
 		// (the rounded netProfit is only what gets surfaced for display).
 		const investorEarnings = Math.round(netProfit * investorSplit);
@@ -16886,6 +16994,8 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			driverPay: Math.round(driverPay),
 			fixedCosts,
 			tripExpenses: Math.round(tripExpenses),
+			maintFundCost: Math.round(maintFundCost),
+			complianceCost: Math.round(complianceCost),
 			netProfit: Math.round(netProfit),
 			investorEarnings,
 			isCurrentMonth: mk === currentMonthKey,
@@ -16964,6 +17074,14 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		user, isSuperAdmin: false, investorDriverSet, investorOwnerId: ownerId, config,
 	});
 
+	// Per-period P&L lookup so the Payouts screen can show WHY each month paid
+	// what it did (revenue − driverPay − fixedCosts − tripExpenses − maintFundCost
+	// − complianceCost = netProfit, × split). Display-only — it does NOT feed
+	// `amount`/carry-forward/totals below.
+	const earningsByPeriod = {};
+	monthlyEarnings.forEach((m) => { earningsByPeriod[m.month] = m; });
+	const splitPct = Math.round((parseFloat(config.investor_split_pct) || 50));
+
 	// ---- Loss carry-forward -------------------------------------------------
 	// A month where costs outran revenue (e.g. driver pay $12,250 on $10,310 of
 	// revenue) yields NEGATIVE investorEarnings. Storing that verbatim produced a
@@ -17036,6 +17154,7 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	const payouts = rows.map((r) => {
 		const adjustment = Number(r.adjustment || 0);
 		const carry = carryByPeriod[r.period] || { raw: r.amount || 0, carriedIn: 0, deferred: 0 };
+		const be = earningsByPeriod[r.period];
 		return {
 			id: r.id,
 			ownerId: r.owner_id,
@@ -17070,6 +17189,22 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			reopenedAt: r.reopened_at || "",
 			reopenedBy: r.reopened_by || "",
 			reopenReason: r.reopen_reason || "",
+			// Display-only P&L breakdown for this period (null if the month has
+			// aged out of the live earnings window). monthShare is the gross split
+			// of this month's netProfit, BEFORE loss carry-forward — see
+			// monthEarnings / lossCarriedIn / lossDeferred above for how it nets
+			// down to `amount`. Never feeds amount/effectiveAmount/totals.
+			breakdown: be ? {
+				revenue: be.revenue,
+				driverPay: be.driverPay,
+				fixedCosts: be.fixedCosts,
+				tripExpenses: be.tripExpenses,
+				maintFundCost: be.maintFundCost || 0,
+				complianceCost: be.complianceCost || 0,
+				netProfit: be.netProfit,
+				splitPct,
+				monthShare: Math.round(be.netProfit * ((parseFloat(config.investor_split_pct) || 50) / 100)),
+			} : null,
 		};
 	});
 
@@ -17079,6 +17214,17 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		period: currentMonthKey,
 		periodLabel: periodLabel(currentMonthKey),
 		amountInProgress: cur ? Math.round(cur.investorEarnings) : 0,
+		breakdown: cur ? {
+			revenue: cur.revenue,
+			driverPay: cur.driverPay,
+			fixedCosts: cur.fixedCosts,
+			tripExpenses: cur.tripExpenses,
+			maintFundCost: cur.maintFundCost || 0,
+			complianceCost: cur.complianceCost || 0,
+			netProfit: cur.netProfit,
+			splitPct,
+			monthShare: Math.round(cur.netProfit * ((parseFloat(config.investor_split_pct) || 50) / 100)),
+		} : null,
 	};
 
 	const totals = payouts.reduce((acc, p) => {
@@ -17469,18 +17615,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		// ---- Expense Data — load-specific + truck-level ----
 		let totalExpenses = 0;
-		if (completedLoadIds.size > 0) {
-			const lidList = [...completedLoadIds];
-			const lidPh = lidList.map(() => '?').join(',');
-			if (investorOwnerId) {
-				const driverList = [...investorDriverSet];
-				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
-				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh}) AND (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER}`).get(...lidList, investorOwnerId, ...driverList);
-				totalExpenses += expSum.total;
-			} else if (isSuperAdmin) {
-				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh}) AND ${EXPENSE_PNL_FILTER}`).get(...lidList);
-				totalExpenses += expSum.total;
-			}
+		// Trip expenses on the SAME owner/driver basis as the monthly tripExpenses
+		// rollup below — NOT gated to completed-load IDs. A receipt with a blank or
+		// non-completed load_id is still a real cost; the old `load_id IN (...)`
+		// filter silently dropped those (Johnny had 11 ≈ $2,028), making
+		// netRevenueToDate under-count expenses vs the payout ledger. Now they match.
+		if (investorOwnerId) {
+			const driverList = [...investorDriverSet];
+			const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
+			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER}`).get(investorOwnerId, ...driverList);
+			totalExpenses += expSum.total;
+		} else if (isSuperAdmin) {
+			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE ${EXPENSE_PNL_FILTER}`).get();
+			totalExpenses += expSum.total;
 		}
 		// Truck-level costs (maintenance fund DISBURSEMENTS, compliance fees)
 		// NOTE: maintenance_fund table = actual service payments. SEPARATE from trucks.maintenance_fund_monthly (budget).
@@ -17681,18 +17828,40 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const driverList = [...investorDriverSet];
 				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
 				const rows = db.prepare(
-					`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
 				).all(investorOwnerId, ...driverList);
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
 				const catRows = db.prepare(
-					`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`
 				).all(investorOwnerId, ...driverList);
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			} else if (isSuperAdmin) {
-				const rows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`).all();
+				const rows = db.prepare(`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`).all();
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
-				const catRows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`).all();
+				const catRows = db.prepare(`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`).all();
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
+			}
+
+			// 2b. Monthly maintenance-fund service + paid compliance fees, grouped
+			// by month — same owner/super-admin scoping as the all-time truck-level
+			// block above. Puts per-month netProfit on the SAME expense basis as the
+			// aggregate totalExpenses (and the payout ledger). Empty in prod = $0.
+			const monthlyMaintFund = {};
+			const monthlyCompliance = {};
+			if (investorOwnerId) {
+				db.prepare(
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND mf.type = 'service' GROUP BY m`
+				).all(user.id).forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+				db.prepare(
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND cf.status = 'Paid' GROUP BY m`
+				).all(user.id).forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
+			} else if (isSuperAdmin) {
+				db.prepare(
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+				).all().forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+				db.prepare(
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+				).all().forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
 			}
 
 			// 3. Monthly fixed costs — constant per month per truck (only months truck existed).
@@ -17733,15 +17902,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const driverPay = monthlyDriverPay[mk] || 0;
 				const rawFixedCosts = getMonthlyFixedCosts(mk);
 				const tripExpenses = monthlyTripExp[mk] || 0;
+				const maintFundCost = monthlyMaintFund[mk] || 0;
+				const complianceCost = monthlyCompliance[mk] || 0;
 				// Investor-facing grace: if the truck did nothing this month
 				// (no revenue, no driver-day records, no trip expenses), defer
 				// the fixed costs so onboarding months don't appear as losses.
 				// /admin/financials still accrues these normally.
 				const driverCount = Object.keys(monthlyDriverDetails[mk] || {}).length;
-				const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && driverCount === 0;
+				const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && maintFundCost === 0 && complianceCost === 0 && driverCount === 0;
 				const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
 				if (isZeroActivity && rawFixedCosts > 0) deferredAccrual += rawFixedCosts;
-				const netProfit = revenue - driverPay - fixedCosts - tripExpenses;
+				const netProfit = revenue - driverPay - fixedCosts - tripExpenses - maintFundCost - complianceCost;
 				monthlyEarnings.push({
 					month: mk,
 					revenue: Math.round(revenue),
@@ -17751,6 +17922,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					fixedCostsDeferred: isZeroActivity && rawFixedCosts > 0,
 					tripExpenses: Math.round(tripExpenses),
 					tripExpCategories: tripExpByCategory[mk] || {},
+					maintFundCost: Math.round(maintFundCost),
+					complianceCost: Math.round(complianceCost),
 					netProfit: Math.round(netProfit),
 					investorEarnings: Math.round(netProfit * monthlySplit),
 					companyEarnings: Math.round(netProfit - Math.round(netProfit * monthlySplit)),
@@ -19557,7 +19730,7 @@ app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { driver, type, status, truck, from, to, state, region, q } = req.query;
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, created_at FROM expenses";
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, created_at FROM expenses";
 		const conditions = [];
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
@@ -19598,7 +19771,7 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		}
 		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 		sql += " ORDER BY id DESC";
-		const expenses = db.prepare(sql).all(...params);
+		const expenses = db.prepare(sql).all(...params).map((e) => ({ ...e, receipt_details: parseReceiptDetails(e.receipt_details) }));
 		res.json({ expenses });
 	} catch (err) {
 		console.error("Error fetching all expenses:", err.message);
