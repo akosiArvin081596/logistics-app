@@ -5729,33 +5729,72 @@ function getEldTravelDaysByVehicle(vehicleIds, minMs, maxMs) {
 	return out;
 }
 
-// Short-TTL memo for getEldTravelDaysByVehicle. The raw compute pulls the full
-// telemetry history (~800k rows and growing) into JS and buckets every ping by
-// truck-local day — 2–5s per call — and /api/investor, /api/financials, and
-// computeInvestorMonthlyEarnings all invoke it with identical args within a
-// single request AND across page navigations, so the same work runs many times.
-// A past day's travel/coverage never changes (only the current day is still
-// forming), so a few-minute cache collapses the repeat cost with no pay impact:
-// the live day re-resolves within the TTL and historical days are immutable.
-// Callers only READ the returned Sets (.has/.size), so sharing the ref is safe.
-const _eldTravelMemo = new Map(); // key -> { at, value }
+// Memo for getEldTravelDaysByVehicle. The raw compute pulls the full telemetry
+// history (~800k rows and growing) into JS and buckets every ping by truck-local
+// day — 2–5s per call — and /api/investor, /api/financials, and
+// computeInvestorMonthlyEarnings all invoke it with identical args within a single
+// request AND across page navigations, so the same work runs many times. A past
+// day's travel/coverage never changes (only the current day is still forming), so
+// caching collapses the repeat cost with no pay impact: historical days are
+// immutable, the live day re-resolves within the TTL, and the payout reconcile
+// only ever settles PAST months. Callers only READ the returned Sets (.has/.size).
+//
+// Keyed on (deduped vehicleIds, minMs) — deliberately NOT maxMs. Every cached
+// caller passes maxMs = now+1d ("everything up to ~now"); the invoice generator's
+// bounded window goes through the DIRECT (uncached) helper, so it never lands
+// here. Keeping the key stable across time is what lets the boot pre-warm and each
+// live request share ONE entry — a maxMs that drifts every request would mint a
+// fresh key and defeat warming.
+//
+// Serve-stale-while-revalidate: a present entry is returned INSTANTLY even past
+// its TTL, and a one-shot background refresh is kicked so the next read is fresh.
+// So a user never waits on the cold 2–5s compute — worst case they get a
+// few-minutes-stale set (immaterial to month-level pay) while it refreshes. With
+// warmEldTravelMemo() (boot + interval), the entry is essentially always present.
+const _eldTravelMemo = new Map(); // key -> { at, value, computing }
 const ELD_TRAVEL_MEMO_TTL_MS = 5 * 60 * 1000;
 function getEldTravelDaysByVehicleCached(vehicleIds, minMs, maxMs) {
-	const ids = (vehicleIds || []).filter(Boolean).map(String).sort();
+	const ids = [...new Set((vehicleIds || []).filter(Boolean).map(String))].sort();
 	if (!ids.length || !(maxMs > minMs)) return {};
-	// Bucket maxMs into TTL windows so calls seconds/minutes apart (one navigation
-	// session) share a key even though the callers pass maxMs = Date.now()+1d.
-	const key = ids.join(",") + "|" + minMs + "|" + Math.floor(maxMs / ELD_TRAVEL_MEMO_TTL_MS);
+	const key = ids.join(",") + "|" + minMs;
+	const now = Date.now();
 	const hit = _eldTravelMemo.get(key);
-	if (hit && (Date.now() - hit.at) < ELD_TRAVEL_MEMO_TTL_MS) return hit.value;
+	if (hit) {
+		// Past TTL → serve the cached set now, refresh once in the background.
+		if (now - hit.at >= ELD_TRAVEL_MEMO_TTL_MS && !hit.computing) {
+			hit.computing = true;
+			setImmediate(() => {
+				try { _eldTravelMemo.set(key, { at: Date.now(), value: getEldTravelDaysByVehicle(ids, minMs, maxMs) }); }
+				catch (e) { hit.computing = false; }
+			});
+		}
+		return hit.value;
+	}
+	// First call for this key (or after eviction) — compute inline (cold).
 	const value = getEldTravelDaysByVehicle(ids, minMs, maxMs);
-	_eldTravelMemo.set(key, { at: Date.now(), value });
+	_eldTravelMemo.set(key, { at: now, value });
 	if (_eldTravelMemo.size > 256) { // bound memory: evict oldest half
 		const sorted = [..._eldTravelMemo.entries()].sort((a, b) => a[1].at - b[1].at);
 		for (let i = 0; i < Math.floor(sorted.length / 2); i++) _eldTravelMemo.delete(sorted[i][0]);
 	}
 	return value;
 }
+
+// Pre-warm the memo for the FULL fleet — the exact vehicle set Super-Admin
+// /api/financials and /api/investor pass (all trucks with a linked ELD) — so the
+// first open after a deploy/restart is instant instead of a ~2.5s cold compute.
+// Best-effort; never throws into boot or the interval. During active use the
+// entry is already fresh; when idle the refresh block hits no waiting user.
+function warmEldTravelMemo() {
+	try {
+		const vids = db.prepare(
+			"SELECT DISTINCT routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''"
+		).all().map((r) => r.vid).filter(Boolean);
+		if (vids.length) getEldTravelDaysByVehicleCached(vids, 0, Date.now() + 86400000);
+	} catch (e) { /* best-effort warm */ }
+}
+setTimeout(warmEldTravelMemo, 8000);                 // shortly after boot (once the app is serving)
+setInterval(warmEldTravelMemo, 4 * 60 * 1000);       // < the 5-min TTL, so the entry is refreshed before it goes stale
 
 // Re-render an invoice PDF using the snapshot stored at generate time, with
 // the row's current adjustment fields. Used by PUT /api/invoices/:id/adjust

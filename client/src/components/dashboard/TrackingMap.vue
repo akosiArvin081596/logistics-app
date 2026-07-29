@@ -55,7 +55,11 @@
             <span class="driver-dot all-dot"></span>
             <div class="driver-info">
               <span class="driver-name">All Drivers</span>
-              <span class="driver-coords">{{ onlineCount }} online — show all routes</span>
+              <span class="driver-coords fleet-summary">
+                <span class="fs-moving">{{ movementCounts.moving }} moving</span> ·
+                <span class="fs-idling">{{ movementCounts.idling }} idling</span> ·
+                <span class="fs-parked">{{ movementCounts.parked }} parked</span>
+              </span>
             </div>
           </div>
           <div v-if="activeLocations.length === 0" class="no-active-drivers">
@@ -1644,6 +1648,13 @@ const visibleLocationsWithGps = computed(() =>
   activeLocations.value.filter(loc => !loc.noGps && loc.latitude != null)
 )
 const onlineCount = computed(() => visibleLocationsWithGps.value.filter(loc => isOnline(loc)).length)
+// Fleet movement summary for the "All Drivers" row — counts every truck shown in
+// the panel (noGps trucks included; they classify as parked).
+const movementCounts = computed(() => {
+  const c = { moving: 0, idling: 0, parked: 0 }
+  for (const loc of activeLocations.value) c[movementState(loc)]++
+  return c
+})
 const selectedDriverSpeed = computed(() => {
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
   return loc?.speed ? Math.round(loc.speed * 2.237) : null
@@ -2243,6 +2254,11 @@ onUnmounted(() => {
 .status-text.parked {
   color: #6b7280;
 }
+/* Fleet movement summary on the "All Drivers" row */
+.fleet-summary { white-space: nowrap; }
+.fleet-summary .fs-moving { color: #16a34a; font-weight: 600; }
+.fleet-summary .fs-idling { color: #d97706; font-weight: 600; }
+.fleet-summary .fs-parked { color: #6b7280; font-weight: 600; }
 .driver-ago {
   font-size: 0.6rem;
   color: #aaa;
