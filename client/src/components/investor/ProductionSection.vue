@@ -48,7 +48,7 @@
           <template v-if="selectedMonthEarnings">
             <div class="step-label">Your Share for This Month</div>
             <div class="modal-explain-sm">
-              How your portion of this month's revenue breaks down after operating costs and the 50/50 split.
+              How your portion of this month's revenue breaks down after operating costs and the {{ investorSplitPct }}%/{{ 100 - investorSplitPct }}% split.
             </div>
             <div class="modal-row deduct">
               <span>- Driver Pay</span>
@@ -62,13 +62,21 @@
               <span>- Trip Expenses</span>
               <span class="val danger">-{{ fmt(selectedMonthEarnings.tripExpenses) }}</span>
             </div>
+            <div class="modal-row deduct" v-if="selectedMonthEarnings.maintFundCost > 0">
+              <span>- Maintenance Fund</span>
+              <span class="val danger">-{{ fmt(selectedMonthEarnings.maintFundCost) }}</span>
+            </div>
+            <div class="modal-row deduct" v-if="selectedMonthEarnings.complianceCost > 0">
+              <span>- Compliance / IFTA</span>
+              <span class="val danger">-{{ fmt(selectedMonthEarnings.complianceCost) }}</span>
+            </div>
             <div class="modal-divider"></div>
             <div class="modal-row">
               <span>Net Profit</span>
               <span class="val" :class="(selectedMonthEarnings.netProfit || 0) >= 0 ? 'accent' : 'danger'">{{ fmt(selectedMonthEarnings.netProfit) }}</span>
             </div>
             <div class="modal-row split-row">
-              <span>&divide; 2 (50/50 split)</span>
+              <span>&times; {{ investorSplitPct }}%</span>
               <span></span>
             </div>
             <div class="modal-row bold result">
@@ -101,6 +109,10 @@ const props = defineProps({
   production: { type: Object, required: true },
   config: { type: Object, default: null },
 })
+
+// Investor's share of net profit, driven by the configured split (server returns
+// investorSplitPct on the production payload). Defaults to 50 when absent.
+const investorSplitPct = computed(() => props.production?.investorSplitPct ?? 50)
 
 const MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 const MONTH_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December']

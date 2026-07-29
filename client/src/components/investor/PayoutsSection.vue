@@ -24,6 +24,41 @@
           <span class="status-pill st-progress">in progress</span>
           <span class="current-note">Accruing this month &mdash; not yet payable until the period closes.</span>
         </div>
+
+        <!-- Same earnings waterfall as the past-months rows, so the in-progress
+             figure is explained too: expenses come out before the split. -->
+        <div v-if="currentMonth.breakdown" class="current-breakdown">
+          <button
+            type="button"
+            class="bd-toggle"
+            :aria-expanded="currentOpen"
+            aria-controls="breakdown-current"
+            @click="currentOpen = !currentOpen"
+          >
+            <svg class="chevron" :class="{ open: currentOpen }" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+              <path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            {{ currentOpen ? 'Hide breakdown' : 'Show breakdown' }}
+          </button>
+          <div v-if="currentOpen" id="breakdown-current" class="breakdown-panel" role="group" aria-label="Earnings breakdown">
+            <div class="bd-caption">How this month&rsquo;s share is calculated</div>
+            <dl class="bd-list">
+              <div
+                v-for="(row, i) in waterfall(currentMonth.breakdown)"
+                :key="i"
+                class="bd-row"
+                :class="[`bd-${row.kind}`, { 'bd-highlight': row.highlight }]"
+              >
+                <dt class="bd-label">
+                  {{ row.label }}
+                  <span v-if="row.highlight" class="bd-tag">your expenses</span>
+                </dt>
+                <dd class="bd-value mono-sm">{{ row.display }}</dd>
+              </div>
+            </dl>
+            <p class="bd-help">Your expenses are already subtracted here before the split.</p>
+          </div>
+        </div>
       </div>
 
       <!-- Totals summary -->
@@ -75,8 +110,27 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="p in visiblePayouts" :key="p.id">
-            <td>{{ p.periodLabel }}</td>
+          <template v-for="p in visiblePayouts" :key="p.id">
+          <tr>
+            <td>
+              <!-- Expand control lives in the Period cell so no column is added.
+                   Only rows that carry a breakdown get it; otherwise plain label. -->
+              <button
+                v-if="p.breakdown"
+                type="button"
+                class="expand-btn"
+                :aria-expanded="expandedId === p.id"
+                :aria-controls="`breakdown-${p.id}`"
+                :title="expandedId === p.id ? 'Hide earnings breakdown' : 'Show earnings breakdown'"
+                @click="toggle(p.id)"
+              >
+                <svg class="chevron" :class="{ open: expandedId === p.id }" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                  <path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+                <span>{{ p.periodLabel }}</span>
+              </button>
+              <span v-else>{{ p.periodLabel }}</span>
+            </td>
             <td class="mono-sm num">
               <div>{{ fmt(p.amount) }}</div>
               <!-- Explain a month that pays out less than it earned, so a reduced
@@ -134,6 +188,32 @@
               <span v-if="p.status === 'paid' || !settleable(p)" class="dim">&mdash;</span>
             </td>
           </tr>
+          <!-- Expandable earnings waterfall — proves trip expenses (and every other
+               cost) are subtracted before the split. Rendered only for the open row
+               that actually carries a breakdown; spans the full table width. -->
+          <tr v-if="p.breakdown && expandedId === p.id" class="breakdown-tr">
+            <td :colspan="colCount" class="breakdown-cell">
+              <div :id="`breakdown-${p.id}`" class="breakdown-panel" role="group" aria-label="Earnings breakdown">
+                <div class="bd-caption">How your share is calculated</div>
+                <dl class="bd-list">
+                  <div
+                    v-for="(row, i) in waterfall(p.breakdown)"
+                    :key="i"
+                    class="bd-row"
+                    :class="[`bd-${row.kind}`, { 'bd-highlight': row.highlight }]"
+                  >
+                    <dt class="bd-label">
+                      {{ row.label }}
+                      <span v-if="row.highlight" class="bd-tag">your expenses</span>
+                    </dt>
+                    <dd class="bd-value mono-sm">{{ row.display }}</dd>
+                  </div>
+                </dl>
+                <p class="bd-help">Your expenses are already subtracted here before the split.</p>
+              </div>
+            </td>
+          </tr>
+          </template>
         </tbody>
       </table>
       </div>
@@ -175,7 +255,20 @@ const totals = computed(() => investorStore.payoutTotals)
 
 const busyId = ref(null)
 
+// Which past-month row has its earnings breakdown open (single-open accordion).
+// The breakdown proves expenses ARE deducted before the split — see waterfall().
+// null = every row collapsed.
+const expandedId = ref(null)
+function toggle(id) {
+  expandedId.value = expandedId.value === id ? null : id
+}
+// The current-month card's breakdown collapses independently of the table.
+const currentOpen = ref(false)
+
 const isSuperAdmin = auth.isSuperAdmin
+// Column count for the past-months table, so an expanded breakdown row can
+// colspan the full width. Mirrors the trailing admin action column's v-if.
+const colCount = isSuperAdmin ? 7 : 6
 
 const STATUS_CLASS = { owed: 'st-owed', processing: 'st-processing', paid: 'st-paid' }
 function statusClass(s) {
@@ -185,6 +278,37 @@ function statusClass(s) {
 function fmtDate(d) {
   if (!d) return '—'
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// A deduction renders as an explicit negative ("−$1,234") so the investor can
+// SEE money coming out; a $0 line stays plain. Uses the same unicode minus as the
+// rest of this statement (the Adjustment column above).
+function fmtNeg(n) {
+  const v = Math.abs(Number(n || 0))
+  return v === 0 ? fmt(0) : '−' + fmt(v)
+}
+
+// Turn a payout breakdown into the display waterfall the row/card expands to show:
+// revenue, each cost as a negative, then Net Profit and the investor's split share
+// (= monthShare). The maintenance-fund and compliance lines only appear when they
+// are actually charged (> 0). Returns [] when breakdown is null/absent, so callers
+// that still render the panel simply get nothing — but they also v-if on breakdown.
+// This is the ONE place the earnings math is described; both surfaces read it.
+function waterfall(b) {
+  if (!b) return []
+  const rows = []
+  const add = (label, value, kind, opts = {}) =>
+    rows.push({ label, kind, display: kind === 'deduct' ? fmtNeg(value) : fmt(value), ...opts })
+  add('Revenue', b.revenue, 'add')
+  add('− Driver Pay', b.driverPay, 'deduct')
+  add('− Fixed Costs', b.fixedCosts, 'deduct')
+  add('− Trip Expenses', b.tripExpenses, 'deduct', { highlight: true })
+  if (Number(b.maintFundCost || 0) > 0) add('− Maintenance Fund', b.maintFundCost, 'deduct')
+  if (Number(b.complianceCost || 0) > 0) add('− Compliance / IFTA', b.complianceCost, 'deduct')
+  add('Net Profit', b.netProfit, 'subtotal')
+  if (b.splitPct != null) rows.push({ label: `× ${b.splitPct}%`, kind: 'split', display: '' })
+  add('Your Share', b.monthShare, 'share')
+  return rows
 }
 
 // effectiveAmount = amount + adjustment (server-computed). Fall back to amount
@@ -401,6 +525,154 @@ onMounted(loadPayouts)
 .totals-note { display: flex; flex-direction: column; gap: 0.15rem; margin: 0.5rem 0 0.9rem; font-size: 0.74rem; color: var(--text-dim); }
 .inv-adj-note { color: #64748b; }
 
+/* --- Expandable earnings breakdown (proof that expenses are deducted) --- */
+.expand-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  font: inherit;
+  font-weight: 600;
+  color: #0f172a;
+  cursor: pointer;
+  text-align: left;
+}
+.expand-btn:hover { color: #0369a1; }
+.expand-btn:hover .chevron { color: #0369a1; }
+.expand-btn:focus-visible,
+.bd-toggle:focus-visible {
+  outline: 2px solid #0369a1;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.chevron {
+  flex: none;
+  color: #94a3b8;
+  transition: transform 0.15s ease;
+}
+.chevron.open { transform: rotate(90deg); }
+
+/* Current-month card: "Show breakdown" disclosure toggle */
+.current-breakdown { margin-top: 0.25rem; }
+.bd-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  padding: 0.15rem 0;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #0369a1;
+  cursor: pointer;
+}
+.bd-toggle:hover { text-decoration: underline; }
+.current-breakdown .breakdown-panel {
+  max-width: 460px;
+  padding: 0.5rem 0 0;
+}
+
+/* Breakdown row inside the past-months table spans every column. Two-class
+   selectors beat the generic `.data-table td` padding/nowrap without !important. */
+.data-table .breakdown-cell {
+  padding: 0;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: normal;
+}
+
+/* The panel — shared by the table row and the current-month card. Sticky-left
+   keeps it readable when the seven-column table scrolls sideways on a phone;
+   the vw cap stops it overflowing a narrow viewport. */
+.breakdown-panel {
+  position: sticky;
+  left: 0;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: min(460px, 90vw);
+  padding: 0.8rem 1rem 0.7rem;
+  white-space: normal;
+}
+.bd-caption {
+  font-size: 0.64rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  margin-bottom: 0.5rem;
+}
+.bd-list { margin: 0; }
+.bd-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.26rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+.bd-label {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  color: #334155;
+  font-size: 0.8rem;
+}
+.bd-value {
+  flex: none;
+  color: #0f172a;
+  text-align: right;
+}
+.bd-deduct .bd-value { color: #b45309; }
+
+/* Trip Expenses — the line the client came to see. Tinted band + bold + a
+   plain-language tag so it unmistakably reads as "your money, taken out." */
+.bd-highlight {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+.bd-highlight .bd-label { color: #0f172a; font-weight: 700; }
+.bd-highlight .bd-value { color: #b91c1c; font-weight: 800; }
+.bd-tag {
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #92400e;
+  background: #fef3c7;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* Divider before the net line, then the emphasized net + share figures. */
+.bd-subtotal {
+  margin-top: 0.35rem;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 0.5rem;
+}
+.bd-subtotal .bd-label,
+.bd-subtotal .bd-value { font-weight: 700; }
+.bd-split .bd-label { color: #64748b; font-size: 0.74rem; }
+.bd-share {
+  background: #f1f5f9;
+  border-color: #e2e8f0;
+}
+.bd-share .bd-label,
+.bd-share .bd-value { font-weight: 800; color: #0f172a; }
+.bd-help {
+  margin: 0.55rem 0 0;
+  font-size: 0.7rem;
+  color: #64748b;
+  font-style: italic;
+}
+
 .status-pill {
   display: inline-block;
   font-size: 0.66rem;
@@ -455,5 +727,6 @@ onMounted(loadPayouts)
   .data-table { font-size: 0.78rem; }
   .data-table th, .data-table td { padding: 0.45rem 0.5rem; }
   .action-cell { white-space: normal; }
+  .breakdown-panel { padding: 0.7rem 0.75rem; }
 }
 </style>

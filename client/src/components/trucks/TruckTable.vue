@@ -33,6 +33,12 @@
           <td>{{ truck.LicensePlate || '\u2014' }}</td>
           <td>
             <span :class="['status-badge', statusClass(truck.Status)]">{{ truck.Status }}</span>
+            <div v-if="needsFixedCostSetup(truck)" style="margin-top:0.3rem;">
+              <span
+                class="cost-warning-badge"
+                title="Active truck with no insurance, ELD, truck payment, HVUT, or IRP configured — its fixed costs show as $0 in the investor P&amp;L. Add them via Edit → Business Configuration."
+              >No fixed costs configured</span>
+            </div>
           </td>
           <td :style="{ color: truck.AssignedDriver ? 'var(--text)' : 'var(--text-dim)' }">
             {{ truck.AssignedDriver || '\u2014' }}
@@ -483,6 +489,19 @@ function statusClass(status) {
   return 'status-maintenance'
 }
 
+// Flags an Active truck that has no fixed-cost fields configured — insurance,
+// ELD, truck payment, HVUT, and IRP all falsy/0. Such a truck contributes $0
+// fixed costs to the investor P&L, which is almost always a data-entry gap.
+// Field names are PascalCase to match the serialized truck objects.
+function needsFixedCostSetup(truck) {
+  return truck.Status === 'Active' &&
+    !truck.InsuranceMonthly &&
+    !truck.EldMonthly &&
+    !truck.TruckPaymentMonthly &&
+    !truck.HvutAnnual &&
+    !truck.IrpAnnual
+}
+
 function confirmDelete(truck) {
   pendingTruck.value = truck
   showConfirm.value = true
@@ -680,6 +699,13 @@ async function handleUnlink(truck) {
   text-transform: none; letter-spacing: normal;
 }
 .pay-default { color: var(--text-dim); font-size: 0.72rem; }
+.cost-warning-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem; border-radius: 10px;
+  font-size: 0.62rem; font-weight: 600; line-height: 1.3;
+  background: #fef3c7; color: #92400e; border: 1px solid #fde68a;
+  cursor: help; white-space: normal; max-width: 150px;
+}
 .clickable-row { cursor: pointer; }
 .clickable-row:hover td { background: var(--accent-dim, #f0f9ff); }
 .view-grid { display: flex; flex-direction: column; gap: 0.4rem; }

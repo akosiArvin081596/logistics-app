@@ -16830,11 +16830,34 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		const driverList = investorDriverSet ? [...investorDriverSet] : [];
 		const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
 		db.prepare(
-			`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
 		).all(investorOwnerId, ...driverList).forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
 	} else if (isSuperAdmin) {
-		db.prepare(`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
+		db.prepare(`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
 			.all().forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+	}
+
+	// Monthly maintenance-fund service disbursements + paid compliance fees,
+	// grouped by month — same owner/super-admin scoping as the all-time
+	// truck-level block in GET /api/investor. Puts per-month netProfit on the
+	// SAME expense basis as the aggregate (and therefore the payout ledger).
+	// Both tables are empty in prod today, so this is $0 — it unifies the basis.
+	const monthlyMaintFund = {};
+	const monthlyCompliance = {};
+	if (investorOwnerId) {
+		db.prepare(
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND mf.type = 'service' GROUP BY m`
+		).all(investorOwnerId).forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+		db.prepare(
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND cf.status = 'Paid' GROUP BY m`
+		).all(investorOwnerId).forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
+	} else if (isSuperAdmin) {
+		db.prepare(
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+		).all().forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+		db.prepare(
+			`SELECT strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+		).all().forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
 	}
 
 	// Monthly fixed costs — Active trucks only, charged from truck.created_at.
@@ -16869,14 +16892,16 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		const driverPay = monthlyDriverPay[mk] || 0;
 		const rawFixedCosts = getMonthlyFixedCosts(mk);
 		const tripExpenses = monthlyTripExp[mk] || 0;
+		const maintFundCost = monthlyMaintFund[mk] || 0;
+		const complianceCost = monthlyCompliance[mk] || 0;
 		// Zero-activity grace: defer fixed costs in months with no activity so
 		// onboarding months don't read as losses (matches GET /api/investor,
 		// including its driver-day-count guard for percentage drivers whose pay
 		// nets to $0 but who were still active that month).
 		const driverCount = Object.values(driverMonthlyDays).filter(m => m[mk] && m[mk].size).length;
-		const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && driverCount === 0;
+		const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && maintFundCost === 0 && complianceCost === 0 && driverCount === 0;
 		const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
-		const netProfit = revenue - driverPay - fixedCosts - tripExpenses;
+		const netProfit = revenue - driverPay - fixedCosts - tripExpenses - maintFundCost - complianceCost;
 		// Match GET /api/investor exactly: split is applied to the RAW netProfit
 		// (the rounded netProfit is only what gets surfaced for display).
 		const investorEarnings = Math.round(netProfit * investorSplit);
@@ -16886,6 +16911,8 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			driverPay: Math.round(driverPay),
 			fixedCosts,
 			tripExpenses: Math.round(tripExpenses),
+			maintFundCost: Math.round(maintFundCost),
+			complianceCost: Math.round(complianceCost),
 			netProfit: Math.round(netProfit),
 			investorEarnings,
 			isCurrentMonth: mk === currentMonthKey,
@@ -16964,6 +16991,14 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		user, isSuperAdmin: false, investorDriverSet, investorOwnerId: ownerId, config,
 	});
 
+	// Per-period P&L lookup so the Payouts screen can show WHY each month paid
+	// what it did (revenue − driverPay − fixedCosts − tripExpenses − maintFundCost
+	// − complianceCost = netProfit, × split). Display-only — it does NOT feed
+	// `amount`/carry-forward/totals below.
+	const earningsByPeriod = {};
+	monthlyEarnings.forEach((m) => { earningsByPeriod[m.month] = m; });
+	const splitPct = Math.round((parseFloat(config.investor_split_pct) || 50));
+
 	// ---- Loss carry-forward -------------------------------------------------
 	// A month where costs outran revenue (e.g. driver pay $12,250 on $10,310 of
 	// revenue) yields NEGATIVE investorEarnings. Storing that verbatim produced a
@@ -17036,6 +17071,7 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	const payouts = rows.map((r) => {
 		const adjustment = Number(r.adjustment || 0);
 		const carry = carryByPeriod[r.period] || { raw: r.amount || 0, carriedIn: 0, deferred: 0 };
+		const be = earningsByPeriod[r.period];
 		return {
 			id: r.id,
 			ownerId: r.owner_id,
@@ -17070,6 +17106,22 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			reopenedAt: r.reopened_at || "",
 			reopenedBy: r.reopened_by || "",
 			reopenReason: r.reopen_reason || "",
+			// Display-only P&L breakdown for this period (null if the month has
+			// aged out of the live earnings window). monthShare is the gross split
+			// of this month's netProfit, BEFORE loss carry-forward — see
+			// monthEarnings / lossCarriedIn / lossDeferred above for how it nets
+			// down to `amount`. Never feeds amount/effectiveAmount/totals.
+			breakdown: be ? {
+				revenue: be.revenue,
+				driverPay: be.driverPay,
+				fixedCosts: be.fixedCosts,
+				tripExpenses: be.tripExpenses,
+				maintFundCost: be.maintFundCost || 0,
+				complianceCost: be.complianceCost || 0,
+				netProfit: be.netProfit,
+				splitPct,
+				monthShare: Math.round(be.netProfit * ((parseFloat(config.investor_split_pct) || 50) / 100)),
+			} : null,
 		};
 	});
 
@@ -17079,6 +17131,17 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		period: currentMonthKey,
 		periodLabel: periodLabel(currentMonthKey),
 		amountInProgress: cur ? Math.round(cur.investorEarnings) : 0,
+		breakdown: cur ? {
+			revenue: cur.revenue,
+			driverPay: cur.driverPay,
+			fixedCosts: cur.fixedCosts,
+			tripExpenses: cur.tripExpenses,
+			maintFundCost: cur.maintFundCost || 0,
+			complianceCost: cur.complianceCost || 0,
+			netProfit: cur.netProfit,
+			splitPct,
+			monthShare: Math.round(cur.netProfit * ((parseFloat(config.investor_split_pct) || 50) / 100)),
+		} : null,
 	};
 
 	const totals = payouts.reduce((acc, p) => {
@@ -17469,18 +17532,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 		// ---- Expense Data — load-specific + truck-level ----
 		let totalExpenses = 0;
-		if (completedLoadIds.size > 0) {
-			const lidList = [...completedLoadIds];
-			const lidPh = lidList.map(() => '?').join(',');
-			if (investorOwnerId) {
-				const driverList = [...investorDriverSet];
-				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
-				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh}) AND (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER}`).get(...lidList, investorOwnerId, ...driverList);
-				totalExpenses += expSum.total;
-			} else if (isSuperAdmin) {
-				const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE load_id IN (${lidPh}) AND ${EXPENSE_PNL_FILTER}`).get(...lidList);
-				totalExpenses += expSum.total;
-			}
+		// Trip expenses on the SAME owner/driver basis as the monthly tripExpenses
+		// rollup below — NOT gated to completed-load IDs. A receipt with a blank or
+		// non-completed load_id is still a real cost; the old `load_id IN (...)`
+		// filter silently dropped those (Johnny had 11 ≈ $2,028), making
+		// netRevenueToDate under-count expenses vs the payout ledger. Now they match.
+		if (investorOwnerId) {
+			const driverList = [...investorDriverSet];
+			const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
+			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER}`).get(investorOwnerId, ...driverList);
+			totalExpenses += expSum.total;
+		} else if (isSuperAdmin) {
+			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE ${EXPENSE_PNL_FILTER}`).get();
+			totalExpenses += expSum.total;
 		}
 		// Truck-level costs (maintenance fund DISBURSEMENTS, compliance fees)
 		// NOTE: maintenance_fund table = actual service payments. SEPARATE from trucks.maintenance_fund_monthly (budget).
@@ -17681,18 +17745,40 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const driverList = [...investorDriverSet];
 				const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
 				const rows = db.prepare(
-					`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m`
 				).all(investorOwnerId, ...driverList);
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
 				const catRows = db.prepare(
-					`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`
 				).all(investorOwnerId, ...driverList);
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			} else if (isSuperAdmin) {
-				const rows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`).all();
+				const rows = db.prepare(`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`).all();
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
-				const catRows = db.prepare(`SELECT strftime('%Y-%m', date) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`).all();
+				const catRows = db.prepare(`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`).all();
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
+			}
+
+			// 2b. Monthly maintenance-fund service + paid compliance fees, grouped
+			// by month — same owner/super-admin scoping as the all-time truck-level
+			// block above. Puts per-month netProfit on the SAME expense basis as the
+			// aggregate totalExpenses (and the payout ledger). Empty in prod = $0.
+			const monthlyMaintFund = {};
+			const monthlyCompliance = {};
+			if (investorOwnerId) {
+				db.prepare(
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(mf.date, ''), strftime('%Y-%m-%d', mf.created_at))) AS m, COALESCE(SUM(mf.amount), 0) AS t FROM maintenance_fund mf INNER JOIN trucks t ON LOWER(mf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND mf.type = 'service' GROUP BY m`
+				).all(user.id).forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+				db.prepare(
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(cf.paid_date, ''), NULLIF(cf.due_date, ''), strftime('%Y-%m-%d', cf.created_at))) AS m, COALESCE(SUM(cf.amount), 0) AS t FROM compliance_fees cf INNER JOIN trucks t ON LOWER(cf.truck) = LOWER(t.unit_number) WHERE t.owner_id = ? AND t.status = 'Active' AND cf.status = 'Paid' GROUP BY m`
+				).all(user.id).forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
+			} else if (isSuperAdmin) {
+				db.prepare(
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM maintenance_fund WHERE type = 'service' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+				).all().forEach(r => { if (r.m) monthlyMaintFund[r.m] = r.t; });
+				db.prepare(
+					`SELECT strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM compliance_fees WHERE status = 'Paid' AND LOWER(truck) NOT IN (SELECT LOWER(unit_number) FROM trucks WHERE status != 'Active') GROUP BY m`
+				).all().forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
 			}
 
 			// 3. Monthly fixed costs — constant per month per truck (only months truck existed).
@@ -17733,15 +17819,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const driverPay = monthlyDriverPay[mk] || 0;
 				const rawFixedCosts = getMonthlyFixedCosts(mk);
 				const tripExpenses = monthlyTripExp[mk] || 0;
+				const maintFundCost = monthlyMaintFund[mk] || 0;
+				const complianceCost = monthlyCompliance[mk] || 0;
 				// Investor-facing grace: if the truck did nothing this month
 				// (no revenue, no driver-day records, no trip expenses), defer
 				// the fixed costs so onboarding months don't appear as losses.
 				// /admin/financials still accrues these normally.
 				const driverCount = Object.keys(monthlyDriverDetails[mk] || {}).length;
-				const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && driverCount === 0;
+				const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && maintFundCost === 0 && complianceCost === 0 && driverCount === 0;
 				const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
 				if (isZeroActivity && rawFixedCosts > 0) deferredAccrual += rawFixedCosts;
-				const netProfit = revenue - driverPay - fixedCosts - tripExpenses;
+				const netProfit = revenue - driverPay - fixedCosts - tripExpenses - maintFundCost - complianceCost;
 				monthlyEarnings.push({
 					month: mk,
 					revenue: Math.round(revenue),
@@ -17751,6 +17839,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					fixedCostsDeferred: isZeroActivity && rawFixedCosts > 0,
 					tripExpenses: Math.round(tripExpenses),
 					tripExpCategories: tripExpByCategory[mk] || {},
+					maintFundCost: Math.round(maintFundCost),
+					complianceCost: Math.round(complianceCost),
 					netProfit: Math.round(netProfit),
 					investorEarnings: Math.round(netProfit * monthlySplit),
 					companyEarnings: Math.round(netProfit - Math.round(netProfit * monthlySplit)),
