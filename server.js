@@ -12663,6 +12663,70 @@ app.post("/api/expenses/:id/extract-details", requireRole("Super Admin", "Dispat
 	}
 });
 
+// GET /api/expenses/:id/receipt-thumbnail — small cached JPEG thumbnail of a
+// stored receipt image so the expenses LIST renders ~5 KB thumbs instead of the
+// full ~283 KB originals (×150 rows ≈ 43 MB, the page's real load cost).
+// Generated on first request via jimp, cached to uploads/expense-receipts/thumbs/,
+// and revalidated by mtime. Super Admin / Dispatcher (same scope as the list).
+// Degrades to the original image on any resize error so a row never shows blank.
+app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	try {
+		const id = parseInt(req.params.id, 10);
+		if (!Number.isInteger(id) || id <= 0) return res.status(400).end();
+		const exp = db.prepare("SELECT photo_data FROM expenses WHERE id = ?").get(id);
+		const photo = exp && exp.photo_data ? exp.photo_data : "";
+		// No thumbnails for missing receipts or PDFs (the list shows a PDF chip instead).
+		if (!photo || /\.pdf$/i.test(photo) || /^data:application\/pdf/i.test(photo)) return res.status(404).end();
+
+		// Resolve the source to an on-disk path (traversal-guarded) or a data-URI buffer.
+		let srcPath = "", srcBuf = null;
+		if (photo.startsWith("/uploads/expense-receipts/")) {
+			const abs = path.join(RECEIPTS_DIR, path.basename(photo));
+			if (!abs.startsWith(RECEIPTS_DIR + path.sep)) return res.status(400).end();
+			srcPath = abs;
+		} else if (photo.startsWith("data:image/")) {
+			const comma = photo.indexOf(",");
+			if (comma < 0) return res.status(404).end();
+			srcBuf = Buffer.from(photo.slice(comma + 1), "base64");
+		} else {
+			return res.status(404).end();
+		}
+
+		const THUMBS_DIR = path.join(RECEIPTS_DIR, "thumbs");
+		const thumbPath = path.join(THUMBS_DIR, `${id}.jpg`);
+		res.set("Cache-Control", "public, max-age=86400");
+		res.type("image/jpeg");
+
+		// Serve a cached thumb if it's at least as new as its source.
+		try {
+			if (fs.existsSync(thumbPath)) {
+				const fresh = srcPath ? fs.statSync(thumbPath).mtimeMs >= fs.statSync(srcPath).mtimeMs : true;
+				if (fresh) return res.send(fs.readFileSync(thumbPath));
+			}
+		} catch { /* stale/unreadable cache → regenerate below */ }
+
+		try {
+			const { Jimp } = require("jimp");
+			const img = await Jimp.read(srcPath || srcBuf);
+			img.resize({ w: 200 }); // width-constrained, aspect preserved
+			const buf = await img.getBuffer("image/jpeg", { quality: 70 });
+			try { fs.mkdirSync(THUMBS_DIR, { recursive: true }); fs.writeFileSync(thumbPath, buf); } catch { /* cache write is best-effort */ }
+			return res.send(buf);
+		} catch (genErr) {
+			// Degrade to the original image so the row still renders.
+			console.warn("thumbnail gen failed, serving original:", genErr && genErr.message);
+			try {
+				if (srcPath) return res.send(fs.readFileSync(srcPath));
+				if (srcBuf) return res.send(srcBuf);
+			} catch { /* ignore */ }
+			return res.status(404).end();
+		}
+	} catch (err) {
+		console.error("receipt-thumbnail error:", err.message);
+		return res.status(500).end();
+	}
+});
+
 // POST /api/documents/scan — crop / deskew / lighting-correct a document photo
 // via ScanKit.io, returning the processed image (or a searchable OCR PDF) as a
 // base64 data URI so the client can preview it and then upload via the existing
