@@ -167,12 +167,14 @@
           <button class="bulk-clear" :disabled="bulkLoading" @click="clearSelection">Clear</button>
         </div>
 
+        <PaginationBar :page="page" :page-size="pageSize" :total="allExpenses.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
+
         <div v-if="allExpenses.length === 0" class="empty-msg">No expenses found.</div>
         <!-- Mobile: card list. Tap the card → detail modal (shipped
              2026-04-20, already mobile-friendly). Approve / Reject full
              width in the card footer. -->
         <div v-else-if="isMobile" class="mobile-exp-list">
-          <div v-for="e in allExpenses" :key="e.id" class="mobile-exp-card" @click="openExpenseDetail(e)">
+          <div v-for="e in paginatedItems" :key="e.id" class="mobile-exp-card" @click="openExpenseDetail(e)">
             <div class="mobile-exp-top">
               <label class="mobile-exp-select" @click.stop>
                 <input
@@ -242,7 +244,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="e in allExpenses" :key="e.id" class="expense-row" @click="openExpenseDetail(e)">
+            <tr v-for="e in paginatedItems" :key="e.id" class="expense-row" @click="openExpenseDetail(e)">
               <td class="select-cell" @click.stop>
                 <input
                   type="checkbox"
@@ -844,6 +846,8 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { usePagination } from '../../composables/usePagination'
+import PaginationBar from '../shared/PaginationBar.vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
@@ -881,6 +885,14 @@ const activeSubTab = ref('all')
 
 // All expenses
 const allExpenses = ref([])
+// Client-side pagination for the expenses list — render one page of rows at a
+// time (default 25) instead of all rows at once. Server-side filtering already
+// scopes `allExpenses`; this only pages the render (and limits how many receipt
+// thumbnails are in the DOM at once). Bar auto-hides at ≤1 page.
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(allExpenses, 25)
+// A socket refresh (quietReload) can shrink the list — keep the page in range
+// without yanking the admin back to page 1 the way a filter change does.
+watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 const allLoading = ref(true)
 const allDrivers = ref([])
 const previewImg = ref(null)
@@ -1469,6 +1481,7 @@ async function loadAll() {
   // Full reload = filters (or data set) changed — a carried-over selection
   // could silently target rows that are no longer on screen.
   clearSelection()
+  goTo(1) // filters/data changed → jump back to the first page
   try {
     const data = await api.get(`/api/expenses/all${buildAllExpensesQuery()}`)
     allExpenses.value = data.expenses || []
