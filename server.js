@@ -296,6 +296,9 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_loc_state ON expenses(loc
 // lookup at POST /api/expenses requires a non-empty hash). Additive + reversible.
 try { db.exec("ALTER TABLE expenses ADD COLUMN receipt_hash TEXT DEFAULT ''"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_expenses_receipt_hash ON expenses(receipt_hash)"); } catch {}
+// Dynamic OCR-extracted receipt fields as a JSON label/value list — populated by
+// runReceiptOcr's `details` + POST /api/expenses/:id/extract-details. '' = none/legacy.
+try { db.exec("ALTER TABLE expenses ADD COLUMN receipt_details TEXT DEFAULT ''"); } catch {}
 
 // Bulk receipt upload drafts — one in-progress batch per user so a stack a
 // dispatcher starts on a phone can be finished on a computer. draft_json holds
@@ -12280,10 +12283,33 @@ function spendGeocodeBudget() {
 }
 
 // POST /api/expenses — Log a new expense (SQLite)
+// Receipt "details" = the dynamic label/value pairs runReceiptOcr extracts from
+// a receipt (fuel: pump/grade/PPG; food: items/tax/tip; etc.), stored as a JSON
+// string in expenses.receipt_details. sanitize → store, parse → serve.
+function sanitizeReceiptDetails(v) {
+	let arr = v;
+	if (typeof arr === "string") { try { arr = JSON.parse(arr); } catch { return ""; } }
+	if (!Array.isArray(arr)) return "";
+	const clean = arr
+		.filter((d) => d && typeof d === "object" && typeof d.label === "string" && d.label.trim())
+		.slice(0, 40)
+		.map((d) => ({
+			label: d.label.trim().slice(0, 40),
+			value: (typeof d.value === "string" ? d.value : String(d.value == null ? "" : d.value)).trim().slice(0, 200),
+		}));
+	return clean.length ? JSON.stringify(clean) : "";
+}
+function parseReceiptDetails(s) {
+	if (!s || typeof s !== "string") return [];
+	try { const a = JSON.parse(s); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+
 app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
 		const { loadId, type, amount, description, date, photoData, gallons, odometer, city, state, vendor } =
 			req.body;
+		// Dynamic OCR-extracted receipt fields the client reviewed (editable). Optional.
+		const safeReceiptDetails = sanitizeReceiptDetails(req.body.receiptDetails != null ? req.body.receiptDetails : req.body.receipt_details);
 		// SECURITY: drivers must use their session identity; admin/dispatcher
 		// can pass driver in the body to log on behalf. Investors cannot log
 		// at all. resolveDriverActor returns null after sending the response.
@@ -12427,12 +12453,12 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		}
 		const result = db
 			.prepare(
-				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_hash)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, photo_data, gallons, odometer, owner_id, truck_unit, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_hash, receipt_details)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoUrlOrPath,
 				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit, enrichCity, enrichState,
-				safeVendor, vendorNormalized, locLat, locLng, locSource, receiptHash);
+				safeVendor, vendorNormalized, locLat, locLng, locSource, receiptHash, safeReceiptDetails);
 		notifyChange("expenses");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -12577,6 +12603,63 @@ app.post("/api/expenses/ocr", requireAuth, expenseOcrLimiter, async (req, res) =
 	} catch (err) {
 		console.error("Expense OCR error:", err.message);
 		res.status(500).json({ error: "ocr_failed" });
+	}
+});
+
+// POST /api/expenses/:id/extract-details — run Gemini vision on an ALREADY
+// stored receipt to (re)build its dynamic label/value details list, so the
+// expense modal can surface "all important info" for receipts logged before
+// details capture existed. Images only (PDFs → 415). Reuses runReceiptOcr;
+// expenseOcrLimiter caps Gemini spend. Super Admin / Dispatcher only (the admin
+// Expenses modal is the sole caller).
+app.post("/api/expenses/:id/extract-details", requireRole("Super Admin", "Dispatcher"), expenseOcrLimiter, async (req, res) => {
+	try {
+		if (!GEMINI_API_KEY) return res.status(503).json({ error: "ocr_unavailable" });
+		const id = parseInt(req.params.id, 10);
+		if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid expense id" });
+		const exp = db.prepare("SELECT id, photo_data FROM expenses WHERE id = ?").get(id);
+		if (!exp) return res.status(404).json({ error: "Expense not found" });
+		const photo = exp.photo_data || "";
+		if (!photo) return res.status(404).json({ error: "No receipt on file" });
+
+		// Build an image data URI from either an inline data URI or a stored file.
+		let dataUri = "";
+		if (photo.startsWith("data:image/")) {
+			dataUri = photo;
+		} else if (/^data:application\/pdf/i.test(photo) || /\.pdf$/i.test(photo)) {
+			return res.status(415).json({ error: "PDF receipts can't be auto-extracted" });
+		} else if (photo.startsWith("/uploads/expense-receipts/")) {
+			const fname = path.basename(photo); // strips any traversal segments
+			const abs = path.join(RECEIPTS_DIR, fname);
+			if (!abs.startsWith(RECEIPTS_DIR + path.sep)) return res.status(400).json({ error: "Invalid receipt path" });
+			let st;
+			try { st = fs.statSync(abs); } catch { return res.status(404).json({ error: "Receipt file missing" }); }
+			// Cap the disk read before base64 — receipts are canvas-compressed images;
+			// anything over 10 MB isn't a real receipt and would spike memory + Gemini cost.
+			if (st.size > 10 * 1024 * 1024) return res.status(413).json({ error: "Receipt too large to scan" });
+			let buf;
+			try { buf = fs.readFileSync(abs); } catch { return res.status(404).json({ error: "Receipt file missing" }); }
+			const ext = fname.split(".").pop().toLowerCase();
+			const mime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+			dataUri = `data:${mime};base64,${buf.toString("base64")}`;
+		} else {
+			return res.status(415).json({ error: "Receipt format not supported for extraction" });
+		}
+
+		let ocr;
+		try {
+			ocr = await runReceiptOcr(dataUri);
+		} catch (err) {
+			if (err && err.code === "OCR_NO_KEY") return res.status(503).json({ error: "ocr_unavailable" });
+			console.error("extract-details OCR failed:", err && err.message);
+			return res.status(502).json({ error: "ocr_failed" });
+		}
+		const json = sanitizeReceiptDetails(ocr.details || []);
+		db.prepare("UPDATE expenses SET receipt_details = ? WHERE id = ?").run(json, id);
+		return res.json({ receipt_details: parseReceiptDetails(json) });
+	} catch (err) {
+		console.error("extract-details error:", err.message);
+		res.status(500).json({ error: "extract_failed" });
 	}
 });
 
@@ -19647,7 +19730,7 @@ app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { driver, type, status, truck, from, to, state, region, q } = req.query;
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, created_at FROM expenses";
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, created_at FROM expenses";
 		const conditions = [];
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
@@ -19688,7 +19771,7 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		}
 		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 		sql += " ORDER BY id DESC";
-		const expenses = db.prepare(sql).all(...params);
+		const expenses = db.prepare(sql).all(...params).map((e) => ({ ...e, receipt_details: parseReceiptDetails(e.receipt_details) }));
 		res.json({ expenses });
 	} catch (err) {
 		console.error("Error fetching all expenses:", err.message);

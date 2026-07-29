@@ -290,128 +290,174 @@
            inside the modal auto-advance to the next Pending row. -->
       <Teleport to="body">
         <div v-if="selectedExpense" class="exp-overlay" @click.self="closeExpenseDetail">
-          <div class="exp-dialog">
-            <div class="exp-nav">
-              <button class="exp-nav-btn" :disabled="!canGoPrev" @click="goPrev" aria-label="Previous pending expense" title="Previous pending (←)">&larr; Prev</button>
-              <span class="exp-nav-counter">
-                <template v-if="isCurrentPending">Pending {{ pendingPos + 1 }} of {{ pendingIndices.length }}</template>
-                <template v-else-if="pendingIndices.length > 0">Viewing {{ (selectedExpense?.status || 'Pending').toLowerCase() }} · {{ pendingIndices.length }} pending remain</template>
-                <template v-else>No pending expenses</template>
-              </span>
-              <button class="exp-nav-btn" :disabled="!canGoNext" @click="goNext" aria-label="Next pending expense" title="Next pending (→)">Next &rarr;</button>
-            </div>
-            <div class="exp-header">
-              <div>
-                <div class="exp-type" :class="'type-' + (selectedExpense.type || 'other').toLowerCase()">{{ selectedExpense.type || 'Other' }}</div>
-                <div class="exp-amount">${{ Number(selectedExpense.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
-                <div class="exp-sub">{{ fmtDate(selectedExpense.date) }} &middot; {{ selectedExpense.driver }}</div>
-              </div>
-              <button class="exp-close" @click="closeExpenseDetail" aria-label="Close (Esc)">&times;</button>
-            </div>
-            <div class="exp-grid">
-              <template v-if="isFuelExpense(selectedExpense)">
-                <div class="exp-stat">
-                  <span class="exp-stat-label">Gallons</span>
-                  <span class="exp-stat-value">{{ Number(selectedExpense.gallons || 0).toFixed(2) }}</span>
+          <div class="exp-dialog exp-dialog--full">
+            <div class="exp-main">
+              <!-- LEFT column — all expense details (scrolls internally only if it overflows) -->
+              <div class="exp-details">
+                <div class="exp-nav">
+                  <button class="exp-nav-btn" :disabled="!canGoPrev" @click="goPrev" aria-label="Previous pending expense" title="Previous pending (←)">&larr; Prev</button>
+                  <span class="exp-nav-counter">
+                    <template v-if="isCurrentPending">Pending {{ pendingPos + 1 }} of {{ pendingIndices.length }}</template>
+                    <template v-else-if="pendingIndices.length > 0">Viewing {{ (selectedExpense?.status || 'Pending').toLowerCase() }} · {{ pendingIndices.length }} pending remain</template>
+                    <template v-else>No pending expenses</template>
+                  </span>
+                  <button class="exp-nav-btn" :disabled="!canGoNext" @click="goNext" aria-label="Next pending expense" title="Next pending (→)">Next &rarr;</button>
                 </div>
-                <div class="exp-stat">
-                  <span class="exp-stat-label">Price / Gallon</span>
-                  <span class="exp-stat-value">${{ pricePerGallon(selectedExpense) }}</span>
-                </div>
-                <div class="exp-stat">
-                  <span class="exp-stat-label">Odometer</span>
-                  <span class="exp-stat-value">{{ selectedExpense.odometer ? Number(selectedExpense.odometer).toLocaleString() : '\u2014' }}</span>
-                </div>
-              </template>
-              <div class="exp-stat">
-                <span class="exp-stat-label">Status</span>
-                <span class="exp-stat-value">
-                  <span :class="['status-pill', 'st-' + (selectedExpense.status || 'Pending').toLowerCase()]">{{ selectedExpense.status || 'Pending' }}</span>
-                </span>
-              </div>
-              <div v-if="selectedExpense.load_id" class="exp-stat">
-                <span class="exp-stat-label">Load</span>
-                <span class="exp-stat-value mono-sm">{{ selectedExpense.load_id }}</span>
-              </div>
-              <div v-if="selectedExpense.truck_unit" class="exp-stat">
-                <span class="exp-stat-label">Truck</span>
-                <span class="exp-stat-value">#{{ selectedExpense.truck_unit }}</span>
-              </div>
-              <div class="exp-stat exp-stat-location">
-                <span class="exp-stat-label">Vendor</span>
-                <template v-if="editingVendor">
-                  <div class="loc-edit-row">
-                    <input
-                      v-model="vendorDraft"
-                      type="text"
-                      class="loc-input"
-                      placeholder="Vendor (e.g., Pilot Flying J)"
-                      aria-label="Vendor"
-                    />
+                <div class="exp-details-scroll">
+                  <div class="exp-header">
+                    <div>
+                      <div class="exp-type" :class="'type-' + (selectedExpense.type || 'other').toLowerCase()">{{ selectedExpense.type || 'Other' }}</div>
+                      <div class="exp-amount">${{ Number(selectedExpense.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
+                      <div class="exp-sub">{{ fmtDate(selectedExpense.date) }} &middot; {{ selectedExpense.driver }}</div>
+                    </div>
+                    <button class="exp-close" @click="closeExpenseDetail" aria-label="Close (Esc)">&times;</button>
                   </div>
-                  <div class="loc-edit-actions">
-                    <button class="loc-save" :disabled="savingVendor" @click="saveVendor">{{ savingVendor ? '…' : 'Save' }}</button>
-                    <button class="loc-cancel" :disabled="savingVendor" @click="editingVendor = false">Cancel</button>
+                  <div class="exp-grid">
+                    <template v-if="isFuelExpense(selectedExpense)">
+                      <div class="exp-stat">
+                        <span class="exp-stat-label">Gallons</span>
+                        <span class="exp-stat-value">{{ Number(selectedExpense.gallons || 0).toFixed(2) }}</span>
+                      </div>
+                      <div class="exp-stat">
+                        <span class="exp-stat-label">Price / Gallon</span>
+                        <span class="exp-stat-value">${{ pricePerGallon(selectedExpense) }}</span>
+                      </div>
+                      <div class="exp-stat">
+                        <span class="exp-stat-label">Odometer</span>
+                        <span class="exp-stat-value">{{ selectedExpense.odometer ? Number(selectedExpense.odometer).toLocaleString() : '—' }}</span>
+                      </div>
+                    </template>
+                    <div class="exp-stat">
+                      <span class="exp-stat-label">Status</span>
+                      <span class="exp-stat-value">
+                        <span :class="['status-pill', 'st-' + (selectedExpense.status || 'Pending').toLowerCase()]">{{ selectedExpense.status || 'Pending' }}</span>
+                      </span>
+                    </div>
+                    <div v-if="selectedExpense.load_id" class="exp-stat">
+                      <span class="exp-stat-label">Load</span>
+                      <span class="exp-stat-value mono-sm">{{ selectedExpense.load_id }}</span>
+                    </div>
+                    <div v-if="selectedExpense.truck_unit" class="exp-stat">
+                      <span class="exp-stat-label">Truck</span>
+                      <span class="exp-stat-value">#{{ selectedExpense.truck_unit }}</span>
+                    </div>
+                    <div class="exp-stat exp-stat-location">
+                      <span class="exp-stat-label">Vendor</span>
+                      <template v-if="editingVendor">
+                        <div class="loc-edit-row">
+                          <input
+                            v-model="vendorDraft"
+                            type="text"
+                            class="loc-input"
+                            placeholder="Vendor (e.g., Pilot Flying J)"
+                            aria-label="Vendor"
+                          />
+                        </div>
+                        <div class="loc-edit-actions">
+                          <button class="loc-save" :disabled="savingVendor" @click="saveVendor">{{ savingVendor ? '…' : 'Save' }}</button>
+                          <button class="loc-cancel" :disabled="savingVendor" @click="editingVendor = false">Cancel</button>
+                        </div>
+                      </template>
+                      <span v-else class="exp-stat-value exp-stat-value-loc">
+                        <span :title="selectedExpense.vendor_normalized || ''">{{ selectedExpense.vendor || '—' }}</span>
+                        <button class="loc-edit-btn" @click="startEditVendor" aria-label="Edit vendor">Edit</button>
+                      </span>
+                    </div>
+                    <div class="exp-stat exp-stat-location">
+                      <span class="exp-stat-label">City / State</span>
+                      <template v-if="editingLocation">
+                        <div class="loc-edit-row">
+                          <input
+                            v-model="locDraft.city"
+                            type="text"
+                            class="loc-input"
+                            placeholder="City"
+                            aria-label="City"
+                          />
+                          <input
+                            v-model="locDraft.state"
+                            type="text"
+                            class="loc-input loc-input-state"
+                            placeholder="ST"
+                            maxlength="2"
+                            aria-label="State (2-letter)"
+                            @input="locDraft.state = locDraft.state.toUpperCase()"
+                          />
+                        </div>
+                        <div class="loc-edit-actions">
+                          <button class="loc-save" :disabled="savingLocation" @click="saveLocation">{{ savingLocation ? '…' : 'Save' }}</button>
+                          <button class="loc-cancel" :disabled="savingLocation" @click="editingLocation = false">Cancel</button>
+                        </div>
+                      </template>
+                      <span v-else class="exp-stat-value exp-stat-value-loc">
+                        {{ fmtLocation(selectedExpense) }}
+                        <button class="loc-edit-btn" @click="startEditLocation" aria-label="Edit city and state">Edit</button>
+                      </span>
+                    </div>
                   </div>
+                  <div v-if="selectedExpense.description" class="exp-desc">
+                    <div class="exp-desc-label">Description</div>
+                    <div>{{ selectedExpense.description }}</div>
+                  </div>
+                  <!-- Receipt Details — dynamic label/value pairs parsed from the stored receipt -->
+                  <div v-if="(selectedExpense.receipt_details || []).length" class="exp-rd">
+                    <div class="exp-desc-label">Receipt Details</div>
+                    <dl class="exp-rd-list">
+                      <div v-for="(d, i) in selectedExpense.receipt_details" :key="i" class="exp-rd-row">
+                        <dt class="exp-rd-label">{{ d.label }}</dt>
+                        <dd class="exp-rd-value">{{ d.value }}</dd>
+                      </div>
+                    </dl>
+                    <button
+                      v-if="canExtractDetails"
+                      class="exp-rd-rescan"
+                      :disabled="extractingDetails"
+                      @click="extractReceiptDetails"
+                    >{{ extractingDetails ? 'Re-scanning…' : 'Re-scan receipt' }}</button>
+                  </div>
+                  <div v-else-if="canExtractDetails" class="exp-rd">
+                    <div class="exp-desc-label">Receipt Details</div>
+                    <div class="exp-rd-empty">
+                      <p class="exp-rd-hint">Scan the stored receipt to pull line items, tax, and payment details.</p>
+                      <button class="exp-rd-extract" :disabled="extractingDetails" @click="extractReceiptDetails">
+                        {{ extractingDetails ? 'Scanning…' : 'Extract details' }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="exp-actions">
+                  <template v-if="(selectedExpense.status || 'Pending') === 'Pending'">
+                    <button class="exp-btn-approve" :disabled="approveLoading" @click="approveCurrent">{{ approveLoading ? '…' : 'Approve' }}</button>
+                    <button class="exp-btn-reject" :disabled="approveLoading" @click="rejectCurrent">{{ approveLoading ? '…' : 'Reject' }}</button>
+                  </template>
+                  <button v-else class="exp-btn-undo" :disabled="approveLoading" @click="undoCurrent">{{ approveLoading ? '…' : 'Undo' }}</button>
+                </div>
+              </div>
+              <!-- RIGHT column — receipt, large + contained so the whole thing is readable -->
+              <div class="exp-receipt-pane">
+                <div class="exp-desc-label exp-receipt-label">Receipt</div>
+                <template v-if="selectedExpense.photo_data">
+                  <template v-if="isPdfReceipt(selectedExpense.photo_data)">
+                    <div class="exp-receipt-pdf-wrap">
+                      <a class="exp-receipt-pdf" :href="selectedExpense.photo_data" target="_blank" rel="noopener">Open PDF receipt</a>
+                      <div class="exp-receipt-hint">Opens in a new tab</div>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="exp-receipt-imgwrap">
+                      <img :src="selectedExpense.photo_data" class="exp-receipt-img" @click="previewImg = selectedExpense.photo_data" />
+                    </div>
+                    <div class="exp-receipt-hint">Click to enlarge</div>
+                  </template>
                 </template>
-                <span v-else class="exp-stat-value exp-stat-value-loc">
-                  <span :title="selectedExpense.vendor_normalized || ''">{{ selectedExpense.vendor || '—' }}</span>
-                  <button class="loc-edit-btn" @click="startEditVendor" aria-label="Edit vendor">Edit</button>
-                </span>
+                <div v-else class="exp-receipt-empty">
+                  <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1Z" />
+                    <path d="M8 7h8M8 11h8M8 15h5" />
+                  </svg>
+                  <span>No receipt attached</span>
+                </div>
               </div>
-              <div class="exp-stat exp-stat-location">
-                <span class="exp-stat-label">City / State</span>
-                <template v-if="editingLocation">
-                  <div class="loc-edit-row">
-                    <input
-                      v-model="locDraft.city"
-                      type="text"
-                      class="loc-input"
-                      placeholder="City"
-                      aria-label="City"
-                    />
-                    <input
-                      v-model="locDraft.state"
-                      type="text"
-                      class="loc-input loc-input-state"
-                      placeholder="ST"
-                      maxlength="2"
-                      aria-label="State (2-letter)"
-                      @input="locDraft.state = locDraft.state.toUpperCase()"
-                    />
-                  </div>
-                  <div class="loc-edit-actions">
-                    <button class="loc-save" :disabled="savingLocation" @click="saveLocation">{{ savingLocation ? '…' : 'Save' }}</button>
-                    <button class="loc-cancel" :disabled="savingLocation" @click="editingLocation = false">Cancel</button>
-                  </div>
-                </template>
-                <span v-else class="exp-stat-value exp-stat-value-loc">
-                  {{ fmtLocation(selectedExpense) }}
-                  <button class="loc-edit-btn" @click="startEditLocation" aria-label="Edit city and state">Edit</button>
-                </span>
-              </div>
-            </div>
-            <div v-if="selectedExpense.description" class="exp-desc">
-              <div class="exp-desc-label">Description</div>
-              <div>{{ selectedExpense.description }}</div>
-            </div>
-            <div v-if="selectedExpense.photo_data" class="exp-receipt">
-              <div class="exp-desc-label">Receipt</div>
-              <template v-if="isPdfReceipt(selectedExpense.photo_data)">
-                <a class="exp-receipt-pdf" :href="selectedExpense.photo_data" target="_blank" rel="noopener">Open PDF receipt</a>
-                <div class="exp-receipt-hint">Opens in a new tab</div>
-              </template>
-              <template v-else>
-                <img :src="selectedExpense.photo_data" class="exp-receipt-img" @click="previewImg = selectedExpense.photo_data" />
-                <div class="exp-receipt-hint">Click to enlarge</div>
-              </template>
-            </div>
-            <div class="exp-actions">
-              <template v-if="(selectedExpense.status || 'Pending') === 'Pending'">
-                <button class="exp-btn-approve" :disabled="approveLoading" @click="approveCurrent">{{ approveLoading ? '…' : 'Approve' }}</button>
-                <button class="exp-btn-reject" :disabled="approveLoading" @click="rejectCurrent">{{ approveLoading ? '…' : 'Reject' }}</button>
-              </template>
-              <button v-else class="exp-btn-undo" :disabled="approveLoading" @click="undoCurrent">{{ approveLoading ? '…' : 'Undo' }}</button>
             </div>
           </div>
         </div>
@@ -1057,6 +1103,35 @@ async function saveVendor() {
     toast(err?.message || 'Failed to update vendor', 'error')
   } finally {
     savingVendor.value = false
+  }
+}
+
+// Receipt Details — run Gemini OCR on the ALREADY-stored receipt and surface
+// the parsed label/value pairs. The endpoint persists them server-side; we also
+// patch the row in `allExpenses` so the modal (a computed-by-id) re-renders
+// live — the same pattern saveVendor/saveLocation use. Only image receipts can
+// be extracted (the server 415s on PDFs).
+const extractingDetails = ref(false)
+const canExtractDetails = computed(() => {
+  const e = selectedExpense.value
+  return !!(e && e.photo_data && !isPdfReceipt(e.photo_data))
+})
+async function extractReceiptDetails() {
+  const e = selectedExpense.value
+  if (!e || extractingDetails.value) return
+  extractingDetails.value = true
+  try {
+    const res = await api.post(`/api/expenses/${e.id}/extract-details`)
+    const details = Array.isArray(res?.receipt_details) ? res.receipt_details : []
+    const row = allExpenses.value.find(x => x.id === e.id)
+    if (row) row.receipt_details = details
+    toast(details.length ? 'Receipt details extracted' : 'No details found on this receipt', 'success')
+  } catch (err) {
+    if (err?.status === 415) toast("PDF receipts can't be auto-extracted", 'error')
+    else if (err?.status === 503) toast("Receipt scanning isn't configured", 'error')
+    else toast(err?.message || 'Failed to extract receipt details', 'error')
+  } finally {
+    extractingDetails.value = false
   }
 }
 onBeforeUnmount(() => {
@@ -2284,6 +2359,208 @@ tr:hover td { background: var(--surface-hover); }
 .exp-btn-undo { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
 .exp-btn-undo:hover:not(:disabled) { background: #e2e8f0; color: #0f172a; }
 .exp-btn-approve:disabled, .exp-btn-reject:disabled, .exp-btn-undo:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- Fullscreen expense-detail modal (two-column: details | receipt) ----
+   Everything below is scoped to .exp-dialog--full so the IFTA state-detail
+   modal (which reuses the plain .exp-dialog) keeps its small centered box. */
+.exp-dialog--full {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.exp-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(330px, 420px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+/* LEFT — details column. Pinned nav on top, pinned actions on the bottom,
+   the middle stats region is the only thing that scrolls (and only if the
+   content overflows a normal desktop). */
+.exp-details {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-right: 1px solid #e2e8f0;
+}
+.exp-dialog--full .exp-nav {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+.exp-details-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.25rem;
+}
+.exp-dialog--full .exp-header { margin-bottom: 1.1rem; }
+.exp-dialog--full .exp-actions {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0.9rem 1.25rem;
+  border-top: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+/* RIGHT — receipt pane. The image fills the column and is object-fit:contain
+   so the whole receipt is always readable and never cropped. */
+.exp-receipt-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 1.25rem;
+  background: #f1f5f9;
+  overflow: hidden;
+}
+.exp-receipt-label { flex-shrink: 0; margin-bottom: 0.85rem; }
+.exp-receipt-imgwrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 0.75rem;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.10);
+}
+.exp-dialog--full .exp-receipt-img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 4px;
+  cursor: zoom-in;
+  display: block;
+}
+.exp-dialog--full .exp-receipt-hint {
+  flex-shrink: 0;
+  text-align: center;
+  margin-top: 0.6rem;
+}
+.exp-receipt-pdf-wrap {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+.exp-receipt-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  color: #94a3b8;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: 2px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+.exp-receipt-empty svg { color: #cbd5e1; }
+
+/* Receipt Details — dynamic label/value list parsed from the receipt (left column). */
+.exp-rd { margin-top: 0.9rem; }
+.exp-rd-list {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+.exp-rd-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid #eef2f7;
+}
+.exp-rd-row:first-child { border-top: none; }
+.exp-rd-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #64748b;
+  word-break: break-word;
+}
+.exp-rd-value {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #0f172a;
+  text-align: right;
+  word-break: break-word;
+}
+.exp-rd-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.exp-rd-hint { margin: 0; font-size: 0.78rem; color: #64748b; line-height: 1.4; }
+.exp-rd-extract {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.74rem; font-weight: 600;
+  background: var(--accent-dim); color: var(--accent);
+  border: none; border-radius: 6px; cursor: pointer; font-family: inherit;
+  transition: opacity 0.15s;
+}
+.exp-rd-extract:hover:not(:disabled) { opacity: 0.8; }
+.exp-rd-extract:disabled { opacity: 0.5; cursor: not-allowed; }
+.exp-rd-rescan {
+  margin-top: 0.55rem;
+  padding: 0;
+  background: none; border: none;
+  font-size: 0.72rem; font-weight: 600;
+  color: var(--accent); cursor: pointer; font-family: inherit;
+  text-decoration: underline; text-underline-offset: 2px;
+  transition: opacity 0.15s;
+}
+.exp-rd-rescan:hover:not(:disabled) { opacity: 0.7; }
+.exp-rd-rescan:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Below 820px a side-by-side split can't work — collapse to one column
+   (details first, receipt below) and let the whole dialog scroll. */
+@media (max-width: 820px) {
+  .exp-dialog--full {
+    display: block;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border-radius: 10px;
+  }
+  .exp-main { display: block; }
+  .exp-details {
+    border-right: none;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .exp-details-scroll { overflow-y: visible; }
+  .exp-receipt-pane { overflow: visible; min-height: 55vh; }
+  .exp-receipt-imgwrap { flex: none; min-height: 46vh; }
+  .exp-dialog--full .exp-receipt-img { max-height: 74vh; }
+}
 
 /* Add Expense form */
 .add-expense-card {
