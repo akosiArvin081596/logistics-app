@@ -31,6 +31,14 @@
           </div>
           <div class="idp-stage">
             <PdfZoomViewer v-if="stageSrc" :key="activeTab" :src="stageSrc" />
+            <div v-else-if="activeTab === 'email'" class="idp-email">
+              <div class="idp-email-head">
+                <div><span class="idp-email-k">To</span> {{ recipient || pv.to || '—' }}</div>
+                <div><span class="idp-email-k">Subject</span> {{ pv.subject || '—' }}</div>
+              </div>
+              <!-- Trusted server-rendered HTML (buildInvoiceEmailHtml esc()'s all dynamic fields). -->
+              <div class="idp-email-body" v-html="emailHtml"></div>
+            </div>
             <div v-else-if="activeTab === 'pod'" class="idp-pod-fallback">
               <template v-if="podUrl">
                 <p>The POD is stored in Google Drive and can't be previewed inline here.</p>
@@ -160,10 +168,15 @@ const badge = computed(() => {
 // --- Attachment tabs + PDF blob URLs ----------------------------------------
 const activeTab = ref('invoice')
 const hasRatecon = computed(() => !!pv.value.rateconPdfBase64)
+const hasEmail = computed(() => !!pv.value.emailHtml)
+// The exact Gmail draft body from the dryRun response. Trusted server HTML —
+// buildInvoiceEmailHtml esc()'s every dynamic field — so it's rendered via v-html.
+const emailHtml = computed(() => pv.value.emailHtml || '')
 const tabs = computed(() => {
   const t = [{ key: 'invoice', label: 'Invoice' }]
   if (hasRatecon.value) t.push({ key: 'ratecon', label: 'Rate-con' })
   t.push({ key: 'pod', label: 'POD' })
+  if (hasEmail.value) t.push({ key: 'email', label: 'Email message' })
   return t
 })
 const podSameOrigin = computed(() => !!(props.podUrl && props.podUrl.startsWith('/uploads')))
@@ -353,6 +366,47 @@ async function approve() {
   text-decoration: none;
 }
 .idp-open-link:hover { background: #1d4ed8; }
+
+/* Email-message preview (the exact Gmail draft body). */
+.idp-email {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  padding: 1rem 1.25rem 1.5rem;
+  background: #f8fafc;
+}
+.idp-email-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-width: 720px;
+  margin: 0 auto 1rem;
+  padding: 0.7rem 0.9rem;
+  background: #fff;
+  border: 1px solid #e8edf2;
+  border-radius: 10px;
+  font-size: 0.85rem;
+  color: #1a1d27;
+  word-break: break-word;
+}
+.idp-email-k {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #94a3b8;
+  margin-right: 0.5rem;
+}
+.idp-email-body {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1.5rem 1.75rem;
+  background: #fff;
+  border: 1px solid #e8edf2;
+  border-radius: 10px;
+}
+/* v-html email content is unscoped — keep its embedded logo/images in bounds. */
+.idp-email-body :deep(img) { max-width: 100%; height: auto; }
 
 /* Right details column. */
 .idp-meta {
