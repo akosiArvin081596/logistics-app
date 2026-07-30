@@ -5,7 +5,8 @@
       <p class="bulk-sub">
         Pick a driver, drop in a stack of receipts, and each one is scanned into an
         editable row. Review the reads, fix anything off, then save them all as
-        expenses. Photos are auto-read; PDFs attach for manual entry.
+        expenses. Photos are auto-read; PDFs attach for manual entry. iPhone (HEIC)
+        photos supported.
       </p>
     </div>
 
@@ -50,7 +51,7 @@
         <input
           ref="fileInputRef"
           type="file"
-          accept="image/*,application/pdf"
+          accept="image/*,.heic,.heif,application/pdf"
           multiple
           class="bulk-file-input"
           :disabled="atCapacity || processing || saving"
@@ -288,6 +289,7 @@ import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from
 import { useApi } from '../../../composables/useApi'
 import { useToast } from '../../../composables/useToast'
 import { useViewport } from '../../../composables/useViewport'
+import { compressImage } from '../../../lib/imageUtils'
 
 const props = defineProps({
   drivers: { type: Array, default: () => [] },
@@ -303,6 +305,10 @@ const MAX_BATCH = 25
 const MAX_PDF_FILE_BYTES = 15 * 1024 * 1024 // matches the server-side cap
 const OCR_CONCURRENCY = 3 // parallel Gemini reads — modest so the limiter/credits last
 const IMG_MAX_EDGE = 1024
+// OCR round-trip can be slow on a large photo over office Wi-Fi; give Gemini
+// headroom beyond the api default so a slow-but-successful read isn't aborted
+// (a client abort surfaces as 'limited'/Retry, masking a read that would land).
+const OCR_CLIENT_TIMEOUT_MS = 50000
 // Skip persisting a draft this big — server caps at 40 MB, so stay under it.
 // A batch that can't be persisted just loses cross-device resume, nothing else.
 const MAX_DRAFT_PERSIST_BYTES = 38 * 1024 * 1024
@@ -383,30 +389,6 @@ async function hashFile(file) {
   }
 }
 
-// Decode + downscale in one createImageBitmap pass so a 12MP photo never
-// materializes ~48MB of raw RGBA (same OOM defense as ExpenseForm/ExpensesTab).
-async function downscaleImage(blob) {
-  try {
-    const probe = await createImageBitmap(blob)
-    let w = probe.width, h = probe.height
-    probe.close()
-    if (w > IMG_MAX_EDGE || h > IMG_MAX_EDGE) {
-      if (w > h) { h = Math.round((h * IMG_MAX_EDGE) / w); w = IMG_MAX_EDGE }
-      else { w = Math.round((w * IMG_MAX_EDGE) / h); h = IMG_MAX_EDGE }
-    }
-    const bitmap = await createImageBitmap(blob, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' })
-    const canvas = document.createElement('canvas')
-    canvas.width = w; canvas.height = h
-    canvas.getContext('2d').drawImage(bitmap, 0, 0)
-    bitmap.close()
-    const url = canvas.toDataURL('image/jpeg', 0.8)
-    canvas.width = 0; canvas.height = 0
-    return url
-  } catch {
-    return ''
-  }
-}
-
 function makeRow(file, fileHash = '') {
   return {
     key: `r${rowSeq++}`,
@@ -431,6 +413,10 @@ function makeRow(file, fileHash = '') {
     // like amount/vendor; stays [] until a successful read fills it (processRow).
     receiptDetails: [],
     ocrStatus: 'queued',
+    // Why a scan ended where it did — drives the aggregate toast buckets after a
+    // batch. 'unsupported' = couldn't be decoded to an OCR-able JPEG (e.g. a HEIC
+    // that failed conversion); 'unreadable' = empty processed image.
+    ocrReason: '',
     saveStatus: null,
     saveError: '',
     fileHash,
@@ -465,15 +451,24 @@ async function processRow(row) {
       row.ocrStatus = 'skipped' // no OCR for PDFs — manual entry
       return
     }
-    const img = await downscaleImage(row._blob)
-    if (!img) { row.ocrStatus = 'failed'; return }
-    row.thumb = img
+    // Shared helper: downscales JPEG/PNG/WEBP and converts iPhone HEIC→JPEG (the
+    // fix for blank bulk rows — createImageBitmap can't decode HEIC off Safari).
+    const img = await compressImage(row._blob, IMG_MAX_EDGE)
+    if (!img) { row.ocrStatus = 'failed'; row.ocrReason = 'unreadable'; return }
+    // Always attach the processed image — even a raw fallback — so the receipt
+    // is never lost; the expense still saves with the photo for manual review.
     row.photoData = img
+    // Only genuinely OCR-able (and browser-renderable) formats go to the server
+    // and the thumbnail. A raw HEIC/HEIF fallback can't be drawn in an <img> and
+    // the OCR endpoint would 400 it, so skip both and flag it for the toast.
+    const ocrable = /^data:image\/(jpeg|jpg|png|webp);base64,/i.test(img)
+    if (ocrable) row.thumb = img
+    if (!ocrable) { row.ocrStatus = 'failed'; row.ocrReason = 'unsupported'; return }
     // Bulk skips the ScanKit enhance pass the single forms do — one OCR call per
     // receipt keeps credit spend and the rate limiter in check. Gemini reads raw
     // downscaled photos fine; the admin fixes any misreads in the grid.
     try {
-      const data = await api.post('/api/expenses/ocr', { photoData: img }, { timeout: 30000 })
+      const data = await api.post('/api/expenses/ocr', { photoData: img }, { timeout: OCR_CLIENT_TIMEOUT_MS })
       if (data.amount != null) row.amount = String(data.amount)
       // Only a real read sets the date. A blank leaves the row flagged so the
       // recorded date is always the receipt's purchase date, never today.
@@ -545,6 +540,30 @@ async function onFilesSelected(event) {
   } finally {
     processing.value = false
   }
+  summarizeScan(added)
+}
+
+// One toast over a just-processed batch (mirrors the single-form tone in
+// ExpensesTab.runAddFormOcr). Its whole reason to exist is to make a silent
+// failure loud — chiefly telling the admin that unreadable iPhone HEICs need
+// converting to JPEG, rather than leaving them staring at blank rows.
+function summarizeScan(batch) {
+  if (!batch.length) return
+  const read = batch.filter(r => r.ocrStatus === 'ok').length
+  const unsupported = batch.filter(r => r.ocrStatus === 'failed' && r.ocrReason === 'unsupported').length
+  const otherFailed = batch.filter(r => r.ocrStatus === 'failed' && r.ocrReason !== 'unsupported').length
+  const ocrOff = batch.filter(r => r.ocrStatus === 'ocr_off').length
+  const limited = batch.filter(r => r.ocrStatus === 'limited').length
+  const skipped = batch.filter(r => r.ocrStatus === 'skipped').length
+  const parts = [`Scanned ${read} of ${batch.length}`]
+  if (unsupported) parts.push(`${unsupported} couldn't be read — convert HEIC to JPEG`)
+  if (otherFailed) parts.push(`${otherFailed} couldn't be read`)
+  if (ocrOff) parts.push(`${ocrOff} not scanned — scanning unavailable, enter manually`)
+  if (limited) parts.push(`${limited} rate-limited — retry`)
+  if (skipped) parts.push(`${skipped} PDF${skipped === 1 ? '' : 's'} attached for manual entry`)
+  // Error tone whenever anything but a clean read or an informational PDF landed.
+  const hasProblem = unsupported || otherFailed || ocrOff || limited
+  toast(parts.join(' · '), hasProblem ? 'error' : 'success')
 }
 
 function applyDefaultToAll() {

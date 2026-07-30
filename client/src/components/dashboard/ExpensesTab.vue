@@ -72,7 +72,7 @@
             <input
               ref="fileInputRef"
               type="file"
-              accept="image/*,application/pdf"
+              accept="image/*,.heic,.heif,application/pdf"
               class="add-photo-input"
               :disabled="addLoading || photoProcessing"
               @change="handleFileInput"
@@ -858,6 +858,7 @@ import ZoomableImage from '../shared/ZoomableImage.vue'
 import ExpenseAnalyticsPanel from './expenses/ExpenseAnalyticsPanel.vue'
 import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import { US_STATES } from '../../utils/usStates'
+import { compressImage } from '../../lib/imageUtils'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -1325,27 +1326,23 @@ async function handleFileInput(event) {
   }
   pdfName.value = ''
   photoProcessing.value = true
-  const MAX = 1024
   try {
-    // Decode + downscale in one pass via createImageBitmap so a 12MP photo
-    // never materializes ~48MB of raw RGBA — same OOM defense as the driver
-    // form (see ExpenseForm.vue:188).
-    const probe = await createImageBitmap(blob)
-    let w = probe.width, h = probe.height
-    probe.close()
-    if (w > MAX || h > MAX) {
-      if (w > h) { h = Math.round((h * MAX) / w); w = MAX }
-      else       { w = Math.round((w * MAX) / h); h = MAX }
+    // Shared helper: one-pass createImageBitmap downscale (OOM defense — a 12MP
+    // photo never materializes ~48MB of raw RGBA) that also converts iPhone
+    // HEIC→JPEG so Chrome/Android admins aren't stuck with a blank preview.
+    photoBase64.value = await compressImage(blob, 1024)
+    if (!photoBase64.value) throw new Error('unreadable')
+    // compressImage only yields a canvas JPEG on a real decode; a non-JPEG data
+    // URL means the format couldn't be decoded/converted (e.g. a HEIC even
+    // heic2any couldn't handle). Don't store an unviewable receipt or waste a
+    // doomed enhance/OCR round-trip — tell the admin to convert it. Mirrors the
+    // Bulk grid's ocrable gate.
+    if (!/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(photoBase64.value)) {
+      photoBase64.value = ''
+      if (fileInputRef.value) fileInputRef.value.value = ''
+      toast("Couldn't read this photo — convert HEIC to JPEG and try again", 'error')
+      return
     }
-    const bitmap = await createImageBitmap(blob, {
-      resizeWidth: w, resizeHeight: h, resizeQuality: 'medium',
-    })
-    const canvas = document.createElement('canvas')
-    canvas.width = w; canvas.height = h
-    canvas.getContext('2d').drawImage(bitmap, 0, 0)
-    bitmap.close()
-    photoBase64.value = canvas.toDataURL('image/jpeg', 0.8)
-    canvas.width = 0; canvas.height = 0
     // Enhance the receipt via ScanKit (crop + flatten lighting) for a cleaner
     // stored image, then OCR it to prefill the form. Both best-effort — any
     // failure keeps the raw photo and leaves manual entry intact.
@@ -1390,7 +1387,7 @@ async function runAddFormOcr() {
     state: addForm.state,
   }
   try {
-    const data = await api.post('/api/expenses/ocr', { photoData: photoBase64.value })
+    const data = await api.post('/api/expenses/ocr', { photoData: photoBase64.value }, { timeout: 50000 })
     if (data.amount != null) addForm.amount = String(data.amount)
     if (data.date) addForm.date = data.date
     if (data.city != null) addForm.city = String(data.city)
