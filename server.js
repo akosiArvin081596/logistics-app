@@ -13759,6 +13759,7 @@ app.post(
 					documentsEmailSource: recipientSource,
 					invoicePdfBase64,
 					rateconPdfBase64: rateconBuffer && rateconBuffer.length ? Buffer.from(rateconBuffer).toString("base64") : "",
+					emailHtml: draftHtml, // exact Gmail draft body so the reviewer can read the cover note before approving
 				});
 			}
 
