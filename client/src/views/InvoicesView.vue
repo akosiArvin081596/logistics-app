@@ -69,7 +69,7 @@
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow v-for="inv in filteredInvoices" :key="inv.id" class="hover:bg-blue-50/30 transition-colors duration-100 cursor-pointer" :class="{ 'opacity-50': inv.deleted_at }" @click="openDetail(inv)">
+            <TableRow v-for="inv in paginatedItems" :key="inv.id" class="hover:bg-blue-50/30 transition-colors duration-100 cursor-pointer" :class="{ 'opacity-50': inv.deleted_at }" @click="openDetail(inv)">
               <TableCell class="font-mono text-[12px] font-semibold text-gray-900">
                 {{ inv.invoice_number }}
                 <span v-if="inv.is_manual" class="manual-chip">Manual</span>
@@ -101,6 +101,7 @@
             </TableRow>
           </TableBody>
         </Table>
+        <PaginationBar :page="page" :page-size="pageSize" :total="filteredInvoices.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
       </CardContent>
     </Card>
 
@@ -346,11 +347,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useInvoicesStore } from '../stores/invoices'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
+import { usePagination } from '../composables/usePagination'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -358,6 +360,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import ManualInvoiceDialog from '../components/invoices/ManualInvoiceDialog.vue'
 import PaymentReportDialog from '../components/invoices/PaymentReportDialog.vue'
+import PaginationBar from '../components/shared/PaginationBar.vue'
 
 const store = useInvoicesStore()
 const auth = useAuthStore()
@@ -405,6 +408,13 @@ const filteredInvoices = computed(() => {
   if (weekFilter.value) list = list.filter(i => i.week_start <= weekFilter.value && i.week_end >= weekFilter.value)
   return list.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
 })
+
+// Client-side pagination over the filtered list (25/page).
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredInvoices, 25)
+// Reset to page 1 whenever a filter narrows/changes the list.
+watch([activeFilter, driverFilter, weekFilter, () => store.showDeleted], () => goTo(1))
+// Clamp: if the list shrinks below the current page, snap back into range.
+watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 
 const kpiCards = computed(() => [
   { label: 'Submitted',  value: store.submittedCount, sub: `$${fmtMoney(store.totalSubmitted)} pending review`, icon: '&#128228;', theme: 'kpi-amber',   iconTheme: 'kpi-icon-amber',   filter: 'Submitted' },

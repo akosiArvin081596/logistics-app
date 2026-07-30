@@ -460,9 +460,9 @@
                   </template>
                   <template v-else>
                     <div class="exp-receipt-imgwrap">
-                      <img :src="selectedExpense.photo_data" class="exp-receipt-img" @click="previewImg = selectedExpense.photo_data" />
+                      <ZoomableImage inline :src="selectedExpense.photo_data" alt="Receipt" />
                     </div>
-                    <div class="exp-receipt-hint">Click to enlarge</div>
+                    <div class="exp-receipt-hint">Scroll or double-click to zoom &middot; drag to pan</div>
                   </template>
                 </template>
                 <div v-else class="exp-receipt-empty">
@@ -1202,6 +1202,9 @@ const MAX_PDF_FILE_BYTES = 15 * 1024 * 1024 // matches the server-side cap
 // photoProcessing "Processing file…" state, so that hint already covers it.)
 const ocrApplied = ref(false)
 const ocrConfidence = ref('')
+// OCR-extracted dynamic receipt fields, carried through to POST /api/expenses so
+// a newly-logged receipt stores its details without the on-demand "Extract".
+const ocrDetails = ref([])
 const preOcrSnapshot = ref(null)
 
 // Download Receipts (Super Admin only) — ZIP bundle endpoint
@@ -1311,6 +1314,14 @@ async function handlePdfInput(blob) {
 async function handleFileInput(event) {
   const blob = event.target.files && event.target.files[0]
   if (!blob) return
+  // New file selected → drop any OCR state from a prior image before branching,
+  // so swapping an OCR'd image for a PDF (or another image) can't carry stale
+  // details or the "✓ Autofilled" chip onto the new receipt. runAddFormOcr
+  // repopulates for images; the PDF path has no OCR, so it stays detail-less.
+  ocrApplied.value = false
+  ocrConfidence.value = ''
+  ocrDetails.value = []
+  preOcrSnapshot.value = null
   if (isPdfFile(blob)) {
     await handlePdfInput(blob)
     return
@@ -1372,6 +1383,7 @@ async function runAddFormOcr() {
   if (!photoBase64.value || photoIsPdf.value) return
   ocrApplied.value = false
   ocrConfidence.value = ''
+  ocrDetails.value = []
   preOcrSnapshot.value = {
     type: addForm.type,
     amount: addForm.amount,
@@ -1392,6 +1404,7 @@ async function runAddFormOcr() {
     if (data.vendor && !addForm.description.trim()) addForm.description = String(data.vendor).slice(0, 80)
     ocrApplied.value = true
     ocrConfidence.value = data.confidence || ''
+    ocrDetails.value = Array.isArray(data.details) ? data.details : []
   } catch (err) {
     // 503 = OCR key unset: silent manual-entry fallback. Anything else is a
     // soft failure — keep the photo, don't nag, admin fills the fields.
@@ -1409,6 +1422,7 @@ function undoAddAutofill() {
   addForm.city = preOcrSnapshot.value.city
   addForm.state = preOcrSnapshot.value.state
   ocrApplied.value = false
+  ocrDetails.value = []
 }
 
 // Bulk upload saved ≥1 expense — refresh the underlying list in the background
@@ -1424,6 +1438,7 @@ function clearPhoto() {
   if (fileInputRef.value) fileInputRef.value.value = ''
   ocrApplied.value = false
   ocrConfidence.value = ''
+  ocrDetails.value = []
   preOcrSnapshot.value = null
 }
 
@@ -1449,6 +1464,7 @@ async function submitExpense() {
       photoData: photoBase64.value,
       gallons: 0,
       odometer: 0,
+      receiptDetails: ocrDetails.value,
     })
     toast('Expense logged')
     addForm.driver = ''; addForm.amount = ''; addForm.loadId = ''; addForm.description = ''; addForm.city = ''; addForm.state = ''
@@ -2498,6 +2514,7 @@ tr:hover td { background: var(--surface-hover); }
 .exp-receipt-imgwrap {
   flex: 1 1 auto;
   min-height: 0;
+  position: relative; /* positioning context for the inline ZoomableImage */
   display: flex;
   align-items: center;
   justify-content: center;

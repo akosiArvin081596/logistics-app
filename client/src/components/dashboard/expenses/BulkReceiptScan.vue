@@ -427,6 +427,9 @@ function makeRow(file, fileHash = '') {
     state: '',
     driver: defaultDriver.value,
     confidence: '',
+    // OCR-parsed dynamic details ({label,value}[]) — carried through to create
+    // like amount/vendor; stays [] until a successful read fills it (processRow).
+    receiptDetails: [],
     ocrStatus: 'queued',
     saveStatus: null,
     saveError: '',
@@ -479,6 +482,8 @@ async function processRow(row) {
       if (data.city != null) row.city = String(data.city)
       if (data.state != null) row.state = String(data.state).toUpperCase().slice(0, 2)
       if (data.suggestedType && props.expenseTypes.includes(data.suggestedType)) row.type = data.suggestedType
+      // Dynamic details ride along unedited (default [] for older/no-key responses).
+      row.receiptDetails = Array.isArray(data.details) ? data.details : []
       row.confidence = data.confidence || ''
       row.ocrStatus = 'ok'
     } catch (err) {
@@ -586,6 +591,7 @@ function serializeRow(r) {
     state: r.state,
     driver: r.driver,
     confidence: r.confidence,
+    receiptDetails: r.receiptDetails || [],
     ocrStatus: r.ocrStatus,
     // A snapshot taken mid-save could catch 'saving' — normalize to pending so a
     // resumed row is savable, never stuck.
@@ -642,6 +648,7 @@ function hydrateDraft(draftRows) {
     state: r.state || '',
     driver: r.driver || '',
     confidence: r.confidence || '',
+    receiptDetails: Array.isArray(r.receiptDetails) ? r.receiptDetails : [],
     ocrStatus: r.ocrStatus || 'queued',
     saveStatus: r.saveStatus === 'saving' ? null : (r.saveStatus || null),
     saveError: r.saveError || '',
@@ -682,6 +689,7 @@ async function saveOne(row) {
       city: row.city || '',
       state: row.state || '',
       photoData: row.photoData || '',
+      receiptDetails: row.receiptDetails || [],
       loadId: '',
       gallons: 0,
       odometer: 0,
