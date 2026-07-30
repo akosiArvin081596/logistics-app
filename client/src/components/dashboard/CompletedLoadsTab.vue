@@ -48,9 +48,13 @@
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
             <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
             <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Open in Active Loads → Edit to fill the gaps.">⚠ Needs Review</span>
-            <button type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Generate the invoice, attach the POD + rate-con, and save a Gmail draft for you to verify then send.">{{ drafting ? 'Drafting…' : '✉ Draft Invoice Email' }}</button>
+            <button type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Preview the invoice, POD, and rate-con and verify the recipient, then approve to save a Gmail draft for you to send.">{{ drafting ? 'Preparing…' : '✉ Draft Invoice Email' }}</button>
           </div>
           <div v-if="draftResult" :style="draftMsgStyle">{{ draftResult.msg }}</div>
+          <div v-if="approvedDraft" :style="approvedLineStyle">
+            <span>✓ Draft #{{ approvedDraft.invoice_id }} → {{ approvedDraft.recipient }} · {{ fmtDraftDate(approvedDraft.created_at) }}</span>
+            <button type="button" :style="reviewLinkStyle" :disabled="drafting" @click="draftInvoice">Review</button>
+          </div>
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
@@ -119,6 +123,16 @@
         </div>
       </DialogContent>
     </Dialog>
+    <InvoiceDraftPreviewModal
+      v-if="previewData"
+      :open="previewOpen"
+      :load-id="loadIdValue"
+      :preview="previewData"
+      :pod-url="podUrl"
+      :already-drafted="!!approvedDraft"
+      @update:open="v => { previewOpen = v }"
+      @approved="onDraftApproved"
+    />
   </div>
 </template>
 
@@ -136,6 +150,7 @@ import StarRating from '../shared/StarRating.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
+import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
 import { parseSheetUtc, formatDeliveredLocal } from '@/utils/datetime'
 
@@ -191,10 +206,12 @@ const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePaginat
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
 async function openDetail(job) {
   selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null
+  previewOpen.value = false; previewData.value = null; approvedDraft.value = null
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
   if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
+  if (lid) p.push(api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`).then(r => { approvedDraft.value = r.draft || null }).catch(() => {}))
   const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
   if (!hasLatCol && lid) p.push(api.get(`/api/geocode/load/${encodeURIComponent(lid)}`).then(g => {
     if (g.originLat) { selectedJob.value['Origin Lat'] = g.originLat; selectedJob.value['Origin Lng'] = g.originLng }
@@ -269,6 +286,37 @@ const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c 
 // on whether a given load can actually be invoiced.
 const drafting = ref(false)
 const draftResult = ref(null) // { ok: boolean, msg: string } | null
+// Review-before-draft: the button now runs a dryRun preview and opens a review
+// modal; the real Gmail draft is only created on "Approve & Create Draft".
+const previewOpen = ref(false)
+const previewData = ref(null) // dryRun response, or null
+const approvedDraft = ref(null) // GET /invoice-draft row, or null
+// POD row's drive_url (same-origin /uploads path or a Drive link) for the preview.
+const podUrl = computed(() => {
+  const pod = loadDocs.value.find(d => (d.type || '').toUpperCase() === 'POD')
+  return pod && pod.drive_url ? pod.drive_url : null
+})
+function fmtDraftDate(ts) {
+  if (!ts) return ''
+  const d = new Date(ts) // created_at is ISO ...Z (see load_invoice_drafts)
+  if (isNaN(d.getTime())) return String(ts)
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'numeric', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(d)
+}
+const approvedLineStyle = {
+  marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
+  fontSize: '0.75rem', fontWeight: '600', color: '#166534',
+  background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '6px',
+  padding: '0.35rem 0.6rem',
+}
+const reviewLinkStyle = computed(() => ({
+  background: 'transparent', border: 'none', padding: '0',
+  color: '#0f2847', fontWeight: '700', fontFamily: 'inherit', fontSize: '0.75rem',
+  textDecoration: 'underline', cursor: drafting.value ? 'not-allowed' : 'pointer',
+  opacity: drafting.value ? 0.6 : 1,
+}))
 const draftBtnStyle = computed(() => ({
   marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
   padding: '0.4rem 0.8rem', fontSize: '0.78rem', fontWeight: '700', borderRadius: '6px',
@@ -283,24 +331,37 @@ const draftMsgStyle = computed(() => ({
   color: draftResult.value && draftResult.value.ok ? '#166534' : '#991b1b',
   border: '1px solid ' + (draftResult.value && draftResult.value.ok ? '#bbf7d0' : '#fecaca'),
 }))
+// Runs a dryRun (no draft, no invoice number burned) and opens the review modal.
+// Doubles as the "Review" re-open for an already-approved draft.
 async function draftInvoice() {
   if (!loadIdValue.value || drafting.value) return
   drafting.value = true; draftResult.value = null
   try {
-    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-invoice`, {})
-    draftResult.value = {
-      ok: true,
-      msg: r.via
-        ? `✓ Draft ready in Gmail (invoice ${r.invoiceId}). Verify the details, then send.`
-        : (r.preview
-          ? `Invoice ${r.invoiceId} generated (preview) — no Gmail draft target is configured, so no draft was saved.`
-          : `Invoice ${r.invoiceId} generated.`),
-    }
+    // The preview does the same heavy work as approve (Sheets + Drive + Gemini +
+    // Puppeteer), so give it the same 60s budget as the approve POST.
+    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-invoice?dryRun=1`, {}, { timeout: 60000 })
+    previewData.value = r
+    previewOpen.value = true
   } catch (e) {
-    draftResult.value = { ok: false, msg: (e && e.message) || 'Failed to draft the invoice.' }
+    draftResult.value = { ok: false, msg: (e && e.message) || 'Failed to prepare the invoice preview.' }
   } finally {
     drafting.value = false
   }
+}
+// The review modal created the real Gmail draft: surface the success banner,
+// close the preview, and refresh the persistent approved-draft line.
+async function onDraftApproved(payload) {
+  previewOpen.value = false
+  draftResult.value = {
+    ok: true,
+    msg: `✓ Draft ready in Gmail (invoice ${payload.invoiceId}). Verify the details, then send.`,
+  }
+  const lid = loadIdValue.value
+  if (!lid) return
+  try {
+    const r = await api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`)
+    approvedDraft.value = r.draft || null
+  } catch { /* keep the success banner even if the refresh fails */ }
 }
 const detailSections = computed(() => {
   if (!selectedJob.value) return []; const used = new Set(); const secs = []
