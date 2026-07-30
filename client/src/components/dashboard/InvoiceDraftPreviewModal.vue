@@ -30,6 +30,7 @@
             </button>
           </div>
           <div class="idp-stage">
+            <div v-if="activeRateconLabel" class="idp-ratecon-label" :title="activeRateconLabel">{{ activeRateconLabel }}</div>
             <PdfZoomViewer v-if="stageSrc" :key="activeTab" :src="stageSrc" />
             <div v-else-if="activeTab === 'email'" class="idp-email">
               <div class="idp-email-head">
@@ -167,22 +168,40 @@ const badge = computed(() => {
 
 // --- Attachment tabs + PDF blob URLs ----------------------------------------
 const activeTab = ref('invoice')
-const hasRatecon = computed(() => !!pv.value.rateconPdfBase64)
+// All rate-con files for this load. A load often has more than one (the original
+// + a "Re:" reply / signed scan), and the billing email may live on only ONE of
+// them — so show every file, not just the primary. Falls back to the single
+// legacy field so an older cached dryRun response still previews. { base64, label, source }.
+const ratecons = computed(() => {
+  const list = Array.isArray(pv.value.ratecons) ? pv.value.ratecons.filter((rc) => rc && rc.base64) : []
+  if (list.length) return list
+  return pv.value.rateconPdfBase64 ? [{ base64: pv.value.rateconPdfBase64, label: 'Rate-con', source: '' }] : []
+})
 const hasEmail = computed(() => !!pv.value.emailHtml)
 // The exact Gmail draft body from the dryRun response. Trusted server HTML —
 // buildInvoiceEmailHtml esc()'s every dynamic field — so it's rendered via v-html.
 const emailHtml = computed(() => pv.value.emailHtml || '')
 const tabs = computed(() => {
   const t = [{ key: 'invoice', label: 'Invoice' }]
-  if (hasRatecon.value) t.push({ key: 'ratecon', label: 'Rate-con' })
+  // One tab per rate-con file; numbered only when there's more than one.
+  ratecons.value.forEach((rc, i) => {
+    t.push({ key: `ratecon:${i}`, label: ratecons.value.length > 1 ? `Rate-con ${i + 1}` : 'Rate-con' })
+  })
   t.push({ key: 'pod', label: 'POD' })
   if (hasEmail.value) t.push({ key: 'email', label: 'Email message' })
   return t
 })
+// Index of the rate-con file the active tab points at, or -1 when not on one.
+const rateconIndex = computed(() => (activeTab.value.startsWith('ratecon:') ? Number(activeTab.value.split(':')[1]) : -1))
+// Filename caption over the PDF — only worth showing when there are several files.
+const activeRateconLabel = computed(() => {
+  const rc = rateconIndex.value >= 0 ? ratecons.value[rateconIndex.value] : null
+  return ratecons.value.length > 1 && rc ? rc.label : ''
+})
 const podSameOrigin = computed(() => !!(props.podUrl && props.podUrl.startsWith('/uploads')))
 const stageSrc = computed(() => {
   if (activeTab.value === 'invoice') return invoiceUrl.value
-  if (activeTab.value === 'ratecon') return rateconUrl.value
+  if (rateconIndex.value >= 0) return rateconUrls.value[rateconIndex.value] || ''
   if (activeTab.value === 'pod') return podSameOrigin.value ? props.podUrl : ''
   return ''
 })
@@ -191,9 +210,9 @@ const stageSrc = computed(() => {
 // (its fallback renders a raw data: URI as a plain link), so we decode the
 // base64 to bytes and wrap in a Blob. Mirrors DocumentUpload.vue's PDF preview.
 const invoiceUrl = ref('')
-const rateconUrl = ref('')
+const rateconUrls = ref([]) // parallel to ratecons.value
 let invoiceBlobUrl = null
-let rateconBlobUrl = null
+let rateconBlobUrls = []
 
 function b64ToBlobUrl(b64) {
   if (!b64) return ''
@@ -209,17 +228,18 @@ function b64ToBlobUrl(b64) {
 
 function revokeBlobs() {
   if (invoiceBlobUrl) { URL.revokeObjectURL(invoiceBlobUrl); invoiceBlobUrl = null }
-  if (rateconBlobUrl) { URL.revokeObjectURL(rateconBlobUrl); rateconBlobUrl = null }
+  rateconBlobUrls.forEach((u) => { if (u) URL.revokeObjectURL(u) })
+  rateconBlobUrls = []
   invoiceUrl.value = ''
-  rateconUrl.value = ''
+  rateconUrls.value = []
 }
 
 function buildBlobs() {
   revokeBlobs()
   invoiceBlobUrl = b64ToBlobUrl(pv.value.invoicePdfBase64)
-  rateconBlobUrl = b64ToBlobUrl(pv.value.rateconPdfBase64)
   invoiceUrl.value = invoiceBlobUrl || ''
-  rateconUrl.value = rateconBlobUrl || ''
+  rateconBlobUrls = ratecons.value.map((rc) => b64ToBlobUrl(rc.base64))
+  rateconUrls.value = rateconBlobUrls.slice()
 }
 
 // Approve state — declared BEFORE the immediate watch below (which reads
@@ -342,6 +362,25 @@ async function approve() {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
+}
+/* Floating filename caption over the PDF (shown when a load has multiple rate-cons). */
+.idp-ratecon-label {
+  position: absolute;
+  top: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  max-width: 80%;
+  padding: 0.3rem 0.8rem;
+  background: rgba(15, 40, 71, 0.92);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border-radius: 999px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }
 .idp-pod-fallback {
   position: absolute;

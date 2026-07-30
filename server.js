@@ -13459,7 +13459,7 @@ async function getRateConBytes(loadId, body) {
 						{ responseType: "arraybuffer" },
 					);
 					const buffer = Buffer.from(resp.data);
-					if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber}.pdf` });
+					if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber}.pdf`, label: (f.name || "").replace(/^Subject:\s*/i, "").replace(/\.pdf$/i, "").trim().slice(0, 70) || "Rate-con", source: "drive" });
 				} catch (e) {
 					console.error("Draft invoice: rate-con Drive file fetch failed:", e.message);
 				}
@@ -13479,7 +13479,7 @@ async function getRateConBytes(loadId, body) {
 		.get(loadId);
 	if (row) {
 		const buffer = await fetchDocumentBytes(row);
-		if (buffer) candidates.push({ buffer, fileName: row.file_name || `${orderNumber || "ratecon"}.pdf` });
+		if (buffer) candidates.push({ buffer, fileName: row.file_name || `${orderNumber || "ratecon"}.pdf`, label: row.file_name || "Stored rate-con", source: "documents" });
 	}
 
 	// 3) Caller-supplied base64 fallback.
@@ -13488,7 +13488,7 @@ async function getRateConBytes(loadId, body) {
 		const b64 = supplied.replace(/^data:application\/pdf;base64,/, "").trim();
 		try {
 			const buffer = Buffer.from(b64, "base64");
-			if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber || "ratecon"}.pdf` });
+			if (buffer && buffer.length) candidates.push({ buffer, fileName: `${orderNumber || "ratecon"}.pdf`, label: "Uploaded file", source: "upload" });
 		} catch { /* fall through */ }
 	}
 
@@ -13760,6 +13760,7 @@ app.post(
 					invoicePdfBase64,
 					rateconPdfBase64: rateconBuffer && rateconBuffer.length ? Buffer.from(rateconBuffer).toString("base64") : "",
 					emailHtml: draftHtml, // exact Gmail draft body so the reviewer can read the cover note before approving
+					ratecons: (rateconCandidates || []).map((c) => ({ base64: Buffer.from(c.buffer).toString("base64"), label: c.label || "Rate-con", source: c.source || "" })), // EVERY rate-con file for this load so the reviewer can see all of them, not just the primary
 				});
 			}
 
