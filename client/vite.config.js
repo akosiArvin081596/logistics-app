@@ -40,6 +40,11 @@ export default defineConfig(({ mode }) => {
             'vendor-maps': ['@googlemaps/js-api-loader'],
             'vendor-socket': ['socket.io-client'],
             'vendor-vant': ['vant'],
+            // pdf.js + its Vue wrapper (the invoice PDF zoom viewer). Only
+            // reached via a dynamic import() in PdfZoomViewer, so this chunk
+            // stays lazy — it just gives the ~2.4MB pdf.js split a clear name
+            // instead of the confusing "index" Rollup derives from its entry file.
+            'vendor-pdf': ['vue-pdf-embed', 'pdfjs-dist'],
           },
         },
       },
