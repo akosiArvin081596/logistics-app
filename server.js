@@ -957,6 +957,26 @@ db.exec(`
 	)
 `);
 
+// One row per official invoice draft created for a load (broker draft-invoice
+// flow), so the load modal can show "an approved draft exists → recipient /
+// invoice #". Additive; dryRun previews never write here.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS load_invoice_drafts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		load_id TEXT NOT NULL,
+		invoice_id TEXT,
+		recipient TEXT,
+		recipient_source TEXT,
+		total TEXT,
+		broker_name TEXT,
+		order_number TEXT,
+		via TEXT,
+		created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+		created_by TEXT
+	)
+`);
+db.exec("CREATE INDEX IF NOT EXISTS idx_load_invoice_drafts_load ON load_invoice_drafts(load_id, id DESC)");
+
 // nextInvoiceNumber(date) → "MMDDYYYY-N", incrementing per calendar day.
 // Concurrency-safe: a single UPSERT atomically bumps the counter and returns
 // the new value (better-sqlite3 calls are synchronous, and the UPSERT is one
@@ -13605,6 +13625,13 @@ app.post(
 			// "Invoice To" block); falls back to Bison AP inbox / quickpay when absent.
 			invoiceTo = brokerInvoice.resolveInvoiceTo({ ...brokerCtx, documentsEmail: rcFields.documentsEmail });
 
+			// Optional dispatcher override from the review-before-approve preview: a
+			// valid recipientEmail in the body wins over the resolved address, so the
+			// dispatcher can correct it before the official draft is created.
+			const recipientOverride = brokerInvoice.normalizeEmail(req.body && req.body.recipientEmail);
+			if (recipientOverride) invoiceTo = { name: invoiceTo.name, email: recipientOverride };
+			const recipientSource = recipientOverride ? "manual" : (rcFields.documentsEmail ? "ratecon" : "default");
+
 			// 4b) Order number: the rate-con's when we got one, else the load ID
 			//     (which IS the order number for Bison, and is the reference the
 			//     broker booked under for everyone else). No longer a hard stop.
@@ -13717,8 +13744,9 @@ app.post(
 					total,
 					totalSource: rcTotal > 0 ? "ratecon" : "sheet",
 					documentsEmail: invoiceTo.email,
-					documentsEmailSource: rcFields.documentsEmail ? "ratecon" : "default",
+					documentsEmailSource: recipientSource,
 					invoicePdfBase64,
+					rateconPdfBase64: rateconBuffer && rateconBuffer.length ? Buffer.from(rateconBuffer).toString("base64") : "",
 				});
 			}
 
@@ -13728,8 +13756,22 @@ app.post(
 			// Record the resolved recipient + its source so a mis-route is
 			// diagnosable after the fact (recipient selection is now dynamic).
 			console.log(
-				`Draft invoice ${loadId}: recipient=${invoiceTo.email} source=${rcFields.documentsEmail ? "ratecon" : "default"}`,
+				`Draft invoice ${loadId}: recipient=${invoiceTo.email} source=${recipientSource}`,
 			);
+
+			// Persist that an official draft was created for this load so the load
+			// modal can show "approved draft → recipient / invoice #". Best-effort —
+			// never fails the draft. Only called on a real (non-dryRun) success.
+			const recordDraft = (via) => {
+				try {
+					db.prepare(
+						"INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_by) VALUES (?,?,?,?,?,?,?,?,?)",
+					).run(loadId, invoiceId, invoiceTo.email, recipientSource, total, brokerName, orderNumber, via, (req.session.user && req.session.user.username) || "");
+					logAudit(req, "invoice_draft_created", "load", loadId, `${invoiceId} → ${invoiceTo.email} (${via})`);
+				} catch (e) {
+					console.error("Draft invoice: draft record persist failed:", e.message);
+				}
+			};
 
 			const gmailUser = process.env.GMAIL_USER;
 			const gmailPass = process.env.GMAIL_APP_PASSWORD;
@@ -13745,6 +13787,7 @@ app.post(
 						html: draftHtml,
 						attachments: draftAttachments,
 					});
+					recordDraft("imap");
 					return res.json({ success: true, invoiceId, via: "imap", draftMailbox: "[Gmail]/Drafts" });
 				} catch (e) {
 					imapError = e;
@@ -13785,6 +13828,7 @@ app.post(
 					let n8nResponse;
 					try { n8nResponse = txt ? JSON.parse(txt) : {}; } catch { n8nResponse = { raw: txt.slice(0, 500) }; }
 					if (!r.ok) return res.status(502).json({ error: `n8n webhook returned ${r.status}`, details: n8nResponse });
+					recordDraft("n8n");
 					return res.json({ success: true, invoiceId, via: "n8n", draftId: n8nResponse && (n8nResponse.draftId || n8nResponse.id), n8n: n8nResponse });
 				} catch (e) {
 					console.error("Draft invoice: n8n webhook call failed:", e.message);
@@ -13810,6 +13854,24 @@ app.post(
 		}
 	},
 );
+
+// GET /api/loads/:loadId/invoice-draft — the latest official invoice draft created
+// for a load (recipient + invoice #), so the load modal can reflect "approved draft".
+app.get("/api/loads/:loadId/invoice-draft", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const loadId = decodeURIComponent(req.params.loadId || "").trim();
+		if (!loadId) return res.status(400).json({ error: "loadId is required" });
+		const row = db
+			.prepare(
+				"SELECT load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_at, created_by FROM load_invoice_drafts WHERE load_id = ? ORDER BY id DESC LIMIT 1",
+			)
+			.get(loadId);
+		res.json({ draft: row || null });
+	} catch (err) {
+		console.error("GET /api/loads/:loadId/invoice-draft error:", err.message);
+		res.status(500).json({ error: "Failed to load invoice draft state" });
+	}
+});
 
 // GET /api/legal-documents — Legal docs for investor's trucks or driver shared docs
 app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, res) => {
