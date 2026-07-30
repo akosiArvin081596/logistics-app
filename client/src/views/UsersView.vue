@@ -27,13 +27,14 @@
       <SkeletonLoader :rows="4" :cols="5" />
     </template>
     <template v-else>
-      <UserTable :users="store.users" :driver-names="store.driverNames" @delete="handleDeleteUser" @update="handleUpdateUser" @rate="handleRateUser" />
+      <PaginationBar :page="page" :page-size="pageSize" :total="store.users.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
+      <UserTable :users="paginatedItems" :driver-names="store.driverNames" @delete="handleDeleteUser" @update="handleUpdateUser" @rate="handleRateUser" />
     </template>
   </div>
 </template>
 
 <script setup>
-import { onMounted, computed } from 'vue'
+import { onMounted, computed, watch } from 'vue'
 import { useUsersStore } from '../stores/users'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
@@ -41,12 +42,17 @@ import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddUserForm from '../components/users/AddUserForm.vue'
 import UserTable from '../components/users/UserTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
+import PaginationBar from '../components/shared/PaginationBar.vue'
+import { usePagination } from '../composables/usePagination'
 import { Card, CardContent } from '@/components/ui/card'
 
 const store = useUsersStore()
 const authStore = useAuthStore()
 const { show: toast } = useToast()
 useSocketRefresh('users:changed', () => store.loadUsers())
+
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(computed(() => store.users), 25)
+watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 
 const kpiCards = computed(() => {
   const users = store.users

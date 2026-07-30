@@ -32,8 +32,9 @@
       <SkeletonLoader :rows="4" :cols="7" />
     </template>
     <template v-else>
+      <PaginationBar :page="page" :page-size="pageSize" :total="store.trucks.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
       <TruckTable
-        :trucks="store.trucks"
+        :trucks="paginatedItems"
         :driver-names="store.driverNames"
         :investor-users="store.investorUsers"
         :show-owner="authStore.user?.role === 'Super Admin'"
@@ -47,7 +48,7 @@
 </template>
 
 <script setup>
-import { onMounted, computed } from 'vue'
+import { onMounted, computed, watch } from 'vue'
 import { useTrucksStore } from '../stores/trucks'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
@@ -55,12 +56,17 @@ import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddTruckForm from '../components/trucks/AddTruckForm.vue'
 import TruckTable from '../components/trucks/TruckTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
+import PaginationBar from '../components/shared/PaginationBar.vue'
+import { usePagination } from '../composables/usePagination'
 import { Card, CardContent } from '@/components/ui/card'
 
 const store = useTrucksStore()
 const authStore = useAuthStore()
 const { show: toast } = useToast()
 useSocketRefresh('trucks:changed', () => { store.loadTrucks(); store.loadDriverNames(); store.loadInvestorUsers() })
+
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(computed(() => store.trucks), 25)
+watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 
 const kpiCards = computed(() => {
   const trucks = store.trucks

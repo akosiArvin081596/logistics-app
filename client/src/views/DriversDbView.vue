@@ -27,8 +27,9 @@
       <SkeletonLoader :rows="4" :cols="10" />
     </template>
     <template v-else>
+      <PaginationBar :page="page" :page-size="pageSize" :total="store.drivers.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
       <DriverTable
-        :drivers="store.drivers"
+        :drivers="paginatedItems"
         :headers="store.headers"
         :driver-ratings="driverRatings"
         :truck-assignments="truckAssignments"
@@ -41,7 +42,7 @@
 </template>
 
 <script setup>
-import { onMounted, computed, ref } from 'vue'
+import { onMounted, computed, ref, watch } from 'vue'
 import { useDriversDbStore } from '../stores/driversDb'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
@@ -49,6 +50,8 @@ import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddDriverForm from '../components/drivers-db/AddDriverForm.vue'
 import DriverTable from '../components/drivers-db/DriverTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
+import PaginationBar from '../components/shared/PaginationBar.vue'
+import { usePagination } from '../composables/usePagination'
 import { Card, CardContent } from '@/components/ui/card'
 
 const store = useDriversDbStore()
@@ -57,6 +60,9 @@ const { show: toast } = useToast()
 useSocketRefresh('drivers:changed', () => store.load())
 const driverRatings = ref({})
 const truckAssignments = ref([])
+
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(computed(() => store.drivers), 25)
+watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 
 const kpiCards = computed(() => {
   const drv = store.drivers

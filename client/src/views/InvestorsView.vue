@@ -27,8 +27,9 @@
       <SkeletonLoader :rows="4" :cols="6" />
     </template>
     <template v-else>
+      <PaginationBar :page="page" :page-size="pageSize" :total="store.investors.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
       <InvestorTable
-        :investors="store.investors"
+        :investors="paginatedItems"
         @delete="handleDelete"
         @update="handleUpdate"
         @picture-updated="store.load()"
@@ -38,18 +39,23 @@
 </template>
 
 <script setup>
-import { onMounted, computed } from 'vue'
+import { onMounted, computed, watch } from 'vue'
 import { useInvestorsStore } from '../stores/investors'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import AddInvestorForm from '../components/investors/AddInvestorForm.vue'
 import InvestorTable from '../components/investors/InvestorTable.vue'
 import SkeletonLoader from '../components/shared/SkeletonLoader.vue'
+import PaginationBar from '../components/shared/PaginationBar.vue'
+import { usePagination } from '../composables/usePagination'
 import { Card, CardContent } from '@/components/ui/card'
 
 const store = useInvestorsStore()
 const { show: toast } = useToast()
 useSocketRefresh('investors:changed', () => store.load())
+
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(computed(() => store.investors), 25)
+watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 
 const kpiCards = computed(() => {
   const inv = store.investors

@@ -134,7 +134,7 @@
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow v-for="trailer in store.trailers" :key="trailer.id" class="hover:bg-blue-50/30 transition-colors duration-100">
+            <TableRow v-for="trailer in paginatedItems" :key="trailer.id" class="hover:bg-blue-50/30 transition-colors duration-100">
               <TableCell class="font-semibold text-[13px] text-gray-900">{{ trailer.trailer_number }}</TableCell>
               <TableCell>
                 <Badge :class="typeBadge(trailer.type)">{{ trailer.type }}</Badge>
@@ -162,15 +162,17 @@
           </TableBody>
         </Table>
       </CardContent>
+      <PaginationBar :page="page" :page-size="pageSize" :total="store.trailers.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
     </Card>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useTrailersStore } from '../stores/trailers'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
+import { usePagination } from '../composables/usePagination'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
@@ -178,10 +180,17 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import PaginationBar from '../components/shared/PaginationBar.vue'
 
 const store = useTrailersStore()
 const { show: toast } = useToast()
 useSocketRefresh('trailers:changed', () => store.load())
+
+// Client-side pagination over the full trailers list (25/page). No filters/search
+// on this view, so this only needs a clamp — no page-1 reset.
+const trailerList = computed(() => store.trailers)
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(trailerList, 25)
+watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 
 const showForm = ref(false)
 const editing = ref(null)

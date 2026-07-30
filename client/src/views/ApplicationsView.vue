@@ -51,7 +51,7 @@
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow v-for="app in filteredApplications" :key="app.id" class="hover:bg-blue-50/30 transition-colors duration-100">
+            <TableRow v-for="app in paginatedItems" :key="app.id" class="hover:bg-blue-50/30 transition-colors duration-100">
               <TableCell class="font-semibold text-[13px] text-gray-900">{{ app.full_name }}</TableCell>
               <TableCell><Badge :class="positionBadge(app.position)">{{ app.position }}</Badge></TableCell>
               <TableCell class="text-[13px] text-gray-600">{{ app.email }}</TableCell>
@@ -97,6 +97,7 @@
             </TableRow>
           </TableBody>
         </Table>
+        <PaginationBar :page="page" :page-size="pageSize" :total="filteredApplications.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
       </CardContent>
     </Card>
 
@@ -271,16 +272,18 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
+import { usePagination } from '../composables/usePagination'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import DrugTestUpload from '../components/users/DrugTestUpload.vue'
+import PaginationBar from '../components/shared/PaginationBar.vue'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -303,6 +306,13 @@ const filteredApplications = computed(() => {
   if (!activeFilter.value) return applications.value
   return applications.value.filter(a => a.status === activeFilter.value)
 })
+
+// Client-side pagination over the filtered list (25/page).
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredApplications, 25)
+// Reset to page 1 when the status filter changes.
+watch(activeFilter, () => goTo(1))
+// Clamp: if the list shrinks below the current page, snap back into range.
+watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 
 const parsedReferences = computed(() => {
   if (!selectedApp.value?.reference_info) return []
