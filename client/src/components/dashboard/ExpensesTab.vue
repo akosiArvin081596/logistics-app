@@ -1075,14 +1075,11 @@ watch(allQ, () => {
 // expenses:changed socket handler below.
 const analyticsPanel = ref(null)
 
-// Keyboard nav for the detail modal. Listener attaches only while the
-// modal is open so we don't leak global handlers.
+// Keyboard nav for the detail modal. Listener attaches only while the modal is
+// open so we don't leak global handlers. The receipt now zooms INLINE in the
+// modal (no separate lightbox opens from here), so there's nothing to defer
+// Escape to — arrows navigate, Escape closes the modal.
 function onModalKeydown(ev) {
-  // When the receipt viewer is open over the modal, let it own the keyboard
-  // (its own Esc closes just the viewer; arrows would otherwise navigate the
-  // modal underneath). This listener is registered before the viewer mounts,
-  // so it fires first — bail out here and let ZoomableImage handle the key.
-  if (previewImg.value) return
   if (ev.key === 'ArrowLeft') { ev.preventDefault(); goPrev() }
   else if (ev.key === 'ArrowRight') { ev.preventDefault(); goNext() }
   else if (ev.key === 'Escape') { ev.preventDefault(); closeExpenseDetail() }
@@ -2373,14 +2370,6 @@ tr:hover td { background: var(--surface-hover); }
   color: #0f172a;
   line-height: 1.4;
 }
-.exp-receipt-img {
-  max-width: 100%;
-  max-height: 320px;
-  border-radius: 8px;
-  cursor: zoom-in;
-  display: block;
-  border: 1px solid #e2e8f0;
-}
 .exp-receipt-hint {
   font-size: 0.7rem;
   color: #94a3b8;
@@ -2525,16 +2514,6 @@ tr:hover td { background: var(--surface-hover); }
   background: #fff;
   box-shadow: 0 6px 20px rgba(15, 23, 42, 0.10);
 }
-.exp-dialog--full .exp-receipt-img {
-  max-width: 100%;
-  max-height: 100%;
-  width: auto;
-  height: auto;
-  object-fit: contain;
-  border-radius: 4px;
-  cursor: zoom-in;
-  display: block;
-}
 .exp-dialog--full .exp-receipt-hint {
   flex-shrink: 0;
   text-align: center;
@@ -2644,7 +2623,6 @@ tr:hover td { background: var(--surface-hover); }
   .exp-details-scroll { overflow-y: visible; }
   .exp-receipt-pane { overflow: visible; min-height: 55vh; }
   .exp-receipt-imgwrap { flex: none; min-height: 46vh; }
-  .exp-dialog--full .exp-receipt-img { max-height: 74vh; }
 }
 
 /* Add Expense form */
