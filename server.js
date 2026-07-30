@@ -13639,13 +13639,16 @@ app.post(
 				invoiceTo = { name: invoiceTo.name, email: recipientOverride };
 			}
 
-			// 4b) Order number: the rate-con's when we got one, else the load ID
-			//     (which IS the order number for Bison, and is the reference the
-			//     broker booked under for everyone else). No longer a hard stop.
-			const orderNumber = rcFields.orderNumber || loadId.replace(/^#/, "").trim();
-			if (!rcFields.orderNumber) {
+			// 4b) Invoice reference number. Per client (2026-07-30): ONLY Bison
+			//     invoices carry the broker's rate-con Order # (Bison AP matches on
+			//     it). EVERY other broker is invoiced by our Load Number, so a
+			//     non-Bison rate-con Order # is deliberately ignored here. Bison
+			//     still falls back to the load ID when its rate-con had no Order #.
+			const loadRef = loadId.replace(/^#/, "").trim();
+			const orderNumber = isBison ? (rcFields.orderNumber || loadRef) : loadRef;
+			if (isBison && !rcFields.orderNumber) {
 				console.log(
-					`Draft invoice ${loadId}: no order # from the rate-con (gemini=${GEMINI_API_KEY ? "on" : "off"}) — falling back to the load ID.`,
+					`Draft invoice ${loadId}: no order # from the Bison rate-con (gemini=${GEMINI_API_KEY ? "on" : "off"}) — falling back to the load ID.`,
 				);
 			}
 
