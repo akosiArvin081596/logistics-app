@@ -75,7 +75,8 @@ const props = defineProps({
 // (~16x area, ~100MB/page) and a multi-page invoice can blank-render past iOS
 // Safari's canvas-area cap. Floor at 1x. Interactive zoom is a pure CSS transform.
 const RENDER_SCALE = Math.max(1, 2 / (window.devicePixelRatio || 1))
-const MIN_SCALE = 1
+const FIT_SCALE = 1          // fit-to-width — the default / reset zoom
+const MIN_SCALE = 0.2        // zoom-out floor: shrink below fit-width to see a whole multi-page doc at once
 const MAX_SCALE = 5
 const ZOOM_STEP = 0.5        // +/- button increment
 const WHEEL_FACTOR = 0.0015  // wheel delta -> scale delta
@@ -113,11 +114,12 @@ function clampScale(v) {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, v))
 }
 
-// Asymmetric, top-pinned pan bounds. The content (a tall stack of pages) can be
-// taller than the pane, so vertical drag is allowed even at scale 1: ty ranges
-// from 0 (top) down to viewportH - contentH (bottom aligned). tx only has slack
-// once zoomed past fit-to-width. scrollWidth/scrollHeight are the un-transformed
-// layout sizes, so multiply by the current scale.
+// Pan bounds, each axis independent. When the content is SMALLER than the pane on
+// that axis (e.g. zoomed out far enough to see the whole document), it's centered;
+// otherwise it's clamped within the overflow — vertical is top-pinned, so ty=0 is
+// the top of page 1. The two branches meet continuously at the fit point (both give
+// 0 there), so wheeling across it is seamless. scrollWidth/scrollHeight are the
+// un-transformed layout sizes, so multiply by the current scale.
 function clampPan() {
   const vp = viewportRef.value
   const content = contentRef.value
@@ -127,15 +129,16 @@ function clampPan() {
   const contentH = content.scrollHeight * scale.value
   const contentW = content.scrollWidth * scale.value
 
-  const minTy = Math.min(0, viewportH - contentH)
-  ty.value = Math.min(0, Math.max(minTy, ty.value))
-
-  if (scale.value > MIN_SCALE && contentW > viewportW) {
-    const minTx = viewportW - contentW
-    tx.value = Math.min(0, Math.max(minTx, tx.value))
+  if (contentH <= viewportH) {
+    ty.value = (viewportH - contentH) / 2                             // whole doc fits — center vertically
   } else {
-    // At (or below) fit-to-width there is no horizontal overflow — stay flush.
-    tx.value = 0
+    ty.value = Math.min(0, Math.max(viewportH - contentH, ty.value))  // taller than pane — top-pinned pan
+  }
+
+  if (contentW <= viewportW) {
+    tx.value = (viewportW - contentW) / 2                             // at/under fit-to-width — center horizontally
+  } else {
+    tx.value = Math.min(0, Math.max(viewportW - contentW, tx.value))  // wider than pane — clamp within overflow
   }
 }
 
@@ -173,7 +176,7 @@ function zoomBy(delta) {
 // ZoomableImage, we never force ty=0 mid-zoom — only an explicit reset/rerender
 // snaps back to the top).
 function reset() {
-  scale.value = MIN_SCALE
+  scale.value = FIT_SCALE
   tx.value = 0
   ty.value = 0
 }
@@ -183,7 +186,7 @@ function onWheel(e) {
 }
 
 function onDoubleClick(e) {
-  if (scale.value > MIN_SCALE) applyZoom(MIN_SCALE, e.clientX, e.clientY)
+  if (scale.value > FIT_SCALE) applyZoom(FIT_SCALE, e.clientX, e.clientY)
   else applyZoom(DBL_SCALE, e.clientX, e.clientY)
 }
 
