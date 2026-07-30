@@ -124,7 +124,7 @@
               :title="pdfExpanded ? 'Show the details panel' : 'Hide the details panel — show the invoice PDF only'"
               @click="pdfExpanded = !pdfExpanded"
             >{{ pdfExpanded ? '⇤ Show details' : '⤢ Expand PDF' }}</button>
-            <iframe :src="`/api/invoices/${selectedInvoice.id}/pdf`" class="pdf-frame" title="Invoice PDF"></iframe>
+            <PdfZoomViewer :src="`/api/invoices/${selectedInvoice.id}/pdf`" />
           </div>
 
           <!-- Right: meta + actions -->
@@ -361,6 +361,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import ManualInvoiceDialog from '../components/invoices/ManualInvoiceDialog.vue'
 import PaymentReportDialog from '../components/invoices/PaymentReportDialog.vue'
 import PaginationBar from '../components/shared/PaginationBar.vue'
+import PdfZoomViewer from '../components/shared/PdfZoomViewer.vue'
 
 const store = useInvoicesStore()
 const auth = useAuthStore()
@@ -736,20 +737,17 @@ onMounted(() => store.load())
   gap: 0;
   min-height: 0;
   /* The modal is always full-screen now (96vh); fill it minus the header so the
-     PDF pane and the details panel both use the full height. */
-  max-height: calc(96vh - 76px);
+     PDF pane and the details panel both use the full height. A definite height
+     (not just max-height) is required so the absolutely-positioned PdfZoomViewer
+     — which no longer contributes in-flow height like the old iframe did — always
+     has a box to fill, including in Expand-PDF mode where the meta column is hidden. */
+  height: calc(96vh - 76px);
 }
 .detail-pdf {
   background: #f1f5f9;
   border-right: 1px solid #e8edf2;
   overflow: hidden;
   position: relative;
-}
-.pdf-frame {
-  width: 100%;
-  height: 100%;
-  border: 0;
-  min-height: 640px;
 }
 .pdf-expand-btn {
   position: absolute;
@@ -773,7 +771,7 @@ onMounted(() => store.load())
    DialogContent) and defaults to the two-column PDF + details split (like the
    Expenses modal). Toggling pdfExpanded applies these rules to hide the details
    panel so a full invoice page reads at ~1:1. */
-.inv-detail-full .detail-body { grid-template-columns: 1fr !important; min-height: 0 !important; max-height: calc(96vh - 76px) !important; }
+.inv-detail-full .detail-body { grid-template-columns: 1fr !important; min-height: 0 !important; height: calc(96vh - 76px) !important; }
 .inv-detail-full .detail-meta { display: none !important; }
 .inv-detail-full .detail-pdf { border-right: none !important; }
 .detail-meta {
@@ -1003,7 +1001,9 @@ onMounted(() => store.load())
 @media (max-width: 900px) {
   /* Full-screen modal on a phone → stack to one scrollable column so the details
      panel below the PDF is never clipped by the modal's fixed height. */
-  .detail-body { grid-template-columns: 1fr; max-height: calc(96vh - 76px); overflow-y: auto; }
+  /* Stack + scroll on a phone: drop the definite desktop height so the column
+     grows to its content; .detail-pdf's own min-height gives the viewer its box. */
+  .detail-body { grid-template-columns: 1fr; height: auto; max-height: calc(96vh - 76px); overflow-y: auto; }
   .detail-pdf { max-height: 62vh; min-height: 360px; }
   .detail-meta { overflow-y: visible; }
 }
