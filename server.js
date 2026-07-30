@@ -13720,6 +13720,8 @@ app.post(
 				: `Order #${orderNumber}`;
 			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({
 				brokerName,
+				isBison,
+				loadNumber: loadRef,
 				orderNumber,
 				moveNumber: rcFields.moveNumber,
 				poNumber: rcFields.poNumber,
