@@ -76,7 +76,7 @@ const props = defineProps({
 // Safari's canvas-area cap. Floor at 1x. Interactive zoom is a pure CSS transform.
 const RENDER_SCALE = Math.max(1, 2 / (window.devicePixelRatio || 1))
 const FIT_SCALE = 1          // fit-to-width — the default / reset zoom
-const MIN_SCALE = 0.2        // zoom-out floor: shrink below fit-width to see a whole multi-page doc at once
+const MIN_SCALE_FLOOR = 0.1  // absolute safety floor (pathological page counts); real floor is fit-whole-page (minScale)
 const MAX_SCALE = 5
 const ZOOM_STEP = 0.5        // +/- button increment
 const WHEEL_FACTOR = 0.0015  // wheel delta -> scale delta
@@ -110,8 +110,22 @@ const transformStyle = computed(() => ({
   transform: `translate(${tx.value}px, ${ty.value}px) scale(${scale.value})`,
 }))
 
+// The lowest useful zoom: the scale at which the ENTIRE document (every page) fits
+// inside the pane — so "zoom all the way out" shows the whole thing and stops there
+// instead of shrinking into empty space. scrollWidth/scrollHeight are the
+// un-transformed layout sizes, so this is independent of the current scale. Adapts
+// to doc length AND pane size (e.g. fullscreen); clamped to a hard floor for
+// pathological page counts and never above fit-to-width.
+function minScale() {
+  const vp = viewportRef.value
+  const content = contentRef.value
+  if (!vp || !content || !content.scrollWidth || !content.scrollHeight) return MIN_SCALE_FLOOR
+  const fit = Math.min(vp.clientWidth / content.scrollWidth, vp.clientHeight / content.scrollHeight)
+  return Math.max(MIN_SCALE_FLOOR, Math.min(FIT_SCALE, fit))
+}
+
 function clampScale(v) {
-  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, v))
+  return Math.min(MAX_SCALE, Math.max(minScale(), v))
 }
 
 // Pan bounds, each axis independent. When the content is SMALLER than the pane on
