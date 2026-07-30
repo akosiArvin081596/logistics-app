@@ -47,11 +47,21 @@
                 v-for="(row, i) in waterfall(currentMonth.breakdown)"
                 :key="i"
                 class="bd-row"
-                :class="[`bd-${row.kind}`, { 'bd-highlight': row.highlight }]"
+                :class="[`bd-${row.kind}`, { 'bd-highlight': row.highlight, 'bd-clickable': !!row.detailKey }]"
+                :role="row.detailKey ? 'button' : undefined"
+                :tabindex="row.detailKey ? 0 : undefined"
+                :aria-label="row.detailKey ? `View ${LINE_LABEL[row.detailKey]} details for ${currentMonth.periodLabel}` : undefined"
+                @click="row.detailKey && openLineDetail(currentMonth.period, row.detailKey, currentMonth.periodLabel)"
+                @keydown.enter.prevent="row.detailKey && openLineDetail(currentMonth.period, row.detailKey, currentMonth.periodLabel)"
+                @keydown.space.prevent="row.detailKey && openLineDetail(currentMonth.period, row.detailKey, currentMonth.periodLabel)"
               >
                 <dt class="bd-label">
                   {{ row.label }}
                   <span v-if="row.highlight" class="bd-tag">your expenses</span>
+                  <template v-if="row.detailKey">
+                    <svg class="bd-chev" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                    <span class="bd-view">view details</span>
+                  </template>
                 </dt>
                 <dd class="bd-value mono-sm">{{ row.display }}</dd>
               </div>
@@ -200,11 +210,21 @@
                     v-for="(row, i) in waterfall(p.breakdown)"
                     :key="i"
                     class="bd-row"
-                    :class="[`bd-${row.kind}`, { 'bd-highlight': row.highlight }]"
+                    :class="[`bd-${row.kind}`, { 'bd-highlight': row.highlight, 'bd-clickable': !!row.detailKey }]"
+                    :role="row.detailKey ? 'button' : undefined"
+                    :tabindex="row.detailKey ? 0 : undefined"
+                    :aria-label="row.detailKey ? `View ${LINE_LABEL[row.detailKey]} details for ${p.periodLabel}` : undefined"
+                    @click="row.detailKey && openLineDetail(p.period, row.detailKey, p.periodLabel)"
+                    @keydown.enter.prevent="row.detailKey && openLineDetail(p.period, row.detailKey, p.periodLabel)"
+                    @keydown.space.prevent="row.detailKey && openLineDetail(p.period, row.detailKey, p.periodLabel)"
                   >
                     <dt class="bd-label">
                       {{ row.label }}
                       <span v-if="row.highlight" class="bd-tag">your expenses</span>
+                      <template v-if="row.detailKey">
+                        <svg class="bd-chev" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                        <span class="bd-view">view details</span>
+                      </template>
                     </dt>
                     <dd class="bd-value mono-sm">{{ row.display }}</dd>
                   </div>
@@ -218,6 +238,119 @@
       </table>
       </div>
     </template>
+
+    <!-- Line-item drill-down for a clicked waterfall figure (Revenue / Driver Pay
+         / Fixed Costs / Trip Expenses). Lazy-fetched + cached per period; the
+         footer echoes the headline total so the itemized sum is reconciled. -->
+    <MetricInfoDialog
+      :open="lineModalOpen"
+      :title="lineModalTitle"
+      :subtitle="lineModalSubtitle"
+      @update:open="(v) => { if (!v) lineModalOpen = false }"
+    >
+      <div v-if="lineLoading" class="ld-state">Loading details&hellip;</div>
+      <div v-else-if="lineError" class="ld-state ld-error">{{ lineError }}</div>
+      <template v-else-if="lineDetail">
+        <!-- Revenue → completed loads -->
+        <template v-if="lineDetailKey === 'revenue'">
+          <div v-if="!lineDetail.revenueLoads || !lineDetail.revenueLoads.length" class="ld-empty">
+            No loads recorded for this month.
+          </div>
+          <div v-else class="ld-scroll">
+            <table class="ld-table">
+              <thead>
+                <tr><th>Load #</th><th>Date</th><th>Driver / Truck</th><th>Route</th><th class="num">Amount</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="(l, i) in lineDetail.revenueLoads" :key="i">
+                  <td class="mono-xs">{{ l.loadId || '—' }}</td>
+                  <td class="mono-xs">{{ fmtShortDate(l.date) }}</td>
+                  <td>
+                    <div>{{ l.driver || '—' }}</div>
+                    <div v-if="l.truck" class="ld-sub">#{{ l.truck }}</div>
+                  </td>
+                  <td class="ld-route">{{ routeText(l) }}</td>
+                  <td class="mono-xs num">{{ fmt(l.amount) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="ld-total"><span>Total Revenue</span><span class="mono num">{{ fmt(lineDetail.revenue) }}</span></div>
+        </template>
+
+        <!-- Driver Pay → per-driver rows -->
+        <template v-else-if="lineDetailKey === 'driverPay'">
+          <div v-if="!lineDetail.driverPayRows || !lineDetail.driverPayRows.length" class="ld-empty">
+            No driver activity recorded for this month.
+          </div>
+          <div v-else class="ld-scroll">
+            <table class="ld-table">
+              <thead>
+                <tr><th>Driver</th><th>Basis</th><th class="num">Pay</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="(r, i) in lineDetail.driverPayRows" :key="i">
+                  <td>{{ r.driver || '—' }}</td>
+                  <td class="ld-basis">
+                    <template v-if="r.payType === 'percentage'">{{ r.payPercentage }}% of revenue</template>
+                    <template v-else>{{ r.activeDays }} day{{ Number(r.activeDays) === 1 ? '' : 's' }} × {{ fmt(r.dailyRate) }}/day</template>
+                  </td>
+                  <td class="mono-xs num">{{ fmt(r.pay) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="ld-total"><span>Total Driver Pay</span><span class="mono num">{{ fmt(lineDetail.driverPay) }}</span></div>
+        </template>
+
+        <!-- Fixed Costs → per-truck breakdown -->
+        <template v-else-if="lineDetailKey === 'fixedCosts'">
+          <div v-if="!lineDetail.fixedCostItems || !lineDetail.fixedCostItems.length" class="ld-empty">
+            No fixed costs charged for this month.
+          </div>
+          <div v-else class="ld-scroll">
+            <div v-for="(t, i) in lineDetail.fixedCostItems" :key="i" class="ld-truck">
+              <div class="ld-truck-head">
+                <span>Truck {{ t.truck ? '#' + t.truck : '—' }}</span>
+                <span class="mono">{{ fmt(t.total) }}</span>
+              </div>
+              <div class="ld-kv"><span>Insurance</span><span class="mono">{{ fmt(t.insurance) }}</span></div>
+              <div class="ld-kv"><span>ELD</span><span class="mono">{{ fmt(t.eld) }}</span></div>
+              <div class="ld-kv"><span>Truck Payment</span><span class="mono">{{ fmt(t.truckPayment) }}</span></div>
+              <div class="ld-kv"><span>IRP Registration</span><span class="mono">{{ fmt(t.irp) }}</span></div>
+              <div class="ld-kv"><span>HVUT Road Tax</span><span class="mono">{{ fmt(t.hvut) }}</span></div>
+            </div>
+          </div>
+          <div class="ld-total"><span>Total Fixed Costs</span><span class="mono num">{{ fmt(lineDetail.fixedCosts) }}</span></div>
+        </template>
+
+        <!-- Trip Expenses → expense rows -->
+        <template v-else-if="lineDetailKey === 'tripExpenses'">
+          <div v-if="!lineDetail.tripExpenseItems || !lineDetail.tripExpenseItems.length" class="ld-empty">
+            No trip expenses recorded for this month.
+          </div>
+          <div v-else class="ld-scroll">
+            <table class="ld-table">
+              <thead>
+                <tr><th>Date</th><th>Type</th><th>Description</th><th class="num">Amount</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="(e, i) in lineDetail.tripExpenseItems" :key="i">
+                  <td class="mono-xs">{{ fmtShortDate(e.date) }}</td>
+                  <td><span :class="['ld-type', 'type-' + (e.type || 'other').toLowerCase()]">{{ e.type || 'Other' }}</span></td>
+                  <td>
+                    <div class="ld-desc">{{ e.description || '—' }}</div>
+                    <div v-if="expMeta(e)" class="ld-sub">{{ expMeta(e) }}</div>
+                  </td>
+                  <td class="mono-xs num">{{ fmt(e.amount) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="ld-total"><span>Total Trip Expenses</span><span class="mono num">{{ fmt(lineDetail.tripExpenses) }}</span></div>
+        </template>
+      </template>
+    </MetricInfoDialog>
   </div>
 </template>
 
@@ -228,6 +361,7 @@ import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
 import { useInvestorStore } from '../../stores/investor'
 import { useToast } from '../../composables/useToast'
+import MetricInfoDialog from './MetricInfoDialog.vue'
 
 const props = defineProps({
   // Super Admin previewing an investor's portal — appended to the payouts
@@ -299,16 +433,100 @@ function waterfall(b) {
   const rows = []
   const add = (label, value, kind, opts = {}) =>
     rows.push({ label, kind, display: kind === 'deduct' ? fmtNeg(value) : fmt(value), ...opts })
-  add('Revenue', b.revenue, 'add')
-  add('− Driver Pay', b.driverPay, 'deduct')
-  add('− Fixed Costs', b.fixedCosts, 'deduct')
-  add('− Trip Expenses', b.tripExpenses, 'deduct', { highlight: true })
+  // The four figures the client wants drillable carry a `detailKey`; the rest
+  // (maintenance/compliance, Net Profit, × %, Your Share) stay plain. The key is
+  // both the click target and the GET /api/investor/payouts/:period/detail slice.
+  add('Revenue', b.revenue, 'add', { detailKey: 'revenue' })
+  add('− Driver Pay', b.driverPay, 'deduct', { detailKey: 'driverPay' })
+  add('− Fixed Costs', b.fixedCosts, 'deduct', { detailKey: 'fixedCosts' })
+  add('− Trip Expenses', b.tripExpenses, 'deduct', { highlight: true, detailKey: 'tripExpenses' })
   if (Number(b.maintFundCost || 0) > 0) add('− Maintenance Fund', b.maintFundCost, 'deduct')
   if (Number(b.complianceCost || 0) > 0) add('− Compliance / IFTA', b.complianceCost, 'deduct')
   add('Net Profit', b.netProfit, 'subtotal')
   if (b.splitPct != null) rows.push({ label: `× ${b.splitPct}%`, kind: 'split', display: '' })
   add('Your Share', b.monthShare, 'share')
   return rows
+}
+
+// ---- Line-item drill-down modal --------------------------------------------
+// Clicking a Revenue / Driver Pay / Fixed Costs / Trip Expenses row in EITHER
+// waterfall (past-month table row or current-month card) opens a modal itemizing
+// exactly what composes that figure. The list is fetched lazily and cached per
+// period in the store, and each modal's footer echoes the headline total so the
+// sum is visibly reconciled.
+const LINE_LABEL = {
+  revenue: 'Revenue',
+  driverPay: 'Driver Pay',
+  fixedCosts: 'Fixed Costs',
+  tripExpenses: 'Trip Expenses',
+}
+const LINE_SUB = {
+  revenue: 'Completed loads that make up this month’s revenue',
+  driverPay: 'Active days × daily rate — percentage drivers earn a share of revenue',
+  fixedCosts: 'Recurring monthly costs, per truck',
+  tripExpenses: 'Fuel, tolls, repairs and other on-the-road costs',
+}
+
+const lineModalOpen = ref(false)
+const lineDetailKey = ref('')    // '' | 'revenue' | 'driverPay' | 'fixedCosts' | 'tripExpenses'
+const linePeriodLabel = ref('')  // e.g. "October 2026" — for the modal header
+const lineDetail = ref(null)     // fetched payload for the open period
+const lineLoading = ref(false)
+const lineError = ref('')
+
+const lineModalTitle = computed(() =>
+  lineDetailKey.value ? `${LINE_LABEL[lineDetailKey.value]} — ${linePeriodLabel.value}` : ''
+)
+const lineModalSubtitle = computed(() => LINE_SUB[lineDetailKey.value] || '')
+
+// Fetch that period's detail through the store (cached), then reveal the modal.
+// Scope explicitly from the prop, mirroring loadPayouts(props.previewUserId):
+// this section also renders standalone on /my-payouts, where the store carries
+// no previewUserId.
+async function openLineDetail(period, key, periodLabel) {
+  if (!period || !key) return
+  lineDetailKey.value = key
+  linePeriodLabel.value = periodLabel || period
+  lineDetail.value = null
+  lineError.value = ''
+  lineModalOpen.value = true
+  lineLoading.value = true
+  try {
+    lineDetail.value = await investorStore.fetchPayoutDetail(period, props.previewUserId)
+  } catch (err) {
+    lineError.value = (err && err.message) || 'Failed to load details. Please try again.'
+  } finally {
+    lineLoading.value = false
+  }
+}
+
+// Short date for the drill-down tables. Parse YYYY-MM-DD as LOCAL (not UTC) so a
+// day never slips a calendar box; fall back to the raw string otherwise.
+function fmtShortDate(d) {
+  if (!d) return '—'
+  const s = String(d).trim()
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  const dt = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(s)
+  return isNaN(dt.getTime()) ? s : dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// "pickup → dropoff" for a revenue load; em-dash when neither side is known.
+function routeText(l) {
+  const p = (l.pickup || '').trim()
+  const d = (l.dropoff || '').trim()
+  if (!p && !d) return '—'
+  return `${p || '—'} → ${d || '—'}`
+}
+
+// "Driver · City, ST" meta line under an expense description (all parts optional).
+function expMeta(e) {
+  const bits = []
+  if (e.driver) bits.push(e.driver)
+  const city = (e.city || '').trim()
+  const st = (e.state || '').trim()
+  const loc = city && st ? `${city}, ${st}` : (city || st)
+  if (loc) bits.push(loc)
+  return bits.join(' · ')
 }
 
 // effectiveAmount = amount + adjustment (server-computed). Fall back to amount
@@ -722,11 +940,77 @@ onMounted(loadPayouts)
   100% { background-position: -200% 0; }
 }
 
+/* --- Clickable waterfall rows (drill into the line items behind a figure) --- */
+.bd-clickable {
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.bd-clickable:hover { background: #f1f5f9; border-color: #cbd5e1; }
+/* Keep the Trip Expenses row's amber identity when it's the one being hovered. */
+.bd-highlight.bd-clickable:hover { background: #fef3c7; border-color: #fcd34d; }
+.bd-clickable:focus-visible { outline: 2px solid #0369a1; outline-offset: 1px; }
+.bd-chev {
+  flex: none; align-self: center; color: #94a3b8;
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+.bd-clickable:hover .bd-chev,
+.bd-clickable:focus-visible .bd-chev { color: #0369a1; transform: translateX(1px); }
+.bd-view {
+  font-size: 0.56rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: #0369a1; opacity: 0; transition: opacity 0.15s ease; white-space: nowrap;
+}
+.bd-clickable:hover .bd-view,
+.bd-clickable:focus-visible .bd-view { opacity: 0.7; }
+
+/* --- Line-item drill-down modal (rendered inside MetricInfoDialog) --- */
+.ld-state { padding: 1.75rem 0.75rem; text-align: center; color: #64748b; font-size: 0.85rem; }
+.ld-error { color: #b91c1c; }
+.ld-empty { padding: 1.5rem 0.75rem; text-align: center; color: #94a3b8; font-size: 0.82rem; font-style: italic; }
+.ld-scroll { max-height: 340px; overflow-y: auto; margin: 0.15rem 0 0; }
+.ld-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.ld-table thead th {
+  position: sticky; top: 0; z-index: 1; background: #f8fafc;
+  text-align: left; font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: #64748b; padding: 0.4rem 0.5rem; border-bottom: 1px solid #e2e8f0;
+}
+.ld-table td { padding: 0.45rem 0.5rem; border-bottom: 1px solid #f1f5f9; color: #0f172a; vertical-align: top; }
+.ld-table .num, .ld-table th.num { text-align: right; white-space: nowrap; }
+.mono-xs { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; }
+.ld-sub { font-size: 0.66rem; color: #94a3b8; margin-top: 0.1rem; }
+.ld-basis { font-size: 0.74rem; color: #475569; }
+.ld-route { font-size: 0.72rem; color: #475569; min-width: 8rem; }
+.ld-desc { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ld-total {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-top: 0.6rem; padding: 0.6rem 0.65rem;
+  background: #f1f5f9; border-radius: 8px;
+  font-weight: 800; color: #0f172a; font-size: 0.84rem;
+}
+.ld-total .mono, .ld-total .num { font-family: 'JetBrains Mono', monospace; }
+.ld-truck { border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.5rem 0.65rem; margin-bottom: 0.5rem; }
+.ld-truck-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-weight: 700; color: #0f172a; font-size: 0.82rem;
+  margin-bottom: 0.35rem; padding-bottom: 0.3rem; border-bottom: 1px solid #f1f5f9;
+}
+.ld-kv { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.76rem; color: #475569; padding: 0.15rem 0; }
+.ld-kv .mono, .ld-truck-head .mono { font-family: 'JetBrains Mono', monospace; }
+.ld-type {
+  display: inline-block; font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; padding: 0.12rem 0.4rem; border-radius: 8px; white-space: nowrap;
+  background: #e2e8f0; color: #475569;
+}
+.ld-type.type-fuel { background: #dbeafe; color: #1e40af; }
+.ld-type.type-repair, .ld-type.type-maintenance, .ld-type.type-wear { background: #fed7aa; color: #9a3412; }
+.ld-type.type-toll { background: #ddd6fe; color: #5b21b6; }
+.ld-type.type-food { background: #dcfce7; color: #166534; }
+
 @media (max-width: 768px) {
   .totals-grid { grid-template-columns: 1fr; }
   .data-table { font-size: 0.78rem; }
   .data-table th, .data-table td { padding: 0.45rem 0.5rem; }
   .action-cell { white-space: normal; }
   .breakdown-panel { padding: 0.7rem 0.75rem; }
+  .ld-desc, .ld-route { max-width: none; white-space: normal; }
 }
 </style>

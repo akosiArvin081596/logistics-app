@@ -34,6 +34,15 @@ export const useInvestorStore = defineStore('investor', {
     // switched to a different investor) is discarded instead of overwriting the
     // new investor's ledger with the previous one's numbers.
     _payoutsToken: 0,
+
+    // ---- Per-month payout drill-down (GET /api/investor/payouts/:period/detail) ----
+    // Line-item composition behind each waterfall figure (revenue loads, driver-pay
+    // rows, fixed-cost items, trip expenses), fetched lazily the first time an
+    // investor clicks a Revenue / Driver Pay / Fixed Costs / Trip Expenses row.
+    // Cached per period ({ 'YYYY-MM': detail }) so re-opening a month's lines never
+    // refetches; cleared by resetPayouts() on a preview switch so one investor's
+    // items never surface under another's name.
+    payoutDetailCache: {},
   }),
 
   getters: {
@@ -104,6 +113,21 @@ export const useInvestorStore = defineStore('investor', {
       }
     },
 
+    // Fetch (and cache) the per-month line-item drill-down for a single period.
+    // Threads the preview scope as ?as_user_id= exactly like loadPayouts(); the
+    // component passes its previewUserId prop explicitly (it renders standalone on
+    // /my-payouts, where the store holds no previewUserId). Resolves to the detail
+    // payload; throws on failure so the caller can render an inline error and retry
+    // (a rejected fetch is NOT cached, so the next open tries again).
+    async fetchPayoutDetail(period, overrideUserId) {
+      if (this.payoutDetailCache[period]) return this.payoutDetailCache[period]
+      const scopeId = overrideUserId !== undefined ? overrideUserId : this.previewUserId
+      const qs = scopeId != null ? `?as_user_id=${scopeId}` : ''
+      const data = await api.get(`/api/investor/payouts/${encodeURIComponent(period)}/detail${qs}`)
+      this.payoutDetailCache[period] = data
+      return data
+    },
+
     async updateConfig(config) {
       const data = await api.put('/api/investor/config', config)
       if (this.data) {
@@ -140,6 +164,7 @@ export const useInvestorStore = defineStore('investor', {
       this.payoutsNotFound = false
       this._payoutsInFlight = null
       this._payoutsToken += 1
+      this.payoutDetailCache = {}
     },
   },
 })
