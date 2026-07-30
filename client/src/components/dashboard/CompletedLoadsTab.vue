@@ -129,6 +129,7 @@
       :load-id="loadIdValue"
       :preview="previewData"
       :pod-url="podUrl"
+      :already-drafted="!!approvedDraft"
       @update:open="v => { previewOpen = v }"
       @approved="onDraftApproved"
     />
@@ -336,7 +337,9 @@ async function draftInvoice() {
   if (!loadIdValue.value || drafting.value) return
   drafting.value = true; draftResult.value = null
   try {
-    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-invoice?dryRun=1`, {})
+    // The preview does the same heavy work as approve (Sheets + Drive + Gemini +
+    // Puppeteer), so give it the same 60s budget as the approve POST.
+    const r = await api.post(`/api/loads/${encodeURIComponent(loadIdValue.value)}/draft-invoice?dryRun=1`, {}, { timeout: 60000 })
     previewData.value = r
     previewOpen.value = true
   } catch (e) {

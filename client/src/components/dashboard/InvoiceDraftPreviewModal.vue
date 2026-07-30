@@ -128,6 +128,9 @@ const props = defineProps({
   preview: { type: Object, default: () => ({}) },
   // POD row's drive_url: a same-origin /uploads/... path OR a Google Drive link.
   podUrl: { type: String, default: null },
+  // True when an official draft already exists for this load (opened via
+  // "Review"); re-approving mints a second draft, so gate it behind a confirm.
+  alreadyDrafted: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['update:open', 'approved'])
@@ -234,14 +237,24 @@ function onOpenChange(value) {
   emit('update:open', false)
 }
 
+const DUPLICATE_APPROVE_MSG =
+  'A draft already exists for this load. Approving creates ANOTHER Gmail draft with a new invoice number (the old draft is NOT removed). Continue?'
+
 async function approve() {
   if (approving.value || !recipientValid.value) return
+  // Re-approving an already-drafted load mints a SECOND draft + invoice number
+  // (the first is not removed), so require an explicit confirm first.
+  if (props.alreadyDrafted && !window.confirm(DUPLICATE_APPROVE_MSG)) return
   approving.value = true
   approveError.value = ''
   try {
-    // Only send recipientEmail when the dispatcher actually changed it — an
-    // unchanged value keeps the backend's ratecon/default source classification.
-    const body = isEdited.value ? { recipientEmail: recipient.value.trim() } : {}
+    // Always pin the reviewed recipient. The approve call re-runs the whole
+    // extraction pipeline (fresh Gemini), so sending the exact address the
+    // dispatcher reviewed guarantees the draft goes where they saw — a
+    // nondeterministic re-resolve can't redirect it. The backend classifies it
+    // "manual" only when it differs from its own re-resolved value, so an
+    // unchanged send still preserves the ratecon/default source badge.
+    const body = { recipientEmail: recipient.value.trim() }
     const r = await api.post(
       `/api/loads/${encodeURIComponent(props.loadId)}/draft-invoice`,
       body,

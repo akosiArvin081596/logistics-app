@@ -13625,12 +13625,19 @@ app.post(
 			// "Invoice To" block); falls back to Bison AP inbox / quickpay when absent.
 			invoiceTo = brokerInvoice.resolveInvoiceTo({ ...brokerCtx, documentsEmail: rcFields.documentsEmail });
 
-			// Optional dispatcher override from the review-before-approve preview: a
-			// valid recipientEmail in the body wins over the resolved address, so the
-			// dispatcher can correct it before the official draft is created.
+			// The review-before-approve preview sends the recipient the dispatcher SAW
+			// back on approve, pinning it — so a nondeterministic Gemini re-run on the
+			// commit can't silently re-route the draft to a different address than the
+			// one that was reviewed. Classify "manual" only when the override actually
+			// DIFFERS from what extraction resolved (an unchanged confirm keeps the
+			// ratecon/default badge). An invalid/empty override is ignored.
+			const resolvedEmail = invoiceTo.email;
 			const recipientOverride = brokerInvoice.normalizeEmail(req.body && req.body.recipientEmail);
-			if (recipientOverride) invoiceTo = { name: invoiceTo.name, email: recipientOverride };
-			const recipientSource = recipientOverride ? "manual" : (rcFields.documentsEmail ? "ratecon" : "default");
+			let recipientSource = rcFields.documentsEmail ? "ratecon" : "default";
+			if (recipientOverride) {
+				if (recipientOverride.toLowerCase() !== String(resolvedEmail).toLowerCase()) recipientSource = "manual";
+				invoiceTo = { name: invoiceTo.name, email: recipientOverride };
+			}
 
 			// 4b) Order number: the rate-con's when we got one, else the load ID
 			//     (which IS the order number for Bison, and is the reference the
