@@ -291,6 +291,10 @@ function hosFor(loc) {
 
 // Google Maps overlay objects (managed programmatically)
 const driverMarkers = new Map()   // driver name -> AdvancedMarkerElement
+// Driver location marker size (px). Bumped well above createTruckArrow's 22
+// default so the truck arrow / parked "P" pin reads clearly on the fleet map
+// (client request 2026-07-30 — the driver location was too small to see).
+const DRIVER_MARKER_SIZE = 40
 let originMarker = null
 let destMarker = null
 let distanceLabelMarker = null
@@ -972,7 +976,7 @@ function syncDriverMarkers() {
       marker = new google.maps.marker.AdvancedMarkerElement({
         position: initialPos,
         map,
-        content: createTruckArrow({ color: markerColor(loc), heading, moving }),
+        content: createTruckArrow({ color: markerColor(loc), heading, moving, size: DRIVER_MARKER_SIZE }),
         title: loc.driver,
         zIndex: 1000,
         gmpClickable: true,
@@ -1022,7 +1026,7 @@ function syncDriverMarkers() {
         marker.content.updateMoving(moving)
         marker.content.updateHeading(heading)
       } else {
-        marker.content = createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving })
+        marker.content = createTruckArrow({ color: isOn ? '#16a34a' : '#9ca3af', heading, moving, size: DRIVER_MARKER_SIZE })
       }
     }
   }
