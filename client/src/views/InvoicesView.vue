@@ -107,7 +107,7 @@
 
     <!-- Detail Modal -->
     <Dialog v-model:open="showDetail">
-      <DialogContent :class="['rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden', pdfExpanded ? 'w-[97vw] max-w-[97vw] h-[96vh] max-h-[96vh] inv-detail-full' : 'sm:max-w-[1200px] max-h-[92vh]']">
+      <DialogContent :class="['rounded-[14px] border-[#e8edf2] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden w-[97vw] max-w-[97vw] h-[96vh] max-h-[96vh]', pdfExpanded ? 'inv-detail-full' : '']">
         <DialogHeader class="px-6 pt-5 pb-4 border-b border-[#e8edf2] bg-gradient-to-b from-gray-50/80 to-white">
           <DialogTitle class="text-[1.1rem] font-bold text-gray-900">{{ selectedInvoice?.invoice_number }}</DialogTitle>
           <DialogDescription class="text-[13px] text-gray-400">
@@ -121,9 +121,9 @@
             <button
               type="button"
               class="pdf-expand-btn"
-              :title="pdfExpanded ? 'Exit fullscreen' : 'Expand the invoice to fill the screen'"
+              :title="pdfExpanded ? 'Show the details panel' : 'Hide the details panel — show the invoice PDF only'"
               @click="pdfExpanded = !pdfExpanded"
-            >{{ pdfExpanded ? '✕ Close' : '⤢ Fullscreen' }}</button>
+            >{{ pdfExpanded ? '⇤ Show details' : '⤢ Expand PDF' }}</button>
             <iframe :src="`/api/invoices/${selectedInvoice.id}/pdf`" class="pdf-frame" title="Invoice PDF"></iframe>
           </div>
 
@@ -734,8 +734,10 @@ onMounted(() => store.load())
   display: grid;
   grid-template-columns: 1fr 360px;
   gap: 0;
-  min-height: 600px;
-  max-height: calc(92vh - 80px);
+  min-height: 0;
+  /* The modal is always full-screen now (96vh); fill it minus the header so the
+     PDF pane and the details panel both use the full height. */
+  max-height: calc(96vh - 76px);
 }
 .detail-pdf {
   background: #f1f5f9;
@@ -767,10 +769,10 @@ onMounted(() => store.load())
 }
 .pdf-expand-btn:hover { background: #fff; border-color: #94a3b8; }
 
-/* Fullscreen: blow the modal + PDF up to fill the viewport, hide the meta panel
-   so a full invoice page reads at ~1:1 (client request — the panel was too small).
-   The modal's 97vw/96vh sizing is set by Tailwind classes on DialogContent when
-   pdfExpanded; these rules just reflow its contents. */
+/* PDF-only mode. The modal is ALWAYS full-screen (97vw/96vh, set by Tailwind on
+   DialogContent) and defaults to the two-column PDF + details split (like the
+   Expenses modal). Toggling pdfExpanded applies these rules to hide the details
+   panel so a full invoice page reads at ~1:1. */
 .inv-detail-full .detail-body { grid-template-columns: 1fr !important; min-height: 0 !important; max-height: calc(96vh - 76px) !important; }
 .inv-detail-full .detail-meta { display: none !important; }
 .inv-detail-full .detail-pdf { border-right: none !important; }
@@ -999,7 +1001,10 @@ onMounted(() => store.load())
 }
 
 @media (max-width: 900px) {
-  .detail-body { grid-template-columns: 1fr; }
+  /* Full-screen modal on a phone → stack to one scrollable column so the details
+     panel below the PDF is never clipped by the modal's fixed height. */
+  .detail-body { grid-template-columns: 1fr; max-height: calc(96vh - 76px); overflow-y: auto; }
   .detail-pdf { max-height: 62vh; min-height: 360px; }
+  .detail-meta { overflow-y: visible; }
 }
 </style>
