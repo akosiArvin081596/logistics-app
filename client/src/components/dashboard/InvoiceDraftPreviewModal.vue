@@ -209,6 +209,12 @@ function buildBlobs() {
   rateconUrl.value = rateconBlobUrl || ''
 }
 
+// Approve state — declared BEFORE the immediate watch below (which reads
+// approveError) so its `immediate` run during setup doesn't hit a temporal-
+// dead-zone ("Cannot access 'approveError' before initialization").
+const approving = ref(false)
+const approveError = ref('')
+
 // Rebuild on open / new preview; revoke on close so a stale blob is never held.
 watch(
   () => [props.open, props.preview],
@@ -228,9 +234,6 @@ watch(
 onBeforeUnmount(revokeBlobs)
 
 // --- Approve ----------------------------------------------------------------
-const approving = ref(false)
-const approveError = ref('')
-
 function onOpenChange(value) {
   if (value) return
   if (approving.value) return // don't orphan an in-flight draft create
