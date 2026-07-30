@@ -1,14 +1,14 @@
 <template>
-  <Teleport to="body">
+  <Teleport to="body" :disabled="inline">
     <div
       v-if="src"
       ref="overlayRef"
-      class="zoom-overlay"
-      role="dialog"
-      aria-modal="true"
+      :class="inline ? 'zoom-inline' : 'zoom-overlay'"
+      :role="inline ? undefined : 'dialog'"
+      :aria-modal="inline ? undefined : 'true'"
       :aria-label="alt"
-      tabindex="-1"
-      @click.self="emitClose"
+      :tabindex="inline ? undefined : -1"
+      @click.self="onBackdropClick"
       @wheel.prevent="onWheel"
     >
       <img
@@ -32,7 +32,7 @@
         <button type="button" class="zoom-btn" aria-label="Zoom in" @click="zoomBy(ZOOM_STEP)">+</button>
       </div>
 
-      <button type="button" class="zoom-close" aria-label="Close" @click="emitClose">&times;</button>
+      <button v-if="!inline" type="button" class="zoom-close" aria-label="Close" @click="emitClose">&times;</button>
     </div>
   </Teleport>
 </template>
@@ -48,6 +48,10 @@ import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 const props = defineProps({
   src: { type: String, default: null },
   alt: { type: String, default: 'Image' },
+  // Inline mode: render in-place (no Teleport/backdrop/close button) so the
+  // image is zoomable/pannable directly inside its container. Default false
+  // preserves the existing fullscreen-overlay behavior for every other caller.
+  inline: { type: Boolean, default: false },
 })
 const emit = defineEmits(['close'])
 
@@ -88,8 +92,14 @@ function clampScale(v) {
 function clampPan() {
   const img = imgRef.value
   if (!img) return
-  const maxX = Math.max(0, (img.clientWidth * scale.value - window.innerWidth) / 2) + 60
-  const maxY = Math.max(0, (img.clientHeight * scale.value - window.innerHeight) / 2) + 60
+  // Bound the pan to the visible box. `overlayRef` is the inset:0 overlay
+  // (≈ viewport) in overlay mode and the host container in inline mode, so its
+  // client size is the right reference for both — falls back to the viewport.
+  const box = overlayRef.value
+  const vw = box ? box.clientWidth : window.innerWidth
+  const vh = box ? box.clientHeight : window.innerHeight
+  const maxX = Math.max(0, (img.clientWidth * scale.value - vw) / 2) + 60
+  const maxY = Math.max(0, (img.clientHeight * scale.value - vh) / 2) + 60
   tx.value = Math.min(maxX, Math.max(-maxX, tx.value))
   ty.value = Math.min(maxY, Math.max(-maxY, ty.value))
 }
@@ -191,6 +201,12 @@ function emitClose() {
   emit('close')
 }
 
+// Backdrop click closes the fullscreen overlay; inline mode has no backdrop to
+// dismiss, so it's a no-op there.
+function onBackdropClick() {
+  if (!props.inline) emitClose()
+}
+
 function onKeydown(e) {
   if (e.key === 'Escape') { e.preventDefault(); emitClose() }
 }
@@ -205,7 +221,9 @@ watch(() => props.src, (val) => {
   dragStart = null
   pinchStart = null
   isInteracting.value = false
-  if (val) {
+  // Inline mode must NOT hijack Escape (the host modal owns it) or steal focus —
+  // only the fullscreen overlay wires those.
+  if (val && !props.inline) {
     window.addEventListener('keydown', onKeydown)
     nextTick(() => overlayRef.value?.focus())
   } else {
@@ -243,6 +261,32 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 .zoom-img.panning { cursor: grab; }
 .zoom-img.panning:active { cursor: grabbing; }
 .zoom-img.no-transition { transition: none; }
+
+/* Inline mode — fill the host container (which must be position:relative), no
+   fixed overlay chrome. Same zoom/pan engine, just scoped to the box. */
+.zoom-inline {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  background: transparent;
+}
+.zoom-inline .zoom-img {
+  max-width: 100%;
+  max-height: 100%;
+  box-shadow: none;
+  border-radius: 4px;
+}
+.zoom-inline .zoom-controls {
+  position: absolute;
+  bottom: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+}
 
 .zoom-controls {
   position: fixed;

@@ -207,6 +207,9 @@ const preOcrSnapshot = ref(null)
 const ocrLoading = ref(false)
 const ocrApplied = ref(false)
 const ocrConfidence = ref('')
+// Dynamic receipt details parsed by OCR ({label,value}[]). Carried straight
+// through to create under the same trust model as amount/vendor — no editor UI.
+const ocrDetails = ref([])
 
 async function handlePhoto(file) {
   const blob = file && file.file
@@ -244,6 +247,7 @@ async function runReceiptOcr() {
   ocrLoading.value = true
   ocrApplied.value = false
   ocrConfidence.value = ''
+  ocrDetails.value = []
   // Snapshot what the driver had entered so we can offer Undo.
   preOcrSnapshot.value = {
     amount: form.amount,
@@ -283,6 +287,8 @@ async function runReceiptOcr() {
     if (data.city != null) form.city = String(data.city)
     if (data.state != null) form.state = String(data.state).toUpperCase()
     if (data.suggestedType && form.type === 'Fuel') form.type = data.suggestedType
+    // Dynamic details ride along unedited (default [] for older/no-key responses).
+    ocrDetails.value = Array.isArray(data.details) ? data.details : []
     ocrApplied.value = true
     ocrConfidence.value = data.confidence || ''
   } catch {
@@ -304,6 +310,7 @@ function undoAutofill() {
   form.state = preOcrSnapshot.value.state
   form.gallons = preOcrSnapshot.value.gallons
   form.odometer = preOcrSnapshot.value.odometer
+  ocrDetails.value = []
   ocrApplied.value = false
 }
 
@@ -333,6 +340,7 @@ function handleSubmit() {
       photoData: photoBase64.value,
       gallons: form.gallons || 0,
       odometer: form.odometer || 0,
+      receiptDetails: ocrDetails.value,
     })
 
     form.amount = ''
@@ -346,6 +354,7 @@ function handleSubmit() {
     fileList.value = []
     ocrApplied.value = false
     ocrConfidence.value = ''
+    ocrDetails.value = []
     preOcrSnapshot.value = null
     // Keep loadId if only one load (inside load detail)
     if (props.loads.length > 1) form.loadId = ''
