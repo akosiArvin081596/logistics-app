@@ -486,21 +486,19 @@ function fmtDate(d) {
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-// A deduction renders as an explicit negative ("−$1,234") so the investor can
-// SEE money coming out; a $0 line stays plain. Uses the same unicode minus as the
-// rest of this statement (the Adjustment column above).
-function fmtNeg(n) {
-  const v = Math.abs(Number(n || 0))
-  return v === 0 ? fmt(0) : '−' + fmt(v)
-}
-
-// The waterfall summary is whole-dollar (Math.round'd server-side), but the
-// drill-down line items are cents-precise — so rounded items can look a dollar
-// off. In the drill-down modal we show CENTS, and each footer total is the SUM
-// of the shown items (ldSum), so the list always reconciles to its own total.
+// The waterfall and its drill-down are BOTH cents-precise (the backend sends
+// unrounded figures for this surface), so they reconcile exactly. Each modal
+// footer total is additionally the sum of the shown items (ldSum), so the list
+// always proves its own total.
 function fmtCents(n) {
   const v = Number(n || 0)
   return (v < 0 ? '−$' : '$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+// Cents-precise deduction: an explicit negative so money coming out is visible,
+// but a $0 line stays plain rather than reading "−$0.00".
+function fmtCentsNeg(n) {
+  const v = Math.abs(Number(n || 0))
+  return v === 0 ? fmtCents(0) : '−' + fmtCents(v)
 }
 function ldSum(arr, key) {
   return (arr || []).reduce((a, x) => a + (Number(x[key]) || 0), 0)
@@ -515,8 +513,12 @@ function ldSum(arr, key) {
 function waterfall(b) {
   if (!b) return []
   const rows = []
+  // Exact to the cent, matching the drill-down modal this waterfall opens — a
+  // $3,043.33 truck cost reading "$3,043" beside an itemized list totalling
+  // $3,043.33 looked like the numbers disagreed. The backend now sends the
+  // unrounded figures, so both surfaces show the same amount.
   const add = (label, value, kind, opts = {}) =>
-    rows.push({ label, kind, display: kind === 'deduct' ? fmtNeg(value) : fmt(value), ...opts })
+    rows.push({ label, kind, display: kind === 'deduct' ? fmtCentsNeg(value) : fmtCents(value), ...opts })
   // The four figures the client wants drillable carry a `detailKey`; the rest
   // (maintenance/compliance, Net Profit, × %, Your Share) stay plain. The key is
   // both the click target and the GET /api/investor/payouts/:period/detail slice.

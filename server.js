@@ -17273,6 +17273,13 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			maintFundCost: Math.round(maintFundCost),
 			complianceCost: Math.round(complianceCost),
 			netProfit: Math.round(netProfit),
+			// Unrounded copies, to the cent. The payout waterfall and its statement
+			// PDF show these so the summary reconciles EXACTLY with the itemized
+			// drill-down (a $3,043.33 truck cost was displaying as $3,043 beside an
+			// itemized list totalling $3,043.33). Purely additive: the rounded fields
+			// above are untouched, so every other consumer — and the settlement math,
+			// which splits the RAW netProfit above — is unchanged.
+			exact: { revenue, driverPay, fixedCosts, tripExpenses, maintFundCost, complianceCost, netProfit },
 			investorEarnings,
 			isCurrentMonth: mk === currentMonthKey,
 		});
@@ -17470,16 +17477,21 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			// of this month's netProfit, BEFORE loss carry-forward — see
 			// monthEarnings / lossCarriedIn / lossDeferred above for how it nets
 			// down to `amount`. Never feeds amount/effectiveAmount/totals.
+			// Exact (unrounded) figures so the waterfall reconciles to the cent with
+			// the line-item drill-down. monthShare is carry.raw — the SAME number the
+			// settlement used (split applied to the raw netProfit, rounded once) —
+			// rather than re-deriving it from the rounded netProfit, which could land
+			// a dollar off the amount actually settled.
 			breakdown: be ? {
-				revenue: be.revenue,
-				driverPay: be.driverPay,
-				fixedCosts: be.fixedCosts,
-				tripExpenses: be.tripExpenses,
-				maintFundCost: be.maintFundCost || 0,
-				complianceCost: be.complianceCost || 0,
-				netProfit: be.netProfit,
+				revenue: (be.exact || be).revenue,
+				driverPay: (be.exact || be).driverPay,
+				fixedCosts: (be.exact || be).fixedCosts,
+				tripExpenses: (be.exact || be).tripExpenses,
+				maintFundCost: (be.exact || be).maintFundCost || 0,
+				complianceCost: (be.exact || be).complianceCost || 0,
+				netProfit: (be.exact || be).netProfit,
 				splitPct,
-				monthShare: Math.round(be.netProfit * ((parseFloat(config.investor_split_pct) || 50) / 100)),
+				monthShare: carry.raw,
 			} : null,
 		};
 	});
@@ -18650,14 +18662,16 @@ async function loadPayoutMonthDetail(ownerId, sessionUser, period) {
 	const m = monthlyEarnings.find((x) => x.month === period) || null;
 	const d = detail || { revenueLoads: [], driverPayRows: [], fixedCostItems: [], tripExpenseItems: [] };
 
-	// Reconciliation guard — each drill-down list MUST sum to its headline. Log
-	// drift (never block; per-row rounding can differ by a dollar or two).
+	// Reconciliation guard — each drill-down list MUST sum to its headline.
+	// Compared against the EXACT headline (both sides to the cent) so the guard
+	// measures real drift rather than the display rounding. Log only; never block.
 	if (m) {
-		const sum = (arr, f) => Math.round(arr.reduce((a, x) => a + (Number(f(x)) || 0), 0));
-		[["revenue", sum(d.revenueLoads, (x) => x.amount), m.revenue],
-		 ["driverPay", sum(d.driverPayRows, (x) => x.pay), m.driverPay],
-		 ["fixedCosts", sum(d.fixedCostItems, (x) => x.total), m.fixedCosts],
-		 ["tripExpenses", sum(d.tripExpenseItems, (x) => x.amount), m.tripExpenses]]
+		const x0 = m.exact || m;
+		const sum = (arr, f) => Math.round(arr.reduce((a, x) => a + (Number(f(x)) || 0), 0) * 100) / 100;
+		[["revenue", sum(d.revenueLoads, (x) => x.amount), x0.revenue],
+		 ["driverPay", sum(d.driverPayRows, (x) => x.pay), x0.driverPay],
+		 ["fixedCosts", sum(d.fixedCostItems, (x) => x.total), x0.fixedCosts],
+		 ["tripExpenses", sum(d.tripExpenseItems, (x) => x.amount), x0.tripExpenses]]
 			.forEach(([k, got, want]) => { if (Math.abs(got - want) > 1) console.warn(`Payout detail ${period} ${k} drift: items=${got} headline=${want} (owner ${ownerId})`); });
 	}
 	return { m, detail: d };
@@ -18680,14 +18694,17 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 		const ownerId = preview.effectiveUserId;
 		const { m, detail: d } = await loadPayoutMonthDetail(ownerId, preview.sessionUser, period);
 
+		// Headlines are the EXACT (unrounded) figures so the modal's totals match
+		// its own itemized rows to the cent.
+		const mx = m ? (m.exact || m) : null;
 		res.json({
 			period,
-			revenue: m ? m.revenue : 0, revenueLoads: d.revenueLoads,
-			driverPay: m ? m.driverPay : 0, driverPayRows: d.driverPayRows,
-			fixedCosts: m ? m.fixedCosts : 0, fixedCostItems: d.fixedCostItems,
-			tripExpenses: m ? m.tripExpenses : 0, tripExpenseItems: d.tripExpenseItems,
-			maintFundCost: m ? m.maintFundCost : 0, complianceCost: m ? m.complianceCost : 0,
-			netProfit: m ? m.netProfit : 0, investorEarnings: m ? m.investorEarnings : 0,
+			revenue: mx ? mx.revenue : 0, revenueLoads: d.revenueLoads,
+			driverPay: mx ? mx.driverPay : 0, driverPayRows: d.driverPayRows,
+			fixedCosts: mx ? mx.fixedCosts : 0, fixedCostItems: d.fixedCostItems,
+			tripExpenses: mx ? mx.tripExpenses : 0, tripExpenseItems: d.tripExpenseItems,
+			maintFundCost: mx ? mx.maintFundCost : 0, complianceCost: mx ? mx.complianceCost : 0,
+			netProfit: mx ? mx.netProfit : 0, investorEarnings: m ? m.investorEarnings : 0,
 		});
 	} catch (err) {
 		console.error("GET /api/investor/payouts/:period/detail error:", err.message);
