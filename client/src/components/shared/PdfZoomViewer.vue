@@ -215,6 +215,12 @@ function pointerMidpoint() {
 
 function onPointerDown(e) {
   if (failed.value) return
+  // The +/−/Reset pill sits INSIDE the viewport, so a press on it also reaches
+  // this handler. Capturing the pointer here retargets the follow-up events to
+  // the viewport and the button never receives its click — the zoom buttons
+  // looked dead to a real mouse (wheel/drag/dblclick still worked, which is why
+  // it went unnoticed). Let the control handle its own press.
+  if (e.target && e.target.closest && e.target.closest('.pz-controls')) return
   viewportRef.value?.setPointerCapture?.(e.pointerId)
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
   if (pointers.size === 2) {
