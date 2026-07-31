@@ -68,6 +68,14 @@
         @click="clearAll"
       >Clear all</button>
 
+      <!-- Sits beside the Add control, where it's read at the moment of choosing
+           files: a multi-page PDF is ONE document to the scanner, so several
+           receipts bundled into one file become a single expense. -->
+      <p class="bulk-pdf-note">
+        <strong>One receipt per file.</strong> A multi-page PDF is read as a single
+        expense &mdash; split bundled receipts before uploading.
+      </p>
+
       <span class="bulk-count">{{ rows.length }} / {{ MAX_BATCH }}</span>
     </div>
 
@@ -1112,6 +1120,17 @@ onUnmounted(() => {
 .bulk-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; margin-top: 0.6rem; }
 
 .bulk-savebar { display: flex; align-items: center; gap: 0.75rem; justify-content: flex-end; flex-wrap: wrap; }
+/* Sits beside the Add control. flex-basis:100% pushes it onto its own line so it
+   reads as guidance rather than another toolbar control. */
+.bulk-pdf-note {
+  flex-basis: 100%;
+  margin: 0.15rem 0 0;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+.bulk-pdf-note strong { color: var(--text); font-weight: 700; }
+
 .bulk-savehint { font-size: 0.78rem; color: var(--text-dim); }
 .bulk-savehint.err { color: var(--danger); }
 .bulk-savehint.warn { color: var(--amber); }
