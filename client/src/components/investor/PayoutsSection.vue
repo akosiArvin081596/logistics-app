@@ -170,9 +170,32 @@
               <strong :class="{ 'amt-negative': effective(p) < 0 }">{{ fmt(effective(p)) }}</strong>
             </td>
             <td class="mono-sm">{{ settleable(p) ? fmtDate(p.dueDate) : '—' }}</td>
-            <td>
+            <td class="status-cell">
               <span v-if="settleable(p)" :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span>
               <span v-else class="status-pill st-none">nothing due</span>
+              <!-- Statement PDF lives INSIDE the Status cell on purpose: no new
+                   column (colCount / the breakdown colspan stay as they are) and
+                   the admin action cell is v-if="isSuperAdmin", so an investor
+                   viewing their own portal would never see a button placed there.
+                   Only a settled row has a statement to render. -->
+              <template v-if="p.status === 'paid'">
+                <button
+                  type="button"
+                  class="stmt-btn"
+                  :disabled="stmtBusyId === p.id"
+                  :aria-busy="stmtBusyId === p.id"
+                  :aria-label="`Download payout statement for ${p.periodLabel}`"
+                  :title="`Download the payout statement PDF for ${p.periodLabel}`"
+                  @click="downloadStatement(p)"
+                >
+                  <span v-if="stmtBusyId === p.id" class="stmt-spinner" aria-hidden="true"></span>
+                  <span v-else class="stmt-icon" aria-hidden="true">&#8595;</span>
+                  {{ stmtBusyId === p.id ? 'Preparing…' : 'Statement PDF' }}
+                </button>
+                <!-- The toast is transient; a failed row also keeps its reason
+                     visible so the download never fails silently. -->
+                <div v-if="stmtError.id === p.id" class="stmt-error" role="alert">{{ stmtError.message }}</div>
+              </template>
             </td>
             <td v-if="isSuperAdmin" class="action-cell">
               <!-- Only rows with a positive payable can be settled; the server
@@ -594,6 +617,64 @@ async function advance(payout, status) {
   }
 }
 
+// ---- Payout statement PDF (paid rows only) ---------------------------------
+// Per-row busy state — an id, not a boolean, so ONLY the clicked row shows
+// "Preparing…"; the server renders through Puppeteer and takes several seconds.
+const stmtBusyId = ref(null)
+// { id, message } — the last failure, pinned to the row it belongs to.
+const stmtError = ref({ id: null, message: '' })
+
+// Deliberately raw fetch, NOT useApi(): that composable always parses the body
+// as JSON (this responds with a PDF) and aborts at 20s (a Puppeteer render can
+// run longer). Mirrors the blob download in TaxShieldSection.exportCsv().
+async function downloadStatement(p) {
+  if (!p || !p.period) return
+  // One Puppeteer render at a time — say so instead of silently swallowing the
+  // click, since the other rows' buttons stay enabled.
+  if (stmtBusyId.value) {
+    toast('A statement is already being prepared — one at a time.')
+    return
+  }
+  stmtBusyId.value = p.id
+  stmtError.value = { id: null, message: '' }
+  try {
+    // Same preview scoping as advance()/loadPayouts: a Super Admin previewing an
+    // investor's portal must download THAT investor's statement.
+    const params = new URLSearchParams()
+    if (props.previewUserId) params.set('as_user_id', String(props.previewUserId))
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    const res = await fetch(
+      `/api/investor/payouts/${encodeURIComponent(p.period)}/statement${qs}`,
+      { credentials: 'include' }
+    )
+    if (!res.ok) {
+      // Errors come back as JSON ({ error }) — but a proxy/gateway failure may
+      // not, so parsing must never throw its own opaque error over the real one.
+      let msg = ''
+      try { msg = (await res.json()).error } catch { /* non-JSON error body */ }
+      throw new Error(msg || `Couldn't generate the statement (${res.status}).`)
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    // ALWAYS set an explicit filename. A blob download without one saves as a
+    // name-less UUID — the bug called out in InvestorView.downloadReport().
+    const m = (res.headers.get('Content-Disposition') || '').match(/filename="(.+)"/)
+    a.download = m ? m[1] : `LogisX_Payout_Statement_${p.period}.pdf`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    const message = (err && err.message) || 'Failed to download the statement.'
+    stmtError.value = { id: p.id, message }
+    toast(message, 'error')
+  } finally {
+    stmtBusyId.value = null
+  }
+}
+
 onMounted(loadPayouts)
 </script>
 
@@ -918,6 +999,48 @@ onMounted(loadPayouts)
 .status-pill.st-paid { background: #dcfce7; color: #166534; }
 .status-pill.st-none { background: #f1f5f9; color: #64748b; }
 .status-pill.st-progress { background: #dbeafe; color: #1e40af; }
+
+/* --- Statement PDF button (paid rows, inside the Status cell) --- */
+.status-cell { line-height: 1.3; }
+/* display:flex (block-level) drops it onto its own line under the pill even
+   though the cell is nowrap; fit-content keeps it from spanning the column. */
+.stmt-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: fit-content;
+  margin-top: 0.4rem;
+  padding: 0.2rem 0.5rem;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #475569;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.stmt-btn:hover:not(:disabled) { background: #f1f5f9; border-color: #cbd5e1; color: #0369a1; }
+.stmt-btn:focus-visible { outline: 2px solid #0369a1; outline-offset: 2px; }
+.stmt-btn:disabled { opacity: 0.7; cursor: progress; }
+.stmt-icon { color: #94a3b8; }
+.stmt-btn:hover:not(:disabled) .stmt-icon { color: #0369a1; }
+.stmt-spinner {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid #cbd5e1;
+  border-top-color: #0369a1;
+  border-radius: 50%;
+  animation: stmt-spin 0.7s linear infinite;
+}
+@keyframes stmt-spin { to { transform: rotate(360deg); } }
+/* Beat the table-wide nowrap so a failure reason wraps instead of widening
+   the column (same trick as .inv-carry / .inv-adj-note above). */
+.stmt-error { margin-top: 0.25rem; max-width: 13rem; font-size: 0.66rem; color: #b91c1c; }
+.data-table .stmt-error { white-space: normal; }
 
 .action-cell {
   text-align: right;
