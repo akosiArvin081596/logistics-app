@@ -14,8 +14,11 @@
           <div class="field">
             <label class="f-label">Payee name <span class="text-red-500">*</span></label>
             <input v-model="form.payee" list="manual-payee-options" class="f-input" placeholder="e.g. Sean Adams" maxlength="100" />
+            <!-- Free text on purpose: an ad-hoc payee who isn't a driver or an
+                 investor still has to be invoiceable. The datalist is only a
+                 shortcut into the on-file records. -->
             <datalist id="manual-payee-options">
-              <option v-for="p in payees" :key="p" :value="p" />
+              <option v-for="p in payeeOptions" :key="p" :value="p" />
             </datalist>
           </div>
           <div class="field">
@@ -32,6 +35,19 @@
             <label class="f-label">Phone</label>
             <input v-model="form.payeePhone" class="f-input" placeholder="Optional" maxlength="40" />
           </div>
+        </div>
+
+        <!-- Autofill receipt. Same pattern as the rate-con prefill banner on
+             NewJobView: say what was written and from where, and let it be
+             dismissed — a silent write into a field the user is about to sign
+             off on is worse than no write at all. -->
+        <div v-if="prefillNote" class="prefill-note" role="status" aria-live="polite">
+          <div class="prefill-note-body">
+            <strong>{{ prefillNote.filledLabel }} filled from file</strong> — matched
+            <em>{{ prefillNote.name }}</em>{{ prefillNote.type ? ` (${prefillNote.type})` : '' }}. Check before creating.
+            <div v-if="prefillNote.kept" class="prefill-kept">Left the {{ prefillNote.kept }} you typed as-is.</div>
+          </div>
+          <button type="button" class="prefill-dismiss" aria-label="Dismiss this note" @click="prefillNote = null">&times;</button>
         </div>
 
         <!-- Period -->
@@ -110,6 +126,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useInvoicesStore } from '../../stores/invoices'
+import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -121,6 +138,7 @@ const props = defineProps({
 const emit = defineEmits(['update:open', 'created'])
 
 const store = useInvoicesStore()
+const api = useApi()
 const { show: toast } = useToast()
 
 const openProxy = computed({
@@ -144,10 +162,165 @@ const form = ref(emptyForm())
 const busy = ref(false)
 const errorMsg = ref('')
 
+/* ── Payees on file ──────────────────────────────────────────────────────────
+   The address/phone for every driver and investor already exist (drivers
+   directory + investor records); this modal used to make the admin retype them.
+   GET /api/invoices/payees returns them with `address` pre-composed server-side.
+   The `payees` prop (names off PRIOR invoices) stays as the fallback so a failed
+   or unavailable fetch never leaves the datalist empty.                       */
+const remotePayees = ref([])
+// Which autofilled fields we still own, keyed by form field → the exact value we
+// wrote. Once the user edits one, form[key] !== filled[key] and we stop touching it.
+const filled = ref({ payeeAddress: '', payeePhone: '', payeeRole: '' })
+const appliedPayee = ref(null)
+const prefillNote = ref(null)
+let payeesReq = 0
+
+// UNION of who we hold on file and who has actually been invoiced before —
+// someone billed manually in the past (an office admin in neither directory)
+// must not disappear from the suggestions just because the directory loaded.
+// Prior-invoice names are matched out by normalized key so the same person
+// doesn't appear twice under two spellings ("johnny rocks spirits llc").
+const payeeOptions = computed(() => {
+  const onFile = remotePayees.value.map(p => String(p.name || '').trim()).filter(Boolean)
+  const seen = new Set(onFile.map(normalizeName))
+  const extras = props.payees
+    .map(p => String(p || '').trim())
+    .filter(n => n && !seen.has(normalizeName(n)))
+  return [...new Set([...onFile, ...extras])].sort((a, b) => a.localeCompare(b))
+})
+
+async function loadPayees() {
+  const reqId = ++payeesReq
+  try {
+    const res = await api.get('/api/invoices/payees')
+    if (reqId !== payeesReq) return
+    const rows = Array.isArray(res?.payees) ? res.payees : []
+    remotePayees.value = rows
+      .map(p => ({
+        name: String(p?.name || '').trim(),
+        type: String(p?.type || '').trim(),
+        address: String(p?.address || '').trim(),
+        phone: String(p?.phone || '').trim(),
+        role: String(p?.role || '').trim(),
+      }))
+      .filter(p => p.name)
+    // The admin may have typed the payee while this was in flight — the watcher
+    // ran against an empty list and matched nothing, so re-run it now.
+    syncPayeeFromFile()
+  } catch {
+    // 403 / offline / endpoint not deployed yet — keep whatever list we already
+    // have (possibly none) and let payeeOptions fall back to the prop. Autofill
+    // just goes quiet; every field is still typeable, so the modal stays usable.
+  }
+}
+
+// "JOHNNY ROCKS SPIRITS LLC" and "Johnny Rocks Spirits" are the same payee: fold
+// case, drop punctuation ("L.L.C." → "l l c" → "llc"), collapse whitespace, then
+// peel trailing entity suffixes. Never reduces a name to nothing — a lone "Co"
+// stays "co" because the loop keeps the last remaining token.
+const ENTITY_SUFFIXES = new Set([
+  'llc', 'lc', 'llp', 'lp', 'pllc', 'inc', 'incorporated',
+  'ltd', 'limited', 'co', 'corp', 'corporation', 'company',
+])
+function normalizeName(value) {
+  const flat = String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .replace(/\bl\s+l\s+c\b/g, 'llc')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!flat) return ''
+  const parts = flat.split(' ')
+  while (parts.length > 1 && ENTITY_SUFFIXES.has(parts[parts.length - 1])) parts.pop()
+  return parts.join(' ')
+}
+
+function findPayee(name) {
+  const raw = String(name || '').trim()
+  if (!raw || !remotePayees.value.length) return null
+  const lower = raw.toLowerCase()
+  const exact = remotePayees.value.find(p => p.name.toLowerCase() === lower)
+  if (exact) return exact
+  const key = normalizeName(raw)
+  if (!key) return null
+  const near = remotePayees.value.filter(p => normalizeName(p.name) === key)
+  if (!near.length) return null
+  // Ambiguous normalized match (e.g. a driver and an investor with the same
+  // name): prefer the record that actually carries contact details.
+  return near.find(p => p.address || p.phone) || near[0]
+}
+
+// Drops only the values we wrote ourselves, so switching payees can't leave
+// person A's address sitting on person B's invoice. Anything the user edited is
+// left alone — and we hand ownership of it back to them permanently.
+function releaseOwnedFields() {
+  const f = form.value
+  for (const key of Object.keys(filled.value)) {
+    if (filled.value[key] && f[key] === filled.value[key]) f[key] = ''
+    filled.value[key] = ''
+  }
+}
+
+function joinLabels(list) {
+  const parts = list.map((s, i) => (i === 0 ? s : s.toLowerCase()))
+  if (parts.length <= 1) return parts[0] || ''
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+}
+
+function applyPayee(match) {
+  const f = form.value
+  const wrote = []
+  const kept = []
+  const set = (key, value, label) => {
+    const val = String(value || '').trim()
+    const current = String(f[key] || '')
+    // Hands off anything the user typed or edited. `filled[key]` is the value we
+    // last wrote, so current !== it means they've since changed it.
+    if (current && current !== filled.value[key]) {
+      if (val && val !== current) kept.push(label.toLowerCase())
+      return
+    }
+    if (!val || current === val) return
+    f[key] = val
+    filled.value[key] = val
+    wrote.push(label)
+  }
+  set('payeeAddress', match.address, 'Address')
+  set('payeePhone', match.phone, 'Phone')
+  set('payeeRole', match.role, 'Role')
+
+  prefillNote.value = wrote.length
+    ? {
+        name: match.name,
+        type: match.type,
+        filledLabel: joinLabels(wrote),
+        kept: kept.length ? joinLabels(kept).toLowerCase() : '',
+      }
+    : null
+}
+
+function syncPayeeFromFile() {
+  const match = findPayee(form.value.payee)
+  if (match && match === appliedPayee.value) return
+  releaseOwnedFields()
+  appliedPayee.value = match
+  if (!match) { prefillNote.value = null; return }
+  applyPayee(match)
+}
+
+// Runs per keystroke (the find is a local scan of ~10 records, no debounce
+// needed) as well as on a datalist pick, which fires as a plain input event.
+watch(() => form.value.payee, syncPayeeFromFile)
+
 watch(() => props.open, (isOpen) => {
   if (isOpen) {
     form.value = emptyForm()
     errorMsg.value = ''
+    prefillNote.value = null
+    filled.value = { payeeAddress: '', payeePhone: '', payeeRole: '' }
+    appliedPayee.value = null
+    loadPayees()
   }
 })
 
@@ -239,6 +412,32 @@ function fmtMoney(n) {
   color: #111827;
 }
 .f-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
+.prefill-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  color: #92400e;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.prefill-note-body { flex: 1; min-width: 0; }
+.prefill-kept { margin-top: 0.2rem; font-weight: 600; }
+.prefill-dismiss {
+  flex-shrink: 0;
+  padding: 0 0.25rem;
+  background: none;
+  border: none;
+  font-size: 1.05rem;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+}
+.prefill-dismiss:hover { opacity: 1; }
 .rows-section {
   border: 1px solid #e8edf2;
   border-radius: 10px;

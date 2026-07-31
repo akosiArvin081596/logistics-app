@@ -1191,7 +1191,13 @@ const photoBase64 = ref('')
 const photoProcessing = ref(false)
 const pdfName = ref('')
 const photoIsPdf = computed(() => photoBase64.value.startsWith('data:application/pdf'))
-const MAX_PDF_FILE_BYTES = 15 * 1024 * 1024 // matches the server-side cap
+const MAX_PDF_FILE_BYTES = 15 * 1024 * 1024 // matches the server-side create cap
+// POST /api/expenses/ocr rejects a photoData string over 8,500,000 chars (413).
+// A downscaled photo is never close; a PDF is sent as-is, so it can be. Checked
+// before the call so an oversize PDF still ATTACHES (up to the 15 MB create cap)
+// and only loses the auto-fill, instead of eating a 413.
+const MAX_OCR_PAYLOAD_CHARS = 8500000
+const MAX_OCR_PAYLOAD_LABEL = '6 MB'
 
 // Receipt OCR autofill on the single Log Expense form — mirrors the driver
 // ExpenseForm. After a photo is enhanced, Gemini reads it and prefills the
@@ -1283,9 +1289,10 @@ function readFileAsDataUrl(file) {
   })
 }
 
-// PDFs skip the whole image pipeline (canvas downscale + ScanKit enhance +
-// Gemini OCR make no sense for a document) — read as-is, validate size, and
-// let the admin fill the fields manually.
+// PDFs skip the IMAGE pipeline (canvas downscale + ScanKit enhance — neither can
+// rasterize a document) but they DO get read: Gemini takes the PDF bytes on the
+// same OCR endpoint a photo uses, so a PDF toll invoice auto-fills the form just
+// like a photographed receipt.
 async function handlePdfInput(blob) {
   if (blob.size > MAX_PDF_FILE_BYTES) {
     if (fileInputRef.value) fileInputRef.value.value = ''
@@ -1299,6 +1306,7 @@ async function handlePdfInput(blob) {
     // matches even when the browser left the MIME blank.
     photoBase64.value = String(dataUrl).replace(/^data:[^;]*;base64,/, 'data:application/pdf;base64,')
     pdfName.value = blob.name || 'receipt.pdf'
+    await runAddFormOcr()
   } catch {
     photoBase64.value = ''
     pdfName.value = ''
@@ -1312,10 +1320,9 @@ async function handlePdfInput(blob) {
 async function handleFileInput(event) {
   const blob = event.target.files && event.target.files[0]
   if (!blob) return
-  // New file selected → drop any OCR state from a prior image before branching,
-  // so swapping an OCR'd image for a PDF (or another image) can't carry stale
-  // details or the "✓ Autofilled" chip onto the new receipt. runAddFormOcr
-  // repopulates for images; the PDF path has no OCR, so it stays detail-less.
+  // New file selected → drop any OCR state from a prior receipt before branching,
+  // so swapping one receipt for another can't carry stale details or the
+  // "✓ Autofilled" chip onto the new file. Both branches re-run runAddFormOcr.
   ocrApplied.value = false
   ocrConfidence.value = ''
   ocrDetails.value = []
@@ -1369,12 +1376,19 @@ async function enhanceReceiptPhoto() {
   }
 }
 
-// Read the enhanced receipt with Gemini and prefill the Log Expense fields.
-// Mirrors the driver form: only fills empty/default fields, snapshots first so
-// Undo can restore, and stays silent when OCR is disabled (503) so manual
-// entry is never blocked. Images only — PDFs never reach here.
+// Read the receipt with Gemini and prefill the Log Expense fields. Mirrors the
+// driver form: only fills empty/default fields, snapshots first so Undo can
+// restore, and stays silent when OCR is disabled (503) so manual entry is never
+// blocked. Runs for images AND PDFs — a PDF just arrives here un-enhanced.
 async function runAddFormOcr() {
-  if (!photoBase64.value || photoIsPdf.value) return
+  if (!photoBase64.value) return
+  // Only a PDF can realistically exceed the endpoint's payload cap (photos are
+  // downscaled first). Skip the doomed round-trip and say so — the receipt is
+  // already attached, so only the auto-fill is lost.
+  if (photoBase64.value.length > MAX_OCR_PAYLOAD_CHARS) {
+    toast(`Receipt is too large to auto-read (${MAX_OCR_PAYLOAD_LABEL} max) — attached, enter the fields manually`, 'error')
+    return
+  }
   ocrApplied.value = false
   ocrConfidence.value = ''
   ocrDetails.value = []
@@ -1392,7 +1406,12 @@ async function runAddFormOcr() {
     if (data.date) addForm.date = data.date
     if (data.city != null) addForm.city = String(data.city)
     if (data.state != null) addForm.state = String(data.state).toUpperCase().slice(0, 2)
-    if (data.suggestedType && addForm.type === 'Fuel') addForm.type = data.suggestedType
+    // Only accept a type the select actually offers — assigning an unlisted value
+    // (e.g. "Tolls" for "Toll") silently blanks this REQUIRED field, so the admin
+    // sees an empty Type with no explanation. Bulk already guards this way.
+    if (data.suggestedType && expenseTypes.includes(data.suggestedType) && addForm.type === 'Fuel') {
+      addForm.type = data.suggestedType
+    }
     // No dedicated vendor field on this form — fold the vendor into the
     // description only when the admin left it blank, so the info isn't lost.
     if (data.vendor && !addForm.description.trim()) addForm.description = String(data.vendor).slice(0, 80)
