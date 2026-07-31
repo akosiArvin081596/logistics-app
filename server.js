@@ -16931,7 +16931,7 @@ function periodLabel(period) {
 //   - investorOwnerId:   user.id for an investor, or null for Super Admin
 //   - config:            merged investor_config (must include investor_split_pct)
 // returns: { monthlyEarnings: [...], currentMonthKey }
-async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config }) {
+async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null }) {
 	const jobTracking = await getJobTrackingCached();
 	const data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
 	const headers = jobTracking.headers;
@@ -16979,6 +16979,18 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const driverCol = findCol(headers, /^driver$/i);
 	const completedStatuses = /^(delivered|completed|pod received)$/i;
 
+	// Optional per-month line-item detail (drill-down). Collected ONLY for
+	// `detailForMonth`, purely additive — it never affects any total computed below.
+	// Match the rest of the codebase (NOT contract.?id): Job Tracking's column A is
+	// "Contract ID" and is blank for email-ingested loads, so including it here binds
+	// to the empty column and the drill-down "Load #" renders "—" on every row.
+	const jtLoadIdCol = findCol(headers, /load.?id|job.?id/i);
+	// Reuse the dashboard's address-column picker (skips lat/lng/date/appt columns)
+	// so the drill-down route text never grabs a coordinate instead of a city.
+	const jtPickupCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
+	const jtDropCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
+	const detail = detailForMonth ? { revenueLoads: [], driverPayRows: [], fixedCostItems: [], tripExpenseItems: [] } : null;
+
 	// Investor-scope the rows: Owner ID column (primary) or driver-set (fallback).
 	const filteredJobData = investorDriverSet
 		? data.filter(r => {
@@ -17025,6 +17037,17 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			const amt = parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0;
 			if (amt && assignedMonthKey) {
 				monthlyRevenue[assignedMonthKey] = (monthlyRevenue[assignedMonthKey] || 0) + amt;
+				if (detail && assignedMonthKey === detailForMonth) {
+					detail.revenueLoads.push({
+						loadId: jtLoadIdCol ? String(r[jtLoadIdCol] || "").trim() : "",
+						driver: driver || "",
+						truck: jtTruckCol ? String(r[jtTruckCol] || "").trim() : "",
+						date: jtDateCol ? String(r[jtDateCol] || "").trim() : "",
+						pickup: jtPickupCol ? String(r[jtPickupCol] || "").trim() : "",
+						dropoff: jtDropCol ? String(r[jtDropCol] || "").trim() : "",
+						amount: Math.round(amt * 100) / 100,
+					});
+				}
 				if (driver) {
 					if (!driverMonthlyRevenue[driver]) driverMonthlyRevenue[driver] = {};
 					driverMonthlyRevenue[driver][assignedMonthKey] = (driverMonthlyRevenue[driver][assignedMonthKey] || 0) + amt;
@@ -17104,6 +17127,16 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 				pay = activeDays * fixedRate;
 			}
 			monthlyDriverPay[mk] = (monthlyDriverPay[mk] || 0) + pay;
+			if (detail && mk === detailForMonth) {
+				detail.driverPayRows.push({
+					driver,
+					activeDays,
+					dailyRate: fixedRate,
+					payType: struct.payType,
+					payPercentage: struct.payPercentage,
+					pay: Math.round(pay * 100) / 100,
+				});
+			}
 		}
 	}
 
@@ -17118,6 +17151,20 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	} else if (isSuperAdmin) {
 		db.prepare(`SELECT strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))) AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
 			.all().forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
+	}
+
+	// Per-expense line items for the drill-down month — SAME scope + P&L filter as
+	// the SUM above, so they reconcile to monthlyTripExp[detailForMonth].
+	if (detail) {
+		const expCols = "COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS date, type, description, amount, driver, truck_unit AS truck, location_city AS city, location_state AS state";
+		const monthExpr = "strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)))";
+		if (investorOwnerId) {
+			const driverList = investorDriverSet ? [...investorDriverSet] : [];
+			const driverPh = driverList.length ? driverList.map(() => '?').join(',') : "'__none__'";
+			detail.tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE (owner_id = ? OR LOWER(driver) IN (${driverPh})) AND ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(investorOwnerId, ...driverList, detailForMonth);
+		} else if (isSuperAdmin) {
+			detail.tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(detailForMonth);
+		}
 	}
 
 	// Monthly maintenance-fund service disbursements + paid compliance fees,
@@ -17145,8 +17192,8 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 
 	// Monthly fixed costs — Active trucks only, charged from truck.created_at.
 	const truckFixedQuery = investorDriverSet
-		? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-		: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
+		? "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+		: "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
 	const fixedTrucks = db.prepare(truckFixedQuery).all(...(investorDriverSet ? [user.id] : []));
 	const getMonthlyFixedCosts = (monthKey) => {
 		let total = 0;
@@ -17161,6 +17208,22 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		}
 		return Math.round(total);
 	};
+
+	// Fixed-cost line items for the drill-down month (same created_at inclusion
+	// guard as getMonthlyFixedCosts). Cleared below if the month is zero-activity.
+	if (detail) {
+		for (const t of fixedTrucks) {
+			if (t.created_at) {
+				const td = new Date(t.created_at);
+				const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
+				if (detailForMonth < truckKey) continue;
+			}
+			const insurance = t.insurance_monthly || 0, eld = t.eld_monthly || 0, truckPayment = t.truck_payment_monthly || 0;
+			const hvut = Math.round(((t.hvut_annual || 0) / 12) * 100) / 100;
+			const irp = Math.round(((t.irp_annual || 0) / 12) * 100) / 100;
+			detail.fixedCostItems.push({ truck: t.unit_number || "", insurance, eld, truckPayment, hvut, irp, total: Math.round((insurance + eld + truckPayment + hvut + irp) * 100) / 100 });
+		}
+	}
 
 	// Build the per-month array from earliest month → current month inclusive.
 	const monthlyEarnings = [];
@@ -17184,6 +17247,8 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		const driverCount = Object.values(driverMonthlyDays).filter(m => m[mk] && m[mk].size).length;
 		const isZeroActivity = revenue === 0 && driverPay === 0 && tripExpenses === 0 && maintFundCost === 0 && complianceCost === 0 && driverCount === 0;
 		const fixedCosts = isZeroActivity ? 0 : rawFixedCosts;
+		// Keep the fixed-cost drill-down consistent with the (possibly deferred) total.
+		if (detail && mk === detailForMonth && fixedCosts === 0) detail.fixedCostItems = [];
 		const netProfit = revenue - driverPay - fixedCosts - tripExpenses - maintFundCost - complianceCost;
 		// Match GET /api/investor exactly: split is applied to the RAW netProfit
 		// (the rounded netProfit is only what gets surfaced for display).
@@ -17202,7 +17267,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		});
 		cursor.setMonth(cursor.getMonth() + 1);
 	}
-	return { monthlyEarnings, currentMonthKey };
+	return { monthlyEarnings, currentMonthKey, detail };
 }
 
 // Enumerate every investor that can be settled, as { ownerId, name }. An
@@ -18549,6 +18614,63 @@ app.get("/api/investor/payouts", requireRole("Super Admin", "Investor"), async (
 	} catch (err) {
 		console.error("GET /api/investor/payouts error:", err.message);
 		res.status(500).json({ error: "Failed to load investor payouts" });
+	}
+});
+
+// GET /api/investor/payouts/:period/detail — lazy per-month line-item drill-down
+// for the Payouts waterfall (Revenue / Driver Pay / Fixed Costs / Trip Expenses).
+// Computed by the SAME computeInvestorMonthlyEarnings() that produces the totals,
+// so each list reconciles to its headline. Honors ?as_user_id= preview scoping.
+app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Investor"), async (req, res) => {
+	try {
+		const period = String(req.params.period || "");
+		if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: "period must be YYYY-MM" });
+
+		const preview = resolvePreviewUser(req);
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
+		if (isSuperAdmin) return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to view an investor's payout detail." });
+		if (preview.isPreview) logAudit(req, "investor_payout_detail_view", "investor", preview.effectiveUserId, period);
+
+		const ownerId = preview.effectiveUserId;
+		await getJobTrackingCached();
+		const config = {};
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (config[r.key] = r.value));
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).forEach((r) => (config[r.key] = r.value));
+		const carrierDB = getCarrierDBFromSQLite();
+		const cDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+		const cCarrierCol = findCol(carrierDB.headers, /carrier/i);
+		const investorDriverSet = getInvestorDriverSet(ownerId, carrierDB.data, cDriverCol, cCarrierCol);
+
+		const { monthlyEarnings, detail } = await computeInvestorMonthlyEarnings({
+			user: { ...preview.sessionUser, id: ownerId }, isSuperAdmin: false,
+			investorDriverSet, investorOwnerId: ownerId, config, detailForMonth: period,
+		});
+		const m = monthlyEarnings.find((x) => x.month === period);
+		const d = detail || { revenueLoads: [], driverPayRows: [], fixedCostItems: [], tripExpenseItems: [] };
+
+		// Reconciliation guard — each drill-down list MUST sum to its headline. Log
+		// drift (never block; per-row rounding can differ by a dollar or two).
+		if (m) {
+			const sum = (arr, f) => Math.round(arr.reduce((a, x) => a + (Number(f(x)) || 0), 0));
+			[["revenue", sum(d.revenueLoads, (x) => x.amount), m.revenue],
+			 ["driverPay", sum(d.driverPayRows, (x) => x.pay), m.driverPay],
+			 ["fixedCosts", sum(d.fixedCostItems, (x) => x.total), m.fixedCosts],
+			 ["tripExpenses", sum(d.tripExpenseItems, (x) => x.amount), m.tripExpenses]]
+				.forEach(([k, got, want]) => { if (Math.abs(got - want) > 1) console.warn(`Payout detail ${period} ${k} drift: items=${got} headline=${want} (owner ${ownerId})`); });
+		}
+
+		res.json({
+			period,
+			revenue: m ? m.revenue : 0, revenueLoads: d.revenueLoads,
+			driverPay: m ? m.driverPay : 0, driverPayRows: d.driverPayRows,
+			fixedCosts: m ? m.fixedCosts : 0, fixedCostItems: d.fixedCostItems,
+			tripExpenses: m ? m.tripExpenses : 0, tripExpenseItems: d.tripExpenseItems,
+			maintFundCost: m ? m.maintFundCost : 0, complianceCost: m ? m.complianceCost : 0,
+			netProfit: m ? m.netProfit : 0, investorEarnings: m ? m.investorEarnings : 0,
+		});
+	} catch (err) {
+		console.error("GET /api/investor/payouts/:period/detail error:", err.message);
+		res.status(500).json({ error: "Failed to load payout detail" });
 	}
 });
 
