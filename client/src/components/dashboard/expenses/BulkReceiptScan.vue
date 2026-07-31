@@ -304,7 +304,8 @@ const { isMobile } = useViewport()
 const { scanDocument } = useDocumentScan()
 
 const MAX_BATCH = 25
-// PDFs now go to OCR like photos, so the cap is the SCANNER's limit, not the
+// PDFs now go to OCR like photos, so this cap is the SCANNER's limit — not a
+// limit on what can be attached.
 // The OCR endpoint 413s on a photoData string over 8,500,000 chars, so anything
 // larger is measured AFTER encoding and simply doesn't get scanned. It is still
 // attached to the expense (expense-create accepts far more — the body limit is
