@@ -16941,6 +16941,21 @@ function periodLabel(period) {
 //   - investorDriverSet: Set of lowercased driver names, or null for Super Admin
 //   - investorOwnerId:   user.id for an investor, or null for Super Admin
 //   - config:            merged investor_config (must include investor_split_pct)
+// One truck's monthly fixed cost, split into the parts the drill-down prints.
+// BOTH the monthly total (getMonthlyFixedCosts) and the per-truck itemized rows
+// go through this, so a headline can never round differently from the list that
+// explains it — summing raw twelfths and rounding once gave $3,043 against an
+// itemized $3,043.33, which read as two different answers to the same question.
+// Annualized lines are divided by 12 and rounded to the cent, exactly as shown.
+function truckMonthlyFixed(t) {
+	const insurance = t.insurance_monthly || 0;
+	const eld = t.eld_monthly || 0;
+	const truckPayment = t.truck_payment_monthly || 0;
+	const hvut = Math.round(((t.hvut_annual || 0) / 12) * 100) / 100;
+	const irp = Math.round(((t.irp_annual || 0) / 12) * 100) / 100;
+	return { insurance, eld, truckPayment, hvut, irp, total: Math.round((insurance + eld + truckPayment + hvut + irp) * 100) / 100 };
+}
+
 // returns: { monthlyEarnings: [...], currentMonthKey }
 async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null }) {
 	const jobTracking = await getJobTrackingCached();
@@ -17209,15 +17224,16 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const getMonthlyFixedCosts = (monthKey) => {
 		let total = 0;
 		for (const t of fixedTrucks) {
-			const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0) + ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 			if (t.created_at) {
 				const td = new Date(t.created_at);
 				const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
 				if (monthKey < truckKey) continue;
 			}
-			total += perMonth;
+			total += truckMonthlyFixed(t).total;
 		}
-		return Math.round(total);
+		// Cents, not whole dollars — this figure is shown beside its own itemized
+		// per-truck list, and the two have to agree.
+		return Math.round(total * 100) / 100;
 	};
 
 	// Fixed-cost line items for the drill-down month (same created_at inclusion
@@ -17229,10 +17245,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 				const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
 				if (detailForMonth < truckKey) continue;
 			}
-			const insurance = t.insurance_monthly || 0, eld = t.eld_monthly || 0, truckPayment = t.truck_payment_monthly || 0;
-			const hvut = Math.round(((t.hvut_annual || 0) / 12) * 100) / 100;
-			const irp = Math.round(((t.irp_annual || 0) / 12) * 100) / 100;
-			detail.fixedCostItems.push({ truck: t.unit_number || "", insurance, eld, truckPayment, hvut, irp, total: Math.round((insurance + eld + truckPayment + hvut + irp) * 100) / 100 });
+			detail.fixedCostItems.push({ truck: t.unit_number || "", ...truckMonthlyFixed(t) });
 		}
 	}
 
@@ -18161,20 +18174,20 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
 			const truckFixedArgs = investorDriverSet ? [user.id] : [];
 			const fixedTrucks = db.prepare(truckFixedQuery).all(...truckFixedArgs);
+			// Same shared per-truck math as computeInvestorMonthlyEarnings, so the
+			// dashboard and the payouts card never disagree on fixed costs.
 			function getMonthlyFixedCosts(monthKey) {
 				let total = 0;
 				for (const t of fixedTrucks) {
-					const perMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
-						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 					// Only count if truck existed in this month
 					if (t.created_at) {
 						const td = new Date(t.created_at);
 						const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
 						if (monthKey < truckKey) continue; // truck didn't exist yet
 					}
-					total += perMonth;
+					total += truckMonthlyFixed(t).total;
 				}
-				return Math.round(total);
+				return Math.round(total * 100) / 100;
 			}
 
 			// 4. Build the array for every month from earliest to current
