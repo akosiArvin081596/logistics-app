@@ -184,16 +184,22 @@
                   class="stmt-btn"
                   :disabled="stmtBusyId === p.id"
                   :aria-busy="stmtBusyId === p.id"
-                  :aria-label="`Download payout statement for ${p.periodLabel}`"
-                  :title="`Download the payout statement PDF for ${p.periodLabel}`"
-                  @click="downloadStatement(p)"
+                  :aria-label="`View payout statement for ${p.periodLabel}`"
+                  :title="`Open the payout statement PDF for ${p.periodLabel}`"
+                  @click="openStatement(p)"
                 >
                   <span v-if="stmtBusyId === p.id" class="stmt-spinner" aria-hidden="true"></span>
-                  <span v-else class="stmt-icon" aria-hidden="true">&#8595;</span>
-                  {{ stmtBusyId === p.id ? 'Preparing…' : 'Statement PDF' }}
+                  <!-- A document glyph, not a download arrow: the click now OPENS
+                       the statement in the viewer; downloading is a choice made
+                       inside the modal. -->
+                  <svg v-else class="stmt-icon" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+                    <path d="M4 1.75h4.5L12 5.25v9H4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+                    <path d="M6.2 8h3.6M6.2 10.6h3.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                  </svg>
+                  {{ stmtBusyId === p.id ? 'Preparing…' : 'View Statement' }}
                 </button>
                 <!-- The toast is transient; a failed row also keeps its reason
-                     visible so the download never fails silently. -->
+                     visible so a statement never fails silently. -->
                 <div v-if="stmtError.id === p.id" class="stmt-error" role="alert">{{ stmtError.message }}</div>
               </template>
             </td>
@@ -374,17 +380,60 @@
         </template>
       </template>
     </MetricInfoDialog>
+
+    <!-- Payout statement viewer. NOT MetricInfoDialog: that wrapper hard-codes
+         `.metric-info-modal` (max-width 520px, shared.css) with no way to widen
+         it, and a Letter page needs the full-screen stage the invoice screens
+         use. Same underlying shadcn Dialog, so backdrop-dismiss + Escape behave
+         identically; sized like InvoicesView / InvoiceDraftPreviewModal. -->
+    <Dialog :open="stmtModalOpen" @update:open="(v) => { if (!v) closeStatement() }">
+      <DialogContent
+        class="w-[97vw] max-w-[97vw] h-[96vh] max-h-[96vh] rounded-[14px] border-[#e2e8f0] shadow-[0_8px_32px_rgba(0,0,0,0.12)] p-0 gap-0 overflow-hidden flex flex-col"
+      >
+        <DialogHeader class="stmt-modal-header">
+          <DialogTitle>Payout statement &mdash; {{ stmtLabel }}</DialogTitle>
+          <DialogDescription>
+            Scroll to zoom, drag to pan. Download a copy with the button below.
+          </DialogDescription>
+        </DialogHeader>
+
+        <!-- PdfZoomViewer is position:absolute/inset:0 and contributes no in-flow
+             height, so this stage has to resolve one of its own (flex:1 inside the
+             dialog's definite 96vh column) — same shape as .idp-stage. -->
+        <div class="stmt-stage">
+          <PdfZoomViewer v-if="stmtSrc" :src="stmtSrc" />
+        </div>
+
+        <div class="stmt-modal-footer">
+          <span class="stmt-foot-note" :title="stmtFileName">{{ stmtFileName }}</span>
+          <div class="stmt-foot-actions">
+            <button type="button" class="stmt-modal-btn" @click="closeStatement">Close</button>
+            <!-- Reuses the blob URL already rendering above. The explicit
+                 `download` filename is load-bearing: a blob download without one
+                 saves as a name-less UUID. -->
+            <a
+              v-if="stmtSrc"
+              class="stmt-modal-btn stmt-modal-primary"
+              :href="stmtSrc"
+              :download="stmtFileName"
+            >&#8595; Download</a>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
 import { useInvestorStore } from '../../stores/investor'
 import { useToast } from '../../composables/useToast'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../ui/dialog'
+import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
 
 const props = defineProps({
   // Super Admin previewing an investor's portal — appended to the payouts
@@ -624,10 +673,35 @@ const stmtBusyId = ref(null)
 // { id, message } — the last failure, pinned to the row it belongs to.
 const stmtError = ref({ id: null, message: '' })
 
+// The statement OPENS inline in the shared PdfZoomViewer (same viewer as the
+// invoice screens) instead of downloading on click — every other PDF in this app
+// is readable in-page first. Downloading stays one click away, inside the modal.
+const stmtModalOpen = ref(false)
+const stmtSrc = ref('')       // blob object URL handed to PdfZoomViewer
+const stmtFileName = ref('')  // explicit `download` name for the modal's anchor
+const stmtLabel = ref('')     // "May 2026" — modal title
+
+// PdfZoomViewer needs a real URL, so the response is wrapped in a Blob; that
+// object URL holds the PDF bytes until it is revoked. Mirrors revokeBlobs() in
+// InvoiceDraftPreviewModal.vue.
+function revokeStatement() {
+  if (stmtSrc.value) URL.revokeObjectURL(stmtSrc.value)
+  stmtSrc.value = ''
+}
+
+// Close = revoke: the viewer and the Download anchor both read stmtSrc, so the
+// blob can only be released once the modal is gone.
+function closeStatement() {
+  stmtModalOpen.value = false
+  revokeStatement()
+}
+
+onBeforeUnmount(revokeStatement)
+
 // Deliberately raw fetch, NOT useApi(): that composable always parses the body
 // as JSON (this responds with a PDF) and aborts at 20s (a Puppeteer render can
 // run longer). Mirrors the blob download in TaxShieldSection.exportCsv().
-async function downloadStatement(p) {
+async function openStatement(p) {
   if (!p || !p.period) return
   // One Puppeteer render at a time — say so instead of silently swallowing the
   // click, since the other rows' buttons stay enabled.
@@ -639,7 +713,7 @@ async function downloadStatement(p) {
   stmtError.value = { id: null, message: '' }
   try {
     // Same preview scoping as advance()/loadPayouts: a Super Admin previewing an
-    // investor's portal must download THAT investor's statement.
+    // investor's portal must open THAT investor's statement.
     const params = new URLSearchParams()
     if (props.previewUserId) params.set('as_user_id', String(props.previewUserId))
     const qs = params.toString() ? `?${params.toString()}` : ''
@@ -655,19 +729,19 @@ async function downloadStatement(p) {
       throw new Error(msg || `Couldn't generate the statement (${res.status}).`)
     }
     const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    // ALWAYS set an explicit filename. A blob download without one saves as a
-    // name-less UUID — the bug called out in InvestorView.downloadReport().
+    // ALWAYS carry an explicit filename through to the modal's Download anchor.
+    // A blob download without one saves as a name-less UUID — the bug called out
+    // in InvestorView.downloadReport().
     const m = (res.headers.get('Content-Disposition') || '').match(/filename="(.+)"/)
-    a.download = m ? m[1] : `LogisX_Payout_Statement_${p.period}.pdf`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
+    stmtFileName.value = m ? m[1] : `LogisX_Payout_Statement_${p.period}.pdf`
+    // Release the previously-viewed statement before minting the next URL: the
+    // overlay is pointer-through, so another row stays clickable behind the modal.
+    revokeStatement()
+    stmtSrc.value = URL.createObjectURL(blob)
+    stmtLabel.value = p.periodLabel || p.period
+    stmtModalOpen.value = true
   } catch (err) {
-    const message = (err && err.message) || 'Failed to download the statement.'
+    const message = (err && err.message) || 'Failed to open the statement.'
     stmtError.value = { id: p.id, message }
     toast(message, 'error')
   } finally {
@@ -1025,7 +1099,7 @@ onMounted(loadPayouts)
 .stmt-btn:hover:not(:disabled) { background: #f1f5f9; border-color: #cbd5e1; color: #0369a1; }
 .stmt-btn:focus-visible { outline: 2px solid #0369a1; outline-offset: 2px; }
 .stmt-btn:disabled { opacity: 0.7; cursor: progress; }
-.stmt-icon { color: #94a3b8; }
+.stmt-icon { flex: none; color: #94a3b8; }
 .stmt-btn:hover:not(:disabled) .stmt-icon { color: #0369a1; }
 .stmt-spinner {
   flex: none;
@@ -1140,6 +1214,69 @@ onMounted(loadPayouts)
 .ld-type.type-toll { background: #ddd6fe; color: #5b21b6; }
 .ld-type.type-food { background: #dcfce7; color: #166534; }
 
+/* --- Statement viewer modal (PdfZoomViewer inside the shadcn Dialog) ---
+   Rendered through DialogPortal, but these are this component's own elements
+   (and DialogHeader's root), so the scoped data attribute still applies — same
+   as the .ld-* rules above, which style MetricInfoDialog's portalled content. */
+/* Extra right padding clears DialogContent's absolutely-positioned close X. */
+.stmt-modal-header {
+  flex: none;
+  padding: 0.85rem 2.5rem 0.85rem 1.25rem;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+  text-align: left;
+}
+/* The stage owns the height PdfZoomViewer can't provide (it is position:absolute,
+   inset:0). flex:1 + min-height:0 inside the dialog's definite 96vh flex column
+   resolves it — the same shape as .idp-stage / .detail-body elsewhere. */
+.stmt-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #f1f5f9;
+}
+.stmt-modal-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 1.25rem;
+  border-top: 1px solid #e2e8f0;
+  background: #fff;
+}
+.stmt-foot-note {
+  min-width: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.68rem;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stmt-foot-actions { flex: none; display: flex; align-items: center; gap: 0.5rem; }
+.stmt-modal-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.42rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.stmt-modal-btn:hover { background: #f1f5f9; border-color: #cbd5e1; }
+.stmt-modal-btn:focus-visible { outline: 2px solid #0369a1; outline-offset: 2px; }
+.stmt-modal-primary { background: #0369a1; border-color: #0369a1; color: #fff; }
+.stmt-modal-primary:hover { background: #075985; border-color: #075985; color: #fff; }
+
 @media (max-width: 768px) {
   .totals-grid { grid-template-columns: 1fr; }
   .data-table { font-size: 0.78rem; }
@@ -1147,5 +1284,9 @@ onMounted(loadPayouts)
   .action-cell { white-space: normal; }
   .breakdown-panel { padding: 0.7rem 0.75rem; }
   .ld-desc, .ld-route { max-width: none; white-space: normal; }
+  /* Phone: the filename drops below the actions rather than squeezing them. */
+  .stmt-modal-footer { flex-wrap: wrap; justify-content: flex-end; padding: 0.6rem 0.85rem; }
+  .stmt-foot-note { flex: 1 1 100%; order: 2; text-align: center; }
+  .stmt-modal-header { padding: 0.7rem 2.5rem 0.7rem 0.9rem; }
 }
 </style>
