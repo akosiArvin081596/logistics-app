@@ -23,6 +23,7 @@ const routemate = require("./lib/routemate-client");
 const linxupPush = require("./lib/linxup-push");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
+const { buildPayoutStatementHtml } = require("./lib/payout-statement");
 const { appendGmailDraft } = require("./lib/imap-draft");
 const { runReceiptOcr } = require("./lib/receipt-ocr");
 const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDetailed, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
@@ -16592,6 +16593,16 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher"), (req, res) 
 	}
 });
 
+// Each payout statement runs a full month recompute AND a Puppeteer render, so a
+// refresh-hammer could pin the box. Generous enough for real use (a handful of
+// months downloaded in a sitting), tight enough to bound the cost.
+const statementLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 20,
+	message: { error: "Too many statement downloads. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
 // Each request fans out to several billed Places calls → cap spend (mirrors scanKitLimiter).
 const poiLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
@@ -18617,6 +18628,41 @@ app.get("/api/investor/payouts", requireRole("Super Admin", "Investor"), async (
 	}
 });
 
+// Shared per-month loader for the two payout drill-down surfaces: the on-screen
+// detail modal and the PDF statement. Extracted so the printed document can
+// never disagree with the screen — one computation, two presentations.
+// Returns { m, detail } where `m` is the monthly earnings row (null when the
+// period aged out of the live window) and `detail` is always populated.
+async function loadPayoutMonthDetail(ownerId, sessionUser, period) {
+	await getJobTrackingCached();
+	const config = {};
+	db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (config[r.key] = r.value));
+	db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).forEach((r) => (config[r.key] = r.value));
+	const carrierDB = getCarrierDBFromSQLite();
+	const cDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+	const cCarrierCol = findCol(carrierDB.headers, /carrier/i);
+	const investorDriverSet = getInvestorDriverSet(ownerId, carrierDB.data, cDriverCol, cCarrierCol);
+
+	const { monthlyEarnings, detail } = await computeInvestorMonthlyEarnings({
+		user: { ...sessionUser, id: ownerId }, isSuperAdmin: false,
+		investorDriverSet, investorOwnerId: ownerId, config, detailForMonth: period,
+	});
+	const m = monthlyEarnings.find((x) => x.month === period) || null;
+	const d = detail || { revenueLoads: [], driverPayRows: [], fixedCostItems: [], tripExpenseItems: [] };
+
+	// Reconciliation guard — each drill-down list MUST sum to its headline. Log
+	// drift (never block; per-row rounding can differ by a dollar or two).
+	if (m) {
+		const sum = (arr, f) => Math.round(arr.reduce((a, x) => a + (Number(f(x)) || 0), 0));
+		[["revenue", sum(d.revenueLoads, (x) => x.amount), m.revenue],
+		 ["driverPay", sum(d.driverPayRows, (x) => x.pay), m.driverPay],
+		 ["fixedCosts", sum(d.fixedCostItems, (x) => x.total), m.fixedCosts],
+		 ["tripExpenses", sum(d.tripExpenseItems, (x) => x.amount), m.tripExpenses]]
+			.forEach(([k, got, want]) => { if (Math.abs(got - want) > 1) console.warn(`Payout detail ${period} ${k} drift: items=${got} headline=${want} (owner ${ownerId})`); });
+	}
+	return { m, detail: d };
+}
+
 // GET /api/investor/payouts/:period/detail — lazy per-month line-item drill-down
 // for the Payouts waterfall (Revenue / Driver Pay / Fixed Costs / Trip Expenses).
 // Computed by the SAME computeInvestorMonthlyEarnings() that produces the totals,
@@ -18632,32 +18678,7 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 		if (preview.isPreview) logAudit(req, "investor_payout_detail_view", "investor", preview.effectiveUserId, period);
 
 		const ownerId = preview.effectiveUserId;
-		await getJobTrackingCached();
-		const config = {};
-		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (config[r.key] = r.value));
-		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).forEach((r) => (config[r.key] = r.value));
-		const carrierDB = getCarrierDBFromSQLite();
-		const cDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
-		const cCarrierCol = findCol(carrierDB.headers, /carrier/i);
-		const investorDriverSet = getInvestorDriverSet(ownerId, carrierDB.data, cDriverCol, cCarrierCol);
-
-		const { monthlyEarnings, detail } = await computeInvestorMonthlyEarnings({
-			user: { ...preview.sessionUser, id: ownerId }, isSuperAdmin: false,
-			investorDriverSet, investorOwnerId: ownerId, config, detailForMonth: period,
-		});
-		const m = monthlyEarnings.find((x) => x.month === period);
-		const d = detail || { revenueLoads: [], driverPayRows: [], fixedCostItems: [], tripExpenseItems: [] };
-
-		// Reconciliation guard — each drill-down list MUST sum to its headline. Log
-		// drift (never block; per-row rounding can differ by a dollar or two).
-		if (m) {
-			const sum = (arr, f) => Math.round(arr.reduce((a, x) => a + (Number(f(x)) || 0), 0));
-			[["revenue", sum(d.revenueLoads, (x) => x.amount), m.revenue],
-			 ["driverPay", sum(d.driverPayRows, (x) => x.pay), m.driverPay],
-			 ["fixedCosts", sum(d.fixedCostItems, (x) => x.total), m.fixedCosts],
-			 ["tripExpenses", sum(d.tripExpenseItems, (x) => x.amount), m.tripExpenses]]
-				.forEach(([k, got, want]) => { if (Math.abs(got - want) > 1) console.warn(`Payout detail ${period} ${k} drift: items=${got} headline=${want} (owner ${ownerId})`); });
-		}
+		const { m, detail: d } = await loadPayoutMonthDetail(ownerId, preview.sessionUser, period);
 
 		res.json({
 			period,
@@ -18671,6 +18692,112 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 	} catch (err) {
 		console.error("GET /api/investor/payouts/:period/detail error:", err.message);
 		res.status(500).json({ error: "Failed to load payout detail" });
+	}
+});
+
+// GET /api/investor/payouts/:period/statement — PDF payout statement for a PAID
+// month. Page 1 is the waterfall ending in the FROZEN figure that was actually
+// paid (effectiveAmount), page 2+ itemizes every component.
+//
+// The payout object comes from reconcileInvestorPayouts — the SAME reconcile the
+// ledger screen runs — so `breakdown`, the loss carry-forward chain and the
+// adjustment printed here are the ledger's own numbers, never re-derived here.
+// The line items come from the shared loadPayoutMonthDetail(), i.e. the same
+// computation behind the on-screen drill-down. Two computations, but this route
+// is a rate-limited, user-initiated download and a money document that disagrees
+// with the screen would be far more expensive than a second of latency.
+app.get("/api/investor/payouts/:period/statement", requireRole("Super Admin", "Investor"), statementLimiter, async (req, res) => {
+	try {
+		const period = String(req.params.period || "");
+		if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: "period must be YYYY-MM" });
+
+		const preview = resolvePreviewUser(req);
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
+		if (isSuperAdmin) return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to download an investor's payout statement." });
+		const ownerId = preview.effectiveUserId;
+
+		// Direct row read: the reconcile projection omits paid_by, and this is the
+		// authority on whether money actually moved.
+		const row = db.prepare("SELECT * FROM investor_payouts WHERE owner_id = ? AND period = ?").get(ownerId, period);
+		if (!row) return res.status(404).json({ error: `No payout on record for ${period}.` });
+		if (row.status !== "paid") {
+			return res.status(409).json({
+				error: `A statement is only issued once a payout is marked paid — ${period} is currently ${row.status}.`,
+				code: "PAYOUT_NOT_PAID",
+			});
+		}
+
+		await getJobTrackingCached();
+		const globalConfig = {};
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (globalConfig[r.key] = r.value));
+		const ctx = { sessionUser: preview.sessionUser, carrierDB: getCarrierDBFromSQLite(), globalConfig };
+		const { payouts } = await reconcileInvestorPayouts(ownerId, ctx);
+		const p = payouts.find((x) => x.period === period);
+		if (!p) return res.status(404).json({ error: `No payout on record for ${period}.` });
+
+		// A settled row can still be corrected (PUT …/adjust accepts a paid row and
+		// can clamp it to zero), which would otherwise print a document stamped PAID
+		// with an "Amount Paid" of $0.00. Mirrors the settleable guard on the
+		// status route.
+		if (Math.round(p.effectiveAmount) <= 0) {
+			return res.status(409).json({
+				error: `The ${period} payout nets to $0 after corrections, so there is no statement to issue.`,
+				code: "PAYOUT_NOT_SETTLEABLE",
+			});
+		}
+
+		const { detail } = await loadPayoutMonthDetail(ownerId, preview.sessionUser, period);
+
+		// Investor identity — same COALESCE precedence as listSettlableInvestors().
+		const who = db.prepare(
+			`SELECT COALESCE(NULLIF(TRIM(i.full_name),''), NULLIF(TRIM(u.company_name),''), u.username) AS name,
+			        COALESCE(NULLIF(TRIM(u.company_name),''), NULLIF(TRIM(i.carrier_name),''), '') AS company
+			   FROM users u LEFT JOIN investors i ON i.user_id = u.id WHERE u.id = ?`,
+		).get(ownerId) || { name: "Investor", company: "" };
+
+		// A correction recorded AFTER the money went out means effectiveAmount is
+		// the corrected net, not the sum that was wired — the document has to say
+		// so rather than labelling the net "Amount Paid".
+		const adjustedAfterPaid = !!(
+			p.adjustmentApplied && row.adjusted_at && row.paid_at && String(row.adjusted_at) > String(row.paid_at)
+		);
+
+		// Log the attempt BEFORE the render so a failed download is still on record.
+		logAudit(req, "investor_payout_statement", "investor_payout", row.id, `Downloaded ${period} payout statement (${who.name})`);
+
+		const html = buildPayoutStatementHtml({
+			investorName: who.name,
+			// Don't print the same string twice when full_name and company_name match.
+			investorCompany: String(who.company || "").trim() === String(who.name || "").trim() ? "" : who.company,
+			period,
+			periodLabel: p.periodLabel,
+			status: p.status,
+			paidAt: p.paidAt,
+			paidBy: row.paid_by || "",
+			adjustedAt: row.adjusted_at || "",
+			adjustedAfterPaid,
+			breakdown: p.breakdown,
+			lossCarriedIn: p.lossCarriedIn,
+			lossDeferred: p.lossDeferred,
+			// adjustmentApplied is the delta that ACTUALLY landed, so
+			// amount + it === effectiveAmount always holds on the printed page.
+			adjustment: p.adjustmentApplied,
+			adjustmentNote: p.adjustmentNote,
+			amount: p.amount,
+			effectiveAmount: p.effectiveAmount,
+			detail,
+			statementNo: `${period.replace("-", "")}-${row.id}`,
+			generatedAt: new Date(),
+		});
+
+		const pdf = await renderHtmlToPdf(html);
+		const safeName = String(who.name || "Investor").replace(/[^a-zA-Z0-9._-]/g, "_");
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader("Content-Disposition", `attachment; filename="LogisX_Payout_Statement_${safeName}_${period}.pdf"`);
+		res.send(pdf);
+	} catch (err) {
+		console.error("GET /api/investor/payouts/:period/statement error:", err.message);
+		res.status(500).json({ error: "Failed to generate the payout statement" });
 	}
 });
 

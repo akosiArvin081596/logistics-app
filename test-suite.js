@@ -1097,6 +1097,56 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     "enabled" in lhb && "hasToken" in lhb && "speedUnit" in lhb &&
     !("token" in lhb) && !("webhookToken" in lhb) && !("LINXUP_WEBHOOK_TOKEN" in lhb));
 
+  // ==========================================================================
+  // 103-106. Payout statement PDF.
+  //
+  // A statement asserts money moved, so the guards matter more than the layout:
+  // it must be issuable ONLY for a paid period, must never cross the tenancy
+  // boundary via ?as_user_id=, and a render failure must surface as JSON rather
+  // than a truncated file the investor would open as a corrupt PDF.
+  // ==========================================================================
+
+  // 103. Same contract as the rest of /api/investor/*: a Super Admin has no
+  //      single owner to issue for and must name one (mirrors test 49).
+  const st103 = await req("GET", "/api/investor/payouts/2026-05/statement", null, ac);
+  test("103. Statement requires ?as_user_id= for a Super Admin (400)",
+    st103.status === 400 && /as_user_id/i.test(st103.body?.error || ""));
+
+  // 104. Malformed period is rejected before any work is done.
+  const st104 = await req("GET", "/api/investor/payouts/not-a-month/statement", null, ic);
+  test("104. Statement rejects a malformed period (400)",
+    st104.status === 400 && /YYYY-MM/i.test(st104.body?.error || ""));
+
+  // 105. Only a PAID period yields a document. Pick a real non-paid row from the
+  //      ledger already fetched above; skip honestly if every row is settled.
+  const unpaidRow = rows.find(r => r.status !== "paid");
+  if (!unpaidRow) {
+    skip("105. Statement refuses a period that is not paid (409)", "every seeded payout row is already paid");
+  } else {
+    const st105 = await req("GET", `/api/investor/payouts/${unpaidRow.period}/statement`, null, ic);
+    test("105. Statement refuses a period that is not paid (409)",
+      st105.status === 409 && /PAYOUT_NOT_PAID|not_settleable/i.test(st105.body?.code || ""));
+  }
+
+  // 106. A paid period returns a real PDF (magic bytes + attachment header), and
+  //      an Investor passing someone else's ?as_user_id= is still scoped to
+  //      THEMSELVES — resolvePreviewUser ignores the param for non-admins, so the
+  //      response must never be another owner's document.
+  const paidRow = rows.find(r => r.status === "paid" && Number(r.effectiveAmount) > 0);
+  if (!paidRow) {
+    skip("106. Paid period returns a PDF and ignores a spoofed as_user_id", "no paid payout row in seeded data");
+  } else {
+    const st106 = await req("GET", `/api/investor/payouts/${paidRow.period}/statement`, null, ic);
+    const ctype = (st106.headers && st106.headers["content-type"]) || "";
+    const disp = (st106.headers && st106.headers["content-disposition"]) || "";
+    const isPdf = st106.status === 200 && /application\/pdf/i.test(ctype) &&
+      /attachment; *filename=/i.test(disp) && typeof st106.body === "string" && st106.body.startsWith("%PDF");
+    // Same request with a spoofed owner must behave identically (own data), not 403/leak.
+    const spoof = await req("GET", `/api/investor/payouts/${paidRow.period}/statement?as_user_id=999999`, null, ic);
+    test("106. Paid period returns a PDF and ignores a spoofed as_user_id",
+      isPdf && spoof.status === 200 && typeof spoof.body === "string" && spoof.body.startsWith("%PDF"));
+  }
+
   // Results
   console.log("");
   let p = 0, f = 0, s = 0;
