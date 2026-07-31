@@ -246,9 +246,16 @@ function findPayee(name) {
   if (!key) return null
   const near = remotePayees.value.filter(p => normalizeName(p.name) === key)
   if (!near.length) return null
-  // Ambiguous normalized match (e.g. a driver and an investor with the same
-  // name): prefer the record that actually carries contact details.
-  return near.find(p => p.address || p.phone) || near[0]
+  if (near.length === 1) return near[0]
+  // AMBIGUOUS: two different records normalize alike — e.g. driver "Johnny Rocks"
+  // (home address) and investor "Johnny Rocks LLC" (business address). Guessing
+  // could stamp someone's HOME address on another party's invoice, so fill
+  // nothing and let the admin pick the exact name from the list. Only proceed
+  // when every candidate agrees on the details anyway.
+  // Mirrors findInvoicePayee() in server.js — the two MUST behave alike.
+  const first = near[0]
+  const agree = near.every(p => (p.address || '') === (first.address || '') && (p.phone || '') === (first.phone || ''))
+  return agree ? first : null
 }
 
 // Drops only the values we wrote ourselves, so switching payees can't leave
