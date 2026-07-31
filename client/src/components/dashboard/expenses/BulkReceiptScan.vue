@@ -5,8 +5,8 @@
       <p class="bulk-sub">
         Pick a driver, drop in a stack of receipts, and each one is scanned into an
         editable row. Review the reads, fix anything off, then save them all as
-        expenses. Photos are auto-read; PDFs attach for manual entry. iPhone (HEIC)
-        photos supported.
+        expenses. Photos <em>and</em> PDFs are auto-read (PDFs up to 6&nbsp;MB).
+        iPhone (HEIC) photos supported.
       </p>
     </div>
 
@@ -289,6 +289,7 @@ import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from
 import { useApi } from '../../../composables/useApi'
 import { useToast } from '../../../composables/useToast'
 import { useViewport } from '../../../composables/useViewport'
+import { useDocumentScan } from '../../../composables/useDocumentScan'
 import { compressImage } from '../../../lib/imageUtils'
 
 const props = defineProps({
@@ -300,11 +301,23 @@ const emit = defineEmits(['saved'])
 const api = useApi()
 const { show: toast } = useToast()
 const { isMobile } = useViewport()
+const { scanDocument } = useDocumentScan()
 
 const MAX_BATCH = 25
-const MAX_PDF_FILE_BYTES = 15 * 1024 * 1024 // matches the server-side cap
+// PDFs now go to OCR like photos, so the cap is the SCANNER's limit, not the
+// The OCR endpoint 413s on a photoData string over 8,500,000 chars, so anything
+// larger is measured AFTER encoding and simply doesn't get scanned. It is still
+// attached to the expense (expense-create accepts far more — the body limit is
+// 50 MB), because losing the receipt is worse than losing the auto-fill.
+// 6 MiB of source encodes to ~8.39M chars, hence the user-facing label.
+const MAX_OCR_PAYLOAD_CHARS = 8_500_000
+const MAX_PDF_LABEL = '6 MB'
 const OCR_CONCURRENCY = 3 // parallel Gemini reads — modest so the limiter/credits last
 const IMG_MAX_EDGE = 1024
+// Renderable in an <img> AND accepted by the OCR endpoint.
+const OCRABLE_IMAGE_RE = /^data:image\/(jpeg|jpg|png|webp);base64,/i
+// Everything the OCR endpoint accepts — images plus PDFs.
+const OCRABLE_RE = /^data:(image\/(jpeg|jpg|png|webp)|application\/pdf);base64,/i
 // OCR round-trip can be slow on a large photo over office Wi-Fi; give Gemini
 // headroom beyond the api default so a slow-but-successful read isn't aborted
 // (a client abort surfaces as 'limited'/Retry, masking a read that would land).
@@ -313,6 +326,8 @@ const OCR_CLIENT_TIMEOUT_MS = 50000
 // A batch that can't be persisted just loses cross-device resume, nothing else.
 const MAX_DRAFT_PERSIST_BYTES = 38 * 1024 * 1024
 
+// 'skipped' is no longer produced — PDFs are scanned like photos now. It is kept
+// only so a draft saved by an older client still renders a sane label on resume.
 const OCR_LABEL = {
   queued: 'Queued', scanning: 'Scanning…', ok: 'Read',
   failed: 'Not read', ocr_off: 'Manual', skipped: 'PDF', limited: 'Retry',
@@ -435,20 +450,96 @@ async function runPool(items, worker, size) {
   await Promise.all(runners)
 }
 
+// Best-effort ScanKit enhance (crop + deskew + flatten lighting) — the exact
+// pass the single Log Expense form runs (ExpensesTab.enhanceReceiptPhoto), now
+// enabled for bulk so a creased, badly-lit receipt reads as well here as it does
+// there. IMAGES ONLY: ScanKit can't rasterize a PDF.
+// Every failure is swallowed and the un-enhanced image is returned — ScanKit can
+// 503 (disabled), 402 (out of credits) or 429 (rate limit), and none of those
+// may cost us the scan.
+async function enhanceImage(dataUrl) {
+  try {
+    const res = await scanDocument(dataUrl, { returnPdf: false, filter: 'flat' })
+    const out = res?.data
+    return out && OCRABLE_IMAGE_RE.test(out) ? out : dataUrl
+  } catch {
+    return dataUrl // keep the raw photo
+  }
+}
+
+// Send row.photoData (image OR PDF — same endpoint, same shape) to Gemini and
+// fill the row from the response. Owns the row's final ocrStatus/ocrReason.
+async function ocrRow(row) {
+  try {
+    const data = await api.post('/api/expenses/ocr', { photoData: row.photoData }, { timeout: OCR_CLIENT_TIMEOUT_MS })
+    if (data.amount != null) row.amount = String(data.amount)
+    // Only a real read sets the date. A blank leaves the row flagged so the
+    // recorded date is always the receipt's purchase date, never today.
+    if (data.date) row.date = data.date
+    if (data.vendor) row.vendor = String(data.vendor).slice(0, 80)
+    if (data.city != null) row.city = String(data.city)
+    if (data.state != null) row.state = String(data.state).toUpperCase().slice(0, 2)
+    if (data.suggestedType && props.expenseTypes.includes(data.suggestedType)) row.type = data.suggestedType
+    // Dynamic details ride along unedited (default [] for older/no-key responses).
+    row.receiptDetails = Array.isArray(data.details) ? data.details : []
+    // A 200 whose every field is null is NOT a read. Reporting it as "Read · low"
+    // over a blank line is the "it scanned but filled nothing" complaint — the
+    // admin trusts the badge and saves an empty row. Call it what it is.
+    // A zero amount counts as a miss too: it can't be saved (save requires
+    // amount > 0), so badging it "Read" would be the same lie.
+    const gotAmount = data.amount != null && Number(data.amount) > 0
+    if (!gotAmount && !data.date && !data.vendor) {
+      row.confidence = ''
+      row.ocrStatus = 'failed'
+      row.ocrReason = 'empty'
+      row.saveError = 'Not read — enter manually'
+      return
+    }
+    row.confidence = data.confidence || ''
+    row.ocrStatus = 'ok'
+  } catch (err) {
+    // 503 = OCR disabled server-side → manual entry.
+    // 429 (rate-limited) or 0 (client timeout/abort) = transient → "Retry", so
+    // the admin knows the receipt is fine and can re-add it, not that it's bad.
+    // 413 = over the server's payload cap (only reachable for a file that dodged
+    // the pre-read size check) — say so plainly instead of "couldn't be read".
+    // Anything else = genuinely couldn't read it.
+    const s = err?.status
+    if (s === 413) {
+      row.ocrStatus = 'failed'
+      row.ocrReason = 'too_large'
+      // photoData is already attached by the time we call OCR, so the receipt is
+      // safe — only the auto-fill was lost. Say that, don't imply a re-upload.
+      row.saveError = `Too big to auto-read (${MAX_PDF_LABEL} max) — attached, enter the fields manually.`
+      return
+    }
+    row.ocrStatus = s === 503 ? 'ocr_off' : (s === 429 || s === 0) ? 'limited' : 'failed'
+  }
+}
+
 async function processRow(row) {
   row.ocrStatus = 'scanning'
   try {
     if (row.isPdf) {
-      if (row._blob.size > MAX_PDF_FILE_BYTES) {
-        row.ocrStatus = 'failed'
-        row.saveError = 'PDF over 15 MB'
-        return
-      }
       const dataUrl = await readFileAsDataUrl(row._blob)
+      if (!dataUrl) { row.ocrStatus = 'failed'; row.ocrReason = 'unreadable'; return }
       // Normalize the prefix so the server's application/pdf branch always
       // matches even when the browser left the MIME blank.
       row.photoData = String(dataUrl).replace(/^data:[^;]*;base64,/, 'data:application/pdf;base64,')
-      row.ocrStatus = 'skipped' // no OCR for PDFs — manual entry
+      // ATTACH FIRST, scan second. Over the OCR cap we skip only the scan — the
+      // receipt still rides along with the expense. Returning early here (as an
+      // earlier revision did) left the row perfectly savable with photoData ''
+      // and booked an expense into the P&L with NO supporting document, which is
+      // exactly the silent gap month-end close can't afford.
+      if (row.photoData.length > MAX_OCR_PAYLOAD_CHARS) {
+        row.ocrStatus = 'failed'
+        row.ocrReason = 'too_large'
+        row.saveError = `Too big to auto-read (${MAX_PDF_LABEL} max) — attached, enter the fields manually.`
+        return
+      }
+      // No compressImage and no ScanKit pass — neither can rasterize a PDF.
+      // Gemini reads the PDF bytes directly off the same endpoint an image uses.
+      await ocrRow(row)
       return
     }
     // Shared helper: downscales JPEG/PNG/WEBP and converts iPhone HEIC→JPEG (the
@@ -458,37 +549,24 @@ async function processRow(row) {
     // Always attach the processed image — even a raw fallback — so the receipt
     // is never lost; the expense still saves with the photo for manual review.
     row.photoData = img
-    // Only genuinely OCR-able (and browser-renderable) formats go to the server
-    // and the thumbnail. A raw HEIC/HEIF fallback can't be drawn in an <img> and
-    // the OCR endpoint would 400 it, so skip both and flag it for the toast.
-    const ocrable = /^data:image\/(jpeg|jpg|png|webp);base64,/i.test(img)
-    if (ocrable) row.thumb = img
-    if (!ocrable) { row.ocrStatus = 'failed'; row.ocrReason = 'unsupported'; return }
-    // Bulk skips the ScanKit enhance pass the single forms do — one OCR call per
-    // receipt keeps credit spend and the rate limiter in check. Gemini reads raw
-    // downscaled photos fine; the admin fixes any misreads in the grid.
-    try {
-      const data = await api.post('/api/expenses/ocr', { photoData: img }, { timeout: OCR_CLIENT_TIMEOUT_MS })
-      if (data.amount != null) row.amount = String(data.amount)
-      // Only a real read sets the date. A blank leaves the row flagged so the
-      // recorded date is always the receipt's purchase date, never today.
-      if (data.date) row.date = data.date
-      if (data.vendor) row.vendor = String(data.vendor).slice(0, 80)
-      if (data.city != null) row.city = String(data.city)
-      if (data.state != null) row.state = String(data.state).toUpperCase().slice(0, 2)
-      if (data.suggestedType && props.expenseTypes.includes(data.suggestedType)) row.type = data.suggestedType
-      // Dynamic details ride along unedited (default [] for older/no-key responses).
-      row.receiptDetails = Array.isArray(data.details) ? data.details : []
-      row.confidence = data.confidence || ''
-      row.ocrStatus = 'ok'
-    } catch (err) {
-      // 503 = OCR disabled server-side → manual entry.
-      // 429 (rate-limited) or 0 (client timeout/abort) = transient → "Retry", so
-      // the admin knows the receipt is fine and can re-add it, not that it's bad.
-      // Anything else = genuinely couldn't read it.
-      const s = err?.status
-      row.ocrStatus = s === 503 ? 'ocr_off' : (s === 429 || s === 0) ? 'limited' : 'failed'
+    // Only a browser-renderable image gets a thumbnail. A raw HEIC/HEIF fallback
+    // can't be drawn in an <img>, so it gets the placeholder instead.
+    const isImage = OCRABLE_IMAGE_RE.test(img)
+    if (isImage) row.thumb = img
+    // A PDF with a blank MIME and no .pdf extension slips past isPdfFile() and
+    // lands here; compressImage can't decode it and hands back the raw data URL.
+    // It's still perfectly OCR-able — just re-flag it so it renders as a PDF.
+    if (!isImage && /^data:application\/pdf;base64,/i.test(img)) row.isPdf = true
+    // Anything the OCR endpoint can't take (e.g. an unconverted HEIC) stops here
+    // and is flagged for the toast rather than burning a doomed request.
+    if (!OCRABLE_RE.test(img)) { row.ocrStatus = 'failed'; row.ocrReason = 'unsupported'; return }
+    // Enhance first (images only), then OCR the cleaned-up copy — and keep it as
+    // the stored receipt, so what the admin reviews is what Gemini read.
+    if (isImage) {
+      row.photoData = await enhanceImage(img)
+      row.thumb = row.photoData
     }
+    await ocrRow(row)
   } catch {
     row.ocrStatus = 'failed'
   } finally {
@@ -549,20 +627,29 @@ async function onFilesSelected(event) {
 // converting to JPEG, rather than leaving them staring at blank rows.
 function summarizeScan(batch) {
   if (!batch.length) return
+  // `read` counts only rows that actually came back with something — a 200 full
+  // of nulls is bucketed as `empty`, not as a scan, so this number matches what
+  // the admin sees in the grid.
   const read = batch.filter(r => r.ocrStatus === 'ok').length
-  const unsupported = batch.filter(r => r.ocrStatus === 'failed' && r.ocrReason === 'unsupported').length
-  const otherFailed = batch.filter(r => r.ocrStatus === 'failed' && r.ocrReason !== 'unsupported').length
+  const failedWith = (reason) => batch.filter(r => r.ocrStatus === 'failed' && r.ocrReason === reason).length
+  const unsupported = failedWith('unsupported')
+  const empty = failedWith('empty')
+  const tooLarge = failedWith('too_large')
+  const KNOWN = ['unsupported', 'empty', 'too_large']
+  const otherFailed = batch.filter(r => r.ocrStatus === 'failed' && !KNOWN.includes(r.ocrReason)).length
   const ocrOff = batch.filter(r => r.ocrStatus === 'ocr_off').length
   const limited = batch.filter(r => r.ocrStatus === 'limited').length
-  const skipped = batch.filter(r => r.ocrStatus === 'skipped').length
   const parts = [`Scanned ${read} of ${batch.length}`]
+  if (empty) parts.push(`${empty} came back blank — enter ${empty === 1 ? 'it' : 'them'} manually`)
   if (unsupported) parts.push(`${unsupported} couldn't be read — convert HEIC to JPEG`)
+  // "attached" is the load-bearing word: the receipt IS saved with the expense,
+  // only the auto-fill was skipped. Without it this reads as "the file was lost".
+  if (tooLarge) parts.push(`${tooLarge} too big to auto-read (${MAX_PDF_LABEL} max) — attached, enter manually`)
   if (otherFailed) parts.push(`${otherFailed} couldn't be read`)
   if (ocrOff) parts.push(`${ocrOff} not scanned — scanning unavailable, enter manually`)
   if (limited) parts.push(`${limited} rate-limited — retry`)
-  if (skipped) parts.push(`${skipped} PDF${skipped === 1 ? '' : 's'} attached for manual entry`)
-  // Error tone whenever anything but a clean read or an informational PDF landed.
-  const hasProblem = unsupported || otherFailed || ocrOff || limited
+  // Error tone whenever anything but a clean read landed.
+  const hasProblem = empty || unsupported || tooLarge || otherFailed || ocrOff || limited
   toast(parts.join(' · '), hasProblem ? 'error' : 'success')
 }
 
@@ -708,6 +795,11 @@ async function saveOne(row) {
       city: row.city || '',
       state: row.state || '',
       photoData: row.photoData || '',
+      // sha256 of the ORIGINAL file. The stored payload is no longer byte-stable
+      // (images now go through ScanKit, which silently falls back to the raw image
+      // when it's down or out of credits), so hashing the payload alone would let
+      // the same receipt back in under a new hash and double-book the P&L.
+      sourceHash: row.fileHash || '',
       receiptDetails: row.receiptDetails || [],
       loadId: '',
       gallons: 0,

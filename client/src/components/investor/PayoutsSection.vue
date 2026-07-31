@@ -57,7 +57,6 @@
               >
                 <dt class="bd-label">
                   {{ row.label }}
-                  <span v-if="row.highlight" class="bd-tag">your expenses</span>
                   <template v-if="row.detailKey">
                     <svg class="bd-chev" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
                     <span class="bd-view">view details</span>
@@ -249,7 +248,6 @@
                   >
                     <dt class="bd-label">
                       {{ row.label }}
-                      <span v-if="row.highlight" class="bd-tag">your expenses</span>
                       <template v-if="row.detailKey">
                         <svg class="bd-chev" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
                         <span class="bd-view">view details</span>
@@ -1026,18 +1024,6 @@ onMounted(loadPayouts)
 }
 .bd-highlight .bd-label { color: #0f172a; font-weight: 700; }
 .bd-highlight .bd-value { color: #b91c1c; font-weight: 800; }
-.bd-tag {
-  font-size: 0.58rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #92400e;
-  background: #fef3c7;
-  padding: 0.05rem 0.4rem;
-  border-radius: 999px;
-  white-space: nowrap;
-}
-
 /* Divider before the net line, then the emphasized net + share figures. */
 .bd-subtotal {
   margin-top: 0.35rem;

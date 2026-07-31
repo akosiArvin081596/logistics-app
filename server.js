@@ -13,6 +13,10 @@ const geolib = require("geolib");
 const PDFDocument = require("pdfkit");
 const compression = require("compression");
 const rateLimit = require("express-rate-limit");
+// Official IPv6-safe IP key helper — express-rate-limit v7+ warns if a custom
+// keyGenerator uses req.ip directly (an IPv6 client could otherwise dodge a
+// per-IP cap by walking its /64). Used as the fallback in the per-user limiters.
+const { ipKeyGenerator } = require("express-rate-limit");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
@@ -6716,6 +6720,121 @@ function sanitizeManualInvoiceRows(raw, label) {
 	return { items };
 }
 
+// ---------------------------------------------------------------------------
+// Invoice payee directory — contact details we ALREADY hold, so a manual
+// invoice never asks anyone to retype an address that's on file.
+//
+// Drivers come from drivers_directory (address composed exactly as the weekly
+// generator does above, phone falling back to cell); investors come from
+// `investors`, backfilled from their application row when the investor record
+// itself is sparse.
+//
+// normalizePayeeName strips punctuation and trailing entity suffixes because
+// the two sides genuinely disagree in production: the invoice payee is
+// "johnny rocks spirits llc" while the investor record reads "Johnny Rocks
+// Spirits". Exact matching would miss the very record the client asked for.
+// ---------------------------------------------------------------------------
+const PAYEE_ENTITY_SUFFIXES = new Set([
+	"llc", "lc", "llp", "lp", "pllc", "inc", "incorporated",
+	"ltd", "limited", "co", "corp", "corporation", "company",
+]);
+
+// Peel entity suffixes only from the END. Stripping them anywhere would mangle
+// a legitimate name ("Co-Op Transport" -> "op transport"). Keeps at least one
+// token so a name can never normalize to "" and match everything.
+// MUST stay in lockstep with normalizeName() in ManualInvoiceDialog.vue.
+function normalizePayeeName(s) {
+	const tokens = String(s == null ? "" : s)
+		.toLowerCase()
+		.replace(/\bl\.l\.c\.?/g, "llc")
+		.replace(/[^a-z0-9]+/g, " ")
+		.trim()
+		.split(" ")
+		.filter(Boolean);
+	while (tokens.length > 1 && PAYEE_ENTITY_SUFFIXES.has(tokens[tokens.length - 1])) tokens.pop();
+	return tokens.join(" ");
+}
+
+function listInvoicePayees() {
+	const out = [];
+	try {
+		for (const d of db.prepare("SELECT driver_name, address, city, state, zip, phone, cell FROM drivers_directory").all()) {
+			const name = (d.driver_name || "").trim();
+			if (!name) continue;
+			out.push({
+				name,
+				type: "driver",
+				address: [d.address, d.city, d.state, d.zip].filter(Boolean).join(", "),
+				phone: d.phone || d.cell || "",
+				role: "",
+			});
+		}
+	} catch (e) { console.error("listInvoicePayees drivers:", e.message); }
+	try {
+		const rows = db.prepare(
+			`SELECT i.full_name, i.carrier_name, i.address, i.phone, i.contact_title,
+			        ia.address AS app_address, ia.phone AS app_phone, ia.contact_title AS app_title
+			   FROM investors i LEFT JOIN investor_applications ia ON ia.id = i.application_id`,
+		).all();
+		for (const r of rows) {
+			const name = (r.full_name || r.carrier_name || "").trim();
+			if (!name) continue;
+			out.push({
+				name,
+				type: "investor",
+				address: (r.address || r.app_address || "").trim(),
+				phone: (r.phone || r.app_phone || "").trim(),
+				role: (r.contact_title || r.app_title || "").trim(),
+			});
+		}
+	} catch (e) { console.error("listInvoicePayees investors:", e.message); }
+	// De-dupe EXACT duplicates only (the same name present in both tables).
+	// Deliberately NOT on the normalized key: driver "Johnny Rocks" and investor
+	// "Johnny Rocks LLC" are different payees with different addresses, and
+	// collapsing them would both hide one from the picker and let a lookup hand
+	// back the other's HOME address for a business invoice.
+	const byName = new Map();
+	for (const p of out) {
+		if (!normalizePayeeName(p.name)) continue;
+		const k = p.name.trim().toLowerCase();
+		const prev = byName.get(k);
+		if (!prev || (!prev.address && p.address)) byName.set(k, p);
+	}
+	return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Resolve one payee's details by name: exact first, then normalized. Returns
+// null when we hold nothing — or when the name is AMBIGUOUS, i.e. two different
+// records normalize alike but disagree on their details. A blank field the user
+// fills in beats a confidently wrong address on a money document.
+function findInvoicePayee(name) {
+	const wanted = normalizePayeeName(name);
+	if (!wanted) return null;
+	const all = listInvoicePayees();
+	const exact = all.find((p) => p.name.trim().toLowerCase() === String(name).trim().toLowerCase());
+	if (exact) return exact;
+	const near = all.filter((p) => normalizePayeeName(p.name) === wanted);
+	if (near.length === 1) return near[0];
+	if (near.length > 1) {
+		const first = near[0];
+		const agree = near.every((p) => (p.address || "") === (first.address || "") && (p.phone || "") === (first.phone || ""));
+		return agree ? first : null;
+	}
+	return null;
+}
+
+// GET /api/invoices/payees — everyone we can invoice, with the contact details
+// already on file, so the New Manual Invoice modal can autofill instead of
+// making the user retype an address we already have.
+app.get("/api/invoices/payees", requireRole("Super Admin"), (req, res) => {
+	try {
+		res.json({ payees: listInvoicePayees() });
+	} catch (err) {
+		console.error("GET /api/invoices/payees error:", err.message);
+		res.status(500).json({ error: "Failed to load payees" });
+	}
+});
+
 // POST /api/invoices/manual — Super Admin creates an invoice from scratch in
 // the same PDF format (owner request: "other employees other than drivers").
 // Free-text payee (not limited to drivers), arbitrary period, line items +
@@ -6744,8 +6863,25 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		const dedRes = sanitizeManualInvoiceRows(body.deductions, "deductions");
 		if (dedRes.error) return res.status(400).json({ error: dedRes.error });
 		const payeeRole = (body.payeeRole || "").toString().trim().slice(0, 100);
-		const payeeAddress = (body.payeeAddress || "").toString().trim().slice(0, 200);
-		const payeePhone = (body.payeePhone || "").toString().trim().slice(0, 40);
+		let payeeAddress = (body.payeeAddress || "").toString().trim().slice(0, 200);
+		let payeePhone = (body.payeePhone || "").toString().trim().slice(0, 40);
+		// Backstop for a caller that never sent the field at all (e.g. the API used
+		// directly): fill it from what we hold on file.
+		//
+		// OMITTED, not merely empty. The dialog always sends these keys, so an
+		// empty string means the admin DELETED the value — which is exactly what
+		// they do when the address on file is stale. Treating "" as "not supplied"
+		// would silently restamp the old address onto the invoice and quietly
+		// defeat the whole point of letting them edit it.
+		const addressOmitted = body.payeeAddress === undefined || body.payeeAddress === null;
+		const phoneOmitted = body.payeePhone === undefined || body.payeePhone === null;
+		if (addressOmitted || phoneOmitted) {
+			const onFile = findInvoicePayee(payee);
+			if (onFile) {
+				if (addressOmitted) payeeAddress = (onFile.address || "").slice(0, 200);
+				if (phoneOmitted) payeePhone = (onFile.phone || "").slice(0, 40);
+			}
+		}
 		const notes = (body.notes || "").toString().trim().slice(0, 500);
 
 		const round2 = (n) => Math.round(n * 100) / 100;
@@ -12406,18 +12542,34 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		if (typeof photoData === "string" && photoData.startsWith("data:")) {
 			const comma = photoData.indexOf(",");
 			const b64 = comma >= 0 ? photoData.slice(comma + 1) : "";
-			if (b64) {
-				receiptHash = crypto.createHash("sha256").update(b64).digest("hex");
-				const dup = db.prepare("SELECT id FROM expenses WHERE receipt_hash = ? LIMIT 1").get(receiptHash);
-				if (dup) {
-					return res.status(409).json({
-						error: `This receipt was already logged (expense #${dup.id})`,
-						code: "DUPLICATE_RECEIPT",
-						existingId: dup.id,
-					});
-				}
+			if (b64) receiptHash = crypto.createHash("sha256").update(b64).digest("hex");
+		}
+		// Prefer the client's hash of the ORIGINAL file when it sends one. The
+		// stored payload stopped being byte-stable once bulk upload began running
+		// images through ScanKit — which silently falls back to the un-enhanced
+		// image when it is down or out of credits — so the same receipt could
+		// re-enter under a different payload hash and double-book the P&L (and the
+		// investor payout deduction). Both hashes are checked so a receipt logged
+		// before this change is still recognized.
+		const rawSourceHash = (req.body && req.body.sourceHash) || "";
+		const sourceHash = /^[a-f0-9]{64}$/i.test(String(rawSourceHash).trim())
+			? String(rawSourceHash).trim().toLowerCase()
+			: "";
+		const hashCandidates = [...new Set([sourceHash, receiptHash].filter(Boolean))];
+		if (hashCandidates.length) {
+			const dup = db
+				.prepare(`SELECT id FROM expenses WHERE receipt_hash IN (${hashCandidates.map(() => "?").join(",")}) LIMIT 1`)
+				.get(...hashCandidates);
+			if (dup) {
+				return res.status(409).json({
+					error: `This receipt was already logged (expense #${dup.id})`,
+					code: "DUPLICATE_RECEIPT",
+					existingId: dup.id,
+				});
 			}
 		}
+		// Store the stable one so future re-uploads collide regardless of processing.
+		if (sourceHash) receiptHash = sourceHash;
 		// Receipt: images keep the legacy path (silent drop on bad format —
 		// the driver flow is unchanged). PDFs are an admin/dispatcher-only
 		// addition (toll invoices etc.) and fail loudly on validation errors.
@@ -12594,6 +12746,14 @@ const expenseOcrLimiter = rateLimit({
 		const role = req.session?.user?.role;
 		return role === "Super Admin" || role === "Dispatcher" ? 100 : 20;
 	},
+	// Key on the SESSION USER, not the IP. With trust proxy on, a whole office
+	// behind one WAN IP was sharing a single bucket — two people running bulk
+	// batches locked each other (and every driver on that IP) out, which reads as
+	// "it stopped scanning". Falls back to IP for the unauthenticated edge.
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
 	message: { error: "Too many OCR requests. Try again later." },
 	standardHeaders: true,
 });
@@ -12607,9 +12767,19 @@ app.post("/api/expenses/ocr", requireAuth, expenseOcrLimiter, async (req, res) =
 		}
 		const { photoData } = req.body || {};
 		if (!photoData || typeof photoData !== "string") return res.status(400).json({ error: "photoData required" });
-		if (photoData.length > 8_500_000) return res.status(413).json({ error: "Image too large" });
-		if (!/^data:image\/(jpeg|jpg|png|webp);base64,(.+)$/i.test(photoData)) {
-			return res.status(400).json({ error: "photoData must be a base64 image data URI" });
+		if (photoData.length > 8_500_000) return res.status(413).json({ error: "Receipt file too large — max about 6 MB" });
+		// Images OR a PDF: fuel/toll receipts routinely arrive as emailed PDFs and
+		// Gemini reads them natively (same mime the rate-con path already sends).
+		// Keep this in lockstep with DATA_URI_RE in lib/receipt-ocr.js.
+		if (!/^data:(image\/(?:jpeg|jpg|png|webp)|application\/pdf);base64,(.+)$/i.test(photoData)) {
+			return res.status(400).json({ error: "photoData must be a base64 image or PDF data URI" });
+		}
+		// The data-URI mime is client-controlled, and the bulk uploader labels a
+		// file a PDF from its extension alone. Re-verify the payload really is one
+		// (same %PDF- magic check the rate-con intake uses) so a mislabelled zip or
+		// photo can't burn three retried Gemini calls before failing.
+		if (/^data:application\/pdf;base64,/i.test(photoData) && !/^data:application\/pdf;base64,JVBERi/i.test(photoData)) {
+			return res.status(400).json({ error: "That file isn't a readable PDF." });
 		}
 		// Prompt, schema, and the Gemini call + retry/15s-timeout live in
 		// lib/receipt-ocr.js — the single point of contact for the vision API.
@@ -12766,7 +12936,14 @@ app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispa
 //   is client-controlled). Rate-limited to cap ScanKit credit spend.
 const scanKitLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
-	max: 30,
+	// Bulk receipt upload now enhances each image before OCR, so one 25-receipt
+	// batch alone would have blown the old cap of 30. Raised, and keyed per user
+	// (see expenseOcrLimiter) so one person's batch can't lock out the office.
+	max: 120,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
 	message: { error: "Too many scan requests. Try again later." },
 	standardHeaders: true,
 });
