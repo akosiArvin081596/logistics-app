@@ -270,12 +270,12 @@
                     <div v-if="l.truck" class="ld-sub">#{{ l.truck }}</div>
                   </td>
                   <td class="ld-route">{{ routeText(l) }}</td>
-                  <td class="mono-xs num">{{ fmt(l.amount) }}</td>
+                  <td class="mono-xs num">{{ fmtCents(l.amount) }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <div class="ld-total"><span>Total Revenue</span><span class="mono num">{{ fmt(lineDetail.revenue) }}</span></div>
+          <div class="ld-total"><span>Total Revenue</span><span class="mono num">{{ fmtCents(ldSum(lineDetail.revenueLoads, 'amount')) }}</span></div>
         </template>
 
         <!-- Driver Pay → per-driver rows -->
@@ -293,14 +293,14 @@
                   <td>{{ r.driver || '—' }}</td>
                   <td class="ld-basis">
                     <template v-if="r.payType === 'percentage'">{{ r.payPercentage }}% of revenue</template>
-                    <template v-else>{{ r.activeDays }} day{{ Number(r.activeDays) === 1 ? '' : 's' }} × {{ fmt(r.dailyRate) }}/day</template>
+                    <template v-else>{{ r.activeDays }} day{{ Number(r.activeDays) === 1 ? '' : 's' }} × {{ fmtCents(r.dailyRate) }}/day</template>
                   </td>
-                  <td class="mono-xs num">{{ fmt(r.pay) }}</td>
+                  <td class="mono-xs num">{{ fmtCents(r.pay) }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <div class="ld-total"><span>Total Driver Pay</span><span class="mono num">{{ fmt(lineDetail.driverPay) }}</span></div>
+          <div class="ld-total"><span>Total Driver Pay</span><span class="mono num">{{ fmtCents(ldSum(lineDetail.driverPayRows, 'pay')) }}</span></div>
         </template>
 
         <!-- Fixed Costs → per-truck breakdown -->
@@ -312,16 +312,16 @@
             <div v-for="(t, i) in lineDetail.fixedCostItems" :key="i" class="ld-truck">
               <div class="ld-truck-head">
                 <span>Truck {{ t.truck ? '#' + t.truck : '—' }}</span>
-                <span class="mono">{{ fmt(t.total) }}</span>
+                <span class="mono">{{ fmtCents(t.total) }}</span>
               </div>
-              <div class="ld-kv"><span>Insurance</span><span class="mono">{{ fmt(t.insurance) }}</span></div>
-              <div class="ld-kv"><span>ELD</span><span class="mono">{{ fmt(t.eld) }}</span></div>
-              <div class="ld-kv"><span>Truck Payment</span><span class="mono">{{ fmt(t.truckPayment) }}</span></div>
-              <div class="ld-kv"><span>IRP Registration</span><span class="mono">{{ fmt(t.irp) }}</span></div>
-              <div class="ld-kv"><span>HVUT Road Tax</span><span class="mono">{{ fmt(t.hvut) }}</span></div>
+              <div class="ld-kv"><span>Insurance</span><span class="mono">{{ fmtCents(t.insurance) }}</span></div>
+              <div class="ld-kv"><span>ELD</span><span class="mono">{{ fmtCents(t.eld) }}</span></div>
+              <div class="ld-kv"><span>Truck Payment</span><span class="mono">{{ fmtCents(t.truckPayment) }}</span></div>
+              <div class="ld-kv"><span>IRP Registration</span><span class="mono">{{ fmtCents(t.irp) }}</span></div>
+              <div class="ld-kv"><span>HVUT Road Tax</span><span class="mono">{{ fmtCents(t.hvut) }}</span></div>
             </div>
           </div>
-          <div class="ld-total"><span>Total Fixed Costs</span><span class="mono num">{{ fmt(lineDetail.fixedCosts) }}</span></div>
+          <div class="ld-total"><span>Total Fixed Costs</span><span class="mono num">{{ fmtCents(ldSum(lineDetail.fixedCostItems, 'total')) }}</span></div>
         </template>
 
         <!-- Trip Expenses → expense rows -->
@@ -342,12 +342,12 @@
                     <div class="ld-desc">{{ e.description || '—' }}</div>
                     <div v-if="expMeta(e)" class="ld-sub">{{ expMeta(e) }}</div>
                   </td>
-                  <td class="mono-xs num">{{ fmt(e.amount) }}</td>
+                  <td class="mono-xs num">{{ fmtCents(e.amount) }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <div class="ld-total"><span>Total Trip Expenses</span><span class="mono num">{{ fmt(lineDetail.tripExpenses) }}</span></div>
+          <div class="ld-total"><span>Total Trip Expenses</span><span class="mono num">{{ fmtCents(ldSum(lineDetail.tripExpenseItems, 'amount')) }}</span></div>
         </template>
       </template>
     </MetricInfoDialog>
@@ -420,6 +420,18 @@ function fmtDate(d) {
 function fmtNeg(n) {
   const v = Math.abs(Number(n || 0))
   return v === 0 ? fmt(0) : '−' + fmt(v)
+}
+
+// The waterfall summary is whole-dollar (Math.round'd server-side), but the
+// drill-down line items are cents-precise — so rounded items can look a dollar
+// off. In the drill-down modal we show CENTS, and each footer total is the SUM
+// of the shown items (ldSum), so the list always reconciles to its own total.
+function fmtCents(n) {
+  const v = Number(n || 0)
+  return (v < 0 ? '−$' : '$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+function ldSum(arr, key) {
+  return (arr || []).reduce((a, x) => a + (Number(x[key]) || 0), 0)
 }
 
 // Turn a payout breakdown into the display waterfall the row/card expands to show:

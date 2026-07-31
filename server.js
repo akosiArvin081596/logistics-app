@@ -16981,9 +16981,14 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 
 	// Optional per-month line-item detail (drill-down). Collected ONLY for
 	// `detailForMonth`, purely additive — it never affects any total computed below.
-	const jtLoadIdCol = findCol(headers, /load.?id|contract.?id|job.?id/i);
-	const jtPickupCol = findCol(headers, /pickup.*(location|address|city)|origin/i);
-	const jtDropCol = findCol(headers, /drop.?off.*(location|address|city)|delivery.*(location|address|city)|dest/i);
+	// Match the rest of the codebase (NOT contract.?id): Job Tracking's column A is
+	// "Contract ID" and is blank for email-ingested loads, so including it here binds
+	// to the empty column and the drill-down "Load #" renders "—" on every row.
+	const jtLoadIdCol = findCol(headers, /load.?id|job.?id/i);
+	// Reuse the dashboard's address-column picker (skips lat/lng/date/appt columns)
+	// so the drill-down route text never grabs a coordinate instead of a city.
+	const jtPickupCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
+	const jtDropCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 	const detail = detailForMonth ? { revenueLoads: [], driverPayRows: [], fixedCostItems: [], tripExpenseItems: [] } : null;
 
 	// Investor-scope the rows: Owner ID column (primary) or driver-set (fallback).
