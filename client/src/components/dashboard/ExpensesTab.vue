@@ -102,6 +102,10 @@
             ✓ Autofilled from receipt<span v-if="ocrConfidence"> · {{ ocrConfidence }} confidence</span>
             <button type="button" class="add-ocr-undo" @click="undoAddAutofill">Undo</button>
           </span>
+          <!-- A confidently WRONG date is worse than a blank one: it files the
+               expense in a year that isn't in the books, so it silently vanishes
+               from its real month. Flag it; never block it. -->
+          <span v-if="addDateSuspect" class="add-date-warn">⚠ {{ addDateSuspect }}</span>
         </div>
       </div>
 
@@ -1062,6 +1066,22 @@ function pricePerGallon(e) {
   return (amt / g).toFixed(3)
 }
 const expenseTypes = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
+// Receipt dates far from today are almost always a misread year — a handwritten
+// year that ran off the page, or a store printer with a wrong clock. Both have
+// dropped real expenses out of the month they belonged to.
+const ADD_DATE_STALE_DAYS = 120
+const addDateSuspect = computed(() => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(addForm.date || '')
+  if (!m) return ''
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  if (isNaN(d)) return ''
+  const days = (Date.now() - d.getTime()) / 86400000
+  if (days < -1) return 'This is dated in the future — check the date.'
+  if (days <= ADD_DATE_STALE_DAYS) return ''
+  return Number(m[1]) === new Date().getFullYear()
+    ? 'This is over 4 months old — check the date.'
+    : `This is dated ${m[1]} — check the year before saving.`
+})
 const allFilter = reactive({ driver: '', type: '', status: '', truck: '', state: '', from: '', to: '' })
 // Text search across vendor/description/city — debounced 300ms so we don't
 // refetch per keystroke.
@@ -2690,6 +2710,11 @@ tr:hover td { background: var(--surface-hover); }
   border: 1px solid rgba(34, 197, 94, 0.3);
 }
 .add-ocr-low { background: rgba(245, 158, 11, 0.12); color: #d97706; border-color: rgba(245, 158, 11, 0.3); }
+.add-date-warn {
+  display: inline-block; margin-left: 0.5rem; font-size: 0.75rem; font-weight: 600;
+  color: var(--amber); background: var(--amber-dim); border: 1px solid var(--amber);
+  border-radius: 6px; padding: 0.15rem 0.5rem;
+}
 .add-ocr-undo {
   background: transparent; border: none; padding: 0; cursor: pointer;
   font-family: inherit; font-size: 0.72rem; color: inherit;

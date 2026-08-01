@@ -136,12 +136,13 @@
                 v-model="row.date"
                 type="date"
                 class="bulk-cell"
-                :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.date, 'cell-warn': dateMissing(row) && row.saveStatus !== 'invalid' }"
+                :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.date, 'cell-warn': (dateMissing(row) || dateSuspect(row)) && row.saveStatus !== 'invalid' }"
                 :disabled="saving"
-                :title="dateMissing(row) ? 'Verify the purchase date — it was not read from the receipt' : ''"
+                :title="dateMissing(row) ? 'Verify the purchase date — it was not read from the receipt' : (dateSuspect(row) || '')"
               />
               <span v-if="!scanFinished(row) && !row.date" class="cell-hint-reading">reading&hellip;</span>
               <span v-else-if="dateMissing(row)" class="cell-hint-warn">verify date</span>
+              <span v-else-if="dateSuspect(row)" class="cell-hint-warn">{{ dateSuspect(row) }}</span>
             </td>
             <td class="col-type">
               <select v-model="row.type" class="bulk-cell" :disabled="saving">
@@ -237,6 +238,7 @@
               />
               <span v-if="!scanFinished(row) && !row.date" class="cell-hint-reading">Reading the receipt&hellip;</span>
               <span v-else-if="dateMissing(row)" class="cell-hint-warn">Verify the purchase date — it was not read from the receipt.</span>
+              <span v-else-if="dateSuspect(row)" class="cell-hint-warn">This receipt is {{ dateSuspect(row) }}. Check it before saving.</span>
             </label>
             <label class="bulk-field">
               <span class="bulk-field-label">Type</span>
@@ -359,6 +361,30 @@ const dateMissing = (row) => scanFinished(row) && !row.date
 // amount, where a "0.00" placeholder looks like a real zero to correct.
 const pendingPlaceholder = (row, normal) => (scanFinished(row) ? normal : 'reading…')
 
+// A date the scanner supplied CONFIDENTLY BUT WRONGLY is more dangerous than a
+// blank one, because nothing prompts anyone to look at it. Two real cases cost a
+// month-end close: a handwritten year that ran off the page was read as 2020, and
+// a fuel receipt was copied faithfully from a store printer whose clock said 2005.
+// Both landed the expense in a year that isn't in the books, so it vanished from
+// the month it belonged to and quietly inflated the investor payout.
+// Flag, never block — a genuinely old receipt can still be logged deliberately.
+const DATE_STALE_DAYS = 120
+function dateSuspect(row) {
+  if (!row.date || !scanFinished(row)) return ''
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(row.date)
+  if (!m) return ''
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  if (isNaN(d)) return ''
+  const days = (Date.now() - d.getTime()) / 86400000
+  if (days < -1) return 'dated in the future — check it'
+  if (days <= DATE_STALE_DAYS) return ''
+  // A wrong YEAR is the dangerous case (it hides the expense in a month that
+  // isn't in the books). Merely-old-but-this-year is worth a look, not an alarm.
+  return Number(m[1]) === new Date().getFullYear()
+    ? 'over 4 months old — check the date'
+    : `dated ${m[1]} — check the year`
+}
+
 // Rows that must NOT be re-sent by Save All: already saved, parked timeouts
 // (ambiguous — may have landed), and server-confirmed duplicates (a re-send
 // would just 409 again).
@@ -394,8 +420,8 @@ const duplicateCount = computed(() => rows.value.filter(r => r.saveStatus === 'd
 // blank on purpose — see makeRow) and it hasn't been saved yet.
 // Only count rows the scanner has already finished with — otherwise a fresh
 // batch announces "12 need a purchase date verified" while it is still reading them.
-const anyNeedsDate = computed(() => rows.value.some(r => dateMissing(r) && r.saveStatus !== 'saved'))
-const needsDateCount = computed(() => rows.value.filter(r => dateMissing(r) && r.saveStatus !== 'saved').length)
+const anyNeedsDate = computed(() => rows.value.some(r => (dateMissing(r) || dateSuspect(r)) && r.saveStatus !== 'saved'))
+const needsDateCount = computed(() => rows.value.filter(r => (dateMissing(r) || dateSuspect(r)) && r.saveStatus !== 'saved').length)
 
 const pendingDraftWhen = computed(() => {
   const ts = pendingDraft.value?.updatedAt
@@ -918,7 +944,7 @@ function rowClass(row) {
     // Same rule as the "verify date" hint: a row still queued/scanning has not
     // failed at anything yet, so it must not be tinted as needing attention —
     // that is what made a fresh batch look like every row was already a problem.
-    'row-unread': (row.ocrStatus === 'failed' || dateMissing(row)) && !row.saveStatus,
+    'row-unread': (row.ocrStatus === 'failed' || dateMissing(row) || dateSuspect(row)) && !row.saveStatus,
   }
 }
 function ocrTitle(row) {
