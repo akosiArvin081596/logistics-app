@@ -180,6 +180,10 @@
                 <span v-else-if="row.saveStatus === 'duplicate'" class="bulk-row-msg dup" :title="row.saveError">dup</span>
                 <span v-else-if="row.saveStatus === 'error'" class="bulk-row-msg err" :title="row.saveError">!</span>
                 <span v-else-if="row.saveStatus === 'invalid'" class="bulk-row-msg err" :title="row.saveError">fix</span>
+                <!-- Saved, but into a different month than its date implies,
+                     because its own month is closed. Not an error — but the
+                     filer has to know where the money landed. -->
+                <span v-else-if="row.postedNote" class="bulk-row-msg posted" :title="row.postedNote">moved</span>
                 <button type="button" class="bulk-remove" :disabled="saving || processing" aria-label="Remove receipt" @click="removeRow(row.key)">&times;</button>
               </div>
             </td>
@@ -388,6 +392,15 @@ function dateSuspect(row) {
     : `dated ${m[1]} — check the year`
 }
 
+// "2026-06" -> "June 2026", for telling the filer where a redirected receipt
+// actually landed.
+function monthName(period) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(period || ''))
+  if (!m) return period || ''
+  return new Date(Number(m[1]), Number(m[2]) - 1, 1)
+    .toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+}
+
 // Rows that must NOT be re-sent by Save All: already saved, parked timeouts
 // (ambiguous — may have landed), and server-confirmed duplicates (a re-send
 // would just 409 again).
@@ -495,6 +508,9 @@ function makeRow(file, fileHash = '') {
     ocrReason: '',
     saveStatus: null,
     saveError: '',
+    // Set when the server books the receipt into a month other than its date's,
+    // because that month is already finalized. Informational, never an error.
+    postedNote: '',
     fileHash,
     allowDuplicate: false, // flipped only by the row's conscious "Save anyway"
     duplicateOf: null,
@@ -862,7 +878,7 @@ async function saveOne(row) {
     // 30s (over the 20s default): a PDF receipt can be ~20MB and up to 3 upload
     // concurrently, so slow office Wi-Fi needs the headroom to avoid a false
     // timeout on a request the server actually completed.
-    await api.post('/api/expenses', {
+    const res = await api.post('/api/expenses', {
       driver: row.driver,
       type: row.type,
       amount: parseFloat(row.amount),
@@ -889,6 +905,13 @@ async function saveOne(row) {
       odometer: 0,
     }, { timeout: 30000 })
     row.saveStatus = 'saved'
+    // The receipt's own month was already closed, so it books to the current open
+    // month instead. Nothing is lost and nothing needs correcting — but the row
+    // has to say so, or a $400 fuel receipt silently lands in a different month
+    // than the person filing it expects.
+    if (res?.periodClosed && res?.postedPeriod) {
+      row.postedNote = `${monthName(res.naturalPeriod)} is closed — booked to ${monthName(res.postedPeriod)}`
+    }
   } catch (err) {
     // 409 DUPLICATE_RECEIPT = the server already has this exact receipt. Park it
     // as 'duplicate' (NOT retryable) so it's flagged, not double-booked.
@@ -1184,6 +1207,9 @@ onUnmounted(() => {
 .bulk-row-msg { font-size: 0.72rem; font-weight: 700; color: var(--text-dim); }
 .bulk-row-msg.err { color: var(--danger); }
 .bulk-row-msg.dup { color: var(--blue); }
+/* Saved successfully, but into a later month than its date — amber because it
+   needs reading, not red because nothing went wrong. */
+.bulk-row-msg.posted { color: var(--amber); cursor: help; }
 
 /* ── Mobile cards ───────────────────────────────────────────────────────── */
 .bulk-cards { display: flex; flex-direction: column; gap: 0.6rem; }

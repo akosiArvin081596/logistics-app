@@ -79,7 +79,9 @@ function test(name, pass) { results.push({ name, pass }); }
 function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
 (async () => {
-  console.log("=== RUNNING 102 TESTS against localhost:" + PORT + " ===\n");
+  // Numbered up to 121, but many guards fan out into several test()/skip() calls,
+  // so the real total is whatever `results` ends up holding — printed at the end.
+  console.log("=== RUNNING TESTS against localhost:" + PORT + " ===\n");
 
   // 1. Server health
   const health = await req("GET", "/api/auth/setup-check");
@@ -426,20 +428,27 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     !!P.currentMonth?.period && !rows.some(r => r.period === P.currentMonth.period));
 
   // 55. A $0 period cannot be settled — "paid $0" is not a settlement.
-  const zeroRow = rows.find(r => Number(r.effectiveAmount) === 0 && r.status === "owed");
+  //     Must assert on the REASON, not just the 409: a period still inside its
+  //     grace window also 409s (PERIOD_NOT_FINALIZED), which would let this pass
+  //     while never exercising the $0 guard it exists for.
+  const zeroRow = rows.find(r => Number(r.effectiveAmount) === 0 && r.status === "owed" && r.phase !== "pending");
   if (!zeroRow) {
-    skip("55. Cannot settle a $0 payout (409)", "no $0 owed row in seeded data");
+    skip("55. Cannot settle a $0 payout (409)", "no finalized $0 owed row in seeded data");
   } else {
     const s55 = await req("POST", `/api/investor/payouts/${zeroRow.id}/status`, { status: "paid" }, ac);
-    test("55. Cannot settle a $0 payout (409)", s55.status === 409);
+    test("55. Cannot settle a $0 payout (409)",
+      s55.status === 409 && /\$0|nothing to settle/i.test(s55.body?.error || ""));
   }
 
   // 56. A deduction cannot exceed the payout it comes off. Kept inside the
   //     pre-existing $10,000 magnitude cap, or that older guard fires first and
-  //     this ceiling is never reached.
-  const payableRow = rows.find(r => Number(r.effectiveAmount) > 0 && Number(r.amount) < 10000);
+  //     this ceiling is never reached. Also skips periods still in their grace
+  //     window — adjustments are refused there (the amount is still moving), so
+  //     the over-deduction ceiling would never be reached.
+  const payableRow = rows.find(r =>
+    Number(r.effectiveAmount) > 0 && Number(r.amount) < 10000 && r.phase !== "pending");
   if (!payableRow) {
-    skip("56. Cannot over-deduct a payout (400)", "no payable row under the $10k cap in seeded data");
+    skip("56. Cannot over-deduct a payout (400)", "no finalized payable row under the $10k cap in seeded data");
   } else {
     const over = -(Math.round(payableRow.amount) + 1);
     const s56 = await req("PUT", `/api/investor/payouts/${payableRow.id}/adjust`,
@@ -489,10 +498,15 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
   // 59. A reversal without a stated reason is refused. Non-mutating, so it also
   //     proves the guard fires before any write.
-  const settledRow = rows.find(r => r.status === "paid" || r.status === "processing");
+  // Must NOT be in a period still inside its grace window: test 60 restores the
+  // original status, and a forward move on a pending period is refused (409
+  // PERIOD_NOT_FINALIZED). Picking one would leave the row reopened with no way
+  // to put it back — debris on a shared staging ledger.
+  const settledRow = rows.find(r =>
+    (r.status === "paid" || r.status === "processing") && r.phase !== "pending");
   if (!settledRow) {
-    skip("59. Reopening without a reason is rejected (400)", "no settled row in seeded data");
-    skip("60. Reopen round-trip un-stamps and re-stamps correctly", "no settled row in seeded data");
+    skip("59. Reopening without a reason is rejected (400)", "no settled row outside a grace window in seeded data");
+    skip("60. Reopen round-trip un-stamps and re-stamps correctly", "no settled row outside a grace window in seeded data");
   } else {
     const s59 = await req("POST", `/api/investor/payouts/${settledRow.id}/status`,
       { status: "owed" }, ac);
@@ -1117,15 +1131,19 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   test("104. Statement rejects a malformed period (400)",
     st104.status === 400 && /YYYY-MM/i.test(st104.body?.error || ""));
 
-  // 105. Only a PAID period yields a document. Pick a real non-paid row from the
-  //      ledger already fetched above; skip honestly if every row is settled.
-  const unpaidRow = rows.find(r => r.status !== "paid");
-  if (!unpaidRow) {
-    skip("105. Statement refuses a period that is not paid (409)", "every seeded payout row is already paid");
+  // 105. A statement is issued once the period is FINALIZED (or paid) — not
+  //      before. The old rule was paid-only; publishing at close is the point of
+  //      the grace window ("publish the final number at settlement, not after the
+  //      money moves"). So the row that must be refused is one that is neither
+  //      finalized nor paid.
+  const noStmtRow = rows.find(r => r.status !== "paid" && r.phase !== "finalized");
+  if (!noStmtRow) {
+    skip("105. Statement refuses a period that is neither finalized nor paid (409)",
+      "every seeded payout row is already paid or finalized");
   } else {
-    const st105 = await req("GET", `/api/investor/payouts/${unpaidRow.period}/statement`, null, ic);
-    test("105. Statement refuses a period that is not paid (409)",
-      st105.status === 409 && /PAYOUT_NOT_PAID|not_settleable/i.test(st105.body?.code || ""));
+    const st105 = await req("GET", `/api/investor/payouts/${noStmtRow.period}/statement`, null, ic);
+    test("105. Statement refuses a period that is neither finalized nor paid (409)",
+      st105.status === 409 && /PERIOD_NOT_FINALIZED|PAYOUT_NOT_PAID|not_settleable/i.test(st105.body?.code || ""));
   }
 
   // 106. A paid period returns a real PDF (magic bytes + attachment header), and
@@ -1181,6 +1199,171 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   const dupD = await req("POST", "/api/expenses", { ...dupBody, driver: "test2", checkDuplicate: true }, ac);
   test("110. Same merchant/day/amount for a DIFFERENT driver is not flagged",
     dupD.status === 200 && dupD.body?.success === true);
+
+  // 111-121. Month-end close: the grace window, the lock, and the posting rule.
+  //
+  // Every one of these SKIPs cleanly when PERIOD_FINALIZE_ENABLED is off (the
+  // state the feature ships in), because with the flag off no row ever reports a
+  // phase. A green run on a dormant server is therefore honest, not vacuous.
+  const per = await req("GET", "/api/periods", null, ac);
+  const closeOn = per.status === 200 && per.body?.enabled === true;
+  test("111. GET /api/periods reports the close calendar (Super Admin)",
+    per.status === 200 && typeof per.body?.enabled === "boolean"
+    && typeof per.body?.graceDays === "number" && Array.isArray(per.body?.periods));
+
+  // 112. Phase is exhaustive and consistent with the lifecycle: no settled row is
+  //      ever 'accruing', and the in-progress month is never a payout row (the
+  //      property test 54 guards, restated on the new field).
+  if (!closeOn) {
+    skip("112. Every payout row reports a settled phase", "period close disabled on this server");
+  } else {
+    test("112. Every payout row reports a settled phase",
+      rows.every(r => r.phase === "pending" || r.phase === "finalized")
+      && rows.every(r => r.period !== P.currentMonth?.period));
+  }
+
+  // 113. A period still inside its grace window cannot be settled forward. THIS
+  //      is the guard that ends the correction treadmill: without it an admin
+  //      marks paid on the 1st, a receipt lands on the 4th, and the month has to
+  //      be adjusted by hand.
+  const pendingRow = rows.find(r => r.phase === "pending" && Number(r.effectiveAmount) > 0);
+  if (!pendingRow) {
+    skip("113. Cannot settle a period still in its grace window (409)",
+      closeOn ? "no payable pending row right now" : "period close disabled on this server");
+  } else {
+    const s113 = await req("POST", `/api/investor/payouts/${pendingRow.id}/status`, { status: "paid" }, ac);
+    test("113. Cannot settle a period still in its grace window (409)",
+      s113.status === 409 && s113.body?.code === "PERIOD_NOT_FINALIZED");
+  }
+
+  // 114. Same period refuses a manual adjustment — its amount is still refreshed
+  //      from live earnings on every read, so a manual delta would be counted
+  //      twice. Closes a hole the UI has been faking client-side.
+  if (!pendingRow) {
+    skip("114. Cannot adjust a period still in its grace window (409)",
+      closeOn ? "no payable pending row right now" : "period close disabled on this server");
+  } else {
+    const s114 = await req("PUT", `/api/investor/payouts/${pendingRow.id}/adjust`,
+      { adjustment: -1, adjustmentNote: "test-suite: must be rejected" }, ac);
+    test("114. Cannot adjust a period still in its grace window (409)",
+      s114.status === 409 && s114.body?.code === "PERIOD_NOT_FINALIZED");
+  }
+
+  // 115. ...and refuses to publish a statement, for the same reason: the number
+  //      is not final yet.
+  if (!pendingRow) {
+    skip("115. Statement refuses a period still in its grace window (409)",
+      closeOn ? "no payable pending row right now" : "period close disabled on this server");
+  } else {
+    const s115 = await req("GET", `/api/investor/payouts/${pendingRow.period}/statement`, null, ic);
+    test("115. Statement refuses a period still in its grace window (409)",
+      s115.status === 409 && s115.body?.code === "PERIOD_NOT_FINALIZED");
+  }
+
+  // 116. Reopening stays EXEMPT from the window guard. A payout advanced by
+  //      mistake yesterday has to be walkable back today, grace window or not —
+  //      the same exemption the $0 rule already carries.
+  //
+  //      WRITE-GATED and one-way on purpose: this reopens a settled payout whose
+  //      period is still open, and the restore would be a FORWARD move on a
+  //      pending period — which the guard under test correctly refuses. So there
+  //      is no way to put the row back, and it must not run unasked against a
+  //      shared ledger. (Such a row can only exist as legacy data anyway: with
+  //      the feature on, a pending period can never be settled in the first place.)
+  const pendingSettled = rows.find(r => r.phase === "pending" && r.status !== "owed");
+  if (!RUN_WRITE_TESTS) {
+    skip("116. Reopen is exempt from the grace-window guard", "write tests disabled (RUN_WRITE_TESTS=1) — this one cannot be undone");
+  } else if (!pendingSettled) {
+    skip("116. Reopen is exempt from the grace-window guard",
+      closeOn ? "no advanced row inside a grace window (expected — the guard prevents creating one)" : "period close disabled on this server");
+  } else {
+    const s116 = await req("POST", `/api/investor/payouts/${pendingSettled.id}/status`,
+      { status: "owed", reason: "test-suite: reopen must stay possible mid-window" }, ac);
+    test("116. Reopen is exempt from the grace-window guard", s116.status === 200);
+  }
+
+  // 117. A FINALIZED but UNPAID period issues a real PDF. This is the literal
+  //      client ask: "let's not wait till after it's paid to publish a statement".
+  const finalUnpaid = rows.find(r => r.phase === "finalized" && r.status !== "paid" && Number(r.effectiveAmount) > 0);
+  if (!finalUnpaid) {
+    skip("117. Finalized-but-unpaid period issues a statement PDF",
+      closeOn ? "no finalized unpaid payable row in seeded data" : "period close disabled on this server");
+  } else {
+    const s117 = await req("GET", `/api/investor/payouts/${finalUnpaid.period}/statement`, null, ic);
+    const ct = (s117.headers && s117.headers["content-type"]) || "";
+    const cd = (s117.headers && s117.headers["content-disposition"]) || "";
+    test("117. Finalized-but-unpaid period issues a statement PDF",
+      s117.status === 200 && /application\/pdf/i.test(ct)
+      && typeof s117.body === "string" && s117.body.startsWith("%PDF")
+      // Filed as a FINAL statement, not a payout receipt — the two documents
+      // must not collide on disk, and the second must not overwrite the first.
+      && /Final_Statement/.test(cd));
+  }
+
+  // 118. Reopening a period requires a stated reason — it un-freezes figures that
+  //      may already sit on a delivered statement. Mirrors test 59's property on
+  //      the new period-level surface.
+  const anyFinal = rows.find(r => r.phase === "finalized");
+  if (!anyFinal) {
+    skip("118. Reopening a period requires a reason (400)",
+      closeOn ? "no finalized period in seeded data" : "period close disabled on this server");
+  } else {
+    const s118 = await req("POST", `/api/periods/${anyFinal.period}/reopen`, {}, ac);
+    test("118. Reopening a period requires a reason (400)",
+      s118.status === 400 && /reason/i.test(s118.body?.error || ""));
+  }
+
+  // 119. A month still in progress has no final figure to freeze.
+  if (!closeOn) {
+    skip("119. Cannot finalize a month that is still in progress (409)", "period close disabled on this server");
+  } else {
+    const s119 = await req("POST", `/api/periods/${P.currentMonth?.period}/finalize`, {}, ac);
+    test("119. Cannot finalize a month that is still in progress (409)",
+      s119.status === 409 && s119.body?.code === "PERIOD_ACCRUING");
+  }
+
+  // 120. Period routes are Super Admin only — an Investor must not be able to
+  //      close or reopen the books.
+  const s120a = await req("POST", `/api/periods/2026-01/reopen`, { reason: "nope" }, ic);
+  const s120b = await req("GET", "/api/periods", null, ic);
+  test("120. Investors cannot close, reopen, or list periods (403)",
+    s120a.status === 403 && s120b.status === 403);
+
+  // 121. THE LOAD-BEARING ONE — the lock is real, not decorative.
+  //      Log a receipt dated INSIDE a finalized month and prove the month does
+  //      not move, the receipt is not lost, and its true date is preserved.
+  //      Every other test here proves a guard fires; this proves the feature works.
+  if (!RUN_WRITE_TESTS) {
+    skip("121. A receipt backdated into a finalized month cannot move it", "write tests disabled (RUN_WRITE_TESTS=1)");
+  } else if (!anyFinal) {
+    skip("121. A receipt backdated into a finalized month cannot move it",
+      closeOn ? "no finalized period in seeded data" : "period close disabled on this server");
+  } else {
+    const before = (await req("GET", "/api/investor/payouts", null, ic)).body || {};
+    const beforeRow = (before.payouts || []).find(r => r.period === anyFinal.period);
+    const beforeCur = Number(before.currentMonth?.amountInProgress ?? 0);
+
+    const post = await req("POST", "/api/expenses", {
+      driver: "test", type: "Fuel", amount: 137.42,
+      date: `${anyFinal.period}-15`,
+      vendor: `test-suite closed-period ${Date.now()}`,
+    }, ac);
+
+    const after = (await req("GET", "/api/investor/payouts", null, ic)).body || {};
+    const afterRow = (after.payouts || []).find(r => r.period === anyFinal.period);
+
+    test("121. A receipt backdated into a finalized month cannot move it",
+      post.status === 200
+      // The server says where it actually booked it, rather than moving money silently.
+      && post.body?.periodClosed === true
+      && post.body?.postedPeriod === after.currentMonth?.period
+      && post.body?.naturalPeriod === anyFinal.period
+      // The frozen figure is byte-identical.
+      && Number(afterRow?.amount) === Number(beforeRow?.amount)
+      && Number(afterRow?.effectiveAmount) === Number(beforeRow?.effectiveAmount)
+      // ...and the money is not lost: the open month absorbed it.
+      && Number(after.currentMonth?.amountInProgress ?? 0) !== beforeCur);
+  }
 
   // Results
   console.log("");

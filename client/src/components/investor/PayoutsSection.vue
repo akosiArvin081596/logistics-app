@@ -22,7 +22,9 @@
         </div>
         <div class="current-meta">
           <span class="status-pill st-progress">in progress</span>
-          <span class="current-note">Accruing this month &mdash; not yet payable until the period closes.</span>
+          <span class="current-note">
+            Accruing this month &mdash; not yet payable until the period closes<template v-if="currentMonth?.graceEndsAt">, with receipts accepted through {{ fmtDate(currentMonth.graceEndsAt) }}</template>.
+          </span>
         </div>
 
         <!-- Same earnings waterfall as the past-months rows, so the in-progress
@@ -172,19 +174,31 @@
             <td class="status-cell">
               <span v-if="settleable(p)" :class="['status-pill', statusClass(p.status)]">{{ p.status }}</span>
               <span v-else class="status-pill st-none">nothing due</span>
+              <!-- Month is over but the books are still open for late receipts, so
+                   this figure can still move. Say so — an investor watching a
+                   number change between visits deserves to know why. -->
+              <div v-if="p.phase === 'pending'" class="phase-note">
+                in final settlement &middot; closes {{ fmtDate(p.graceEndsAt) }}
+              </div>
               <!-- Statement PDF lives INSIDE the Status cell on purpose: no new
                    column (colCount / the breakdown colspan stay as they are) and
                    the admin action cell is v-if="isSuperAdmin", so an investor
                    viewing their own portal would never see a button placed there.
-                   Only a settled row has a statement to render. -->
-              <template v-if="p.status === 'paid'">
+                   Published once the period is FINALIZED, not once it's paid —
+                   the client's ask was to issue the final number at settlement
+                   rather than after the money moves. `|| paid` keeps every
+                   historical paid month printable, including ones that predate
+                   period locks entirely. -->
+              <template v-if="(p.phase === 'finalized' || p.status === 'paid') && settleable(p)">
                 <button
                   type="button"
                   class="stmt-btn"
                   :disabled="stmtBusyId === p.id"
                   :aria-busy="stmtBusyId === p.id"
-                  :aria-label="`View payout statement for ${p.periodLabel}`"
-                  :title="`Open the payout statement PDF for ${p.periodLabel}`"
+                  :aria-label="`View ${p.status === 'paid' ? 'payout' : 'final'} statement for ${p.periodLabel}`"
+                  :title="p.status === 'paid'
+                    ? `Open the payout statement PDF for ${p.periodLabel}`
+                    : `Open the final settlement statement for ${p.periodLabel} — this is the amount payable, not a receipt`"
                   @click="openStatement(p)"
                 >
                   <span v-if="stmtBusyId === p.id" class="stmt-spinner" aria-hidden="true"></span>
@@ -195,7 +209,7 @@
                     <path d="M4 1.75h4.5L12 5.25v9H4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
                     <path d="M6.2 8h3.6M6.2 10.6h3.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
                   </svg>
-                  {{ stmtBusyId === p.id ? 'Preparing…' : 'View Statement' }}
+                  {{ stmtBusyId === p.id ? 'Preparing…' : (p.status === 'paid' ? 'View Statement' : 'Final Statement') }}
                 </button>
                 <!-- The toast is transient; a failed row also keeps its reason
                      visible so a statement never fails silently. -->
@@ -204,8 +218,10 @@
             </td>
             <td v-if="isSuperAdmin" class="action-cell">
               <!-- Only rows with a positive payable can be settled; the server
-                   rejects the rest (409) and the buttons would be dead ends. -->
-              <template v-if="settleable(p)">
+                   rejects the rest (409) and the buttons would be dead ends.
+                   A period still inside its grace window can't be settled either
+                   (409 PERIOD_NOT_FINALIZED) — its figure is still moving. -->
+              <template v-if="settleable(p) && p.phase !== 'pending'">
                 <button
                   v-if="p.status === 'owed'"
                   type="button"
@@ -223,6 +239,7 @@
                   @click="advance(p, 'paid')"
                 >Mark Paid</button>
               </template>
+              <span v-else-if="p.phase === 'pending'" class="dim" :title="`Settles once ${p.periodLabel} closes on ${fmtDate(p.graceEndsAt)}`">awaiting close</span>
               <span v-if="p.status === 'paid' || !settleable(p)" class="dim">&mdash;</span>
             </td>
           </tr>
@@ -1129,6 +1146,14 @@ onMounted(loadPayouts)
 
 /* --- Statement PDF button (paid rows, inside the Status cell) --- */
 .status-cell { line-height: 1.3; }
+/* A month past its end but still inside the grace window: the figure is live,
+   not settled, and this is what tells the investor why it can still change. */
+.phase-note {
+  margin-top: 0.2rem;
+  font-size: 0.68rem;
+  color: var(--amber);
+  white-space: nowrap;
+}
 /* display:flex (block-level) drops it onto its own line under the pill even
    though the cell is nowrap; fit-content keeps it from spanning the column. */
 .stmt-btn {

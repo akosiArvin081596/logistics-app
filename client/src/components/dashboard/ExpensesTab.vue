@@ -1082,6 +1082,14 @@ const addDateSuspect = computed(() => {
     ? 'This is over 4 months old — check the date.'
     : `This is dated ${m[1]} — check the year before saving.`
 })
+// "2026-06" -> "June 2026", for telling the filer which month a receipt was
+// booked to when its own month is already closed.
+function monthLabel(period) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(period || ''))
+  if (!m) return period || ''
+  return new Date(Number(m[1]), Number(m[2]) - 1, 1)
+    .toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+}
 const allFilter = reactive({ driver: '', type: '', status: '', truck: '', state: '', from: '', to: '' })
 // Text search across vendor/description/city — debounced 300ms so we don't
 // refetch per keystroke.
@@ -1502,8 +1510,9 @@ async function submitExpense() {
       // confirm and resend, so a 409 here is always survivable.
       checkDuplicate: true,
     }
+    let res
     try {
-      await api.post('/api/expenses', payload)
+      res = await api.post('/api/expenses', payload)
     } catch (err) {
       // The server flags same-merchant/day/amount as a POSSIBLE duplicate. It is
       // a warning, not a verdict — a driver can genuinely fuel twice at one stop —
@@ -1511,12 +1520,18 @@ async function submitExpense() {
       if (err?.status === 409 && err?.code === 'POSSIBLE_DUPLICATE') {
         const ok = window.confirm(`${err.message}\n\nLog it anyway?`)
         if (!ok) { toast('Not logged — treated as a duplicate', 'info'); return }
-        await api.post('/api/expenses', { ...payload, allowDuplicate: true })
+        res = await api.post('/api/expenses', { ...payload, allowDuplicate: true })
       } else {
         throw err
       }
     }
-    toast('Expense logged')
+    // Its own month is already closed, so it books to the current open month
+    // instead. Say so — the expense is filed, just not where the date implies.
+    if (res?.periodClosed && res?.postedPeriod) {
+      toast(`Expense logged — ${monthLabel(res.naturalPeriod)} is closed, so it was booked to ${monthLabel(res.postedPeriod)}`, 'warning')
+    } else {
+      toast('Expense logged')
+    }
     addForm.driver = ''; addForm.amount = ''; addForm.loadId = ''; addForm.description = ''; addForm.city = ''; addForm.state = ''
     clearPhoto()
     await loadAll()

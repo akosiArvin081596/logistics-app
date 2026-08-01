@@ -326,6 +326,10 @@ body {
   opacity: 0; transition: opacity 0.3s;
 }
 .toast.error { background: var(--danger); }
+/* The action succeeded but carries a caveat the user has to read — e.g.
+   reopening a month leaves already-redirected receipts where they were. Without
+   this it renders identically to a plain success and the caveat reads as noise. */
+.toast.warning { background: var(--amber); }
 .toast.show { opacity: 1; }
 
 /* ---- Skeleton Loader ---- */
