@@ -235,7 +235,7 @@
                 <div class="bd-caption">How your share is calculated</div>
                 <dl class="bd-list">
                   <div
-                    v-for="(row, i) in waterfall(p.breakdown, effective(p))"
+                    v-for="(row, i) in waterfall(p.breakdown, { amount: p.amount, adjustment: applied(p), payout: effective(p) })"
                     :key="i"
                     class="bd-row"
                     :class="[`bd-${row.kind}`, { 'bd-highlight': row.highlight, 'bd-clickable': !!row.detailKey }]"
@@ -509,8 +509,9 @@ function ldSum(arr, key) {
 // are actually charged (> 0). Returns [] when breakdown is null/absent, so callers
 // that still render the panel simply get nothing — but they also v-if on breakdown.
 // This is the ONE place the earnings math is described; both surfaces read it.
-// `settled` is the figure this month was actually settled at (amount + adjustment),
-// or null for the in-progress month, which has none yet. The waterfall is a LIVE
+// `settled` is { amount, adjustment, payout } for a settled month — the earnings
+// share it was frozen at, any manual correction, and what actually gets paid — or
+// null for the in-progress month, which has none of those yet. The waterfall is a LIVE
 // recompute from today's records, so once a month is settled the two can drift
 // apart — a receipt corrected or a duplicate removed after settlement moves the
 // recompute but never the frozen amount. Leaving the panel to end at the live
@@ -545,19 +546,39 @@ function waterfall(b, settled = null) {
   // exists to prevent. Compared in whole cents so floating-point noise never
   // triggers the settled branch spuriously.
   const live = Number(b.monthShare) || 0
-  const drift = settled == null ? 0 : Math.round(live * 100) - Math.round(Number(settled) * 100)
-  if (settled == null || drift === 0) {
+  // In-progress month: nothing settled, nothing adjusted — the live share IS the
+  // answer and the panel ends there, exactly as it always has.
+  if (!settled) {
     add('Your Share', live, 'share')
     return rows
   }
-  add('Your Share', settled, 'share')
-  // One quiet line, no figure. Without it the rows above visibly don't foot to
-  // Your Share, which reads as a maths error — worse than the two-number problem.
-  rows.push({
-    kind: 'drift',
-    label: 'Your payout is the amount this month was settled at. The figures above reflect current records, which have changed since it closed.',
-    display: '',
-  })
+
+  const base = Number(settled.amount) || 0
+  const adj = Number(settled.adjustment) || 0
+  const payout = Number(settled.payout) || 0
+
+  // A manual adjustment is applied AFTER the earnings split, so it was invisible
+  // here: the panel jumped from "× %" straight to the final figure, and a −$661
+  // correction had nothing on screen explaining it (client, 2026-08-01). Show it
+  // as its own line so Share + Adjustment = Payout is legible end to end.
+  if (adj !== 0) {
+    add('Your Share', base, 'subtotal')
+    add('Adjustment', adj, adj < 0 ? 'deduct' : 'add')
+    add('Payout', payout, 'share')
+  } else {
+    add('Your Share', payout, 'share')
+  }
+
+  // The rows above are a live recompute, so on a settled month they may no longer
+  // foot to the settled share. One line of prose, deliberately carrying no second
+  // figure — an extra number here is what confused the client last time.
+  if (Math.round(live * 100) !== Math.round(base * 100)) {
+    rows.push({
+      kind: 'drift',
+      label: 'Your payout is the amount this month was settled at. The figures above reflect current records, which have changed since it closed.',
+      display: '',
+    })
+  }
   return rows
 }
 
