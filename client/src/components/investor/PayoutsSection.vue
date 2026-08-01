@@ -539,21 +539,23 @@ function waterfall(b, settled = null) {
   add('Net Profit', b.netProfit, 'subtotal')
   if (b.splitPct != null) rows.push({ label: `× ${b.splitPct}%`, kind: 'split', display: '' })
 
-  // Settled months reconcile the live recompute against the frozen figure.
-  // Compared in whole cents so floating-point noise never invents a drift row.
+  // Settled months show the SETTLED figure as Your Share — never a second,
+  // competing number. Showing the live recompute alongside it (client, 2026-08-01)
+  // just raised "why are there two amounts?", which is the confusion this panel
+  // exists to prevent. Compared in whole cents so floating-point noise never
+  // triggers the settled branch spuriously.
   const live = Number(b.monthShare) || 0
   const drift = settled == null ? 0 : Math.round(live * 100) - Math.round(Number(settled) * 100)
   if (settled == null || drift === 0) {
     add('Your Share', live, 'share')
     return rows
   }
-  // Demote the live figure to an explanatory line; the settled amount is the
-  // one that matches the payout, so it gets the emphasised final row.
-  add('Recalculated today', live, 'restated')
   add('Your Share', settled, 'share')
+  // One quiet line, no figure. Without it the rows above visibly don't foot to
+  // Your Share, which reads as a maths error — worse than the two-number problem.
   rows.push({
     kind: 'drift',
-    label: `Settled at ${fmtCents(settled)}. Recalculating from today's records gives ${fmtCents(live)} — a ${fmtCents(Math.abs(drift) / 100)} difference from receipts corrected after this month was closed. Your payout is the settled figure.`,
+    label: 'Your payout is the amount this month was settled at. The figures above reflect current records, which have changed since it closed.',
     display: '',
   })
   return rows
@@ -1066,11 +1068,6 @@ onMounted(loadPayouts)
 }
 .bd-share .bd-label,
 .bd-share .bd-value { font-weight: 800; color: #0f172a; }
-/* The live recompute on a settled month: shown for transparency but visibly
-   subordinate to the settled figure below it, so there is no doubt which number
-   is the payout. */
-.bd-restated .bd-label,
-.bd-restated .bd-value { color: #64748b; font-weight: 500; }
 /* Prose, not a figure. The parent .bd-row is flex, so the note takes the whole
    width via flex:1 (grid-column would be a no-op here) and renders with no
    value column beside it. */
