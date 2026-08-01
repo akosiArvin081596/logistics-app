@@ -12791,6 +12791,14 @@ app.post("/api/expenses/ocr", requireAuth, expenseOcrLimiter, async (req, res) =
 			return res.json(out);
 		} catch (err) {
 			if (err && err.code === "OCR_NO_KEY") return res.status(503).json({ error: "ocr_unavailable" });
+			// A rejected/limited key is a SERVICE problem, not a bad receipt. Saying
+			// "couldn't read this receipt" sends the user off re-photographing
+			// perfectly good paper; 503 makes the UI say scanning is unavailable and
+			// to enter it manually, which is the truth and the useful instruction.
+			if (err && (err.status === 401 || err.status === 403 || err.status === 429)) {
+				console.error("Expense OCR unavailable (Gemini key rejected/limited):", err.message);
+				return res.status(503).json({ error: "ocr_unavailable" });
+			}
 			console.error("Expense OCR failed after retries:", err && err.message);
 			return res.status(502).json({ error: "ocr_failed" });
 		}
