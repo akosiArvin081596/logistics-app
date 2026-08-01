@@ -208,7 +208,9 @@
             </div>
             <div class="bulk-card-line2">
               <span class="bulk-card-vendor">{{ row.vendor || row.fileName }}</span>
-              <span class="bulk-card-date" :class="{ 'date-missing': !row.date }">{{ row.date || 'verify purchase date' }}</span>
+              <!-- Mobile card header: same rule — while the scan is still running
+                   show a neutral placeholder, not a "verify" demand. -->
+              <span class="bulk-card-date" :class="{ 'date-missing': dateMissing(row) }">{{ row.date || (scanFinished(row) ? 'verify purchase date' : '—') }}</span>
             </div>
             <div class="bulk-card-line3">
               <span class="bulk-card-driver" :class="{ 'date-missing': !row.driver }">{{ row.driver || 'no driver' }}</span>
@@ -907,7 +909,10 @@ function rowClass(row) {
     'row-error': row.saveStatus === 'error' || row.saveStatus === 'invalid',
     'row-warn': row.saveStatus === 'timeout',
     'row-dup': row.saveStatus === 'duplicate',
-    'row-unread': (row.ocrStatus === 'failed' || !row.date) && !row.saveStatus,
+    // Same rule as the "verify date" hint: a row still queued/scanning has not
+    // failed at anything yet, so it must not be tinted as needing attention —
+    // that is what made a fresh batch look like every row was already a problem.
+    'row-unread': (row.ocrStatus === 'failed' || dateMissing(row)) && !row.saveStatus,
   }
 }
 function ocrTitle(row) {
