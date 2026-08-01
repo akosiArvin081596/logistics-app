@@ -176,6 +176,7 @@
               <span v-if="row.saveStatus === 'saving'" class="bulk-row-msg">…</span>
               <div v-else class="bulk-cell-actions">
                 <button v-if="row.saveStatus === 'timeout'" type="button" class="bulk-retry" :disabled="saving || processing" :title="row.saveError" @click="retryRow(row)">Retry</button>
+                <button v-else-if="row.saveStatus === 'maybe-duplicate'" type="button" class="bulk-retry bulk-anyway" :disabled="saving || processing" :title="row.saveError" @click="saveAnyway(row)">Save anyway</button>
                 <span v-else-if="row.saveStatus === 'duplicate'" class="bulk-row-msg dup" :title="row.saveError">dup</span>
                 <span v-else-if="row.saveStatus === 'error'" class="bulk-row-msg err" :title="row.saveError">!</span>
                 <span v-else-if="row.saveStatus === 'invalid'" class="bulk-row-msg err" :title="row.saveError">fix</span>
@@ -268,7 +269,8 @@
           </div>
           <div v-if="row.saveError" class="bulk-card-err">{{ row.saveError }}</div>
           <div class="bulk-card-actions">
-            <button v-if="row.saveStatus === 'timeout' || row.saveStatus === 'error'" type="button" class="bulk-retry" :disabled="saving || processing" @click="retryRow(row)">Retry</button>
+            <button v-if="row.saveStatus === 'maybe-duplicate'" type="button" class="bulk-retry bulk-anyway" :disabled="saving || processing" :title="row.saveError" @click="saveAnyway(row)">Save anyway</button>
+            <button v-else-if="row.saveStatus === 'timeout' || row.saveStatus === 'error'" type="button" class="bulk-retry" :disabled="saving || processing" @click="retryRow(row)">Retry</button>
             <button type="button" class="bulk-btn-ghost bulk-clear" :disabled="saving || processing" @click="removeRow(row.key)">Remove</button>
           </div>
         </div>
@@ -281,6 +283,7 @@
       <span v-else-if="anyNeedsDate" class="bulk-savehint warn">{{ needsDateCount }} need a purchase date verified before saving.</span>
       <span v-else-if="anyTimeout" class="bulk-savehint warn">{{ timeoutCount }} timed out — check All Expenses, then Retry only if not saved.</span>
       <span v-else-if="anyFailed" class="bulk-savehint err">{{ failedCount }} failed to save — retry or remove.</span>
+      <span v-else-if="anyMaybeDuplicate" class="bulk-savehint warn">{{ maybeDuplicateCount }} may already be logged — check, then Save anyway or remove.</span>
       <span v-else-if="anyDuplicate" class="bulk-savehint info">{{ duplicateCount }} already logged (duplicate) — remove them.</span>
       <span v-else class="bulk-savehint">{{ savableCount }} ready to save.</span>
       <button
@@ -388,7 +391,9 @@ function dateSuspect(row) {
 // Rows that must NOT be re-sent by Save All: already saved, parked timeouts
 // (ambiguous — may have landed), and server-confirmed duplicates (a re-send
 // would just 409 again).
-const NON_SAVABLE = new Set(['saved', 'timeout', 'duplicate'])
+// 'maybe-duplicate' joins these: it must never be resent by a blanket Save All,
+// only by the row's conscious "Save anyway".
+const NON_SAVABLE = new Set(['saved', 'timeout', 'duplicate', 'maybe-duplicate'])
 
 const defaultDriver = ref('')
 const rows = ref([])
@@ -415,6 +420,8 @@ const failedCount = computed(() => rows.value.filter(r => r.saveStatus === 'erro
 const anyTimeout = computed(() => rows.value.some(r => r.saveStatus === 'timeout'))
 const timeoutCount = computed(() => rows.value.filter(r => r.saveStatus === 'timeout').length)
 const anyDuplicate = computed(() => rows.value.some(r => r.saveStatus === 'duplicate'))
+const anyMaybeDuplicate = computed(() => rows.value.some(r => r.saveStatus === 'maybe-duplicate'))
+const maybeDuplicateCount = computed(() => rows.value.filter(r => r.saveStatus === 'maybe-duplicate').length)
 const duplicateCount = computed(() => rows.value.filter(r => r.saveStatus === 'duplicate').length)
 // A row needs its purchase date verified when OCR couldn't read one (date left
 // blank on purpose — see makeRow) and it hasn't been saved yet.
@@ -489,6 +496,8 @@ function makeRow(file, fileHash = '') {
     saveStatus: null,
     saveError: '',
     fileHash,
+    allowDuplicate: false, // flipped only by the row's conscious "Save anyway"
+    duplicateOf: null,
   }
 }
 
@@ -823,6 +832,10 @@ function hydrateDraft(draftRows) {
     saveStatus: r.saveStatus === 'saving' ? null : (r.saveStatus || null),
     saveError: r.saveError || '',
     fileHash: r.fileHash || '',
+    // Deliberately NOT restored from the draft: an override that books money is
+    // re-confirmed on the device that resumes, never inherited from an old tab.
+    allowDuplicate: false,
+    duplicateOf: null,
   }))
   // Release the guard after the load-triggered watcher has flushed, so the very
   // first change that re-saves the draft is a genuine user edit.
@@ -864,6 +877,12 @@ async function saveOne(row) {
       // when it's down or out of credits), so hashing the payload alone would let
       // the same receipt back in under a new hash and double-book the P&L.
       sourceHash: row.fileHash || '',
+      // Opt in to the same-merchant/day/amount check: this grid can show the
+      // warning and offer "Save anyway", so a 409 here is always survivable.
+      checkDuplicate: true,
+      // Set only by the conscious "Save anyway" on a POSSIBLE_DUPLICATE row, so a
+      // same-merchant/day/amount match is confirmed by a person, never by a resend.
+      allowDuplicate: row.allowDuplicate === true,
       receiptDetails: row.receiptDetails || [],
       loadId: '',
       gallons: 0,
@@ -877,6 +896,13 @@ async function saveOne(row) {
       row.saveStatus = 'duplicate'
       const existing = err?.data?.existingId
       row.saveError = existing ? `Already logged as expense #${existing}` : 'This receipt was already logged'
+    } else if (err?.status === 409 && err?.code === 'POSSIBLE_DUPLICATE') {
+      // Same merchant + day + amount as an existing expense. Strong, but a driver
+      // CAN buy twice at one stop — so this is a question, not a verdict. Park it
+      // in its own state offering "Save anyway"; never auto-retried.
+      row.saveStatus = 'maybe-duplicate'
+      row.saveError = err?.message || 'This may already be logged'
+      row.duplicateOf = err?.data?.existingId || null
     } else if (err?.status === 0) {
       // A timeout/abort (status 0) is AMBIGUOUS — the server may have inserted the
       // row before the response was lost. POST /api/expenses is not idempotent, so
@@ -899,6 +925,21 @@ async function saveOne(row) {
 function retryRow(row) {
   row.saveStatus = null
   row.saveError = ''
+}
+
+// Conscious override for a 'maybe-duplicate': the admin has looked at the named
+// existing expense and decided this is a separate purchase. Sets allowDuplicate
+// so the server skips the content check for this row only — it is never set
+// automatically, which is the whole point of the guard.
+async function saveAnyway(row) {
+  row.allowDuplicate = true
+  row.saveStatus = null
+  row.saveError = ''
+  row.duplicateOf = null
+  // Save immediately. "Save anyway" reads as an action, not a queue — arming the
+  // row and waiting for Save All would look like it had already been logged.
+  saving.value = true
+  try { await saveOne(row) } finally { saving.value = false }
 }
 
 async function saveAll() {
@@ -931,13 +972,18 @@ async function saveAll() {
   const failed = rows.value.filter(r => r.saveStatus === 'error').length
   const timedOut = rows.value.filter(r => r.saveStatus === 'timeout').length
   const dup = rows.value.filter(r => r.saveStatus === 'duplicate').length
+  // Rows the server flagged as a possible duplicate were NOT saved and still need
+  // a decision — leaving them out of the summary reported "7 saved" as a success
+  // on a batch where three were silently held back.
+  const maybeDup = rows.value.filter(r => r.saveStatus === 'maybe-duplicate').length
   if (saved > 0) emit('saved')
   const parts = [`${saved} saved`]
   if (failed) parts.push(`${failed} failed`)
   if (timedOut) parts.push(`${timedOut} timed out`)
   if (dup) parts.push(`${dup} duplicate`)
+  if (maybeDup) parts.push(`${maybeDup} may already be logged`)
   if (invalid) parts.push(`${invalid} need fixing`)
-  toast(parts.join(' · '), failed || timedOut || invalid ? 'error' : (dup ? 'error' : 'success'))
+  toast(parts.join(' · '), failed || timedOut || invalid || dup || maybeDup ? 'error' : 'success')
   // Drop the saved rows; keep failures/invalids/timeouts/duplicates in the grid.
   rows.value = rows.value.filter(r => r.saveStatus !== 'saved')
   // Persist the remaining state now (or clear the draft if the batch is done)
@@ -949,7 +995,9 @@ function rowClass(row) {
   return {
     'row-saving': row.saveStatus === 'saving',
     'row-error': row.saveStatus === 'error' || row.saveStatus === 'invalid',
-    'row-warn': row.saveStatus === 'timeout',
+    // 'maybe-duplicate' is amber, not the calm blue of a settled duplicate — it is
+    // the one row state that still needs a decision from the admin.
+    'row-warn': row.saveStatus === 'timeout' || row.saveStatus === 'maybe-duplicate',
     'row-dup': row.saveStatus === 'duplicate',
     // Same rule as the "verify date" hint: a row still queued/scanning has not
     // failed at anything yet, so it must not be tinted as needing attention —
@@ -972,6 +1020,7 @@ function statusBadge(row) {
   if (s === 'saved') return { label: 'Saved', tone: 'good' }
   if (s === 'saving') return { label: 'Saving…', tone: 'info' }
   if (s === 'duplicate') return { label: 'Duplicate', tone: 'info' }
+  if (s === 'maybe-duplicate') return { label: 'Already logged?', tone: 'warn' }
   if (s === 'timeout') return { label: 'Timed out', tone: 'warn' }
   if (s === 'error') return { label: 'Failed', tone: 'bad' }
   if (s === 'invalid') return { label: 'Needs fix', tone: 'bad' }
@@ -1130,6 +1179,8 @@ onUnmounted(() => {
 }
 .bulk-retry:hover:not(:disabled) { opacity: 0.85; }
 .bulk-retry:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Amber: an override that books money, so it should not look like a plain Retry. */
+.bulk-anyway { background: #b45309; white-space: nowrap; }
 .bulk-row-msg { font-size: 0.72rem; font-weight: 700; color: var(--text-dim); }
 .bulk-row-msg.err { color: var(--danger); }
 .bulk-row-msg.dup { color: var(--blue); }
