@@ -12570,6 +12570,63 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		}
 		// Store the stable one so future re-uploads collide regardless of processing.
 		if (sourceHash) receiptHash = sourceHash;
+
+		// CONTENT DEDUP — the hash check above only fires on identical BYTES, and
+		// that misses the most common real-world case: the driver logs a receipt
+		// from his phone, then the same photo is bulk-uploaded by an admin. The
+		// phone's HEIC is converted to JPEG client-side before upload, so the two
+		// never share a hash even though they are the same purchase. (2026-08-01:
+		// three such pairs — QuikTrip Conroe $500, Alvarado $450, Gardner $30 —
+		// were caught only by manual audit, after an earlier round of duplicates
+		// had already inflated the investor payout deduction.)
+		//
+		// Same merchant + same day + same amount is strong but NOT proof: a driver
+		// can genuinely fuel twice at one stop. So this WARNS rather than blocks —
+		// distinct code, and `allowDuplicate: true` lets the caller consciously
+		// override, mirroring the conscious per-row Retry used for save timeouts.
+		//
+		// OPT-IN, not role-gated. Whether a 409 is survivable is a property of the
+		// SURFACE, not the caller's role: only a form that can offer "save anyway"
+		// may ask for this check. `ExpensesTab` and `BulkReceiptScan` send
+		// checkDuplicate:true; the driver app does not — and a Super Admin can use
+		// the driver app (router: /driver allows Super Admin), where ExpenseForm
+		// clears the photo and every field the moment it submits. A 409 there would
+		// strand the user AND destroy the receipt, with no way to re-file it.
+		//
+		// Scoped to the SAME driver: the incident is one driver's receipt entered
+		// twice, so this keeps every real case while dropping the largest
+		// false-positive class (two trucks hitting one brand on one day for the
+		// same round prepaid amount — $500/$30 are exactly such amounts).
+		const wantsDuplicateCheck = req.body?.checkDuplicate === true && req.body?.allowDuplicate !== true;
+		const findContentDuplicate = () =>
+			db
+				.prepare(
+					`SELECT id, driver, amount, date, vendor FROM expenses
+					 WHERE vendor_normalized = ? AND date = ? AND ROUND(amount, 2) = ROUND(?, 2)
+					   AND LOWER(TRIM(COALESCE(driver, ''))) = LOWER(TRIM(?))
+					   AND COALESCE(status, '') != 'Rejected'
+					 ORDER BY id DESC LIMIT 1`,
+				)
+				.get(vendorNormalized, date, parsedAmount, driver || "");
+		if (wantsDuplicateCheck && vendorNormalized && parsedAmount > 0) {
+			const near = findContentDuplicate();
+			if (near) {
+				return res.status(409).json({
+					error: `Looks like this was already logged — expense #${near.id} (${near.vendor || vendorNormalized}, ${near.date}, $${near.amount}${near.driver ? `, ${near.driver}` : ""}). Save anyway if it is a separate purchase.`,
+					code: "POSSIBLE_DUPLICATE",
+					existingId: near.id,
+					existing: { id: near.id, driver: near.driver, amount: near.amount, date: near.date, vendor: near.vendor },
+				});
+			}
+		}
+		// An override books money against a warning a human dismissed. The original
+		// duplicates took a manual audit to find; leave something greppable so the
+		// next one doesn't.
+		let overrodeDuplicateOf = null;
+		if (req.body?.allowDuplicate === true && vendorNormalized && parsedAmount > 0) {
+			const near = findContentDuplicate();
+			if (near) overrodeDuplicateOf = near.id;
+		}
 		// Receipt: images keep the legacy path (silent drop on bad format —
 		// the driver flow is unchanged). PDFs are an admin/dispatcher-only
 		// addition (toll invoices etc.) and fail loudly on validation errors.
@@ -12635,6 +12692,10 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			.run(timestamp, driver, safeLoadId, type, parsedAmount, safeDescription, date, photoUrlOrPath,
 				parseFloat(gallons) || 0, parseFloat(odometer) || 0, expOwnerId, expTruckUnit, enrichCity, enrichState,
 				safeVendor, vendorNormalized, locLat, locLng, locSource, receiptHash, safeReceiptDetails);
+		if (overrodeDuplicateOf) {
+			logAudit(req, "expense_duplicate_override", "expense", String(result.lastInsertRowid),
+				`Logged despite matching expense #${overrodeDuplicateOf} (${safeVendor || vendorNormalized}, ${date}, $${parsedAmount}, ${driver})`);
+		}
 		notifyChange("expenses");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {

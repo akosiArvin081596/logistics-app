@@ -1147,6 +1147,41 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       isPdf && spoof.status === 200 && typeof spoof.body === "string" && spoof.body.startsWith("%PDF"));
   }
 
+  // ==========================================================================
+  // 107-110. Content-duplicate guard on POST /api/expenses.
+  //
+  // The byte-hash guard only catches identical FILES. It missed the real case:
+  // a driver logs a receipt from his phone, then the same photo is bulk-uploaded
+  // by an admin — the phone's HEIC is converted to JPEG client-side, so the two
+  // never share a hash. Three such pairs reached production (2026-08-01) and
+  // double-booked the P&L and the investor payout deduction.
+  //
+  // The guard is OPT-IN (checkDuplicate) because whether a 409 is survivable is a
+  // property of the surface: the admin forms can offer "save anyway", the driver
+  // app cannot (and a Super Admin can use the driver app). It is scoped to the
+  // same driver so two trucks hitting one brand on one day don't collide.
+  // ==========================================================================
+  const dupVendor = "QuikTrip #90210";
+  const dupDate = "2026-04-12";
+  const dupBody = { driver: "test", type: "Fuel", amount: 123.45, date: dupDate, vendor: dupVendor };
+
+  // Seed WITHOUT the flag, so re-running the suite never trips over its own row.
+  const dupA = await req("POST", "/api/expenses", dupBody, ac);
+  test("107. Expense POST without checkDuplicate is never blocked (driver-app path)",
+    dupA.status === 200 && dupA.body?.success === true);
+
+  const dupB = await req("POST", "/api/expenses", { ...dupBody, checkDuplicate: true }, ac);
+  test("108. Same driver/merchant/day/amount with checkDuplicate returns 409 POSSIBLE_DUPLICATE",
+    dupB.status === 409 && dupB.body?.code === "POSSIBLE_DUPLICATE" && Number.isInteger(dupB.body?.existingId));
+
+  const dupC = await req("POST", "/api/expenses", { ...dupBody, checkDuplicate: true, allowDuplicate: true }, ac);
+  test("109. allowDuplicate overrides the warning (a genuine second purchase)",
+    dupC.status === 200 && dupC.body?.success === true);
+
+  const dupD = await req("POST", "/api/expenses", { ...dupBody, driver: "test2", checkDuplicate: true }, ac);
+  test("110. Same merchant/day/amount for a DIFFERENT driver is not flagged",
+    dupD.status === 200 && dupD.body?.success === true);
+
   // Results
   console.log("");
   let p = 0, f = 0, s = 0;
