@@ -13762,6 +13762,15 @@ app.post(
 			if (!podBuffer) return res.status(400).json({ error: "POD not found for this load" });
 
 			const { buffer: rateconBuffer, fileName: rateconFileName, candidates: rateconCandidates } = await getRateConBytes(loadId, req.body);
+			// Say so plainly. The invoice still drafts without one (POD + the
+			// sheet's Payment column carry it), but brokers generally require the
+			// rate-con alongside the invoice, so an unattached one is the reason a
+			// payment later stalls. The preview modal warns the reviewer too.
+			if (!rateconBuffer || !rateconBuffer.length) {
+				console.warn(
+					`Draft invoice ${loadId}: no rate-con found (Drive folder, documents table and request body all empty) — drafting without it.`,
+				);
+			}
 
 			// 4) Extract the rate-con fields (deterministic text scan → Gemini fallback).
 			//    The Gemini fallback reuses the shared runRateConGemini() helper.
@@ -13771,6 +13780,10 @@ app.post(
 			//    (verified against real C.H. Robinson / Navisphere rate-cons).
 			const geminiExtract = GEMINI_API_KEY
 				? async (buf) => {
+						// Defensive: extractRateConFields already skips the call when
+						// there are no bytes, but this wrapper is the seam a future
+						// caller reaches for, and Buffer.from(null) throws.
+						if (!buf || !buf.length) return null;
 						const b64 = Buffer.from(buf).toString("base64");
 						if (!/^JVBERi/.test(b64)) return null;
 						return runRateConGemini(b64);
