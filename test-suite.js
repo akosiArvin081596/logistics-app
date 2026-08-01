@@ -1352,17 +1352,29 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     const after = (await req("GET", "/api/investor/payouts", null, ic)).body || {};
     const afterRow = (after.payouts || []).find(r => r.period === anyFinal.period);
 
+    // "Not lost" is checked on the expense row itself, NOT on this investor's
+    // accrual. The receipt is logged against a generic test driver who is not in
+    // any particular investor's driver set, so it correctly never enters their
+    // P&L — asserting their current month moved would be asserting a
+    // cross-investor leak, i.e. the opposite of what should happen.
+    const saved = (await req("GET", `/api/expenses/all?driver=test`, null, ac)).body;
+    const savedRow = (Array.isArray(saved) ? saved : saved?.expenses || [])
+      .find(e => e.id === post.body?.id);
+
     test("121. A receipt backdated into a finalized month cannot move it",
       post.status === 200
-      // The server says where it actually booked it, rather than moving money silently.
+      // The server states where it booked it rather than moving money silently.
       && post.body?.periodClosed === true
       && post.body?.postedPeriod === after.currentMonth?.period
       && post.body?.naturalPeriod === anyFinal.period
-      // The frozen figure is byte-identical.
+      // THE property: the frozen figure is byte-identical.
       && Number(afterRow?.amount) === Number(beforeRow?.amount)
       && Number(afterRow?.effectiveAmount) === Number(beforeRow?.effectiveAmount)
-      // ...and the money is not lost: the open month absorbed it.
-      && Number(after.currentMonth?.amountInProgress ?? 0) !== beforeCur);
+      // ...and nothing was lost: the row persisted, keeps its true purchase date,
+      // and carries the redirect that moved it into the open month.
+      && !!savedRow
+      && savedRow.date === `${anyFinal.period}-15`
+      && savedRow.posted_period === after.currentMonth?.period);
   }
 
   // Results

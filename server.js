@@ -21227,7 +21227,10 @@ app.put("/api/investor/config", requireRole("Super Admin", "Investor"), (req, re
 app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { driver, type, status, truck, from, to, state, region, q } = req.query;
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, created_at FROM expenses";
+		// posted_period is exposed so a receipt that was redirected out of a closed
+		// month is visible as such in the admin list — otherwise a March-dated row
+		// silently counting in August looks like a bug rather than the rule.
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, posted_period, created_at FROM expenses";
 		const conditions = [];
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
