@@ -101,7 +101,9 @@
           </div>
           <div class="current-meta">
             <span class="status-pill st-progress">in progress</span>
-            <span class="current-note">Accruing this month &mdash; not yet payable until the period closes.</span>
+            <span class="current-note">
+              Accruing this month &mdash; not yet payable until the period closes<template v-if="inv.currentMonth?.graceEndsAt">, with receipts accepted through {{ fmtDate(inv.currentMonth.graceEndsAt) }}</template>.
+            </span>
           </div>
         </div>
 
@@ -137,46 +139,84 @@
                      one that was never advanced. Mark it so the correction is
                      visible without digging through the audit trail. -->
                 <span v-if="p.reopenedAt" class="reopened-flag" :title="reopenTitle(p)">reopened</span>
+                <!-- Month is over but the books are still open for straggler
+                     receipts. The figure is still moving, so nothing can be
+                     settled yet — say why, and say until when. -->
+                <div v-if="p.phase === 'pending'" class="phase-note">
+                  in final settlement &middot; closes {{ fmtDate(p.graceEndsAt) }}
+                </div>
               </td>
               <td class="action-cell">
-                <button
-                  v-if="p.status === 'owed'"
-                  type="button"
-                  class="action-btn act-processing"
-                  :disabled="busyId === p.id"
-                  title="Move this payout from owed to processing"
-                  @click="advance(p, 'processing')"
-                >Mark Processing</button>
-                <button
-                  v-if="p.status !== 'paid'"
-                  type="button"
-                  class="action-btn act-paid"
-                  :disabled="busyId === p.id"
-                  title="Mark this payout as paid"
-                  @click="confirmPaid(inv, p)"
-                >Mark Paid</button>
+                <!-- Settling is blocked until the period closes. This is the whole
+                     point of the window: marking paid on day 1 and then hand-
+                     adjusting when a receipt lands on day 4 is the treadmill it
+                     exists to end. Server enforces the same rule (409
+                     PERIOD_NOT_FINALIZED) — this only avoids offering the click. -->
+                <template v-if="p.phase === 'pending'">
+                  <span class="await-note">Receipts open until {{ fmtDate(p.graceEndsAt) }}</span>
+                  <button
+                    type="button"
+                    class="action-btn act-finalize"
+                    :disabled="busyId === p.id"
+                    title="Close this month now — every receipt is in. Freezes the figure and publishes the statement."
+                    @click="openFinalize(p)"
+                  >Close now</button>
+                </template>
+                <template v-else>
+                  <button
+                    v-if="p.status === 'owed'"
+                    type="button"
+                    class="action-btn act-processing"
+                    :disabled="busyId === p.id"
+                    title="Move this payout from owed to processing"
+                    @click="advance(p, 'processing')"
+                  >Mark Processing</button>
+                  <button
+                    v-if="p.status !== 'paid'"
+                    type="button"
+                    class="action-btn act-paid"
+                    :disabled="busyId === p.id"
+                    title="Mark this payout as paid"
+                    @click="confirmPaid(inv, p)"
+                  >Mark Paid</button>
                 <!-- Reopen a settled row. The correction path for a payout
                      advanced by mistake — without it, "Mark Paid" is one click
                      and permanently books money that may never have been sent. -->
-                <button
-                  v-if="p.status !== 'owed'"
-                  type="button"
-                  class="action-btn act-reopen"
-                  :disabled="busyId === p.id"
-                  title="Move this payout back — it was advanced by mistake"
-                  @click="openReopen(inv, p)"
-                >Reopen</button>
-                <!-- Adjust only frozen (processing/paid) rows. An 'owed' row's
-                     amount still auto-refreshes from live expenses, so a manual
-                     adjustment there would double-count and drift on each reconcile. -->
-                <button
-                  v-if="p.status !== 'owed'"
-                  type="button"
-                  class="action-btn act-adjust"
-                  :disabled="busyId === p.id"
-                  title="Add or edit a settlement adjustment (e.g. receipts uploaded after this month was paid)"
-                  @click="openAdjust(inv, p)"
-                >{{ p.adjustment ? 'Edit Adj.' : 'Adjust' }}</button>
+                  <button
+                    v-if="p.status !== 'owed'"
+                    type="button"
+                    class="action-btn act-reopen"
+                    :disabled="busyId === p.id"
+                    title="Move this payout back — it was advanced by mistake"
+                    @click="openReopen(inv, p)"
+                  >Reopen</button>
+                  <!-- Adjust once the figure has stopped moving. Until the period
+                       is finalized, `amount` is refreshed from live earnings on
+                       every read, so a manual delta on top would be counted twice
+                       and drift again on the next reconcile. Keyed on the PERIOD
+                       (not the row's status) to match the server guard, which also
+                       means a finalized-but-unpaid row IS adjustable — the
+                       finalize -> correct -> pay flow. -->
+                  <button
+                    v-if="p.phase === 'finalized' || p.status !== 'owed'"
+                    type="button"
+                    class="action-btn act-adjust"
+                    :disabled="busyId === p.id"
+                    title="Add or edit a settlement adjustment (e.g. receipts that arrived after this month closed)"
+                    @click="openAdjust(inv, p)"
+                  >{{ p.adjustment ? 'Edit Adj.' : 'Adjust' }}</button>
+                  <!-- Reopening the whole month, distinct from reopening one
+                       payout row: this puts the books back in a state where late
+                       receipts count again, for every investor. -->
+                  <button
+                    v-if="p.phase === 'finalized'"
+                    type="button"
+                    class="action-btn act-reopen-period"
+                    :disabled="busyId === p.id"
+                    title="Reopen this month for everyone so late receipts count again"
+                    @click="openPeriodReopen(p)"
+                  >Reopen Month</button>
+                </template>
               </td>
             </tr>
           </tbody>
@@ -254,6 +294,72 @@
           <button type="button" class="btn-ghost" :disabled="reopenSaving" @click="closeReopen">Cancel</button>
           <button type="button" class="btn btn-primary" :disabled="reopenSaving || !reopenReason.trim()" @click="saveReopen">
             {{ reopenSaving ? 'Saving…' : 'Reopen payout' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Close-the-month confirm. Fleet-wide and one-way-ish: it freezes every
+         investor's figure for the period and publishes their statements, so it
+         asks first even though the sweep would do the same thing on its own. -->
+    <div v-if="finalizeTarget" class="adj-overlay" @click.self="closeFinalize">
+      <div class="adj-modal">
+        <div class="adj-modal-title">Close {{ finalizeTarget.periodLabel }}</div>
+        <div class="adj-modal-sub">Final settlement &mdash; all investors</div>
+
+        <div class="adj-facts">
+          <div class="adj-fact">
+            <span>Would close on its own</span><span class="mono">{{ fmtDate(finalizeTarget.graceEndsAt) }}</span>
+          </div>
+        </div>
+
+        <p class="adj-hint pay-warn">
+          Closing now freezes <strong>every investor's</strong> {{ finalizeTarget.periodLabel }} figure and publishes
+          their statements. Receipts dated in {{ finalizeTarget.periodLabel }} that arrive afterwards will be booked
+          to the current open month instead.
+          <br /><br />
+          Only do this if every receipt for {{ finalizeTarget.periodLabel }} is already in.
+        </p>
+
+        <div class="adj-actions">
+          <button type="button" class="btn-ghost" :disabled="periodSaving" @click="closeFinalize">Cancel</button>
+          <button type="button" class="btn btn-primary" :disabled="periodSaving" @click="savePeriodFinalize">
+            {{ periodSaving ? 'Closing…' : 'Close the month' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reopen the whole month. Distinct from reopening one payout row: this
+         puts the period back in "receipts still count" state for everyone. -->
+    <div v-if="periodReopenTarget" class="adj-overlay" @click.self="closePeriodReopen">
+      <div class="adj-modal">
+        <div class="adj-modal-title">Reopen {{ periodReopenTarget.periodLabel }}</div>
+        <div class="adj-modal-sub">Reopens the month for all investors</div>
+
+        <p class="adj-hint">
+          Still-owed payouts go back to tracking live earnings, so new receipts dated in
+          {{ periodReopenTarget.periodLabel }} will count again. Payouts already marked
+          <strong>processing</strong> or <strong>paid</strong> keep their settled figure &mdash; their statements
+          have already gone out.
+          <br /><br />
+          Receipts that were redirected to a later month while this one was closed <strong>stay there</strong>:
+          pulling them back would move two months at once.
+        </p>
+
+        <label class="adj-label">Reason (required)</label>
+        <textarea
+          v-model="periodReopenReason"
+          class="adj-textarea"
+          rows="2"
+          maxlength="500"
+          placeholder="e.g. A stack of fuel receipts for the month arrived late from the terminal"
+        ></textarea>
+
+        <div class="adj-actions">
+          <button type="button" class="btn-ghost" :disabled="periodSaving" @click="closePeriodReopen">Cancel</button>
+          <button type="button" class="btn btn-primary" :disabled="periodSaving || !periodReopenReason.trim()" @click="savePeriodReopen">
+            {{ periodSaving ? 'Saving…' : 'Reopen the month' }}
           </button>
         </div>
       </div>
@@ -421,6 +527,57 @@ function reopenTitle(p) {
   const who = p.reopenedBy ? ` by ${p.reopenedBy}` : ''
   const when = p.reopenedAt ? ` on ${fmtDate(p.reopenedAt)}` : ''
   return `Reopened${who}${when}${p.reopenReason ? ` — ${p.reopenReason}` : ''}`
+}
+
+// --- Month close / reopen ----------------------------------------------------
+// These act on the PERIOD, not on one payout row: a month is open or closed for
+// every investor at once. Closing normally happens by itself once the grace
+// window elapses; these are the "everything's in, close it now" and "we got that
+// wrong" overrides.
+const finalizeTarget = ref(null)        // a payout row, used only for its period
+const periodReopenTarget = ref(null)
+const periodReopenReason = ref('')
+const periodSaving = ref(false)
+
+function openFinalize(p) { finalizeTarget.value = p }
+function closeFinalize() { finalizeTarget.value = null }
+function openPeriodReopen(p) { periodReopenTarget.value = p; periodReopenReason.value = '' }
+function closePeriodReopen() { periodReopenTarget.value = null; periodReopenReason.value = '' }
+
+async function savePeriodFinalize() {
+  const t = finalizeTarget.value
+  if (!t || periodSaving.value) return
+  periodSaving.value = true
+  try {
+    const r = await api.post(`/api/periods/${t.period}/finalize`)
+    toast(`${t.periodLabel} closed — ${r.stamped} payout(s) frozen, statements published`)
+    finalizeTarget.value = null
+    await loadPayouts()
+  } catch (err) {
+    toast(err.message || 'Failed to close the month', 'error')
+  } finally {
+    periodSaving.value = false
+  }
+}
+
+async function savePeriodReopen() {
+  const t = periodReopenTarget.value
+  const reason = periodReopenReason.value.trim()
+  if (!t || !reason || periodSaving.value) return
+  periodSaving.value = true
+  try {
+    const r = await api.post(`/api/periods/${t.period}/reopen`, { reason })
+    // Surface what reopening did NOT undo rather than letting it be discovered
+    // later: receipts already booked to a later month stay there.
+    toast(r.note || `${t.periodLabel} reopened`, r.divertedReceipts ? 'warning' : 'success')
+    periodReopenTarget.value = null
+    periodReopenReason.value = ''
+    await loadPayouts()
+  } catch (err) {
+    toast(err.message || 'Failed to reopen the month', 'error')
+  } finally {
+    periodSaving.value = false
+  }
 }
 
 function openReopen(inv, p) {
@@ -772,6 +929,26 @@ onMounted(loadPayouts)
 /* Amber — a correction, not a normal step forward through the lifecycle. */
 .act-reopen { background: #fef3c7; color: #92400e; }
 .act-reopen:hover:not(:disabled) { background: #fde68a; }
+/* Slate — closing the month is an administrative act on the whole period, not a
+   step in one payout's lifecycle, so it reads differently from the pills above. */
+.act-finalize { background: #e2e8f0; color: #334155; }
+.act-finalize:hover:not(:disabled) { background: #cbd5e1; }
+.act-reopen-period { background: #fef3c7; color: #92400e; }
+.act-reopen-period:hover:not(:disabled) { background: #fde68a; }
+
+/* A month still inside its grace window: the figure is live, not settled. */
+.phase-note {
+  margin-top: 0.25rem;
+  font-size: 0.68rem;
+  color: var(--amber);
+  white-space: nowrap;
+}
+.await-note {
+  font-size: 0.68rem;
+  color: var(--text-dim, #64748b);
+  margin-right: 0.4rem;
+  white-space: nowrap;
+}
 
 .reopened-flag {
   margin-left: 0.4rem;
