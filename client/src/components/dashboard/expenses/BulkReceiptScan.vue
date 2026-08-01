@@ -511,13 +511,22 @@ async function runPool(items, worker, size) {
 // Every failure is swallowed and the un-enhanced image is returned — ScanKit can
 // 503 (disabled), 402 (out of credits) or 429 (rate limit), and none of those
 // may cost us the scan.
+// Cleanup is a nice-to-have, so one hard failure disables it for the rest of the
+// batch. Without this, a service that is off, out of credits or rate-limited is
+// re-asked once per receipt — 25 doomed round trips that delay every row and
+// make the grid look frozen. Resets per batch, so it self-heals once the service
+// is back. 402 = no credits, 503 = disabled/unconfigured, 401/403 = bad key.
+const ENHANCE_OFF_STATUS = new Set([401, 402, 403, 503])
+let enhanceDisabled = false
 async function enhanceImage(dataUrl) {
+  if (enhanceDisabled) return dataUrl
   try {
     const res = await scanDocument(dataUrl, { returnPdf: false, filter: 'flat' })
     const out = res?.data
     return out && OCRABLE_IMAGE_RE.test(out) ? out : dataUrl
-  } catch {
-    return dataUrl // keep the raw photo
+  } catch (err) {
+    if (ENHANCE_OFF_STATUS.has(err?.status)) enhanceDisabled = true
+    return dataUrl // keep the raw photo — scanning still runs on it
   }
 }
 
@@ -667,6 +676,7 @@ async function onFilesSelected(event) {
   processing.value = true
   progress.done = 0
   progress.total = added.length
+  enhanceDisabled = false // give cleanup a fresh chance each batch
   try {
     await runPool(added, processRow, OCR_CONCURRENCY)
   } finally {
