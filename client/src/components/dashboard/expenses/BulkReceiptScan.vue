@@ -136,11 +136,11 @@
                 v-model="row.date"
                 type="date"
                 class="bulk-cell"
-                :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.date, 'cell-warn': !row.date && row.saveStatus !== 'invalid' }"
+                :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.date, 'cell-warn': dateMissing(row) && row.saveStatus !== 'invalid' }"
                 :disabled="saving"
-                :title="!row.date ? 'Verify the purchase date — it was not read from the receipt' : ''"
+                :title="dateMissing(row) ? 'Verify the purchase date — it was not read from the receipt' : ''"
               />
-              <span v-if="!row.date" class="cell-hint-warn">verify date</span>
+              <span v-if="dateMissing(row)" class="cell-hint-warn">verify date</span>
             </td>
             <td class="col-type">
               <select v-model="row.type" class="bulk-cell" :disabled="saving">
@@ -229,10 +229,10 @@
                 v-model="row.date"
                 type="date"
                 class="bulk-cell"
-                :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.date, 'cell-warn': !row.date && row.saveStatus !== 'invalid' }"
+                :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.date, 'cell-warn': dateMissing(row) && row.saveStatus !== 'invalid' }"
                 :disabled="saving"
               />
-              <span v-if="!row.date" class="cell-hint-warn">Verify the purchase date — it was not read from the receipt.</span>
+              <span v-if="dateMissing(row)" class="cell-hint-warn">Verify the purchase date — it was not read from the receipt.</span>
             </label>
             <label class="bulk-field">
               <span class="bulk-field-label">Type</span>
@@ -342,6 +342,15 @@ const OCR_LABEL = {
   failed: 'Not read', ocr_off: 'Manual', skipped: 'PDF', limited: 'Retry',
 }
 
+// Still in flight — the scan hasn't had its chance yet. Nothing about a row in
+// one of these states should be reported as missing: telling someone to "verify
+// date — it was not read from the receipt" on a row that is literally still
+// Scanning… is both wrong and alarming, and it lit up every row of a fresh batch.
+const OCR_PENDING = new Set(['queued', 'scanning'])
+const scanFinished = (row) => !OCR_PENDING.has(row.ocrStatus)
+// A date is only "missing" once the scanner has finished and still didn't get one.
+const dateMissing = (row) => scanFinished(row) && !row.date
+
 // Rows that must NOT be re-sent by Save All: already saved, parked timeouts
 // (ambiguous — may have landed), and server-confirmed duplicates (a re-send
 // would just 409 again).
@@ -375,8 +384,10 @@ const anyDuplicate = computed(() => rows.value.some(r => r.saveStatus === 'dupli
 const duplicateCount = computed(() => rows.value.filter(r => r.saveStatus === 'duplicate').length)
 // A row needs its purchase date verified when OCR couldn't read one (date left
 // blank on purpose — see makeRow) and it hasn't been saved yet.
-const anyNeedsDate = computed(() => rows.value.some(r => !r.date && r.saveStatus !== 'saved'))
-const needsDateCount = computed(() => rows.value.filter(r => !r.date && r.saveStatus !== 'saved').length)
+// Only count rows the scanner has already finished with — otherwise a fresh
+// batch announces "12 need a purchase date verified" while it is still reading them.
+const anyNeedsDate = computed(() => rows.value.some(r => dateMissing(r) && r.saveStatus !== 'saved'))
+const needsDateCount = computed(() => rows.value.filter(r => dateMissing(r) && r.saveStatus !== 'saved').length)
 
 const pendingDraftWhen = computed(() => {
   const ts = pendingDraft.value?.updatedAt
