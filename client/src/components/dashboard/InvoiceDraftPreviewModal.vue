@@ -75,6 +75,16 @@
             <p v-else-if="isEdited" class="idp-hint">Edited — the draft will be addressed to this address.</p>
           </div>
 
+          <!-- No rate-con on file. Previously this only showed as a MISSING tab,
+               which reads as nothing at all — so an invoice could be approved and
+               sent without the rate confirmation the broker needs to pay it. -->
+          <div v-if="!ratecons.length" class="idp-warn" role="status">
+            <strong>No rate confirmation attached.</strong>
+            This load has no rate-con on file, so the draft will go out with only the
+            invoice and POD. Most brokers need the rate-con to process payment — attach
+            it to the load first if this one does.
+          </div>
+
           <dl class="idp-facts">
             <div class="idp-fact idp-fact-wide">
               <dt>Subject</dt>
@@ -530,6 +540,24 @@ async function approve() {
   background: #fef2f2;
   border: 1px solid #fecaca;
   color: #b91c1c;
+}
+
+/* Amber, not red — a missing rate-con is a "check this before you approve",
+   not a failure; the draft is still valid without one. */
+.idp-warn {
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+}
+
+.idp-warn strong {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.15rem;
 }
 
 .idp-footer {
