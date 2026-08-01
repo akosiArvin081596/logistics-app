@@ -235,7 +235,7 @@
                 <div class="bd-caption">How your share is calculated</div>
                 <dl class="bd-list">
                   <div
-                    v-for="(row, i) in waterfall(p.breakdown)"
+                    v-for="(row, i) in waterfall(p.breakdown, effective(p))"
                     :key="i"
                     class="bd-row"
                     :class="[`bd-${row.kind}`, { 'bd-highlight': row.highlight, 'bd-clickable': !!row.detailKey }]"
@@ -246,14 +246,15 @@
                     @keydown.enter.prevent="row.detailKey && openLineDetail(p.period, row.detailKey, p.periodLabel)"
                     @keydown.space.prevent="row.detailKey && openLineDetail(p.period, row.detailKey, p.periodLabel)"
                   >
-                    <dt class="bd-label">
+                    <dt v-if="row.kind === 'drift'" class="bd-driftnote">{{ row.label }}</dt>
+                    <dt v-else class="bd-label">
                       {{ row.label }}
                       <template v-if="row.detailKey">
                         <svg class="bd-chev" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
                         <span class="bd-view">view details</span>
                       </template>
                     </dt>
-                    <dd class="bd-value mono-sm">{{ row.display }}</dd>
+                    <dd v-if="row.kind !== 'drift'" class="bd-value mono-sm">{{ row.display }}</dd>
                   </div>
                 </dl>
                 <p class="bd-help">Your expenses are already subtracted here before the split.</p>
@@ -508,7 +509,16 @@ function ldSum(arr, key) {
 // are actually charged (> 0). Returns [] when breakdown is null/absent, so callers
 // that still render the panel simply get nothing — but they also v-if on breakdown.
 // This is the ONE place the earnings math is described; both surfaces read it.
-function waterfall(b) {
+// `settled` is the figure this month was actually settled at (amount + adjustment),
+// or null for the in-progress month, which has none yet. The waterfall is a LIVE
+// recompute from today's records, so once a month is settled the two can drift
+// apart — a receipt corrected or a duplicate removed after settlement moves the
+// recompute but never the frozen amount. Leaving the panel to end at the live
+// "Your Share" put a different number directly under the payout it was meant to
+// explain ($8,790 under a $8,703 payout), which reads as a bug. When they differ
+// the panel now closes on the settled figure and says why — the same
+// reconciliation the payout statement PDF prints.
+function waterfall(b, settled = null) {
   if (!b) return []
   const rows = []
   // Exact to the cent, matching the drill-down modal this waterfall opens — a
@@ -528,7 +538,24 @@ function waterfall(b) {
   if (Number(b.complianceCost || 0) > 0) add('− Compliance / IFTA', b.complianceCost, 'deduct')
   add('Net Profit', b.netProfit, 'subtotal')
   if (b.splitPct != null) rows.push({ label: `× ${b.splitPct}%`, kind: 'split', display: '' })
-  add('Your Share', b.monthShare, 'share')
+
+  // Settled months reconcile the live recompute against the frozen figure.
+  // Compared in whole cents so floating-point noise never invents a drift row.
+  const live = Number(b.monthShare) || 0
+  const drift = settled == null ? 0 : Math.round(live * 100) - Math.round(Number(settled) * 100)
+  if (settled == null || drift === 0) {
+    add('Your Share', live, 'share')
+    return rows
+  }
+  // Demote the live figure to an explanatory line; the settled amount is the
+  // one that matches the payout, so it gets the emphasised final row.
+  add('Recalculated today', live, 'restated')
+  add('Your Share', settled, 'share')
+  rows.push({
+    kind: 'drift',
+    label: `Settled at ${fmtCents(settled)}. Recalculating from today's records gives ${fmtCents(live)} — a ${fmtCents(Math.abs(drift) / 100)} difference from receipts corrected after this month was closed. Your payout is the settled figure.`,
+    display: '',
+  })
   return rows
 }
 
@@ -1039,6 +1066,26 @@ onMounted(loadPayouts)
 }
 .bd-share .bd-label,
 .bd-share .bd-value { font-weight: 800; color: #0f172a; }
+/* The live recompute on a settled month: shown for transparency but visibly
+   subordinate to the settled figure below it, so there is no doubt which number
+   is the payout. */
+.bd-restated .bd-label,
+.bd-restated .bd-value { color: #64748b; font-weight: 500; }
+/* Prose, not a figure. The parent .bd-row is flex, so the note takes the whole
+   width via flex:1 (grid-column would be a no-op here) and renders with no
+   value column beside it. */
+.bd-driftnote {
+  flex: 1;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: #64748b;
+  font-weight: 400;
+  text-align: left;
+}
+.bd-drift {
+  padding-top: 0.3rem;
+  align-items: flex-start;
+}
 .bd-help {
   margin: 0.55rem 0 0;
   font-size: 0.7rem;
