@@ -129,7 +129,7 @@
               </span>
             </td>
             <td class="col-amount">
-              <input v-model="row.amount" type="number" step="0.01" min="0" placeholder="0.00" class="bulk-cell" :disabled="saving" />
+              <input v-model="row.amount" type="number" step="0.01" min="0" :placeholder="pendingPlaceholder(row, '0.00')" class="bulk-cell" :disabled="saving" />
             </td>
             <td class="col-date">
               <input
@@ -140,7 +140,8 @@
                 :disabled="saving"
                 :title="dateMissing(row) ? 'Verify the purchase date — it was not read from the receipt' : ''"
               />
-              <span v-if="dateMissing(row)" class="cell-hint-warn">verify date</span>
+              <span v-if="!scanFinished(row) && !row.date" class="cell-hint-reading">reading&hellip;</span>
+              <span v-else-if="dateMissing(row)" class="cell-hint-warn">verify date</span>
             </td>
             <td class="col-type">
               <select v-model="row.type" class="bulk-cell" :disabled="saving">
@@ -148,16 +149,16 @@
               </select>
             </td>
             <td class="col-vendor">
-              <input v-model="row.vendor" type="text" placeholder="Vendor" class="bulk-cell" maxlength="80" :disabled="saving" />
+              <input v-model="row.vendor" type="text" :placeholder="pendingPlaceholder(row, 'Vendor')" class="bulk-cell" maxlength="80" :disabled="saving" />
             </td>
             <td class="col-city">
-              <input v-model="row.city" type="text" placeholder="City" class="bulk-cell" maxlength="60" :disabled="saving" />
+              <input v-model="row.city" type="text" :placeholder="pendingPlaceholder(row, 'City')" class="bulk-cell" maxlength="60" :disabled="saving" />
             </td>
             <td class="col-state">
               <input
                 v-model="row.state"
                 type="text"
-                placeholder="ST"
+                :placeholder="pendingPlaceholder(row, 'ST')"
                 class="bulk-cell bulk-cell-st"
                 maxlength="2"
                 :disabled="saving"
@@ -223,7 +224,7 @@
           <div class="bulk-card-fields">
             <label class="bulk-field">
               <span class="bulk-field-label">Amount *</span>
-              <input v-model="row.amount" type="number" step="0.01" min="0" placeholder="0.00" class="bulk-cell" :class="{ 'cell-error': row.saveStatus === 'invalid' && !(parseFloat(row.amount) > 0) }" :disabled="saving" />
+              <input v-model="row.amount" type="number" step="0.01" min="0" :placeholder="pendingPlaceholder(row, '0.00')" class="bulk-cell" :class="{ 'cell-error': row.saveStatus === 'invalid' && !(parseFloat(row.amount) > 0) }" :disabled="saving" />
             </label>
             <label class="bulk-field bulk-field-wide">
               <span class="bulk-field-label">Purchase date *</span>
@@ -234,7 +235,8 @@
                 :class="{ 'cell-error': row.saveStatus === 'invalid' && !row.date, 'cell-warn': dateMissing(row) && row.saveStatus !== 'invalid' }"
                 :disabled="saving"
               />
-              <span v-if="dateMissing(row)" class="cell-hint-warn">Verify the purchase date — it was not read from the receipt.</span>
+              <span v-if="!scanFinished(row) && !row.date" class="cell-hint-reading">Reading the receipt&hellip;</span>
+              <span v-else-if="dateMissing(row)" class="cell-hint-warn">Verify the purchase date — it was not read from the receipt.</span>
             </label>
             <label class="bulk-field">
               <span class="bulk-field-label">Type</span>
@@ -251,15 +253,15 @@
             </label>
             <label class="bulk-field bulk-field-wide">
               <span class="bulk-field-label">Vendor</span>
-              <input v-model="row.vendor" type="text" placeholder="Vendor" class="bulk-cell" maxlength="80" :disabled="saving" />
+              <input v-model="row.vendor" type="text" :placeholder="pendingPlaceholder(row, 'Vendor')" class="bulk-cell" maxlength="80" :disabled="saving" />
             </label>
             <label class="bulk-field">
               <span class="bulk-field-label">City</span>
-              <input v-model="row.city" type="text" placeholder="City" class="bulk-cell" maxlength="60" :disabled="saving" />
+              <input v-model="row.city" type="text" :placeholder="pendingPlaceholder(row, 'City')" class="bulk-cell" maxlength="60" :disabled="saving" />
             </label>
             <label class="bulk-field">
               <span class="bulk-field-label">State</span>
-              <input v-model="row.state" type="text" placeholder="ST" class="bulk-cell bulk-cell-st" maxlength="2" :disabled="saving" @input="row.state = row.state.toUpperCase()" />
+              <input v-model="row.state" type="text" :placeholder="pendingPlaceholder(row, 'ST')" class="bulk-cell bulk-cell-st" maxlength="2" :disabled="saving" @input="row.state = row.state.toUpperCase()" />
             </label>
           </div>
           <div v-if="row.saveError" class="bulk-card-err">{{ row.saveError }}</div>
@@ -352,6 +354,10 @@ const OCR_PENDING = new Set(['queued', 'scanning'])
 const scanFinished = (row) => !OCR_PENDING.has(row.ocrStatus)
 // A date is only "missing" once the scanner has finished and still didn't get one.
 const dateMissing = (row) => scanFinished(row) && !row.date
+// While a row is queued/scanning its blank fields are about to be FILLED BY the
+// scanner, so an empty box must not read as "type this in" — least of all the
+// amount, where a "0.00" placeholder looks like a real zero to correct.
+const pendingPlaceholder = (row, normal) => (scanFinished(row) ? normal : 'reading…')
 
 // Rows that must NOT be re-sent by Save All: already saved, parked timeouts
 // (ambiguous — may have landed), and server-confirmed duplicates (a re-send
@@ -1074,6 +1080,8 @@ onUnmounted(() => {
 /* Purchase-date needs verifying (OCR couldn't read one) — amber, not a hard error. */
 .bulk-cell.cell-warn { border-color: var(--amber); background: var(--amber-dim); }
 .cell-hint-warn { display: block; margin-top: 0.15rem; font-size: 0.64rem; font-weight: 600; color: var(--amber); }
+/* Same slot as the warning, but deliberately quiet — this is progress, not a problem. */
+.cell-hint-reading { display: block; margin-top: 0.15rem; font-size: 0.64rem; font-weight: 600; color: var(--text-dim); font-style: italic; }
 
 .bulk-cell-actions { display: flex; align-items: center; justify-content: center; gap: 0.25rem; }
 .bulk-remove { background: transparent; border: none; color: var(--text-dim); font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 0 0.2rem; }
