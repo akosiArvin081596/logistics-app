@@ -118,6 +118,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
+import { fmtYmd } from '../../utils/datetime'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -171,10 +172,9 @@ async function loadExpenses() {
   loading.value = false
 }
 
-function fmtDate(d) {
-  if (!d) return '—'
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
+// expenses.date is a bare 'YYYY-MM-DD' — see utils/datetime. Parsing it with
+// new Date() shows the previous day to every US-based investor.
+const fmtDate = (d) => fmtYmd(d)
 
 // City/State display: both -> "City, ST"; one -> that one; neither -> em-dash.
 // Read defensively — location_city/location_state may be absent until the

@@ -58,7 +58,7 @@
             <div class="shared-doc-name">{{ doc.file_name }}</div>
             <div class="shared-doc-meta">
               <span class="shared-doc-type">{{ doc.doc_type }}</span>
-              <span class="shared-doc-date">{{ formatDate(doc.uploaded_at) }}</span>
+              <span class="shared-doc-date">Uploaded {{ fmtTimestamp(doc.uploaded_at) }}</span>
             </div>
             <div v-if="doc.notes" class="shared-doc-notes">{{ doc.notes }}</div>
           </div>
@@ -108,7 +108,7 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/></svg>
           </div>
           <div class="kit-file-label">{{ doc.doc_name }}</div>
-          <div class="kit-file-type">Signed {{ formatDate(doc.signed_at) }}</div>
+          <div class="kit-file-type">Signed {{ fmtTimestamp(doc.signed_at) }}</div>
         </a>
       </div>
     </div>
@@ -129,7 +129,7 @@
             <div class="shared-doc-name">{{ doc.file_name }}</div>
             <div class="shared-doc-meta">
               <span class="shared-doc-type">{{ doc.doc_type }}</span>
-              <span class="shared-doc-date">{{ formatDate(doc.uploaded_at) }}</span>
+              <span class="shared-doc-date">Uploaded {{ fmtTimestamp(doc.uploaded_at) }}</span>
             </div>
             <div v-if="doc.notes" class="shared-doc-notes">{{ doc.notes }}</div>
           </div>
@@ -151,6 +151,7 @@ import { computed, ref } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
+import { fmtTimestamp } from '../../utils/datetime'
 import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 
 const api = useApi()
@@ -276,13 +277,6 @@ const visibleRows = computed(() => {
 
 function isUrl(val) {
   return /^https?:\/\//i.test(val || '')
-}
-
-function formatDate(ts) {
-  if (!ts) return ''
-  const d = new Date(ts)
-  if (isNaN(d.getTime())) return ''
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 </script>
 
@@ -484,6 +478,16 @@ function formatDate(ts) {
   margin-top: 0.25rem;
   font-size: 0.72rem;
   color: var(--text-dim);
+  /* Now that the date carries a time too, the badge + timestamp no longer fit
+     on one line on a narrow phone — wrap the timestamp under the badge rather
+     than letting it squeeze or clip against the View button. */
+  flex-wrap: wrap;
+  row-gap: 0.2rem;
+}
+/* Keep the timestamp on a single line so it never breaks mid-value
+   ("Aug 1, 2026," / "8:34 AM"). */
+.shared-doc-date {
+  white-space: nowrap;
 }
 .shared-doc-type {
   background: var(--accent-dim);

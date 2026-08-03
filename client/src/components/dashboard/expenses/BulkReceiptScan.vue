@@ -102,6 +102,9 @@
             <th class="col-amount">Amount *</th>
             <th class="col-date">Date *</th>
             <th class="col-type">Type</th>
+            <!-- Fuel only: cost-per-gallon and MPG are computed from this, so a
+                 blank leaves the receipt out of fuel analytics entirely. -->
+            <th class="col-gal">Gallons</th>
             <th class="col-vendor">Vendor</th>
             <th class="col-city">City</th>
             <th class="col-state">ST</th>
@@ -148,6 +151,26 @@
               <select v-model="row.type" class="bulk-cell" :disabled="saving">
                 <option v-for="t in expenseTypes" :key="t" :value="t">{{ t }}</option>
               </select>
+            </td>
+            <!-- Only meaningful for Fuel. Flagged when a fuel receipt has none,
+                 because that row then contributes nothing to cost-per-gallon or
+                 MPG — the failure that made 100% of bulk uploads useless for
+                 fuel analytics. Warn, never block: a prepay slip genuinely may
+                 not show gallons. -->
+            <td class="col-gal">
+              <input
+                v-if="row.type === 'Fuel'"
+                v-model="row.gallons"
+                type="number"
+                step="0.001"
+                min="0"
+                :placeholder="pendingPlaceholder(row, 'gal')"
+                class="bulk-cell"
+                :class="{ 'cell-warn': gallonsMissing(row) }"
+                :title="gallonsMissing(row) ? 'No gallons — this receipt won\'t count toward cost-per-gallon or MPG' : ''"
+                :disabled="saving"
+              />
+              <span v-else class="cell-na">—</span>
             </td>
             <td class="col-vendor">
               <input v-model="row.vendor" type="text" :placeholder="pendingPlaceholder(row, 'Vendor')" class="bulk-cell" maxlength="80" :disabled="saving" />
@@ -250,6 +273,20 @@
               <select v-model="row.type" class="bulk-cell" :disabled="saving">
                 <option v-for="t in expenseTypes" :key="t" :value="t">{{ t }}</option>
               </select>
+            </label>
+            <label v-if="row.type === 'Fuel'" class="bulk-field">
+              <span class="bulk-field-label">Gallons</span>
+              <input
+                v-model="row.gallons"
+                type="number"
+                step="0.001"
+                min="0"
+                :placeholder="pendingPlaceholder(row, 'gal')"
+                class="bulk-cell"
+                :class="{ 'cell-warn': gallonsMissing(row) }"
+                :disabled="saving"
+              />
+              <span v-if="gallonsMissing(row)" class="cell-hint-warn">No gallons — this receipt won't count toward cost-per-gallon or MPG.</span>
             </label>
             <label class="bulk-field">
               <span class="bulk-field-label">Driver *</span>
@@ -392,6 +429,14 @@ function dateSuspect(row) {
     : `dated ${m[1]} — check the year`
 }
 
+// A Fuel receipt with no gallons still saves, but it contributes nothing to
+// cost-per-gallon or MPG — so it is worth flagging in the grid while the person
+// still has the image in front of them. Only fires once the scan has finished,
+// so it doesn't shout at a row that is still being read.
+function gallonsMissing(row) {
+  return row.type === 'Fuel' && scanFinished(row) && !(parseFloat(row.gallons) > 0)
+}
+
 // "2026-06" -> "June 2026", for telling the filer where a redirected receipt
 // actually landed.
 function monthName(period) {
@@ -497,6 +542,11 @@ function makeRow(file, fileHash = '') {
     city: '',
     state: '',
     driver: defaultDriver.value,
+    // Fuel quantity + odometer. OCR fills these (see ocrRow); they are what
+    // cost-per-gallon and MPG are computed from, so a blank here is a hole in
+    // fuel analytics rather than a cosmetic gap.
+    gallons: '',
+    odometer: '',
     confidence: '',
     // OCR-parsed dynamic details ({label,value}[]) — carried through to create
     // like amount/vendor; stays [] until a successful read fills it (processRow).
@@ -568,6 +618,14 @@ async function ocrRow(row) {
     if (data.city != null) row.city = String(data.city)
     if (data.state != null) row.state = String(data.state).toUpperCase().slice(0, 2)
     if (data.suggestedType && props.expenseTypes.includes(data.suggestedType)) row.type = data.suggestedType
+    // Gallons/odometer were being read by the OCR and then thrown away: this grid
+    // used to post a hardcoded `gallons: 0, odometer: 0`, so EVERY bulk-uploaded
+    // fuel receipt landed with no gallons — 19 of 19 in production, while
+    // individually-entered ones were only 10% short. Cost-per-gallon and MPG in
+    // fuel-analytics are derived from these columns, so the bulk path was
+    // silently excluded from both.
+    if (data.gallons != null) row.gallons = String(data.gallons)
+    if (data.odometer != null) row.odometer = String(data.odometer)
     // Dynamic details ride along unedited (default [] for older/no-key responses).
     row.receiptDetails = Array.isArray(data.details) ? data.details : []
     // A 200 whose every field is null is NOT a read. Reporting it as "Read · low"
@@ -781,6 +839,10 @@ function serializeRow(r) {
     amount: r.amount,
     date: r.date,
     type: r.type,
+    // Carried through the draft too, or a batch resumed on another device loses
+    // the gallons the OCR read and silently saves zeros again.
+    gallons: r.gallons,
+    odometer: r.odometer,
     vendor: r.vendor,
     city: r.city,
     state: r.state,
@@ -838,6 +900,8 @@ function hydrateDraft(draftRows) {
     amount: r.amount ?? '',
     date: r.date || '',
     type: r.type || 'Fuel',
+    gallons: r.gallons ?? '',
+    odometer: r.odometer ?? '',
     vendor: r.vendor || '',
     city: r.city || '',
     state: r.state || '',
@@ -901,8 +965,10 @@ async function saveOne(row) {
       allowDuplicate: row.allowDuplicate === true,
       receiptDetails: row.receiptDetails || [],
       loadId: '',
-      gallons: 0,
-      odometer: 0,
+      // Send what the OCR actually read. These were hardcoded to 0, which is why
+      // 100% of bulk-uploaded fuel receipts had no gallons.
+      gallons: parseFloat(row.gallons) || 0,
+      odometer: parseFloat(row.odometer) || 0,
     }, { timeout: 30000 })
     row.saveStatus = 'saved'
     // The receipt's own month was already closed, so it books to the current open
@@ -1161,6 +1227,8 @@ onUnmounted(() => {
 .col-amount { width: 100px; }
 .col-date { width: 148px; }
 .col-type { width: 120px; }
+.col-gal { width: 86px; }
+.cell-na { color: #cbd5e1; }
 .col-state { width: 56px; }
 .col-remove { width: 76px; text-align: center; }
 

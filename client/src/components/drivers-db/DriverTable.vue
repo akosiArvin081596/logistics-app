@@ -124,7 +124,7 @@
                   <div class="doc-name">{{ doc.doc_name }}</div>
                   <div v-if="doc.signed" class="doc-meta">
                     Signed by <b>{{ doc.signature_text }}</b>
-                    <span v-if="doc.signed_at"> · {{ new Date(doc.signed_at).toLocaleDateString() }}</span>
+                    <span v-if="doc.signed_at"> · {{ fmtTimestamp(doc.signed_at) }}</span>
                   </div>
                   <div v-else class="doc-meta doc-pending">Not signed</div>
                 </div>
@@ -147,7 +147,7 @@
                     <span :class="docsData.drugTest.result === 'pass' ? 'dt-pass' : 'dt-fail'">
                       {{ docsData.drugTest.result.toUpperCase() }}
                     </span>
-                    <span v-if="docsData.drugTest.uploaded_at"> · {{ new Date(docsData.drugTest.uploaded_at).toLocaleDateString() }}</span>
+                    <span v-if="docsData.drugTest.uploaded_at"> · Uploaded {{ fmtTimestamp(docsData.drugTest.uploaded_at) }}</span>
                   </div>
                 </div>
                 <a v-if="docsData.drugTest.file_url" :href="docsData.drugTest.file_url" target="_blank" class="doc-link">View File</a>
@@ -305,6 +305,7 @@
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
+import { fmtTimestamp } from '../../utils/datetime'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import StarRating from '../shared/StarRating.vue'

@@ -8,7 +8,7 @@
           <span :class="['doc-badge', `badge-${doc.type.toLowerCase()}`]">{{ doc.type }}</span>
           <div class="doc-meta">
             <span class="doc-name">{{ doc.file_name }}</span>
-            <span class="doc-date">{{ formatDate(doc.uploaded_at) }}</span>
+            <span class="doc-date">Uploaded {{ fmtTimestamp(doc.uploaded_at) }}</span>
           </div>
         </div>
         <a
@@ -38,6 +38,7 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
+import { fmtTimestamp } from '../../utils/datetime'
 
 const props = defineProps({
   loadId: { type: String, required: true },
@@ -71,13 +72,6 @@ async function fetchDocs() {
   } finally {
     loading.value = false
   }
-}
-
-function formatDate(str) {
-  if (!str) return ''
-  const d = new Date(str)
-  if (isNaN(d)) return str
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
 }
 
 // Expose refresh method for parent
@@ -151,6 +145,9 @@ watch(() => props.loadId, fetchDocs)
 .doc-date {
   font-size: 0.65rem;
   color: var(--text-dim);
+  /* Single line so the timestamp never breaks mid-value on a phone. The name
+     above it already ellipsises; the date is short enough to just not wrap. */
+  white-space: nowrap;
 }
 
 .doc-link {

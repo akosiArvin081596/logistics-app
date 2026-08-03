@@ -39,7 +39,7 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/></svg>
           </div>
           <div class="ob-doc-name">{{ doc.doc_name }}</div>
-          <div class="ob-doc-meta">Signed {{ fmtDate(doc.signed_at) }}</div>
+          <div class="ob-doc-meta">Signed {{ fmtTimestamp(doc.signed_at) }}</div>
         </a>
       </div>
     </div>
@@ -66,7 +66,7 @@
           </td>
           <td class="file-name">{{ doc.file_name }}</td>
           <td class="notes-col">{{ doc.notes || '\u2014' }}</td>
-          <td class="date-col">{{ fmtDate(doc.uploaded_at) }}</td>
+          <td class="date-col">{{ fmtTimestamp(doc.uploaded_at) }}</td>
           <td class="by-col">{{ doc.uploaded_by }}</td>
           <td>
             <a :href="doc.file_url" target="_blank" rel="noopener" class="btn-view">View</a>
@@ -92,6 +92,12 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
+// uploaded_at / signed_at are real INSTANTS, not date-only values, so they
+// convert to the viewer's zone and carry a time — the client asked every upload
+// table to show date AND time. Replaces a local date-only fmtDate that also read
+// the then-unzoned uploaded_at as local, landing ~8h early and rolling the day
+// back for anything stamped 00:00-05:59 UTC.
+import { fmtTimestamp } from '../../utils/datetime'
 
 const props = defineProps({
   truckId: { type: Number, default: null },
@@ -238,11 +244,6 @@ async function remove(doc) {
   }
 }
 
-function fmtDate(ts) {
-  if (!ts) return '\u2014'
-  return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
 async function loadOnboardingDocs() {
   try {
     const params = props.investorId ? `?investor_id=${props.investorId}` : ''
@@ -326,7 +327,11 @@ onMounted(() => {
 }
 .file-name { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; }
 .notes-col { color: var(--text-dim); font-size: 0.78rem; max-width: 180px; }
-.date-col { color: var(--text-dim); font-size: 0.75rem; white-space: nowrap; }
+/* Was nowrap while this held a date only. Now it carries a time too, and this
+   table renders inside modals that cap at ~640-700px and clip horizontally, so
+   forcing one line squeezes the File/Notes columns. Wrapping lets it break after
+   the date and drop the time to a second, still-subdued line. */
+.date-col { color: var(--text-dim); font-size: 0.75rem; }
 .by-col { color: var(--text-dim); font-size: 0.75rem; }
 
 .btn-view {
