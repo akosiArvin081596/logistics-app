@@ -1268,7 +1268,9 @@ const preOcrSnapshot = ref(null)
 // Download Receipts (Super Admin only) — ZIP bundle endpoint
 const truckList = ref([])
 // Computed so a long-lived tab that crosses midnight still clamps correctly.
-const todayIso = computed(() => new Date().toISOString().slice(0, 10))
+// en-CA gives the LOCAL day; toISOString() gives the UTC one, which after 7pm
+// Houston would let the user pick tomorrow.
+const todayIso = computed(() => new Date().toLocaleDateString('en-CA'))
 const downloadForm = reactive({ truck: '', from: '', to: '' })
 const downloadLoading = ref(false)
 const downloadError = ref('')
@@ -1766,7 +1768,10 @@ const maintForm = reactive({
   type: 'contribution',
   amount: '',
   truck: '',
-  date: new Date().toISOString().split('T')[0],
+  // Local day, NOT toISOString(): the UTC day is already tomorrow after 7pm
+  // Houston, and this date is the month key the investor payout books against —
+  // a Jul 31 evening PM service would otherwise land in August.
+  date: new Date().toLocaleDateString('en-CA'),
   description: '',
 })
 
@@ -1774,7 +1779,10 @@ const maintForm = reactive({
 const ifta = ref({})
 const iftaLoading = ref(true)
 const iftaStart = ref('2026-01-01')
-const iftaEnd = ref(new Date().toISOString().slice(0, 10))
+// Houston day, not the UTC day: after 7 PM Houston toISOString() is already
+// tomorrow, which defaulted this tax-report range end to a day that hasn't
+// happened yet.
+const iftaEnd = ref(new Date().toLocaleDateString('en-CA'))
 const fees = ref({})
 const feeSubmitting = ref(false)
 const feeForm = reactive({
@@ -1904,7 +1912,9 @@ async function submitFee() {
 async function markFeePaid(id) {
   try {
     await api.put(`/api/compliance/fees/${id}`, {
-      paidDate: new Date().toISOString().split('T')[0],
+      // Local day, NOT toISOString() — the UTC day rolls at 7pm Houston, and
+      // paid_date is another payout month key.
+      paidDate: new Date().toLocaleDateString('en-CA'),
     })
     toast('Fee marked as paid', 'success')
     await loadIfta()

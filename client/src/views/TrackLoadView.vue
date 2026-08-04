@@ -155,7 +155,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { io } from 'socket.io-client'
 import StatusTimeline from '../components/shared/StatusTimeline.vue'
 import DriverRouteMap from '../components/driver/DriverRouteMap.vue'
-import { parseSheetUtc } from '../utils/datetime'
+import { parseSheetStamp } from '../utils/datetime'
 
 const route = useRoute()
 const router = useRouter()
@@ -372,11 +372,11 @@ function formatEta(minutes) {
 
 function formatFriendlyDate(ts) {
   if (!ts) return ''
-  // parseSheetUtc reads the bare sheet strings (scheduledPickup/Delivery,
+  // parseSheetStamp reads the bare sheet strings (scheduledPickup/Delivery,
   // deliveredAt — "M/D/YYYY H:MM") as UTC, while ISO actuals (…Z) fall through
   // to new Date() unchanged. Matches the Completed tab + Status Timeline so the
   // tracker no longer renders UTC-as-local. timeZoneName labels the viewer zone.
-  const d = parseSheetUtc(ts)
+  const d = parseSheetStamp(ts)
   if (!d || isNaN(d)) return String(ts)
   return d.toLocaleString('en-US', {
     month: 'short', day: 'numeric', year: 'numeric',

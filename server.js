@@ -1016,12 +1016,19 @@ const insertInvoiceSeqStmt = db.prepare(`
 	ON CONFLICT(day) DO UPDATE SET n = n + 1
 	RETURNING n
 `);
-function nextInvoiceNumber(date = new Date()) {
+// MMDDYYYY key. Houston, not server-local: this string is the visible invoice
+// number on the broker PDF, the email subject, and the filename, and the VPS runs
+// UTC — so an invoice raised 8:30 PM Houston on Jul 31 went out as 08012026-1,
+// the wrong day AND the wrong month for broker aging terms. It also rolled the
+// per-day counter at 7 PM Houston instead of midnight.
+function invoiceSeqDayKey(date = new Date()) {
 	const d = date instanceof Date ? date : new Date(date);
-	const day =
-		String(d.getMonth() + 1).padStart(2, "0") +
-		String(d.getDate()).padStart(2, "0") +
-		d.getFullYear();
+	const [y, m, day] = houstonDay(d).split("-");
+	return `${m}${day}${y}`;
+}
+
+function nextInvoiceNumber(date = new Date()) {
+	const day = invoiceSeqDayKey(date);
 	const row = insertInvoiceSeqStmt.get(day);
 	return `${day}-${row.n}`;
 }
@@ -1030,11 +1037,7 @@ function nextInvoiceNumber(date = new Date()) {
 // preview never burns a real invoice number.
 const peekInvoiceSeqStmt = db.prepare("SELECT n FROM bison_invoice_seq WHERE day = ?");
 function peekInvoiceNumber(date = new Date()) {
-	const d = date instanceof Date ? date : new Date(date);
-	const day =
-		String(d.getMonth() + 1).padStart(2, "0") +
-		String(d.getDate()).padStart(2, "0") +
-		d.getFullYear();
+	const day = invoiceSeqDayKey(date);
 	const row = peekInvoiceSeqStmt.get(day);
 	return `${day}-${(row ? row.n : 0) + 1}`;
 }
@@ -3138,7 +3141,7 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 		// display everything the applicant submitted. SSN is kept out of the
 		// application object and returned as a separate, Super-Admin-only field.
 		const fullApplication = db.prepare(
-			"SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)"
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)"
 		).get(user.id);
 		let ssn = null;
 		let application = null;
@@ -3477,7 +3480,8 @@ app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
 				ja.id, ja.full_name, ja.email, ja.phone, ja.dob, ja.address,
 				ja.drivers_license, ja.position, ja.experience, ja.has_cdl,
 				ja.work_authorized, ja.felony_convicted, ja.accident_history,
-				ja.certifications, ja.status, ja.created_at, ja.deleted_at,
+				ja.certifications, ja.status,
+				strftime('%Y-%m-%dT%H:%M:%SZ', ja.created_at) AS created_at, ja.deleted_at,
 				ja.city, ja.state, ja.zip, ja.cell, ja.dot, ja.mc, ja.hazmat,
 				do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result
 			FROM job_applications ja
@@ -3539,7 +3543,8 @@ app.post("/api/applications/:id/restore", requireRole("Super Admin"), (req, res)
 // SSN, skills, references, availability, etc. Used by the detail modal.
 app.get("/api/applications/:id", requireRole("Super Admin"), (req, res) => {
 	try {
-		const row = db.prepare(`SELECT ja.*, do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result
+		const row = db.prepare(`SELECT ja.*, do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result,
+				strftime('%Y-%m-%dT%H:%M:%SZ', ja.created_at) AS created_at
 			FROM job_applications ja
 			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
 			WHERE ja.id = ?`).get(Number(req.params.id));
@@ -5465,7 +5470,11 @@ async function checkAndCompleteOnboarding(userId) {
 		}
 		return { ...ob, status: "fully_onboarded", onboarded_at: now };
 	}
-	return db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
+	// created_at is UTC CURRENT_TIMESTAMP with no zone marker; onboarded_at is
+	// already app-set ISO-Z. Wrap created_at so both read as UTC on the client.
+	return db.prepare(
+		"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
+	).get(userId);
 }
 
 // GET /api/onboarding — list all onboarding records (Super Admin)
@@ -5473,7 +5482,8 @@ app.get("/api/onboarding", requireRole("Super Admin"), (req, res) => {
 	try {
 		const records = db.prepare(`
 			SELECT o.*, u.username, u.email,
-				(SELECT COUNT(*) FROM onboarding_documents WHERE user_id = o.user_id AND signed = 1) AS signed_count
+				(SELECT COUNT(*) FROM onboarding_documents WHERE user_id = o.user_id AND signed = 1) AS signed_count,
+				strftime('%Y-%m-%dT%H:%M:%SZ', o.created_at) AS created_at
 			FROM driver_onboarding o
 			JOIN users u ON u.id = o.user_id
 			ORDER BY o.created_at DESC
@@ -5492,7 +5502,9 @@ app.get("/api/onboarding/:userId", requireAuth, (req, res) => {
 		if (req.session.user.role === "Driver" && req.session.user.id !== userId) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
-		const onboarding = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
+		const onboarding = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
+		).get(userId);
 		if (!onboarding) return res.status(404).json({ error: "No onboarding record" });
 		const documents = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId);
 		res.json({ onboarding, documents, totalDocs: ONBOARDING_DOCS.length });
@@ -5728,6 +5740,82 @@ function isAfterDeadline(weekEndDate) {
 	return now > deadline;
 }
 
+// The DAY we switched the Job Tracking date stamps from UTC to Houston time.
+// A stamp dated before this is a UTC wall-clock string; on/after it is a Houston
+// (America/Chicago) wall-clock string. Mirrored in client/src/utils/datetime.js
+// as SHEET_STAMP_TZ_CUTOVER — the two MUST agree, because this is the only way a
+// reader can tell the eras apart: both use the identical "MM/DD/YYYY H:MM:SS"
+// shape with no zone marker.
+//
+// A DAY rather than an instant on purpose. The eras differ by only 5-6 hours, so
+// an instant comparison is ambiguous for stamps written near the boundary, while
+// the date part is a plain string compare.
+//
+// It is set to the HOUSTON day of the deploy, not the UTC day. Houston is behind
+// UTC, so around the switch the eras overlap in BOTH directions: the old code was
+// still writing "08/04" stamps while the new code writes "08/03" ones. Dating the
+// cutover to the Houston day is what makes every NEW stamp classify correctly
+// from the first one onward.
+//
+// Residual exposure, measured against production before choosing this date: one
+// legacy cell (load 2216467, "08/03/2026 13:28:33"). Read as Houston rather than
+// UTC it keeps the SAME day, so only its displayed time shifts; no day bucket and
+// no money figure moves.
+//
+// Historical rows are deliberately NOT rewritten (client decision 2026-08-04:
+// no restatement of closed months), so this boundary is permanent.
+const SHEET_STAMP_TZ_CUTOVER = "2026-08-03";
+
+// "Now" as a Houston wall-clock stamp, in the EXACT legacy format:
+// MM/DD/YYYY H:MM:SS — zero-padded month/day/minute/second, UNPADDED hour.
+//
+// WHY: this used to be built from new Date() getters, which on the UTC VPS
+// produced a UTC wall-clock. Houston is UTC-5/-6, so any load delivered in the
+// evening was stamped with the NEXT day's date. Measured on production: 23 of
+// 268 status changes (9%) were mis-dated, which put $1,100 of June revenue into
+// July. The date part of this string is what decides a load's revenue month,
+// invoice week, and driver-pay day, so the zone here is a money question, not a
+// display one.
+//
+// Intl/formatToParts rather than the toLocaleString->new Date() round-trip used
+// by getWeekRange above: that older trick re-parses a localized string and is
+// both locale-fragile and wrong across a DST transition. formatToParts asks the
+// zone database directly and is DST-safe by construction.
+//
+// The format is preserved byte-for-byte on purpose. Every server-side parser of
+// this column (parseInvoiceDate, the three parseSheetDate copies) matches
+// /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/ — anchored at the start and
+// discarding the time — so they keep working untouched and simply see the
+// correct date. Appending a zone suffix would have been self-describing but
+// risks every unknown downstream consumer (n8n, the archive sheet, exports).
+function houstonStamp(d = new Date()) {
+	const p = new Intl.DateTimeFormat("en-US", {
+		timeZone: "America/Chicago",
+		year: "numeric", month: "2-digit", day: "2-digit",
+		hour: "2-digit", minute: "2-digit", second: "2-digit",
+		hourCycle: "h23",
+	})
+		.formatToParts(d)
+		.reduce((acc, part) => (acc[part.type] = part.value, acc), {});
+	// parseInt strips the pad so the hour matches the old getHours() output.
+	return `${p.month}/${p.day}/${p.year} ${parseInt(p.hour, 10)}:${p.minute}:${p.second}`;
+}
+
+// Today's date in Houston as "YYYY-MM-DD".
+//
+// Replaces new Date().toISOString().split("T")[0], which is the UTC day: after
+// 7 PM Houston (6 PM in winter) that is already TOMORROW. It stamps a new
+// load's "Assigned Date" — and per the financials convention revenue counts in
+// the month a load was ASSIGNED — so an evening load booked on the 31st was
+// being credited to the following month before anyone touched it.
+function houstonDay(d = new Date()) {
+	// en-CA renders as YYYY-MM-DD, which is exactly the shape we want.
+	return new Intl.DateTimeFormat("en-CA", {
+		timeZone: "America/Chicago",
+		year: "numeric", month: "2-digit", day: "2-digit",
+	}).format(d);
+}
+
 function generateInvoiceNumber(driverName, weekStart) {
 	const initials = driverName.split(/\s+/).map(w => w[0]).join("").toUpperCase().slice(0, 3);
 	const d = new Date(weekStart);
@@ -5826,13 +5914,21 @@ const EXPENSE_PERIOD_EXPR =
 // guard below is inert and the ledger is byte-identical to before.
 const PERIOD_FINALIZE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PERIOD_FINALIZE_ENABLED ?? "").trim());
 
-// 'YYYY-MM-DD' for the current America/New_York calendar day. ET throughout, not
-// server-local: the close deadline is shown to the client in ET, and a lock that
-// fires a day off from what the UI promised is its own support ticket.
-function todayKeyET() {
+// 'YYYY-MM-DD' for the current America/Chicago calendar day. Central, not
+// server-local: the close deadline is shown to the client in business time, and a
+// lock that fires a day off from what the UI promised is its own support ticket.
+//
+// This used to run on America/New_York. The carrier is in HOUSTON, and Eastern is
+// one hour AHEAD of Central, so the ET day flipped first and the books froze at
+// 23:00 Houston on the final grace day rather than midnight — a receipt logged at
+// 23:15 on day 7 missed the window the UI had promised. It also posted a receipt
+// logged 23:30 on the last day of a month into the NEXT month. Central is the zone
+// BUSINESS_DAY_TZ, getWeekRange, isAfterDeadline and houstonStamp already use; ET
+// was the outlier.
+function todayKeyCT() {
 	const p = {};
 	for (const x of new Intl.DateTimeFormat("en-US", {
-		timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+		timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit",
 	}).formatToParts(new Date())) p[x.type] = x.value;
 	return `${p.year}-${p.month}-${p.day}`;
 }
@@ -5841,8 +5937,8 @@ function todayKeyET() {
 // misses its own month's close gets posted into. Never a future month: posting
 // forward would put an expense in a period with no earnings row to absorb it and
 // break the ledger's reconciliation identity.
-function currentMonthKeyET() {
-	return todayKeyET().slice(0, 7);
+function currentMonthKeyCT() {
+	return todayKeyCT().slice(0, 7);
 }
 
 // Configured grace window, clamped to something sane. 0 = close at month end
@@ -5871,7 +5967,7 @@ function graceEndsAt(period, days) {
 // Is `period`'s grace window over? Pure clock arithmetic — no DB, no Sheets.
 function isPastGrace(period, days) {
 	const ends = graceEndsAt(period, days);
-	return !!ends && todayKeyET() > ends;
+	return !!ends && todayKeyCT() > ends;
 }
 
 const periodLockStmt = db.prepare("SELECT status FROM period_locks WHERE period = ?");
@@ -5894,7 +5990,7 @@ function isLocked(period) {
 function isPending(period) {
 	if (!PERIOD_FINALIZE_ENABLED) return false;
 	const p = String(period || "");
-	return !!p && p < currentMonthKeyET() && !isLocked(p);
+	return !!p && p < currentMonthKeyCT() && !isLocked(p);
 }
 
 // JS mirror of EXPENSE_PERIOD_EXPR for a row already in hand — same precedence
@@ -5923,7 +6019,7 @@ function periodPhase(period) {
 	if (!p) return "";
 	if (isLocked(p)) return "finalized";
 	if (!PERIOD_FINALIZE_ENABLED) return "";
-	return p >= currentMonthKeyET() ? "accruing" : "pending";
+	return p >= currentMonthKeyCT() ? "accruing" : "pending";
 }
 
 // Returns { [driver_name_lc]: { [yyyy-mm]: total, _total: allTime } } summing
@@ -6257,7 +6353,7 @@ async function generateInvoiceHandler(req, res) {
 		// (admin-created) invoices never block a weekly regenerate — the partial
 		// unique index idx_invoices_driver_week applies the same scoping.
 		const existing = db.prepare(
-			"SELECT * FROM invoices WHERE LOWER(driver) = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0"
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE LOWER(driver) = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0"
 		).get(driverName.toLowerCase(), weekStart);
 		if (existing && existing.status !== "Draft") {
 			return res.status(409).json({
@@ -6387,8 +6483,26 @@ async function generateInvoiceHandler(req, res) {
 		const unitToVid = {};
 		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''")
 			.all().forEach(t => { unitToVid[t.u] = t.vid; });
-		const weekStartMs = new Date(weekStart + "T00:00:00").getTime();
-		const weekEndMs = new Date(computedWeekEnd + "T00:00:00").getTime() + 24 * 3600 * 1000;
+		// Central midnight, not server-local midnight. getEldTravelDaysByVehicle
+		// buckets each ping into the TRUCK'S local day, but this window was built
+		// with new Date("...T00:00:00"), which on the UTC VPS is UTC midnight — so
+		// the window sat ~5-6 h ahead of the buckets it feeds. Pings from Friday
+		// 19:00-23:59 Central on the LAST day of the billing week fell past
+		// weekEndMs and were never fetched, so a truck that moved only on Friday
+		// evening silently lost that active day — one daily rate ($250 default).
+		const centralMidnightMs = (ymd) => {
+			const guess = Date.parse(ymd + "T00:00:00Z");
+			const parts = new Intl.DateTimeFormat("en-US", {
+				timeZone: "America/Chicago", hour: "2-digit", hourCycle: "h23",
+			}).formatToParts(new Date(guess));
+			const h = Number(parts.find((x) => x.type === "hour").value);
+			// h is how far Central already is into the day at UTC midnight; adding
+			// (24 - h) walks forward to the next Central midnight. DST-safe because
+			// the offset is read from the zone database at that very instant.
+			return guess + ((24 - h) % 24) * 3600 * 1000;
+		};
+		const weekStartMs = centralMidnightMs(weekStart);
+		const weekEndMs = centralMidnightMs(computedWeekEnd) + 24 * 3600 * 1000;
 		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), weekStartMs, weekEndMs);
 
 		const activeDaySet = new Set();
@@ -6642,7 +6756,12 @@ async function generateInvoiceHandler(req, res) {
 			JSON.stringify(renderSnapshot)
 		);
 
-		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(result.lastInsertRowid);
+		// created_at is SQLite CURRENT_TIMESTAMP — UTC but serialized without a
+		// zone, which JS parses as local time. Wrap it as ISO-8601 Z; the trailing
+		// alias overrides the value the star already selected.
+		const invoice = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(result.lastInsertRowid);
 		const late = isAfterDeadline(computedWeekEnd);
 		res.json({ success: true, invoice, isLate: late });
 	} catch (err) {
@@ -7197,7 +7316,10 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 			pdfFileName, JSON.stringify(renderSnapshot), adminName
 		);
 
-		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(result.lastInsertRowid);
+		// created_at wrapped as ISO-8601 Z (see note in generateInvoiceHandler).
+		const invoice = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(result.lastInsertRowid);
 		logAudit(
 			req,
 			"create_manual_invoice",
@@ -7225,7 +7347,10 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 			// with ?include_deleted=true (recovery/audit view — rows carry
 			// deleted_at/deleted_by/delete_reason so the client can badge them).
 			const includeDeleted = req.query.include_deleted === "true";
-			let sql = "SELECT * FROM invoices WHERE 1=1";
+			// created_at wrapped as ISO-8601 Z (UTC CURRENT_TIMESTAMP would
+			// otherwise be read as local time by the client). ORDER BY created_at
+			// binds to this alias, which is monotonic in the raw value — same order.
+			let sql = "SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE 1=1";
 			const params = [];
 			if (!includeDeleted) sql += " AND deleted_at = ''";
 			if (driverFilter) { sql += " AND LOWER(driver) = ?"; params.push(driverFilter.toLowerCase()); }
@@ -7234,8 +7359,9 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 			invoices = db.prepare(sql).all(...params);
 		} else {
 			const driverName = user.driverName || "";
-			invoices = db.prepare("SELECT * FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC")
-				.all(driverName.toLowerCase());
+			invoices = db.prepare(
+				"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC"
+			).all(driverName.toLowerCase());
 		}
 		res.json({ invoices });
 	} catch (err) {
@@ -7644,7 +7770,9 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), async (req, res)
 			`${postApproval ? `POST-APPROVAL EDIT (status ${invoice.status}): ` : ""}${invoice.invoice_number}: adjustment ${oldAdjustment.toFixed(2)} → ${adjustment.toFixed(2)} (${note || "no reason given"})`
 		);
 		notifyChange("invoices");
-		const final = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
+		const final = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(invoice.id);
 		res.json({ success: true, invoice: final, pdfMode });
 	} catch (err) {
 		console.error("Invoice adjust error:", err.message);
@@ -7687,7 +7815,9 @@ app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 			`${invoice.invoice_number}: status ${invoice.status} → Submitted${reason ? ` (${reason})` : ""}${priorState ? ` [was: ${priorState}]` : ""}`
 		);
 		notifyChange("invoices");
-		const fresh = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
+		const fresh = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(invoice.id);
 		res.json({ success: true, invoice: fresh });
 	} catch (err) {
 		console.error("Invoice revert error:", err.message);
@@ -7749,7 +7879,9 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 			`${invoice.invoice_number} restored (was deleted by ${invoice.deleted_by || "unknown"} at ${invoice.deleted_at}${invoice.delete_reason ? `, reason: ${invoice.delete_reason}` : ""})`
 		);
 		notifyChange("invoices");
-		const fresh = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
+		const fresh = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(invoice.id);
 		res.json({ success: true, invoice: fresh });
 	} catch (err) {
 		console.error("Invoice restore error:", err.message);
@@ -7987,7 +8119,8 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 // Admin: list all users (without password hashes)
 app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
-		.prepare(`SELECT u.id, u.username, u.role, u.driver_name, u.email, u.full_name, u.company_name, u.created_at, u.rating,
+		.prepare(`SELECT u.id, u.username, u.role, u.driver_name, u.email, u.full_name, u.company_name, u.rating,
+			strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at) AS created_at,
 			do2.status AS onboarding_status
 			FROM users u
 			LEFT JOIN driver_onboarding do2 ON do2.user_id = u.id`)
@@ -8206,7 +8339,9 @@ app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, 
 
 app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 	const rows = db.prepare(`
-		SELECT i.*, u.username FROM investors i
+		SELECT i.*, u.username,
+			strftime('%Y-%m-%dT%H:%M:%SZ', i.created_at) AS created_at
+		FROM investors i
 		LEFT JOIN users u ON u.id = i.user_id
 		ORDER BY i.full_name ASC
 	`).all();
@@ -8330,12 +8465,15 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 	// Outside preview mode the behavior is unchanged for all roles.
 	const preview = resolvePreviewUser(req);
 	let rows;
+	// created_at is UTC CURRENT_TIMESTAMP with no zone marker — the trailing
+	// alias re-emits it as ISO-8601 Z, overriding the starred value.
+	const TRUCK_CREATED_AT = "strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at";
 	if (preview.isPreview) {
-		rows = db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(preview.effectiveUserId);
+		rows = db.prepare(`SELECT *, ${TRUCK_CREATED_AT} FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC`).all(preview.effectiveUserId);
 	} else if (user.role === "Investor") {
-		rows = db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(user.id);
+		rows = db.prepare(`SELECT *, ${TRUCK_CREATED_AT} FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC`).all(user.id);
 	} else {
-		rows = db.prepare("SELECT * FROM trucks ORDER BY unit_number ASC").all();
+		rows = db.prepare(`SELECT *, ${TRUCK_CREATED_AT} FROM trucks ORDER BY unit_number ASC`).all();
 	}
 
 	// Build completed-load counts per truck from the cached Job Tracking sheet.
@@ -8668,7 +8806,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 app.get("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const trailers = db.prepare(`
-			SELECT t.*, tr.unit_number AS truck_number, tr.assigned_driver
+			SELECT t.*, tr.unit_number AS truck_number, tr.assigned_driver,
+				strftime('%Y-%m-%dT%H:%M:%SZ', t.created_at) AS created_at
 			FROM trailers t
 			LEFT JOIN trucks tr ON t.truck_id = tr.id
 			ORDER BY t.created_at DESC
@@ -8751,7 +8890,10 @@ app.delete("/api/trailers/:id", requireRole("Super Admin"), (req, res) => {
 // GET /api/admin/audit-trail — View audit log
 app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 	const { limit = 100, entity, username } = req.query;
-	let sql = "SELECT * FROM audit_trail";
+	// created_at is UTC CURRENT_TIMESTAMP with no zone marker (the sibling
+	// `timestamp` column is already app-set ISO-Z). Trailing alias overrides
+	// the starred value so both read as UTC on the client.
+	let sql = "SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM audit_trail";
 	const conditions = [];
 	const params = [];
 	if (entity) { conditions.push("entity = ?"); params.push(entity); }
@@ -9386,7 +9528,7 @@ app.get("/api/debug/driver-loads/:driverName", requireRole("Super Admin"), async
 app.get("/api/debug/user/:username", requireRole("Super Admin"), (req, res) => {
 	const username = decodeURIComponent(req.params.username).trim();
 	const user = db
-		.prepare("SELECT id, username, role, driver_name, email, created_at FROM users WHERE LOWER(username) = ?")
+		.prepare("SELECT id, username, role, driver_name, email, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM users WHERE LOWER(username) = ?")
 		.get(username.toLowerCase());
 	if (!user) return res.status(404).json({ error: "User not found" });
 	res.json({
@@ -10080,7 +10222,7 @@ app.post("/api/admin/excluded-days", requireRole("Super Admin"), (req, res) => {
 		logAudit(req, auditAction, "driver_active_day", `${driver}:${date}`, reason || `${action === "add" ? "Added" : "Excluded"} by ${excludedBy}`);
 		jtCacheInvalidate();
 		const row = db.prepare(
-			"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days WHERE driver_name = ? AND excluded_date = ?"
+			"SELECT id, driver_name, excluded_date, reason, excluded_by, strftime('%Y-%m-%dT%H:%M:%SZ', excluded_at) AS excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days WHERE driver_name = ? AND excluded_date = ?"
 		).get(driver, date);
 		res.json({ success: true, inserted: result.changes > 0, row });
 	} catch (error) {
@@ -10119,7 +10261,7 @@ app.delete("/api/admin/excluded-days/:id", requireRole("Super Admin"), (req, res
 app.get("/api/admin/driver-day-overrides", requireRole("Super Admin"), (req, res) => {
 	try {
 		const overrides = db.prepare(
-			"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days ORDER BY excluded_date DESC, id DESC"
+			"SELECT id, driver_name, excluded_date, reason, excluded_by, strftime('%Y-%m-%dT%H:%M:%SZ', excluded_at) AS excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days ORDER BY excluded_date DESC, id DESC"
 		).all();
 		// Driver universe = anyone in drivers_directory OR currently assigned to
 		// a truck. Some drivers exist in only one or the other depending on how
@@ -10201,7 +10343,11 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 		const sheets = await getSheets();
 		const now = new Date();
 		const logId = `LOG-${now.getTime()}`;
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
+		// getter-based build stamped evening deliveries with tomorrow's date.
+		// See houstonStamp() — the date part here decides revenue month,
+		// invoice week, and driver-pay day.
+		const dateTime = houstonStamp(now);
 
 		if (response === "accepted") {
 			// Update Job Status to "Assigned" in the sheet
@@ -10973,9 +11119,14 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			.all(nameLower, nameLower);
 
 		// Notifications from SQLite
+		// SQLite's CURRENT_TIMESTAMP is UTC but serializes without a zone
+		// ("2026-04-20 14:30:00"), which JS parses as local time — every row
+		// then looks ~N hours in the future and the UI stuck on "just now".
+		// Force ISO-8601 with Z so `new Date(...)` parses it as UTC.
 		const driverNotifications = db
 			.prepare(
-				`SELECT id, type, title, body, metadata, read, created_at AS createdAt
+				`SELECT id, type, title, body, metadata, read,
+				        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS createdAt
 				 FROM notifications
 				 WHERE driver_name = ?
 				 ORDER BY id DESC
@@ -11153,7 +11304,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		// Super Admin / Dispatcher still sees them via /api/drivers-directory/:id/documents.
 		const userId = req.session.user.id;
 		const onboarding = db.prepare(
-			"SELECT id, user_id, application_id, driver_name, status, onboarded_at, created_at FROM driver_onboarding WHERE user_id = ?"
+			"SELECT id, user_id, application_id, driver_name, status, onboarded_at, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
 		).get(userId) || null;
 		const onboardingDocs = onboarding
 			? db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId)
@@ -11170,7 +11321,9 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		// /api/driver/me/identity-file/:fileType when it renders.
 		let application = null;
 		if (onboarding?.application_id) {
-			const fullApp = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(onboarding.application_id);
+			const fullApp = db.prepare(
+				"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM job_applications WHERE id = ?"
+			).get(onboarding.application_id);
 			if (fullApp) {
 				const { ssn: _drop, cdl_front, cdl_back, medical_card, ...safeApp } = fullApp;
 				const detectMime = (b64) => {
@@ -11189,7 +11342,8 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		}
 		// Recent invoices (soft-deleted ones are hidden from drivers)
 		const driverInvoices = db.prepare(
-			`SELECT id, invoice_number, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at, created_at
+			`SELECT id, invoice_number, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at,
+			        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at
 			 FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC LIMIT 20`
 		).all(nameLower);
 
@@ -11560,7 +11714,11 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 
 		// Build batch update for status column + date column
 		const now = new Date();
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
+		// getter-based build stamped evening deliveries with tomorrow's date.
+		// See houstonStamp() — the date part here decides revenue month,
+		// invoice week, and driver-pay day.
+		const dateTime = houstonStamp(now);
 		const updateData = [
 			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[newStatus]] },
 		];
@@ -11660,7 +11818,11 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		const driverName = driverIdx !== -1 ? (currentRow[driverIdx] || "") : "";
 
 		const now = new Date();
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
+		// getter-based build stamped evening deliveries with tomorrow's date.
+		// See houstonStamp() — the date part here decides revenue month,
+		// invoice week, and driver-pay day.
+		const dateTime = houstonStamp(now);
 
 		const updateData = [
 			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[newStatus]] },
@@ -11844,6 +12006,14 @@ function sheetDayKey(val) {
 		let yr = parseInt(us[3], 10);
 		if (yr < 100) yr += 2000; // "5/16/25" -> 2025 (same rule as parseSheetDate)
 		if (us[4] == null) return `${yr}-${p2(us[1])}-${p2(us[2])}`; // date-only
+		// Stamps written on/after the cutover are ALREADY a Houston wall clock
+		// (see houstonStamp), so the date part is the business day as written.
+		// Converting it again would subtract another 5-6 hours and roll an
+		// evening delivery back onto the previous day — the very bug this whole
+		// change removes, reintroduced one layer down. Pre-cutover stamps are a
+		// UTC wall clock and still need the conversion below.
+		const ymd = `${yr}-${p2(us[1])}-${p2(us[2])}`;
+		if (ymd >= SHEET_STAMP_TZ_CUTOVER) return ymd;
 		let hh = parseInt(us[4], 10);
 		// Apps Script writes 12-hour with a meridiem ("2:15:49 PM"); the n8n path
 		// writes 24-hour. Reading "2:15:49 PM" as 02:15 would land it a day early.
@@ -12346,7 +12516,7 @@ app.get("/api/routemate/vehicles", requireRole("Super Admin", "Dispatcher"), (re
 		const rows = db.prepare(`
 			SELECT rv.id, rv.routemate_vehicle_id, rv.vehicle_id, rv.vin, rv.make, rv.model,
 			       rv.year, rv.fuel_type, rv.license_num, rv.eld_id, rv.state, rv.active,
-			       rv.last_synced_at,
+			       strftime('%Y-%m-%dT%H:%M:%SZ', rv.last_synced_at) AS last_synced_at,
 			       (SELECT t.id FROM trucks t WHERE t.routemate_vehicle_id = rv.routemate_vehicle_id LIMIT 1) AS linked_truck_id,
 			       (SELECT t.unit_number FROM trucks t WHERE t.routemate_vehicle_id = rv.routemate_vehicle_id LIMIT 1) AS linked_truck_unit
 			FROM routemate_vehicles rv
@@ -12609,7 +12779,10 @@ app.get("/api/routemate/fault-codes", requireRole("Super Admin", "Dispatcher", "
 		const placeholders = trucksFilter.map(() => "?").join(",");
 		const args = trucksFilter.map(t => t.routemate_vehicle_id);
 		const faults = db.prepare(`
-			SELECT id, routemate_vehicle_id, code, status, first_seen, last_seen, ack_by_user_id, ack_at
+			SELECT id, routemate_vehicle_id, code, status, ack_by_user_id,
+			       strftime('%Y-%m-%dT%H:%M:%SZ', first_seen) AS first_seen,
+			       strftime('%Y-%m-%dT%H:%M:%SZ', last_seen) AS last_seen,
+			       strftime('%Y-%m-%dT%H:%M:%SZ', ack_at) AS ack_at
 			FROM routemate_fault_codes
 			WHERE routemate_vehicle_id IN (${placeholders})
 			  AND ack_at IS NULL
@@ -13247,7 +13420,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// the expense into a period with no earnings row to absorb it and break the
 		// ledger's paid+processing+owed+accruing == earned+adjustments identity.
 		const naturalPeriod = String(date || "").slice(0, 7);
-		const postedPeriod = naturalPeriod && isLocked(naturalPeriod) ? currentMonthKeyET() : "";
+		const postedPeriod = naturalPeriod && isLocked(naturalPeriod) ? currentMonthKeyCT() : "";
 
 		const result = db
 			.prepare(
@@ -13919,7 +14092,9 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		try { dropoffCoords = dropoffAddress ? await geocodeAddress(dropoffAddress) : null; } catch { /* non-critical */ }
 
 		// ---- 4) Append the Job Tracking row (n8n "JOB DETAILS ENTRY") ----
-		const today = new Date().toISOString().split("T")[0];
+		// Houston day, not the UTC day — this lands in "Assigned Date", which
+		// decides the load's revenue month. See houstonDay().
+		const today = houstonDay();
 		const values = rateconLoad.buildJobTrackingRow(headers, fields, {
 			today,
 			ownerId: 0,
@@ -18041,7 +18216,12 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		: data;
 
 	const now = new Date();
-	const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+	// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
+	// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
+	// final 5-6 hours of every month the portal showed the NEXT month accruing at
+	// $0 and treated the just-ended one as complete. houstonDay() is the same
+	// Central basis the stamps and the close lifecycle now use.
+	const currentMonthKey = houstonDay(now).slice(0, 7);
 
 	// ELD travel-day index per in-scope truck (same as GET /api/investor).
 	const unitToVid = {};
@@ -18443,15 +18623,15 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	);
 	// A month is "completed" only if BOTH clocks agree it is. currentMonthKey is
 	// server-local (computeInvestorMonthlyEarnings), while the close lifecycle
-	// runs on America/New_York — so on a UTC server they disagree for the first
+	// runs on America/Chicago — so on a UTC server they disagree for the first
 	// few hours of each month. Taking the stricter of the two keeps row existence
 	// and `phase` from contradicting each other (a row that exists but reports
 	// 'accruing', which is settleable while the UI calls it pending). Whichever
 	// way the server's zone leans, the AND is always the conservative choice.
-	const etMonthKey = currentMonthKeyET();
+	const ctMonthKey = currentMonthKeyCT();
 	const reconcile = db.transaction((months) => {
 		for (const m of months) {
-			if (m.isCurrentMonth || m.month >= currentMonthKey || m.month >= etMonthKey) continue; // only completed past months
+			if (m.isCurrentMonth || m.month >= currentMonthKey || m.month >= ctMonthKey) continue; // only completed past months
 			const amount = carryByPeriod[m.month].payable;
 			const existing = findRow.get(ownerId, m.month);
 			if (!existing) {
@@ -19092,7 +19272,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// ---- Monthly Earnings Breakdown (exact calendar month) ----
 		const monthlyEarnings = [];
 		{
-			const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
+			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
+			// final 5-6 hours of every month the portal showed the NEXT month accruing at
+			// $0 and treated the just-ended one as complete. houstonDay() is the same
+			// Central basis the stamps and the close lifecycle now use.
+			const currentMonthKey = houstonDay(now).slice(0, 7);
 			// Investor take-home = configurable split of net profit (default 50%).
 			// Read from investor_config.investor_split_pct (per-investor override
 			// already merged into `config` above). This is the SAME split the
@@ -19112,7 +19297,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const overrideRows = (() => {
 				try {
 					return db.prepare(
-						"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days"
+						"SELECT id, driver_name, excluded_date, reason, excluded_by, strftime('%Y-%m-%dT%H:%M:%SZ', excluded_at) AS excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days"
 					).all();
 				} catch { return []; }
 			})();
@@ -19658,7 +19843,9 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 		if (from) { conditions.push("date >= ?"); params.push(from); }
 		if (to) { conditions.push("date <= ?"); params.push(to); }
 
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, created_at FROM expenses";
+		// created_at is UTC CURRENT_TIMESTAMP with no zone marker — emit ISO-8601 Z
+		// so the client doesn't parse it as local time.
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM expenses";
 		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 		sql += " ORDER BY date DESC, id DESC LIMIT 1000";
 
@@ -20158,7 +20345,9 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 				? `REOPENED ${payout.status} -> ${status} (owner ${payout.owner_id} ${payout.period}): ${reason}`
 				: `${payout.status} -> ${status}`
 		);
-		const updated = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
+		const updated = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM investor_payouts WHERE id = ?"
+		).get(id);
 		res.json({ success: true, reopened: isReopen, payout: updated });
 	} catch (err) {
 		console.error("POST /api/investor/payouts/:id/status error:", err.message);
@@ -20244,7 +20433,9 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), (req, re
 			`${settledTag}owner ${payout.owner_id} ${payout.period}: adjustment ${oldAdjustment.toFixed(2)} -> ${rounded.toFixed(2)} (${note || "no reason given"})`
 		);
 
-		const updated = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
+		const updated = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM investor_payouts WHERE id = ?"
+		).get(id);
 		res.json({
 			success: true,
 			payout: {
@@ -20279,7 +20470,7 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 	try {
 		const graceDays = settlementGraceDays();
 		const locks = db.prepare("SELECT * FROM period_locks ORDER BY period DESC").all();
-		const cur = currentMonthKeyET();
+		const cur = currentMonthKeyCT();
 
 		// Periods that have payout rows but no lock yet — i.e. accruing or pending.
 		const open = db.prepare(
@@ -20321,7 +20512,7 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), async (req
 			return res.status(503).json({ error: "Period close is not enabled on this server.", code: "FEATURE_DISABLED" });
 		}
 		// A month still in progress has no final number to freeze.
-		if (period >= currentMonthKeyET()) {
+		if (period >= currentMonthKeyCT()) {
 			return res.status(409).json({
 				error: `${periodLabel(period)} is still in progress — it can't be finalized until the month ends.`,
 				code: "PERIOD_ACCRUING",
@@ -20532,7 +20723,7 @@ let periodCloseFailStreak = 0;
 // through years of empty calendar.
 function periodsDueForClose() {
 	const graceDays = settlementGraceDays();
-	const cur = currentMonthKeyET();
+	const cur = currentMonthKeyCT();
 	return db.prepare(
 		"SELECT DISTINCT period FROM investor_payouts WHERE period NOT IN (SELECT period FROM period_locks) ORDER BY period ASC"
 	).all()
@@ -20617,7 +20808,7 @@ if (PERIOD_FINALIZE_ENABLED) {
 		const seeded = db.prepare("SELECT COUNT(*) AS c FROM period_locks").get().c;
 		if (seeded === 0) {
 			const graceDays = settlementGraceDays();
-			const cur = currentMonthKeyET();
+			const cur = currentMonthKeyCT();
 			const historical = db.prepare("SELECT DISTINCT period FROM investor_payouts ORDER BY period ASC").all()
 				.map((r) => r.period)
 				.filter((p) => p < cur && isPastGrace(p, graceDays));
@@ -20630,7 +20821,7 @@ if (PERIOD_FINALIZE_ENABLED) {
 
 	setInterval(() => { maybeCloseFinishedPeriods().catch(() => {}); }, 60 * 1000);
 	setTimeout(() => { maybeCloseFinishedPeriods().catch(() => {}); }, 95 * 1000);
-	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (America/New_York)`);
+	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (America/Chicago)`);
 }
 
 // GET /api/financials — Super Admin financials dashboard (P1-1 from 2026-04-12 meeting)
@@ -21289,7 +21480,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// same numbers as the table rows instead of forking the math.
 		const { monthlyPerformance, monthlyDriverPay, monthlyTripExp, monthlyFixedCosts } = (() => {
 			const pad = (n) => String(n).padStart(2, "0");
-			const currentMonthKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
+			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
+			// final 5-6 hours of every month the portal showed the NEXT month accruing at
+			// $0 and treated the just-ended one as complete. houstonDay() is the same
+			// Central basis the stamps and the close lifecycle now use.
+			const currentMonthKey = houstonDay(now).slice(0, 7);
 
 			// Driver pay per month.
 			const monthlyDriverPay = {};
@@ -21386,7 +21582,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		let monthDetail = null;
 		if (monthParam) {
 			const pad2 = (n) => String(n).padStart(2, "0");
-			const currentMonthKey = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}`;
+			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
+			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
+			// final 5-6 hours of every month the portal showed the NEXT month accruing at
+			// $0 and treated the just-ended one as complete. houstonDay() is the same
+			// Central basis the stamps and the close lifecycle now use.
+			const currentMonthKey = houstonDay(now).slice(0, 7);
 			const yearN = parseInt(monthParam.slice(0, 4), 10);
 			const monthN = parseInt(monthParam.slice(5, 7), 10);
 			const prevDate = new Date(yearN, monthN - 2, 1);
@@ -21730,7 +21931,7 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		// posted_period is exposed so a receipt that was redirected out of a closed
 		// month is visible as such in the admin list — otherwise a March-dated row
 		// silently counting in August looks like a bug rather than the rule.
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, posted_period, created_at FROM expenses";
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, posted_period, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM expenses";
 		const conditions = [];
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
@@ -22420,7 +22621,7 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 		const { paidDate } = req.body;
 		db.prepare(
 			`UPDATE compliance_fees SET status = 'Paid', paid_date = ? WHERE id = ?`
-		).run(paidDate || new Date().toISOString().split("T")[0], req.params.id);
+		).run(paidDate || houstonDay(), req.params.id); // Houston day: paid_date is the month bucket for the investor compliance deduction
 
 		res.json({ success: true });
 	} catch (error) {
@@ -22666,7 +22867,10 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 					}
 
 					if (jtDriverCol && jtLoadIdCol && jtAssignedCol) {
-						const todayIso = new Date().toISOString().slice(0, 10);
+						// Houston day, not the UTC day — after 7 PM Houston the UTC
+						// day is already tomorrow, so this compared candidate loads
+						// against a date that hadn't happened yet.
+						const todayIso = houstonDay();
 						const candidates = [];
 						for (const row of jtData) {
 							const drv = String(row[jtDriverCol] || "").toLowerCase().trim();

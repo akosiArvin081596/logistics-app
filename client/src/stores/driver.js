@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
+import { parseYmdLocal, parseSheetStamp } from '../utils/datetime'
 
 const api = useApi()
 
@@ -194,8 +195,12 @@ export const useDriverStore = defineStore('driver', {
       if (state.filterDateFrom || state.filterDateTo) {
         const dateCol = pickupDateCol || delivDateCol
         if (dateCol) {
-          const from = state.filterDateFrom ? new Date(state.filterDateFrom) : null
-          const to = state.filterDateTo ? new Date(state.filterDateTo) : null
+          // The filter inputs are bare 'YYYY-MM-DD', which new Date() reads as
+          // UTC MIDNIGHT — in Houston that is 6/7pm the PREVIOUS day, sliding
+          // the whole window a day early and hiding a day of the driver's own
+          // loads. parseYmdLocal pins both ends to local midnight instead.
+          const from = parseYmdLocal(state.filterDateFrom)
+          const to = parseYmdLocal(state.filterDateTo)
           if (to) to.setHours(23, 59, 59, 999)
           result = result.filter((l) => {
             const raw = l[dateCol]
@@ -242,10 +247,17 @@ export const useDriverStore = defineStore('driver', {
         result.sort((a, b) => {
           // Try date-based sort first
           if (sortDateCol) {
-            const da = new Date((a[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').replace(/^Date:\s*/i, '').trim())
-            const db = new Date((b[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').replace(/^Date:\s*/i, '').trim())
-            const ta = isNaN(da) ? 0 : da.getTime()
-            const tb = isNaN(db) ? 0 : db.getTime()
+            // 'Status Update Date' / 'Completion Date' are bare wall-clock
+            // stamps with TWO ERAS (UTC before the 2026-08-03 cutover, Houston
+            // after) — a plain new Date() reads both as local, so a legacy
+            // evening delivery lands on the wrong day and sorts out of order.
+            // parseSheetStamp resolves the era; null (blank/unparseable) →
+            // -Infinity keeps those rows last, as the old epoch-0 fallback did.
+            // Safe because the `ta !== tb` guard below never subtracts -Inf.
+            const da = parseSheetStamp((a[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').replace(/^Date:\s*/i, '').trim())
+            const db = parseSheetStamp((b[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').replace(/^Date:\s*/i, '').trim())
+            const ta = da ? da.getTime() : -Infinity
+            const tb = db ? db.getTime() : -Infinity
             if (ta !== tb) return tb - ta
           }
           // Fall back to row index (newer rows are at the bottom of the sheet)

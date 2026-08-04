@@ -214,7 +214,10 @@ const submitting = ref(false)
 const errorMsg = ref('')
 const duplicateWarning = ref('')
 
-const today = new Date().toISOString().split('T')[0]
+// en-CA yields YYYY-MM-DD in local time — not toISOString(), which is UTC and
+// pre-fills tomorrow's pickup date after 7pm Houston. That date drives the
+// driver-pay active-day window, so an off-by-one shifts pay.
+const today = new Date().toLocaleDateString('en-CA')
 
 const form = reactive({
   loadId: '',
