@@ -100,27 +100,12 @@ export function parseSheetStamp(v) {
   return isNaN(d.getTime()) ? null : d
 }
 
-/**
- * The Houston calendar day ("YYYY-MM-DD") a sheet stamp falls on — the business
- * day, since the carrier is Houston-based. Post-cutover this is just the date
- * part; pre-cutover the UTC stamp has to be converted first.
- */
-export function sheetStampHoustonDay(v) {
-  const s = String(v || '').trim()
-  if (!s) return ''
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/)
-  if (m) {
-    const ymd = `${m[3]}-${String(m[1]).padStart(2, '0')}-${String(m[2]).padStart(2, '0')}`
-    // Already a Houston date — return it verbatim rather than round-tripping
-    // through an instant, which is where an off-by-one day comes from.
-    if (ymd >= SHEET_STAMP_TZ_CUTOVER) return ymd
-  }
-  const d = parseSheetStamp(s)
-  if (!d) return ''
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: HOUSTON, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(d)
-}
+// NOTE: a sheetStampHoustonDay() helper lived here and was deleted on purpose.
+// It converted a legacy UTC stamp to its true Houston day, which made the
+// Completed Loads screen disagree with the P&L for pre-cutover evening loads
+// (the money paths read the date part verbatim). The screen now does the same.
+// Do not reintroduce a day-converting helper without changing the accounting
+// to match — otherwise the two drift apart again.
 
 /**
  * Format a sheet "Completion Date" as the viewer-local delivered time, with a
