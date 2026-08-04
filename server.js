@@ -20286,12 +20286,25 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 			// SAME reconcile as GET /api/investor/payouts (shared implementation).
 			const { payouts, currentMonth, totals } = await reconcileInvestorPayouts(inv.ownerId, ctx);
 
+			// How many recorded movements each period has, so the console can show
+			// the affordance only on rows that actually have something behind it.
+			// ONE grouped query per investor rather than one per row: this endpoint
+			// already loops every settlable investor, and a per-row query would turn
+			// a page load into investors x months round-trips.
+			const histCounts = {};
+			try {
+				for (const r of db.prepare(
+					"SELECT period, COUNT(*) AS n FROM investor_payout_history WHERE owner_id = ? GROUP BY period"
+				).all(inv.ownerId)) histCounts[r.period] = r.n;
+			} catch { /* history is additive; its absence must not break the console */ }
+
 			investors.push({
 				ownerId: inv.ownerId,
 				name: inv.name,
 				payouts: payouts.map((p) => ({
 					id: p.id,
 					period: p.period,
+					historyCount: histCounts[p.period] || 0,
 					periodLabel: p.periodLabel,
 					amount: p.amount,
 					adjustment: p.adjustment,
