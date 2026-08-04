@@ -5740,31 +5740,12 @@ function isAfterDeadline(weekEndDate) {
 	return now > deadline;
 }
 
-// The DAY we switched the Job Tracking date stamps from UTC to Houston time.
-// A stamp dated before this is a UTC wall-clock string; on/after it is a Houston
-// (America/Chicago) wall-clock string. Mirrored in client/src/utils/datetime.js
-// as SHEET_STAMP_TZ_CUTOVER — the two MUST agree, because this is the only way a
-// reader can tell the eras apart: both use the identical "MM/DD/YYYY H:MM:SS"
-// shape with no zone marker.
-//
-// A DAY rather than an instant on purpose. The eras differ by only 5-6 hours, so
-// an instant comparison is ambiguous for stamps written near the boundary, while
-// the date part is a plain string compare.
-//
-// It is set to the HOUSTON day of the deploy, not the UTC day. Houston is behind
-// UTC, so around the switch the eras overlap in BOTH directions: the old code was
-// still writing "08/04" stamps while the new code writes "08/03" ones. Dating the
-// cutover to the Houston day is what makes every NEW stamp classify correctly
-// from the first one onward.
-//
-// Residual exposure, measured against production before choosing this date: one
-// legacy cell (load 2216467, "08/03/2026 13:28:33"). Read as Houston rather than
-// UTC it keeps the SAME day, so only its displayed time shifts; no day bucket and
-// no money figure moves.
-//
-// Historical rows are deliberately NOT rewritten (client decision 2026-08-04:
-// no restatement of closed months), so this boundary is permanent.
-const SHEET_STAMP_TZ_CUTOVER = "2026-08-03";
+// NOTE: a SHEET_STAMP_TZ_CUTOVER constant lived here. It let readers tell a
+// legacy UTC stamp from a Houston one so the day could be corrected. Day
+// bucketing is now LITERAL everywhere (see sheetDayKey), so nothing on the
+// server needs the distinction. The client keeps its own copy purely to resolve
+// a stamp to a true INSTANT for sorting and ETA math, which is unaffected.
+
 
 // "Now" as a Houston wall-clock stamp, in the EXACT legacy format:
 // MM/DD/YYYY H:MM:SS — zero-padded month/day/minute/second, UNPADDED hour.
@@ -11976,9 +11957,23 @@ const exportLimiter = rateLimit({
 //   RFC 2822 "Date: Thu, 19 Jun 2025 08:16:37 -0500"    (n8n stamps the raw
 //            email header on rate-con-ingested loads — 103 of 258 completed
 //            rows carry Assigned Date in this form today)
-// A cell with a TIME is a real instant and gets converted. A DATE-ONLY cell has
-// no instant to convert and passes through as written — treating its midnight
-// as UTC would shove every bare date back a day, which is a bug, not a fix.
+// The date is taken VERBATIM off the front of the cell — no timezone conversion,
+// whatever shape the cell is in.
+//
+// That is deliberate, and it is the whole point of this helper. Every money path
+// (parseSheetDate x4, parseInvoiceDate, the invoice-week filter) reads this
+// column's date part literally. When this function converted and they did not,
+// the same load showed one day on the Completed Loads screen and counted on
+// another in the P&L. Load 558865809 was the live case: stored 7/1, displayed
+// Jun 30, revenue counted in JULY — so a June export listed a load whose money
+// was not in June. Making the accounting convert instead would have moved
+// revenue into a closed month, which the client's rule forbids ("if it is
+// already closed and locked by the month then follow that date").
+//
+// Cost is limited to history: since 2026-08-03 the server stamps Houston time,
+// so the stored date IS the business day and literal == correct. Only
+// pre-cutover evening loads read a day off, and for those the recorded date is
+// the one that was settled on.
 // Returns "YYYY-MM-DD", or "" when nothing is parseable.
 const BUSINESS_DAY_TZ = "America/Chicago";
 const RFC2822_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -11992,36 +11987,14 @@ function sheetDayKey(val) {
 	// ISO first — the US M/D/Y branch below would misread "2026-05-13" as May 13 2020.
 	const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?)?/i);
 	if (iso) {
-		if (iso[4] == null) return `${iso[1]}-${p2(iso[2])}-${p2(iso[3])}`; // date-only
-		// An explicit Z/offset already pins the instant; let Date.parse read it.
-		// Without one, the value is UTC wall-clock (Date.parse would call it
-		// server-local), so build the instant with Date.UTC instead.
-		const ms = iso[7] ? Date.parse(s)
-			: Date.UTC(+iso[1], +iso[2] - 1, +iso[3], +iso[4], +iso[5], +(iso[6] || 0));
-		return isNaN(ms) ? "" : localDayInTz(ms, BUSINESS_DAY_TZ);
+		return `${iso[1]}-${p2(iso[2])}-${p2(iso[3])}`;
 	}
 
 	const us = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:,?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i);
 	if (us) {
 		let yr = parseInt(us[3], 10);
 		if (yr < 100) yr += 2000; // "5/16/25" -> 2025 (same rule as parseSheetDate)
-		if (us[4] == null) return `${yr}-${p2(us[1])}-${p2(us[2])}`; // date-only
-		// Stamps written on/after the cutover are ALREADY a Houston wall clock
-		// (see houstonStamp), so the date part is the business day as written.
-		// Converting it again would subtract another 5-6 hours and roll an
-		// evening delivery back onto the previous day — the very bug this whole
-		// change removes, reintroduced one layer down. Pre-cutover stamps are a
-		// UTC wall clock and still need the conversion below.
-		const ymd = `${yr}-${p2(us[1])}-${p2(us[2])}`;
-		if (ymd >= SHEET_STAMP_TZ_CUTOVER) return ymd;
-		let hh = parseInt(us[4], 10);
-		// Apps Script writes 12-hour with a meridiem ("2:15:49 PM"); the n8n path
-		// writes 24-hour. Reading "2:15:49 PM" as 02:15 would land it a day early.
-		const ap = (us[7] || "").toUpperCase();
-		if (ap === "PM" && hh < 12) hh += 12;
-		if (ap === "AM" && hh === 12) hh = 0;
-		const ms = Date.UTC(yr, +us[1] - 1, +us[2], hh, +us[5], +(us[6] || 0));
-		return isNaN(ms) ? "" : localDayInTz(ms, BUSINESS_DAY_TZ);
+		return `${yr}-${p2(us[1])}-${p2(us[2])}`;
 	}
 
 	// RFC 2822 last: both checks above are ^-anchored and cheap, and this one is
@@ -12030,13 +12003,6 @@ function sheetDayKey(val) {
 	if (rfc) {
 		const mon = RFC2822_MONTHS.indexOf(rfc[2].toLowerCase()) + 1;
 		if (mon > 0) {
-			// These carry their own offset ("-0500"), so they ARE an instant —
-			// re-bucket it into Central like everything else. Without an offset
-			// there is nothing to convert; take the day as written.
-			if (/[+-]\d{4}\b|[+-]\d{2}:\d{2}\b|\b(GMT|UTC)\b/i.test(s)) {
-				const ms = Date.parse(s);
-				if (!isNaN(ms)) return localDayInTz(ms, BUSINESS_DAY_TZ);
-			}
 			return `${rfc[3]}-${p2(mon)}-${p2(rfc[1])}`;
 		}
 	}
