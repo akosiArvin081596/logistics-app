@@ -5728,6 +5728,73 @@ function isAfterDeadline(weekEndDate) {
 	return now > deadline;
 }
 
+// The DAY we switched the Job Tracking date stamps from UTC to Houston time.
+// A stamp dated before this is a UTC wall-clock string; on/after it is a Houston
+// (America/Chicago) wall-clock string. Mirrored in client/src/utils/datetime.js
+// as SHEET_STAMP_TZ_CUTOVER — the two MUST agree, because this is the only way a
+// reader can tell the eras apart: both use the identical "MM/DD/YYYY H:MM:SS"
+// shape with no zone marker.
+//
+// A DAY rather than an instant on purpose. The eras differ by only 5-6 hours, so
+// an instant comparison is ambiguous for stamps written near the boundary, while
+// the date part is a plain string compare. The cost is that stamps written on
+// the cutover day itself may be attributed to the wrong era — a one-day fuzz
+// affecting at most the rows written between deploy and midnight.
+//
+// Historical rows are deliberately NOT rewritten (client decision 2026-08-04:
+// no restatement of closed months), so this boundary is permanent.
+const SHEET_STAMP_TZ_CUTOVER = "2026-08-04";
+
+// "Now" as a Houston wall-clock stamp, in the EXACT legacy format:
+// MM/DD/YYYY H:MM:SS — zero-padded month/day/minute/second, UNPADDED hour.
+//
+// WHY: this used to be built from new Date() getters, which on the UTC VPS
+// produced a UTC wall-clock. Houston is UTC-5/-6, so any load delivered in the
+// evening was stamped with the NEXT day's date. Measured on production: 23 of
+// 268 status changes (9%) were mis-dated, which put $1,100 of June revenue into
+// July. The date part of this string is what decides a load's revenue month,
+// invoice week, and driver-pay day, so the zone here is a money question, not a
+// display one.
+//
+// Intl/formatToParts rather than the toLocaleString->new Date() round-trip used
+// by getWeekRange above: that older trick re-parses a localized string and is
+// both locale-fragile and wrong across a DST transition. formatToParts asks the
+// zone database directly and is DST-safe by construction.
+//
+// The format is preserved byte-for-byte on purpose. Every server-side parser of
+// this column (parseInvoiceDate, the three parseSheetDate copies) matches
+// /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/ — anchored at the start and
+// discarding the time — so they keep working untouched and simply see the
+// correct date. Appending a zone suffix would have been self-describing but
+// risks every unknown downstream consumer (n8n, the archive sheet, exports).
+function houstonStamp(d = new Date()) {
+	const p = new Intl.DateTimeFormat("en-US", {
+		timeZone: "America/Chicago",
+		year: "numeric", month: "2-digit", day: "2-digit",
+		hour: "2-digit", minute: "2-digit", second: "2-digit",
+		hourCycle: "h23",
+	})
+		.formatToParts(d)
+		.reduce((acc, part) => (acc[part.type] = part.value, acc), {});
+	// parseInt strips the pad so the hour matches the old getHours() output.
+	return `${p.month}/${p.day}/${p.year} ${parseInt(p.hour, 10)}:${p.minute}:${p.second}`;
+}
+
+// Today's date in Houston as "YYYY-MM-DD".
+//
+// Replaces new Date().toISOString().split("T")[0], which is the UTC day: after
+// 7 PM Houston (6 PM in winter) that is already TOMORROW. It stamps a new
+// load's "Assigned Date" — and per the financials convention revenue counts in
+// the month a load was ASSIGNED — so an evening load booked on the 31st was
+// being credited to the following month before anyone touched it.
+function houstonDay(d = new Date()) {
+	// en-CA renders as YYYY-MM-DD, which is exactly the shape we want.
+	return new Intl.DateTimeFormat("en-CA", {
+		timeZone: "America/Chicago",
+		year: "numeric", month: "2-digit", day: "2-digit",
+	}).format(d);
+}
+
 function generateInvoiceNumber(driverName, weekStart) {
 	const initials = driverName.split(/\s+/).map(w => w[0]).join("").toUpperCase().slice(0, 3);
 	const d = new Date(weekStart);
@@ -10201,7 +10268,11 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 		const sheets = await getSheets();
 		const now = new Date();
 		const logId = `LOG-${now.getTime()}`;
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
+		// getter-based build stamped evening deliveries with tomorrow's date.
+		// See houstonStamp() — the date part here decides revenue month,
+		// invoice week, and driver-pay day.
+		const dateTime = houstonStamp(now);
 
 		if (response === "accepted") {
 			// Update Job Status to "Assigned" in the sheet
@@ -11560,7 +11631,11 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 
 		// Build batch update for status column + date column
 		const now = new Date();
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
+		// getter-based build stamped evening deliveries with tomorrow's date.
+		// See houstonStamp() — the date part here decides revenue month,
+		// invoice week, and driver-pay day.
+		const dateTime = houstonStamp(now);
 		const updateData = [
 			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[newStatus]] },
 		];
@@ -11660,7 +11735,11 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		const driverName = driverIdx !== -1 ? (currentRow[driverIdx] || "") : "";
 
 		const now = new Date();
-		const dateTime = `${(now.getMonth() + 1).toString().padStart(2, "0")}/${now.getDate().toString().padStart(2, "0")}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
+		// getter-based build stamped evening deliveries with tomorrow's date.
+		// See houstonStamp() — the date part here decides revenue month,
+		// invoice week, and driver-pay day.
+		const dateTime = houstonStamp(now);
 
 		const updateData = [
 			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[newStatus]] },
@@ -11844,6 +11923,14 @@ function sheetDayKey(val) {
 		let yr = parseInt(us[3], 10);
 		if (yr < 100) yr += 2000; // "5/16/25" -> 2025 (same rule as parseSheetDate)
 		if (us[4] == null) return `${yr}-${p2(us[1])}-${p2(us[2])}`; // date-only
+		// Stamps written on/after the cutover are ALREADY a Houston wall clock
+		// (see houstonStamp), so the date part is the business day as written.
+		// Converting it again would subtract another 5-6 hours and roll an
+		// evening delivery back onto the previous day — the very bug this whole
+		// change removes, reintroduced one layer down. Pre-cutover stamps are a
+		// UTC wall clock and still need the conversion below.
+		const ymd = `${yr}-${p2(us[1])}-${p2(us[2])}`;
+		if (ymd >= SHEET_STAMP_TZ_CUTOVER) return ymd;
 		let hh = parseInt(us[4], 10);
 		// Apps Script writes 12-hour with a meridiem ("2:15:49 PM"); the n8n path
 		// writes 24-hour. Reading "2:15:49 PM" as 02:15 would land it a day early.
@@ -13919,7 +14006,9 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		try { dropoffCoords = dropoffAddress ? await geocodeAddress(dropoffAddress) : null; } catch { /* non-critical */ }
 
 		// ---- 4) Append the Job Tracking row (n8n "JOB DETAILS ENTRY") ----
-		const today = new Date().toISOString().split("T")[0];
+		// Houston day, not the UTC day — this lands in "Assigned Date", which
+		// decides the load's revenue month. See houstonDay().
+		const today = houstonDay();
 		const values = rateconLoad.buildJobTrackingRow(headers, fields, {
 			today,
 			ownerId: 0,

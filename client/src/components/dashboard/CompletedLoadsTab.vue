@@ -36,8 +36,11 @@
       </div>
 
       <!-- Labelled, because two bare mm/dd/yyyy boxes give no clue which date
-           they filter on. Central is stated: the stamp is UTC off the VPS, so a
-           late-evening delivery lands on the previous Houston day. -->
+           they filter on. Central is stated because the filter buckets on the
+           Houston business day. Loads delivered before 2026-08-04 were stamped
+           in UTC off the VPS, so a late-evening delivery from that era can still
+           sit on the following day; newer loads are stamped in Houston time and
+           are exact. -->
       <div class="cl-field">
         <label class="cl-label" for="cl-from">Delivered <span class="cl-tz">(Central)</span></label>
         <div class="cl-dates">
@@ -241,7 +244,7 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
-import { parseSheetUtc, fmtTimestamp } from '@/utils/datetime'
+import { parseSheetStamp, sheetStampHoustonDay, fmtTimestamp } from '@/utils/datetime'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -295,21 +298,14 @@ const driverLabel = computed(() => (driverOptions.value.find(o => o.key === driv
 // different calendar day depending on who is looking. The server-side export
 // buckets on the same Central day.
 const CENTRAL_TZ = 'America/Chicago'
-// formatToParts, not offset arithmetic, so DST is the platform's problem.
-// Mirrors server.js's localDayInTz().
-const centralDayFmt = new Intl.DateTimeFormat('en-US', { timeZone: CENTRAL_TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
 // Sheet timestamp → 'YYYY-MM-DD' in Central; '' when blank or unparseable.
-function centralDay(v) {
-  const d = parseSheetUtc(v)
-  if (!d || isNaN(d.getTime())) return ''
-  let y = '', m = '', day = ''
-  for (const p of centralDayFmt.formatToParts(d)) {
-    if (p.type === 'year') y = p.value
-    else if (p.type === 'month') m = p.value
-    else if (p.type === 'day') day = p.value
-  }
-  return `${y}-${m}-${day}`
-}
+//
+// Delegates to the shared helper because this column now has TWO eras: stamps
+// written before 2026-08-04 are a UTC wall clock and must be converted, while
+// stamps written after are already a Houston wall clock and must NOT be — a
+// second conversion would move an evening delivery back a day and drop it out
+// of a range filter that should have matched it.
+const centralDay = (v) => sheetStampHoustonDay(v)
 // Exactly the predicates the export endpoint understands, so the button's
 // enabled/disabled state mirrors whether the server would find rows or 404.
 const exportMatches = computed(() => {
@@ -357,7 +353,7 @@ const emptyMessage = computed(() => {
 const sortedJobs = computed(() => {
   const col = completionCol.value
   if (!col) return filteredJobs.value
-  const ts = (v) => { const d = parseSheetUtc(v); return d && !isNaN(d.getTime()) ? d.getTime() : -Infinity }
+  const ts = (v) => { const d = parseSheetStamp(v); return d && !isNaN(d.getTime()) ? d.getTime() : -Infinity }
   return [...filteredJobs.value].sort((a, b) => ts(b[col]) - ts(a[col]))
 })
 const reviewToggleStyle = computed(() => ({
@@ -562,9 +558,10 @@ const displayCols = computed(() => {
   return out
 })
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
-// Delivery date/time. The raw cell is a UTC wall-clock string with no zone, so
-// parseSheetUtc re-interprets it as a true instant — then we render it in
-// CENTRAL (see the day-basis note above), NOT the viewer's zone, so the date
+// Delivery date/time. The raw cell is a bare wall-clock string with no zone —
+// UTC if written before the 2026-08-04 cutover, Houston after — so
+// parseSheetStamp resolves the era and returns a true instant. We then render
+// it in CENTRAL (see the day-basis note above), NOT the viewer's zone, so the date
 // shown here is the same calendar day the range filter and the CSV bucket it
 // into. Same shape as formatDeliveredLocal() with the zone pinned; the zone
 // label stays on so "8:18 PM CDT" is never ambiguous.
@@ -575,7 +572,7 @@ const deliveryFmt = new Intl.DateTimeFormat('en-US', {
 })
 function fmtDeliveryDate(v) {
   if (!v || !String(v).trim()) return '—'
-  const d = parseSheetUtc(v)
+  const d = parseSheetStamp(v)
   if (!d || isNaN(d.getTime())) return String(v)
   return deliveryFmt.format(d)
 }
