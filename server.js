@@ -3141,7 +3141,7 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 		// display everything the applicant submitted. SSN is kept out of the
 		// application object and returned as a separate, Super-Admin-only field.
 		const fullApplication = db.prepare(
-			"SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)"
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)"
 		).get(user.id);
 		let ssn = null;
 		let application = null;
@@ -3480,7 +3480,8 @@ app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
 				ja.id, ja.full_name, ja.email, ja.phone, ja.dob, ja.address,
 				ja.drivers_license, ja.position, ja.experience, ja.has_cdl,
 				ja.work_authorized, ja.felony_convicted, ja.accident_history,
-				ja.certifications, ja.status, ja.created_at, ja.deleted_at,
+				ja.certifications, ja.status,
+				strftime('%Y-%m-%dT%H:%M:%SZ', ja.created_at) AS created_at, ja.deleted_at,
 				ja.city, ja.state, ja.zip, ja.cell, ja.dot, ja.mc, ja.hazmat,
 				do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result
 			FROM job_applications ja
@@ -3542,7 +3543,8 @@ app.post("/api/applications/:id/restore", requireRole("Super Admin"), (req, res)
 // SSN, skills, references, availability, etc. Used by the detail modal.
 app.get("/api/applications/:id", requireRole("Super Admin"), (req, res) => {
 	try {
-		const row = db.prepare(`SELECT ja.*, do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result
+		const row = db.prepare(`SELECT ja.*, do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result,
+				strftime('%Y-%m-%dT%H:%M:%SZ', ja.created_at) AS created_at
 			FROM job_applications ja
 			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
 			WHERE ja.id = ?`).get(Number(req.params.id));
@@ -5468,7 +5470,11 @@ async function checkAndCompleteOnboarding(userId) {
 		}
 		return { ...ob, status: "fully_onboarded", onboarded_at: now };
 	}
-	return db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
+	// created_at is UTC CURRENT_TIMESTAMP with no zone marker; onboarded_at is
+	// already app-set ISO-Z. Wrap created_at so both read as UTC on the client.
+	return db.prepare(
+		"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
+	).get(userId);
 }
 
 // GET /api/onboarding — list all onboarding records (Super Admin)
@@ -5476,7 +5482,8 @@ app.get("/api/onboarding", requireRole("Super Admin"), (req, res) => {
 	try {
 		const records = db.prepare(`
 			SELECT o.*, u.username, u.email,
-				(SELECT COUNT(*) FROM onboarding_documents WHERE user_id = o.user_id AND signed = 1) AS signed_count
+				(SELECT COUNT(*) FROM onboarding_documents WHERE user_id = o.user_id AND signed = 1) AS signed_count,
+				strftime('%Y-%m-%dT%H:%M:%SZ', o.created_at) AS created_at
 			FROM driver_onboarding o
 			JOIN users u ON u.id = o.user_id
 			ORDER BY o.created_at DESC
@@ -5495,7 +5502,9 @@ app.get("/api/onboarding/:userId", requireAuth, (req, res) => {
 		if (req.session.user.role === "Driver" && req.session.user.id !== userId) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
-		const onboarding = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
+		const onboarding = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
+		).get(userId);
 		if (!onboarding) return res.status(404).json({ error: "No onboarding record" });
 		const documents = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId);
 		res.json({ onboarding, documents, totalDocs: ONBOARDING_DOCS.length });
@@ -6344,7 +6353,7 @@ async function generateInvoiceHandler(req, res) {
 		// (admin-created) invoices never block a weekly regenerate — the partial
 		// unique index idx_invoices_driver_week applies the same scoping.
 		const existing = db.prepare(
-			"SELECT * FROM invoices WHERE LOWER(driver) = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0"
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE LOWER(driver) = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0"
 		).get(driverName.toLowerCase(), weekStart);
 		if (existing && existing.status !== "Draft") {
 			return res.status(409).json({
@@ -6747,7 +6756,12 @@ async function generateInvoiceHandler(req, res) {
 			JSON.stringify(renderSnapshot)
 		);
 
-		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(result.lastInsertRowid);
+		// created_at is SQLite CURRENT_TIMESTAMP — UTC but serialized without a
+		// zone, which JS parses as local time. Wrap it as ISO-8601 Z; the trailing
+		// alias overrides the value the star already selected.
+		const invoice = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(result.lastInsertRowid);
 		const late = isAfterDeadline(computedWeekEnd);
 		res.json({ success: true, invoice, isLate: late });
 	} catch (err) {
@@ -7302,7 +7316,10 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 			pdfFileName, JSON.stringify(renderSnapshot), adminName
 		);
 
-		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(result.lastInsertRowid);
+		// created_at wrapped as ISO-8601 Z (see note in generateInvoiceHandler).
+		const invoice = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(result.lastInsertRowid);
 		logAudit(
 			req,
 			"create_manual_invoice",
@@ -7330,7 +7347,10 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 			// with ?include_deleted=true (recovery/audit view — rows carry
 			// deleted_at/deleted_by/delete_reason so the client can badge them).
 			const includeDeleted = req.query.include_deleted === "true";
-			let sql = "SELECT * FROM invoices WHERE 1=1";
+			// created_at wrapped as ISO-8601 Z (UTC CURRENT_TIMESTAMP would
+			// otherwise be read as local time by the client). ORDER BY created_at
+			// binds to this alias, which is monotonic in the raw value — same order.
+			let sql = "SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE 1=1";
 			const params = [];
 			if (!includeDeleted) sql += " AND deleted_at = ''";
 			if (driverFilter) { sql += " AND LOWER(driver) = ?"; params.push(driverFilter.toLowerCase()); }
@@ -7339,8 +7359,9 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 			invoices = db.prepare(sql).all(...params);
 		} else {
 			const driverName = user.driverName || "";
-			invoices = db.prepare("SELECT * FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC")
-				.all(driverName.toLowerCase());
+			invoices = db.prepare(
+				"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC"
+			).all(driverName.toLowerCase());
 		}
 		res.json({ invoices });
 	} catch (err) {
@@ -7749,7 +7770,9 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), async (req, res)
 			`${postApproval ? `POST-APPROVAL EDIT (status ${invoice.status}): ` : ""}${invoice.invoice_number}: adjustment ${oldAdjustment.toFixed(2)} → ${adjustment.toFixed(2)} (${note || "no reason given"})`
 		);
 		notifyChange("invoices");
-		const final = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
+		const final = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(invoice.id);
 		res.json({ success: true, invoice: final, pdfMode });
 	} catch (err) {
 		console.error("Invoice adjust error:", err.message);
@@ -7792,7 +7815,9 @@ app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 			`${invoice.invoice_number}: status ${invoice.status} → Submitted${reason ? ` (${reason})` : ""}${priorState ? ` [was: ${priorState}]` : ""}`
 		);
 		notifyChange("invoices");
-		const fresh = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
+		const fresh = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(invoice.id);
 		res.json({ success: true, invoice: fresh });
 	} catch (err) {
 		console.error("Invoice revert error:", err.message);
@@ -7854,7 +7879,9 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 			`${invoice.invoice_number} restored (was deleted by ${invoice.deleted_by || "unknown"} at ${invoice.deleted_at}${invoice.delete_reason ? `, reason: ${invoice.delete_reason}` : ""})`
 		);
 		notifyChange("invoices");
-		const fresh = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice.id);
+		const fresh = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
+		).get(invoice.id);
 		res.json({ success: true, invoice: fresh });
 	} catch (err) {
 		console.error("Invoice restore error:", err.message);
@@ -8092,7 +8119,8 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 // Admin: list all users (without password hashes)
 app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
-		.prepare(`SELECT u.id, u.username, u.role, u.driver_name, u.email, u.full_name, u.company_name, u.created_at, u.rating,
+		.prepare(`SELECT u.id, u.username, u.role, u.driver_name, u.email, u.full_name, u.company_name, u.rating,
+			strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at) AS created_at,
 			do2.status AS onboarding_status
 			FROM users u
 			LEFT JOIN driver_onboarding do2 ON do2.user_id = u.id`)
@@ -8311,7 +8339,9 @@ app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, 
 
 app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 	const rows = db.prepare(`
-		SELECT i.*, u.username FROM investors i
+		SELECT i.*, u.username,
+			strftime('%Y-%m-%dT%H:%M:%SZ', i.created_at) AS created_at
+		FROM investors i
 		LEFT JOIN users u ON u.id = i.user_id
 		ORDER BY i.full_name ASC
 	`).all();
@@ -8435,12 +8465,15 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 	// Outside preview mode the behavior is unchanged for all roles.
 	const preview = resolvePreviewUser(req);
 	let rows;
+	// created_at is UTC CURRENT_TIMESTAMP with no zone marker — the trailing
+	// alias re-emits it as ISO-8601 Z, overriding the starred value.
+	const TRUCK_CREATED_AT = "strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at";
 	if (preview.isPreview) {
-		rows = db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(preview.effectiveUserId);
+		rows = db.prepare(`SELECT *, ${TRUCK_CREATED_AT} FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC`).all(preview.effectiveUserId);
 	} else if (user.role === "Investor") {
-		rows = db.prepare("SELECT * FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC").all(user.id);
+		rows = db.prepare(`SELECT *, ${TRUCK_CREATED_AT} FROM trucks WHERE owner_id = ? ORDER BY unit_number ASC`).all(user.id);
 	} else {
-		rows = db.prepare("SELECT * FROM trucks ORDER BY unit_number ASC").all();
+		rows = db.prepare(`SELECT *, ${TRUCK_CREATED_AT} FROM trucks ORDER BY unit_number ASC`).all();
 	}
 
 	// Build completed-load counts per truck from the cached Job Tracking sheet.
@@ -8773,7 +8806,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 app.get("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const trailers = db.prepare(`
-			SELECT t.*, tr.unit_number AS truck_number, tr.assigned_driver
+			SELECT t.*, tr.unit_number AS truck_number, tr.assigned_driver,
+				strftime('%Y-%m-%dT%H:%M:%SZ', t.created_at) AS created_at
 			FROM trailers t
 			LEFT JOIN trucks tr ON t.truck_id = tr.id
 			ORDER BY t.created_at DESC
@@ -8856,7 +8890,10 @@ app.delete("/api/trailers/:id", requireRole("Super Admin"), (req, res) => {
 // GET /api/admin/audit-trail — View audit log
 app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 	const { limit = 100, entity, username } = req.query;
-	let sql = "SELECT * FROM audit_trail";
+	// created_at is UTC CURRENT_TIMESTAMP with no zone marker (the sibling
+	// `timestamp` column is already app-set ISO-Z). Trailing alias overrides
+	// the starred value so both read as UTC on the client.
+	let sql = "SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM audit_trail";
 	const conditions = [];
 	const params = [];
 	if (entity) { conditions.push("entity = ?"); params.push(entity); }
@@ -9491,7 +9528,7 @@ app.get("/api/debug/driver-loads/:driverName", requireRole("Super Admin"), async
 app.get("/api/debug/user/:username", requireRole("Super Admin"), (req, res) => {
 	const username = decodeURIComponent(req.params.username).trim();
 	const user = db
-		.prepare("SELECT id, username, role, driver_name, email, created_at FROM users WHERE LOWER(username) = ?")
+		.prepare("SELECT id, username, role, driver_name, email, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM users WHERE LOWER(username) = ?")
 		.get(username.toLowerCase());
 	if (!user) return res.status(404).json({ error: "User not found" });
 	res.json({
@@ -10185,7 +10222,7 @@ app.post("/api/admin/excluded-days", requireRole("Super Admin"), (req, res) => {
 		logAudit(req, auditAction, "driver_active_day", `${driver}:${date}`, reason || `${action === "add" ? "Added" : "Excluded"} by ${excludedBy}`);
 		jtCacheInvalidate();
 		const row = db.prepare(
-			"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days WHERE driver_name = ? AND excluded_date = ?"
+			"SELECT id, driver_name, excluded_date, reason, excluded_by, strftime('%Y-%m-%dT%H:%M:%SZ', excluded_at) AS excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days WHERE driver_name = ? AND excluded_date = ?"
 		).get(driver, date);
 		res.json({ success: true, inserted: result.changes > 0, row });
 	} catch (error) {
@@ -10224,7 +10261,7 @@ app.delete("/api/admin/excluded-days/:id", requireRole("Super Admin"), (req, res
 app.get("/api/admin/driver-day-overrides", requireRole("Super Admin"), (req, res) => {
 	try {
 		const overrides = db.prepare(
-			"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days ORDER BY excluded_date DESC, id DESC"
+			"SELECT id, driver_name, excluded_date, reason, excluded_by, strftime('%Y-%m-%dT%H:%M:%SZ', excluded_at) AS excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days ORDER BY excluded_date DESC, id DESC"
 		).all();
 		// Driver universe = anyone in drivers_directory OR currently assigned to
 		// a truck. Some drivers exist in only one or the other depending on how
@@ -11082,9 +11119,14 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			.all(nameLower, nameLower);
 
 		// Notifications from SQLite
+		// SQLite's CURRENT_TIMESTAMP is UTC but serializes without a zone
+		// ("2026-04-20 14:30:00"), which JS parses as local time — every row
+		// then looks ~N hours in the future and the UI stuck on "just now".
+		// Force ISO-8601 with Z so `new Date(...)` parses it as UTC.
 		const driverNotifications = db
 			.prepare(
-				`SELECT id, type, title, body, metadata, read, created_at AS createdAt
+				`SELECT id, type, title, body, metadata, read,
+				        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS createdAt
 				 FROM notifications
 				 WHERE driver_name = ?
 				 ORDER BY id DESC
@@ -11262,7 +11304,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		// Super Admin / Dispatcher still sees them via /api/drivers-directory/:id/documents.
 		const userId = req.session.user.id;
 		const onboarding = db.prepare(
-			"SELECT id, user_id, application_id, driver_name, status, onboarded_at, created_at FROM driver_onboarding WHERE user_id = ?"
+			"SELECT id, user_id, application_id, driver_name, status, onboarded_at, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
 		).get(userId) || null;
 		const onboardingDocs = onboarding
 			? db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId)
@@ -11279,7 +11321,9 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		// /api/driver/me/identity-file/:fileType when it renders.
 		let application = null;
 		if (onboarding?.application_id) {
-			const fullApp = db.prepare("SELECT * FROM job_applications WHERE id = ?").get(onboarding.application_id);
+			const fullApp = db.prepare(
+				"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM job_applications WHERE id = ?"
+			).get(onboarding.application_id);
 			if (fullApp) {
 				const { ssn: _drop, cdl_front, cdl_back, medical_card, ...safeApp } = fullApp;
 				const detectMime = (b64) => {
@@ -11298,7 +11342,8 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		}
 		// Recent invoices (soft-deleted ones are hidden from drivers)
 		const driverInvoices = db.prepare(
-			`SELECT id, invoice_number, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at, created_at
+			`SELECT id, invoice_number, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at,
+			        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at
 			 FROM invoices WHERE LOWER(driver) = ? AND deleted_at = '' ORDER BY created_at DESC LIMIT 20`
 		).all(nameLower);
 
@@ -12471,7 +12516,7 @@ app.get("/api/routemate/vehicles", requireRole("Super Admin", "Dispatcher"), (re
 		const rows = db.prepare(`
 			SELECT rv.id, rv.routemate_vehicle_id, rv.vehicle_id, rv.vin, rv.make, rv.model,
 			       rv.year, rv.fuel_type, rv.license_num, rv.eld_id, rv.state, rv.active,
-			       rv.last_synced_at,
+			       strftime('%Y-%m-%dT%H:%M:%SZ', rv.last_synced_at) AS last_synced_at,
 			       (SELECT t.id FROM trucks t WHERE t.routemate_vehicle_id = rv.routemate_vehicle_id LIMIT 1) AS linked_truck_id,
 			       (SELECT t.unit_number FROM trucks t WHERE t.routemate_vehicle_id = rv.routemate_vehicle_id LIMIT 1) AS linked_truck_unit
 			FROM routemate_vehicles rv
@@ -12734,7 +12779,10 @@ app.get("/api/routemate/fault-codes", requireRole("Super Admin", "Dispatcher", "
 		const placeholders = trucksFilter.map(() => "?").join(",");
 		const args = trucksFilter.map(t => t.routemate_vehicle_id);
 		const faults = db.prepare(`
-			SELECT id, routemate_vehicle_id, code, status, first_seen, last_seen, ack_by_user_id, ack_at
+			SELECT id, routemate_vehicle_id, code, status, ack_by_user_id,
+			       strftime('%Y-%m-%dT%H:%M:%SZ', first_seen) AS first_seen,
+			       strftime('%Y-%m-%dT%H:%M:%SZ', last_seen) AS last_seen,
+			       strftime('%Y-%m-%dT%H:%M:%SZ', ack_at) AS ack_at
 			FROM routemate_fault_codes
 			WHERE routemate_vehicle_id IN (${placeholders})
 			  AND ack_at IS NULL
@@ -19249,7 +19297,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			const overrideRows = (() => {
 				try {
 					return db.prepare(
-						"SELECT id, driver_name, excluded_date, reason, excluded_by, excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days"
+						"SELECT id, driver_name, excluded_date, reason, excluded_by, strftime('%Y-%m-%dT%H:%M:%SZ', excluded_at) AS excluded_at, COALESCE(action, 'remove') AS action FROM excluded_driver_days"
 					).all();
 				} catch { return []; }
 			})();
@@ -19795,7 +19843,9 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 		if (from) { conditions.push("date >= ?"); params.push(from); }
 		if (to) { conditions.push("date <= ?"); params.push(to); }
 
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, created_at FROM expenses";
+		// created_at is UTC CURRENT_TIMESTAMP with no zone marker — emit ISO-8601 Z
+		// so the client doesn't parse it as local time.
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM expenses";
 		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 		sql += " ORDER BY date DESC, id DESC LIMIT 1000";
 
@@ -20295,7 +20345,9 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 				? `REOPENED ${payout.status} -> ${status} (owner ${payout.owner_id} ${payout.period}): ${reason}`
 				: `${payout.status} -> ${status}`
 		);
-		const updated = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
+		const updated = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM investor_payouts WHERE id = ?"
+		).get(id);
 		res.json({ success: true, reopened: isReopen, payout: updated });
 	} catch (err) {
 		console.error("POST /api/investor/payouts/:id/status error:", err.message);
@@ -20381,7 +20433,9 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), (req, re
 			`${settledTag}owner ${payout.owner_id} ${payout.period}: adjustment ${oldAdjustment.toFixed(2)} -> ${rounded.toFixed(2)} (${note || "no reason given"})`
 		);
 
-		const updated = db.prepare("SELECT * FROM investor_payouts WHERE id = ?").get(id);
+		const updated = db.prepare(
+			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM investor_payouts WHERE id = ?"
+		).get(id);
 		res.json({
 			success: true,
 			payout: {
@@ -21877,7 +21931,7 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		// posted_period is exposed so a receipt that was redirected out of a closed
 		// month is visible as such in the admin list — otherwise a March-dated row
 		// silently counting in August looks like a bug rather than the rule.
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, posted_period, created_at FROM expenses";
+		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, vendor, vendor_normalized, location_lat, location_lng, location_source, receipt_details, posted_period, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM expenses";
 		const conditions = [];
 		const params = [];
 		if (driver) { conditions.push("LOWER(driver) = ?"); params.push(driver.toLowerCase()); }
