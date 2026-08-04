@@ -16,6 +16,52 @@
       </div>
       <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
+
+    <!-- Per-driver history + export — Super Admin only.
+         Its own bar rather than more controls in the search row: these answer a
+         different question ("what did this driver do, and give me the file")
+         than the load-number lookup above, and inlining them made the row wrap
+         into a ragged two lines with no clue what the bare dates applied to.
+         The driver list is built from the completed loads themselves, never from
+         the active-driver roster: work done by a since-deactivated driver is
+         exactly the history this answers, and a roster-backed dropdown would
+         silently hide it. -->
+    <div v-if="auth.isSuperAdmin" class="cl-bar">
+      <div v-if="driverCol" class="cl-field">
+        <label class="cl-label" for="cl-driver">Driver</label>
+        <select id="cl-driver" v-model="driverFilter" class="dash-select cl-control cl-driver">
+          <option value="">All drivers</option>
+          <option v-for="d in driverOptions" :key="d.key" :value="d.key">{{ d.label }}</option>
+        </select>
+      </div>
+
+      <!-- Labelled, because two bare mm/dd/yyyy boxes give no clue which date
+           they filter on. Central is stated: the stamp is UTC off the VPS, so a
+           late-evening delivery lands on the previous Houston day. -->
+      <div class="cl-field">
+        <label class="cl-label" for="cl-from">Delivered <span class="cl-tz">(Central)</span></label>
+        <div class="cl-dates">
+          <input id="cl-from" v-model="fromDate" type="date" class="cl-control cl-date" :max="toDate || undefined" aria-label="Delivered on or after (Central time)" />
+          <span class="cl-dash" aria-hidden="true">–</span>
+          <input v-model="toDate" type="date" class="cl-control cl-date" :min="fromDate || undefined" aria-label="Delivered on or before (Central time)" />
+        </div>
+      </div>
+
+      <button v-if="filtersActive" type="button" class="cl-clear" title="Clear the driver and date filters" @click="clearFilters">Clear</button>
+
+      <!-- Pushed right: this is the action, not another filter. -->
+      <div class="cl-actions">
+        <span v-if="filtersActive" class="cl-count">{{ filteredJobs.length }} load{{ filteredJobs.length === 1 ? '' : 's' }}</span>
+        <button type="button" class="cl-download" :disabled="!canDownload" :title="downloadTitle" @click="downloadExport">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download CSV
+        </button>
+      </div>
+      <!-- The export endpoint only understands driver + date range, so a live
+           load-number search or the Needs Review toggle would make the file
+           wider than the table. Say so rather than surprise them. -->
+      <p v-if="exportWiderThanTable" class="cl-note">Search and Needs Review aren’t applied to the downloaded file.</p>
+    </div>
     <div class="overflow-x-auto">
       <Table v-if="filteredJobs.length > 0">
         <TableHeader>
@@ -40,7 +86,7 @@
           </TableRow>
         </TableBody>
       </Table>
-      <EmptyState v-else>{{ needsReviewOnly ? 'No completed loads need review.' : (searchQuery ? 'No loads match your search.' : 'No completed loads.') }}</EmptyState>
+      <EmptyState v-else>{{ emptyMessage }}</EmptyState>
     </div>
     <Dialog :open="!!selectedJob" @update:open="v => { if (!v) selectedJob = null }">
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
@@ -160,7 +206,7 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
-import { parseSheetUtc, formatDeliveredLocal, fmtTimestamp } from '@/utils/datetime'
+import { parseSheetUtc, fmtTimestamp } from '@/utils/datetime'
 
 const api = useApi()
 const auth = useAuthStore()
@@ -171,17 +217,105 @@ const needsReviewOnly = ref(false)
 const loadRating = ref(0)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const needsReviewCount = computed(() => countNeedsReview(props.jobs))
-const filteredJobs = computed(() => {
+// Delivery date/time lives in "Completion Date" (stamped when a load is marked
+// delivered through the app; equals the final Status Update Date). Loads
+// delivered/imported before this tracking have it blank.
+const completionCol = computed(() => props.headers.find(h => /completion|complete/i.test(h)) || props.headers.find(h => /status.*update/i.test(h)) || null)
+
+// --- Driver + delivery-date filters (Super Admin) ---------------------------
+const driverFilter = ref('') // normalised driver key, '' = all
+const fromDate = ref('')     // 'YYYY-MM-DD' from <input type="date">
+const toDate = ref('')
+const driverCol = computed(() => props.headers.find(h => /driver/i.test(h)) || '')
+// The server's own key rule: trim → lowercase → collapse internal whitespace.
+// Without the collapse, sheet drift renders "Rodney Brown" and "Rodney  Brown"
+// as two separate drivers, each holding half the history.
+const normDriver = (s) => (s || '').toString().trim().toLowerCase().replace(/\s+/g, ' ')
+// Distinct drivers present in the completed loads, keyed on the normalised form
+// and labelled with the first spelling seen (original casing preserved).
+const driverOptions = computed(() => {
+  const col = driverCol.value
+  if (!col) return []
+  const seen = new Map()
+  for (const j of props.jobs) {
+    const raw = (j[col] || '').toString().trim()
+    const key = normDriver(raw)
+    if (!key || seen.has(key)) continue
+    seen.set(key, raw.replace(/\s+/g, ' '))
+  }
+  return [...seen.entries()]
+    .map(([key, label]) => ({ key, label }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+})
+const driverLabel = computed(() => (driverOptions.value.find(o => o.key === driverFilter.value) || {}).label || '')
+
+// THE DAY BASIS IS AMERICA/CHICAGO — NOT the viewer's timezone. Please don't
+// "fix" this back to local time. The company operates out of Houston, so the
+// business day IS the Central day; pinning it is what makes the rows on screen,
+// the range filter, and the downloaded CSV agree for everyone, wherever they
+// open the dashboard. Viewer-local would only line up for people sitting in one
+// zone, and the sheet stamp is a UTC wall-clock written by the VPS, so an
+// overnight delivery ("7/1/2026 4:16:50" = Jun 30, 11:16 PM CDT) lands on a
+// different calendar day depending on who is looking. The server-side export
+// buckets on the same Central day.
+const CENTRAL_TZ = 'America/Chicago'
+// formatToParts, not offset arithmetic, so DST is the platform's problem.
+// Mirrors server.js's localDayInTz().
+const centralDayFmt = new Intl.DateTimeFormat('en-US', { timeZone: CENTRAL_TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
+// Sheet timestamp → 'YYYY-MM-DD' in Central; '' when blank or unparseable.
+function centralDay(v) {
+  const d = parseSheetUtc(v)
+  if (!d || isNaN(d.getTime())) return ''
+  let y = '', m = '', day = ''
+  for (const p of centralDayFmt.formatToParts(d)) {
+    if (p.type === 'year') y = p.value
+    else if (p.type === 'month') m = p.value
+    else if (p.type === 'day') day = p.value
+  }
+  return `${y}-${m}-${day}`
+}
+// Exactly the predicates the export endpoint understands, so the button's
+// enabled/disabled state mirrors whether the server would find rows or 404.
+const exportMatches = computed(() => {
   let pool = props.jobs
+  const dc = driverCol.value
+  if (driverFilter.value && dc) pool = pool.filter(j => normDriver(j[dc]) === driverFilter.value)
+  const col = completionCol.value
+  const from = fromDate.value
+  const to = toDate.value
+  if (col && (from || to)) {
+    pool = pool.filter(j => {
+      // 'YYYY-MM-DD' vs 'YYYY-MM-DD', both inclusive. Deliberately a STRING
+      // compare against the raw <input type="date"> values — no Date is built
+      // from a date-only string on either side, which sidesteps the
+      // new Date('2026-07-15')-is-UTC-midnight class of bug outright.
+      const day = centralDay(j[col])
+      // Blank completion date (pre-tracking / imported load) can't be shown to
+      // fall inside the window, so a date filter excludes it rather than guess.
+      if (!day) return false
+      return (!from || day >= from) && (!to || day <= to)
+    })
+  }
+  return pool
+})
+const filtersActive = computed(() => !!(driverFilter.value || fromDate.value || toDate.value))
+function clearFilters() { driverFilter.value = ''; fromDate.value = ''; toDate.value = '' }
+// PaginationBar is fed `filteredJobs.length` while the page slice is computed
+// over sortedJobs — so every predicate has to live here, not in sortedJobs, or
+// the page count silently desyncs from the rows on screen.
+const filteredJobs = computed(() => {
+  let pool = exportMatches.value
   if (needsReviewOnly.value) pool = pool.filter(needsReview)
   const q = searchQuery.value.trim().toLowerCase()
   if (!q || !loadIdCol.value) return pool
   return pool.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q))
 })
-// Delivery date/time lives in "Completion Date" (stamped when a load is marked
-// delivered through the app; equals the final Status Update Date). Loads
-// delivered/imported before this tracking have it blank.
-const completionCol = computed(() => props.headers.find(h => /completion|complete/i.test(h)) || props.headers.find(h => /status.*update/i.test(h)) || null)
+const emptyMessage = computed(() => {
+  if (needsReviewOnly.value) return 'No completed loads need review.'
+  if (searchQuery.value.trim()) return 'No loads match your search.'
+  if (filtersActive.value) return 'No completed loads match these filters.'
+  return 'No completed loads.'
+})
 // Order completed loads by delivery date, most recent first; loads with no
 // recorded delivery time sort to the bottom.
 const sortedJobs = computed(() => {
@@ -210,7 +344,58 @@ const reviewBadgeStyle = {
   color: '#92400e',
   whiteSpace: 'nowrap',
 }
-const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(sortedJobs)
+// 25/page, not usePagination's default 5 — this tab is the "every load a driver
+// did" history, and 5 rows a page turns a year of work into endless paging.
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(sortedJobs, 25)
+// Any filter change re-slices the list, so a carried-over page number can land
+// on a blank page (filter while on page 4 → nothing). Snap back to page 1.
+watch([searchQuery, needsReviewOnly, driverFilter, fromDate, toDate], () => goTo(1))
+
+// --- Export ----------------------------------------------------------------
+// "Pattern A": a plain same-origin anchor, deliberately no fetch/blob.
+//   • useApi() hard-codes a 20s abort and always res.json()s the body, so it
+//     cannot carry a file.
+//   • A blob download without an explicit `download` attribute saves as a
+//     nameless UUID — the bug that hit the investor exports.
+// The button is disabled when nothing matches, which is also the case the
+// endpoint answers with a 404 JSON body an anchor couldn't intercept anyway.
+const canDownload = computed(() => exportMatches.value.length > 0)
+const exportWiderThanTable = computed(() => canDownload.value && (!!searchQuery.value.trim() || needsReviewOnly.value))
+const downloadTitle = computed(() => {
+  if (!canDownload.value) return 'No completed loads match these filters.'
+  const who = driverLabel.value ? `every load ${driverLabel.value} delivered` : 'every completed load'
+  let when = ''
+  if (fromDate.value && toDate.value) when = ` between ${fromDate.value} and ${toDate.value}`
+  else if (fromDate.value) when = ` delivered on or after ${fromDate.value}`
+  else if (toDate.value) when = ` delivered on or before ${toDate.value}`
+  return `Download ${who}${when} (${exportMatches.value.length} load${exportMatches.value.length === 1 ? '' : 's'}).`
+})
+const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+function exportFileName() {
+  const parts = ['completed-loads']
+  if (driverLabel.value) parts.push(slug(driverLabel.value))
+  if (fromDate.value || toDate.value) parts.push(`${fromDate.value || 'start'}_${toDate.value || 'latest'}`)
+  return `${parts.join('-')}.csv`
+}
+function downloadExport() {
+  if (!canDownload.value) return
+  const params = new URLSearchParams()
+  // Send the human spelling, not the normalised key — the server applies the
+  // same trim/lowercase/collapse rule on its side.
+  if (driverLabel.value) params.set('driver', driverLabel.value)
+  if (fromDate.value) params.set('from', fromDate.value)
+  if (toDate.value) params.set('to', toDate.value)
+  const qs = params.toString()
+  const a = document.createElement('a')
+  a.href = `/api/loads/completed/export${qs ? `?${qs}` : ''}`
+  a.download = exportFileName()
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+// Clear/Download moved to scoped CSS classes (.cl-clear / .cl-download) when the
+// filter bar became its own surface — the disabled state is :disabled now, so
+// the computed style object it needed is gone with it.
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
 async function openDetail(job) {
   selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null
@@ -264,11 +449,22 @@ const displayCols = computed(() => {
   return out
 })
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
-// Delivery date/time. The raw cell is a UTC wall-clock string with no zone; we
-// re-interpret it as UTC and render the viewer-local instant + zone label so
-// this column matches the load-detail Status Timeline. See @/utils/datetime.
+// Delivery date/time. The raw cell is a UTC wall-clock string with no zone, so
+// parseSheetUtc re-interprets it as a true instant — then we render it in
+// CENTRAL (see the day-basis note above), NOT the viewer's zone, so the date
+// shown here is the same calendar day the range filter and the CSV bucket it
+// into. Same shape as formatDeliveredLocal() with the zone pinned; the zone
+// label stays on so "8:18 PM CDT" is never ambiguous.
+const deliveryFmt = new Intl.DateTimeFormat('en-US', {
+  timeZone: CENTRAL_TZ,
+  month: 'numeric', day: 'numeric', year: 'numeric',
+  hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
+})
 function fmtDeliveryDate(v) {
-  return formatDeliveredLocal(v)
+  if (!v || !String(v).trim()) return '—'
+  const d = parseSheetUtc(v)
+  if (!d || isNaN(d.getTime())) return String(v)
+  return deliveryFmt.format(d)
 }
 // Document upload time. GET /api/documents/:loadId serves uploaded_at as ISO with
 // 'Z', so this is a true instant. Never swap in a raw SQLite stamp: those are UTC
@@ -389,4 +585,73 @@ const detailSections = computed(() => {
 .addr-cell { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }
 .addr-csz { font-size: 0.92em; color: #64748b; }
+
+/* Driver / date filter controls. The search bar already wraps (flex-wrap on the
+   parent), so these only need to stay tappable and go full-width once it does. */
+/* Driver-history bar. Its own surface so it reads as one cluster of related
+   controls rather than four more chips crowding the search row. */
+.cl-bar {
+  display: flex; align-items: flex-end; flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  margin-bottom: 0.75rem;
+  background: #f8fafc;
+  border: 1px solid #eef2f7;
+  border-radius: 10px;
+}
+.cl-field { display: flex; flex-direction: column; gap: 0.3rem; }
+.cl-label {
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase; color: #64748b; white-space: nowrap;
+}
+.cl-tz { font-weight: 500; text-transform: none; letter-spacing: 0; color: #94a3b8; }
+
+/* One height for every control on the row, so nothing sits half a pixel proud. */
+.cl-control {
+  height: 2.25rem;
+  font-size: 0.8125rem; font-family: inherit;
+  background: #fff; border: 1px solid #e2e8f0;
+  border-radius: 8px; color: #374151; outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.cl-control:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.1); }
+.cl-driver { max-width: 200px; }
+.cl-dates { display: flex; align-items: center; gap: 0.35rem; }
+.cl-date { width: 140px; padding: 0 0.55rem; }
+.cl-dash { color: #94a3b8; font-size: 0.8125rem; }
+
+.cl-clear {
+  height: 2.25rem; padding: 0 0.75rem;
+  font-size: 0.75rem; font-weight: 600; font-family: inherit;
+  color: #64748b; background: #fff;
+  border: 1px solid #e2e8f0; border-radius: 8px;
+  cursor: pointer; white-space: nowrap; transition: all 0.15s;
+}
+.cl-clear:hover { color: #0f172a; border-color: #cbd5e1; }
+
+/* margin-left:auto is what separates action from filters — the download is the
+   outcome of the row, not another input on it. */
+.cl-actions { display: flex; align-items: center; gap: 0.6rem; margin-left: auto; }
+.cl-count { font-size: 0.75rem; color: #64748b; white-space: nowrap; }
+.cl-download {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  height: 2.25rem; padding: 0 0.9rem;
+  font-size: 0.75rem; font-weight: 700; font-family: inherit;
+  border-radius: 8px; white-space: nowrap;
+  border: 1px solid #0f2847; background: #0f2847; color: #fff;
+  cursor: pointer; transition: all 0.15s;
+}
+.cl-download:hover:not(:disabled) { background: #1b3a63; border-color: #1b3a63; }
+.cl-download:disabled { background: #f1f5f9; border-color: #e2e8f0; color: #94a3b8; cursor: not-allowed; }
+.cl-note { flex: 1 1 100%; margin: 0; font-size: 0.7rem; color: #94a3b8; line-height: 1.3; }
+
+@media (max-width: 640px) {
+  .cl-bar { gap: 0.6rem; }
+  .cl-field { flex: 1 1 100%; }
+  .cl-driver, .cl-dates { width: 100%; max-width: none; }
+  .cl-date { flex: 1 1 0; width: auto; min-width: 0; }
+  /* Full-width action on a phone; auto-margin would strand it mid-row. */
+  .cl-actions { flex: 1 1 100%; margin-left: 0; justify-content: space-between; }
+  .cl-download { flex: 1 1 auto; justify-content: center; }
+}
 </style>

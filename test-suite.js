@@ -30,6 +30,19 @@ try {
 	linxupPush = null;
 }
 
+// lib/csv.js is the pure escaper the CSV exports share. Tests 135-136 exercise
+// it directly, because the formula-injection guard is the one property of the
+// completed-loads export that seeded data cannot be relied on to reach: test 127
+// (the end-to-end check) honestly SKIPS when no exported cell happens to begin
+// with a dangerous character, and a security guard that is only tested when the
+// data feels like it is not tested at all. Loaded defensively like the two above.
+let csvLib = null;
+try {
+	csvLib = require("./lib/csv");
+} catch {
+	csvLib = null;
+}
+
 // Optional directory of REAL rate-con PDFs (they contain broker pricing, so
 // they are deliberately NOT committed). Point at a local folder to run the
 // fixture-backed extraction tests 91-92; unset, they skip.
@@ -1375,6 +1388,296 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       && !!savedRow
       && savedRow.date === `${anyFinal.period}-15`
       && savedRow.posted_period === after.currentMonth?.period);
+  }
+
+  // ==========================================================================
+  // 122-134. Completed-loads CSV export — GET /api/loads/completed/export
+  //
+  // Contract (fixed up front; these tests were written BEFORE the route existed):
+  //   Super Admin only · driver/from/to all optional · 200 => text/csv +
+  //   attachment disposition · 9 fixed columns in a fixed order · CRLF row
+  //   endings · every cell quoted · a value starting with = + - @ or TAB is
+  //   emitted with a leading ' (spreadsheet formula-injection guard) ·
+  //   malformed or inverted dates 400 · no matching rows 404 · exportLimiter.
+  //
+  // ⚠️ READ BEFORE DEBUGGING A FAILURE HERE. This server mounts an SPA
+  // catch-all (app.get("*") -> index.html), so a route that does NOT exist yet
+  // answers **200 with text/html** — not 404. Status alone is therefore a
+  // worthless assertion on this endpoint: `res.status === 200` passes against a
+  // route nobody has written. Every test below also checks the content-type /
+  // body shape, and notRouted() turns "the feature hasn't landed" into a loud,
+  // named failure instead of a baffling mismatch.
+  //
+  // Read-only endpoint: nothing here mutates shared state, so none of it is
+  // behind RUN_WRITE_TESTS.
+  // ==========================================================================
+  const EXPORT_PATH = "/api/loads/completed/export";
+  const EXPORT_COLS = ["Load ID", "Job Status", "Driver", "Truck", "Pickup",
+    "Drop-off", "Assigned Date", "Delivery Date", "Payment"];
+  // Leading chars Excel/Sheets will evaluate as a formula (tab included: it is
+  // stripped on paste, promoting whatever follows it to the front of the cell).
+  const CSV_DANGER = /^[=+\-@\t]/;
+
+  // The SPA fallback answers any unrouted GET, including /api/*, with 200 HTML.
+  function notRouted(r) {
+    if (!r) return true;
+    if (/text\/html/i.test(String((r.headers || {})["content-type"] || ""))) return true;
+    return typeof r.body === "string" && /^\s*<!doctype html/i.test(r.body);
+  }
+
+  // RFC 4180 reader. Records per-cell "was it quoted?" and per-row "what
+  // terminated it?", because both are contract terms here — asserting them by
+  // regex over the raw text would misfire on a newline legitimately embedded
+  // inside a quoted address cell.
+  function parseCsv(text) {
+    const rows = [], terms = [];
+    let row = [], cell = "", quoted = false, inQ = false, i = 0;
+    const endCell = () => { row.push({ v: cell, quoted }); cell = ""; quoted = false; };
+    const endRow = t => { endCell(); rows.push(row); terms.push(t); row = []; };
+    while (i < text.length) {
+      const ch = text[i];
+      if (inQ) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') { cell += '"'; i += 2; continue; }
+          inQ = false; i += 1; continue;
+        }
+        cell += ch; i += 1; continue;
+      }
+      if (ch === '"') { inQ = true; quoted = true; i += 1; continue; }
+      if (ch === ",") { endCell(); i += 1; continue; }
+      if (ch === "\r" && text[i + 1] === "\n") { endRow("\r\n"); i += 2; continue; }
+      if (ch === "\n") { endRow("\n"); i += 1; continue; }
+      if (ch === "\r") { endRow("\r"); i += 1; continue; }
+      cell += ch; i += 1;
+    }
+    if (row.length || cell !== "" || quoted) endRow("EOF");
+    return { rows, terms };
+  }
+
+  async function getExport(qs, cookies) {
+    const r = await req("GET", EXPORT_PATH + (qs || ""), null, cookies === undefined ? ac : cookies);
+    const ct = String((r.headers || {})["content-type"] || "");
+    const isCsv = r.status === 200 && /text\/csv/i.test(ct) && typeof r.body === "string";
+    // A leading BOM is a legitimate Excel-friendliness choice; strip it before
+    // parsing so it can't fail the header assertion on its own.
+    const parsed = isCsv ? parseCsv(r.body.replace(/^\uFEFF/, "")) : { rows: [], terms: [] };
+    return {
+      res: r, ct, isCsv, rows: parsed.rows, terms: parsed.terms,
+      header: (parsed.rows[0] || []).map(c => c.v),
+      data: parsed.rows.slice(1),
+      col(name) { return this.header.indexOf(name); },
+      cells(name) {
+        const i = this.header.indexOf(name);
+        return i < 0 ? [] : this.data.map(r2 => (r2[i] ? r2[i].v : ""));
+      },
+    };
+  }
+  const jsonErr = r => !!r && !!r.body && typeof r.body === "object"
+    && ("error" in r.body || "code" in r.body);
+
+  const xp = await getExport("");
+  if (notRouted(xp.res)) {
+    console.log("\n  NOTE: " + EXPORT_PATH + " is not routed yet — the SPA catch-all answered "
+      + xp.res.status + " " + (String((xp.res.headers || {})["content-type"] || "?").split(";")[0])
+      + ". Tests 122-134 FAIL (they do not skip) until the route lands — that is intended.\n");
+  }
+
+  // 122. Transport contract: a CSV file, delivered as a download. The
+  //      disposition is what makes a browser save it instead of rendering it.
+  const xpDisp = String((xp.res.headers || {})["content-disposition"] || "");
+  test("122. No-param export returns 200 text/csv as a named attachment",
+    xp.res.status === 200
+    && /text\/csv/i.test(xp.ct)
+    && /^\s*attachment\s*;\s*filename\s*=\s*"?[^";]+"?/i.test(xpDisp)
+    && typeof xp.res.body === "string" && xp.res.body.length > 0);
+
+  // 123. The column set is the contract — downstream spreadsheets index by
+  //      position, so order matters as much as membership.
+  test("123. Header row is exactly the 9 contract columns, in order",
+    xp.header.length === 9 && EXPORT_COLS.every((c, i) => xp.header[i] === c));
+
+  // 124. RFC 4180 shape: CRLF terminators, every cell quoted (header included),
+  //      every row exactly 9 fields wide. A row that is not 9 wide means an
+  //      unescaped comma leaked out of a cell and shifted every column after it.
+  const termsOk = xp.terms.length > 0 && xp.terms.every(t => t === "\r\n" || t === "EOF");
+  const quotedOk = xp.rows.length > 0 && xp.rows.every(r => r.every(c => c.quoted));
+  const widthOk = xp.rows.length > 0 && xp.rows.every(r => r.length === 9);
+  test("124. CRLF row endings, every cell quoted, every row 9 fields wide",
+    xp.isCsv && termsOk && quotedOk && widthOk);
+
+  // 125. ?driver= filter. The driver is taken from the live completed set
+  //      rather than hardcoded — a fixed name 404s on any other database.
+  const completedRows = Array.isArray(dash.body?.completedJobs) ? dash.body.completedJobs : [];
+  const drvCounts = {};
+  for (const r of completedRows) {
+    const k = Object.keys(r || {}).find(x => /^driver$/i.test(x));
+    const v = k ? String(r[k] || "").trim() : "";
+    if (v) drvCounts[v] = (drvCounts[v] || 0) + 1;
+  }
+  const xpDriver = Object.keys(drvCounts).sort((a, b) => drvCounts[b] - drvCounts[a])[0] || null;
+  if (!xpDriver) {
+    skip("125. ?driver= returns that driver's rows and nobody else's",
+      "no completed load in dashboard data carries a driver name");
+  } else {
+    const xpD = await getExport("?driver=" + encodeURIComponent(xpDriver));
+    const drvCells = xpD.cells("Driver");
+    // Compared on the server's own normalization (trim + lowercase + collapse
+    // runs of whitespace). The filter is deliberately tolerant of the
+    // double-space and casing drift in older sheet rows, so a byte-exact
+    // comparison here would fail on rows the endpoint is RIGHT to include.
+    // A genuinely different driver still fails this.
+    const normName = s => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+    test("125. ?driver= returns that driver's rows and nobody else's (" + xpDriver + ")",
+      xpD.isCsv && xpD.col("Driver") >= 0 && drvCells.length > 0
+      && drvCells.every(v => normName(v) === normName(xpDriver)));
+  }
+
+  // 126. A date range narrows. Asserted as a SUBSET rather than an exact count,
+  //      because the contract does not say which date column is filtered on —
+  //      but whichever it is, a filtered export may never invent a load that the
+  //      unfiltered one does not contain. 404 (narrowed to nothing) is a legal
+  //      outcome of the range, so it counts as zero rows rather than failing.
+  const xpRange = await getExport("?from=2026-01-01&to=2026-01-31");
+  const allIds = new Set(xp.cells("Load ID").map(v => v.replace(/^'/, "").trim()));
+  const rangeIds = xpRange.cells("Load ID").map(v => v.replace(/^'/, "").trim());
+  const rangeLegal = xpRange.isCsv || xpRange.res.status === 404;
+  test("126. A date range returns a subset of the unfiltered export",
+    xp.isCsv && rangeLegal
+    && xpRange.data.length <= xp.data.length
+    && rangeIds.every(id => allIds.has(id)));
+
+  // 127. THE LOAD-BEARING ONE — spreadsheet formula injection.
+  //      A broker-supplied cell like "-45886" or "=HYPERLINK(...)" is a live
+  //      formula the moment this file is opened in Excel; the guard prefixes it
+  //      with an apostrophe so it renders as text. Three outcomes, no vacuous
+  //      pass: a raw dangerous cell FAILS, a neutralised one PASSES, and data
+  //      containing neither SKIPS with the reason stated.
+  const xpCells = xp.data.reduce((a, r) => a.concat(r), []);
+  const rawDanger = xpCells.filter(c => CSV_DANGER.test(c.v));
+  const neutralised = xpCells.filter(c => c.v.startsWith("'") && CSV_DANGER.test(c.v.slice(1)));
+  if (!xp.isCsv) {
+    // Not routed, or not CSV. Must not be skipped — an unwritten guard is
+    // exactly what this test exists to catch.
+    test("127. Cells starting with = + - @ or TAB are neutralised with a leading '", false);
+  } else if (xp.data.length === 0) {
+    skip("127. Cells starting with = + - @ or TAB are neutralised with a leading '",
+      "export returned a header row but no data rows to inspect");
+  } else if (rawDanger.length > 0) {
+    console.log("  NOTE (127): " + rawDanger.length + " unescaped cell(s), e.g. "
+      + rawDanger.slice(0, 3).map(c => JSON.stringify(c.v.slice(0, 30))).join(", "));
+    test("127. Cells starting with = + - @ or TAB are neutralised with a leading '", false);
+  } else if (neutralised.length > 0) {
+    test("127. Cells starting with = + - @ or TAB are neutralised with a leading '", true);
+  } else {
+    // Honest skip — and point at where a fixture could come from, since the
+    // source data DOES contain such values in columns this export may not carry.
+    const srcFields = [...new Set(completedRows.flatMap(r =>
+      Object.entries(r || {}).filter(([, v]) => v != null && CSV_DANGER.test(String(v))).map(([k]) => k)))];
+    skip("127. Cells starting with = + - @ or TAB are neutralised with a leading '",
+      "no exported cell begins with = + - @ or tab, so the guard is never exercised"
+      + (srcFields.length
+        ? " (such values DO exist upstream in " + srcFields.join(", ")
+          + " — seed one into an exported column to make this test real)"
+        : " (and no completed-load field upstream contains one either)"));
+  }
+
+  // 128. Investor is forbidden. Not merely "no CSV" — an explicit 403.
+  const xpInvRes = await req("GET", EXPORT_PATH, null, ic);
+  test("128. Export blocked for Investor (403)",
+    xpInvRes.status === 403 && !/text\/csv/i.test(String((xpInvRes.headers || {})["content-type"] || "")));
+
+  // 129. Dispatcher is forbidden too. This suite only establishes Super Admin +
+  //      Investor sessions, so the branch is opt-in via env vars, mirroring
+  //      TEST_ADMIN_USER / TEST_INVESTOR_USER. Left as a stated gap otherwise —
+  //      the Dispatcher path is genuinely untested without credentials.
+  const DISPATCHER_USER = process.env.TEST_DISPATCHER_USER || "";
+  const DISPATCHER_PASS = process.env.TEST_DISPATCHER_PASS || "";
+  if (!DISPATCHER_USER || !DISPATCHER_PASS) {
+    skip("129. Export blocked for Dispatcher (403)",
+      "no dispatcher credentials — set TEST_DISPATCHER_USER / TEST_DISPATCHER_PASS to cover this branch");
+  } else {
+    const dLogin = await req("POST", "/api/auth/login", { username: DISPATCHER_USER, password: DISPATCHER_PASS });
+    if (dLogin.status !== 200 || !dLogin.cookies) {
+      skip("129. Export blocked for Dispatcher (403)",
+        "TEST_DISPATCHER_USER login failed (" + dLogin.status + ") — branch not exercised");
+    } else {
+      const xpDis = await req("GET", EXPORT_PATH, null, dLogin.cookies);
+      test("129. Export blocked for Dispatcher (403)", xpDis.status === 403);
+    }
+  }
+
+  // 130. No session at all is 401, not 403 and not a silent SPA 200.
+  const xpAnon = await req("GET", EXPORT_PATH);
+  test("130. Export blocked without a session (401)",
+    xpAnon.status === 401 && !/text\/csv/i.test(String((xpAnon.headers || {})["content-type"] || "")));
+
+  // 131. Malformed dates are rejected, not coerced. "2026-8-3" is the one that
+  //      matters: it is a real date a human would type, and a lenient parser
+  //      accepts it while a YYYY-MM-DD contract does not.
+  const badFrom = await req("GET", EXPORT_PATH + "?from=notadate", null, ac);
+  const badTo = await req("GET", EXPORT_PATH + "?to=08%2F03%2F2026", null, ac);
+  const badPad = await req("GET", EXPORT_PATH + "?from=2026-8-3", null, ac);
+  test("131. Malformed from/to dates are rejected with 400 JSON",
+    [badFrom, badTo, badPad].every(r => r.status === 400 && jsonErr(r)));
+
+  // 132. An inverted range is rejected — AND the single-day boundary (to ===
+  //      from) is not. A `to <= from` check would pass the first half of this
+  //      and quietly break every one-day export.
+  const invRange = await req("GET", EXPORT_PATH + "?from=2026-06-01&to=2026-05-01", null, ac);
+  const sameDay = await req("GET", EXPORT_PATH + "?from=2026-06-01&to=2026-06-01", null, ac);
+  test("132. 'to' before 'from' is 400, but to === from is a legal one-day range",
+    invRange.status === 400 && jsonErr(invRange)
+    && (sameDay.status === 200 || sameDay.status === 404));
+
+  // 133. No matching rows is a 404 JSON, not a 200 with a lone header row —
+  //      a header-only CSV looks like a successful empty export to the user.
+  const noMatch = await req("GET", EXPORT_PATH + "?driver=" + encodeURIComponent("QA No Such Driver 9999"), null, ac);
+  test("133. No matching rows returns 404 JSON (never a header-only 200)",
+    noMatch.status === 404 && jsonErr(noMatch));
+
+  // 134. exportLimiter is actually mounted. This server has no global limiter
+  //      (an unlimited route emits no RateLimit-* headers at all), so their
+  //      presence on this response is specific evidence the limiter is wired —
+  //      checkable without burning the window the way a flood test would.
+  const xpHdrs = xp.res.headers || {};
+  test("134. exportLimiter is wired (RateLimit-* headers present)",
+    "ratelimit-limit" in xpHdrs || "x-ratelimit-limit" in xpHdrs);
+
+  // 135-136. The escaper itself, exercised directly (no server, no fixtures) —
+  //          this is what makes the injection guard genuinely covered rather
+  //          than dependent on whether today's sheet happens to hold a hostile
+  //          value. Test 127 remains the end-to-end proof that the export
+  //          actually routes its cells through this.
+  if (!csvLib || typeof csvLib.csvCell !== "function" || typeof csvLib.csvRows !== "function") {
+    skip("135. csvCell prefixes = + - @ TAB with ' and leaves safe values alone",
+      "lib/csv.js not loadable from this checkout");
+    skip("136. csvRows joins rows with CRLF and never lets a cell shift a column",
+      "lib/csv.js not loadable from this checkout");
+  } else {
+    const { csvCell, csvRows } = csvLib;
+    // Every lead character a spreadsheet evaluates must come back inert. The
+    // "-45886" case is not hypothetical: that exact value sits in the seeded
+    // completed-loads data today.
+    const danger = ['=HYPERLINK("http://evil","click")', "+1+1", "-45886", "@SUM(A1)", "\tinjected"];
+    const guarded = danger.every(v => csvCell(v) === '"\'' + v.replace(/"/g, '""') + '"');
+    // ...and a benign value must NOT be mangled. Over-escaping is its own bug:
+    // a Payment cell that came back as "'$ 1,800.00" would break every sum.
+    const safe = ["$ 1,800.00", "Lesline Johnson", "AMES, IA 50010", "2026-08-03", ""];
+    const untouched = safe.every(v => csvCell(v) === '"' + v + '"');
+    const nullish = csvCell(null) === '""' && csvCell(undefined) === '""';
+    test("135. csvCell prefixes = + - @ TAB with ' and leaves safe values alone",
+      guarded && untouched && nullish);
+
+    // A quote, a comma and a dangerous lead in one table: the row must stay
+    // three lines and two columns wide, or every column after it shifts.
+    const body = csvRows([["Load ID", "Driver"], ["7083240", 'Say "hi", now'], ["-45886", null]]);
+    const lines = body.split("\r\n");
+    test("136. csvRows joins rows with CRLF and never lets a cell shift a column",
+      lines.length === 3
+      && lines[0] === '"Load ID","Driver"'
+      && lines[1] === '"7083240","Say ""hi"", now"'
+      && lines[2] === '"\'-45886",""'
+      && !/(^|[^\r])\n/.test(body));
   }
 
   // Results
