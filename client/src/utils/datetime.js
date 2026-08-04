@@ -32,9 +32,21 @@ const HOUSTON = 'America/Chicago'
  * Compared against the stamp's own DATE PART, not a parsed instant: the two
  * eras differ by only 5-6 hours, so an instant comparison is ambiguous for
  * values written near the boundary, whereas the date part is a plain compare.
- * Values written ON the cutover day itself may be read as the wrong era — that
- * is a display-only fuzz limited to a single day, and it cannot affect any
- * money figure, because every SERVER-side consumer reads the date part alone.
+ * Values written ON the cutover day itself may be read as the wrong era — a
+ * display-only fuzz limited to a single day. It cannot reach a money figure,
+ * but NOT for the comforting reason: it is because the money paths
+ * (parseSheetDate / parseInvoiceDate on the server) never consult this constant
+ * at all. They read the stamp's date part verbatim, so era misclassification is
+ * invisible to them.
+ *
+ * The flip side, stated plainly because it is easy to misread the above as
+ * "therefore the money is right": for PRE-cutover rows the date part is itself
+ * the wrong Houston day — that IS the original bug — and the money paths read
+ * it verbatim. Those rows are deliberately left wrong (client decision
+ * 2026-08-04: no restatement of closed months). So this module can make the
+ * Completed-Loads display and CSV show the corrected day for a legacy evening
+ * load while the P&L still counts it on the old one. That divergence is
+ * intentional, not a bug to "fix" by touching history.
  */
 export const SHEET_STAMP_TZ_CUTOVER = '2026-08-03'
 

@@ -133,7 +133,9 @@ const loading = ref(true)
 const previewImg = ref(null)
 
 const expenseTypes = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
-const todayIso = computed(() => new Date().toISOString().slice(0, 10))
+// en-CA gives the LOCAL day; toISOString() gives the UTC one, which after 7pm
+// Houston would let this :max clamp accept tomorrow.
+const todayIso = computed(() => new Date().toLocaleDateString('en-CA'))
 const filter = reactive({ truck: '', type: '', status: '', from: '', to: '' })
 
 const truckUnits = computed(() => {

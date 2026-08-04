@@ -66,7 +66,10 @@
 import { onMounted } from 'vue'
 const props = defineProps({ form: { type: Object, required: true } })
 onMounted(() => {
-  props.form.signature_date = new Date().toISOString().split('T')[0]
+  // The applicant's LOCAL day, not toISOString()'s UTC day: this is a legal
+  // signature date printed on the PDF, and after 7pm Houston the UTC day is
+  // already tomorrow — a date they did not sign on.
+  props.form.signature_date = new Date().toLocaleDateString('en-CA')
 })
 </script>
 

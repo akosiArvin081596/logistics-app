@@ -681,7 +681,9 @@ function exportCsv() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `invoices-${new Date().toISOString().slice(0, 10)}.csv`
+  // en-CA = the exporter's LOCAL day; toISOString() is UTC, which after 7pm
+  // Houston stamps the file with tomorrow's date.
+  a.download = `invoices-${new Date().toLocaleDateString('en-CA')}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }

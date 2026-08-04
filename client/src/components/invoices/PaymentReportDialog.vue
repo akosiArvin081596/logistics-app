@@ -99,7 +99,10 @@
                   {{ inv.adjustment ? (inv.adjustment > 0 ? '+' : '-') + '$' + fmtMoney(Math.abs(inv.adjustment)) : '—' }}
                 </td>
                 <td class="num font-semibold">${{ fmtMoney(inv.total_due) }}</td>
-                <td class="num text-gray-500">{{ inv.status === 'Paid' && inv.paid_at ? String(inv.paid_at).slice(0, 10) : '—' }}</td>
+                <!-- fmtYmd, not paid_at.slice(0,10): paid_at is a real instant,
+                     and its UTC day shows an invoice paid 9:15pm CDT Jul 31 as
+                     Aug 1. fmtYmd's timestamp branch converts to local. -->
+                <td class="num text-gray-500">{{ inv.status === 'Paid' && inv.paid_at ? fmtYmd(inv.paid_at) : '—' }}</td>
               </tr>
             </tbody>
           </table>
@@ -120,6 +123,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useInvoicesStore } from '../../stores/invoices'
+import { fmtYmd } from '../../utils/datetime'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
