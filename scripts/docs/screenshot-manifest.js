@@ -2,7 +2,7 @@
 //
 // Each entry is captured by scripts/docs/capture-screenshots.js after logging in
 // as the named user against a local dev server. The seeded test users come from
-// scripts/truncate-and-seed.js + scripts/seed-staging.js:
+// scripts/prepare-test-fixtures.js + scripts/seed-staging.js:
 //
 //   super_admin / Password123!     (Super Admin)
 //   dispatch1   / investor123      (Dispatcher)

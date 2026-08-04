@@ -155,4 +155,4 @@ Plan ahead for a routine snapshot of `app.db`, `.env`, `service-account-key.json
 
 ## Two-process model with staging
 
-Both `logistics-app` (production) and `logisx-staging` (staging) run on the same VPS. They share the host but have separate `.env`, separate SQLite databases, and separate ports. This is enough isolation for "test a deploy before promoting" — not enough for "run integration tests against a fresh DB." For destructive testing, point staging at a seeded copy of `app.db` (via `scripts/truncate-and-seed.js`) before exercising it.
+Both `logistics-app` (production) and `logisx-staging` (staging) run on the same VPS. They share the host but have separate `.env`, separate SQLite databases, and separate ports. This is enough isolation for "test a deploy before promoting" — not enough for "run integration tests against a fresh DB." For destructive testing, point staging at a copy of `app.db` and run `scripts/prepare-test-fixtures.js` against it before exercising it. Note there is no truncate-and-reseed path: loads come from Google Sheets, not the database, so a wiped DB cannot be rebuilt locally.

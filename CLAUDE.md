@@ -34,7 +34,14 @@ ssh root@76.13.22.110 "cd /var/www/logistics-app && git pull --ff-only origin ma
 ```
 A staging process (`logisx-staging`) also runs on the same VPS.
 
-**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured. Integration harness at `test-suite.js` — 25 HTTP tests against a running server (`npm start`, then `node test-suite.js`). Covers auth, role gating, debug-endpoint auth, webhook secret, chat file validation, canceled-load exclusion. Exits 1 on any failure. Seed the DB via `scripts/truncate-and-seed.js` for deterministic state. When editing `server.js`, run `node --check server.js` before committing (~18k lines; a syntax error breaks the whole app).
+**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured. Integration harness at `test-suite.js` — **137** HTTP tests against a running server. Prepare fixtures first, or nearly everything fails at the login on test 2:
+```bash
+node scripts/prepare-test-fixtures.js --yes-local-db   # sets known passwords on existing accounts
+npm start                                              # separate terminal
+TEST_ADMIN_USER=super_admin TEST_INVESTOR_USER=johnny.rocks.spirits.llc \
+  TEST_DISPATCHER_USER=amir_serrano TEST_DISPATCHER_PASS='Password123!' node test-suite.js
+```
+**The suite cannot be run twice inside 15 minutes** — it exhausts its own rate limiters (`exportLimiter` is 20/15min), so a second back-to-back run returns 429 across the export and statement tests and looks like a regression. Wait for the window, or compare against a run from the same cold start. Covers auth, role gating, debug-endpoint auth, webhook secret, chat file validation, canceled-load exclusion. Exits 1 on any failure. When editing `server.js`, run `node --check server.js` before committing (~18k lines; a syntax error breaks the whole app).
 
 ## Environment Setup
 
@@ -65,7 +72,10 @@ Default values in `server.js` (override via env):
 
 Helper scripts in `scripts/`:
 - `reset-super-admin-password.js` — reset the Super Admin password against the local SQLite DB.
-- `truncate-and-seed.js` — wipe and reseed the local DB for clean-slate testing.
+- `prepare-test-fixtures.js` — makes a LOCAL app.db runnable by `test-suite.js` by setting known
+  passwords on the accounts that already own the test data. Refuses to touch a deployed path or
+  `NODE_ENV=production`, and requires `--yes-local-db`. Deliberately does NOT wipe/reseed: loads live
+  in Google Sheets, so a truncate destroys the fixture chain and cannot rebuild it.
 - `seed-staging.js` — seed a staging DB.
 - `geocode-loads.js` — backfill geocodes for rows in "Job Tracking".
 - `generate-timeline-docx.py` / `generate-timeline-apr13-apr17.py` — one-off Python scripts rendering session-timeline `.docx` reports from HTML/markdown (needs `python-docx`).

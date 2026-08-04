@@ -28,7 +28,7 @@ The screenshots in `assets/screenshots/` are captured by Puppeteer driving a loc
 npm run build:client
 
 # 2. Reset the local DB and seed multi-role users + trucks
-node scripts/truncate-and-seed.js
+node scripts/prepare-test-fixtures.js --yes-local-db
 node scripts/seed-staging.js
 
 # 3. (One time after first seed) populate the trucks if seed-staging.js
