@@ -155,7 +155,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { io } from 'socket.io-client'
 import StatusTimeline from '../components/shared/StatusTimeline.vue'
 import DriverRouteMap from '../components/driver/DriverRouteMap.vue'
-import { parseSheetStamp } from '../utils/datetime'
+import { fmtSheetMoment } from '../utils/datetime'
 
 const route = useRoute()
 const router = useRouter()
@@ -370,18 +370,28 @@ function formatEta(minutes) {
   return m ? `${h}h ${m}m` : `${h}h`
 }
 
+// SIX values reach this one formatter and they are of TWO kinds — which is
+// precisely why fmtSheetMoment is the entire body, since it splits on the value
+// itself rather than on the caller:
+//
+//   ZONED, real instants → converted to Houston and labelled
+//     eta.expectedAt (server .toISOString()), actualPickup, actualDelivery
+//     (strftime('…Z', changed_at))
+//   BARE sheet text, no zone → printed exactly as written, unlabelled
+//     scheduledPickup, scheduledDelivery (appointments), deliveredAt (the raw
+//     'Status Update Date' cell)
+//
+// The bare three used to be converted too, which shifted an appointment by the
+// Houston offset and, for a post-cutover stamp that is ALREADY Houston, applied
+// a second conversion that rolls an evening delivery back a day. The zoned
+// three used to render in the VIEWER's zone, so this public page told an
+// out-of-state customer a delivery time in their own zone while the carrier
+// read Houston. Both are gone by construction.
+//
+// fallback '' (not '—') keeps the template's `formatFriendlyDate(x) || '—'`
+// working as before.
 function formatFriendlyDate(ts) {
-  if (!ts) return ''
-  // parseSheetStamp reads the bare sheet strings (scheduledPickup/Delivery,
-  // deliveredAt — "M/D/YYYY H:MM") as UTC, while ISO actuals (…Z) fall through
-  // to new Date() unchanged. Matches the Completed tab + Status Timeline so the
-  // tracker no longer renders UTC-as-local. timeZoneName labels the viewer zone.
-  const d = parseSheetStamp(ts)
-  if (!d || isNaN(d)) return String(ts)
-  return d.toLocaleString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
-  })
+  return fmtSheetMoment(ts, { fallback: '' })
 }
 
 const lastUpdatedText = computed(() => {
