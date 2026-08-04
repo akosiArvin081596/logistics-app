@@ -93,6 +93,10 @@
           <div style="margin-bottom:1rem;">
             <div class="dash-section-title">Documents</div>
             <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
+              <!-- Persistent, not a toast: the refusal that actually lands here is
+                   the 409 "last POD on a delivered load" guard, and its message
+                   explains the load would stop being invoiceable. -->
+              <div v-if="docError" role="alert" :style="docErrorStyle">{{ docError }}</div>
               <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
               <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
               <!-- Filename over a muted upload time, matching ActiveLoadsTab and the
@@ -109,9 +113,38 @@
                       <span style="font-size:0.7rem;color:#94a3b8;">Uploaded {{ fmtUploaded(doc.uploaded_at) }}</span>
                     </div>
                   </div>
-                  <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;flex-shrink:0;">View</a>
+                  <!-- Actions in one non-shrinking group so a long
+                       underscore-joined filename ellipsizes instead of pushing
+                       View/X off the row. -->
+                  <div style="display:flex;align-items:center;gap:0.35rem;flex-shrink:0;">
+                    <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;">View</a>
+                    <button
+                      v-if="canManageDocs"
+                      type="button"
+                      class="doc-del"
+                      :disabled="deletingDocId === doc.id"
+                      :aria-label="`Delete ${doc.file_name || doc.type || 'document'}`"
+                      :title="`Delete ${doc.file_name || doc.type || 'document'}`"
+                      @click="confirmDeleteDoc(doc)"
+                    >
+                      <span v-if="deletingDocId === doc.id" class="doc-del-spin"></span>
+                      <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                  </div>
                 </div>
               </div>
+            </div>
+            <!-- Admin upload, mirroring ActiveLoadsTab. A missing POD is usually
+                 noticed *after* the load lands here (it's what blocks Draft
+                 Invoice Email above), so this is the screen where a Super Admin
+                 or Dispatcher needs to attach one on the driver's behalf. -->
+            <div v-if="loadIdValue && canManageDocs" style="margin-top:0.75rem;">
+              <DocumentUpload
+                :load-id="loadIdValue"
+                :driver-name="selectedJobDriverName"
+                :row-index="selectedJob?._rowIndex || 0"
+                @uploaded="refreshDocs"
+              />
             </div>
           </div>
           <div v-if="auth.isSuperAdmin" style="margin-bottom:1rem;">
@@ -148,6 +181,7 @@
 import { computed, ref, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import { useApi } from '../../composables/useApi'
+import { useToast } from '../../composables/useToast'
 import { useAuthStore } from '../../stores/auth'
 import { Input } from '@/components/ui/input'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
@@ -158,11 +192,13 @@ import StarRating from '../shared/StarRating.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
+import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
 import { parseSheetUtc, formatDeliveredLocal, fmtTimestamp } from '@/utils/datetime'
 
 const api = useApi()
+const { show: toast } = useToast()
 const auth = useAuthStore()
 const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
@@ -212,8 +248,81 @@ const reviewBadgeStyle = {
 }
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(sortedJobs)
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
+// --- Document management (Super Admin + Dispatcher) -------------------------
+// Same pair that can upload can delete: a POD gets attached here on the driver's
+// behalf, so whoever attached the wrong one has to be able to take it back off.
+const canManageDocs = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
+const deletingDocId = ref(null)
+const docError = ref('')
+// 'blocked' = refused on a business rule (the 409 last-POD guard) rather than
+// broken; amber reads as "not allowed", red as "something went wrong".
+const docErrorKind = ref('error')
+const docErrorStyle = computed(() => ({
+  marginBottom: '0.6rem',
+  padding: '0.5rem 0.7rem',
+  borderRadius: '6px',
+  fontSize: '0.78rem',
+  fontWeight: '600',
+  lineHeight: '1.4',
+  background: docErrorKind.value === 'blocked' ? '#fffbeb' : '#fef2f2',
+  color: docErrorKind.value === 'blocked' ? '#92400e' : '#991b1b',
+  border: '1px solid ' + (docErrorKind.value === 'blocked' ? '#fde68a' : '#fecaca'),
+}))
+// DocumentUpload posts the driver name with the doc so the upload is attributed
+// to whoever ran the load, not the admin clicking the button.
+const selectedJobDriverName = computed(() => {
+  if (!selectedJob.value) return ''
+  const c = props.headers.find(h => /driver/i.test(h))
+  return c ? (selectedJob.value[c] || '').toString().trim() : ''
+})
+async function refreshDocs() {
+  if (!loadIdValue.value) return
+  try {
+    const r = await api.get(`/api/documents/${encodeURIComponent(loadIdValue.value)}`)
+    loadDocs.value = r.documents || []
+  } catch {
+    // Keep the existing list on a transient failure — the upload/delete that
+    // triggered this already succeeded server-side.
+  }
+}
+// Confirm names the file: these are near-identical machine names
+// (7083240_POD_1785763065469.pdf), so "are you sure?" alone doesn't tell you
+// which of three PODs is about to go.
+async function confirmDeleteDoc(doc) {
+  if (!doc || !doc.id || deletingDocId.value) return
+  const label = doc.file_name || `this ${doc.type || 'document'}`
+  const kind = (doc.type || 'document').toUpperCase() === 'POD' ? 'POD' : (doc.type || 'document')
+  const ok = window.confirm(
+    `Delete ${label}?\n\n` +
+    `It will be removed from load ${loadIdValue.value || 'this load'}. ` +
+    `If this is the ${kind} backing the invoice, someone has to re-upload it before the load can be billed.`
+  )
+  if (!ok) return
+  deletingDocId.value = doc.id
+  docError.value = ''
+  try {
+    await api.del(`/api/documents/${encodeURIComponent(doc.id)}`)
+    await refreshDocs()
+    toast(`${doc.type || 'Document'} deleted`)
+  } catch (err) {
+    // The server owns the "would this load stop being invoiceable?" rule and
+    // returns 409 with a human explanation. Surface its words verbatim —
+    // flattening that to "Delete failed" hides the only useful part.
+    // useApi only falls back to "Request failed (NNN)" when the response wasn't
+    // JSON (e.g. the route isn't deployed yet); name the file in that case so
+    // a bare status code isn't the whole message.
+    const serverSaid = err && err.data && err.data.error
+    docErrorKind.value = err && err.status === 409 ? 'blocked' : 'error'
+    docError.value = serverSaid
+      ? String(err.data.error)
+      : `Couldn't delete ${label} — ${(err && err.message) || 'please try again.'}`
+  } finally {
+    deletingDocId.value = null
+  }
+}
 async function openDetail(job) {
   selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null
+  docError.value = ''; deletingDocId.value = null
   previewOpen.value = false; previewData.value = null; approvedDraft.value = null
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []
@@ -389,4 +498,35 @@ const detailSections = computed(() => {
 .addr-cell { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }
 .addr-csz { font-size: 0.92em; color: #64748b; }
+/* Per-document delete. Muted until hover so it never competes with View, but a
+   28px hit box so it stays tappable in the same dialog on a phone. */
+.doc-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  color: #cbd5e1;
+  cursor: pointer;
+  font-family: inherit;
+  line-height: 1;
+  transition: color 0.15s, background 0.15s;
+}
+.doc-del:hover:not(:disabled) { color: #dc2626; background: #fef2f2; }
+.doc-del:focus-visible { outline: 2px solid #dc2626; outline-offset: 1px; }
+.doc-del:disabled { cursor: progress; color: #94a3b8; }
+.doc-del-spin {
+  width: 13px;
+  height: 13px;
+  border: 2px solid #e2e8f0;
+  border-top-color: #94a3b8;
+  border-radius: 50%;
+  animation: doc-del-spin 0.7s linear infinite;
+}
+@keyframes doc-del-spin { to { transform: rotate(360deg); } }
 </style>
