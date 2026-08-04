@@ -25,9 +25,16 @@ const isSent = computed(() => {
   return from === 'dispatch' || from === 'admin' || from === 'super_admin'
 })
 
+// Houston rule: message times render in America/Chicago with a visible zone
+// label, never the viewer's zone. `msg.timestamp` is a true instant (ISO-Z from
+// the server), so without the pin the same bubble reads 8:05 AM in Houston and
+// 9:05 PM in Manila on one shared super_admin login.
 const time = computed(() => {
   const t = new Date(props.msg.timestamp)
-  return isNaN(t) ? '' : t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return isNaN(t) ? '' : t.toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
+  })
 })
 </script>
 

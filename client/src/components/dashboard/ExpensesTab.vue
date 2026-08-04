@@ -1803,10 +1803,21 @@ const iftaStatesTracked = computed(() => {
 
 const stateDetail = ref(null)
 
+// IFTA per-state day detail: first/last ELD ping of the day. The server sends
+// these as ISO-Z (new Date(location_date_ms).toISOString()) — true instants.
+// Houston rule: America/Chicago with a visible zone label.
+//
+// The locale is pinned to 'en-US' alongside the zone, deliberately: with the
+// default locale ([]) an en-GB/fil-PH browser renders timeZoneName as "GMT-5"
+// instead of "CDT". Still honest, but the point of the label is that it is
+// instantly readable as Houston time, so make it deterministic.
 function fmtHM(iso) {
   if (!iso) return '—'
   try {
-    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return new Date(iso).toLocaleTimeString('en-US', {
+      hour: '2-digit', minute: '2-digit',
+      timeZone: 'America/Chicago', timeZoneName: 'short',
+    })
   } catch {
     return '—'
   }

@@ -98,11 +98,19 @@ function isSent(m) {
   return (m.from || '').toLowerCase() === props.driverName.toLowerCase()
 }
 
+// `messages.timestamp` is a true instant (server writes new Date().toISOString()),
+// so it renders in whatever zone the phone is set to. Houston rule: the carrier
+// runs on Houston time, so pin to America/Chicago and ALWAYS show the zone —
+// a driver on the road in Phoenix or Denver must be able to see that "8:05 AM"
+// is dispatch's clock, not theirs. Dropping the label is what makes it a lie.
 function formatTime(str) {
   if (!str) return ''
   const d = new Date(str)
   if (isNaN(d)) return str
-  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return d.toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
+  })
 }
 
 async function handleSend() {

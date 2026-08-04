@@ -645,13 +645,25 @@ const podUrl = computed(() => {
   const pod = loadDocs.value.find(d => (d.type || '').toUpperCase() === 'POD')
   return pod && pod.drive_url ? pod.drive_url : null
 })
+// When the Gmail draft for this load's invoice was created. Houston rule:
+// America/Chicago with a visible zone label, never the viewer's zone — the
+// carrier runs on Houston time and the owner/developer share one login.
+//
+// Locale pinned to 'en-US' alongside the zone: with the default locale an
+// en-GB/fil-PH browser renders timeZoneName as "GMT-5" rather than "CDT", and
+// the label only does its job if it reads as Houston time at a glance.
+//
+// NOTE: scoped strictly to this draft timestamp. `centralDay` / `fmtDeliveryDate`
+// in this file handle sheet-sourced wall-clock dates, which are a different
+// problem — do not fold them into this pattern.
 function fmtDraftDate(ts) {
   if (!ts) return ''
   const d = new Date(ts) // created_at is ISO ...Z (see load_invoice_drafts)
   if (isNaN(d.getTime())) return String(ts)
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat('en-US', {
     month: 'numeric', day: 'numeric', year: 'numeric',
     hour: 'numeric', minute: '2-digit', hour12: true,
+    timeZone: 'America/Chicago', timeZoneName: 'short',
   }).format(d)
 }
 const approvedLineStyle = {

@@ -189,11 +189,18 @@ function avatarClass(role) {
   return avatarClassMap[role] || 'av-driver'
 }
 
+// `user.CreatedAt` is a true instant \u2014 /api/users emits it as ISO-Z
+// (strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at)). Houston rule: render in
+// America/Chicago with a visible zone label so the "Created" column shows the
+// Houston calendar day rather than the viewer's.
 function formatDate(dateStr) {
   if (!dateStr) return '\u2014'
   const d = new Date(dateStr)
   if (isNaN(d.getTime())) return dateStr
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  return d.toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
+  })
 }
 
 function confirmDelete(user) {

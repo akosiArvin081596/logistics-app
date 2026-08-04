@@ -1078,7 +1078,14 @@ function buildDriverPopupContent(loc) {
   // → injection-safe.
   if (loc.etaMinutes != null && Number.isFinite(Number(loc.etaMinutes))) {
     const epoch = loc._etaEpochMs || (Date.now() + Number(loc.etaMinutes) * 60000)
-    const clock = new Date(epoch).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    // Houston rule: the arrival clock is pinned to America/Chicago and carries
+    // its zone label. An ETA is the one number a dispatcher relays verbally —
+    // an unlabelled "3:40 PM" rendered in the viewer's zone is how a Manila
+    // session quotes a Houston customer a time 13 hours off.
+    const clock = new Date(epoch).toLocaleString('en-US', {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      timeZone: 'America/Chicago', timeZoneName: 'short',
+    })
     const dur = formatMinutes(Number(loc.etaMinutes))
     const late = loc.etaStatus === 'delayed'
     html += `<div style="color:${late ? '#b91c1c' : '#15803d'};font-size:0.8rem;font-weight:600">ETA ${clock}${dur ? ' &middot; ' + dur : ''}${late ? ' (delayed)' : ''}</div>`
@@ -1867,10 +1874,16 @@ function onLocationUpdate(payload) {
   }
 }
 
+// Last-GPS-ping time in the marker InfoWindow. `loc.timestamp` is a true
+// instant (ISO-Z off the ELD feed). Houston rule: America/Chicago + a visible
+// zone label so "how fresh is this ping" reads the same for every viewer.
 function formatTime(ts) {
   if (!ts) return ''
   const d = new Date(ts)
-  return isNaN(d) ? ts : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return isNaN(d) ? ts : d.toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
+  })
 }
 
 // Fix tile rendering when tab becomes visible

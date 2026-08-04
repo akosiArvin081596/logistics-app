@@ -489,9 +489,17 @@ async function performDelete() {
   }
 }
 
+// Only ever called with `created_at`, which the server emits as ISO-Z
+// (strftime('%Y-%m-%dT%H:%M:%SZ', ja.created_at)) — a true instant, so it was
+// rendering in the viewer's zone. Houston rule: America/Chicago + a visible
+// zone label. Date-only + a zone ahead of Central is the "applied tomorrow"
+// bug: an application submitted 8 PM Houston showed the NEXT day from Manila.
 function formatDate(d) {
   if (!d) return ''
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  return new Date(d).toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
+  })
 }
 
 function maskSSN(ssn) {

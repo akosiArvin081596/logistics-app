@@ -397,9 +397,32 @@ async function loadOutreachLog() {
 
 function openPdf(url) { window.open(url, '_blank') }
 
+// A bare SQLite CURRENT_TIMESTAMP: "2026-08-04 13:05:07" — UTC, but with no
+// zone marker. Anything else (real ISO, with 'Z' or an offset) falls through.
+const SQLITE_UTC_STAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/
+
+// Outreach send time. TWO problems here, and fixing only the second would have
+// left the value viewer-dependent:
+//
+//   1. PARSE. `investor_outreach_log.created_at` is SQLite's CURRENT_TIMESTAMP,
+//      which is UTC but serialises zone-less, and GET /api/investor-outreach/log
+//      returns it via `SELECT *` with no strftime('...Z') wrapper (see the
+//      "SQLite timestamps on the wire" convention). `new Date()` then reads it
+//      as LOCAL, so the same row parsed to a different instant in Houston and
+//      in Manila. Normalise to UTC first.
+//   2. RENDER. Houston rule: format in America/Chicago with a visible zone
+//      label, never the viewer's zone.
+//
+// If that endpoint is ever fixed to emit ISO-Z, the regex simply stops matching
+// and this keeps working — no change needed here.
 function formatDate(d) {
   if (!d) return ''
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+  const s = String(d).trim()
+  const dt = new Date(SQLITE_UTC_STAMP_RE.test(s) ? `${s.replace(' ', 'T')}Z` : s)
+  return isNaN(dt.getTime()) ? s : dt.toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
+  })
 }
 
 onMounted(() => { load(); loadOutreachLog() })
