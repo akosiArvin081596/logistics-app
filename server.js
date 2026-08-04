@@ -962,6 +962,19 @@ try {
 	db.exec(`ALTER TABLE documents ADD COLUMN ocr_text TEXT DEFAULT ''`);
 }
 
+// Migration: soft-delete for documents. A POD is a financial/legal document —
+// a broker or an audit can ask for it years later — so DELETE /api/documents/:id
+// only STAMPS these columns and never unlinks the file on disk or in Drive.
+// Same shape as job_applications.deleted_at (NULL = live); every reader filters
+// `deleted_at IS NULL`, so recovery is one UPDATE away:
+//   UPDATE documents SET deleted_at = NULL WHERE id = ?
+try { db.exec("ALTER TABLE documents ADD COLUMN deleted_at DATETIME DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN deleted_by TEXT DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN delete_reason TEXT DEFAULT ''"); } catch {}
+// The hot read is "live docs for this load" (POD gate, per-load list, invoice
+// attach) and the dashboard's load_id IN (...) POD-count fan-out.
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_documents_load_live ON documents(load_id, deleted_at)"); } catch {}
+
 // Per-day Bison invoice counter. Powers nextInvoiceNumber(): each calendar
 // day gets its own sequence so invoice IDs read "MMDDYYYY-N" (first of the
 // day → "-1"). `day` is the MMDDYYYY key (server-local), `n` the last issued
@@ -11013,7 +11026,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 						SUM(CASE WHEN type = 'BOL' THEN 1 ELSE 0 END) as bol_count,
 						SUM(CASE WHEN type = 'Receipt' THEN 1 ELSE 0 END) as receipt_count,
 						SUM(CASE WHEN type NOT IN ('POD', 'BOL', 'Receipt') THEN 1 ELSE 0 END) as other_count
-					FROM documents WHERE load_id IN (${placeholders}) GROUP BY load_id`,
+					FROM documents WHERE load_id IN (${placeholders}) AND deleted_at IS NULL GROUP BY load_id`,
 				)
 				.all(...loadIds);
 			docs.forEach((d) => {
@@ -11526,9 +11539,12 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 		// POD gate: require at least one POD document before allowing a delivered/completed transition.
 		// CEO requirement (2026-05-05): drivers and dispatchers cannot mark Delivered without proof.
 		// Backend enforcement covers the dispatcher dropdown bypass that the client-side gate misses.
+		// `deleted_at IS NULL` is load-bearing: without it a soft-deleted POD would
+		// still satisfy the gate, and the load could reach Delivered with no
+		// attachable proof — exactly the state DELETE /api/documents/:id refuses to create.
 		if (/^(delivered|completed|pod received)$/i.test((newStatus || "").trim())) {
 			const podRow = db
-				.prepare("SELECT COUNT(*) AS n FROM documents WHERE load_id = ? AND UPPER(type) = 'POD'")
+				.prepare("SELECT COUNT(*) AS n FROM documents WHERE load_id = ? AND UPPER(type) = 'POD' AND deleted_at IS NULL")
 				.get(loadId || "");
 			if (!podRow || podRow.n === 0) {
 				return res.status(409).json({
@@ -14161,13 +14177,120 @@ app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 		const docs = db
 			.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at, ocr_text
-				 FROM documents WHERE load_id = ? ORDER BY uploaded_at DESC`,
+				 FROM documents WHERE load_id = ? AND deleted_at IS NULL ORDER BY uploaded_at DESC`,
 			)
 			.all(loadId);
 		res.json({ documents: docs });
 	} catch (error) {
 		console.error("Error fetching documents:", error.message);
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// DELETE /api/documents/:id — SOFT-delete one document (the "X" on a POD tile).
+//
+// Soft only, deliberately: a POD is the financial/legal proof a broker paid
+// against, so the bytes stay on disk / in Drive and the row stays queryable.
+// This mirrors deleted_loads and job_applications.deleted_at. Recovery is
+// `UPDATE documents SET deleted_at = NULL WHERE id = ?`.
+//
+// Guard: the LAST live POD on a delivered/completed load cannot be removed.
+// That load could not legally have reached Delivered without a POD (see the POD
+// gate in PUT /api/driver/status), so dropping its last one would manufacture a
+// state the system would never have allowed — and silently break invoicing,
+// since POST /api/loads/:loadId/draft-invoice 400s with no POD. Upload the
+// replacement first, then delete. Removing a NON-last POD is always fine.
+// Super Admin ONLY, per the owner. Deleting a POD is what makes a load
+// un-invoiceable, so it sits with whoever answers for the money — not with
+// whoever is moving the freight. Note this is narrower than the UPLOAD route
+// (requireAuth), which must stay open: drivers upload their own PODs from the
+// driver app, and dispatchers attach ones that arrive by email.
+app.delete("/api/documents/:id", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		if (!Number.isInteger(id) || id <= 0) {
+			return res.status(400).json({ error: "Invalid document id" });
+		}
+		const doc = db.prepare("SELECT * FROM documents WHERE id = ?").get(id);
+		if (!doc) return res.status(404).json({ error: "Document not found" });
+		if (doc.deleted_at) return res.status(404).json({ error: "Document already deleted" });
+
+		const reason = String((req.body && req.body.reason) || "").trim().slice(0, 500);
+		const loadId = doc.load_id || "";
+		const isPod = String(doc.type || "").toUpperCase() === "POD";
+
+		// Only the last-POD case needs the load's status, so the Sheets read is
+		// skipped entirely for every other delete — a Sheets outage must not
+		// block removing a duplicate receipt or a page-2 POD.
+		if (isPod && loadId) {
+			const remaining = db
+				.prepare(
+					"SELECT COUNT(*) AS n FROM documents WHERE load_id = ? AND UPPER(type) = 'POD' AND deleted_at IS NULL AND id != ?",
+				)
+				.get(loadId, id);
+			if (!remaining || remaining.n === 0) {
+				let status = null;
+				try {
+					const jt = await getJobTrackingCached();
+					const headers = jt.headers || [];
+					const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+					const statusCol = findCol(headers, /status/i);
+					const target = String(loadId).trim().toLowerCase().replace(/^#/, "");
+					if (loadIdCol && statusCol) {
+						const row = (jt.data || []).find(
+							(r) => String(r[loadIdCol] || "").trim().toLowerCase().replace(/^#/, "") === target,
+						);
+						// A load with NO Job Tracking row stays null, not "". Older
+						// loads do get archived out of the live sheet, and "" would
+						// sail past the delivered regex below and drop the guard
+						// entirely for exactly the archived, already-invoiced loads
+						// this protects.
+						if (row) status = String(row[statusCol] || "").trim();
+					}
+				} catch (e) {
+					console.error("Document delete: Job Tracking read failed:", e.message);
+				}
+				// status === null means the load's status could not be established —
+				// sheet unreadable, columns missing, or no matching row. Fail CLOSED
+				// rather than guess the load is still in transit.
+				if (status === null) {
+					return res.status(409).json({
+						code: "LOAD_STATUS_UNVERIFIED",
+						error:
+							"This is the only Proof of Delivery on the load, and its status could not be verified right now. Try again in a moment.",
+					});
+				}
+				if (/^(delivered|completed|pod received)$/i.test(status)) {
+					return res.status(409).json({
+						code: "LAST_POD_ON_DELIVERED_LOAD",
+						error: `This is the only Proof of Delivery on load ${loadId}, which is already ${status}. Removing it would leave the load un-invoiceable — upload a replacement POD first, then delete this one.`,
+					});
+				}
+			}
+		}
+
+		const result = db
+			.prepare(
+				"UPDATE documents SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ?, delete_reason = ? WHERE id = ? AND deleted_at IS NULL",
+			)
+			.run((req.session.user && req.session.user.username) || "", reason, id);
+		if (result.changes === 0) {
+			// Lost a race with a concurrent delete of the same row.
+			return res.status(404).json({ error: "Document not found or already deleted" });
+		}
+
+		logAudit(
+			req,
+			"soft_delete_document",
+			"document",
+			id,
+			`${doc.type || "document"} "${doc.file_name || id}" on load ${loadId || "(none)"}${reason ? ` — ${reason}` : ""}`,
+		);
+		notifyChange("dashboard"); // _podCount on the load card just changed
+		res.json({ success: true, id, loadId, type: doc.type || "", fileName: doc.file_name || "" });
+	} catch (err) {
+		console.error("Document soft-delete failed:", err.message);
+		res.status(500).json({ error: "Delete failed. Please try again." });
 	}
 });
 
@@ -14282,6 +14405,7 @@ async function getRateConBytes(loadId, body) {
 		.prepare(
 			`SELECT * FROM documents
 			 WHERE load_id = ? AND UPPER(type) IN ('RATECON','RATE CON','RATE_CON','BOL')
+			   AND deleted_at IS NULL
 			 ORDER BY uploaded_at DESC LIMIT 1`,
 		)
 		.get(loadId);
@@ -14374,14 +14498,57 @@ app.post(
 			}
 
 			// 3) Get the POD + rate-con bytes (server-side).
-			const podDoc = db
+			//
+			// EVERY POD, not just the newest. A proof packet routinely arrives as
+			// several files (driver photographs the signed BOL page by page), and
+			// this used to be `ORDER BY uploaded_at DESC LIMIT 1` — which silently
+			// billed brokers with a one-page fragment of a three-page proof and got
+			// invoices rejected. 14 of 85 loads with a POD have more than one.
+			//
+			// ASC = upload order = page order (id breaks ties: uploaded_at only has
+			// second granularity and a burst of page uploads can share a second).
+			const podDocs = db
 				.prepare(
-					"SELECT * FROM documents WHERE load_id = ? AND UPPER(type) = 'POD' ORDER BY uploaded_at DESC LIMIT 1",
+					"SELECT * FROM documents WHERE load_id = ? AND UPPER(type) = 'POD' AND deleted_at IS NULL ORDER BY uploaded_at ASC, id ASC",
 				)
-				.get(loadId);
-			if (!podDoc) return res.status(400).json({ error: "POD not found for this load" });
-			const podBuffer = await fetchDocumentBytes(podDoc);
-			if (!podBuffer) return res.status(400).json({ error: "POD not found for this load" });
+				.all(loadId);
+			if (!podDocs.length) return res.status(400).json({ error: "POD not found for this load" });
+
+			// Fetch sequentially — these are local /uploads reads in the common case,
+			// and the Drive fallback is rate-limited enough that a parallel fan-out
+			// buys nothing. A row whose bytes are unreadable is dropped rather than
+			// failing the whole draft, but it IS surfaced to the caller (below), so a
+			// missing page is never silently omitted a second time.
+			const podFiles = [];
+			const podMissing = [];
+			for (const d of podDocs) {
+				const buf = await fetchDocumentBytes(d);
+				if (buf && buf.length) podFiles.push({ doc: d, buffer: buf });
+				else podMissing.push(d.file_name || String(d.id));
+			}
+			if (!podFiles.length) return res.status(400).json({ error: "POD not found for this load" });
+			if (podMissing.length) {
+				console.warn(
+					`Draft invoice ${loadId}: ${podMissing.length} of ${podDocs.length} POD file(s) unreadable, attaching ${podFiles.length} — ${podMissing.join(", ")}`,
+				);
+			}
+
+			// Attachment names. A single POD keeps its EXACT historical name — the
+			// overwhelming majority of loads, and "1 of 1" would be noise a broker
+			// has to parse. Multi-POD gets "POD_2_of_3_<loadId>.pdf" so an AP clerk
+			// can see at a glance whether the packet is complete.
+			const podSafeLoadId = String(loadId).replace(/[^A-Za-z0-9._-]/g, "_");
+			const podAttachments = podFiles.map((f, i) => ({
+				filename:
+					podFiles.length === 1
+						? f.doc.file_name || `${podSafeLoadId}_POD.pdf`
+						: `POD_${i + 1}_of_${podFiles.length}_${podSafeLoadId}.pdf`,
+				content: f.buffer,
+				contentType: "application/pdf",
+			}));
+			// Back-compat aliases for the single-POD consumers further down.
+			const podDoc = podFiles[0].doc;
+			const podBuffer = podFiles[0].buffer;
 
 			const { buffer: rateconBuffer, fileName: rateconFileName, candidates: rateconCandidates } = await getRateConBytes(loadId, req.body);
 			// Say so plainly. The invoice still drafts without one (POD + the
@@ -14555,7 +14722,8 @@ app.post(
 				: `${safeName ? safeName + " " : ""}Invoice Order #${orderNumber}.pdf`;
 			const draftAttachments = [
 				{ filename: invoiceFileName, content: invoicePdf, contentType: "application/pdf" },
-				{ filename: podDoc.file_name || `${loadId}_POD.pdf`, content: podBuffer, contentType: "application/pdf" },
+				// ALL PODs, in page order — see step 3.
+				...podAttachments,
 			];
 			if (rateconBuffer && rateconBuffer.length) {
 				draftAttachments.push({ filename: `${orderNumber}.pdf`, content: rateconBuffer, contentType: "application/pdf" });
@@ -14576,6 +14744,11 @@ app.post(
 					orderNumber,
 					total,
 					totalSource: rcTotal > 0 ? "ratecon" : "sheet",
+					// The whole POD packet, by name, so QA/the reviewer can confirm
+					// every page is attached without opening the draft.
+					podCount: podAttachments.length,
+					podFileNames: podAttachments.map((a) => a.filename),
+					podUnreadable: podMissing,
 					documentsEmail: invoiceTo.email,
 					documentsEmailSource: recipientSource,
 					invoicePdfBase64,
@@ -14644,8 +14817,17 @@ app.post(
 					to: invoiceTo.email,
 					invoicePdfBase64,
 					invoiceFileName,
+					// Legacy single-POD fields — kept so the existing n8n node keeps
+					// working untouched; they carry page 1.
 					podPdfBase64: Buffer.from(podBuffer).toString("base64"),
-					podFileName: podDoc.file_name || `${loadId}_POD.pdf`,
+					podFileName: podAttachments[0].filename,
+					// Full packet. n8n must attach `pods` (not just podPdfBase64) to
+					// send a complete proof; the two overlap on page 1 by design.
+					podCount: podAttachments.length,
+					pods: podAttachments.map((a) => ({
+						fileName: a.filename,
+						base64: Buffer.from(a.content).toString("base64"),
+					})),
 					rateconPdfBase64: rateconBuffer ? Buffer.from(rateconBuffer).toString("base64") : "",
 					rateconFileName: `${orderNumber}.pdf`,
 				};
@@ -14921,7 +15103,7 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 		if (isSuperAdmin) {
 			docs = db.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at
-				 FROM documents ORDER BY uploaded_at DESC LIMIT 500`
+				 FROM documents WHERE deleted_at IS NULL ORDER BY uploaded_at DESC LIMIT 500`
 			).all();
 		} else {
 			const cdb = getCarrierDBFromSQLite();
@@ -14933,7 +15115,7 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 			const placeholders = drivers.map(() => '?').join(',');
 			docs = db.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at
-				 FROM documents WHERE LOWER(driver) IN (${placeholders})
+				 FROM documents WHERE LOWER(driver) IN (${placeholders}) AND deleted_at IS NULL
 				 ORDER BY uploaded_at DESC LIMIT 500`
 			).all(...drivers);
 		}
