@@ -598,6 +598,79 @@ function recordStatusChange({ loadId, oldStatus, newStatus, source, actor }) {
 	}
 }
 
+// Investor payout amount history — append-only log of everything that moved a
+// payout figure. Forward-only: rows accrue from the moment this ships, and prior
+// movements are NOT reconstructible because `amount` was overwritten in place.
+//
+// WHY: reconcileInvestorPayouts() refreshes `amount` on every relevant page load.
+// Deliberate actions (adjust, status change, reopen) leave a trace in audit_trail
+// and in columns on the row, but a SILENT recompute — caused by a load or an
+// expense changing underneath an open month — left none at all. So "why is this
+// month different from last week?" had no answer on screen. That is the question
+// this table exists to answer.
+//
+// `breakdown` stores the SAME component object the waterfall and the payout
+// statement already use ({ revenue, driverPay, fixedCosts, tripExpenses,
+// maintFundCost, complianceCost, netProfit, splitPct, monthShare }), so the UI
+// derives "what moved" by diffing consecutive snapshots rather than recomputing —
+// and it reconciles to the existing drill-down by construction. finalized_breakdown
+// already serialises that same object, so this is a proven shape, not a new one.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS investor_payout_history (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		payout_id INTEGER,
+		owner_id INTEGER NOT NULL,
+		period TEXT NOT NULL,
+		kind TEXT NOT NULL DEFAULT 'recompute',
+		old_amount REAL,
+		new_amount REAL,
+		delta REAL,
+		detail TEXT DEFAULT '',
+		breakdown TEXT DEFAULT '',
+		actor TEXT DEFAULT '',
+		changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_iph_owner_period ON investor_payout_history(owner_id, period, changed_at)`); } catch {}
+
+const insertPayoutHistory = db.prepare(
+	`INSERT INTO investor_payout_history
+	   (payout_id, owner_id, period, kind, old_amount, new_amount, delta, detail, breakdown, actor)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+);
+
+// Record one payout movement. Best-effort in the same sense as
+// recordStatusChange: it must NEVER throw into the caller, because a failed
+// history write must not break a settlement, a reconcile, or a period close.
+//
+// It also skips no-ops for the `recompute` kind. The reconcile's own guard
+// already suppresses identical amounts before it writes, so this is belt-and-
+// braces — but the reconcile runs on every GET and loops per investor on the
+// admin console, so anything that slipped past would flood the table and bury
+// the handful of rows that matter.
+function recordPayoutChange({ payoutId, ownerId, period, kind, oldAmount, newAmount, detail, breakdown, actor }) {
+	try {
+		const oid = Number(ownerId);
+		const per = String(period || "").trim();
+		if (!oid || !per) return;
+		const k = String(kind || "recompute").trim();
+		const oldA = oldAmount == null ? null : Number(oldAmount);
+		const newA = newAmount == null ? null : Number(newAmount);
+		// A recompute that moved nothing is not a movement.
+		if (k === "recompute" && oldA != null && newA != null && Math.abs(newA - oldA) < 0.005) return;
+		const delta = oldA != null && newA != null ? Number((newA - oldA).toFixed(2)) : null;
+		insertPayoutHistory.run(
+			payoutId == null ? null : Number(payoutId),
+			oid, per, k, oldA, newA, delta,
+			String(detail || "").trim(),
+			breakdown ? (typeof breakdown === "string" ? breakdown : JSON.stringify(breakdown)) : "",
+			String(actor || "").trim()
+		);
+	} catch (err) {
+		console.error("recordPayoutChange error:", err.message);
+	}
+}
+
 // Escape applicant-controlled text before interpolating into HTML email bodies.
 // Submission and acceptance emails embed full_name, address, phone, etc.; without
 // this, a name like `<img src=x onerror=...>` would render in the admin's mail
@@ -18637,6 +18710,31 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 				// settlement. Also what heals rows written before carry-forward
 				// existed.
 				refreshAmount.run(amount, ownerId, m.month);
+				// The whole reason investor_payout_history exists. This is the ONE
+				// place a payout figure moves without anybody asking it to, and it
+				// used to leave no trace — so a month that quietly changed between
+				// two page loads was unexplainable after the fact.
+				//
+				// Deliberately inside this guard, not before it: the four conditions
+				// above are what make the write change-only. The reconcile runs on
+				// every GET and loops per investor on the admin console, so hooking
+				// any earlier would log thousands of no-ops and bury the few real
+				// movements. `m` carries the recomputed components, so the snapshot
+				// costs nothing extra.
+				recordPayoutChange({
+					payoutId: existing.id,
+					ownerId,
+					period: m.month,
+					kind: "recompute",
+					oldAmount: existing.amount,
+					newAmount: amount,
+					detail: "recalculated from current loads and expenses",
+					// splitPct (line ~18629) is already a whole-number percentage, and
+					// m.exact holds the UNROUNDED components — the same values the
+					// waterfall uses, so the history reconciles to it to the cent.
+					breakdown: m.exact ? { ...m.exact, splitPct } : null,
+					actor: "system",
+				});
 			}
 		}
 	});
@@ -19926,6 +20024,58 @@ async function loadPayoutMonthDetail(ownerId, sessionUser, period) {
 // for the Payouts waterfall (Revenue / Driver Pay / Fixed Costs / Trip Expenses).
 // Computed by the SAME computeInvestorMonthlyEarnings() that produces the totals,
 // so each list reconciles to its headline. Honors ?as_user_id= preview scoping.
+// GET /api/investor/payouts/:period/history — the movement log for one month.
+//
+// Answers "when did this amount move, and why". Rows accrue from 2026-08-04 only;
+// earlier movements were overwritten in place and cannot be reconstructed, so an
+// empty log for an older month means "not recorded", NOT "never moved". The client
+// says so rather than showing a bare empty state.
+//
+// changed_at is re-exposed via strftime because SQLite's CURRENT_TIMESTAMP is UTC
+// but serialises with no zone marker, which the browser would read as local.
+app.get("/api/investor/payouts/:period/history", requireRole("Super Admin", "Investor"), (req, res) => {
+	try {
+		const period = String(req.params.period || "");
+		if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: "period must be YYYY-MM" });
+
+		// Same scoping rule as the detail route: a Super Admin must name whose
+		// payouts they are reading, so an investor's history can never be served
+		// off an ambiguous session.
+		const preview = resolvePreviewUser(req);
+		const isSuperAdmin = preview.sessionUser.role === "Super Admin" && !preview.isPreview;
+		if (isSuperAdmin) return res.status(400).json({ error: "Pass ?as_user_id=<investorUserId> to view an investor's payout history." });
+
+		const rows = db.prepare(
+			`SELECT id, payout_id, period, kind, old_amount, new_amount, delta, detail, breakdown, actor,
+			        strftime('%Y-%m-%dT%H:%M:%SZ', changed_at) AS changed_at
+			   FROM investor_payout_history
+			  WHERE owner_id = ? AND period = ?
+			  ORDER BY changed_at DESC, id DESC`
+		).all(preview.effectiveUserId, period);
+
+		res.json({
+			period,
+			// Explicit, so the UI can distinguish "nothing moved" from "we were not
+			// recording yet" without hardcoding the date in the client.
+			recordingSince: "2026-08-04",
+			entries: rows.map((r) => ({
+				id: r.id,
+				kind: r.kind,
+				oldAmount: r.old_amount,
+				newAmount: r.new_amount,
+				delta: r.delta,
+				detail: r.detail || "",
+				actor: r.actor || "",
+				changedAt: r.changed_at,
+				breakdown: (() => { try { return r.breakdown ? JSON.parse(r.breakdown) : null; } catch { return null; } })(),
+			})),
+		});
+	} catch (error) {
+		console.error("GET /api/investor/payouts/:period/history error:", error.message);
+		res.status(500).json({ error: "Failed to load payout history" });
+	}
+});
+
 app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Investor"), async (req, res) => {
 	try {
 		const period = String(req.params.period || "");
@@ -20136,12 +20286,25 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 			// SAME reconcile as GET /api/investor/payouts (shared implementation).
 			const { payouts, currentMonth, totals } = await reconcileInvestorPayouts(inv.ownerId, ctx);
 
+			// How many recorded movements each period has, so the console can show
+			// the affordance only on rows that actually have something behind it.
+			// ONE grouped query per investor rather than one per row: this endpoint
+			// already loops every settlable investor, and a per-row query would turn
+			// a page load into investors x months round-trips.
+			const histCounts = {};
+			try {
+				for (const r of db.prepare(
+					"SELECT period, COUNT(*) AS n FROM investor_payout_history WHERE owner_id = ? GROUP BY period"
+				).all(inv.ownerId)) histCounts[r.period] = r.n;
+			} catch { /* history is additive; its absence must not break the console */ }
+
 			investors.push({
 				ownerId: inv.ownerId,
 				name: inv.name,
 				payouts: payouts.map((p) => ({
 					id: p.id,
 					period: p.period,
+					historyCount: histCounts[p.period] || 0,
 					periodLabel: p.periodLabel,
 					amount: p.amount,
 					adjustment: p.adjustment,
@@ -20317,6 +20480,25 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 			}
 		}
 
+		// Every status branch above converges here, so one hook covers forward
+		// settlement AND reopens. A status change does not move `amount` — it moves
+		// the settlement STATE — so old and new are equal by design; the value is in
+		// the transition itself. Without this the timeline would show a month's
+		// figure changing and then go silent about it being paid, which is the half
+		// of the story Deshorn is most likely to be asking about.
+		recordPayoutChange({
+			payoutId: id,
+			ownerId: payout.owner_id,
+			period: payout.period,
+			kind: "status",
+			oldAmount: Number(payout.amount || 0) + Number(payout.adjustment || 0),
+			newAmount: Number(payout.amount || 0) + Number(payout.adjustment || 0),
+			detail: isReopen
+				? `reopened ${payout.status} -> ${status}: ${reason}`
+				: `${payout.status} -> ${status}`,
+			actor,
+		});
+
 		// Tag reversals distinctly — scanning the trail for money that was
 		// un-booked should not mean eyeballing every status line.
 		logAudit(
@@ -20404,6 +20586,21 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), (req, re
 		db.prepare(
 			"UPDATE investor_payouts SET adjustment = ?, adjustment_note = ?, adjusted_by = ?, adjusted_at = ? WHERE id = ?"
 		).run(rounded, note, actor, nowIso, id);
+
+		// An adjustment does not change `amount` — it sits beside it — so the
+		// effective payout moves without `amount` moving. Record the EFFECTIVE
+		// figures, or the timeline would show a settled month as unchanged while
+		// the number the investor is paid demonstrably changed.
+		recordPayoutChange({
+			payoutId: id,
+			ownerId: payout.owner_id,
+			period: payout.period,
+			kind: "adjustment",
+			oldAmount: Number(payout.amount || 0) + Number(payout.adjustment || 0),
+			newAmount: Number(payout.amount || 0) + rounded,
+			detail: note ? `adjustment: ${note}` : "adjustment",
+			actor,
+		});
 
 		// Flag corrections to an already-settled row explicitly in the audit trail.
 		const settledTag = (payout.status === "paid" || payout.status === "processing")
@@ -20663,8 +20860,27 @@ async function finalizePeriods(periods, actor) {
 			if (!p) continue;
 			const breakdown = JSON.stringify(p.breakdown || null);
 			const live = p.recomputedAmount != null ? p.recomputedAmount : p.amount;
-			stamped += stampOwed.run(live, nowIso, live, breakdown, ownerId, period).changes;
-			stamped += stampSettled.run(nowIso, breakdown, ownerId, period).changes;
+			const n = stampOwed.run(live, nowIso, live, breakdown, ownerId, period).changes
+				+ stampSettled.run(nowIso, breakdown, ownerId, period).changes;
+			stamped += n;
+			// Closing a month is the last moment its figure can move, and stampOwed
+			// writes `live` — which is the RECOMPUTED amount, not necessarily the one
+			// stored. So the close itself can shift the number, and this is the only
+			// record that it did. Guarded on n so a period that stamped nothing (the
+			// idempotent re-run case) logs nothing.
+			if (n > 0) {
+				recordPayoutChange({
+					payoutId: p.id,
+					ownerId,
+					period,
+					kind: "finalize",
+					oldAmount: p.amount,
+					newAmount: live,
+					detail: `period closed and frozen${actor ? ` by ${actor}` : ""}`,
+					breakdown: p.breakdown || null,
+					actor: actor || "period-close",
+				});
+			}
 		}
 	}
 	return { stamped, investors: owners.length, periods: list };

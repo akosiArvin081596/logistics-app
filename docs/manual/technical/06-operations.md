@@ -26,7 +26,7 @@ Live in `scripts/`:
 | Script | Purpose |
 |---|---|
 | `reset-super-admin-password.js` | Reset the Super Admin password against the local SQLite DB. |
-| `truncate-and-seed.js` | Wipe and reseed `app.db` for clean-slate testing. |
+| `prepare-test-fixtures.js` | Set known passwords on the accounts that already own the test data, so `test-suite.js` can log in. Requires `--yes-local-db`; refuses deployed paths. Does NOT wipe — loads live in Google Sheets, so a truncate destroys the fixture chain. |
 | `seed-staging.js` | Seed a staging DB. |
 | `geocode-loads.js` | Backfill geocodes for rows in "Job Tracking". |
 | `generate-timeline-docx.py` | One-off Python script to render `.docx` session timelines (requires `python-docx`). |

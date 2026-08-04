@@ -530,7 +530,7 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       /reason is required/i.test(s59.body?.error || ""));
 
     // 60. The round-trip. MUTATES, then restores — the suite is meant to run
-    //     against a seeded DB (scripts/truncate-and-seed.js), and the reopen
+    //     against a prepared DB (scripts/prepare-test-fixtures.js), and the reopen
     //     trail it leaves on the row is the point of the feature, not debris.
     const back = settledRow.status === "paid" ? "processing" : "owed";
     const r60 = await req("POST", `/api/investor/payouts/${settledRow.id}/status`,
@@ -924,7 +924,15 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     //     ("$0.00") must not win over the sheet's Payment column, or the route
     //     would bill $0 while believing it had a rate-con number. Also pins
     //     that "None" never becomes a trailer id (see 86).
-    const merged85 = await BI.extractRateConFields(null, {
+    //     MUST pass a real Buffer. extractRateConFields only reaches the Gemini
+    //     branch when Buffer.isBuffer(pdfBuffer) && pdfBuffer.length, so calling it
+    //     with null — as this test did until 2026-08-04 — returned an all-empty
+    //     object and Gemini never ran. Two of the three assertions below then passed
+    //     because everything was empty rather than because the guard worked: the
+    //     test was giving false assurance on the exact behaviour it exists to
+    //     protect. A non-PDF buffer is enough — the text scan finds no "Order #"
+    //     anchor, the all-or-nothing gate leaves fields empty, and Gemini runs.
+    const merged85 = await BI.extractRateConFields(Buffer.from("rate con placeholder, not a real pdf"), {
       geminiExtract: async () => ({ "Order Number": "#7,007,280.", "Total Rate": "$0.00", "Trailer Number": "None" }),
     });
     test("85. A Gemini 'None'/'$0.00' answer never shadows the sheet fallback",
@@ -955,21 +963,39 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       s87.orderNumber === "7076944" && s87.trailerNumber === "118013" &&
       s87.moveNumber === "20050535" && BI.parseMoney(s87.totalRate) === 1800);
 
-    // 88. Most brokers supply neither a Move # nor a PO #. The old Bison-shaped
-    //     sentence always cited both, so a C.H. Robinson invoice read "...is
-    //     &amp; PO #" — which looks like a bug to the person paying it. Omit
-    //     the sentence entirely instead.
-    const html88 = BI.buildInvoiceEmailHtml({ brokerName: "C.H. Robinson", orderNumber: "560909669" });
-    test("88. Invoice email omits the driver-ID/PO sentence when both are absent",
-      html88.includes("C.H. Robinson Order # 560909669") &&
-      !/driver ID/i.test(html88) && !/PO\s*#/i.test(html88) && !/&amp;\s*PO/i.test(html88));
+    // 88. UPDATED 2026-08-04. This asserted that a C.H. Robinson email still cited
+    //     "Order # …". Per the client decision of 2026-07-30 (see the comment above
+    //     buildInvoiceEmailHtml), the Order #/PO #/driver-ID summary is now a
+    //     BISON-ONLY format: every other broker gets a plain cover note keyed on the
+    //     LOAD number, with no purchase-order language at all. The old assertion was
+    //     testing a spec the client had already replaced.
+    //
+    //     What still matters, and is what this now pins: a non-Bison email must not
+    //     leak any of that Bison vocabulary — the original bug was an invoice
+    //     reading "...is  &amp; PO #", which looks broken to the person paying it.
+    const html88 = BI.buildInvoiceEmailHtml({ brokerName: "C.H. Robinson", orderNumber: "560909669", loadNumber: "560909669" });
+    test("88. Non-Bison invoice email is a plain cover note with no Order#/PO/driver-ID language",
+      html88.includes("load number 560909669") &&
+      !/driver ID/i.test(html88) && !/PO\s*#/i.test(html88) && !/&amp;\s*PO/i.test(html88) &&
+      !/Order\s*#/i.test(html88));
 
-    // 89. A real C.H. Robinson PO is "SHP2607-A3BJ112". The old digits-only
-    //     normalization truncated it to "2607" and cited the wrong PO on the
-    //     invoice — silently, and only the broker would ever notice.
-    const html89 = BI.buildInvoiceEmailHtml({ brokerName: "C.H. Robinson", orderNumber: "560909669", poNumber: "SHP2607-A3BJ112" });
-    test("89. Invoice email preserves an alphanumeric PO",
-      html89.includes("SHP2607-A3BJ112") && !/PO\s*#2607\b/.test(html89));
+    // 89. UPDATED 2026-08-04, same reason. A real C.H. Robinson PO is
+    //     "SHP2607-A3BJ112", and the old digits-only normalization truncated it to
+    //     "2607" — citing the wrong PO, silently, where only the broker would
+    //     notice. That regression is still worth guarding, but the PO is now
+    //     rendered ONLY on the Bison path, so the guard has to live there or it
+    //     tests nothing. Verified: Bison still renders it intact.
+    const html89 = BI.buildInvoiceEmailHtml({ isBison: true, brokerName: "Bison Transport", orderNumber: "560909669", moveNumber: "20050535", poNumber: "SHP2607-A3BJ112" });
+    test("89. Invoice email preserves an alphanumeric PO (Bison path)",
+      html89.includes("SHP2607-A3BJ112") && !/PO\s*#?\s*2607\b/.test(html89));
+
+    // 89b. The other half of the 2026-07-30 split: a PO handed to a NON-Bison
+    //      broker must not resurrect the purchase-order sentence. Without this,
+    //      "render the PO intact" (89) and "no PO language" (88) could both be
+    //      satisfied by a build that quietly reintroduced it for everyone.
+    const html89b = BI.buildInvoiceEmailHtml({ brokerName: "C.H. Robinson", orderNumber: "560909669", loadNumber: "560909669", poNumber: "SHP2607-A3BJ112" });
+    test("89b. A PO on a non-Bison load does not reintroduce PO language",
+      !/PO\s*#/i.test(html89b) && !html89b.includes("SHP2607-A3BJ112"));
   }
 
   // ==========================================================================
@@ -1192,9 +1218,27 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   // app cannot (and a Super Admin can use the driver app). It is scoped to the
   // same driver so two trucks hitting one brand on one day don't collide.
   // ==========================================================================
+  // The AMOUNT is made RUN-UNIQUE (2026-08-04). This block used to use a fixed
+  // signature, which made it self-poisoning: test 110 posts a row for driver "test2"
+  // on every run, so the NEXT run's 110 found that row and got the 409 it asserts
+  // must not happen. The suite passed once on a clean database and failed forever
+  // after — 41 stale rows had accumulated — and the failure read like a
+  // duplicate-detection bug when the detection was correct and properly scoped to
+  // one driver.
+  //
+  // It must be the amount, NOT the vendor. The dedupe matches on
+  // `vendor_normalized`, and "QuikTrip #90210" normalises to plain "QUIKTRIP" — so
+  // a unique vendor suffix is stripped before the comparison and collides anyway.
+  // (Tried that first; it did not work.) Amount is compared as ROUND(amount, 2) with
+  // no normalisation, so it is a real per-run axis.
+  //
+  // The seed comment below only ever protected 107/108 — same driver, where
+  // re-finding its own row is the point. 110 is the one that needed a signature no
+  // earlier run could own.
   const dupVendor = "QuikTrip #90210";
   const dupDate = "2026-04-12";
-  const dupBody = { driver: "test", type: "Fuel", amount: 123.45, date: dupDate, vendor: dupVendor };
+  const dupAmount = Number((100 + (Date.now() % 900000) / 10000).toFixed(2));
+  const dupBody = { driver: "test", type: "Fuel", amount: dupAmount, date: dupDate, vendor: dupVendor };
 
   // Seed WITHOUT the flag, so re-running the suite never trips over its own row.
   const dupA = await req("POST", "/api/expenses", dupBody, ac);
@@ -1682,13 +1726,18 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
 
   // Results
   console.log("");
+  // A SKIP is not a PASS. It used to be counted as one ("s++; p++"), which made the
+  // headline read 67 passed when only 39 assertions had actually run — the other 28
+  // were skips wearing a pass's clothes. That is the one failure mode a summary line
+  // must not have: it hides a regression behind a number that looks green. Skips are
+  // now reported on their own, and the pass count means only what it says.
   let p = 0, f = 0, s = 0;
   results.forEach(r => {
-    if (r.skipped) { console.log("  [SKIP] " + r.name + " — " + r.skipped); s++; p++; return; }
+    if (r.skipped) { console.log("  [SKIP] " + r.name + " — " + r.skipped); s++; return; }
     console.log((r.pass ? "  [PASS]" : "  [FAIL]") + " " + r.name);
     if (r.pass) p++; else f++;
   });
-  console.log("\n" + p + " passed, " + f + " failed out of " + results.length + " tests"
-    + (s > 0 ? " (" + s + " skipped — see above)" : ""));
+  console.log("\n" + p + " passed, " + f + " failed, " + s + " skipped"
+    + "  (" + results.length + " tests total; skipped are NOT counted as passed)");
   if (f > 0) process.exit(1);
 })();

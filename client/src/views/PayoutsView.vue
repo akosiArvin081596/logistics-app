@@ -121,8 +121,27 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="p in inv.payouts" :key="p.id">
-              <td class="mono">{{ p.periodLabel }}</td>
+            <template v-for="p in inv.payouts" :key="p.id">
+            <tr>
+              <!-- The period cell doubles as the expand control, so the movement log
+                   costs no extra column. Offered only where there is something
+                   behind it: historyCount comes from the server, so the console does
+                   not have to fetch every row to find out which ones moved. -->
+              <td class="mono">
+                <button
+                  v-if="p.historyCount"
+                  type="button"
+                  class="hist-toggle"
+                  :aria-expanded="String(expandedId === p.id)"
+                  :title="`${p.historyCount} recorded change${p.historyCount === 1 ? '' : 's'} to this amount`"
+                  @click="toggleHistory(inv.ownerId, p)"
+                >
+                  <svg class="hist-chev" :class="{ open: expandedId === p.id }" viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  {{ p.periodLabel }}
+                  <span class="hist-count">{{ p.historyCount }}</span>
+                </button>
+                <template v-else>{{ p.periodLabel }}</template>
+              </td>
               <!-- Amount / Adjustment / Adjusted total broken out, mirroring the
                    investor statement so both read the same arithmetic. -->
               <td class="num">{{ fmt(p.amount) }}</td>
@@ -219,6 +238,32 @@
                 </template>
               </td>
             </tr>
+            <!-- Movement log. Same data the investor sees on their own portal, so
+                 the two surfaces cannot tell different stories about the same
+                 number. Sibling <tr>, so the table layout is untouched. -->
+            <tr v-if="expandedId === p.id" class="hist-tr">
+              <td :colspan="7" class="hist-cell">
+                <div class="hist-panel">
+                  <div class="hist-title">Changes to this amount</div>
+                  <div v-if="histLoading" class="hist-empty">Loading…</div>
+                  <ol v-else-if="histEntries.length" class="hist-list">
+                    <li v-for="h in histEntries" :key="h.id" class="hist-row">
+                      <span class="hist-when">{{ fmtTimestamp(h.changedAt) }}</span>
+                      <span class="hist-what">
+                        {{ h.detail || h.kind }}
+                        <span v-if="h.delta" class="hist-delta" :class="h.delta > 0 ? 'hist-up' : 'hist-down'">
+                          {{ h.delta > 0 ? '+' : '−' }}{{ fmt(Math.abs(h.delta)) }}
+                        </span>
+                        <span class="hist-actor">{{ h.actor }}</span>
+                      </span>
+                      <span v-if="h.why" class="hist-why">{{ h.why }}</span>
+                    </li>
+                  </ol>
+                  <div v-else class="hist-empty">No changes recorded for this month.</div>
+                </div>
+              </td>
+            </tr>
+            </template>
           </tbody>
         </table>
       </section>
@@ -416,7 +461,7 @@ import { formatCurrency as fmt } from '../utils/format'
 import { useApi } from '../composables/useApi'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
-import { fmtYmd } from '../utils/datetime'
+import { fmtYmd, fmtTimestamp } from '../utils/datetime'
 
 const api = useApi()
 // Pulled in for parity with the other admin pages; auth gating is enforced by
@@ -433,6 +478,54 @@ const loadFailed = ref(false)
 const notFound = ref(false)
 const errorMsg = ref('')
 const busyId = ref(null)
+
+// ---------------------------------------------------------------------------
+// Movement log. Reads the SAME endpoint the investor portal reads, so the console
+// and the investor can never be shown different stories about one number.
+//
+// Single-open accordion, and fetched on expand rather than with the table: this
+// page already loops every settlable investor and re-fetches after every mutation,
+// so eagerly loading history for every row would multiply that by the row count
+// for data almost nobody opens.
+// ---------------------------------------------------------------------------
+const expandedId = ref(null)
+const histEntries = ref([])
+const histLoading = ref(false)
+
+const MOVE_LABELS = {
+  revenue: 'revenue', driverPay: 'driver pay', fixedCosts: 'fixed costs',
+  tripExpenses: 'trip expenses', maintFundCost: 'maintenance fund', complianceCost: 'compliance',
+}
+// What moved, by diffing a snapshot against the next OLDER one — never recomputed,
+// so the explanation always reconciles with the figures beside it. Entries arrive
+// newest-first, hence i + 1. Returns '' for the oldest entry, which has nothing
+// behind it to compare against; saying nothing beats inventing a cause.
+function describeMove(now, prev) {
+  if (!now || !prev) return ''
+  return Object.keys(MOVE_LABELS)
+    .map((k) => ({ k, d: Number(now[k] || 0) - Number(prev[k] || 0) }))
+    .filter((x) => Math.abs(x.d) >= 0.01)
+    .sort((a, b) => Math.abs(b.d) - Math.abs(a.d))
+    .map((x) => `${MOVE_LABELS[x.k]} ${x.d > 0 ? '+' : '−'}${fmt(Math.abs(x.d))}`)
+    .join(' · ')
+}
+
+async function toggleHistory(ownerId, p) {
+  if (expandedId.value === p.id) { expandedId.value = null; return }
+  expandedId.value = p.id
+  histEntries.value = []
+  histLoading.value = true
+  try {
+    // as_user_id is REQUIRED here: the endpoint refuses an unscoped Super Admin
+    // session rather than guessing whose payouts are being read.
+    const r = await api.get(`/api/investor/payouts/${encodeURIComponent(p.period)}/history?as_user_id=${encodeURIComponent(ownerId)}`)
+    histEntries.value = (r?.entries || []).map((e, i, all) => ({ ...e, why: describeMove(e.breakdown, all[i + 1]?.breakdown) }))
+  } catch {
+    histEntries.value = []
+  } finally {
+    histLoading.value = false
+  }
+}
 
 const investors = ref([])
 const monthlyTotals = ref([])
@@ -1041,4 +1134,24 @@ onMounted(loadPayouts)
   .data-table th, .data-table td { padding: 0.45rem 0.4rem; }
   .action-cell { white-space: normal; }
 }
+
+/* Movement log — quieter than the figures it explains. */
+.hist-toggle { display: inline-flex; align-items: center; gap: 0.35rem; background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.hist-toggle:hover { color: #2563eb; }
+.hist-chev { transition: transform 0.15s; flex: none; }
+.hist-chev.open { transform: rotate(90deg); }
+.hist-count { font-size: 0.62rem; font-weight: 700; color: #6b7280; background: #f1f3f5; border-radius: 999px; padding: 0 0.35rem; line-height: 1.5; }
+.hist-tr > .hist-cell { background: #fafbfc; border-top: 0; padding: 0.6rem 0.9rem 0.85rem; }
+.hist-title { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; margin-bottom: 0.4rem; }
+.hist-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.hist-row { display: grid; grid-template-columns: minmax(9.5rem, auto) 1fr; gap: 0.1rem 0.6rem; font-size: 0.78rem; line-height: 1.35; }
+.hist-when { color: #6b7280; font-variant-numeric: tabular-nums; }
+.hist-what { color: #111827; }
+.hist-delta { font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 0.3rem; }
+.hist-up { color: #047857; }
+.hist-down { color: #b91c1c; }
+.hist-actor { color: #9ca3af; margin-left: 0.4rem; font-size: 0.72rem; }
+/* Column 2 on its own line: the cause reads as a sub-clause of the change. */
+.hist-why { grid-column: 2; color: #6b7280; font-size: 0.72rem; }
+.hist-empty { font-size: 0.76rem; color: #6b7280; }
 </style>

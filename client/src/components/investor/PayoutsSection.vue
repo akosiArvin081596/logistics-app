@@ -275,6 +275,31 @@
                   </div>
                 </dl>
                 <p class="bd-help">Your expenses are already subtracted here before the split.</p>
+
+                <!-- Movement log. The waterfall above says what the figure IS; this
+                     says what it DID. Loaded lazily with the panel, so a collapsed
+                     row costs nothing. -->
+                <div class="hist-block">
+                  <div class="bd-caption">Changes to this amount</div>
+                  <div v-if="historyLoading[p.period]" class="hist-empty">Loading…</div>
+                  <ol v-else-if="(history[p.period] || []).length" class="hist-list">
+                    <li v-for="h in history[p.period]" :key="h.id" class="hist-row">
+                      <span class="hist-when">{{ fmtTimestamp(h.changedAt) }}</span>
+                      <span class="hist-what">
+                        {{ h.detail || h.kind }}
+                        <span v-if="h.delta" class="hist-delta" :class="h.delta > 0 ? 'hist-up' : 'hist-down'">
+                          {{ h.delta > 0 ? '+' : '−' }}{{ fmtMoney(Math.abs(h.delta)) }}
+                        </span>
+                      </span>
+                      <span v-if="h.why" class="hist-why">{{ h.why }}</span>
+                    </li>
+                  </ol>
+                  <!-- Distinguishes "nothing moved" from "we were not recording yet".
+                       Movements before this shipped were overwritten in place and
+                       cannot be reconstructed, so an empty log on an older month is
+                       not evidence that it never changed. -->
+                  <div v-else class="hist-empty">{{ historyEmptyText(p.period) }}</div>
+                </div>
               </div>
             </td>
           </tr>
@@ -450,7 +475,7 @@ import { useToast } from '../../composables/useToast'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../ui/dialog'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
-import { fmtYmd } from '../../utils/datetime'
+import { fmtYmd, fmtTimestamp } from '../../utils/datetime'
 
 const props = defineProps({
   // Super Admin previewing an investor's portal — appended to the payouts
@@ -484,6 +509,66 @@ const busyId = ref(null)
 const expandedId = ref(null)
 function toggle(id) {
   expandedId.value = expandedId.value === id ? null : id
+  // Lazy-load the movement log for whichever row just opened. Fetching on expand
+  // rather than with the table keeps the common case (nobody expands anything) at
+  // zero extra requests, and mirrors how the line-item drill-down already loads.
+  const row = (investorStore.payouts || []).find((x) => x.id === expandedId.value)
+  if (row) loadHistory(row.period)
+}
+
+// Movement log, keyed by period. Answers "when did this amount change, and why".
+const history = ref({})
+const historyLoading = ref({})
+const historyMeta = ref({})
+
+async function loadHistory(period) {
+  if (!period || history.value[period] || historyLoading.value[period]) return
+  historyLoading.value = { ...historyLoading.value, [period]: true }
+  try {
+    const qs = props.previewUserId ? `?as_user_id=${encodeURIComponent(props.previewUserId)}` : ''
+    const r = await api.get(`/api/investor/payouts/${encodeURIComponent(period)}/history${qs}`)
+    const entries = (r?.entries || []).map((e, i, all) => ({
+      ...e,
+      // "What moved" is derived by diffing this snapshot against the NEXT older
+      // one, rather than recomputed — so the explanation always reconciles with
+      // the waterfall above it. Entries arrive newest-first, hence i + 1.
+      why: describeMove(e.breakdown, all[i + 1]?.breakdown),
+    }))
+    history.value = { ...history.value, [period]: entries }
+    historyMeta.value = { ...historyMeta.value, [period]: r?.recordingSince || '' }
+  } catch {
+    history.value = { ...history.value, [period]: [] }
+  } finally {
+    historyLoading.value = { ...historyLoading.value, [period]: false }
+  }
+}
+
+// Which components actually moved between two snapshots, biggest first. Returns
+// '' when there is nothing to compare (the first recorded entry has no older
+// snapshot behind it) rather than inventing a cause.
+const MOVE_LABELS = {
+  revenue: 'revenue', driverPay: 'driver pay', fixedCosts: 'fixed costs',
+  tripExpenses: 'trip expenses', maintFundCost: 'maintenance fund', complianceCost: 'compliance',
+}
+function describeMove(now, prev) {
+  if (!now || !prev) return ''
+  const moved = Object.keys(MOVE_LABELS)
+    .map((k) => ({ k, d: Number(now[k] || 0) - Number(prev[k] || 0) }))
+    .filter((x) => Math.abs(x.d) >= 0.01)
+    .sort((a, b) => Math.abs(b.d) - Math.abs(a.d))
+  return moved.map((x) => `${MOVE_LABELS[x.k]} ${x.d > 0 ? '+' : '−'}${fmtMoney(Math.abs(x.d))}`).join(' · ')
+}
+
+const fmtMoney = (n) => fmt(Math.round((Number(n) || 0) * 100) / 100)
+
+function historyEmptyText(period) {
+  const since = historyMeta.value[period] || ''
+  // A month that closed before tracking began genuinely has no record, which is
+  // not the same claim as "it never changed". Say which one it is.
+  if (since && period < since.slice(0, 7)) {
+    return 'No change history — this month closed before change tracking started.'
+  }
+  return 'No changes recorded for this month.'
 }
 // The current-month card's breakdown collapses independently of the table.
 const currentOpen = ref(false)
@@ -1370,4 +1455,19 @@ onMounted(loadPayouts)
   .stmt-foot-note { flex: 1 1 100%; order: 2; text-align: center; }
   .stmt-modal-header { padding: 0.7rem 2.5rem 0.7rem 0.9rem; }
 }
+
+/* Movement log inside the breakdown panel. Deliberately quieter than the
+   waterfall above it: the waterfall is the answer, this is the audit behind it. */
+.hist-block { margin-top: 0.9rem; padding-top: 0.75rem; border-top: 1px solid #eef0f3; }
+.hist-list { list-style: none; margin: 0.35rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.hist-row { display: grid; grid-template-columns: minmax(9rem, auto) 1fr; gap: 0.15rem 0.6rem; font-size: 0.78rem; line-height: 1.35; }
+.hist-when { color: #6b7280; font-variant-numeric: tabular-nums; }
+.hist-what { color: #111827; }
+.hist-delta { font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 0.3rem; }
+.hist-up { color: #047857; }
+.hist-down { color: #b91c1c; }
+/* Grid column 2 on its own line — the cause reads as a sub-clause of the change,
+   not as a second column of its own. */
+.hist-why { grid-column: 2; color: #6b7280; font-size: 0.72rem; }
+.hist-empty { margin-top: 0.35rem; font-size: 0.76rem; color: #6b7280; }
 </style>

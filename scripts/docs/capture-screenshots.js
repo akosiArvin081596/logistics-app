@@ -4,7 +4,7 @@
 //
 // Prerequisites:
 //   1. npm run build:client     (so Express can serve client/dist/)
-//   2. node scripts/truncate-and-seed.js   (super_admin + clean state)
+//   2. node scripts/prepare-test-fixtures.js --yes-local-db   (known passwords)
 //   3. node scripts/seed-staging.js        (multi-role test users + trucks)
 //   4. npm start                (Express on :3000) — leave running in another shell
 //
