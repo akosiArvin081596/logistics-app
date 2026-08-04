@@ -681,9 +681,13 @@ function exportCsv() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  // en-CA = the exporter's LOCAL day; toISOString() is UTC, which after 7pm
-  // Houston stamps the file with tomorrow's date.
-  a.download = `invoices-${new Date().toLocaleDateString('en-CA')}.csv`
+  // The HOUSTON day. en-CA gives the YYYY-MM-DD shape; the timeZone is what
+  // makes it the business day rather than the exporter's. toISOString() would be
+  // UTC (tomorrow's date after 7pm Houston), and plain en-CA is whoever ran it —
+  // so a file pulled at 09:00 Manila was already stamped a day ahead in Houston
+  // terms. Two people share this login from two countries; the filename has to
+  // mean the same thing to both.
+  a.download = `invoices-${new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' })}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }

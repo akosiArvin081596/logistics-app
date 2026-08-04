@@ -284,6 +284,9 @@ export function fmtYmd(v, { fallback = '—' } = {}) {
     if (!name) return fallback
     return `${name} ${parseInt(d, 10)}, ${y}`
   }
+  // Not a bare 'YYYY-MM-DD'. If it carries no zone either, it is a wall clock
+  // and must NOT go through new Date() — see the guard note in fmtTimestamp.
+  if (!isZoned(s)) return fmtSheetMoment(s, { fallback })
   const dt = new Date(s)
   return isNaN(dt.getTime())
     ? fallback
@@ -312,6 +315,21 @@ export function fmtYmd(v, { fallback = '—' } = {}) {
 export function fmtTimestamp(v, { fallback = '—' } = {}) {
   const s = String(v || '').trim()
   if (!s) return fallback
+
+  // GUARD — do not let a bare wall clock reach new Date().
+  //
+  // Pinning the OUTPUT to Houston is not sufficient on its own, because the
+  // INPUT parse is viewer-dependent: JS reads "08/04/2026 8:05:07" as LOCAL
+  // time, so the same cell becomes a different instant in Houston than in
+  // Manila, and rendering that in Houston then yields two different answers
+  // (measured: "Aug 4, 8:05 AM CDT" vs "Aug 3, 7:05 PM CDT" — a day apart).
+  //
+  // The docstring below has always said "not for sheet cells", but nothing
+  // enforced it, and one stray caller would have reintroduced exactly the
+  // viewer-dependence this file exists to remove. A bare value now takes the
+  // verbatim path instead, which is correct for it by definition.
+  if (!isZoned(s)) return fmtSheetMoment(s, { fallback })
+
   const dt = new Date(s)
   if (isNaN(dt.getTime())) return fallback
   return new Intl.DateTimeFormat('en-US', {
