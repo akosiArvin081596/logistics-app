@@ -249,6 +249,26 @@ export function sheetSortKey(v) {
 // The fix is to never build a Date from a date-only string.
 // ---------------------------------------------------------------------------
 
+/**
+ * Today's date in HOUSTON as 'YYYY-MM-DD' — the business day.
+ *
+ * For form defaults and filter bounds, i.e. values that get STORED or that
+ * decide which records are counted. Those are exactly where "whose today?" has
+ * a real answer: the carrier's, not the person typing.
+ *
+ * These sites used `new Date().toLocaleDateString('en-CA')`, the VIEWER's day.
+ * That was already an improvement on toISOString() (the UTC day, which after
+ * 7 PM Houston is tomorrow) — but it is still wrong for anyone not in Houston,
+ * and this login is shared across two countries. At 3 PM Houston it is already
+ * the NEXT day in Manila, so a form there pre-filled a date the business has
+ * not reached yet, onto a stored expense or load.
+ */
+export function houstonToday() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: HOUSTON, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date())
+}
+
 /** True for a bare 'YYYY-MM-DD' (no time component). */
 export function isYmd(v) {
   return YMD_RE.test(String(v || '').trim())
