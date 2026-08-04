@@ -14200,7 +14200,12 @@ app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 // state the system would never have allowed — and silently break invoicing,
 // since POST /api/loads/:loadId/draft-invoice 400s with no POD. Upload the
 // replacement first, then delete. Removing a NON-last POD is always fine.
-app.delete("/api/documents/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+// Super Admin ONLY, per the owner. Deleting a POD is what makes a load
+// un-invoiceable, so it sits with whoever answers for the money — not with
+// whoever is moving the freight. Note this is narrower than the UPLOAD route
+// (requireAuth), which must stay open: drivers upload their own PODs from the
+// driver app, and dispatchers attach ones that arrive by email.
+app.delete("/api/documents/:id", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const id = Number(req.params.id);
 		if (!Number.isInteger(id) || id <= 0) {

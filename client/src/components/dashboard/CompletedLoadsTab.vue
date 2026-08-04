@@ -436,7 +436,11 @@ const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref
 // --- Document management (Super Admin + Dispatcher) -------------------------
 // Same pair that can upload can delete: a POD gets attached here on the driver's
 // behalf, so whoever attached the wrong one has to be able to take it back off.
-const canManageDocs = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
+// Super Admin only, per the owner — POD upload and delete on a completed load
+// are both restricted, and the server enforces the same on DELETE. Dispatchers
+// keep the upload affordance on ACTIVE loads, which predates this and is where
+// they attach a POD that arrived by email mid-haul.
+const canManageDocs = computed(() => auth.isSuperAdmin)
 const deletingDocId = ref(null)
 const docError = ref('')
 // 'blocked' = refused on a business rule (the 409 last-POD guard) rather than
