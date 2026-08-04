@@ -1016,12 +1016,19 @@ const insertInvoiceSeqStmt = db.prepare(`
 	ON CONFLICT(day) DO UPDATE SET n = n + 1
 	RETURNING n
 `);
-function nextInvoiceNumber(date = new Date()) {
+// MMDDYYYY key. Houston, not server-local: this string is the visible invoice
+// number on the broker PDF, the email subject, and the filename, and the VPS runs
+// UTC — so an invoice raised 8:30 PM Houston on Jul 31 went out as 08012026-1,
+// the wrong day AND the wrong month for broker aging terms. It also rolled the
+// per-day counter at 7 PM Houston instead of midnight.
+function invoiceSeqDayKey(date = new Date()) {
 	const d = date instanceof Date ? date : new Date(date);
-	const day =
-		String(d.getMonth() + 1).padStart(2, "0") +
-		String(d.getDate()).padStart(2, "0") +
-		d.getFullYear();
+	const [y, m, day] = houstonDay(d).split("-");
+	return `${m}${day}${y}`;
+}
+
+function nextInvoiceNumber(date = new Date()) {
+	const day = invoiceSeqDayKey(date);
 	const row = insertInvoiceSeqStmt.get(day);
 	return `${day}-${row.n}`;
 }
@@ -1030,11 +1037,7 @@ function nextInvoiceNumber(date = new Date()) {
 // preview never burns a real invoice number.
 const peekInvoiceSeqStmt = db.prepare("SELECT n FROM bison_invoice_seq WHERE day = ?");
 function peekInvoiceNumber(date = new Date()) {
-	const d = date instanceof Date ? date : new Date(date);
-	const day =
-		String(d.getMonth() + 1).padStart(2, "0") +
-		String(d.getDate()).padStart(2, "0") +
-		d.getFullYear();
+	const day = invoiceSeqDayKey(date);
 	const row = peekInvoiceSeqStmt.get(day);
 	return `${day}-${(row ? row.n : 0) + 1}`;
 }
@@ -5902,13 +5905,21 @@ const EXPENSE_PERIOD_EXPR =
 // guard below is inert and the ledger is byte-identical to before.
 const PERIOD_FINALIZE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PERIOD_FINALIZE_ENABLED ?? "").trim());
 
-// 'YYYY-MM-DD' for the current America/New_York calendar day. ET throughout, not
-// server-local: the close deadline is shown to the client in ET, and a lock that
-// fires a day off from what the UI promised is its own support ticket.
-function todayKeyET() {
+// 'YYYY-MM-DD' for the current America/Chicago calendar day. Central, not
+// server-local: the close deadline is shown to the client in business time, and a
+// lock that fires a day off from what the UI promised is its own support ticket.
+//
+// This used to run on America/New_York. The carrier is in HOUSTON, and Eastern is
+// one hour AHEAD of Central, so the ET day flipped first and the books froze at
+// 23:00 Houston on the final grace day rather than midnight — a receipt logged at
+// 23:15 on day 7 missed the window the UI had promised. It also posted a receipt
+// logged 23:30 on the last day of a month into the NEXT month. Central is the zone
+// BUSINESS_DAY_TZ, getWeekRange, isAfterDeadline and houstonStamp already use; ET
+// was the outlier.
+function todayKeyCT() {
 	const p = {};
 	for (const x of new Intl.DateTimeFormat("en-US", {
-		timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+		timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit",
 	}).formatToParts(new Date())) p[x.type] = x.value;
 	return `${p.year}-${p.month}-${p.day}`;
 }
@@ -5917,8 +5928,8 @@ function todayKeyET() {
 // misses its own month's close gets posted into. Never a future month: posting
 // forward would put an expense in a period with no earnings row to absorb it and
 // break the ledger's reconciliation identity.
-function currentMonthKeyET() {
-	return todayKeyET().slice(0, 7);
+function currentMonthKeyCT() {
+	return todayKeyCT().slice(0, 7);
 }
 
 // Configured grace window, clamped to something sane. 0 = close at month end
@@ -5947,7 +5958,7 @@ function graceEndsAt(period, days) {
 // Is `period`'s grace window over? Pure clock arithmetic — no DB, no Sheets.
 function isPastGrace(period, days) {
 	const ends = graceEndsAt(period, days);
-	return !!ends && todayKeyET() > ends;
+	return !!ends && todayKeyCT() > ends;
 }
 
 const periodLockStmt = db.prepare("SELECT status FROM period_locks WHERE period = ?");
@@ -5970,7 +5981,7 @@ function isLocked(period) {
 function isPending(period) {
 	if (!PERIOD_FINALIZE_ENABLED) return false;
 	const p = String(period || "");
-	return !!p && p < currentMonthKeyET() && !isLocked(p);
+	return !!p && p < currentMonthKeyCT() && !isLocked(p);
 }
 
 // JS mirror of EXPENSE_PERIOD_EXPR for a row already in hand — same precedence
@@ -5999,7 +6010,7 @@ function periodPhase(period) {
 	if (!p) return "";
 	if (isLocked(p)) return "finalized";
 	if (!PERIOD_FINALIZE_ENABLED) return "";
-	return p >= currentMonthKeyET() ? "accruing" : "pending";
+	return p >= currentMonthKeyCT() ? "accruing" : "pending";
 }
 
 // Returns { [driver_name_lc]: { [yyyy-mm]: total, _total: allTime } } summing
@@ -6463,8 +6474,26 @@ async function generateInvoiceHandler(req, res) {
 		const unitToVid = {};
 		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''")
 			.all().forEach(t => { unitToVid[t.u] = t.vid; });
-		const weekStartMs = new Date(weekStart + "T00:00:00").getTime();
-		const weekEndMs = new Date(computedWeekEnd + "T00:00:00").getTime() + 24 * 3600 * 1000;
+		// Central midnight, not server-local midnight. getEldTravelDaysByVehicle
+		// buckets each ping into the TRUCK'S local day, but this window was built
+		// with new Date("...T00:00:00"), which on the UTC VPS is UTC midnight — so
+		// the window sat ~5-6 h ahead of the buckets it feeds. Pings from Friday
+		// 19:00-23:59 Central on the LAST day of the billing week fell past
+		// weekEndMs and were never fetched, so a truck that moved only on Friday
+		// evening silently lost that active day — one daily rate ($250 default).
+		const centralMidnightMs = (ymd) => {
+			const guess = Date.parse(ymd + "T00:00:00Z");
+			const parts = new Intl.DateTimeFormat("en-US", {
+				timeZone: "America/Chicago", hour: "2-digit", hourCycle: "h23",
+			}).formatToParts(new Date(guess));
+			const h = Number(parts.find((x) => x.type === "hour").value);
+			// h is how far Central already is into the day at UTC midnight; adding
+			// (24 - h) walks forward to the next Central midnight. DST-safe because
+			// the offset is read from the zone database at that very instant.
+			return guess + ((24 - h) % 24) * 3600 * 1000;
+		};
+		const weekStartMs = centralMidnightMs(weekStart);
+		const weekEndMs = centralMidnightMs(computedWeekEnd) + 24 * 3600 * 1000;
 		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), weekStartMs, weekEndMs);
 
 		const activeDaySet = new Set();
@@ -13343,7 +13372,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// the expense into a period with no earnings row to absorb it and break the
 		// ledger's paid+processing+owed+accruing == earned+adjustments identity.
 		const naturalPeriod = String(date || "").slice(0, 7);
-		const postedPeriod = naturalPeriod && isLocked(naturalPeriod) ? currentMonthKeyET() : "";
+		const postedPeriod = naturalPeriod && isLocked(naturalPeriod) ? currentMonthKeyCT() : "";
 
 		const result = db
 			.prepare(
@@ -18139,7 +18168,12 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		: data;
 
 	const now = new Date();
-	const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+	// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
+	// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
+	// final 5-6 hours of every month the portal showed the NEXT month accruing at
+	// $0 and treated the just-ended one as complete. houstonDay() is the same
+	// Central basis the stamps and the close lifecycle now use.
+	const currentMonthKey = houstonDay(now).slice(0, 7);
 
 	// ELD travel-day index per in-scope truck (same as GET /api/investor).
 	const unitToVid = {};
@@ -18541,15 +18575,15 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	);
 	// A month is "completed" only if BOTH clocks agree it is. currentMonthKey is
 	// server-local (computeInvestorMonthlyEarnings), while the close lifecycle
-	// runs on America/New_York — so on a UTC server they disagree for the first
+	// runs on America/Chicago — so on a UTC server they disagree for the first
 	// few hours of each month. Taking the stricter of the two keeps row existence
 	// and `phase` from contradicting each other (a row that exists but reports
 	// 'accruing', which is settleable while the UI calls it pending). Whichever
 	// way the server's zone leans, the AND is always the conservative choice.
-	const etMonthKey = currentMonthKeyET();
+	const ctMonthKey = currentMonthKeyCT();
 	const reconcile = db.transaction((months) => {
 		for (const m of months) {
-			if (m.isCurrentMonth || m.month >= currentMonthKey || m.month >= etMonthKey) continue; // only completed past months
+			if (m.isCurrentMonth || m.month >= currentMonthKey || m.month >= ctMonthKey) continue; // only completed past months
 			const amount = carryByPeriod[m.month].payable;
 			const existing = findRow.get(ownerId, m.month);
 			if (!existing) {
@@ -19190,7 +19224,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// ---- Monthly Earnings Breakdown (exact calendar month) ----
 		const monthlyEarnings = [];
 		{
-			const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
+			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
+			// final 5-6 hours of every month the portal showed the NEXT month accruing at
+			// $0 and treated the just-ended one as complete. houstonDay() is the same
+			// Central basis the stamps and the close lifecycle now use.
+			const currentMonthKey = houstonDay(now).slice(0, 7);
 			// Investor take-home = configurable split of net profit (default 50%).
 			// Read from investor_config.investor_split_pct (per-investor override
 			// already merged into `config` above). This is the SAME split the
@@ -20377,7 +20416,7 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 	try {
 		const graceDays = settlementGraceDays();
 		const locks = db.prepare("SELECT * FROM period_locks ORDER BY period DESC").all();
-		const cur = currentMonthKeyET();
+		const cur = currentMonthKeyCT();
 
 		// Periods that have payout rows but no lock yet — i.e. accruing or pending.
 		const open = db.prepare(
@@ -20419,7 +20458,7 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), async (req
 			return res.status(503).json({ error: "Period close is not enabled on this server.", code: "FEATURE_DISABLED" });
 		}
 		// A month still in progress has no final number to freeze.
-		if (period >= currentMonthKeyET()) {
+		if (period >= currentMonthKeyCT()) {
 			return res.status(409).json({
 				error: `${periodLabel(period)} is still in progress — it can't be finalized until the month ends.`,
 				code: "PERIOD_ACCRUING",
@@ -20630,7 +20669,7 @@ let periodCloseFailStreak = 0;
 // through years of empty calendar.
 function periodsDueForClose() {
 	const graceDays = settlementGraceDays();
-	const cur = currentMonthKeyET();
+	const cur = currentMonthKeyCT();
 	return db.prepare(
 		"SELECT DISTINCT period FROM investor_payouts WHERE period NOT IN (SELECT period FROM period_locks) ORDER BY period ASC"
 	).all()
@@ -20715,7 +20754,7 @@ if (PERIOD_FINALIZE_ENABLED) {
 		const seeded = db.prepare("SELECT COUNT(*) AS c FROM period_locks").get().c;
 		if (seeded === 0) {
 			const graceDays = settlementGraceDays();
-			const cur = currentMonthKeyET();
+			const cur = currentMonthKeyCT();
 			const historical = db.prepare("SELECT DISTINCT period FROM investor_payouts ORDER BY period ASC").all()
 				.map((r) => r.period)
 				.filter((p) => p < cur && isPastGrace(p, graceDays));
@@ -20728,7 +20767,7 @@ if (PERIOD_FINALIZE_ENABLED) {
 
 	setInterval(() => { maybeCloseFinishedPeriods().catch(() => {}); }, 60 * 1000);
 	setTimeout(() => { maybeCloseFinishedPeriods().catch(() => {}); }, 95 * 1000);
-	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (America/New_York)`);
+	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (America/Chicago)`);
 }
 
 // GET /api/financials — Super Admin financials dashboard (P1-1 from 2026-04-12 meeting)
@@ -21387,7 +21426,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// same numbers as the table rows instead of forking the math.
 		const { monthlyPerformance, monthlyDriverPay, monthlyTripExp, monthlyFixedCosts } = (() => {
 			const pad = (n) => String(n).padStart(2, "0");
-			const currentMonthKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
+			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
+			// final 5-6 hours of every month the portal showed the NEXT month accruing at
+			// $0 and treated the just-ended one as complete. houstonDay() is the same
+			// Central basis the stamps and the close lifecycle now use.
+			const currentMonthKey = houstonDay(now).slice(0, 7);
 
 			// Driver pay per month.
 			const monthlyDriverPay = {};
@@ -21484,7 +21528,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		let monthDetail = null;
 		if (monthParam) {
 			const pad2 = (n) => String(n).padStart(2, "0");
-			const currentMonthKey = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}`;
+			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
+			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
+			// final 5-6 hours of every month the portal showed the NEXT month accruing at
+			// $0 and treated the just-ended one as complete. houstonDay() is the same
+			// Central basis the stamps and the close lifecycle now use.
+			const currentMonthKey = houstonDay(now).slice(0, 7);
 			const yearN = parseInt(monthParam.slice(0, 4), 10);
 			const monthN = parseInt(monthParam.slice(5, 7), 10);
 			const prevDate = new Date(yearN, monthN - 2, 1);
@@ -22518,7 +22567,7 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 		const { paidDate } = req.body;
 		db.prepare(
 			`UPDATE compliance_fees SET status = 'Paid', paid_date = ? WHERE id = ?`
-		).run(paidDate || new Date().toISOString().split("T")[0], req.params.id);
+		).run(paidDate || houstonDay(), req.params.id); // Houston day: paid_date is the month bucket for the investor compliance deduction
 
 		res.json({ success: true });
 	} catch (error) {
