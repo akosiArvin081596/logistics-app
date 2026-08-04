@@ -50,6 +50,13 @@
           <button class="btn btn-primary add-btn" :disabled="addLoading || photoProcessing" @click="submitExpense">{{ addLoading ? '...' : 'Add' }}</button>
         </div>
         <div class="add-expense-row">
+          <!-- Fuel only. These drive cost-per-gallon and MPG; the form used to post
+               a hardcoded 0, so every admin-entered fuel receipt was excluded from
+               both. The OCR fills them on Enhance — this just stops discarding it. -->
+          <template v-if="addForm.type === 'Fuel'">
+            <input v-model="addForm.gallons" type="number" step="0.001" min="0" placeholder="Gallons" class="add-input" style="max-width:110px" :class="{ 'add-input-warn': addForm.amount && !(parseFloat(addForm.gallons) > 0) }" title="Without gallons this receipt won't count toward cost-per-gallon or MPG" />
+            <input v-model="addForm.odometer" type="number" step="1" min="0" placeholder="Odometer" class="add-input" style="max-width:120px" />
+          </template>
           <input v-model="addForm.loadId" type="text" placeholder="Load ID (optional)" class="add-input" style="max-width:180px" />
           <input v-model="addForm.city" type="text" placeholder="City (optional)" class="add-input" style="max-width:160px" />
           <input
@@ -191,6 +198,10 @@
               </label>
               <div class="mobile-exp-top-left">
                 <div class="mobile-exp-date">{{ fmtDate(e.date) }}</div>
+                <div class="mobile-exp-uploaded">
+                  Uploaded {{ fmtUploaded(e.timestamp) }}
+                  <span v-if="receiptDateSuspect(e)" class="date-warn" :title="receiptDateSuspect(e)">⚠</span>
+                </div>
                 <div class="mobile-exp-driver">{{ e.driver }}<span v-if="e.truck_unit" class="mobile-exp-truck"> · #{{ e.truck_unit }}</span></div>
                 <div v-if="e.location_city || e.location_state" class="mobile-exp-location">{{ fmtLocation(e) }}</div>
                 <div v-if="e.vendor" class="mobile-exp-vendor" :title="e.vendor_normalized || ''">{{ e.vendor }}</div>
@@ -234,7 +245,11 @@
                   @change="toggleSelectAllPending"
                 />
               </th>
-              <th>Date</th>
+              <!-- "Date" alone was read as the upload date, which is what led to
+                   "how could it be uploaded a day before the purchase". Naming it
+                   and showing the upload time beside it removes the ambiguity. -->
+              <th>Receipt Date</th>
+              <th>Uploaded</th>
               <th>Driver</th>
               <th>Truck</th>
               <th>City / State</th>
@@ -258,7 +273,13 @@
                   @change="toggleSelect(e.id)"
                 />
               </td>
-              <td class="mono-sm">{{ fmtDate(e.date) }}</td>
+              <td class="mono-sm">
+                {{ fmtDate(e.date) }}
+                <span v-if="receiptDateSuspect(e)" class="date-warn" :title="receiptDateSuspect(e)">⚠</span>
+              </td>
+              <!-- e.timestamp, NOT e.created_at: the latter is UTC with no zone
+                   marker and would render ~8h early. -->
+              <td class="mono-sm upload-cell">{{ fmtUploaded(e.timestamp) }}</td>
               <td>{{ e.driver }}</td>
               <td class="mono-sm">{{ e.truck_unit ? '#' + e.truck_unit : '\u2014' }}</td>
               <td class="mono-sm">{{ fmtLocation(e) }}</td>
@@ -327,7 +348,8 @@
                     <div>
                       <div class="exp-type" :class="'type-' + (selectedExpense.type || 'other').toLowerCase()">{{ selectedExpense.type || 'Other' }}</div>
                       <div class="exp-amount">${{ Number(selectedExpense.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</div>
-                      <div class="exp-sub">{{ fmtDate(selectedExpense.date) }} &middot; {{ selectedExpense.driver }}</div>
+                      <div class="exp-sub">Receipt {{ fmtDate(selectedExpense.date) }} &middot; {{ selectedExpense.driver }}</div>
+                      <div class="exp-sub exp-sub-dim">Uploaded {{ fmtUploaded(selectedExpense.timestamp) }}</div>
                     </div>
                     <button class="exp-close" @click="closeExpenseDetail" aria-label="Close (Esc)">&times;</button>
                   </div>
@@ -863,6 +885,7 @@ import ExpenseAnalyticsPanel from './expenses/ExpenseAnalyticsPanel.vue'
 import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import { US_STATES } from '../../utils/usStates'
 import { compressImage } from '../../lib/imageUtils'
+import { fmtYmd, fmtTimestamp, parseYmdLocal } from '../../utils/datetime'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -1209,7 +1232,10 @@ onBeforeUnmount(() => {
 
 // Add Expense form (Super Admin / Dispatcher only)
 const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'Dispatcher')
-const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toISOString().slice(0, 10), loadId: '', description: '', city: '', state: '' })
+// Default date uses local getters, NOT toISOString(): the latter yields the UTC
+// day, so after 7pm Houston it would pre-fill tomorrow — and at month end that
+// books the receipt into the wrong period entirely. Mirrors ExpenseForm.vue.
+const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toLocaleDateString('en-CA'), loadId: '', description: '', city: '', state: '', gallons: '', odometer: '' })
 const addLoading = ref(false)
 const fileInputRef = ref(null)
 // photoBase64 holds the receipt as a data URI — image/jpeg from the canvas
@@ -1440,6 +1466,9 @@ async function runAddFormOcr() {
     if (data.suggestedType && expenseTypes.includes(data.suggestedType) && addForm.type === 'Fuel') {
       addForm.type = data.suggestedType
     }
+    // The OCR has always returned these; this form just never used them.
+    if (data.gallons != null) addForm.gallons = String(data.gallons)
+    if (data.odometer != null) addForm.odometer = String(data.odometer)
     // No dedicated vendor field on this form — fold the vendor into the
     // description only when the admin left it blank, so the info isn't lost.
     if (data.vendor && !addForm.description.trim()) addForm.description = String(data.vendor).slice(0, 80)
@@ -1503,8 +1532,10 @@ async function submitExpense() {
       city: addForm.city || '',
       state: addForm.state || '',
       photoData: photoBase64.value,
-      gallons: 0,
-      odometer: 0,
+      // Were hardcoded to 0, so every admin-entered fuel receipt lost its gallons
+      // and dropped out of cost-per-gallon / MPG. The OCR already returns both.
+      gallons: parseFloat(addForm.gallons) || 0,
+      odometer: parseFloat(addForm.odometer) || 0,
       receiptDetails: ocrDetails.value,
       // Opt in to the same-driver/merchant/day/amount check — this form can
       // confirm and resend, so a 409 here is always survivable.
@@ -1533,6 +1564,7 @@ async function submitExpense() {
       toast('Expense logged')
     }
     addForm.driver = ''; addForm.amount = ''; addForm.loadId = ''; addForm.description = ''; addForm.city = ''; addForm.state = ''
+    addForm.gallons = ''; addForm.odometer = ''
     clearPhoto()
     await loadAll()
   } catch (err) {
@@ -1673,9 +1705,36 @@ async function bulkSetStatus(status) {
   }
 }
 
-function fmtDate(d) {
-  if (!d) return '\u2014'
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+// expenses.date is a bare 'YYYY-MM-DD'. Routed through the shared helper because
+// new Date('2026-07-15') parses as UTC MIDNIGHT and renders as Jul 14 in every US
+// timezone \u2014 the client reported exactly that against a receipt reading 07/15.
+const fmtDate = (d) => fmtYmd(d)
+
+// Upload time. Uses expenses.timestamp (ISO with 'Z'), never created_at, which is
+// UTC with no zone marker and would read ~8h early in the browser.
+const fmtUploaded = (t) => fmtTimestamp(t)
+
+// A receipt dated far from when it was filed is nearly always a misread year — a
+// store printer with a wrong clock, or a handwritten year that ran off the page.
+// It is not cosmetic: the expense lands in a month that isn't in the books, so it
+// silently drops out of the P&L. One live row was dated 2017, buckets to 2017-07
+// (a period that doesn't exist), and overstates July 2026's investor payout by the
+// $100 that never got deducted.
+//
+// The entry forms already warn, but that fires once and nothing surfaces it again
+// after saving — so it stays flagged in the list where someone can still act on it.
+// Flag, never block: a genuinely old receipt can be logged deliberately.
+const STALE_RECEIPT_DAYS = 120
+function receiptDateSuspect(e) {
+  const d = parseYmdLocal(e?.date)
+  const up = e?.timestamp ? new Date(e.timestamp) : null
+  if (!d || !up || isNaN(up.getTime())) return ''
+  const days = Math.round((up - d) / 86400000)
+  if (days < -1) return 'Dated after it was uploaded — check the date'
+  if (days <= STALE_RECEIPT_DAYS) return ''
+  return d.getFullYear() !== up.getFullYear()
+    ? `Dated ${d.getFullYear()} but uploaded ${up.getFullYear()} — check the year`
+    : `Dated ${days} days before it was uploaded — check the date`
 }
 
 // City/State display: both -> "City, ST"; one -> that one; neither -> em-dash.
@@ -2357,6 +2416,12 @@ tr:hover td { background: var(--surface-hover); }
 .exp-type.type-food { background: #dcfce7; color: #166534; }
 .exp-amount { font-size: 1.75rem; font-weight: 800; color: #0f172a; }
 .exp-sub { font-size: 0.78rem; color: #64748b; margin-top: 0.25rem; }
+.exp-sub-dim { color: #94a3b8; margin-top: 0.1rem; }
+/* Upload time is secondary to the receipt date it sits beside. */
+.upload-cell { color: #64748b; white-space: nowrap; }
+/* Amber, not red: the row saved fine and the date may be legitimate — this asks
+   for a look, it doesn't assert an error. */
+.date-warn { color: var(--amber, #f59e0b); cursor: help; margin-left: 0.25rem; }
 .exp-close {
   background: transparent;
   border: none;
@@ -2712,6 +2777,9 @@ tr:hover td { background: var(--surface-hover); }
   min-width: 120px;
 }
 .add-input:focus { outline: none; border-color: var(--blue); }
+/* Amber hint on an empty Gallons for a fuel receipt — it saves fine, it just
+   won't contribute to cost-per-gallon or MPG. */
+.add-input-warn { border-color: var(--amber, #f59e0b); }
 .add-btn {
   padding: 0.4rem 1rem; font-size: 0.8rem; font-weight: 600; border-radius: 6px;
   border: none; background: var(--blue); color: #fff; cursor: pointer;
@@ -2859,6 +2927,13 @@ tr:hover td { background: var(--surface-hover); }
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 0.75rem;
     color: #64748b;
+  }
+  /* Deliberately quieter than the receipt date: the purchase date is the figure
+     that matters, the upload time is there to answer "when did this arrive". */
+  .mobile-exp-uploaded {
+    font-size: 0.68rem;
+    color: #94a3b8;
+    margin-top: 0.1rem;
   }
   .mobile-exp-driver {
     font-size: 0.92rem;

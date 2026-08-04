@@ -215,13 +215,21 @@
             <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
               <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
               <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
+              <!-- Filename over a muted upload time — same row shape the driver's
+                   DocumentList uses, so a POD reads the same on both sides.
+                   Dispatchers need "when did this land" to chase a missing POD. -->
               <div v-else style="display:flex;flex-direction:column;gap:0.5rem;">
                 <div v-for="doc in loadDocs" :key="doc.id" class="flex items-center justify-between" style="padding:0.25rem 0;">
-                  <div class="flex items-center gap-2">
-                    <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;">{{ doc.type }}</span>
-                    <span style="font-size:0.875rem;">{{ doc.file_name }}</span>
+                  <div class="flex items-center gap-2" style="min-width:0;flex:1;">
+                    <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;flex-shrink:0;">{{ doc.type }}</span>
+                    <div style="display:flex;flex-direction:column;min-width:0;">
+                      <!-- Phone-camera uploads produce long underscore-joined names,
+                           which don't word-break and would shove View off the row. -->
+                      <span :title="doc.file_name" style="font-size:0.875rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ doc.file_name }}</span>
+                      <span style="font-size:0.7rem;color:#94a3b8;">Uploaded {{ fmtUploaded(doc.uploaded_at) }}</span>
+                    </div>
                   </div>
-                  <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;">View</a>
+                  <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;flex-shrink:0;">View</a>
                 </div>
               </div>
             </div>
@@ -395,6 +403,7 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { fmtTimestamp } from '../../utils/datetime'
 
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
@@ -792,6 +801,11 @@ const sectionPatterns = [
 const hiddenCols = /broker|phone|email|contact|contract|address/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
 const selectedJobDriverName = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /driver/i.test(h)); return c ? (selectedJob.value[c] || '').toString().trim() : '' })
+
+// GET /api/documents/:loadId serves uploaded_at as ISO with 'Z'. Never swap this
+// for a raw SQLite stamp: those are UTC with no zone marker, so the browser reads
+// them as local and a POD uploaded at 2am shows on the previous day in Houston.
+const fmtUploaded = (t) => fmtTimestamp(t)
 
 async function refreshDocs() {
   if (!loadIdValue.value) return

@@ -450,6 +450,7 @@ import { useToast } from '../../composables/useToast'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../ui/dialog'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
+import { fmtYmd } from '../../utils/datetime'
 
 const props = defineProps({
   // Super Admin previewing an investor's portal — appended to the payouts
@@ -497,10 +498,12 @@ function statusClass(s) {
   return STATUS_CLASS[s] || 'st-owed'
 }
 
-function fmtDate(d) {
-  if (!d) return '—'
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
+// MIXED INPUT: dueDate/graceEndsAt are bare 'YYYY-MM-DD' (must not go through
+// new Date(), which renders the previous day in US timezones), while paidAt/
+// reopenedAt are real ISO instants that SHOULD convert to the viewer's zone.
+// fmtYmd branches on the shape and handles both. NB fmtShortDate below already
+// got this right — this function is the one that didn't.
+const fmtDate = (d) => fmtYmd(d)
 
 // The waterfall and its drill-down are BOTH cents-precise (the backend sends
 // unrounded figures for this surface), so they reconcile exactly. Each modal

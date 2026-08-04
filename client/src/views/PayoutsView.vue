@@ -416,6 +416,7 @@ import { formatCurrency as fmt } from '../utils/format'
 import { useApi } from '../composables/useApi'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
+import { fmtYmd } from '../utils/datetime'
 
 const api = useApi()
 // Pulled in for parity with the other admin pages; auth gating is enforced by
@@ -442,10 +443,10 @@ function statusClass(s) {
   return STATUS_CLASS[s] || 'st-owed'
 }
 
-function fmtDate(d) {
-  if (!d) return '—'
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
+// MIXED INPUT: dueDate/graceEndsAt are bare 'YYYY-MM-DD' (new Date() would render
+// the previous day in Houston), paidAt/reopenedAt are ISO instants that should
+// convert to the viewer's zone. fmtYmd branches on the shape.
+const fmtDate = (d) => fmtYmd(d)
 
 async function loadPayouts() {
   loading.value = true

@@ -58,6 +58,7 @@
 <script setup>
 import { computed } from 'vue'
 import StatusBadge from '../shared/StatusBadge.vue'
+import { parseYmdLocal } from '../../utils/datetime'
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -101,7 +102,12 @@ const deliveryDate = computed(() => delivCol.value ? props.load[delivCol.value] 
 function formatDate(str) {
   if (!str) return '\u2014'
   const cleaned = str.replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').trim()
-  const d = new Date(cleaned)
+  // Sheet dates arrive in two shapes. Slash-format ("7/15/2026") parses as LOCAL
+  // and is fine. A bare "2026-07-15" \u2014 which loads created in-app write \u2014 parses
+  // as UTC MIDNIGHT, so new Date() alone would show the driver the previous day
+  // as their pickup date in every US timezone. parseYmdLocal returns null for
+  // anything that isn't date-only, so the slash path is untouched.
+  const d = parseYmdLocal(cleaned) || new Date(cleaned)
   if (isNaN(d)) return str
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }

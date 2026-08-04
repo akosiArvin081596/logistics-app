@@ -25,6 +25,16 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           ws: true,
         },
+        // Uploaded files (receipts, PODs, legal docs, signed onboarding PDFs) are
+        // stored as '/uploads/...' paths and served by Express behind requireAuth.
+        // Without this, dev requests for them hit Vite instead, fall through to the
+        // SPA catch-all, and come back as index.html with content-type text/html —
+        // so every <img> pointing at a receipt renders as a broken image locally
+        // while working perfectly in production, where Express serves both.
+        '/uploads': {
+          target: apiTarget,
+          changeOrigin: true,
+        },
       },
     },
     build: {

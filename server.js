@@ -3115,7 +3115,7 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 			return res.json({ documents: [], drugTest: null, linked: false, ssn: null });
 		}
 
-		const onboarding = db.prepare("SELECT drug_test_result, drug_test_file_url, drug_test_uploaded_at, status FROM driver_onboarding WHERE user_id = ?").get(user.id);
+		const onboarding = db.prepare("SELECT drug_test_result, drug_test_file_url, strftime('%Y-%m-%dT%H:%M:%SZ', drug_test_uploaded_at) AS drug_test_uploaded_at, status FROM driver_onboarding WHERE user_id = ?").get(user.id);
 		const documents = db.prepare(
 			"SELECT doc_key, doc_name, signed, signature_text, signed_at, signed_pdf_url FROM onboarding_documents WHERE user_id = ? ORDER BY id"
 		).all(user.id);
@@ -8580,7 +8580,7 @@ app.get("/api/trucks/:id/driver-files", requireRole("Super Admin", "Dispatcher")
 		if (!user) {
 			return res.json({ driverName, files: [], onboardingDocs: [], drugTest: null });
 		}
-		const onboarding = db.prepare("SELECT application_id, drug_test_result, drug_test_file_url, drug_test_uploaded_at FROM driver_onboarding WHERE user_id = ?").get(user.id);
+		const onboarding = db.prepare("SELECT application_id, drug_test_result, drug_test_file_url, strftime('%Y-%m-%dT%H:%M:%SZ', drug_test_uploaded_at) AS drug_test_uploaded_at FROM driver_onboarding WHERE user_id = ?").get(user.id);
 		const files = [];
 		if (onboarding?.application_id) {
 			const app = db.prepare("SELECT cdl_front, cdl_back, medical_card FROM job_applications WHERE id = ?").get(onboarding.application_id);
@@ -11104,7 +11104,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 		let truckDocuments = [];
 		if (assignedTruck && assignedTruck.id > 0) {
 			truckDocuments = db.prepare(
-				`SELECT id, doc_type, file_name, notes, uploaded_at
+				`SELECT id, doc_type, file_name, notes, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at
 				 FROM legal_documents
 				 WHERE truck_id = ?
 				   AND visible_to_driver = 1
@@ -11200,7 +11200,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			driverDirectoryId = directoryRow.id;
 			profilePictureUrl = directoryRow.profile_picture_url || "";
 			sharedDocuments = db.prepare(
-				`SELECT id, doc_type, file_name, notes, uploaded_by, uploaded_at
+				`SELECT id, doc_type, file_name, notes, uploaded_by, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at
 				 FROM legal_documents WHERE driver_id = ? ORDER BY uploaded_at DESC`
 			).all(directoryRow.id);
 		}
@@ -13850,7 +13850,7 @@ app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 		}
 		const docs = db
 			.prepare(
-				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, uploaded_at, ocr_text
+				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at, ocr_text
 				 FROM documents WHERE load_id = ? ORDER BY uploaded_at DESC`,
 			)
 			.all(loadId);
@@ -14419,7 +14419,7 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 		const queryDriverId = req.query.driver_id ? parseInt(req.query.driver_id) : null;
 		if (isSuperAdmin && queryDriverId && queryDriverId > 0) {
 			const driverDocs = db.prepare(
-				`SELECT ld.* FROM legal_documents ld WHERE ld.driver_id = ? ORDER BY ld.uploaded_at DESC`
+				`SELECT ld.*, strftime('%Y-%m-%dT%H:%M:%SZ', ld.uploaded_at) AS uploaded_at FROM legal_documents ld WHERE ld.driver_id = ? ORDER BY ld.uploaded_at DESC`
 			).all(queryDriverId);
 			return res.json({ documents: driverDocs });
 		}
@@ -14436,11 +14436,11 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 					conditions.push(`ld.truck_id IN (${owned.map(() => '?').join(',')})`);
 					params.push(...owned);
 				}
-				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE (${conditions.join(' OR ')}) ORDER BY ld.uploaded_at DESC`).all(...params);
+				docs = db.prepare(`SELECT ld.*, t.make, t.model, strftime('%Y-%m-%dT%H:%M:%SZ', ld.uploaded_at) AS uploaded_at FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE (${conditions.join(' OR ')}) ORDER BY ld.uploaded_at DESC`).all(...params);
 			} else if (truckId) {
-				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE ld.truck_id = ? ORDER BY ld.uploaded_at DESC`).all(truckId);
+				docs = db.prepare(`SELECT ld.*, t.make, t.model, strftime('%Y-%m-%dT%H:%M:%SZ', ld.uploaded_at) AS uploaded_at FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE ld.truck_id = ? ORDER BY ld.uploaded_at DESC`).all(truckId);
 			} else {
-				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ORDER BY ld.uploaded_at DESC`).all();
+				docs = db.prepare(`SELECT ld.*, t.make, t.model, strftime('%Y-%m-%dT%H:%M:%SZ', ld.uploaded_at) AS uploaded_at FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ORDER BY ld.uploaded_at DESC`).all();
 			}
 		} else {
 			const inv = db.prepare("SELECT id FROM investors WHERE user_id = ?").get(user.id);
@@ -14454,7 +14454,7 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 			// investor owned, even when viewing a single-truck modal.
 			if (truckId) {
 				if (!owned.includes(truckId)) return res.json({ documents: [] });
-				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE ld.truck_id = ? ORDER BY ld.uploaded_at DESC`).all(truckId);
+				docs = db.prepare(`SELECT ld.*, t.make, t.model, strftime('%Y-%m-%dT%H:%M:%SZ', ld.uploaded_at) AS uploaded_at FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id WHERE ld.truck_id = ? ORDER BY ld.uploaded_at DESC`).all(truckId);
 			} else {
 				// Fleet-wide view: all owned-truck docs + investor-profile docs.
 				const conditions = [];
@@ -14468,7 +14468,7 @@ app.get("/api/legal-documents", requireRole("Super Admin", "Investor"), (req, re
 					params.push(invId);
 				}
 				const where = conditions.length > 0 ? `WHERE (${conditions.join(' OR ')})` : '';
-				docs = db.prepare(`SELECT ld.*, t.make, t.model FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ${where} ORDER BY ld.uploaded_at DESC`).all(...params);
+				docs = db.prepare(`SELECT ld.*, t.make, t.model, strftime('%Y-%m-%dT%H:%M:%SZ', ld.uploaded_at) AS uploaded_at FROM legal_documents ld LEFT JOIN trucks t ON t.id = ld.truck_id ${where} ORDER BY ld.uploaded_at DESC`).all(...params);
 			}
 		}
 		res.json({ documents: docs });
@@ -14610,7 +14610,7 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 		let docs;
 		if (isSuperAdmin) {
 			docs = db.prepare(
-				`SELECT id, load_id, driver, type, file_name, drive_url, uploaded_at
+				`SELECT id, load_id, driver, type, file_name, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at
 				 FROM documents ORDER BY uploaded_at DESC LIMIT 500`
 			).all();
 		} else {
@@ -14622,7 +14622,7 @@ app.get("/api/investor/documents", requireRole("Super Admin", "Investor"), async
 			const drivers = [...driverSet];
 			const placeholders = drivers.map(() => '?').join(',');
 			docs = db.prepare(
-				`SELECT id, load_id, driver, type, file_name, drive_url, uploaded_at
+				`SELECT id, load_id, driver, type, file_name, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at
 				 FROM documents WHERE LOWER(driver) IN (${placeholders})
 				 ORDER BY uploaded_at DESC LIMIT 500`
 			).all(...drivers);

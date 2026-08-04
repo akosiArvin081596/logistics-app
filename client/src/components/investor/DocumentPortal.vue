@@ -41,7 +41,7 @@
           <td class="mono">{{ doc.load_id || '—' }}</td>
           <td>{{ doc.driver || '—' }}</td>
           <td class="file-name" :title="doc.file_name">{{ doc.file_name }}</td>
-          <td class="date">{{ fmtDate(doc.uploaded_at) }}</td>
+          <td class="date">{{ fmtTimestamp(doc.uploaded_at) }}</td>
           <td>
             <a :href="doc.drive_url" target="_blank" class="view-btn">View</a>
           </td>
@@ -54,6 +54,12 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
+// documents.uploaded_at is a real INSTANT (served ISO-with-Z), so it converts to
+// the viewer's zone and carries a time — the client asked every upload table to
+// show date AND time. Replaces a local date-only fmtDate that also read the
+// then-unzoned value as local, landing ~8h early and rolling the day back for
+// anything stamped 00:00-05:59 UTC.
+import { fmtTimestamp } from '../../utils/datetime'
 
 const api = useApi()
 const docs = ref([])
@@ -91,12 +97,6 @@ async function load() {
   } finally {
     loading.value = false
   }
-}
-
-function fmtDate(ts) {
-  if (!ts) return '—'
-  const d = new Date(ts)
-  return isNaN(d) ? ts : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
 function typeClass(type) {
@@ -161,7 +161,9 @@ onMounted(load)
 
 .mono { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; }
 .file-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 0.75rem; }
-.date { font-size: 0.75rem; color: var(--text-dim); white-space: nowrap; }
+/* Was nowrap while this held a date only. Now it carries a time too, so let it
+   break after the date rather than forcing the column wide on narrow screens. */
+.date { font-size: 0.75rem; color: var(--text-dim); }
 
 .type-badge {
   display: inline-flex; padding: 0.2rem 0.55rem; border-radius: 10px;

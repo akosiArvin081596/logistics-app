@@ -95,13 +95,21 @@
             <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
               <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
               <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
+              <!-- Filename over a muted upload time, matching ActiveLoadsTab and the
+                   driver's DocumentList. On a completed load this is the evidence
+                   trail for when the POD backing the invoice actually arrived. -->
               <div v-else style="display:flex;flex-direction:column;gap:0.5rem;">
                 <div v-for="doc in loadDocs" :key="doc.id" style="display:flex;align-items:center;justify-content:space-between;padding:0.25rem 0;">
-                  <div style="display:flex;align-items:center;gap:0.5rem;">
-                    <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;">{{ doc.type }}</span>
-                    <span style="font-size:0.875rem;">{{ doc.file_name }}</span>
+                  <div style="display:flex;align-items:center;gap:0.5rem;min-width:0;flex:1;">
+                    <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;flex-shrink:0;">{{ doc.type }}</span>
+                    <div style="display:flex;flex-direction:column;min-width:0;">
+                      <!-- Phone-camera uploads produce long underscore-joined names,
+                           which don't word-break and would shove View off the row. -->
+                      <span :title="doc.file_name" style="font-size:0.875rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ doc.file_name }}</span>
+                      <span style="font-size:0.7rem;color:#94a3b8;">Uploaded {{ fmtUploaded(doc.uploaded_at) }}</span>
+                    </div>
                   </div>
-                  <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;">View</a>
+                  <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;flex-shrink:0;">View</a>
                 </div>
               </div>
             </div>
@@ -152,7 +160,7 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
-import { parseSheetUtc, formatDeliveredLocal } from '@/utils/datetime'
+import { parseSheetUtc, formatDeliveredLocal, fmtTimestamp } from '@/utils/datetime'
 
 const api = useApi()
 const auth = useAuthStore()
@@ -262,6 +270,10 @@ function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') ret
 function fmtDeliveryDate(v) {
   return formatDeliveredLocal(v)
 }
+// Document upload time. GET /api/documents/:loadId serves uploaded_at as ISO with
+// 'Z', so this is a true instant. Never swap in a raw SQLite stamp: those are UTC
+// with no zone marker and the browser reads them as local, landing hours early.
+const fmtUploaded = (t) => fmtTimestamp(t)
 function cellValue(j, c) { if (c === 'Pickup') return j._pickupLocation || '\u2014'; if (c === 'Drop-off') return j._dropLocation || '\u2014'; if (c === 'Delivery Date') return fmtDeliveryDate(completionCol.value ? j[completionCol.value] : ''); const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
 function addrStreet(j, c) { return c === 'Pickup' ? j._pickupStreet : j._dropStreet }
 function addrCsz(j, c) { return c === 'Pickup' ? j._pickupLocation : j._dropLocation }
