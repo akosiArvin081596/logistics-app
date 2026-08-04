@@ -167,9 +167,15 @@ function selectConversation(c) {
   store.selectConversation(c.driver, c.loadId || '')
 }
 
+// Conversation-list "last message" time. Houston rule: pinned to
+// America/Chicago with a visible zone label so the owner (Houston) and the
+// developer (Manila) share one login and still read the same clock.
 function formatTime(ts) {
   const t = new Date(ts)
-  return isNaN(t) ? '' : t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return isNaN(t) ? '' : t.toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
+  })
 }
 
 async function sendMessage() {

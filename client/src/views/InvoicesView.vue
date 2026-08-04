@@ -693,13 +693,29 @@ function fmtMoney(n) {
   const num = Number(n || 0)
   return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
+// Both of these take a true instant — submitted_at / approved_at / paid_at /
+// adjusted_at / deleted_at are all written server-side as new Date().toISOString().
+// Houston rule: America/Chicago with a visible zone label, never the viewer's zone.
+//
+// The pin matters MORE for the date-only formatter than for the datetime one:
+// an instant late in the Houston evening rendered date-only in a zone ahead of
+// Central shows TOMORROW's date, so an invoice submitted Fri Aug 7 reads
+// "Aug 8" — the wrong billing week — on a Manila session of the shared login.
+// The ", CDT" the label adds to a bare date is deliberate: it says which zone's
+// calendar day this is, which is the whole point of pinning it.
 function formatDate(d) {
   if (!d) return ''
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  return new Date(d).toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
+  })
 }
 function formatDateTime(d) {
   if (!d) return ''
-  return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+  return new Date(d).toLocaleString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
+  })
 }
 function formatWeek(start, end) {
   if (!start || !end) return ''
