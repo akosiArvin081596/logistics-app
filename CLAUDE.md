@@ -67,7 +67,6 @@ Helper scripts in `scripts/`:
 - `reset-super-admin-password.js` — reset the Super Admin password against the local SQLite DB.
 - `truncate-and-seed.js` — wipe and reseed the local DB for clean-slate testing.
 - `seed-staging.js` — seed a staging DB.
-- `create-demo-user.js` — create a demo user for testing.
 - `geocode-loads.js` — backfill geocodes for rows in "Job Tracking".
 - `generate-timeline-docx.py` / `generate-timeline-apr13-apr17.py` — one-off Python scripts rendering session-timeline `.docx` reports from HTML/markdown (needs `python-docx`).
 

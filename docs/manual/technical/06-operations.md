@@ -28,7 +28,6 @@ Live in `scripts/`:
 | `reset-super-admin-password.js` | Reset the Super Admin password against the local SQLite DB. |
 | `truncate-and-seed.js` | Wipe and reseed `app.db` for clean-slate testing. |
 | `seed-staging.js` | Seed a staging DB. |
-| `create-demo-user.js` | Create a demo user for testing. |
 | `geocode-loads.js` | Backfill geocodes for rows in "Job Tracking". |
 | `generate-timeline-docx.py` | One-off Python script to render `.docx` session timelines (requires `python-docx`). |
 | `docs/generate-docs.js` | Build the technical and user PDFs. |

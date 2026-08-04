@@ -144,11 +144,21 @@ When you reset a user's password:
 
 If a user forgets their password again, repeat.
 
-## Demo viewer
+## Demo viewer (removed)
 
-There's a special account `demo_viewer` that's a read-only Super Admin (the middleware blocks all mutations). It's used for client demos, screenshots, training videos. Don't delete it.
+There used to be a `demo_viewer` account — a read-only Super Admin used for demos.
+It was **deleted on 2026-08-04**, and this page previously told you not to delete it.
 
-If you need to refresh the demo viewer's password, run `node scripts/create-demo-user.js`.
+Why it went: it held the role literally "Super Admin", its password was published in
+the public repo, and the only protection was a check on the HTTP method. That meant
+every Super-Admin page in the app was readable by anyone who found the account,
+including the full database download. Nothing automated used it (the screenshot
+scripts sign in as `super_admin`, `dispatch1`, `lesline` and `kevin`), and it had no
+recorded activity in nine months.
+
+If you want a demo account again, ask for one to be built properly: its own
+non-admin role, a password kept out of the repo, and a named list of what it may
+open. Do not recreate the old one.
 
 ## Pro tips
 

@@ -3323,35 +3323,23 @@ function requireRole(...roles) {
 // instead of direct static URLs, so locking this down does not break any public page.
 app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads")));
 
-// Read-only demo account lockdown. demo_viewer can GET anything (Super Admin role
-// so they see the full app), but any mutation returns 403 with a friendly message.
-// Logout is explicitly allowed so they can sign out.
+// NOTE: a read-only `demo_viewer` account and its lockdown middleware lived here
+// and were removed 2026-08-04, account and all.
 //
-// ⚠️ The method check is NOT a sufficient boundary on its own. demo_viewer holds
-// the role literally "Super Admin" and its password is published in
-// scripts/create-demo-user.js ("anyone who knows the URL gets it"), so every
-// Super-Admin-gated GET in this app is effectively public. Bulk financial GETs
-// therefore need to be named here explicitly. This list is seeded with the
-// completed-loads export only — a single request that would otherwise hand out
-// every load in company history with its Payment value.
+// It held the role literally "Super Admin" and its password was published in
+// scripts/create-demo-user.js, while the only thing standing between it and the
+// data was a check on the HTTP METHOD. So every Super-Admin-gated GET in the app
+// was effectively public to anyone who read the repo — including
+// GET /api/db/download, the entire SQLite file. Live from 2026-04-15.
 //
-// KNOWN GAP, needs an owner: GET /api/db/download (the entire SQLite file),
-// /api/db/query/:table, /api/financials, /api/investor/tax-csv, and
-// /api/expenses/receipts-download are all still reachable by this account. The
-// durable fix is to stop reusing the "Super Admin" role for the demo user
-// rather than to grow this list forever.
-const DEMO_BLOCKED_GETS = ["/loads/completed/export"];
-app.use("/api", (req, res, next) => {
-	if (!req.session.user) return next();
-	if (req.session.user.username !== "demo_viewer") return next();
-	const method = req.method.toUpperCase();
-	if (DEMO_BLOCKED_GETS.includes(req.path)) {
-		return res.status(403).json({ error: "Bulk data export is disabled on the demo account." });
-	}
-	if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
-	if (req.path === "/auth/logout") return next();
-	return res.status(403).json({ error: "This is a read-only demo account. Sign up at /invest to create your own investor account." });
-});
+// It was removed rather than repaired: nine months of audit_trail showed zero
+// activity, and no tooling depended on it (the screenshot scripts authenticate
+// as super_admin/dispatch1/lesline/kevin). The admin manual claimed it was used
+// for demos and said not to delete it; that claim had nothing behind it.
+//
+// If a demo account is ever wanted again, do NOT restore this shape. It needs a
+// real non-admin role, credentials outside the repo, and an explicit allow-list
+// of endpoints — never "any GET is fine", which is what made this exploitable.
 
 // ============================================================
 // PUBLIC: Job Application
@@ -5937,7 +5925,7 @@ function settlementGraceDays() {
 // LAST DAY the books stay open for `period`, inclusive, as 'YYYY-MM-DD'.
 // '2026-07' + 7 -> '2026-08-07', so the lock fires on the 8th.
 // Date.UTC(y, m, 0) is day zero of the NEXT month = the last day of this one;
-// noon UTC dodges the DST edges, same trick as mostRecentInvoiceFridayET().
+// noon UTC dodges the DST edges, same trick as mostRecentInvoiceFridayCT().
 function graceEndsAt(period, days) {
 	const [y, m] = String(period).split("-").map(Number);
 	if (!Number.isFinite(y) || !Number.isFinite(m)) return "";
@@ -6790,20 +6778,31 @@ const INVOICE_AUTOGEN_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.INV
 const INVOICE_AUTOGEN_MAX_ATTEMPTS = 3;              // retries for a week with unbilled drivers
 const INVOICE_AUTOGEN_RETRY_MS = 15 * 60 * 1000;     // min gap between attempts
 
-// Most recent Friday (YYYY-MM-DD, America/New_York) whose 4:00 PM ET has passed.
-// Identifies the billing week to run: on Friday >= 16:00 ET it's today; any
-// other time it's the previous Friday. DST-aware via Intl (always 4 PM in NY).
-function mostRecentInvoiceFridayET() {
+// Most recent Friday (YYYY-MM-DD, America/Chicago) whose 7:00 PM CT has passed.
+// Identifies the billing week to run: on Friday >= 19:00 CT it's today; any
+// other time it's the previous Friday. DST-aware via Intl (always 7 PM in Houston).
+//
+// WAS 4:00 PM America/New_York, i.e. 3:00 PM Houston — and that was wrong twice
+// over. The zone was the outlier (everything else in this app is Central), and
+// more importantly the batch CLOSED THE BILLING WEEK BEFORE DRIVERS WERE DONE:
+// isAfterDeadline lets a driver submit until 6:30 PM Central on Friday, so
+// anyone submitting between 3:00 and 6:30 PM had already missed the run and
+// billed into the following week.
+//
+// 19:00 is therefore not a cosmetic move to Central — it is deliberately AFTER
+// the 18:30 driver cutoff, with a half-hour of slack. If that cutoff ever moves,
+// this must move with it; they are a pair, not two independent settings.
+function mostRecentInvoiceFridayCT() {
 	const parts = {};
 	for (const p of new Intl.DateTimeFormat("en-US", {
-		timeZone: "America/New_York", weekday: "short",
+		timeZone: "America/Chicago", weekday: "short",
 		year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false,
 	}).formatToParts(new Date())) parts[p.type] = p.value;
 	const WD = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 	const wd = WD[parts.weekday];
 	const hour = parseInt(parts.hour, 10);
 	let daysAgo = (wd - 5 + 7) % 7;                 // 0 when today is Friday
-	if (daysAgo === 0 && hour < 16) daysAgo = 7;    // Friday before 4 PM -> last Friday
+	if (daysAgo === 0 && hour < 19) daysAgo = 7;    // Friday before 7 PM CT -> last Friday
 	// Date-only arithmetic on the ET calendar day (noon UTC dodges DST edges).
 	const d = new Date(`${parts.year}-${parts.month}-${parts.day}T12:00:00Z`);
 	d.setUTCDate(d.getUTCDate() - daysAgo);
@@ -7012,7 +7011,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 let invoiceAutogenRunning = false;
 async function maybeRunWeeklyInvoiceBatch() {
 	if (!INVOICE_AUTOGEN_ENABLED || invoiceAutogenRunning) return;
-	const weekEnd = mostRecentInvoiceFridayET();
+	const weekEnd = mostRecentInvoiceFridayCT();
 	const marker = db.prepare("SELECT attempts, failed, ran_at FROM invoice_autogen_runs WHERE week_end = ?").get(weekEnd);
 	let attemptNum = 1;
 	if (marker) {
@@ -7042,7 +7041,7 @@ if (INVOICE_AUTOGEN_ENABLED) {
 		if (!hasRuns) {
 			db.prepare(
 				"INSERT OR IGNORE INTO invoice_autogen_runs (week_end, ran_at, attempts, failed, summary) VALUES (?, ?, ?, 0, ?)",
-			).run(mostRecentInvoiceFridayET(), new Date().toISOString(), INVOICE_AUTOGEN_MAX_ATTEMPTS, "baseline (feature enabled — no retroactive run)");
+			).run(mostRecentInvoiceFridayCT(), new Date().toISOString(), INVOICE_AUTOGEN_MAX_ATTEMPTS, "baseline (feature enabled — no retroactive run)");
 			console.log("[invoice-autogen] baseline seeded; first run is the next Friday 4 PM ET");
 		}
 	} catch (e) { console.error("[invoice-autogen] baseline seed failed:", e.message); }
@@ -7052,7 +7051,7 @@ if (INVOICE_AUTOGEN_ENABLED) {
 	setInterval(() => { maybeRunWeeklyInvoiceBatch().catch(() => {}); }, 60 * 1000);
 	// Boot catch-up (delayed so the app finishes initializing first).
 	setTimeout(() => { maybeRunWeeklyInvoiceBatch().catch(() => {}); }, 90 * 1000);
-	console.log("[invoice-autogen] enabled — Fridays 4:00 PM America/New_York");
+	console.log("[invoice-autogen] enabled — Fridays 7:00 PM America/Chicago (after the 6:30 PM driver cutoff)");
 }
 
 // Validate + normalize the line-item/deduction rows of a manual invoice.
