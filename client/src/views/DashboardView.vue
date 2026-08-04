@@ -137,7 +137,15 @@ const driverOptions = computed(() => {
 
 const lastUpdated = computed(() => {
   if (!store.timestamp) return 'Loading...'
-  return 'Updated ' + new Date(store.timestamp).toLocaleTimeString()
+  // Houston, like every other time in this app. A bare toLocaleTimeString()
+  // renders in the viewer's zone AND omits the label, so on a shared login the
+  // same refresh read 8:05 AM to one person and 9:05 PM to the other, with
+  // nothing on screen to explain the gap.
+  return 'Updated ' + new Date(store.timestamp).toLocaleTimeString('en-US', {
+    timeZone: 'America/Chicago',
+    hour: 'numeric', minute: '2-digit', second: '2-digit',
+    hour12: true, timeZoneName: 'short',
+  })
 })
 
 function handleKpiClick(key) { const m = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }; activeTab.value = m[key] || activeTab.value }

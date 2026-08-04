@@ -127,6 +127,7 @@
 </template>
 
 <script setup>
+import { houstonToday } from '../../utils/datetime'
 import { ref, reactive, computed } from 'vue'
 import { Form as VanForm, Field as VanField, CellGroup as VanCellGroup, Button as VanButton, Uploader as VanUploader, Picker as VanPicker, Popup as VanPopup } from 'vant'
 import { useToast } from '../../composables/useToast'
@@ -152,7 +153,7 @@ const showLoadPicker = ref(false)
 const form = reactive({
   type: 'Fuel',
   amount: '',
-  date: new Date().toLocaleDateString('en-CA'),
+  date: houstonToday(),
   loadId: '',
   vendor: '',
   description: '',

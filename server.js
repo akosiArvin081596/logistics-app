@@ -5904,8 +5904,9 @@ const PERIOD_FINALIZE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PER
 // 23:00 Houston on the final grace day rather than midnight — a receipt logged at
 // 23:15 on day 7 missed the window the UI had promised. It also posted a receipt
 // logged 23:30 on the last day of a month into the NEXT month. Central is the zone
-// BUSINESS_DAY_TZ, getWeekRange, isAfterDeadline and houstonStamp already use; ET
-// was the outlier.
+// houstonDay, getWeekRange, isAfterDeadline and houstonStamp already use; ET was
+// the outlier. (This sentence used to name BUSINESS_DAY_TZ, a constant that has
+// since been deleted — sheetDayKey reads the sheet literally and needs no zone.)
 function todayKeyCT() {
 	const p = {};
 	for (const x of new Intl.DateTimeFormat("en-US", {
@@ -10521,12 +10522,23 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 
 		// Date boundaries
 		const now = new Date();
+		// NOTE: this week is MONDAY-based, which is NOT the Sat-Fri LogisX invoice
+		// week (see getWeekRange). Pre-existing and deliberately left alone here —
+		// "completed this week" is a dashboard glance, not a payroll figure.
 		const weekStart = new Date(now);
 		weekStart.setDate(
 			now.getDate() - now.getDay() + (now.getDay() === 0 ? -6 : 1),
 		);
 		weekStart.setHours(0, 0, 0, 0);
-		const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+		// Month boundary on the HOUSTON calendar, not the server's. This was
+		// new Date(now.getFullYear(), now.getMonth(), 1), and those getters are
+		// server-local — UTC on the VPS. So for the last 5-6 hours of every month
+		// (from 19:00 CDT / 18:00 CST on the final day) the dashboard had already
+		// rolled to the NEXT month and showed 0 completed, while /api/investor and
+		// /api/financials — which key off houstonDay() — were still counting the
+		// month the owner was actually still working. Same basis, same numbers.
+		const [hYear, hMonth] = houstonDay(now).slice(0, 7).split("-").map(Number);
+		const monthStart = new Date(hYear, hMonth - 1, 1);
 
 		const completedThisWeek = completedJobs.filter((r) => {
 			if (!delivDateCol) return false;
@@ -11932,24 +11944,7 @@ const exportLimiter = rateLimit({
 	standardHeaders: true,
 });
 
-// WHICH DAY A LOAD BELONGS TO — pinned to America/Chicago, on purpose.
-//
-// The sheet stores delivery timestamps as UTC wall-clock, but nobody reads them
-// that way: the Completed table renders them through the browser, so
-// "7/1/2026 4:16:50" shows on screen as Jun 30, 11:16 PM CDT. Bucketing the
-// export on the raw UTC day therefore hands the owner a file that disagrees
-// with the screen he ran it from — 8 of today's completed loads sit on that
-// seam. Bucketing on the VIEWER's zone instead would only move the problem:
-// the same export would then contain different loads depending on who clicked.
-//
-// So both halves of this feature pin to Central. LogisX is Houston-based, so
-// the business day IS the Central day, and it is already the zone the invoice
-// week boundaries use (see getWeekRange / usTzForLongitude's fallback). The
-// client filters on the same basis; keep them together.
-//
-// Reuses localDayInTz() (Intl + formatToParts, one cached formatter per zone)
-// rather than subtracting a fixed offset, so CST↔CDT is handled for free — a
-// hardcoded -5 or -6 would be wrong for half the year.
+// WHICH DAY A LOAD BELONGS TO — read LITERALLY off the cell, on purpose.
 //
 // Cells arrive in THREE shapes, all verified against prod:
 //   ISO      "2026-07-31" / "2026-07-15T13:28:33.000Z"  (n8n, reassign endpoint)
@@ -11958,24 +11953,47 @@ const exportLimiter = rateLimit({
 //            email header on rate-con-ingested loads — 103 of 258 completed
 //            rows carry Assigned Date in this form today)
 // The date is taken VERBATIM off the front of the cell — no timezone conversion,
-// whatever shape the cell is in.
+// whatever shape the cell is in. This helper does NOT convert and must not start
+// doing so: its job is to agree with the accounting, not to be independently
+// right. Bucketing on the VIEWER's zone would be worse still — the same export
+// would then contain different loads depending on who clicked it.
 //
-// That is deliberate, and it is the whole point of this helper. Every money path
-// (parseSheetDate x4, parseInvoiceDate, the invoice-week filter) reads this
-// column's date part literally. When this function converted and they did not,
-// the same load showed one day on the Completed Loads screen and counted on
-// another in the P&L. Load 558865809 was the live case: stored 7/1, displayed
-// Jun 30, revenue counted in JULY — so a June export listed a load whose money
-// was not in June. Making the accounting convert instead would have moved
-// revenue into a closed month, which the client's rule forbids ("if it is
-// already closed and locked by the month then follow that date").
+// This used to convert to America/Chicago via localDayInTz(). It no longer calls
+// that (or any zone lookup) — the export has to land on the day the P&L already
+// used. Load 558865809 was the live case: stored 7/1, displayed Jun 30, revenue
+// counted in JULY, so a June export listed a load whose money was not in June.
+// Making the accounting convert instead would have moved revenue into a closed
+// month, which the client's rule forbids ("if it is already closed and locked by
+// the month then follow that date"). The client filters on the same literal
+// basis; keep them together.
+//
+// WHAT THE MONEY PATHS ACTUALLY DO. This comment used to claim every one of them
+// "reads this column's date part literally". That is false, and the exceptions
+// matter before you trust a reconciliation. Verified under TZ=UTC, which is what
+// the VPS runs:
+//
+//   parseSheetDate (x4)  literal for ISO and US slash. But it returns null on
+//                        RFC 2822, and every call site is
+//                        `parseSheetDate(v) || new Date(v)` — that fallback
+//                        honors the offset and is then read back through
+//                        server-local getters, so "19 Jun 2025 20:16:37 -0500"
+//                        buckets as Jun 20.
+//   parseInvoiceDate     literal for US slash ONLY. It has no ISO branch, so
+//                        both ISO and RFC 2822 fall through to new Date() +
+//                        server-local getters. Same Jun 19 -> Jun 20 shift.
+//   invoice-week filter  not literal at all: new Date(raw).toISOString(), an
+//                        outright conversion to UTC. Same shift.
+//
+// The three agree with this helper only where the string carries no UTC offset.
+// RFC 2822 always carries one — and it is the most common shape on completed
+// rows — so that is where a literal day and a money day can still differ by
+// exactly one, on evening stamps. Not hypothetical; just old.
 //
 // Cost is limited to history: since 2026-08-03 the server stamps Houston time,
 // so the stored date IS the business day and literal == correct. Only
 // pre-cutover evening loads read a day off, and for those the recorded date is
 // the one that was settled on.
 // Returns "YYYY-MM-DD", or "" when nothing is parseable.
-const BUSINESS_DAY_TZ = "America/Chicago";
 const RFC2822_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 function sheetDayKey(val) {
 	// The "Date: " prefix is part of the copied email header (the dashboard's

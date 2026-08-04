@@ -128,12 +128,16 @@ function isMine(msg) {
   return (msg.from || '').toLowerCase() === myName.value
 }
 
+// Houston rule: pinned to America/Chicago with a visible zone label. Investors
+// are not necessarily in Houston, so the label is what keeps the timestamp
+// honest for an out-of-state reader. `msg.timestamp` is a true instant (ISO-Z).
 function fmtTime(ts) {
   if (!ts) return ''
   const d = new Date(ts)
   return isNaN(d) ? ts : d.toLocaleString('en-US', {
     month: 'short', day: 'numeric',
-    hour: 'numeric', minute: '2-digit'
+    hour: 'numeric', minute: '2-digit',
+    timeZone: 'America/Chicago', timeZoneName: 'short',
   })
 }
 

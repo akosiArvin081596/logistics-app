@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
-import { parseYmdLocal, parseSheetStamp } from '../utils/datetime'
+import { parseYmdLocal, sheetSortKey } from '../utils/datetime'
 
 const api = useApi()
 
@@ -249,16 +249,22 @@ export const useDriverStore = defineStore('driver', {
           if (sortDateCol) {
             // 'Status Update Date' / 'Completion Date' are bare wall-clock
             // stamps with TWO ERAS (UTC before the 2026-08-03 cutover, Houston
-            // after) — a plain new Date() reads both as local, so a legacy
-            // evening delivery lands on the wrong day and sorts out of order.
-            // parseSheetStamp resolves the era; null (blank/unparseable) →
-            // -Infinity keeps those rows last, as the old epoch-0 fallback did.
-            // Safe because the `ta !== tb` guard below never subtracts -Inf.
-            const da = parseSheetStamp((a[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').replace(/^Date:\s*/i, '').trim())
-            const db = parseSheetStamp((b[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').replace(/^Date:\s*/i, '').trim())
-            const ta = da ? da.getTime() : -Infinity
-            const tb = db ? db.getTime() : -Infinity
-            if (ta !== tb) return tb - ta
+            // after). sheetSortKey keys them the way they are DISPLAYED —
+            // verbatim — so this list stays in the order the driver reads off
+            // the rows, rather than an era-resolved instant nothing renders.
+            // (The .replace()s strip an appointment window's "-HH:MM" tail and
+            // a "Date:" prefix so the raw cell matches a stamp shape at all.)
+            const clean = (r) => (r[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').replace(/^Date:\s*/i, '').trim()
+            const ka = sheetSortKey(clean(a))
+            const kb = sheetSortKey(clean(b))
+            if (ka !== kb) {
+              // '' is blank/unparseable → last, as the old -Infinity did. Pinned
+              // explicitly rather than relying on '' being the smallest string.
+              if (!ka) return 1
+              if (!kb) return -1
+              return kb < ka ? -1 : 1
+            }
+            // Equal keys (incl. both blank) fall through to the row-index tiebreak.
           }
           // Fall back to row index (newer rows are at the bottom of the sheet)
           return (b._rowIndex || 0) - (a._rowIndex || 0)

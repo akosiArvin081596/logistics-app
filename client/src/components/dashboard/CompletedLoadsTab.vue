@@ -246,7 +246,7 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
-import { parseSheetStamp, fmtTimestamp } from '@/utils/datetime'
+import { fmtSheetMoment, sheetSortKey, fmtTimestamp } from '@/utils/datetime'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -376,8 +376,21 @@ const emptyMessage = computed(() => {
 const sortedJobs = computed(() => {
   const col = completionCol.value
   if (!col) return filteredJobs.value
-  const ts = (v) => { const d = parseSheetStamp(v); return d && !isNaN(d.getTime()) ? d.getTime() : -Infinity }
-  return [...filteredJobs.value].sort((a, b) => ts(b[col]) - ts(a[col]))
+  // Key on what the Delivery Date column DISPLAYS, not on a resolved instant.
+  // The two agree within one era but not across the 2026-08-03 stamp cutover,
+  // so sorting by the instant left the table ordered by something no one on
+  // screen could read. sheetSortKey is derived the same way fmtSheetMoment
+  // renders, so the order always matches the column.
+  return [...filteredJobs.value].sort((a, b) => {
+    const ka = sheetSortKey(a[col])
+    const kb = sheetSortKey(b[col])
+    // '' is blank OR unparseable. Pin those last explicitly rather than leaning
+    // on '' being the smallest string — that only holds while this sort stays
+    // descending, and it is one flipped comparator away from floating every
+    // dateless load to the top of the history.
+    if (!ka || !kb) return ka === kb ? 0 : (ka ? -1 : 1)
+    return kb < ka ? -1 : kb > ka ? 1 : 0
+  })
 })
 const reviewToggleStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
@@ -581,32 +594,21 @@ const displayCols = computed(() => {
   return out
 })
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
-// Delivery date/time, rendered from the stored wall clock WITHOUT conversion —
-// the same basis as centralDay() above, so the date in this column can never
-// disagree with the date the row filters, exports, and gets paid on.
+// Delivery date/time. The stored value is a bare wall clock, so fmtSheetMoment
+// prints it WITHOUT conversion — the same basis as centralDay() above, so the
+// date in this column can never disagree with the date the row filters,
+// exports, and gets paid on.
 //
 // It used to resolve the stamp to a true instant and re-render it in Central.
 // That was more "correct" in isolation and wrong in context: it silently
 // disagreed with the accounting for pre-cutover evening loads. One column that
 // matches the books beats two columns that argue.
 //
-// No zone label, because the stored value only carries one for loads written
-// after 2026-08-03 (Houston) — asserting "CDT" over a legacy UTC stamp would be
-// a confident lie. Post-cutover rows are genuinely Houston time, which is the
-// only era that will exist before long.
-function fmtDeliveryDate(v) {
-  const s = String(v || '').trim()
-  if (!s) return '—'
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?$/i)
-  if (!m) return s
-  const [, mo, day, yr, hh, mi, , ap] = m
-  if (hh == null) return `${+mo}/${+day}/${yr}`
-  let h = +hh
-  if (ap) { const up = ap.toUpperCase(); if (up === 'PM' && h < 12) h += 12; if (up === 'AM' && h === 12) h = 0 }
-  const suffix = h >= 12 ? 'PM' : 'AM'
-  const h12 = h % 12 === 0 ? 12 : h % 12
-  return `${+mo}/${+day}/${yr}, ${h12}:${mi} ${suffix}`
-}
+// A bare stamp gets no zone label either, because the stored value only carries
+// one for loads written after 2026-08-03 (Houston) — asserting "CDT" over a
+// legacy UTC stamp would be a confident lie. fmtSheetMoment labels only a value
+// that actually carries a zone, so that stays true without a special case here.
+const fmtDeliveryDate = (v) => fmtSheetMoment(v)
 // Document upload time. GET /api/documents/:loadId serves uploaded_at as ISO with
 // 'Z', so this is a true instant. Never swap in a raw SQLite stamp: those are UTC
 // with no zone marker and the browser reads them as local, landing hours early.
@@ -645,13 +647,25 @@ const podUrl = computed(() => {
   const pod = loadDocs.value.find(d => (d.type || '').toUpperCase() === 'POD')
   return pod && pod.drive_url ? pod.drive_url : null
 })
+// When the Gmail draft for this load's invoice was created. Houston rule:
+// America/Chicago with a visible zone label, never the viewer's zone — the
+// carrier runs on Houston time and the owner/developer share one login.
+//
+// Locale pinned to 'en-US' alongside the zone: with the default locale an
+// en-GB/fil-PH browser renders timeZoneName as "GMT-5" rather than "CDT", and
+// the label only does its job if it reads as Houston time at a glance.
+//
+// NOTE: scoped strictly to this draft timestamp. `centralDay` / `fmtDeliveryDate`
+// in this file handle sheet-sourced wall-clock dates, which are a different
+// problem — do not fold them into this pattern.
 function fmtDraftDate(ts) {
   if (!ts) return ''
   const d = new Date(ts) // created_at is ISO ...Z (see load_invoice_drafts)
   if (isNaN(d.getTime())) return String(ts)
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat('en-US', {
     month: 'numeric', day: 'numeric', year: 'numeric',
     hour: 'numeric', minute: '2-digit', hour12: true,
+    timeZone: 'America/Chicago', timeZoneName: 'short',
   }).format(d)
 }
 const approvedLineStyle = {

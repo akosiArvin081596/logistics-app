@@ -885,7 +885,7 @@ import ExpenseAnalyticsPanel from './expenses/ExpenseAnalyticsPanel.vue'
 import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import { US_STATES } from '../../utils/usStates'
 import { compressImage } from '../../lib/imageUtils'
-import { fmtYmd, fmtTimestamp, parseYmdLocal } from '../../utils/datetime'
+import { fmtTimestamp, fmtYmd, houstonToday, parseYmdLocal } from '../../utils/datetime'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -1235,7 +1235,7 @@ const canAddExpense = computed(() => auth.isSuperAdmin || auth.user?.role === 'D
 // Default date uses local getters, NOT toISOString(): the latter yields the UTC
 // day, so after 7pm Houston it would pre-fill tomorrow — and at month end that
 // books the receipt into the wrong period entirely. Mirrors ExpenseForm.vue.
-const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: new Date().toLocaleDateString('en-CA'), loadId: '', description: '', city: '', state: '', gallons: '', odometer: '' })
+const addForm = reactive({ driver: '', type: 'Fuel', amount: '', date: houstonToday(), loadId: '', description: '', city: '', state: '', gallons: '', odometer: '' })
 const addLoading = ref(false)
 const fileInputRef = ref(null)
 // photoBase64 holds the receipt as a data URI — image/jpeg from the canvas
@@ -1270,7 +1270,7 @@ const truckList = ref([])
 // Computed so a long-lived tab that crosses midnight still clamps correctly.
 // en-CA gives the LOCAL day; toISOString() gives the UTC one, which after 7pm
 // Houston would let the user pick tomorrow.
-const todayIso = computed(() => new Date().toLocaleDateString('en-CA'))
+const todayIso = computed(() => houstonToday())
 const downloadForm = reactive({ truck: '', from: '', to: '' })
 const downloadLoading = ref(false)
 const downloadError = ref('')
@@ -1771,7 +1771,7 @@ const maintForm = reactive({
   // Local day, NOT toISOString(): the UTC day is already tomorrow after 7pm
   // Houston, and this date is the month key the investor payout books against —
   // a Jul 31 evening PM service would otherwise land in August.
-  date: new Date().toLocaleDateString('en-CA'),
+  date: houstonToday(),
   description: '',
 })
 
@@ -1782,7 +1782,7 @@ const iftaStart = ref('2026-01-01')
 // Houston day, not the UTC day: after 7 PM Houston toISOString() is already
 // tomorrow, which defaulted this tax-report range end to a day that hasn't
 // happened yet.
-const iftaEnd = ref(new Date().toLocaleDateString('en-CA'))
+const iftaEnd = ref(houstonToday())
 const fees = ref({})
 const feeSubmitting = ref(false)
 const feeForm = reactive({
@@ -1803,10 +1803,21 @@ const iftaStatesTracked = computed(() => {
 
 const stateDetail = ref(null)
 
+// IFTA per-state day detail: first/last ELD ping of the day. The server sends
+// these as ISO-Z (new Date(location_date_ms).toISOString()) — true instants.
+// Houston rule: America/Chicago with a visible zone label.
+//
+// The locale is pinned to 'en-US' alongside the zone, deliberately: with the
+// default locale ([]) an en-GB/fil-PH browser renders timeZoneName as "GMT-5"
+// instead of "CDT". Still honest, but the point of the label is that it is
+// instantly readable as Houston time, so make it deterministic.
 function fmtHM(iso) {
   if (!iso) return '—'
   try {
-    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return new Date(iso).toLocaleTimeString('en-US', {
+      hour: '2-digit', minute: '2-digit',
+      timeZone: 'America/Chicago', timeZoneName: 'short',
+    })
   } catch {
     return '—'
   }
@@ -1914,7 +1925,7 @@ async function markFeePaid(id) {
     await api.put(`/api/compliance/fees/${id}`, {
       // Local day, NOT toISOString() — the UTC day rolls at 7pm Houston, and
       // paid_date is another payout month key.
-      paidDate: new Date().toLocaleDateString('en-CA'),
+      paidDate: houstonToday(),
     })
     toast('Fee marked as paid', 'success')
     await loadIfta()

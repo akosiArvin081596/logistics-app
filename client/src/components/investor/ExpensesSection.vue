@@ -118,7 +118,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
-import { fmtYmd } from '../../utils/datetime'
+import { fmtYmd, houstonToday } from '../../utils/datetime'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -135,7 +135,7 @@ const previewImg = ref(null)
 const expenseTypes = ['Fuel', 'Repair', 'Maintenance', 'Wear & Tear', 'Toll', 'Food', 'Other']
 // en-CA gives the LOCAL day; toISOString() gives the UTC one, which after 7pm
 // Houston would let this :max clamp accept tomorrow.
-const todayIso = computed(() => new Date().toLocaleDateString('en-CA'))
+const todayIso = computed(() => houstonToday())
 const filter = reactive({ truck: '', type: '', status: '', from: '', to: '' })
 
 const truckUnits = computed(() => {
