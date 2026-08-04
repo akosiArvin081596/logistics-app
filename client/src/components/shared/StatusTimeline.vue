@@ -13,7 +13,7 @@
       No status history recorded yet. The timeline begins tracking at this load’s next status update.
     </div>
     <ol v-else class="st-list">
-      <li v-for="(p, i) in phases" :key="i" class="st-item" :class="{ current: p.inProgress }">
+      <li v-for="(p, i) in rows" :key="i" class="st-item" :class="{ current: p.inProgress }">
         <span class="st-rail"><span class="st-dot" :style="{ background: colorsFor(p.status).fg }"></span></span>
         <div class="st-body">
           <div class="st-row1">
@@ -25,6 +25,13 @@
             <span>Started {{ fmt(p.startedAt) }}</span>
             <span v-if="p.endedAt"> · Ended {{ fmt(p.endedAt) }}</span>
           </div>
+          <!-- Secondary, viewer-zone echo. Houston above stays the value of
+               record; this is only an orientation aid and renders for nobody in
+               Houston (both notes are '' there, so the whole line disappears). -->
+          <div v-if="p.startedNote || p.endedNote" class="st-viewer-tz">
+            <span v-if="p.startedNote">Started {{ p.startedNote }}</span>
+            <span v-if="p.endedNote"> · Ended {{ p.endedNote }}</span>
+          </div>
           <div v-if="p.source && p.source !== 'manual'" class="st-src">via {{ sourceLabel(p.source) }}</div>
         </div>
       </li>
@@ -33,7 +40,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useApi } from '@/composables/useApi'
 
 const props = defineProps({
@@ -92,14 +99,62 @@ function pillStyle(status) {
   return { color: c.fg, background: c.bg }
 }
 
+// Houston time, always — never the viewer's.
+//
+// These values ARE true instants (the endpoint serves
+// strftime('%Y-%m-%dT%H:%M:%SZ', changed_at)), so CONVERTING is correct; what was
+// wrong is converting to the VIEWER. On the default zone a load stamped 8:05 AM
+// CDT rendered "Aug 4, 9:05 PM GMT+8" for the Manila dev while the row beside it
+// showed the Houston clock — same load, two clocks, permanently, on every new
+// load. Client's governing rule: "all time and date are Houston time."
+//
+// en-US is pinned as well as the zone: on a non-English locale the short label
+// degrades from "CDT" to "GMT-5" and the month/hour get localized, so the zone
+// stops being legible as Houston (verified: fil-PH, de-DE, ja-JP).
+//
+// year is now included — this rendered month/day only, so a Jun 30 <-> Jul 1
+// crossing showed with nothing on screen to explain which year it belonged to.
 function fmt(iso) {
   if (!iso) return ''
   try {
-    return new Intl.DateTimeFormat(undefined, {
-      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago',
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
     }).format(new Date(iso))
   } catch { return iso }
 }
+// Secondary line: the same instant in the VIEWER's own zone, shown only when the
+// viewer is not already in Houston.
+//
+// WHY it keys on the browser zone and not the role: the Houston owner and the
+// Manila developer share one super_admin login, so the account cannot tell them
+// apart — but they are not on the same machine, so the browser zone can.
+// Deshorn (America/Chicago) sees nothing new; Manila gets a PH-time echo.
+//
+// Safe HERE specifically because these values are true ISO-Z instants from
+// load_status_history, so a real equivalent in another zone exists. Do NOT copy
+// this onto a bare sheet wall clock — those carry no instant, and an "equivalent"
+// would be a guess about which zone the text was typed in.
+function viewerNote(iso) {
+  if (!iso) return ''
+  const dt = new Date(iso)
+  if (isNaN(dt.getTime())) return ''
+  let tz = ''
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { return '' }
+  if (!tz || tz === 'America/Chicago') return ''
+  const label = tz === 'Asia/Manila' ? 'PH Time' : 'Your time'
+  return `(${label}: ${new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(dt)})`
+}
+// Decorate each phase with its viewer-zone note once, rather than calling
+// viewerNote() four times per row straight from the template (v-if + both spans).
+const rows = computed(() => phases.value.map((p) => ({
+  ...p,
+  startedNote: viewerNote(p.startedAt),
+  endedNote: p.endedAt ? viewerNote(p.endedAt) : '',
+})))
 function humanizeDuration(ms) {
   if (ms == null || ms < 0) return ''
   const m = Math.floor(ms / 60000)
@@ -137,9 +192,13 @@ function sourceLabel(s) { return SOURCE_LABELS[s] || s }
 .st-dur { color: #6b7280; font-size: 0.75rem; font-weight: 600; }
 .st-live { color: #047857; background: #d1fae5; padding: 1px 8px; border-radius: 999px; font-size: 0.7rem; font-weight: 600; }
 .st-times { color: #6b7280; font-size: 0.78rem; margin-top: 2px; }
+/* Clearly subordinate to .st-times above — lighter and smaller, so Houston
+   reads as the value of record and this as the aside it is. */
+.st-viewer-tz { color: #9ca3af; font-size: 0.72rem; margin-top: 1px; }
 .st-src { color: #9ca3af; font-size: 0.72rem; margin-top: 1px; }
 .st-item.current .st-pill { box-shadow: 0 0 0 2px rgba(4, 120, 87, 0.15); }
 .compact { font-size: 0.8rem; }
 .compact .st-item { padding-bottom: 0.7rem; }
 .compact .st-times { font-size: 0.74rem; }
+.compact .st-viewer-tz { font-size: 0.7rem; }
 </style>
