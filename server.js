@@ -5737,13 +5737,22 @@ function isAfterDeadline(weekEndDate) {
 //
 // A DAY rather than an instant on purpose. The eras differ by only 5-6 hours, so
 // an instant comparison is ambiguous for stamps written near the boundary, while
-// the date part is a plain string compare. The cost is that stamps written on
-// the cutover day itself may be attributed to the wrong era — a one-day fuzz
-// affecting at most the rows written between deploy and midnight.
+// the date part is a plain string compare.
+//
+// It is set to the HOUSTON day of the deploy, not the UTC day. Houston is behind
+// UTC, so around the switch the eras overlap in BOTH directions: the old code was
+// still writing "08/04" stamps while the new code writes "08/03" ones. Dating the
+// cutover to the Houston day is what makes every NEW stamp classify correctly
+// from the first one onward.
+//
+// Residual exposure, measured against production before choosing this date: one
+// legacy cell (load 2216467, "08/03/2026 13:28:33"). Read as Houston rather than
+// UTC it keeps the SAME day, so only its displayed time shifts; no day bucket and
+// no money figure moves.
 //
 // Historical rows are deliberately NOT rewritten (client decision 2026-08-04:
 // no restatement of closed months), so this boundary is permanent.
-const SHEET_STAMP_TZ_CUTOVER = "2026-08-04";
+const SHEET_STAMP_TZ_CUTOVER = "2026-08-03";
 
 // "Now" as a Houston wall-clock stamp, in the EXACT legacy format:
 // MM/DD/YYYY H:MM:SS — zero-padded month/day/minute/second, UNPADDED hour.

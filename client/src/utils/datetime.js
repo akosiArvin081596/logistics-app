@@ -36,7 +36,7 @@ const HOUSTON = 'America/Chicago'
  * is a display-only fuzz limited to a single day, and it cannot affect any
  * money figure, because every SERVER-side consumer reads the date part alone.
  */
-export const SHEET_STAMP_TZ_CUTOVER = '2026-08-04'
+export const SHEET_STAMP_TZ_CUTOVER = '2026-08-03'
 
 /** Milliseconds `timeZone` is ahead of UTC at a given instant (DST-aware). */
 function tzOffsetMs(instantMs, timeZone) {
