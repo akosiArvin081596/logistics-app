@@ -22867,7 +22867,10 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 					}
 
 					if (jtDriverCol && jtLoadIdCol && jtAssignedCol) {
-						const todayIso = new Date().toISOString().slice(0, 10);
+						// Houston day, not the UTC day — after 7 PM Houston the UTC
+						// day is already tomorrow, so this compared candidate loads
+						// against a date that hadn't happened yet.
+						const todayIso = houstonDay();
 						const candidates = [];
 						for (const row of jtData) {
 							const drv = String(row[jtDriverCol] || "").toLowerCase().trim();
