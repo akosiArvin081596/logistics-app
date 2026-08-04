@@ -35,6 +35,7 @@ const expenseAi = require("./lib/expense-ai");
 const fuelModel = require("./lib/fuel-model");
 const poiFuelStops = require("./lib/poi-fuel-stops");
 const rateconNormalize = require("./lib/ratecon-normalize");
+const { csvRows } = require("./lib/csv");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -3322,10 +3323,28 @@ app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads"))
 // Read-only demo account lockdown. demo_viewer can GET anything (Super Admin role
 // so they see the full app), but any mutation returns 403 with a friendly message.
 // Logout is explicitly allowed so they can sign out.
+//
+// ⚠️ The method check is NOT a sufficient boundary on its own. demo_viewer holds
+// the role literally "Super Admin" and its password is published in
+// scripts/create-demo-user.js ("anyone who knows the URL gets it"), so every
+// Super-Admin-gated GET in this app is effectively public. Bulk financial GETs
+// therefore need to be named here explicitly. This list is seeded with the
+// completed-loads export only — a single request that would otherwise hand out
+// every load in company history with its Payment value.
+//
+// KNOWN GAP, needs an owner: GET /api/db/download (the entire SQLite file),
+// /api/db/query/:table, /api/financials, /api/investor/tax-csv, and
+// /api/expenses/receipts-download are all still reachable by this account. The
+// durable fix is to stop reusing the "Super Admin" role for the demo user
+// rather than to grow this list forever.
+const DEMO_BLOCKED_GETS = ["/loads/completed/export"];
 app.use("/api", (req, res, next) => {
 	if (!req.session.user) return next();
 	if (req.session.user.username !== "demo_viewer") return next();
 	const method = req.method.toUpperCase();
+	if (DEMO_BLOCKED_GETS.includes(req.path)) {
+		return res.status(403).json({ error: "Bulk data export is disabled on the demo account." });
+	}
 	if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
 	if (req.path === "/auth/logout") return next();
 	return res.status(403).json({ error: "This is a read-only demo account. Sign up at /invest to create your own investor account." });
@@ -11757,6 +11776,297 @@ app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 	}
 });
 
+// An export walks every Job Tracking row and resolves an address per row, so it
+// is real work on top of the (cached) sheet read — but it is user-initiated,
+// read-only, and trivially re-requested when a download fails. Same shape and
+// rationale as statementLimiter: generous enough for real use (an owner pulling
+// a handful of driver histories in one sitting), tight enough that a
+// refresh-hammer can't pin the box.
+const exportLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 20,
+	message: { error: "Too many exports. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// WHICH DAY A LOAD BELONGS TO — pinned to America/Chicago, on purpose.
+//
+// The sheet stores delivery timestamps as UTC wall-clock, but nobody reads them
+// that way: the Completed table renders them through the browser, so
+// "7/1/2026 4:16:50" shows on screen as Jun 30, 11:16 PM CDT. Bucketing the
+// export on the raw UTC day therefore hands the owner a file that disagrees
+// with the screen he ran it from — 8 of today's completed loads sit on that
+// seam. Bucketing on the VIEWER's zone instead would only move the problem:
+// the same export would then contain different loads depending on who clicked.
+//
+// So both halves of this feature pin to Central. LogisX is Houston-based, so
+// the business day IS the Central day, and it is already the zone the invoice
+// week boundaries use (see getWeekRange / usTzForLongitude's fallback). The
+// client filters on the same basis; keep them together.
+//
+// Reuses localDayInTz() (Intl + formatToParts, one cached formatter per zone)
+// rather than subtracting a fixed offset, so CST↔CDT is handled for free — a
+// hardcoded -5 or -6 would be wrong for half the year.
+//
+// Cells arrive in THREE shapes, all verified against prod:
+//   ISO      "2026-07-31" / "2026-07-15T13:28:33.000Z"  (n8n, reassign endpoint)
+//   US slash "7/15/2026 14:31:58" / "8/3/2026, 2:15:49 PM"  (Apps Script/manual)
+//   RFC 2822 "Date: Thu, 19 Jun 2025 08:16:37 -0500"    (n8n stamps the raw
+//            email header on rate-con-ingested loads — 103 of 258 completed
+//            rows carry Assigned Date in this form today)
+// A cell with a TIME is a real instant and gets converted. A DATE-ONLY cell has
+// no instant to convert and passes through as written — treating its midnight
+// as UTC would shove every bare date back a day, which is a bug, not a fix.
+// Returns "YYYY-MM-DD", or "" when nothing is parseable.
+const BUSINESS_DAY_TZ = "America/Chicago";
+const RFC2822_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+function sheetDayKey(val) {
+	// The "Date: " prefix is part of the copied email header (the dashboard's
+	// completed-sort strips the same thing before parsing).
+	const s = String(val ?? "").replace(/^Date:\s*/i, "").trim();
+	if (!s) return "";
+	const p2 = (n) => String(parseInt(n, 10)).padStart(2, "0");
+
+	// ISO first — the US M/D/Y branch below would misread "2026-05-13" as May 13 2020.
+	const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?)?/i);
+	if (iso) {
+		if (iso[4] == null) return `${iso[1]}-${p2(iso[2])}-${p2(iso[3])}`; // date-only
+		// An explicit Z/offset already pins the instant; let Date.parse read it.
+		// Without one, the value is UTC wall-clock (Date.parse would call it
+		// server-local), so build the instant with Date.UTC instead.
+		const ms = iso[7] ? Date.parse(s)
+			: Date.UTC(+iso[1], +iso[2] - 1, +iso[3], +iso[4], +iso[5], +(iso[6] || 0));
+		return isNaN(ms) ? "" : localDayInTz(ms, BUSINESS_DAY_TZ);
+	}
+
+	const us = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:,?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i);
+	if (us) {
+		let yr = parseInt(us[3], 10);
+		if (yr < 100) yr += 2000; // "5/16/25" -> 2025 (same rule as parseSheetDate)
+		if (us[4] == null) return `${yr}-${p2(us[1])}-${p2(us[2])}`; // date-only
+		let hh = parseInt(us[4], 10);
+		// Apps Script writes 12-hour with a meridiem ("2:15:49 PM"); the n8n path
+		// writes 24-hour. Reading "2:15:49 PM" as 02:15 would land it a day early.
+		const ap = (us[7] || "").toUpperCase();
+		if (ap === "PM" && hh < 12) hh += 12;
+		if (ap === "AM" && hh === 12) hh = 0;
+		const ms = Date.UTC(yr, +us[1] - 1, +us[2], hh, +us[5], +(us[6] || 0));
+		return isNaN(ms) ? "" : localDayInTz(ms, BUSINESS_DAY_TZ);
+	}
+
+	// RFC 2822 last: both checks above are ^-anchored and cheap, and this one is
+	// the only loose match here.
+	const rfc = s.match(/\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{4})\b/i);
+	if (rfc) {
+		const mon = RFC2822_MONTHS.indexOf(rfc[2].toLowerCase()) + 1;
+		if (mon > 0) {
+			// These carry their own offset ("-0500"), so they ARE an instant —
+			// re-bucket it into Central like everything else. Without an offset
+			// there is nothing to convert; take the day as written.
+			if (/[+-]\d{4}\b|[+-]\d{2}:\d{2}\b|\b(GMT|UTC)\b/i.test(s)) {
+				const ms = Date.parse(s);
+				if (!isNaN(ms)) return localDayInTz(ms, BUSINESS_DAY_TZ);
+			}
+			return `${rfc[3]}-${p2(mon)}-${p2(rfc[1])}`;
+		}
+	}
+	return "";
+}
+
+// GET /api/loads/completed/export?driver=&from=&to= — every completed load as a
+// CSV, optionally narrowed to one driver and/or a delivery-date window. Built
+// for "download everything <driver> did" from the Completed tab.
+//
+// Super Admin only, and that is not a copy/paste of the neighbouring routes: the
+// Payment column ships in this file. Dispatchers are stripped of broker and
+// financial columns on every other surface (sanitizeBrokerColumns, the Driver
+// column filter in GET /api/data), so handing them a whole-fleet money export
+// would be the one hole in that policy.
+//
+// All three params are optional; none of them means "every completed load".
+app.get("/api/loads/completed/export", requireRole("Super Admin"), exportLimiter, async (req, res) => {
+	try {
+		const driverQ = (req.query.driver || "").toString().trim();
+		const from = (req.query.from || "").toString().trim();
+		const to = (req.query.to || "").toString().trim();
+
+		// Same date contract as GET /api/expenses/receipts-download. A backwards
+		// range is a caller mistake, not an empty result — say so instead of
+		// returning a confusing "no loads found".
+		if ((from && !/^\d{4}-\d{2}-\d{2}$/.test(from)) || (to && !/^\d{4}-\d{2}-\d{2}$/.test(to))) {
+			return res.status(400).json({ error: "Dates must be YYYY-MM-DD" });
+		}
+		if (from && to && to < from) {
+			return res.status(400).json({ error: "'to' must be on or after 'from'" });
+		}
+
+		const jt = await getJobTrackingCached();
+		const headers = jt.headers || [];
+		// Cancelled + soft-deleted loads are absent from every KPI and admin list;
+		// an export that included them would hand the owner a document that
+		// disagrees with the screen he ran it from.
+		const rows = excludeDroppedLoads(jt.data || [], headers);
+
+		// Column resolution mirrors /api/dashboard's, regex for regex, so the file
+		// and the Completed tab can never disagree about which column holds what.
+		const statusCol = findCol(headers, /status/i);
+		const driverCol = findCol(headers, /driver/i);
+		const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+		const truckCol = findCol(headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
+		const assignedDateCol = findCol(headers, /assigned.*date/i);
+		// Delivery date. Two findCol calls, not one alternation, and that matters:
+		// findCol returns the first HEADER that matches, so a single
+		// `/completion|status.*update/` resolves by sheet column ORDER rather than
+		// by preference. That is not hypothetical — the dashboard's completed-sort
+		// regex has all four alternatives in one pattern, and because the live
+		// header order is [20] Assigned Date, [21] Status Update Date,
+		// [22] Completion Date, it silently resolves to "Assigned Date" and sorts
+		// the Completed tab by assignment instead of delivery (pre-existing, filed
+		// separately). Splitting the calls pins us to Completion Date, which is
+		// what "Delivery Date" means. In prod it and Status Update Date hold the
+		// same instant on 252 of 258 rows (the other 6 differ only in zero-padding),
+		// so the fallback is a genuine equivalent when Completion Date is absent.
+		const deliveredDateCol = findCol(headers, /completion|complete/i) || findCol(headers, /status.*update/i);
+		// The money header is literally "  Payment  " — real leading/trailing
+		// spaces. Reuses the invoice builder's resolver, which trims before
+		// matching and deliberately refuses a /rate|amount/ fallback. That refusal
+		// is the whole point: a `rate` keyword is why the on-screen Completed table
+		// silently has no money column today, and it would happily bill
+		// "Rate Per Mile" as the load's pay.
+		const paymentCol = brokerInvoice.findPaymentColumn(headers);
+		// Same address-column picker the dashboard uses, so we get the real
+		// address and not the "Pickup Company Information" broker-reference column.
+		const originAddrCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
+		const destAddrCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
+
+		// Byte-identical to /api/dashboard's completedJobs test. If these two ever
+		// diverge, the owner exports a different set of loads than the tab shows.
+		const completedStatuses = /^(delivered|completed|pod received)$/i;
+		// Whitespace-tolerant driver match — older sheet rows carry double-space
+		// drift, and the UI dropdown normalizes names the same way.
+		const wantDriver = driverQ ? normalizeDriverName(driverQ) : "";
+		const filtering = !!(from || to);
+
+		const matched = rows.filter((r) => {
+			if (loadIdCol && !(r[loadIdCol] || "").toString().trim()) return false;
+			if (!statusCol || !completedStatuses.test((r[statusCol] || "").toString().trim())) return false;
+			if (wantDriver && (!driverCol || normalizeDriverName(r[driverCol]) !== wantDriver)) return false;
+			if (filtering) {
+				const day = deliveredDateCol ? sheetDayKey(r[deliveredDateCol]) : "";
+				// DELIBERATE, and it is not a small effect: 160 of today's 258
+				// completed loads have a BLANK Completion Date (they predate
+				// status logging), so ANY date range drops ~62% of history. We
+				// exclude them rather than pad, because the alternatives are
+				// worse — falling back to Drop-off Appointment would silently mix
+				// the SCHEDULED date into a filter the owner reads as actual
+				// delivery, and including undated rows in every range would make
+				// two adjacent months double-count the same load. An unfiltered
+				// export (the primary ask, "every load this driver did") still
+				// returns all of them. The client applies the same rule.
+				if (!day) return false;
+				if (from && day < from) return false;
+				if (to && day > to) return false;
+			}
+			return true;
+		});
+
+		if (matched.length === 0) {
+			// Human-readable and specific about which filter came up empty — this
+			// lands in a toast, and "no results" alone sends the owner hunting.
+			const scope = [
+				driverQ ? `for ${driverQ}` : "",
+				from && to ? `between ${from} and ${to}` : from ? `on or after ${from}` : to ? `on or before ${to}` : "",
+			].filter(Boolean).join(" ");
+			return res.status(404).json({
+				error: `No completed loads found${scope ? " " + scope : ""}.`,
+			});
+		}
+
+		// Newest delivery first — the order the Completed tab already shows.
+		// Sorting the day-strings keeps this on the same TZ-free basis as the
+		// filter; undated rows sort to the bottom instead of to 1970.
+		matched.sort((a, b) => {
+			const da = deliveredDateCol ? sheetDayKey(a[deliveredDateCol]) : "";
+			const db2 = deliveredDateCol ? sheetDayKey(b[deliveredDateCol]) : "";
+			if (da === db2) return 0;
+			if (!da) return 1;
+			if (!db2) return -1;
+			return da < db2 ? 1 : -1;
+		});
+
+		// Collapse newlines/runs of spaces — a multi-line sheet address is legal
+		// inside a quoted CSV cell but makes the row look broken in Excel.
+		const oneLine = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
+		const cell = (r, col) => (col ? oneLine(r[col]) : "");
+		// Both date columns carry BOTH shapes in prod — "8/3/2026, 2:15:49 PM"
+		// (Apps Script) and "2026-07-31" (n8n) sit in the same column — so a
+		// straight passthrough gives the owner a column Excel cannot sort. Emit
+		// the normalized day, which is also the exact basis the from/to filter
+		// ran on, so the file can't appear to contradict the range that produced
+		// it. Unparseable cells pass through raw rather than silently blanking.
+		const dateCell = (r, col) => (col ? (sheetDayKey(r[col]) || oneLine(r[col])) : "");
+
+		const out = [[
+			"Load ID", "Job Status", "Driver", "Truck", "Pickup", "Drop-off",
+			"Assigned Date", "Delivery Date", "Payment",
+		]];
+		for (const r of matched) {
+			const lid = loadIdCol ? (r[loadIdCol] || "").toString().trim() : "";
+			// Prefer the enriched "City, ST ZIP" the dashboard computed — these ARE
+			// the shared cache's row objects, so the fields are already there
+			// whenever the dashboard ran inside the 60s TTL. Otherwise derive it
+			// the same way (geocoded address first, sheet column second), and only
+			// fall back to the raw cell when nothing parses.
+			const pickupRaw = originAddrCol ? r[originAddrCol] : "";
+			const dropRaw = destAddrCol ? r[destAddrCol] : "";
+			const pickup = r._pickupLocation
+				|| resolveAddressParts(r, "pickup", lid, pickupRaw).cityStateZip
+				|| oneLine(pickupRaw);
+			const drop = r._dropLocation
+				|| resolveAddressParts(r, "drop", lid, dropRaw).cityStateZip
+				|| oneLine(dropRaw);
+			out.push([
+				lid,
+				cell(r, statusCol),
+				cell(r, driverCol),
+				cell(r, truckCol),
+				pickup,
+				drop,
+				dateCell(r, assignedDateCol),
+				dateCell(r, deliveredDateCol),
+				// Raw sheet value ("$1,800.00"), not a reformat — the export should
+				// reconcile to the sheet the invoices are billed from.
+				cell(r, paymentCol),
+			]);
+		}
+
+		// completed-loads[-<driver>][-<from>-to-<to>].csv — one-sided ranges get a
+		// labelled segment so the filename still says what the file contains.
+		const safe = (s) => String(s).replace(/[^a-zA-Z0-9._-]/g, "_");
+		let name = "completed-loads";
+		if (driverQ) name += `-${safe(driverQ)}`;
+		if (from && to) name += `-${safe(from)}-to-${safe(to)}`;
+		else if (from) name += `-from-${safe(from)}`;
+		else if (to) name += `-to-${safe(to)}`;
+		const filename = `${name}.csv`;
+
+		res.setHeader("Content-Type", "text/csv");
+		res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+		// Matches the other file-serving routes (truck docs, shared driver files).
+		// no-store matters here specifically because the session cookie is
+		// sameSite:"none" in production, so this URL is reachable on a cross-site
+		// navigation — a whole-fleet revenue CSV should never sit in a shared or
+		// browser cache afterwards.
+		res.setHeader("X-Content-Type-Options", "nosniff");
+		res.setHeader("Cache-Control", "no-store");
+		res.send(csvRows(out));
+		console.log(`Completed-loads export: ${matched.length} rows${driverQ ? " driver=" + driverQ : ""}${from || to ? ` ${from || "…"}..${to || "…"}` : ""}`);
+	} catch (err) {
+		console.error("GET /api/loads/completed/export error:", err.message);
+		if (!res.headersSent) res.status(500).json({ error: "Failed to export completed loads" });
+	}
+});
+
 // --- Routemate ELD/telematics probe endpoints (Phase 1) ---
 // The sync intervals come in Phase 2+. For now these two endpoints validate
 // that the API key works and mirror the vehicle list into routemate_vehicles
@@ -14916,7 +15226,10 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), async (
 			["Disclaimer", "Consult a licensed tax professional before filing."],
 		];
 
-		const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+		// Shared escaper (lib/csv.js) — this file goes to an Investor and carries
+		// dollar figures, so it gets the same formula-injection guard as every
+		// other export rather than the quote-only escaping it used to do.
+		const csv = csvRows(rows);
 		const filename = `tax-shield-${user.username}-${new Date().toISOString().slice(0, 10)}.csv`;
 		res.setHeader("Content-Type", "text/csv");
 		res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -15106,18 +15419,23 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		}
 
 		if (format === "csv") {
-			const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
-			const lines = ["Period,Start,End,Load ID,Status,Pickup,Dropoff,Truck,Driver,Pickup Date,Drop Date,Rate,Completed,Your Share (net)"];
+			// Shared escaper (lib/csv.js). This one matters most of the four: the
+			// pickup/dropoff/driver/status cells originate in broker-supplied rate
+			// con PDFs parsed by n8n/Gemini — attacker-influenceable text — and the
+			// reader is an Investor, so a `=HYPERLINK(...)` smuggled through a
+			// shipper name would fire in their spreadsheet. Quote-only escaping
+			// (what this used to do) does not stop that.
+			const lines = [["Period", "Start", "End", "Load ID", "Status", "Pickup", "Dropoff", "Truck", "Driver", "Pickup Date", "Drop Date", "Rate", "Completed", "Your Share (net)"]];
 			for (const p of periods) {
 				const shares = allocateNet(p.loads, periodNet(p));
 				for (const l of p.loads) {
 					const ns = Object.prototype.hasOwnProperty.call(shares, l.loadId) ? shares[l.loadId] : null;
-					lines.push([p.label, p.start, p.end, l.loadId, l.status, l.pickup, l.dropoff, l.truck, l.driver, l.pickupDate, l.dropDate, l.rate, l.completed ? "Yes" : "No", ns == null ? "" : ns].map(esc).join(","));
+					lines.push([p.label, p.start, p.end, l.loadId, l.status, l.pickup, l.dropoff, l.truck, l.driver, l.pickupDate, l.dropDate, l.rate, l.completed ? "Yes" : "No", ns == null ? "" : ns]);
 				}
 			}
 			res.setHeader("Content-Type", "text/csv");
 			res.setHeader("Content-Disposition", `attachment; filename="load-report-${period}.csv"`);
-			return res.send(lines.join("\r\n"));
+			return res.send(csvRows(lines));
 		}
 
 		// format === "pdf"
@@ -21510,8 +21828,10 @@ app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res
 		});
 		archive.pipe(res);
 
-		// Manifest CSV — reviewer can open in Excel to reconcile the bundle
-		const csvRows = ["date,expense_id,driver,load_id,type,amount,description,file_name"];
+		// Manifest CSV — reviewer can open in Excel to reconcile the bundle.
+		// Escaping (quoting + the formula-injection guard) lives in lib/csv.js so
+		// this export and the completed-loads export can never drift apart.
+		const manifestRows = [["date", "expense_id", "driver", "load_id", "type", "amount", "description", "file_name"]];
 		const receiptsDir = path.join(__dirname, "uploads", "expense-receipts");
 		let attachedCount = 0;
 		for (const exp of expenses) {
@@ -21531,21 +21851,13 @@ app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res
 				}
 			}
 			// CSV row: always include, so rows without a receipt file are still accounted for.
-			// Prepend a single quote to any cell starting with =+-@\t to neutralize
-			// Excel/Calc formula-injection (OWASP CSV injection).
-			const csvCell = (v) => {
-				let s = String(v ?? "");
-				if (/^[=+\-@\t]/.test(s)) s = "'" + s;
-				return `"${s.replace(/"/g, '""')}"`;
-			};
-			csvRows.push([
+			manifestRows.push([
 				exp.date, exp.id, exp.driver, exp.load_id, exp.type,
 				Number(exp.amount || 0).toFixed(2),
 				exp.description, fileName || "(no file)"
-			].map(csvCell).join(","));
+			]);
 		}
-		// RFC 4180 uses CRLF between rows so Excel on Windows parses it correctly.
-		archive.append(csvRows.join("\r\n"), { name: "manifest.csv" });
+		archive.append(csvRows(manifestRows), { name: "manifest.csv" });
 		archive.finalize();
 		console.log(`Receipt zip: ${truck} ${from}..${to} — ${expenses.length} rows, ${attachedCount} files`);
 	} catch (err) {
