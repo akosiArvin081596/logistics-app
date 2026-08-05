@@ -575,9 +575,14 @@ db.exec(`
 	)
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_lsh_load ON load_status_history(load_id, changed_at)`); } catch {}
+// Why a transition happened. Only cancellations require one today (see
+// POST /api/dispatch/cancel); every other source leaves it ''. Added after a
+// live load was cancelled by mistake and the log could say who and when but
+// never why. Additive, so existing rows keep their blank reason.
+try { db.exec("ALTER TABLE load_status_history ADD COLUMN reason TEXT DEFAULT ''"); } catch { /* column already exists */ }
 
 const insertStatusHistory = db.prepare(
-	`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor) VALUES (?, ?, ?, ?, ?)`
+	`INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, reason) VALUES (?, ?, ?, ?, ?, ?)`
 );
 
 // Record one load status transition for the phase timeline. Best-effort: never
@@ -585,14 +590,14 @@ const insertStatusHistory = db.prepare(
 // and skips no-op transitions (old === new, case-insensitive) so a re-saved
 // identical status or a geofence re-fire doesn't create duplicate rows. load_id
 // is normalized (lowercase, leading '#' stripped) to match the lookup convention.
-function recordStatusChange({ loadId, oldStatus, newStatus, source, actor }) {
+function recordStatusChange({ loadId, oldStatus, newStatus, source, actor, reason }) {
 	try {
 		const lid = String(loadId || "").trim().toLowerCase().replace(/^#/, "");
 		const ns = String(newStatus || "").trim();
 		if (!lid || !ns) return;
 		const os = String(oldStatus || "").trim();
 		if (os && os.toLowerCase() === ns.toLowerCase()) return; // no-op transition
-		insertStatusHistory.run(lid, os, ns, source || "manual", String(actor || "").trim());
+		insertStatusHistory.run(lid, os, ns, source || "manual", String(actor || "").trim(), String(reason || "").trim().slice(0, 500));
 	} catch (err) {
 		console.error("recordStatusChange error:", err.message);
 	}
@@ -4968,9 +4973,10 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			}
 		} catch { /* table may not exist on legacy installs */ }
 
-		// Per-phase timeline mirrored from the admin modal, with the `actor`
-		// field stripped so no driver/admin name leaks through the public payload.
-		const phases = computeStatusPhases(target).map(({ actor, ...p }) => p);
+		// Per-phase timeline mirrored from the admin modal, with `actor` and
+		// `reason` stripped so neither a driver/admin name nor dispatch's
+		// internal cancellation note leaks through the public payload.
+		const phases = computeStatusPhases(target).map(({ actor, reason, ...p }) => p);
 
 		const payload = {
 			loadId: (load[loadIdCol] || "").toString().trim(),
@@ -10137,6 +10143,20 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 			return res.status(400).json({ error: "rowIndex required" });
 		}
 
+		// A reason is MANDATORY. Cancelling drops the load from every KPI, wipes
+		// the driver assignment and pushes "cancelled" to their phone — and on
+		// 2026-08-05 a live $1,050 load was cancelled by mistake because the
+		// confirm said only "Cancel this assignment?" with no load ID. The log
+		// could then say who and when but never why. Same guard the payout
+		// reopen uses: no reason, no state change.
+		const cancelReason = String(req.body.reason || "").trim();
+		if (cancelReason.length < 3) {
+			return res.status(400).json({
+				error: "A reason is required to cancel a load.",
+				code: "CANCEL_REASON_REQUIRED",
+			});
+		}
+
 		const sheets = await getSheets();
 		const headerResp = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
@@ -10164,15 +10184,16 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 				requestBody: { values: [["Cancelled"]] },
 			});
 		}
-		recordStatusChange({ loadId, newStatus: 'Cancelled', source: 'cancel', actor: req.session?.user?.username || '' });
+		recordStatusChange({ loadId, newStatus: 'Cancelled', source: 'cancel', actor: req.session?.user?.username || '', reason: cancelReason });
+		logAudit(req, 'cancel_load', 'load', loadId, `Cancelled load ${loadId || 'N/A'}${driver ? ` (driver: ${driver})` : ''} — reason: ${cancelReason}`);
 
 		// Notify driver
 		if (driver) {
 			const cancelNotif = insertNotification.run(
 				driver.trim().toLowerCase(), 'load-assigned',
 				`Load Cancelled: ${loadId || 'Load'}`,
-				'Your assignment has been cancelled by dispatch',
-				JSON.stringify({ loadId, rowIndex })
+				`Cancelled by dispatch — ${cancelReason}`,
+				JSON.stringify({ loadId, rowIndex, reason: cancelReason })
 			);
 			io.to(driver.trim().toLowerCase()).emit("load-cancelled", {
 				loadId,
@@ -10185,13 +10206,13 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 		insertDispatchNotification.run(
 			'load-cancelled',
 			`Cancelled Load ${loadId || 'N/A'}`,
-			`Was assigned to ${driver || 'unknown'}`,
-			JSON.stringify({ loadId, driver, rowIndex })
+			`Was assigned to ${driver || 'unknown'} — ${cancelReason}`,
+			JSON.stringify({ loadId, driver, rowIndex, reason: cancelReason })
 		);
 		io.to("dispatch").emit("dispatch-notification", {
 			type: 'load-cancelled',
 			title: `Cancelled Load ${loadId || 'N/A'}`,
-			body: `Was assigned to ${driver || 'unknown'}`,
+			body: `Was assigned to ${driver || 'unknown'} — ${cancelReason}`,
 		});
 		notifyChange("dashboard"); jtCacheInvalidate();
 		res.json({ success: true });
@@ -11938,15 +11959,16 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 // computeStatusPhases(loadId) — derive the per-phase timeline for one load from
 // the load_status_history table. Each transition opens a phase whose end is the
 // next transition's start; the last phase is in-progress unless its status is
-// terminal. Returns Array<{ status, source, actor, startedAt, endedAt,
+// terminal. Returns Array<{ status, source, actor, reason, startedAt, endedAt,
 // durationMs, inProgress, terminal }>. Shared by the auth-protected
-// /api/loads/:loadId/status-history route (which returns phases WITH actor) and
-// the public tracker (which strips actor — no driver names). Forward-only: loads
-// that predate this feature yield an empty array.
+// /api/loads/:loadId/status-history route (which returns phases WITH actor and
+// reason) and the public tracker (which strips BOTH — no driver names, and no
+// internal cancellation note). Forward-only: loads that predate this feature
+// yield an empty array.
 function computeStatusPhases(loadId) {
 	const lid = (loadId || "").toString().trim().toLowerCase().replace(/^#/, "");
 	const rows = db.prepare(
-		`SELECT new_status AS newStatus, source, actor,
+		`SELECT new_status AS newStatus, source, actor, reason,
 		        strftime('%Y-%m-%dT%H:%M:%SZ', changed_at) AS at
 		 FROM load_status_history
 		 WHERE load_id = ?
@@ -11966,6 +11988,10 @@ function computeStatusPhases(loadId) {
 			status: r.newStatus,
 			source: r.source,
 			actor: r.actor,
+			// Internal — why a load was cancelled. Stripped for the public
+			// tracker alongside actor (see the /api/public/track whitelist);
+			// a customer must never read dispatch's internal note.
+			reason: r.reason || "",
 			startedAt,
 			endedAt,
 			durationMs,

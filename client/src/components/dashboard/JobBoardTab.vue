@@ -197,6 +197,32 @@
       @cancel="pendingAssignment = null"
     />
 
+    <!-- Cancel confirm — names the load and requires a reason, which is stored
+         on the status-history row. -->
+    <ConfirmModal
+      :open="!!pendingCancel"
+      title="Cancel this load?"
+      :message="cancelMessage"
+      confirm-text="Cancel Load"
+      cancel-text="Keep Load"
+      :danger="true"
+      :confirm-disabled="cancelReason.trim().length < 3"
+      @confirm="runCancel"
+      @cancel="pendingCancel = null"
+    >
+      <label class="cancel-reason-label">
+        Reason <span class="cancel-reason-req">(required)</span>
+        <input
+          v-model="cancelReason"
+          type="text"
+          maxlength="200"
+          class="cancel-reason-input"
+          placeholder="e.g. broker called it off"
+          @keyup.enter="runCancel"
+        />
+      </label>
+    </ConfirmModal>
+
     <RateConReviewModal
       v-model:open="rateConOpen"
       :fields="rateConFields"
@@ -428,9 +454,26 @@ const deleting = ref(false)
 const linkCopied = ref(false)
 let linkCopiedTimer = null
 
-function confirmCancel(j) {
-  if (!confirm(`Cancel load ${cellValue(j, loadIdCol.value) || 'this load'}? It will be removed from every list and KPI.`)) return
-  emit('cancel', { rowIndex: j._rowIndex, job: j })
+// Mirrors ActiveLoadsTab's cancel confirm: state exactly which load is being
+// cancelled and require a reason (the server rejects a blank one). A native
+// confirm() here named the load but still could not capture a why.
+const pendingCancel = ref(null)
+const cancelReason = ref('')
+const cancelMessage = computed(() => {
+  const j = pendingCancel.value
+  if (!j) return ''
+  const id = cellValue(j, loadIdCol.value) || 'this load'
+  const route = [j._pickupLocation, j._dropLocation].filter(Boolean).join(' → ')
+  return `Load ${id}.` + (route ? `\n${route}` : '')
+    + `\n\nThis removes it from every list and KPI. Check the load number above before continuing.`
+})
+function confirmCancel(j) { pendingCancel.value = j; cancelReason.value = '' }
+function runCancel() {
+  const j = pendingCancel.value
+  if (!j || cancelReason.value.trim().length < 3) return
+  emit('cancel', { rowIndex: j._rowIndex, job: j, reason: cancelReason.value.trim() })
+  pendingCancel.value = null
+  cancelReason.value = ''
 }
 
 async function copyTrackingLink() {
@@ -593,4 +636,14 @@ const deleteBtnStyle = computed(() => ({
 .addr-cell, .addr-stack { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }
 .addr-csz { font-size: 0.92em; color: #64748b; }
+
+/* Cancel-confirm reason field (mirrors ActiveLoadsTab). */
+.cancel-reason-label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--text); }
+.cancel-reason-req { font-weight: 400; color: var(--text-dim); }
+.cancel-reason-input {
+  display: block; width: 100%; margin-top: 0.35rem; padding: 0.5rem 0.6rem;
+  font-size: 0.85rem; border: 1px solid var(--border, #e2e8f0); border-radius: 8px;
+  background: var(--bg, #fff); color: inherit;
+}
+.cancel-reason-input:focus { outline: none; border-color: #94a3b8; }
 </style>
