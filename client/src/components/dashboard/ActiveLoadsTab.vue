@@ -213,6 +213,10 @@
           <div style="margin-bottom:1rem;">
             <div class="dash-section-title">Documents</div>
             <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
+              <!-- Persistent, not a toast: the refusal that actually lands here is
+                   the server's 409 guard explaining the load would stop being
+                   invoiceable, and that needs to stay on screen to be read. -->
+              <div v-if="docError" role="alert" :style="docErrorStyle">{{ docError }}</div>
               <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
               <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
               <!-- Filename over a muted upload time — same row shape the driver's
@@ -229,7 +233,24 @@
                       <span style="font-size:0.7rem;color:#94a3b8;">Uploaded {{ fmtUploaded(doc.uploaded_at) }}</span>
                     </div>
                   </div>
-                  <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;flex-shrink:0;">View</a>
+                  <div style="display:flex;align-items:center;gap:0.5rem;flex-shrink:0;">
+                    <a v-if="doc.drive_url" :href="doc.drive_url" target="_blank" style="font-size:0.75rem;color:#38bdf8;">View</a>
+                    <!-- Super Admin only, matching Completed loads and the server's
+                         own DELETE /api/documents/:id role gate. A dispatcher can
+                         still attach a POD; removing one is deliberately narrower. -->
+                    <button
+                      v-if="canManageDocs"
+                      type="button"
+                      class="doc-del"
+                      :disabled="deletingDocId === doc.id"
+                      :aria-label="`Delete ${doc.file_name || doc.type || 'document'}`"
+                      :title="`Delete ${doc.file_name || doc.type || 'document'}`"
+                      @click="confirmDeleteDoc(doc)"
+                    >
+                      <span v-if="deletingDocId === doc.id" class="doc-del-spin"></span>
+                      <template v-else>&times;</template>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -722,6 +743,7 @@ watch([() => props.focusLoadId, () => props.jobs], ([focus, jobs]) => {
   }
 }, { immediate: true })
 async function openDetail(job) {
+  docError.value = ''; deletingDocId.value = null
   selectedJob.value = { ...job }; selectedDriverPosition.value = null; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (job[dc] || '').trim() : ''
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
@@ -806,6 +828,62 @@ const selectedJobDriverName = computed(() => { if (!selectedJob.value) return ''
 // for a raw SQLite stamp: those are UTC with no zone marker, so the browser reads
 // them as local and a POD uploaded at 2am shows on the previous day in Houston.
 const fmtUploaded = (t) => fmtTimestamp(t)
+
+// POD management on an ACTIVE load. Deshorn asked for this on 2026-08-05 after
+// finding two PODs on one in-progress load and no way to remove either; it had
+// been scoped to Completed loads only, on the earlier read that completed was
+// what he meant.
+//
+// Super Admin only, matching Completed loads and the server's own role gate on
+// DELETE /api/documents/:id. Upload stays open to dispatchers — attaching a POD a
+// driver emailed in is routine, removing one is not.
+const canManageDocs = computed(() => auth.isSuperAdmin)
+const deletingDocId = ref(null)
+const docError = ref('')
+const docErrorKind = ref('error')
+const docErrorStyle = computed(() => ({
+  margin: '0 0 0.5rem',
+  padding: '0.5rem 0.65rem',
+  borderRadius: '6px',
+  fontSize: '0.78rem',
+  lineHeight: '1.35',
+  background: docErrorKind.value === 'blocked' ? '#fffbeb' : '#fef2f2',
+  color: docErrorKind.value === 'blocked' ? '#92400e' : '#991b1b',
+  border: '1px solid ' + (docErrorKind.value === 'blocked' ? '#fde68a' : '#fecaca'),
+}))
+
+// The confirm names the FILE. These are near-identical machine names
+// (2218094_POD_1785896106322.pdf), so a bare "are you sure?" does not tell you
+// which of two PODs is about to go — which is exactly the situation Deshorn is in.
+async function confirmDeleteDoc(doc) {
+  if (!doc || !doc.id || deletingDocId.value) return
+  const label = doc.file_name || `this ${doc.type || 'document'}`
+  const kind = (doc.type || 'document').toUpperCase() === 'POD' ? 'POD' : (doc.type || 'document')
+  const ok = window.confirm(
+    `Delete ${label}?\n\n` +
+    `It will be removed from load ${loadIdValue.value || 'this load'}. ` +
+    `If this is the ${kind} backing the invoice, someone has to re-upload it before the load can be billed.`
+  )
+  if (!ok) return
+  deletingDocId.value = doc.id
+  docError.value = ''
+  try {
+    await api.del(`/api/documents/${encodeURIComponent(doc.id)}`)
+    await refreshDocs()
+    toast(`${doc.type || 'Document'} deleted`)
+  } catch (err) {
+    // The server owns the "would this load stop being invoiceable?" rule and
+    // returns 409 with a human explanation. Surface its words verbatim —
+    // flattening that to "Delete failed" throws away the only useful part.
+    const serverSaid = err && err.data && err.data.error
+    docErrorKind.value = err && err.status === 409 ? 'blocked' : 'error'
+    docError.value = serverSaid
+      ? String(err.data.error)
+      : `Couldn't delete ${label} — ${(err && err.message) || 'please try again.'}`
+  } finally {
+    deletingDocId.value = null
+  }
+}
 
 async function refreshDocs() {
   if (!loadIdValue.value) return
@@ -901,4 +979,22 @@ const detailSections = computed(() => {
 .addr-cell, .addr-stack { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }
 .addr-csz { font-size: 0.92em; color: #64748b; }
+
+/* POD delete — same control as Completed loads, so the two tabs behave alike. */
+.doc-del {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0;
+  border: 0; border-radius: 4px; background: transparent;
+  color: #94a3b8; font-size: 1.05rem; line-height: 1; cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+.doc-del:hover:not(:disabled) { color: #dc2626; background: #fef2f2; }
+.doc-del:focus-visible { outline: 2px solid #dc2626; outline-offset: 1px; }
+.doc-del:disabled { cursor: progress; color: #94a3b8; }
+.doc-del-spin {
+  width: 11px; height: 11px;
+  border: 2px solid #cbd5e1; border-top-color: #64748b; border-radius: 50%;
+  animation: doc-del-spin 0.7s linear infinite;
+}
+@keyframes doc-del-spin { to { transform: rotate(360deg); } }
 </style>
