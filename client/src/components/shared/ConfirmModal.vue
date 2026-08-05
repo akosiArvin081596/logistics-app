@@ -10,9 +10,16 @@
       <div class="confirm-dialog">
         <h3>{{ title }}</h3>
         <p>{{ message }}</p>
+        <!-- Optional extra content (e.g. a required reason field). Callers that
+             pass no slot render exactly as before. -->
+        <div v-if="$slots.default" class="confirm-body"><slot /></div>
         <div class="confirm-actions">
-          <button class="btn btn-secondary" @click="$emit('cancel')">Cancel</button>
-          <button :class="['btn', danger ? 'btn-danger' : 'btn-primary']" @click="$emit('confirm')">
+          <button class="btn btn-secondary" @click="$emit('cancel')">{{ cancelText }}</button>
+          <button
+            :class="['btn', danger ? 'btn-danger' : 'btn-primary']"
+            :disabled="confirmDisabled"
+            @click="$emit('confirm')"
+          >
             {{ confirmText }}
           </button>
         </div>
@@ -27,7 +34,11 @@ defineProps({
   title: { type: String, default: 'Confirm' },
   message: { type: String, default: 'Are you sure?' },
   confirmText: { type: String, default: 'Confirm' },
+  cancelText: { type: String, default: 'Cancel' },
   danger: { type: Boolean, default: false },
+  // Lets a caller gate the confirm button on its own validity (e.g. a required
+  // reason). Defaults false so existing callers are unaffected.
+  confirmDisabled: { type: Boolean, default: false },
 })
 
 defineEmits(['confirm', 'cancel'])
@@ -65,10 +76,20 @@ defineEmits(['confirm', 'cancel'])
   font-size: 0.85rem;
   color: var(--text-dim);
   margin-bottom: 1.25rem;
+  /* Callers compose multi-line summaries (load id / route / payment) so the
+     operator can see exactly what they are acting on. */
+  white-space: pre-line;
+}
+.confirm-body {
+  margin-bottom: 1.25rem;
 }
 .confirm-actions {
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
+}
+.confirm-actions .btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

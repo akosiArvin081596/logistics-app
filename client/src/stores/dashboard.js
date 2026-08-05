@@ -65,12 +65,15 @@ export const useDashboardStore = defineStore('dashboard', {
       await api.post('/api/dispatch/reassign', { rowIndex, newDriver, loadId, oldDriver })
     },
 
-    async cancelLoad(rowIndex, job, headers) {
+    // `reason` is required by the server (400 CANCEL_REASON_REQUIRED without
+    // one) and is stored on the status-history row, so a cancellation can
+    // always answer "why", not just who and when.
+    async cancelLoad(rowIndex, job, headers, reason) {
       const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
       const driverCol = headers.find((h) => /driver/i.test(h))
       const loadId = loadIdCol ? job[loadIdCol] || '' : ''
       const driver = driverCol ? job[driverCol] || '' : ''
-      await api.post('/api/dispatch/cancel', { rowIndex, loadId, driver })
+      await api.post('/api/dispatch/cancel', { rowIndex, loadId, driver, reason })
     },
 
     async deleteLoad(loadId) {

@@ -405,6 +405,32 @@
       @confirm="confirmQueueReassign"
       @cancel="pendingReassign = null"
     />
+
+    <!-- Cancel confirm — names the load, driver, route and payment so the wrong
+         row is obvious, and requires a reason (stored in the status history). -->
+    <ConfirmModal
+      :open="!!pendingCancel"
+      title="Cancel this load?"
+      :message="cancelMessage"
+      confirm-text="Cancel Load"
+      cancel-text="Keep Load"
+      :danger="true"
+      :confirm-disabled="cancelReason.trim().length < 3"
+      @confirm="runCancel"
+      @cancel="pendingCancel = null"
+    >
+      <label class="cancel-reason-label">
+        Reason <span class="cancel-reason-req">(required)</span>
+        <input
+          v-model="cancelReason"
+          type="text"
+          maxlength="200"
+          class="cancel-reason-input"
+          placeholder="e.g. broker called it off"
+          @keyup.enter="runCancel"
+        />
+      </label>
+    </ConfirmModal>
   </div>
 </template>
 
@@ -616,7 +642,36 @@ function confirmQueueReassign() {
   reassignSelections[job._rowIndex] = ''
   pendingReassign.value = null
 }
-function confirmCancel(j) { if (confirm('Cancel this assignment?')) emit('cancel', { rowIndex: j._rowIndex, job: j }) }
+// Cancelling drops the load from every KPI, wipes the driver assignment and
+// pushes "cancelled" to their phone. This used to be a bare
+// confirm('Cancel this assignment?') that named no load at all — so the prompt
+// for the right row and the wrong row were identical, and on 2026-08-05 a live
+// $1,050 load was cancelled instead of the one the broker had called off.
+// The dialog now states exactly what is being cancelled and requires a reason,
+// which is stored on the status-history row (server rejects a blank one).
+const pendingCancel = ref(null)
+const cancelReason = ref('')
+const payCol = computed(() => props.headers.find(h => /^\s*payment\s*$/i.test(h)) || '')
+const cancelMessage = computed(() => {
+  const j = pendingCancel.value
+  if (!j) return ''
+  const id = (loadIdCol.value ? j[loadIdCol.value] : '') || 'this load'
+  const drv = getCurrentDriver(j)
+  const route = [j._pickupLocation, j._dropLocation].filter(Boolean).join(' → ')
+  const pay = payCol.value ? (j[payCol.value] || '').toString().trim() : ''
+  return `Load ${id}${drv ? ` — assigned to ${drv}` : ''}.`
+    + (route ? `\n${route}` : '')
+    + (pay ? `\nPayment: ${pay}` : '')
+    + `\n\nThis removes it from every list and KPI and notifies the driver. Check the load number above before continuing.`
+})
+function confirmCancel(j) { pendingCancel.value = j; cancelReason.value = '' }
+function runCancel() {
+  const j = pendingCancel.value
+  if (!j || cancelReason.value.trim().length < 3) return
+  emit('cancel', { rowIndex: j._rowIndex, job: j, reason: cancelReason.value.trim() })
+  pendingCancel.value = null
+  cancelReason.value = ''
+}
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
 function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }; showDeleteConfirm.value = false }
 
@@ -997,4 +1052,29 @@ const detailSections = computed(() => {
   animation: doc-del-spin 0.7s linear infinite;
 }
 @keyframes doc-del-spin { to { transform: rotate(360deg); } }
+
+/* Cancel-confirm reason field. Deliberately plain so it inherits the confirm
+   dialog's surface rather than the table's dense styling. */
+.cancel-reason-label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.cancel-reason-req { font-weight: 400; color: var(--text-dim); }
+.cancel-reason-input {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--bg, #fff);
+  color: inherit;
+}
+.cancel-reason-input:focus {
+  outline: none;
+  border-color: #94a3b8;
+}
 </style>
