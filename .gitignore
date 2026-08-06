@@ -2,6 +2,11 @@ node_modules/
 node_modules
 service-account-key.json
 .env
+# Timestamped .env snapshots taken before deploys/config changes. These hold the
+# SAME live secrets as .env (session secret, webhook tokens, API keys), so they
+# must never be committable — they were untracked-but-stageable until 2026-08-06.
+.env.bak-*
+.env.*.bak
 
 # Vue / Vite
 client/dist/
