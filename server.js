@@ -7134,6 +7134,173 @@ if (INVOICE_AUTOGEN_ENABLED) {
 	console.log("[invoice-autogen] enabled — Fridays 7:00 PM America/Chicago (after the 6:30 PM driver cutoff)");
 }
 
+// ============================================================
+// RATE-CON RECONCILIATION — "did every emailed load reach the sheet?"
+// ============================================================
+//
+// The backstop for silent ingestion loss. On 2026-08-05 two loads were lost in
+// one day: one to a Gemini outage (which alerted), one to an n8n Filter node
+// that discarded a bad extraction with NO alert while reporting success. Both
+// were found by hand.
+//
+// Wiring n8n's reject branch to its alert makes KNOWN failures loud. It cannot
+// cover an execution that never starts, a Gmail filter that stops matching, an
+// n8n outage, or a workflow left deactivated — all of which yield zero signal.
+// This asks the question from OUTSIDE the pipeline, so it catches failure modes
+// nobody has thought of yet.
+//
+// Alerts ONCE per load id (ratecon_reconcile_alerts), because a daily repeat of
+// the same gap trains everyone to ignore the channel — which is how the 13
+// existing "needs a manual check" emails came to be unread.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS ratecon_reconcile_alerts (
+		load_id TEXT PRIMARY KEY,
+		subject TEXT DEFAULT '',
+		email_date TEXT DEFAULT '',
+		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+		alerted_at DATETIME,
+		resolved_at DATETIME
+	)
+`);
+
+// DEFAULT OFF, like every other side-effectful integration here
+// (ROUTEMATE_ENABLED / SCANKIT_ENABLED / INVOICE_AUTOGEN_ENABLED). It only reads
+// the mailbox and sends mail, but it ships dormant so production opts in.
+const RATECON_RECONCILE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.RATECON_RECONCILE_ENABLED ?? "").trim());
+const RATECON_RECONCILE_DAYS = Math.max(1, Math.min(60, parseInt(process.env.RATECON_RECONCILE_DAYS ?? "14", 10) || 14));
+const RATECON_RECONCILE_MAILBOX = String(process.env.RATECON_RECONCILE_MAILBOX ?? "RATECONs").trim() || "RATECONs";
+const RATECON_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;   // 4×/day
+let rateconReconcileRunning = false;
+const rateconReconcileHealth = { lastRun: null, lastError: null, lastGapCount: 0, lastScanned: 0 };
+
+// Returns { scanned, missing[], newlyAlerted[] }. Read-only against the mailbox
+// (EXAMINE + BODY.PEEK) — it must never set \Seen or touch \Flagged, because
+// n8n's Gmail Trigger selects on unread+starred and a sweep that marked mail
+// read would silently stop ingestion, i.e. cause the very outage it detects.
+async function reconcileRateCons({ alert = true } = {}) {
+	const { fetchRateConSubjects, findMissingLoads } = require("./lib/ratecon-reconcile.js");
+	const emails = await fetchRateConSubjects({
+		user: process.env.GMAIL_USER,
+		pass: process.env.GMAIL_APP_PASSWORD,
+		mailbox: RATECON_RECONCILE_MAILBOX,
+		sinceDays: RATECON_RECONCILE_DAYS,
+	});
+
+	const jt = await getJobTrackingCached();
+	const loadIdCol = (jt.headers || []).find((h) => /load.?id|job.?id/i.test(h));
+	if (!loadIdCol) throw new Error("Load ID column not found in Job Tracking");
+	// Deliberately NOT excludeDroppedLoads(): a cancelled or soft-deleted load
+	// still reached the sheet, so it is not an ingestion gap. Filtering those
+	// out would re-report every cancelled load as "missing" forever.
+	const sheetIds = (jt.data || []).map((r) => r[loadIdCol]).filter(Boolean);
+
+	const missing = findMissingLoads(emails, sheetIds);
+	rateconReconcileHealth.lastScanned = emails.length;
+	rateconReconcileHealth.lastGapCount = missing.length;
+
+	// Anything previously flagged that has since appeared: mark resolved so a
+	// recovered load stops counting against us.
+	const sheetSet = new Set(sheetIds.map((v) => String(v).trim().toLowerCase().replace(/^#/, "")));
+	for (const row of db.prepare("SELECT load_id FROM ratecon_reconcile_alerts WHERE resolved_at IS NULL").all()) {
+		if (sheetSet.has(String(row.load_id).toLowerCase())) {
+			db.prepare("UPDATE ratecon_reconcile_alerts SET resolved_at = CURRENT_TIMESTAMP WHERE load_id = ?").run(row.load_id);
+		}
+	}
+
+	const newly = [];
+	for (const m of missing) {
+		const seen = db.prepare("SELECT load_id, alerted_at FROM ratecon_reconcile_alerts WHERE load_id = ?").get(m.loadNumber);
+		if (seen && seen.alerted_at) continue;                 // already told them once
+		db.prepare(
+			"INSERT OR REPLACE INTO ratecon_reconcile_alerts (load_id, subject, email_date, first_seen, alerted_at, resolved_at) VALUES (?, ?, ?, COALESCE((SELECT first_seen FROM ratecon_reconcile_alerts WHERE load_id = ?), CURRENT_TIMESTAMP), ?, NULL)",
+		).run(m.loadNumber, m.subject, m.date, m.loadNumber, alert ? new Date().toISOString() : null);
+		newly.push(m);
+	}
+
+	if (alert && newly.length) {
+		const rowsHtml = newly.map((m) =>
+			`<tr><td style="padding:6px 10px;border:1px solid #ddd;"><b>${m.loadNumber}</b></td>` +
+			`<td style="padding:6px 10px;border:1px solid #ddd;">${String(m.subject).replace(/[<>]/g, "")}</td>` +
+			`<td style="padding:6px 10px;border:1px solid #ddd;">${String(m.date).replace(/[<>]/g, "")}</td></tr>`).join("");
+		const html =
+			`<p><b>${newly.length} rate-con email(s) never became a load.</b></p>` +
+			`<p>These arrived in the <code>${RATECON_RECONCILE_MAILBOX}</code> label but there is no matching row in Job Tracking, ` +
+			`so the load is not on the board, not dispatchable and not invoiceable.</p>` +
+			`<table style="border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;">` +
+			`<tr><th style="padding:6px 10px;border:1px solid #ddd;">Load</th><th style="padding:6px 10px;border:1px solid #ddd;">Subject</th><th style="padding:6px 10px;border:1px solid #ddd;">Received</th></tr>` +
+			rowsHtml + `</table>` +
+			`<p style="margin-top:14px;">To recover: open the rate con and drag the PDF onto the Job Board, which runs the same ingestion by hand.</p>` +
+			`<p style="color:#888;font-size:12px;">Each load is reported once. Scanned ${emails.length} rate-con email(s) from the last ${RATECON_RECONCILE_DAYS} days.</p>`;
+		try {
+			await sendEmail(process.env.GMAIL_USER, `⚠️ ${newly.length} rate-con(s) missing from Job Tracking`, html);
+		} catch (e) { console.error("[ratecon-reconcile] alert email failed:", e.message); }
+		try {
+			insertDispatchNotification.run(
+				"ratecon-gap",
+				`${newly.length} rate-con(s) never became a load`,
+				newly.map((m) => m.loadNumber).join(", "),
+				JSON.stringify({ missing: newly.map((m) => m.loadNumber) }),
+			);
+			io.to("dispatch").emit("dispatch-notification", {
+				type: "ratecon-gap",
+				title: `${newly.length} rate-con(s) never became a load`,
+				body: newly.map((m) => m.loadNumber).join(", "),
+			});
+		} catch (e) { console.error("[ratecon-reconcile] notification failed:", e.message); }
+		console.log(`[ratecon-reconcile] ALERT — missing loads: ${newly.map((m) => m.loadNumber).join(", ")}`);
+	}
+
+	return { scanned: emails.length, missing, newlyAlerted: newly };
+}
+
+async function maybeReconcileRateCons() {
+	if (!RATECON_RECONCILE_ENABLED || rateconReconcileRunning) return;
+	rateconReconcileRunning = true;
+	try {
+		const r = await reconcileRateCons({ alert: true });
+		rateconReconcileHealth.lastRun = new Date().toISOString();
+		rateconReconcileHealth.lastError = null;
+		console.log(`[ratecon-reconcile] scanned ${r.scanned} email(s), ${r.missing.length} gap(s), ${r.newlyAlerted.length} newly alerted`);
+	} catch (e) {
+		rateconReconcileHealth.lastError = e.message;
+		console.error("[ratecon-reconcile] failed:", e.message);
+	} finally {
+		rateconReconcileRunning = false;
+	}
+}
+
+if (RATECON_RECONCILE_ENABLED) {
+	setInterval(() => { maybeReconcileRateCons().catch(() => {}); }, RATECON_RECONCILE_INTERVAL_MS);
+	setTimeout(() => { maybeReconcileRateCons().catch(() => {}); }, 2 * 60 * 1000);   // boot run, after init
+	console.log(`[ratecon-reconcile] enabled — every 6h over the last ${RATECON_RECONCILE_DAYS} days of "${RATECON_RECONCILE_MAILBOX}"`);
+}
+
+// GET /api/admin/ratecon-reconcile — run the sweep on demand. Super Admin only.
+// ?dryRun=true reports gaps WITHOUT sending mail or recording an alert, so the
+// check can be run freely without burning the once-per-load alert.
+app.get("/api/admin/ratecon-reconcile", requireRole("Super Admin"), async (req, res) => {
+	try {
+		if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+			return res.status(503).json({ error: "GMAIL_USER / GMAIL_APP_PASSWORD not configured" });
+		}
+		const dryRun = /^(true|1|yes|on)$/i.test(String(req.query.dryRun ?? "").trim());
+		const r = await reconcileRateCons({ alert: !dryRun });
+		res.json({
+			enabled: RATECON_RECONCILE_ENABLED,
+			dryRun,
+			windowDays: RATECON_RECONCILE_DAYS,
+			mailbox: RATECON_RECONCILE_MAILBOX,
+			scanned: r.scanned,
+			missing: r.missing,
+			newlyAlerted: r.newlyAlerted.map((m) => m.loadNumber),
+			health: rateconReconcileHealth,
+		});
+	} catch (error) {
+		console.error("ratecon-reconcile error:", error.message);
+		res.status(500).json({ error: error.message });
+	}
+});
+
 // Validate + normalize the line-item/deduction rows of a manual invoice.
 // Returns { items } on success or { error } with a user-facing message.
 function sanitizeManualInvoiceRows(raw, label) {
