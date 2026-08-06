@@ -19808,6 +19808,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const milesByTruck = {};        // per-truck haversine miles
 		const loadsByDriver = {};       // per-driver completed load count (fallback when no truck column)
 		const loadsByTruck = {};        // per-truck completed load count (preferred when truck column exists)
+		// Per-truck per-month REVENUE (completed loads only), bucketed by the load's
+		// ASSIGNED month exactly like monthlyRevenue / driverMonthlyRevenue below.
+		// Needed because perTruckData.unitMonthlyGross is DRIVER-keyed: two trucks
+		// sharing a driver each read back that driver's full gross, so it cannot say
+		// which truck earned what. The per-truck projection at the bottom of this
+		// handler needs revenue on the same monthly clock as monthlyEarnings, and
+		// this is the only place both keys (truckUnit + assignedMonthKey) are already
+		// in hand — so it costs no extra query and no extra sheet read.
+		const revenueByTruckMonth = {}; // { truckUnit: { "YYYY-MM": revenue } }
 		const driverDaySets = {};        // per-driver active day Sets (all-time, used for totals)
 		// Driver active days bucketed by LOAD'S ASSIGNED MONTH (not by physical day).
 		// This matches how revenue is bucketed — both should answer the question:
@@ -19896,6 +19905,15 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 							if (!driverMonthlyRevenue[driver]) driverMonthlyRevenue[driver] = {};
 							driverMonthlyRevenue[driver][assignedMonthKey] =
 								(driverMonthlyRevenue[driver][assignedMonthKey] || 0) + amt;
+						}
+						// Same accumulation, keyed on the sheet's truck column. Paired with
+						// driverMonthlyRevenue above the way loadsByTruck pairs with
+						// loadsByDriver: truck attribution is preferred, driver attribution
+						// is the fallback for sheets/rows with no usable truck column.
+						if (truckUnit) {
+							if (!revenueByTruckMonth[truckUnit]) revenueByTruckMonth[truckUnit] = {};
+							revenueByTruckMonth[truckUnit][assignedMonthKey] =
+								(revenueByTruckMonth[truckUnit][assignedMonthKey] || 0) + amt;
 						}
 					}
 				}
@@ -20515,36 +20533,176 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			? Math.round((recentMonths.reduce((s, m) => s + (m.investorEarnings || 0), 0) / trailingDays) * 100) / 100
 			: 0;
 
-		// Annotate every perTruckData entry with the investor-centric
-		// numbers the frontend needs for ROI and break-even. For the
-		// single-truck investor (the common case) this is just the fleet
-		// totals. For multi-truck investors each truck gets an equal share;
-		// true per-truck monthly tracking is a P1 enhancement.
+		// Annotate every perTruckData entry with the investor-centric numbers the
+		// frontend needs for ROI and break-even. Each ACTIVE truck now takes the
+		// share of the investor's trailing take-home that its OWN revenue earned
+		// over the SAME trailing months.
+		//
+		// This replaces an equal split by active-truck count that never consulted a
+		// load: Logisx-#91 (0 loads, 0 miles, in service 2026-08) projected exactly
+		// the same annual take-home as LogisX-#33 (41 loads, 22,148 mi), and the
+		// client reasonably asked how a truck that has never moved projects what a
+		// working truck does.
 		{
-			// Split the investor's trailing earnings across ACTIVE trucks
-			// only — inactive/OOS/maintenance units don't run, so they must
-			// not dilute the active trucks' per-unit projection, and they
-			// show $0 expected take-home / ROI (an inactive truck "is not
-			// supposed to show any data").
+			// ACTIVE trucks only — inactive/OOS/maintenance units don't run, so they
+			// must not dilute the active trucks' share, and they keep showing $0
+			// expected take-home / ROI (an inactive truck "is not supposed to show
+			// any data"). That $0 contract is unchanged by this rewrite.
 			const activeUnits = new Set(
 				allOwnedTrucks
 					.filter(t => String(t.status || "").toLowerCase() === "active")
 					.map(t => t.unit_number)
 			);
-			const activeTruckCount = Math.max(1, activeUnits.size);
-			const perTruckMonthlyInvestor = Math.round(trailing3MonthInvestor / activeTruckCount);
-			const perTruckEstAnnualInvestor = Math.round(perTruckMonthlyInvestor * 12);
+			// The revenue window MUST be the exact months recentMonths covers, so the
+			// numerator (a truck's revenue) and the denominator (trailing3MonthInvestor,
+			// averaged over those same months) describe the same period. Derived from
+			// recentMonths rather than re-deriving "the last 3 months" from `now`, which
+			// would silently disagree for an investor with fewer than 3 months of history.
+			const trailingWindow = recentMonths.map(m => m.month);
+			const windowStart = trailingWindow.length ? trailingWindow[0] : null;
+			const sumWindow = (byMonth) => byMonth
+				? trailingWindow.reduce((s, mk) => s + (byMonth[mk] || 0), 0)
+				: 0;
+			// Attribution mode mirrors /api/financials' perTruck block byte-for-byte in
+			// shape (see grossByTruck / fleetHasTruckRevenue there): a truck carrying its
+			// own truck-column revenue is "truck"; a truck with none is "no-data" when the
+			// fleet uses the truck column at all, else "driver-fallback" (the sheet has no
+			// usable truck column, so the assigned driver is the best signal available).
+			// Same three names, same precedence — one convention across both endpoints.
+			const fleetHasTruckRevenue = Object.keys(revenueByTruckMonth).length > 0;
+
+			// Deliberately NOT weighted by loadCount or totalMiles. Both are ALL-TIME
+			// (the single-pass loop applies no date gate to them), so weighting a
+			// 3-month earnings figure by them would let a truck parked since last year
+			// keep a large slice of today's projection. Revenue inside the window is the
+			// only per-truck figure on the same clock as trailing3MonthInvestor.
+			const windowRevenue = {};   // unit -> revenue earned inside trailingWindow
+			const modeByUnit = {};      // unit -> "truck" | "driver-fallback" | "no-data"
+			const insufficient = {};    // unit -> not in service for the whole window
+			for (const unit of Object.keys(perTruckData)) {
+				const truck = allOwnedTrucks.find(t => t.unit_number === unit);
+				const unitLower = unit.toLowerCase();
+				const byTruck = revenueByTruckMonth[unitLower];
+				if (byTruck !== undefined) {
+					modeByUnit[unit] = "truck";
+					windowRevenue[unit] = sumWindow(byTruck);
+				} else if (fleetHasTruckRevenue) {
+					modeByUnit[unit] = "no-data";
+					windowRevenue[unit] = 0;
+				} else {
+					modeByUnit[unit] = "driver-fallback";
+					windowRevenue[unit] = sumWindow(driverMonthlyRevenue[normalizeDriverName(truck?.assigned_driver)]);
+				}
+				// A truck that entered service partway through the window was never given
+				// the chance to earn across it, so a share computed from a partial window
+				// is not a projection, it's an artifact. truckChargeFromMonth() is the same
+				// in-service resolver the fixed-cost accrual uses — reuse it so "when did
+				// this truck start" has exactly one answer in this handler. It returns ""
+				// for a truck with neither in_service_date nor created_at, and "" is never
+				// > windowStart, so an undated truck is treated as long-standing (the safe
+				// direction: it keeps projecting rather than blanking out).
+				const chargeFrom = truck ? truckChargeFromMonth(truck) : "";
+				insufficient[unit] = !!(windowStart && chargeFrom && chargeFrom > windowStart);
+			}
+
+			// Allocate the fleet annual ONCE, then split it — never round each truck's
+			// own monthly and multiply by 12. FleetBreakdownSection sums this column into
+			// a Fleet Total while TrendSection and CashFlowSection independently render
+			// trailing3MonthInvestor × 12 ON THE SAME PAGE, so any rounding residue is a
+			// visible self-contradiction (the old per-truck rounding drifted $12 on a
+			// two-truck fleet). Largest-remainder hands each leftover dollar to the
+			// truck with the biggest fractional claim, so the parts sum to the whole
+			// EXACTLY rather than approximately.
+			//
+			// ⚠️ round(x) × 12, NOT round(x × 12) — and the difference is visible money.
+			// The response publishes the ROUNDED scalar (`trailing3MonthInvestor:
+			// Math.round(trailing3MonthInvestor)` further below), and both sibling
+			// components multiply THAT by 12: TrendSection.vue:321 and
+			// CashFlowSection.vue:197/280. Targeting round(x × 12) here would make this
+			// column sum to a different number than the "Projected Annual Take-Home"
+			// card rendered beside it — up to $6 apart, e.g. a Trend card reading
+			// $59,988 next to a Fleet Total of $59,992. Match what the page actually
+			// displays, not the mathematically tidier value.
+			const fleetAnnualInvestor = Math.round(trailing3MonthInvestor) * 12;
+			let eligible = Object.keys(perTruckData).filter(u => activeUnits.has(u) && !insufficient[u]);
+			// Guard: if every active truck is too new (e.g. the only earning truck was
+			// just flipped Inactive), allocating to nobody would leave the Fleet Total at
+			// $0 against a non-zero Trend figure. Falling back to all active units keeps
+			// the page self-consistent — those rows then carry a real number, so they are
+			// NOT flagged insufficientData (that flag means exactly "this row is null").
+			// With no active trucks at all nothing can hold the invariant, and that was
+			// equally true before this change.
+			if (!eligible.length) eligible = Object.keys(perTruckData).filter(u => activeUnits.has(u));
+			const basis = {};
+			let totalBasis = 0;
+			for (const u of eligible) {
+				// Negative revenue is not expected (rates parse positive) but a floor of 0
+				// keeps a bad sheet cell from handing a truck a negative share.
+				basis[u] = Math.max(0, windowRevenue[u] || 0);
+				totalBasis += basis[u];
+			}
+			// No revenue anywhere in the window (a brand-new or fully idle fleet) leaves
+			// no basis to rank on, so fall back to the equal split — which is what this
+			// block did unconditionally before, and is the only defensible answer when
+			// every truck's claim is identical.
+			const shareOf = (u) => totalBasis > 0 ? basis[u] / totalBasis : (eligible.length ? 1 / eligible.length : 0);
+			const alloc = {};
+			{
+				let floorSum = 0;
+				const parts = eligible.map((u) => {
+					const raw = fleetAnnualInvestor * shareOf(u);
+					const whole = Math.floor(raw);
+					alloc[u] = whole;
+					floorSum += whole;
+					return { unit: u, frac: raw - whole };
+				});
+				// Σraw is exactly fleetAnnualInvestor, so Σfloor is short by an integer in
+				// [0, eligible.length). Hand those dollars out largest-fraction-first.
+				// Math.round() absorbs float error in floorSum; the residue sweep below
+				// then makes the sum exact no matter what the arithmetic did.
+				let remainder = Math.round(fleetAnnualInvestor - floorSum);
+				remainder = Math.max(0, Math.min(parts.length, remainder));
+				parts.sort((a, b) => b.frac - a.frac);
+				for (let i = 0; i < remainder; i++) alloc[parts[i].unit] += 1;
+				if (parts.length) {
+					const residue = fleetAnnualInvestor - eligible.reduce((s, u) => s + alloc[u], 0);
+					if (residue !== 0) alloc[parts[0].unit] += residue;
+				}
+			}
+
 			for (const unit of Object.keys(perTruckData)) {
 				const price = (allOwnedTrucks.find(t => t.unit_number === unit)?.purchase_price) || 0;
 				const unitActive = activeUnits.has(unit);
-				perTruckData[unit].monthlyInvestorEarnings = unitActive ? perTruckMonthlyInvestor : 0;
-				perTruckData[unit].estAnnualInvestorRevenue = unitActive ? perTruckEstAnnualInvestor : 0;
-				perTruckData[unit].investorROI = (unitActive && price > 0)
-					? Math.round((perTruckEstAnnualInvestor / price) * 1000) / 10
-					: 0;
-				perTruckData[unit].breakEvenMonths = (unitActive && perTruckMonthlyInvestor > 0)
-					? Math.ceil(price / perTruckMonthlyInvestor)
+				const tooNew = unitActive && insufficient[unit] && !(unit in alloc);
+				// null ≠ 0 here, and the difference is the whole point: null means "in
+				// service too briefly to project" (the UI renders "—"), while 0 means
+				// "in service the whole window and genuinely earned nothing". A truck
+				// that ran the full window with no revenue must still read 0.
+				const annual = tooNew ? null : (unitActive ? (alloc[unit] || 0) : 0);
+				const monthly = annual === null ? null : Math.round(annual / 12);
+				perTruckData[unit].monthlyInvestorEarnings = monthly;
+				perTruckData[unit].estAnnualInvestorRevenue = annual;
+				// investorROI follows the annual rather than being pinned to 0 — a 0% ROI
+				// is the same false claim as $0 revenue. It stays published (the client
+				// recomputes ROI from estAnnualInvestorRevenue and ignores this field, but
+				// dropping fields is a separate cleanup, not something to couple to a
+				// money-visible change).
+				perTruckData[unit].investorROI = annual === null
+					? null
+					: ((unitActive && price > 0) ? Math.round((annual / price) * 1000) / 10 : 0);
+				perTruckData[unit].breakEvenMonths = (monthly !== null && monthly > 0)
+					? Math.ceil(price / monthly)
 					: null;
+				// Why this truck got the share it got — so a surprising row is explainable
+				// without re-deriving the math (same spirit as /api/financials' per-truck
+				// data-quality flags). insufficientData is true exactly when the three
+				// projection fields are null, so the UI can key on either one.
+				perTruckData[unit].insufficientData = tooNew;
+				perTruckData[unit].attributionMode = modeByUnit[unit] || "no-data";
+				perTruckData[unit].windowRevenue = Math.round(windowRevenue[unit] || 0);
+				perTruckData[unit].windowRevenueShare = (unit in alloc)
+					? Math.round(shareOf(unit) * 1000) / 1000
+					: 0;
 			}
 		}
 
