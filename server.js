@@ -2830,8 +2830,28 @@ async function runRateConGemini(base64) {
 }
 
 app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
-	const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
-	if (!webhookSecret || req.headers["x-webhook-secret"] !== webhookSecret) {
+	// Accepts EITHER the shared n8n secret OR an extract-only secret.
+	//
+	// WHY THE SECOND ONE EXISTS: N8N_WEBHOOK_SECRET also gates POST /api/n8n/job
+	// and POST /api/webhook/new-load — and that last one CREATES LOADS. n8n Cloud
+	// cannot give this workflow a usable credential via its API (create works, but
+	// read/list/projects are all 403 and an API-created credential is not visible
+	// to the workflow owner), so the value has to sit in a node parameter — which
+	// is PLAINTEXT in the workflow JSON and readable by anyone with n8n access.
+	// Putting the shared secret there would hand out load injection. This one is
+	// accepted ONLY here, so a leak costs Gemini credits against a rate-limited
+	// read-only endpoint and nothing else.
+	//
+	// Swap the n8n node to a proper Header Auth credential when one is created in
+	// the UI, then drop N8N_EXTRACT_SECRET — this is the safe interim, not the
+	// permanent shape.
+	const presented = req.headers["x-webhook-secret"];
+	const sharedSecret = process.env.N8N_WEBHOOK_SECRET;
+	const extractSecret = process.env.N8N_EXTRACT_SECRET;
+	const authorized =
+		(sharedSecret && safeEqual(presented, sharedSecret)) ||
+		(extractSecret && safeEqual(presented, extractSecret));
+	if (!authorized) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	try {
