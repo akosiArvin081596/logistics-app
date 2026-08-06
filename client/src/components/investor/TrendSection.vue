@@ -60,7 +60,7 @@
       >
         <div class="kpi-label">Your Take-Home / Day</div>
         <div class="kpi-value">{{ fmt(avgDailyTakeHome) }}</div>
-        <div class="kpi-sub">your 50% share per day</div>
+        <div class="kpi-sub">your {{ investorSplitPct }}% share per day</div>
         <div class="kpi-formula">= trailing 3mo take-home / days</div>
       </div>
       <div
@@ -199,11 +199,11 @@
       <template v-if="detailType === 'avgDailyTakeHome'">
         <div class="modal-breakdown">
           <div class="modal-explain">
-            This is your investor share (50% of net profit) averaged into a per-day figure. It uses the trailing 3 months of actual take-home and divides it across the number of days.
+            This is your investor share ({{ investorSplitPct }}% of net profit) averaged into a per-day figure. It uses the trailing 3 months of actual take-home and divides it across the number of days.
           </div>
           <div class="step-label">The Calculation</div>
           <div class="modal-explain-sm">
-            Take the last 3 months of your share (after driver pay, fixed costs, and trip expenses are deducted, then divided by 2 for the 50/50 split), and spread that across the days in those months.
+            Take the last 3 months of your share (after driver pay, fixed costs, and trip expenses are deducted, then multiplied by your {{ investorSplitPct }}% share), and spread that across the days in those months.
           </div>
           <div class="modal-divider"></div>
           <div class="modal-row bold result">
@@ -281,6 +281,15 @@ const props = defineProps({
   production: { type: Object, required: true },
 })
 
+// The configured investor/LogisX split. Comes off the production payload
+// (server.js sends `investorSplitPct` from investor_config.investor_split_pct),
+// NOT off a `config` prop — which is why this component needs no new props.
+// Same one-liner as ProductionSection / CashFlowSection / EarningsSection;
+// keep them identical. Defaults to 50 when absent, matching the server's own
+// fallback. Every investor is on 50 today, but hardcoding it means the portal
+// silently misstates the agreement the day anyone signs at a different rate.
+const investorSplitPct = computed(() => props.production?.investorSplitPct ?? 50)
+
 const months = computed(() => props.production?.monthlyData || [])
 
 const momGrowth = computed(() => {
@@ -345,7 +354,11 @@ const MODAL_CONFIG = {
   momGrowth: { title: 'Month-over-Month Growth', subtitle: 'How current revenue compares to the prior month' },
   bestMonth: { title: 'Best Month', subtitle: 'Your highest revenue month so far' },
   avgDailyGross: { title: 'Truck Gross per Day', subtitle: 'Gross revenue averaged across the last 30 days' },
-  avgDailyTakeHome: { title: 'Your Take-Home per Day', subtitle: 'Your 50% share spread across recent days' },
+  // Worded without the percentage on purpose: MODAL_CONFIG is a static
+  // module-scope object, so it cannot interpolate investorSplitPct without
+  // becoming a computed. Not worth that for one word in a subtitle — the modal
+  // body it opens states the actual percentage.
+  avgDailyTakeHome: { title: 'Your Take-Home per Day', subtitle: 'Your share of net profit, spread across recent days' },
   avgMonthly: { title: 'Average Monthly Revenue', subtitle: 'Gross revenue averaged across every month with data' },
   projectedAnnualTakeHome: { title: 'Projected Annual Take-Home', subtitle: 'Trailing 3-month take-home extrapolated forward' },
 }
