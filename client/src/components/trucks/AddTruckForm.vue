@@ -124,6 +124,13 @@
       </div>
       <div class="form-row">
         <div class="form-group">
+          <label class="form-label" for="add-truck-in-service-date">In Service Since</label>
+          <input id="add-truck-in-service-date" v-model="form.inServiceDate" class="form-input" type="date" />
+          <div class="field-hint">Fixed costs below are billed from this month onward. Leave blank to fall back to the date the truck record was created.</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
           <label class="form-label">Insurance ($/mo)</label>
           <input v-model.number="form.insuranceMonthly" class="form-input" type="number" min="0" placeholder="0" />
         </div>
@@ -212,6 +219,11 @@ const form = reactive({
   hvutAnnual: 0,
   irpAnnual: 0,
   adminFeePct: 50,
+  // Month the truck entered service — scopes when its fixed costs start being
+  // charged to the owner's payout. MUST default to '' (never today's date):
+  // blank is what preserves the server's created_at fallback, and a wrong value
+  // here silently restates historical payouts.
+  inServiceDate: '',
   // '' (not 0) so the "250 (default)" placeholder is visible until a rate is typed
   driverPayDaily: '',
   purchasePrice: 0,
@@ -261,6 +273,12 @@ function handleSubmit() {
     hvutAnnual: form.hvutAnnual,
     irpAnnual: form.irpAnnual,
     adminFeePct: form.adminFeePct,
+    // Blank stays blank ('' — never null, never today) so the server keeps its
+    // created_at fallback. Sent under both key styles because the trucks API
+    // mixes conventions (camelCase driverPayDaily vs snake_case
+    // fuel_tank_gallons); identical value, so whichever the server reads wins.
+    in_service_date: form.inServiceDate || '',
+    inServiceDate: form.inServiceDate || '',
     // Blank input = no custom rate (server stores 0 = use $250 default)
     driverPayDaily: form.driverPayDaily === '' ? 0 : form.driverPayDaily,
     purchasePrice: form.purchasePrice,
@@ -289,6 +307,7 @@ function handleSubmit() {
   form.hvutAnnual = 0
   form.irpAnnual = 0
   form.adminFeePct = 50
+  form.inServiceDate = ''
   form.driverPayDaily = ''
   form.purchasePrice = 0
   form.titleStatus = 'Clean'

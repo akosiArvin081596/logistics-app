@@ -256,6 +256,11 @@
                 <div class="field-hint">Blank auto-derives MPG from ELD fuel + odometer.</div>
               </div>
             </div>
+            <div class="edit-field">
+              <label for="edit-truck-in-service-date">In Service Since</label>
+              <input id="edit-truck-in-service-date" v-model="editForm.inServiceDate" type="date" />
+              <div class="field-hint">Fixed costs below are billed from this month onward. Leave blank to fall back to the date the truck record was created.</div>
+            </div>
             <div class="edit-row">
               <div class="edit-field">
                 <label>Insurance ($/mo)</label>
@@ -322,6 +327,11 @@
           <div class="view-row"><span class="view-label">Purchase Price</span><span>{{ viewTruck.PurchasePrice ? '$' + Number(viewTruck.PurchasePrice).toLocaleString() : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Title Status</span><span>{{ viewTruck.TitleStatus || '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Maintenance Fund</span><span>{{ viewTruck.MaintenanceFundMonthly ? '$' + viewTruck.MaintenanceFundMonthly + '/mo' : '\u2014' }}</span></div>
+          <div class="view-row">
+            <span class="view-label">In Service Since</span>
+            <span v-if="inServiceDate(viewTruck)">{{ formatInServiceDate(inServiceDate(viewTruck)) }}</span>
+            <span v-else class="view-unset" title="No in-service date set \u2014 fixed costs are billed from the date this truck record was created.">Not set</span>
+          </div>
           <div class="view-row"><span class="view-label">Insurance</span><span>{{ viewTruck.InsuranceMonthly ? '$' + viewTruck.InsuranceMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Truck Payment</span><span>{{ viewTruck.TruckPaymentMonthly ? '$' + Number(viewTruck.TruckPaymentMonthly).toLocaleString() + '/mo' : '\u2014' }}</span></div>
@@ -400,8 +410,26 @@ const editForm = reactive({
   vin: '', licensePlate: '', status: 'Active', assignedDriver: '', ownerId: 0, notes: '',
   photo: '', insuranceMonthly: 0, eldMonthly: 0, truckPaymentMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50, driverPayDaily: 0,
   purchasePrice: 0, titleStatus: 'Clean', maintenanceFundMonthly: 0,
-  fuelTankGallons: '', avgMpg: '',
+  fuelTankGallons: '', avgMpg: '', inServiceDate: '',
 })
+
+// The trucks API serializes PascalCase (InsuranceMonthly, FuelTankGallons...),
+// but in_service_date landed after this component; read both spellings so the
+// value round-trips whichever key the server ends up emitting.
+function inServiceDate(truck) {
+  return (truck?.InServiceDate ?? truck?.in_service_date ?? '') || ''
+}
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+// Formats 'YYYY-MM-DD' by string math only — never via `new Date(iso)`, which
+// parses as UTC midnight and renders as the previous day in US timezones.
+function formatInServiceDate(raw) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(raw).trim())
+  if (!m) return String(raw)
+  const month = MONTH_NAMES[Number(m[2]) - 1]
+  return month ? `${month} ${Number(m[3])}, ${m[1]}` : String(raw)
+}
 
 function openEdit(truck) {
   editForm.id = truck.id
@@ -431,6 +459,8 @@ function openEdit(truck) {
   // '' when unset/0 so the default placeholder shows instead of a literal 0.
   editForm.fuelTankGallons = truck.FuelTankGallons || ''
   editForm.avgMpg = truck.AvgMpg || ''
+  // '' when unset — an empty date input is what keeps the created_at fallback.
+  editForm.inServiceDate = inServiceDate(truck)
   showEdit.value = true
 }
 
@@ -471,6 +501,11 @@ function handleSaveEdit() {
       // Fuel-model inputs (snake_case per the wave contract); blank → 0 = unset.
       fuel_tank_gallons: editForm.fuelTankGallons === '' ? 0 : editForm.fuelTankGallons,
       avg_mpg: editForm.avgMpg === '' ? 0 : editForm.avgMpg,
+      // Cleared input sends '' (never null, never today) so the server reverts
+      // to its created_at fallback rather than restating the owner's payout.
+      // Both key styles — the trucks API mixes camelCase and snake_case.
+      in_service_date: editForm.inServiceDate || '',
+      inServiceDate: editForm.inServiceDate || '',
     },
   })
   showEdit.value = false
@@ -711,6 +746,7 @@ async function handleUnlink(truck) {
 .view-grid { display: flex; flex-direction: column; gap: 0.4rem; }
 .view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
 .view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.view-unset { color: var(--text-dim); cursor: help; }
 
 /* Routemate column — minimal "Linked / Link / —" affordances. */
 .rm-linked {
