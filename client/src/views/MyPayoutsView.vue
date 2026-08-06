@@ -7,6 +7,21 @@
       </p>
     </div>
 
+    <!-- No maintenance disclaimer here on purpose, and the same call is made on
+         the investor dashboard — this comment is the one place the rule is
+         written down. MaintenanceDisclaimer is mounted at SECTION level only,
+         compact, exactly twice: EarningsSection and PayoutsSection, each
+         directly under its own section title. No page-level copies.
+         Why: the caveat has to travel with the figures it qualifies, so it
+         lands beside the money wherever those sections are mounted, and it
+         can't be scrolled away from them. A page-level copy adds nothing —
+         here it would sit a few pixels above PayoutsSection's own, and on
+         /investor it would sit one row above EarningsSection's. Two amber
+         callouts that close together read as a rendering glitch, and with the
+         red maintenance banner overhead that would be three renderings of the
+         same sentence on one screen, which reads as broken rather than
+         emphatic. -->
+
     <!-- No previewUserId → the section scopes to the logged-in investor. -->
     <PayoutsSection />
   </div>

@@ -18478,6 +18478,148 @@ app.get("/api/config/maps-key", (req, res) => {
 	res.json({ key: GOOGLE_MAPS_API_KEY });
 });
 
+// --- Investor maintenance notice --------------------------------------------
+// Client ask: while the app is mid-update, investors should see (a) a one-shot
+// popup on login and (b) a persistent banner saying so — WITHOUT losing access
+// to anything; nothing here gates a route or an action. The copy has to be
+// tunable in production without a redeploy, so it lives in env vars and is
+// served through an endpoint rather than baked into the client bundle — the
+// same reason GOOGLE_MAPS_API_KEY above is served, not inlined. Like every
+// other env-derived constant in this file, these are read once at module
+// scope, so a copy change still needs a `pm2 restart` — a redeploy is avoided,
+// a restart is not, and that's an accepted tradeoff, not an oversight.
+//
+// DEFAULT OFF, matching this repo's convention for anything that changes what a
+// user sees the instant the flag flips (ROUTEMATE_ENABLED / SCANKIT_ENABLED /
+// INVOICE_AUTOGEN_ENABLED / PERIOD_FINALIZE_ENABLED): merging this code must
+// not, by itself, put a "SYSTEM UPDATE IN PROGRESS" banner in front of an
+// investor — an operator opts in only once there is a real maintenance window
+// to announce.
+const MAINTENANCE_NOTICE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.MAINTENANCE_NOTICE_ENABLED ?? "").trim());
+
+// COPY CAPS. Tunable-without-a-redeploy is also an unguarded input path: this
+// endpoint hands out whatever an operator typed into .env, and the banner is
+// `position: sticky`, so its height is taken off every screen underneath it for
+// as long as the flag is on. Roughly 1,300 characters of message fills a phone
+// viewport, which pins the banner over the whole page and locks the investor
+// out of the very content the client insisted we never take away ("don't knock
+// him out of it"). The client caps the rendered banner height — that is the
+// primary fix; this is the second layer, so the server never hands out copy
+// long enough to cause it in the first place. Caps are ~2-4x the default copy
+// below, and the two the banner stacks (title 80 + message 400) sit well under
+// that 1,300 even at worst case.
+//
+// TRUNCATE, NEVER REJECT. This ships during an incident: a maintenance notice
+// that fails closed because someone pasted an essay is worse than one that got
+// shortened. Nothing in here can 400, throw, or blank the notice.
+const MAINTENANCE_NOTICE_MAX = { title: 80, message: 400, disclaimer: 200, version: 32 };
+
+// Clamp one copy field, cutting at a word boundary. Deliberately appends NO
+// ellipsis: on a surface with no expand affordance a "…" reads as "tap for
+// more" and, on copy whose entire job is to reassure an investor, as broken
+// text — a shortened line that still reads like a finished line is the better
+// failure mode. The operator is not left guessing either; a real truncation
+// warns at boot (same module-scope pattern as the SESSION_SECRET warning).
+function clampNoticeCopy(text, max, envName) {
+	const s = String(text ?? "");
+	if (s.length <= max) return s; // the normal path — copy passes through byte-for-byte
+	let cut = s.slice(0, max);
+	// Drop a half-word, but only when the cut actually splits one, and only if
+	// enough survives — one giant token (a pasted URL/blob) would otherwise back
+	// off to nothing.
+	if (/\S$/.test(cut) && /^\S/.test(s.slice(max))) {
+		const atBoundary = cut.replace(/\S+$/, "");
+		if (atBoundary.trim().length >= max * 0.6) cut = atBoundary;
+	}
+	// A cut can strand an opener whose closer sat past `max`. Backing up to it is
+	// cheap and beats copy that ends on a lone `(` or `"`.
+	const paren = cut.lastIndexOf("(");
+	if (paren > -1 && cut.indexOf(")", paren) === -1) cut = cut.slice(0, paren);
+	const curly = cut.lastIndexOf("“");
+	if (curly > -1 && cut.indexOf("”", curly) === -1) cut = cut.slice(0, curly);
+	if ((cut.match(/"/g) || []).length % 2 === 1) cut = cut.slice(0, cut.lastIndexOf('"'));
+	// Trailing joiners/openers read as a sentence someone chopped; a trailing
+	// . ! ? is kept, since landing on one is the cleanest cut available.
+	cut = cut.replace(/[\s,;:\-–—\/&+([{<«]+$/, "");
+	// A quote after a space is an opener that lost its closer; a quote glued to a
+	// word is a possessive or contraction, so leave that one alone.
+	cut = cut.replace(/\s+['‘"“]$/, "").trim();
+	const out = cut || s.slice(0, max).trim(); // never hand back an empty string
+	console.warn(`[maintenance-notice] ${envName} is ${s.length} chars, capped at ${max} — serving ${out.length}. Shorten it in .env: long copy pins the sticky banner over the whole page on a phone.`);
+	return out;
+}
+
+const MAINTENANCE_NOTICE_TITLE = clampNoticeCopy(
+	String(process.env.MAINTENANCE_NOTICE_TITLE ?? "SYSTEM UPDATE IN PROGRESS").trim() || "SYSTEM UPDATE IN PROGRESS",
+	MAINTENANCE_NOTICE_MAX.title, "MAINTENANCE_NOTICE_TITLE");
+// Default copy: says the portal is mid-update, that figures may move, and that
+// nothing is locked — the thing investors are most likely to worry about.
+const MAINTENANCE_NOTICE_MESSAGE_DEFAULT =
+	"The portal is being updated behind the scenes right now — some figures may shift while we finish. You're welcome to keep using everything as normal; nothing here is locked.";
+// The clamp wraps the whole `env || DEFAULT` expression rather than just the env
+// value, so (a) an all-whitespace env var still falls back to the default
+// instead of collapsing to an empty banner, and (b) a default that someone
+// later edits past its own cap is caught too.
+const MAINTENANCE_NOTICE_MESSAGE = clampNoticeCopy(
+	String(process.env.MAINTENANCE_NOTICE_MESSAGE ?? MAINTENANCE_NOTICE_MESSAGE_DEFAULT).trim() || MAINTENANCE_NOTICE_MESSAGE_DEFAULT,
+	MAINTENANCE_NOTICE_MAX.message, "MAINTENANCE_NOTICE_MESSAGE");
+// The client's own wording for the fine-print disclaimer. NOTE: an earlier draft
+// of this copy read "final sentiments", a mis-transcription of the client's
+// spoken "final settlements" — the word means the monthly investor payout, so
+// the typo landed on investor-facing money copy. Keep it "settlements".
+const MAINTENANCE_NOTICE_DISCLAIMER_DEFAULT = "The final settlements are still being calculated.";
+const MAINTENANCE_NOTICE_DISCLAIMER = clampNoticeCopy(
+	String(process.env.MAINTENANCE_NOTICE_DISCLAIMER ?? MAINTENANCE_NOTICE_DISCLAIMER_DEFAULT).trim() || MAINTENANCE_NOTICE_DISCLAIMER_DEFAULT,
+	MAINTENANCE_NOTICE_MAX.disclaimer, "MAINTENANCE_NOTICE_DISCLAIMER");
+// 'all' is the only other accepted value; anything unrecognized (typo, blank,
+// unset) falls back to the narrower 'investor' rather than silently
+// broadcasting to dispatch/admin staff who have no reason to see an
+// investor-facing notice.
+const MAINTENANCE_NOTICE_AUDIENCE = String(process.env.MAINTENANCE_NOTICE_AUDIENCE ?? "").trim().toLowerCase() === "all" ? "all" : "investor";
+// A STRING, not a number: the client store compares it with
+// `String(data?.version ?? DEFAULTS.version)` and keys the per-session
+// dismissal flag off it (client/src/stores/maintenance.js), so bumping this is
+// how an operator re-shows the popup to everyone who already dismissed it.
+//
+// Because it is concatenated straight into a sessionStorage key
+// (`logisx.maintenanceNotice.dismissed.v${version}`), it gets the tightest
+// handling of the four: strip to plain alphanumerics plus `. _ -`, THEN cap —
+// stripping first so the cap counts only surviving characters. That keeps a
+// pathological value (an essay, a quoted blob, a key-shaped string with its own
+// dots and colons) from becoming an absurd or ambiguous storage key. Caveat
+// worth knowing: a bump that differs from the previous value only in stripped
+// characters sanitizes to the same string, so the popup will NOT resurface —
+// use plain values like `2`, `2026-08-06`, `aug-window`.
+const MAINTENANCE_NOTICE_VERSION = String(process.env.MAINTENANCE_NOTICE_VERSION ?? "1").trim().replace(/[^A-Za-z0-9._-]/g, "").slice(0, MAINTENANCE_NOTICE_MAX.version) || "1";
+if (MAINTENANCE_NOTICE_VERSION !== (String(process.env.MAINTENANCE_NOTICE_VERSION ?? "1").trim() || "1")) {
+	console.warn(`[maintenance-notice] MAINTENANCE_NOTICE_VERSION sanitized to "${MAINTENANCE_NOTICE_VERSION}" (alphanumerics plus . _ - only, max ${MAINTENANCE_NOTICE_MAX.version}). If that matches the previous version, dismissed popups will not re-show.`);
+}
+
+// GET /api/config/maintenance — investor maintenance-notice copy (login popup +
+// top banner). No auth, same reasoning as /api/config/maps-key above: the SPA
+// fetches this at boot, potentially before the session has resolved, and the
+// payload is nothing but static copy already destined for the investor's own
+// screen — requiring auth here would just race the session check for zero
+// benefit. The client applies its own DEFAULTS and audience/role gating; this
+// endpoint's only job is to hand back today's configured copy, length-capped
+// per MAINTENANCE_NOTICE_MAX above but otherwise untouched.
+//
+// ⚠️ Unauthenticated means ANYONE who curls this can read the copy whenever the
+// flag is on. That is acceptable — and strictly less sensitive than the Maps key
+// next door — precisely because the copy is generic. Keep it that way: it must
+// never name a client, a dollar amount, or a root cause. Same warning sits over
+// the vars in .env.example, where an operator actually types the words.
+app.get("/api/config/maintenance", (req, res) => {
+	res.json({
+		enabled: MAINTENANCE_NOTICE_ENABLED,
+		title: MAINTENANCE_NOTICE_TITLE,
+		message: MAINTENANCE_NOTICE_MESSAGE,
+		disclaimer: MAINTENANCE_NOTICE_DISCLAIMER,
+		audience: MAINTENANCE_NOTICE_AUDIENCE,
+		version: MAINTENANCE_NOTICE_VERSION,
+	});
+});
+
 // GET /api/geocode — reverse geocode via Google Geocoding API
 app.get("/api/geocode", async (req, res) => {
 	const { lat, lng } = req.query;
