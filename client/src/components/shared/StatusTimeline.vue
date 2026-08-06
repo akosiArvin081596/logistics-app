@@ -32,7 +32,14 @@
             <span v-if="p.startedNote">Started {{ p.startedNote }}</span>
             <span v-if="p.endedNote"> · Ended {{ p.endedNote }}</span>
           </div>
-          <div v-if="p.source && p.source !== 'manual'" class="st-src">via {{ sourceLabel(p.source) }}</div>
+          <!-- `reason` carries how far the truck was from the MAPPED point when a
+               GPS transition fired. A geocode lands on a gate or centroid, not the
+               dock, so at a large site the truck can legitimately be a few hundred
+               metres out — showing the number is what makes the auto-status
+               auditable instead of something you have to take on faith. -->
+          <div v-if="p.source && p.source !== 'manual'" class="st-src">
+            via {{ sourceLabel(p.source) }}<span v-if="p.reason"> · {{ p.reason }}</span>
+          </div>
         </div>
       </li>
     </ol>

@@ -16585,6 +16585,26 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				if (!prevTriggers.includes(trigger)) return null;
 			}
 
+			// How far the truck actually was from the MAPPED point when this
+			// fired. A geocode lands on a front gate or a centroid, not on the
+			// dock — at a large DC or a yard the truck can legitimately sit
+			// several hundred metres from the coordinate we hold. Recording the
+			// real distance is what tells you whether a given coordinate is
+			// trustworthy and whether the 1000 m radius is right for that site,
+			// instead of everyone guessing. Measured against the pickup point
+			// for At Shipper and In Transit (departure), the drop for At Receiver.
+			const zonePoints = resolveGeofencePoints(loadObj, headers, loadId);
+			const zonePoint = trigger === "At Receiver" ? zonePoints.dest : zonePoints.origin;
+			let distanceM = null;
+			try {
+				if (zonePoint) distanceM = geolib.getDistance({ latitude, longitude }, zonePoint);
+			} catch { /* distance is informational — never block the transition */ }
+			const distTxt = distanceM === null
+				? ""
+				: departed
+					? ` (${distanceM} m from the mapped pickup point)`
+					: ` (${distanceM} m from the mapped ${trigger === "At Receiver" ? "delivery" : "pickup"} point)`;
+
 			const sheets = await getSheets();
 			const statusColIdx = headers.indexOf(statusCol);
 			const statusColLetter = colLetter(statusColIdx);
@@ -16596,36 +16616,48 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				requestBody: { values: [[trigger]] },
 			});
 			jtCacheInvalidate();
-			recordStatusChange({ loadId, oldStatus: loadObj[statusCol] || '', newStatus: trigger, source: 'geofence', actor: driverName });
+			recordStatusChange({
+				loadId,
+				oldStatus: loadObj[statusCol] || '',
+				newStatus: trigger,
+				source: 'geofence',
+				actor: driverName,
+				// Reuses the `reason` column added for cancellations — same
+				// question ("why did this transition happen"), and it surfaces
+				// in the phase timeline the admin modal and driver app render.
+				reason: distanceM === null
+					? "auto by GPS"
+					: `auto by GPS — ${distanceM} m from the mapped ${trigger === "At Receiver" ? "delivery" : "pickup"} point (radius ${GEOFENCE_RADIUS} m)`,
+			});
 
-			const geoMsg = trigger === "At Shipper"
+			const geoMsg = (trigger === "At Shipper"
 				? "You have arrived at the pickup location"
 				: trigger === "In Transit"
 					? "Departed the pickup location — you're now in transit"
-					: "You have arrived at the delivery location";
+					: "You have arrived at the delivery location") + distTxt;
 			const geoNotif = insertNotification.run(
 				driverName.trim().toLowerCase(), "geofence",
 				`${trigger} — Load ${loadId}`,
 				geoMsg,
-				JSON.stringify({ loadId, status: trigger })
+				JSON.stringify({ loadId, status: trigger, distanceM })
 			);
 			io.to(driverName.trim().toLowerCase()).emit("geofence-trigger", {
-				loadId, status: trigger,
+				loadId, status: trigger, distanceM,
 				notificationId: geoNotif.lastInsertRowid,
 			});
 			io.to("dispatch").emit("geofence-trigger", {
-				loadId, driver: driverName, status: trigger,
+				loadId, driver: driverName, status: trigger, distanceM,
 			});
-			const dispatchMsg = trigger === "At Shipper"
+			const dispatchMsg = (trigger === "At Shipper"
 				? `${driverName} has arrived at the pickup location (Load ${loadId})`
 				: trigger === "In Transit"
 					? `${driverName} has departed the pickup location (Load ${loadId})`
-					: `${driverName} has arrived at the delivery location (Load ${loadId})`;
+					: `${driverName} has arrived at the delivery location (Load ${loadId})`) + distTxt;
 			insertDispatchNotification.run(
 				"geofence",
 				`${driverName}: ${trigger}`,
 				dispatchMsg,
-				JSON.stringify({ loadId, driverName, status: trigger })
+				JSON.stringify({ loadId, driverName, status: trigger, distanceM })
 			);
 			io.to("dispatch").emit("dispatch-notification", {
 				type: "geofence",
