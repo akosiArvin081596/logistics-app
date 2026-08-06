@@ -3456,6 +3456,17 @@ function requireRole(...roles) {
 	};
 }
 
+// Rate cons state the BROKER RATE, so they are dispatch/ownership material, not
+// driver material — this app strips financial columns from the Driver role
+// everywhere else (GET /api/driver/:driverName, the /rate|amount|pay|.../i
+// column filter). requireAuth alone is not enough here: a driver IS
+// authenticated, load ids are visible to them, and the archive filename is
+// exactly `<loadId>.pdf`, so the URL is guessable rather than secret.
+//
+// MUST stay ABOVE the general /uploads handler below — express matches in
+// registration order, so if the static handler is registered first it answers
+// and this guard never runs.
+app.use("/uploads/rate-cons", requireRole("Super Admin", "Dispatcher"));
 // Authenticated static serving for uploads (drug tests, signed PDFs, invoices, legal docs, etc.)
 // Every subdirectory under uploads/ contains sensitive documents (PII, signatures, banking info, SSN on W-9),
 // so the entire tree requires a session. Public onboarding flows serve PDFs via dedicated /api/... routes
@@ -14778,10 +14789,30 @@ app.get("/api/documents/:loadId", requireAuth, async (req, res) => {
 			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
 		}
+		// RATECON rows are EXCLUDED from this list, by owner request 2026-08-06:
+		// this panel is the driver's proof-of-delivery paperwork, and a rate con
+		// is neither uploaded by the driver nor something dispatch needs beside a
+		// POD. It is written here only as an invoice-drafting archive by
+		// POST /api/loads/from-ratecon (getRateConBytes() source (b), since the
+		// service account cannot write the Drive folder).
+		//
+		// SECURITY, not just cosmetics: a rate con states the BROKER RATE, and
+		// every RATECON row carries a working drive_url (/uploads/rate-cons/...).
+		// The driver's DocumentList renders a View link for any row with one, so
+		// before this filter a driver could open the rate con for their own load
+		// and read the rate — undoing the financial-column stripping that
+		// GET /api/driver/:driverName and the /rate|amount|.../i filter do
+		// everywhere else. The matching /uploads/rate-cons guard is above.
+		//
+		// The row is NOT deleted and NOT hidden from invoicing: getRateConBytes()
+		// queries `documents` directly, so drafting still finds and attaches it.
 		const docs = db
 			.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at, ocr_text
-				 FROM documents WHERE load_id = ? AND deleted_at IS NULL ORDER BY uploaded_at DESC`,
+				 FROM documents
+				 WHERE load_id = ? AND deleted_at IS NULL
+				   AND UPPER(REPLACE(REPLACE(COALESCE(type,''), ' ', ''), '_', '')) != 'RATECON'
+				 ORDER BY uploaded_at DESC`,
 			)
 			.all(loadId);
 		res.json({ documents: docs });
