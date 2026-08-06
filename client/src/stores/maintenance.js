@@ -11,7 +11,11 @@ const api = useApi()
 // can retune the wording without a redeploy.
 const DEFAULTS = {
   enabled: false,
+  // Two headlines, deliberately different. `title` is the red banner's — short,
+  // shouted, rendered uppercase. `modalTitle` is the login popup's, in the
+  // client's own words. Sharing one string could only ever satisfy one surface.
   title: 'SYSTEM UPDATE IN PROGRESS',
+  modalTitle: 'Application is currently under maintenance',
   message:
     'The portal is being updated right now. You can keep using it as normal — nothing here is locked.',
   disclaimer: 'The final settlements are still being calculated.',
@@ -97,6 +101,11 @@ export const useMaintenanceStore = defineStore('maintenance', {
         const data = await api.get('/api/config/maintenance')
         this.enabled = !!data?.enabled
         this.title = data?.title || DEFAULTS.title
+        // Falls back to `title` before DEFAULTS.modalTitle: a server that
+        // predates this field (an older deploy, or a rollback) should show the
+        // banner headline in the popup — the behaviour before the split — not a
+        // sentence the operator never configured.
+        this.modalTitle = data?.modalTitle || data?.title || DEFAULTS.modalTitle
         this.message = data?.message || DEFAULTS.message
         this.disclaimer = data?.disclaimer || DEFAULTS.disclaimer
         this.audience = data?.audience || DEFAULTS.audience

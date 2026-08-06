@@ -18580,9 +18580,21 @@ function clampNoticeCopy(text, max, envName) {
 	return out;
 }
 
+// The BANNER headline. Rendered uppercase, 800-weight, on the red bar — the
+// client's "make it big and bold and red so they know this is under maintenance".
 const MAINTENANCE_NOTICE_TITLE = clampNoticeCopy(
 	String(process.env.MAINTENANCE_NOTICE_TITLE ?? "SYSTEM UPDATE IN PROGRESS").trim() || "SYSTEM UPDATE IN PROGRESS",
 	MAINTENANCE_NOTICE_MAX.title, "MAINTENANCE_NOTICE_TITLE");
+// The POPUP heading — SEPARATE from the banner on purpose. The client asked for
+// two different things in one breath: a banner saying the system is updating,
+// and a popup saying "Application is currently under maintenance". One shared
+// title could only satisfy one of them, and the banner uppercases whatever it
+// is given, so borrowing the popup's sentence would have shouted a full
+// sentence across the top of the page. Defaults to the client's exact wording.
+// Falls back to the banner title only if an operator deliberately blanks it.
+const MAINTENANCE_NOTICE_MODAL_TITLE = clampNoticeCopy(
+	String(process.env.MAINTENANCE_NOTICE_MODAL_TITLE ?? "Application is currently under maintenance").trim() || MAINTENANCE_NOTICE_TITLE,
+	MAINTENANCE_NOTICE_MAX.title, "MAINTENANCE_NOTICE_MODAL_TITLE");
 // Default copy: says the portal is mid-update, that figures may move, and that
 // nothing is locked — the thing investors are most likely to worry about.
 const MAINTENANCE_NOTICE_MESSAGE_DEFAULT =
@@ -18644,6 +18656,7 @@ app.get("/api/config/maintenance", (req, res) => {
 	res.json({
 		enabled: MAINTENANCE_NOTICE_ENABLED,
 		title: MAINTENANCE_NOTICE_TITLE,
+		modalTitle: MAINTENANCE_NOTICE_MODAL_TITLE,
 		message: MAINTENANCE_NOTICE_MESSAGE,
 		disclaimer: MAINTENANCE_NOTICE_DISCLAIMER,
 		audience: MAINTENANCE_NOTICE_AUDIENCE,

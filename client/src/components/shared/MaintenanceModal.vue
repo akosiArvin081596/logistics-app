@@ -45,7 +45,9 @@
           </svg>
         </div>
 
-        <h3 id="maintenance-modal-title" class="maintenance-title">{{ maintenance.title }}</h3>
+        <!-- modalTitle, NOT title — the banner's uppercase headline and this
+             popup's sentence are deliberately different strings. -->
+        <h3 id="maintenance-modal-title" class="maintenance-title">{{ maintenance.modalTitle }}</h3>
         <p id="maintenance-modal-message" class="maintenance-message">{{ maintenance.message }}</p>
 
         <!-- Set apart from the body copy on purpose — this is a caveat about
