@@ -53,8 +53,26 @@
         <template v-for="t in trucksWithROI" :key="t.id">
           <tr class="clickable-row" @click="toggleDetail(t.UnitNumber || t.unit_number)">
             <td class="photo-cell">
-              <img v-if="t.Photo" :src="t.Photo" class="truck-thumb" :alt="t.UnitNumber" />
-              <div v-else class="truck-thumb-placeholder">&#128665;</div>
+              <!-- Same full-size photo affordance as My Trucks — the investor sees
+                   the same trucks in both tables, so only one being clickable
+                   reads as a bug.
+                   .stop is LOAD-BEARING here (My Trucks needs no equivalent):
+                   this <tr> is a .clickable-row that toggles the expanded detail
+                   row, so without it one click would open the lightbox AND
+                   expand/collapse the row underneath it. -->
+              <img
+                v-if="t.Photo"
+                :src="t.Photo"
+                class="truck-thumb truck-thumb-clickable"
+                :alt="t.UnitNumber"
+                role="button"
+                tabindex="0"
+                :title="`View ${t.UnitNumber || 'truck'} full size`"
+                @click.stop="zoomTruck = t"
+                @keyup.enter.stop="zoomTruck = t"
+                @keyup.space.stop.prevent="zoomTruck = t"
+              />
+              <div v-else class="truck-thumb-placeholder" :title="`No photo on file for ${t.UnitNumber || 'this truck'}`">&#128665;</div>
             </td>
             <td class="unit-num">{{ t.UnitNumber }}</td>
             <td>{{ [t.Make, t.Model].filter(Boolean).join(' ') || '\u2014' }}</td>
@@ -143,6 +161,16 @@
     </div>
 
     <!-- Detail modal -->
+    <!-- Full-size vehicle photo, same shared viewer as My Trucks and the
+         Expenses receipt preview. Teleports to <body>, so its position here
+         is cosmetic. -->
+    <ZoomableImage
+      v-if="zoomTruck"
+      :src="zoomTruck.Photo"
+      :alt="`${zoomTruck.UnitNumber || 'Truck'}${zoomTruck.Year || zoomTruck.Make || zoomTruck.Model ? ' — ' : ''}${[zoomTruck.Year, zoomTruck.Make, zoomTruck.Model].filter(Boolean).join(' ')}`"
+      @close="zoomTruck = null"
+    />
+
     <MetricInfoDialog
       :open="!!detailType"
       :title="modalTitle"
@@ -242,6 +270,7 @@
 import { ref, computed } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import ZoomableImage from '../shared/ZoomableImage.vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -251,6 +280,10 @@ const props = defineProps({
 
 const expandedUnit = ref(null)
 function toggleDetail(unit) { expandedUnit.value = expandedUnit.value === unit ? null : unit }
+
+// The truck whose photo is open full-size, or null. Mirrors MyTrucks.vue —
+// holds the whole row so the viewer can name the vehicle, not just show pixels.
+const zoomTruck = ref(null)
 
 function perUnit(t) {
   const key = t.UnitNumber || t.unit_number || ''
@@ -394,6 +427,23 @@ const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle ||
 .truck-thumb {
   width: 38px; height: 28px; object-fit: cover;
   border-radius: 4px; display: block;
+}
+/* Only applied when a photo exists, so the affordance never lies. Matches
+   MyTrucks.vue — same trucks, same interaction, wherever the investor meets them.
+   zoom-in overrides the row's own pointer cursor, which is the visual cue that
+   this cell does something different from the rest of the (expandable) row. */
+.truck-thumb-clickable {
+  cursor: zoom-in;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.truck-thumb-clickable:hover { transform: scale(1.12); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); }
+.truck-thumb-clickable:focus-visible {
+  outline: 2px solid var(--accent, #6366f1);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .truck-thumb-clickable { transition: none; }
+  .truck-thumb-clickable:hover { transform: none; }
 }
 .truck-thumb-placeholder {
   width: 38px; height: 28px; border-radius: 4px;
