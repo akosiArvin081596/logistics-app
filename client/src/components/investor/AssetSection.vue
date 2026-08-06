@@ -140,7 +140,11 @@
             <span class="val danger">{{ asset.costPerMile ? '$' + asset.costPerMile.toFixed(2) : '—' }}</span>
           </div>
           <div class="modal-callout info">
-            For the truck to be profitable, Revenue / Mile must exceed Cost / Mile. The gap between the two is your gross margin per mile, before the 50/50 split.
+            <!-- "your profit split" rather than a percentage: the split lives on the
+                 production payload, and this component receives `asset` + `config`
+                 only. Threading `production` through InvestorView.vue to interpolate
+                 one word in one sentence isn't worth the coupling. -->
+            For the truck to be profitable, Revenue / Mile must exceed Cost / Mile. The gap between the two is your gross margin per mile, before your profit split.
           </div>
         </div>
       </template>
