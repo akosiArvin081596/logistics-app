@@ -1613,6 +1613,7 @@ async function routemateSyncTelemetry() {
 					driverName,
 					loadId: activeLoadId,
 					routemateVehicleId: t.routemate_vehicle_id,
+					speedMps: t.speed,
 				});
 			} catch (geoErr) {
 				console.error("routemate geofence error:", geoErr.message);
@@ -16378,36 +16379,132 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 // ============================================================
 
 const GEOFENCE_RADIUS = 1000; // meters
+// Departure needs the truck to actually be moving, not just to have drifted a
+// few metres while parked. Same threshold the driver-pay "active day" basis
+// uses for "traveled" (~5 mph), so the two notions of moving agree.
+const GEOFENCE_DEPART_SPEED_MPS = 2.235;
 
-function checkGeofence(lat, lng, loadData, headers) {
-	// Look for lat/lng columns for origin and destination
-	const originLatCol = headers.find((h) => /origin.*lat|pickup.*lat|shipper.*lat/i.test(h));
-	const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
-	const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
-	const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
+// Pickup/drop-off coordinates for a load.
+//
+// WHY THIS EXISTS: geofencing was written in full — radius, hysteresis, guards,
+// notifications — and then never fired once in production (zero rows of
+// source='geofence' against 197 manual status changes). The cause was that
+// coordinates were resolved ONLY from Job Tracking sheet columns, and that sheet
+// has 26 columns of which none is a latitude or longitude. checkGeofence
+// therefore returned [] on every ping, silently, forever.
+//
+// The coordinates do exist — in load_coordinates, written by
+// POST /api/loads/from-ratecon at ingestion and by the on-demand geocode. The
+// sheet stays PRIMARY so this keeps working if such columns are ever added;
+// load_coordinates is the fallback that actually carries the data today.
+const loadCoordsStmt = db.prepare(
+	`SELECT origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE load_id = ?`
+);
 
+// The previous clean fix for a vehicle. OFFSET 1 skips the ping currently being
+// processed (already INSERTed by the sync's txn). Used twice: arrival hysteresis
+// (previous fix must ALSO be inside the zone) and departure detection (previous
+// fix must have been inside the zone we just left).
+const prevCleanFixStmt = db.prepare(`
+	SELECT latitude, longitude
+	FROM routemate_telemetry
+	WHERE routemate_vehicle_id = ?
+	  AND dropped_reason = ''
+	  AND latitude IS NOT NULL
+	  AND longitude IS NOT NULL
+	ORDER BY id DESC
+	LIMIT 1 OFFSET 1
+`);
+
+// load_coordinates keys are not written consistently — from-ratecon stores the
+// raw sheet value while /api/geocode/load stores it lowercased with a leading
+// '#' stripped, and the sheet contains both "513987502" and "#513987502" forms.
+// Look both up rather than silently missing a row that exists.
+const normLoadKey = (id) => String(id || "").trim().toLowerCase().replace(/^#/, "");
+function getLoadCoordsRow(loadId) {
+	const raw = String(loadId || "").trim();
+	if (!raw) return null;
+	try {
+		return loadCoordsStmt.get(raw) || loadCoordsStmt.get(normLoadKey(raw)) || null;
+	} catch { return null; }
+}
+
+const upsertLoadCoordsStmt = db.prepare(
+	`INSERT OR REPLACE INTO load_coordinates
+	 (load_id, origin_lat, origin_lng, dest_lat, dest_lng, pickup_address, dropoff_address)
+	 VALUES (?, ?, ?, ?, ?, ?, ?)`
+);
+
+// Geofencing is a silent no-op for any load with no coordinates, and
+// load_coordinates is populated only opportunistically — at rate-con ingestion,
+// or when someone opens the load's map. n8n-ingested loads (the majority) get
+// no row until a human happens to look at them, so geofencing would stay dead
+// for exactly the loads nobody is watching. Fill the gap on first ping instead.
+//
+// Cheap by construction: the row here comes from the already-cached sheet (no
+// re-read), geocodeAddress() is backed by geocode_cache, and a successful write
+// means this never runs again for that load. Best-effort — never throws.
+async function ensureLoadCoordinates(loadId, loadObj, headers) {
+	const lid = normLoadKey(loadId);
+	if (!lid) return false;
+	try {
+		const existing = getLoadCoordsRow(loadId);
+		if (existing && existing.origin_lat != null && existing.dest_lat != null) return true;
+
+		const puCol = headers.find((h) => /pickup.*address|origin.*address|shipper.*address/i.test(h));
+		const doCol = headers.find((h) => /drop.?off.*address|dest.*address|receiver.*address|delivery.*address/i.test(h));
+		const pu = puCol ? String(loadObj[puCol] || "").trim() : "";
+		const dz = doCol ? String(loadObj[doCol] || "").trim() : "";
+		if (!pu && !dz) return false;
+
+		const [o, d] = await Promise.all([
+			pu ? geocodeAddress(pu) : Promise.resolve(null),
+			dz ? geocodeAddress(dz) : Promise.resolve(null),
+		]);
+		if (!o && !d) return false;
+		upsertLoadCoordsStmt.run(lid, o ? o.lat : null, o ? o.lng : null, d ? d.lat : null, d ? d.lng : null, pu, dz);
+		console.log(`[geofence] geocoded load ${lid} on demand (origin=${!!o} dest=${!!d})`);
+		return true;
+	} catch (err) {
+		console.error("ensureLoadCoordinates error:", err.message);
+		return false;
+	}
+}
+
+function resolveGeofencePoints(loadData, headers, loadId) {
+	const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+	const col = (re) => headers.find((h) => re.test(h));
+
+	const oLatCol = col(/origin.*lat|pickup.*lat|shipper.*lat/i);
+	const oLngCol = col(/origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i);
+	const dLatCol = col(/dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i);
+	const dLngCol = col(/dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i);
+
+	let oLat = oLatCol ? num(loadData[oLatCol]) : null;
+	let oLng = oLngCol ? num(loadData[oLngCol]) : null;
+	let dLat = dLatCol ? num(loadData[dLatCol]) : null;
+	let dLng = dLngCol ? num(loadData[dLngCol]) : null;
+
+	if ((oLat === null || oLng === null || dLat === null || dLng === null) && loadId) {
+		const row = getLoadCoordsRow(loadId);
+		if (row) {
+			if (oLat === null || oLng === null) { oLat = num(row.origin_lat); oLng = num(row.origin_lng); }
+			if (dLat === null || dLng === null) { dLat = num(row.dest_lat); dLng = num(row.dest_lng); }
+		}
+	}
+
+	return {
+		origin: (oLat !== null && oLng !== null) ? { latitude: oLat, longitude: oLng } : null,
+		dest: (dLat !== null && dLng !== null) ? { latitude: dLat, longitude: dLng } : null,
+	};
+}
+
+function checkGeofence(lat, lng, loadData, headers, loadId) {
+	const { origin, dest } = resolveGeofencePoints(loadData, headers, loadId);
+	const here = { latitude: lat, longitude: lng };
 	const triggers = [];
-
-	if (originLatCol && originLngCol) {
-		const oLat = parseFloat(loadData[originLatCol]);
-		const oLng = parseFloat(loadData[originLngCol]);
-		if (!isNaN(oLat) && !isNaN(oLng)) {
-			if (geolib.isPointWithinRadius({ latitude: lat, longitude: lng }, { latitude: oLat, longitude: oLng }, GEOFENCE_RADIUS)) {
-				triggers.push("At Shipper");
-			}
-		}
-	}
-
-	if (destLatCol && destLngCol) {
-		const dLat = parseFloat(loadData[destLatCol]);
-		const dLng = parseFloat(loadData[destLngCol]);
-		if (!isNaN(dLat) && !isNaN(dLng)) {
-			if (geolib.isPointWithinRadius({ latitude: lat, longitude: lng }, { latitude: dLat, longitude: dLng }, GEOFENCE_RADIUS)) {
-				triggers.push("At Receiver");
-			}
-		}
-	}
-
+	if (origin && geolib.isPointWithinRadius(here, origin, GEOFENCE_RADIUS)) triggers.push("At Shipper");
+	if (dest && geolib.isPointWithinRadius(here, dest, GEOFENCE_RADIUS)) triggers.push("At Receiver");
 	return triggers;
 }
 
@@ -16417,7 +16514,7 @@ function checkGeofence(lat, lng, loadData, headers) {
 // status, only transitions from a valid predecessor status, AND requires the
 // previous (non-dropped) telemetry fix to also be inside the same geofence
 // trigger so a single noisy ping can't flip status mid-highway-pass.
-async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId }) {
+async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, routemateVehicleId, speedMps }) {
 	if (!latitude || !longitude || !driverName || !loadId) return null;
 	try {
 		const jt = await getJobTrackingCached();
@@ -16431,18 +16528,43 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 			if (/^(delivered|completed|pod received|canceled|cancelled)$/i.test(rowStatus)) continue;
 			if (String(loadObj[loadIdCol] || "") !== String(loadId)) continue;
 
-			const triggers = checkGeofence(latitude, longitude, loadObj, headers);
-			if (triggers.length === 0) return null;
+			// No coordinates => checkGeofence can only ever return []. Geocode
+			// once from the addresses already on this row so the next ping works,
+			// rather than staying silently dead for the life of the load.
+			if (!resolveGeofencePoints(loadObj, headers, loadId).origin) {
+				await ensureLoadCoordinates(loadId, loadObj, headers);
+			}
+
+			const triggers = checkGeofence(latitude, longitude, loadObj, headers, loadId);
 			// With a 1000m radius a short-haul load whose pickup and drop sit
 			// within ~2km can fall inside BOTH geofences at once (checkGeofence
 			// then returns both). Pick the trigger whose predecessor matches the
 			// current status instead of taking triggers[0], so the correct
 			// transition still fires. checkGeofence only ever emits the two
 			// arrival statuses, so a completion status can never be auto-written.
-			const trigger = triggers.find((t) =>
+			let trigger = triggers.find((t) =>
 				(t === "At Shipper" && /^(dispatched|assigned|heading to shipper)$/i.test(rowStatus)) ||
 				(t === "At Receiver" && /^(in transit)$/i.test(rowStatus))
 			);
+
+			// DEPARTURE -> In Transit. Arrival alone gives a time-IN but no
+			// time-OUT, which is why detention has been invisible. Leaving the
+			// pickup zone under power is the departure signal: the truck was
+			// inside the shipper geofence on the previous fix, is outside it
+			// now, and is actually moving (not GPS drift while parked).
+			//
+			// Deliberately pickup-only. Leaving the RECEIVER is NOT automated —
+			// that would mean "delivered", and the hard rule here is that a
+			// completion status is never auto-written (POD depends on it).
+			let departed = false;
+			if (!trigger && /^(at shipper|loading)$/i.test(rowStatus) && !triggers.includes("At Shipper")
+				&& Number(speedMps) > GEOFENCE_DEPART_SPEED_MPS && routemateVehicleId) {
+				const prevFix = prevCleanFixStmt.get(routemateVehicleId);
+				if (prevFix && checkGeofence(prevFix.latitude, prevFix.longitude, loadObj, headers, loadId).includes("At Shipper")) {
+					trigger = "In Transit";
+					departed = true;
+				}
+			}
 			if (!trigger) return null;
 
 			// Dwell hysteresis (Tier 1, 2026-05-15). Require the *previous*
@@ -16451,21 +16573,15 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 			// drop a fix 150m sideways into the 1000m radius; demanding two
 			// consecutive fixes (≈30s at 15s polling) rules that out without
 			// adding meaningful latency to legitimate arrivals.
-			if (routemateVehicleId) {
-				const prevFix = db.prepare(`
-					SELECT latitude, longitude
-					FROM routemate_telemetry
-					WHERE routemate_vehicle_id = ?
-					  AND dropped_reason = ''
-					  AND latitude IS NOT NULL
-					  AND longitude IS NOT NULL
-					ORDER BY id DESC
-					LIMIT 1 OFFSET 1
-				`).get(routemateVehicleId);
+			// Arrivals only: a departure already proved the previous fix was
+			// inside the zone (that IS its signal), so re-checking it here
+			// would demand the truck be simultaneously in and out of the zone.
+			if (routemateVehicleId && !departed) {
+				const prevFix = prevCleanFixStmt.get(routemateVehicleId);
 				// OFFSET 1 because the CURRENT ping was already INSERTed by
 				// the txn above us; OFFSET 0 would just hand back our own row.
 				if (!prevFix) return null;
-				const prevTriggers = checkGeofence(prevFix.latitude, prevFix.longitude, loadObj, headers);
+				const prevTriggers = checkGeofence(prevFix.latitude, prevFix.longitude, loadObj, headers, loadId);
 				if (!prevTriggers.includes(trigger)) return null;
 			}
 
@@ -16484,7 +16600,9 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 
 			const geoMsg = trigger === "At Shipper"
 				? "You have arrived at the pickup location"
-				: "You have arrived at the delivery location";
+				: trigger === "In Transit"
+					? "Departed the pickup location — you're now in transit"
+					: "You have arrived at the delivery location";
 			const geoNotif = insertNotification.run(
 				driverName.trim().toLowerCase(), "geofence",
 				`${trigger} — Load ${loadId}`,
@@ -16500,7 +16618,9 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 			});
 			const dispatchMsg = trigger === "At Shipper"
 				? `${driverName} has arrived at the pickup location (Load ${loadId})`
-				: `${driverName} has arrived at the delivery location (Load ${loadId})`;
+				: trigger === "In Transit"
+					? `${driverName} has departed the pickup location (Load ${loadId})`
+					: `${driverName} has arrived at the delivery location (Load ${loadId})`;
 			insertDispatchNotification.run(
 				"geofence",
 				`${driverName}: ${trigger}`,
