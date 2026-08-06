@@ -434,6 +434,20 @@ catch { try { db.exec("ALTER TABLE trucks ADD COLUMN maintenance_fund_monthly RE
 // items; both are summed into each truck's monthly fixed cost everywhere.
 try { db.exec("ALTER TABLE trucks ADD COLUMN truck_payment_monthly REAL DEFAULT 0"); } catch {}
 
+// Migration: the month a truck actually enters service, i.e. the first month it
+// should be charged monthly fixed costs. Every fixed-cost gate used to key on
+// created_at, which is only when the row was TYPED INTO the Trucks UI — those
+// are not the same date and the gap costs real money: Logisx-#91 was entered
+// 2026-05-21 but did not go into service until 2026-08-04, so its $3,105.83/mo
+// was billed against May, June and July, understating that investor's July
+// payout by ~$1,553. (May/June were already frozen via finalized_breakdown, so
+// only the live-recomputing month showed it.)
+//
+// Bare 'YYYY-MM-DD', deliberately NOT backfilled: empty means "fall back to
+// created_at", so every existing row behaves exactly as it does today and this
+// column is additive + reversible. Read only through truckChargeFromMonth().
+try { db.exec("ALTER TABLE trucks ADD COLUMN in_service_date TEXT DEFAULT ''"); } catch {}
+
 // Trailers table
 db.exec(`
 	CREATE TABLE IF NOT EXISTS trailers (
@@ -8794,6 +8808,11 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			OwnerId: t.owner_id || 0,
 			Notes: t.notes,
 			CreatedAt: t.created_at,
+			// Bare 'YYYY-MM-DD' (or "" when unknown) — deliberately NOT run through
+			// TRUCK_CREATED_AT's strftime. This is a calendar date, not a UTC
+			// instant, and re-emitting it as ...T00:00:00Z is exactly how it would
+			// display a day early in Houston. Empty means "falls back to CreatedAt".
+			InServiceDate: t.in_service_date || '',
 			Photo: t.photo || '',
 			InsuranceMonthly: t.insurance_monthly || 0,
 			EldMonthly: t.eld_monthly || 0,
@@ -8847,6 +8866,44 @@ function parseDriverPayDaily(raw) {
 	return { value: n };
 }
 
+// In-service date — the month a truck starts accruing fixed costs
+// (truckChargeFromMonth). Shared by POST and PUT so the two can't drift.
+// Returns {error} | {value}, where value === undefined means "field not sent"
+// and "" means "unset, fall back to created_at".
+//
+// truckChargeFromMonth compares this as a STRING, so a value that is merely
+// well-formed enough to slice is not safe. Three things are checked:
+//   - the exact YYYY-MM-DD shape (the helper's own guard, enforced here too so
+//     the API rejects rather than silently falling back to created_at);
+//   - a real month, because '2026-13-01' passes a bare shape check and yields
+//     the start month '2026-13', which no 2026 month sorts above — the truck
+//     would book nothing until 2027;
+//   - a sane horizon, because a fat-fingered '2062-08-04' produces a start
+//     month that never arrives, so the truck books $0 fixed costs permanently
+//     (~$3k/mo quietly handed to the investor) with nothing to surface it.
+// 24 months is generous for a truck ordered well ahead of delivery.
+const IN_SERVICE_MAX_MONTHS_AHEAD = 24;
+function parseInServiceDate(raw) {
+	if (raw === undefined) return { value: undefined };
+	const day = String(raw || "").trim();
+	if (!day) return { value: "" };
+	const m = day.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+	if (!m) return { error: "in_service_date must be YYYY-MM-DD or empty" };
+	const mo = parseInt(m[2], 10), dd = parseInt(m[3], 10);
+	if (mo < 1 || mo > 12 || dd < 1 || dd > 31) {
+		return { error: "in_service_date must be a real calendar date (YYYY-MM-DD)" };
+	}
+	// Month arithmetic on a month index, so the cap can't be built with a Date
+	// (same bare-date/UTC trap truckChargeFromMonth documents).
+	const today = todayKeyCT();
+	const capIdx = parseInt(today.slice(0, 4), 10) * 12 + (parseInt(today.slice(5, 7), 10) - 1) + IN_SERVICE_MAX_MONTHS_AHEAD;
+	const cap = `${Math.floor(capIdx / 12)}-${String((capIdx % 12) + 1).padStart(2, "0")}`;
+	if (day.slice(0, 7) > cap) {
+		return { error: `in_service_date cannot be more than ${IN_SERVICE_MAX_MONTHS_AHEAD} months in the future` };
+	}
+	return { value: day };
+}
+
 // Truck Database: add a new truck
 app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	try {
@@ -8859,6 +8916,16 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		if (driverPayParsed.error) {
 			return res.status(400).json({ error: driverPayParsed.error });
 		}
+		// In-service date, same dual-case + same validator as the PUT. Optional:
+		// blank stores "" and the truck falls back to created_at, which for a
+		// freshly-added truck is usually right — but a truck entered ahead of the
+		// month it actually starts running needs to say so at creation, otherwise
+		// the Add form's field would be silently dropped here.
+		const inServiceCheck = parseInServiceDate(req.body.in_service_date ?? req.body.inServiceDate);
+		if (inServiceCheck.error) {
+			return res.status(400).json({ error: inServiceCheck.error });
+		}
+		const inServiceCreate = inServiceCheck.value || "";
 		// Investors auto-set owner_id to their own user ID
 		let finalOwnerId = parseInt(ownerId) || 0;
 		if (req.session.user.role === "Investor") {
@@ -8878,12 +8945,18 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			if (activeCheck) return res.status(409).json({ error: activeCheck });
 		}
 		const result = db.prepare(
-			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", finalOwnerId, driverPayParsed.value, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0, parseFloat(fuelTankGallons) || 0, parseFloat(avgMpg) || 0);
+			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", finalOwnerId, driverPayParsed.value, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0, parseFloat(fuelTankGallons) || 0, parseFloat(avgMpg) || 0, inServiceCreate);
 		// Create truck assignment record
 		if (assignedDriver && assignedDriver.trim()) {
 			assignDriverToTruck(result.lastInsertRowid, assignedDriver.trim());
 		}
+		// Audit creation, naming the in-service date. The PUT audits every change
+		// to that field because it re-books fixed costs across whole months; the
+		// value it starts at deserves the same trail, and this handler previously
+		// recorded nothing at all.
+		logAudit(req, "create_truck", "truck", String(result.lastInsertRowid),
+			`Created truck ${unitNumber.trim()} (${validStatus}), in-service date: ${inServiceCreate || "unset (falls back to created_at)"}`);
 		notifyChange("trucks");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -8914,6 +8987,16 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 				return res.status(400).json({ error: driverPayParsed.error });
 			}
 		}
+		// Validate the in-service date up front, for the same reason: it decides
+		// which months a truck is charged $1k+ of fixed costs, so a bad value must
+		// reject the edit rather than land as garbage in the column every
+		// fixed-cost gate reads. undefined = field not sent (leave the column
+		// alone); "" = explicitly cleared back to the created_at fallback.
+		const inServiceCheck = parseInServiceDate(req.body.in_service_date ?? req.body.inServiceDate);
+		if (inServiceCheck.error) {
+			return res.status(400).json({ error: inServiceCheck.error });
+		}
+		const inServiceParsed = inServiceCheck.value;
 		const updates = [];
 		const params = [];
 
@@ -8927,7 +9010,12 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (year !== undefined) { updates.push("year = ?"); params.push(parseInt(year) || 0); }
 		if (vin !== undefined) { updates.push("vin = ?"); params.push(vin); }
 		if (licensePlate !== undefined) { updates.push("license_plate = ?"); params.push(licensePlate); }
+		// Track the status that actually lands, not just `status !== undefined` —
+		// an unrecognized value is silently ignored here, and both the audit row
+		// and the in-service auto-stamp below must key on what was really written.
+		let newStatus = null;
 		if (status !== undefined && ["Active", "Inactive", "Maintenance", "OOS"].includes(status)) {
+			newStatus = status;
 			updates.push("status = ?"); params.push(status);
 		}
 		if (assignedDriver !== undefined) {
@@ -8956,6 +9044,21 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (fuelTankGallons !== undefined) { updates.push("fuel_tank_gallons = ?"); params.push(parseFloat(fuelTankGallons) || 0); }
 		if (avgMpg !== undefined) { updates.push("avg_mpg = ?"); params.push(parseFloat(avgMpg) || 0); }
 
+		// In-service date — the month a truck STARTS being charged fixed costs
+		// (truckChargeFromMonth). Written ONLY when the caller sends one. There is
+		// deliberately no auto-stamp on an Inactive/Maintenance→Active flip: the
+		// obvious guard for "is this a new truck" is "in_service_date is still
+		// empty", but the migration intentionally does not backfill, so TODAY that
+		// is true of every truck in the fleet. A legacy truck's first trip back
+		// from the shop would stamp itself with today's date and erase its entire
+		// cost history — measured at +$1,522 on one investor's July from an
+		// otherwise unrelated status change. Re-adding this needs a signal for
+		// "this row was created after the feature shipped", which needs the
+		// backfill we chose not to do.
+		if (inServiceParsed !== undefined) {
+			updates.push("in_service_date = ?"); params.push(inServiceParsed);
+		}
+
 		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 		params.push(id);
 		db.prepare(`UPDATE trucks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
@@ -8965,6 +9068,20 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			const fmtRate = (v) => (v > 0 ? `$${v}/day` : "default ($250/day)");
 			logAudit(req, "update_driver_pay", "truck", String(id),
 				`Driver daily pay for ${truck.unit_number}: ${fmtRate(truck.driver_pay_daily || 0)} → ${fmtRate(driverPayParsed.value)}`);
+		}
+		// Audit status changes for the same reason: Active/Inactive is what decides
+		// whether a truck's ~$3k/mo of fixed costs hits the P&L at all, and it used
+		// to be written with no trail of who flipped it or when.
+		if (newStatus && newStatus !== truck.status) {
+			logAudit(req, "update_truck_status", "truck", String(id),
+				`Status for ${truck.unit_number}: ${truck.status} → ${newStatus}`);
+		}
+		// An in-service date edit re-books fixed costs across whole months, so it
+		// gets the same treatment as a pay-rate change.
+		if (inServiceParsed !== undefined && inServiceParsed !== String(truck.in_service_date || "").trim()) {
+			const fmtDay = (v) => (v ? v : "unset (falls back to created_at)");
+			logAudit(req, "update_truck_in_service_date", "truck", String(id),
+				`In-service date for ${truck.unit_number}: ${fmtDay(String(truck.in_service_date || "").trim())} → ${fmtDay(inServiceParsed)}`);
 		}
 		// Log driver assignment change to history + sync to Carrier Database sheet
 		if (assignedDriver !== undefined) {
@@ -16099,9 +16216,9 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 		const currentValue = Math.round(totalPurchasePrice * 0.80);
 
 		// Helper: how many months does this truck appear in the report period?
-		// - With a date range: clamp to the range, bounded by created_at
-		// - All-time: from truck.created_at to now
-		// - Missing created_at (legacy data): fall back to the fleet-wide
+		// - With a date range: clamp to the range, bounded by the in-service date
+		// - All-time: from the truck's in-service date to now
+		// - Missing both dates (legacy data): fall back to the fleet-wide
 		//   earliest created_at, or to 1 month as a floor
 		const reportNow = new Date();
 		const fleetEarliestCreated = ownedTrucks2
@@ -16110,9 +16227,20 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			.reduce((min, d) => (min === null || d < min ? d : min), null);
 		function truckMonthsInPeriod(t) {
 			const createdAt = t.created_at ? new Date(t.created_at) : null;
-			const truckStart = (createdAt && !isNaN(createdAt))
+			// Same precedence and same start MONTH as truckChargeFromMonth
+			// (in_service_date first, else created_at) — but this site clamps
+			// against a caller-supplied date range, so it needs day granularity
+			// and builds a Date instead of consuming the helper's 'YYYY-MM'.
+			// Parsed component-wise on purpose: new Date('2026-08-01') is UTC
+			// midnight = 2026-07-31 19:00 in Houston, which would pull the truck
+			// back into the previous month. See truckChargeFromMonth.
+			const inService = String(t.in_service_date || "").trim();
+			const inServiceDate = /^\d{4}-\d{2}-\d{2}$/.test(inService)
+				? new Date(parseInt(inService.slice(0, 4), 10), parseInt(inService.slice(5, 7), 10) - 1, parseInt(inService.slice(8, 10), 10))
+				: null;
+			const truckStart = inServiceDate || ((createdAt && !isNaN(createdAt))
 				? createdAt
-				: fleetEarliestCreated; // legacy data fallback
+				: fleetEarliestCreated); // legacy data fallback
 			let start, end;
 			if (filterStart || filterEnd) {
 				start = filterStart || truckStart || reportNow;
@@ -16121,9 +16249,9 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 				start = truckStart || reportNow;
 				end = reportNow;
 			}
-			// If the truck was created after the period ended, zero months.
+			// If the truck entered service after the period ended, zero months.
 			if (truckStart && filterEnd && truckStart > filterEnd) return 0;
-			// Clamp start to truck creation.
+			// Clamp start to the truck's service start.
 			if (truckStart && start < truckStart) start = truckStart;
 			if (end < start) return 0;
 			const months = (end.getFullYear() - start.getFullYear()) * 12
@@ -18618,6 +18746,53 @@ function truckMonthlyFixed(t) {
 	return { insurance, eld, truckPayment, hvut, irp, total: Math.round((insurance + eld + truckPayment + hvut + irp) * 100) / 100 };
 }
 
+// The first 'YYYY-MM' a truck may be charged monthly fixed costs for, or "" when
+// we have no date at all (callers then charge every month — today's behavior for
+// a truck with neither date, so this is a no-op for existing rows).
+//
+// Companion to truckMonthlyFixed: that answers "how much per month", this answers
+// "starting which month". Both exist so a headline, its drill-down, the P&L and
+// the investor report cannot disagree — there were SEVEN independent copies of
+// this month gate, and fixing one of them would have made the drill-down
+// contradict the number it was explaining.
+//
+// in_service_date is the real answer. created_at is only when the row was typed
+// into the Trucks UI, which for Logisx-#91 was ~2.5 months before the truck ever
+// moved; charging from it billed May/June/July for a truck that entered service
+// 2026-08-04.
+//
+// ⚠️ The in_service_date branch slices the STRING, and that is load-bearing, not
+// style. in_service_date is a bare 'YYYY-MM-DD', which new Date() parses as UTC
+// midnight — in America/Chicago that is 19:00 the PREVIOUS day, so a truck in
+// service 2026-08-01 would read back as July and re-introduce the exact
+// off-by-one-month overcharge this helper exists to kill. Never round-trip a
+// bare date through Date here.
+//
+// ⚠️ The regex guard is equally load-bearing, because a slice cannot fail — it
+// just returns something wrong-shaped that still compares. '2026-8-4' (what a
+// hand-written UPDATE or a scripts/patch-*.js produces; the API validators
+// reject it, direct SQL does not) slices to '2026-8-', and index 5 of any real
+// 'YYYY-MM' is '0' or '1', both < '8' — so `monthKey < truckKey` is true for
+// EVERY month and the truck silently books $0 fixed costs forever, ~$1,553/mo
+// straight to the investor. 'not-a-date' behaves the same way. Anything not
+// exactly YYYY-MM-DD therefore falls through to created_at, which is a stale
+// answer but a sane one. This is the same regex truckMonthsInPeriod applies, so
+// the two agree on malformed input instead of diverging.
+//
+// The created_at branch deliberately keeps new Date(): created_at is
+// 'YYYY-MM-DD HH:MM:SS', which parses as LOCAL time and has no such shift. It is
+// reproduced byte-for-byte from the gate it replaces so nothing can regress for
+// the ~all rows that have no in_service_date yet.
+function truckChargeFromMonth(t) {
+	const inService = String(t.in_service_date || "").trim();
+	if (/^\d{4}-\d{2}-\d{2}$/.test(inService)) return inService.slice(0, 7);
+	if (t.created_at) {
+		const td = new Date(t.created_at);
+		return `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
+	}
+	return "";
+}
+
 // returns: { monthlyEarnings: [...], currentMonthKey }
 async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null }) {
 	const jobTracking = await getJobTrackingCached();
@@ -18887,19 +19062,17 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		).all().forEach(r => { if (r.m) monthlyCompliance[r.m] = r.t; });
 	}
 
-	// Monthly fixed costs — Active trucks only, charged from truck.created_at.
+	// Monthly fixed costs — Active trucks only, charged from the truck's
+	// in-service month (truckChargeFromMonth: in_service_date, else created_at).
 	const truckFixedQuery = investorDriverSet
-		? "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-		: "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
+		? "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE owner_id = ? AND status = 'Active'"
+		: "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE status = 'Active'";
 	const fixedTrucks = db.prepare(truckFixedQuery).all(...(investorDriverSet ? [user.id] : []));
 	const getMonthlyFixedCosts = (monthKey) => {
 		let total = 0;
 		for (const t of fixedTrucks) {
-			if (t.created_at) {
-				const td = new Date(t.created_at);
-				const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
-				if (monthKey < truckKey) continue;
-			}
+			const truckKey = truckChargeFromMonth(t);
+			if (truckKey && monthKey < truckKey) continue;
 			total += truckMonthlyFixed(t).total;
 		}
 		// Cents, not whole dollars — this figure is shown beside its own itemized
@@ -18907,15 +19080,14 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		return Math.round(total * 100) / 100;
 	};
 
-	// Fixed-cost line items for the drill-down month (same created_at inclusion
-	// guard as getMonthlyFixedCosts). Cleared below if the month is zero-activity.
+	// Fixed-cost line items for the drill-down month (same in-service inclusion
+	// guard as getMonthlyFixedCosts — if these two ever diverge the drill-down
+	// contradicts the headline it is supposed to explain). Cleared below if the
+	// month is zero-activity.
 	if (detail) {
 		for (const t of fixedTrucks) {
-			if (t.created_at) {
-				const td = new Date(t.created_at);
-				const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
-				if (detailForMonth < truckKey) continue;
-			}
+			const truckKey = truckChargeFromMonth(t);
+			if (truckKey && detailForMonth < truckKey) continue;
 			detail.fixedCostItems.push({ truck: t.unit_number || "", ...truckMonthlyFixed(t) });
 		}
 	}
@@ -19744,23 +19916,34 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// truck is flipped off Active in the Trucks UI, its IRP/HVUT/ELD/
 			// insurance stops accruing on the investor bottom-line.
 			const truckQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
+				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE owner_id = ? AND status = 'Active'"
+				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE status = 'Active'";
 			const truckArgs = investorDriverSet ? [user.id] : [];
 			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
 			for (const t of fleetTrucks) {
 				const fixedPerMonth = (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
 					+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
+				// Accrue from the in-service month, not the row's created_at — same
+				// start month the monthlyEarnings gate uses, so this all-time total
+				// stays the sum of the months shown below it.
 				let truckMonths = monthsOfOperation;
-				if (t.created_at) {
-					const truckDate = new Date(t.created_at);
-					if (!isNaN(truckDate)) {
-						truckMonths = Math.max(1,
-							(now.getFullYear() - truckDate.getFullYear()) * 12
-							+ (now.getMonth() - truckDate.getMonth()) + 1
-						);
-						truckMonths = Math.min(truckMonths, monthsOfOperation);
-					}
+				const chargeFrom = truckChargeFromMonth(t);
+				const startYear = parseInt(chargeFrom.slice(0, 4), 10);
+				const startMonthIdx = parseInt(chargeFrom.slice(5, 7), 10) - 1;
+				// Number.isFinite() rejects an unparseable date exactly as the old
+				// !isNaN(truckDate) guard did — fall through to full fleet months.
+				if (Number.isFinite(startYear) && Number.isFinite(startMonthIdx)) {
+					// Floor 0, not 1: a truck dated into the future accrues nothing
+					// yet. The old floor of 1 was unreachable while the start month
+					// could only come from created_at (never future), but
+					// forward-dating is now the actual workflow — #91 was entered
+					// 2026-05-21 for 2026-08-04 — and a floor of 1 would charge a
+					// month here while every monthly row correctly shows $0.
+					truckMonths = Math.max(0,
+						(now.getFullYear() - startYear) * 12
+						+ (now.getMonth() - startMonthIdx) + 1
+					);
+					truckMonths = Math.min(truckMonths, monthsOfOperation);
 				}
 				totalExpenses += fixedPerMonth * truckMonths;
 			}
@@ -19919,21 +20102,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// fix above. Reserve budget ≠ actual cost; actual maintenance
 			// flows through monthlyTripExp / maintByTruck.
 			const truckFixedQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
-				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'";
+				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE owner_id = ? AND status = 'Active'"
+				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE status = 'Active'";
 			const truckFixedArgs = investorDriverSet ? [user.id] : [];
 			const fixedTrucks = db.prepare(truckFixedQuery).all(...truckFixedArgs);
-			// Same shared per-truck math as computeInvestorMonthlyEarnings, so the
-			// dashboard and the payouts card never disagree on fixed costs.
+			// Same shared per-truck math AND the same start-month gate as
+			// computeInvestorMonthlyEarnings, so the dashboard and the payouts card
+			// never disagree on fixed costs.
 			function getMonthlyFixedCosts(monthKey) {
 				let total = 0;
 				for (const t of fixedTrucks) {
-					// Only count if truck existed in this month
-					if (t.created_at) {
-						const td = new Date(t.created_at);
-						const truckKey = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
-						if (monthKey < truckKey) continue; // truck didn't exist yet
-					}
+					// Only count from the month the truck entered service
+					const truckKey = truckChargeFromMonth(t);
+					if (truckKey && monthKey < truckKey) continue; // not in service yet
 					total += truckMonthlyFixed(t).total;
 				}
 				return Math.round(total * 100) / 100;
@@ -20051,13 +20232,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// fleet totalExpenses loop and /api/financials.
 				const fixedPerMonth = (truck.insurance_monthly || 0) + (truck.eld_monthly || 0) + (truck.truck_payment_monthly || 0)
 					+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12);
+				// Accrue from the in-service month — same gate as the fleet
+				// totalExpenses loop above, so this per-truck table stays a
+				// breakdown OF that total rather than a second opinion.
+				// Floor 0: a forward-dated truck accrues nothing yet (see the
+				// fleet loop above for why the old floor of 1 was safe until
+				// in_service_date made future start months reachable).
 				let truckMonths = monthsOfOperation;
-				if (truck.created_at) {
-					const td = new Date(truck.created_at);
-					if (!isNaN(td)) {
-						truckMonths = Math.max(1, (now.getFullYear() - td.getFullYear()) * 12 + (now.getMonth() - td.getMonth()) + 1);
-						truckMonths = Math.min(truckMonths, monthsOfOperation);
-					}
+				const chargeFrom = truckChargeFromMonth(truck);
+				const sy = parseInt(chargeFrom.slice(0, 4), 10);
+				const sm = parseInt(chargeFrom.slice(5, 7), 10) - 1;
+				if (Number.isFinite(sy) && Number.isFinite(sm)) {
+					truckMonths = Math.max(0, (now.getFullYear() - sy) * 12 + (now.getMonth() - sm) + 1);
+					truckMonths = Math.min(truckMonths, monthsOfOperation);
 				}
 				const driverPay = driverPayDetails[driverName]?.totalPay || 0;
 				const unitTotalExpenses = varExp + maintExp + compExp + (fixedPerMonth * truckMonths) + driverPay;
@@ -21843,10 +22030,16 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					(last.getFullYear() - first.getFullYear()) * 12
 					+ (last.getMonth() - first.getMonth()) + 1
 				);
-			} else if (t.created_at) {
-				const td = new Date(t.created_at);
-				if (!isNaN(td)) {
-					truckMonths = Math.max(1, (now.getFullYear() - td.getFullYear()) * 12 + (now.getMonth() - td.getMonth()) + 1);
+			} else {
+				// No loads: accrue from the in-service month (in_service_date, else
+				// created_at) rather than the day the row was entered in the UI.
+				// Floor 0 so a forward-dated truck accrues nothing yet, matching
+				// the $0 its monthly rows show.
+				const chargeFrom = truckChargeFromMonth(t);
+				const sy = parseInt(chargeFrom.slice(0, 4), 10);
+				const sm = parseInt(chargeFrom.slice(5, 7), 10) - 1;
+				if (Number.isFinite(sy) && Number.isFinite(sm)) {
+					truckMonths = Math.max(0, (now.getFullYear() - sy) * 12 + (now.getMonth() - sm) + 1);
 					truckMonths = Math.min(truckMonths, monthsOfOperation);
 				}
 			}
@@ -21917,9 +22110,12 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				+ ((truck.hvut_annual || 0) / 12) + ((truck.irp_annual || 0) / 12);
 
 			// Operating window: prefer the actual range of load dates for
-			// THIS truck. Falls back to created_at-capped fleet months only
+			// THIS truck. Falls back to in-service-capped fleet months only
 			// when the truck has no recorded loads (then it's all overhead
 			// and Net should be negative — that's accurate, not a bug).
+			// MUST stay identical to the fleet totalFixedCosts loop above:
+			// that KPI is documented as reconciling to sum(perTruck.fixedTotal),
+			// so moving one start month without the other silently breaks it.
 			let truckMonths = monthsOfOperation;
 			if (truckLoadDates[unitLower]) {
 				const { first, last } = truckLoadDates[unitLower];
@@ -21927,10 +22123,13 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					(last.getFullYear() - first.getFullYear()) * 12
 					+ (last.getMonth() - first.getMonth()) + 1
 				);
-			} else if (truck.created_at) {
-				const td = new Date(truck.created_at);
-				if (!isNaN(td)) {
-					truckMonths = Math.max(1, (now.getFullYear() - td.getFullYear()) * 12 + (now.getMonth() - td.getMonth()) + 1);
+			} else {
+				// Floor 0, same as the fleet loop — these two must not diverge.
+				const chargeFrom = truckChargeFromMonth(truck);
+				const sy = parseInt(chargeFrom.slice(0, 4), 10);
+				const sm = parseInt(chargeFrom.slice(5, 7), 10) - 1;
+				if (Number.isFinite(sy) && Number.isFinite(sm)) {
+					truckMonths = Math.max(0, (now.getFullYear() - sy) * 12 + (now.getMonth() - sm) + 1);
 					truckMonths = Math.min(truckMonths, monthsOfOperation);
 				}
 			}
@@ -22140,21 +22339,18 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			}
 
 			// Fixed costs per month — constant per Active truck for every month
-			// from its created_at onward (maintenance-fund reserve omitted, same
-			// as the fleet totals).
+			// from its in-service month onward (maintenance-fund reserve omitted,
+			// same as the fleet totals). Whole dollars here, unlike the investor
+			// drill-down's cents — that rounding is this chart's own convention and
+			// is left alone.
 			const fixedTrucks = db.prepare(
-				"SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at FROM trucks WHERE status = 'Active'"
+				"SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE status = 'Active'"
 			).all();
 			const monthlyFixedCosts = (mk) => {
 				let total = 0;
 				for (const t of fixedTrucks) {
-					if (t.created_at) {
-						const td = new Date(t.created_at);
-						if (!isNaN(td)) {
-							const truckKey = `${td.getFullYear()}-${pad(td.getMonth() + 1)}`;
-							if (mk < truckKey) continue; // truck didn't exist yet
-						}
-					}
+					const truckKey = truckChargeFromMonth(t);
+					if (truckKey && mk < truckKey) continue; // not in service yet
 					total += (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
 						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 				}
