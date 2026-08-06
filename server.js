@@ -1534,6 +1534,19 @@ async function routemateSyncTelemetry() {
 		// waiting for the 30 s HTTP poll cycle.
 		const activeRe = /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i;
 		const loadIdByDriver = {};
+		// Geofencing needs EVERY active load for a driver, not just the first.
+		// Queueing is a supported workflow (see POST /api/dispatch), so a driver
+		// routinely carries two. loadIdByDriver keeps first-match-wins because
+		// the public tracker fan-out below depends on that shape; changing it
+		// would alter customer-facing tracking as a side effect. So the geofence
+		// gets its own driver -> [loads] map instead.
+		//
+		// First-match-wins is not merely "1 of 2 tracked": rows arrive in
+		// rate-con order, so the OLDEST load holds the slot until it is
+		// completed — starving every later load that driver takes. A load left
+		// sitting in Dispatched (exactly what happened to 561151778) would
+		// silently block automation on the load actually being driven.
+		const activeLoadsByDriver = {};
 		try {
 			const jt = await getJobTrackingCached();
 			const headers = jt.headers || [];
@@ -1548,6 +1561,7 @@ async function routemateSyncTelemetry() {
 					if (!d || !lid) continue;
 					if (!activeRe.test(s)) continue;
 					if (!loadIdByDriver[d]) loadIdByDriver[d] = lid;
+					(activeLoadsByDriver[d] = activeLoadsByDriver[d] || []).push({ loadId: lid, status: s });
 				}
 			}
 		} catch { /* lookup is best-effort — emit still happens to dispatch */ }
@@ -1604,19 +1618,31 @@ async function routemateSyncTelemetry() {
 			if (!driverName) continue;
 			if (!Number.isFinite(t.latitude) || !Number.isFinite(t.longitude)) continue;
 			if (t.latitude === 0 && t.longitude === 0) continue;
-			const activeLoadId = loadIdByDriver[driverName.trim().toLowerCase()] || "";
-			if (!activeLoadId) continue;
-			try {
-				await tryGeofenceAdvance({
-					latitude: t.latitude,
-					longitude: t.longitude,
-					driverName,
-					loadId: activeLoadId,
-					routemateVehicleId: t.routemate_vehicle_id,
-					speedMps: t.speed,
-				});
-			} catch (geoErr) {
-				console.error("routemate geofence error:", geoErr.message);
+			// Evaluate EVERY active load for this driver, most-progressed first.
+			// Safe by construction: tryGeofenceAdvance only advances a load whose
+			// CURRENT status is the valid predecessor for the zone it is in, so
+			// at most one candidate can be in a firing state for a given zone —
+			// two loads cannot both advance off one ping. Ordering only decides
+			// who gets asked first, and it stops early on the first advance so a
+			// single ping never writes two rows.
+			const candidates = (activeLoadsByDriver[driverName.trim().toLowerCase()] || [])
+				.slice()
+				.sort((a, b) => statusProgressRank(b.status) - statusProgressRank(a.status));
+			if (!candidates.length) continue;
+			for (const cand of candidates) {
+				try {
+					const advanced = await tryGeofenceAdvance({
+						latitude: t.latitude,
+						longitude: t.longitude,
+						driverName,
+						loadId: cand.loadId,
+						routemateVehicleId: t.routemate_vehicle_id,
+						speedMps: t.speed,
+					});
+					if (advanced) break;   // one transition per ping
+				} catch (geoErr) {
+					console.error("routemate geofence error:", geoErr.message);
+				}
 			}
 		}
 	} catch (err) {
@@ -12656,6 +12682,12 @@ async function ingestLinxupPosition(pos) {
 	if (!droppedReason && driverName) {
 		const driverLower = driverName.trim().toLowerCase();
 		let activeLoadId = "";
+		// Every active load for this driver, most-progressed first — same reason
+		// as the Routemate path: queueing is supported, and first-match-by-row
+		// is rate-con arrival order, which picks the STALEST load and starves the
+		// one actually being driven. activeLoadId (first match) is kept for the
+		// location payload / tracker, which expects a single id.
+		let driverActiveLoads = [];
 		try {
 			const jt = await getJobTrackingCached();
 			const headers = jt.headers || [];
@@ -12666,10 +12698,14 @@ async function ingestLinxupPosition(pos) {
 			if (loadIdCol && statusCol && driverCol) {
 				for (const r of (jt.data || [])) {
 					if ((r[driverCol] || "").toString().trim().toLowerCase() !== driverLower) continue;
-					if (!activeRe.test((r[statusCol] || "").toString().trim())) continue;
-					activeLoadId = (r[loadIdCol] || "").toString().trim();
-					if (activeLoadId) break;
+					const s = (r[statusCol] || "").toString().trim();
+					if (!activeRe.test(s)) continue;
+					const lid = (r[loadIdCol] || "").toString().trim();
+					if (!lid) continue;
+					if (!activeLoadId) activeLoadId = lid;
+					driverActiveLoads.push({ loadId: lid, status: s });
 				}
+				driverActiveLoads.sort((a, b) => statusProgressRank(b.status) - statusProgressRank(a.status));
 			}
 		} catch { /* best-effort */ }
 		const headingDeg = parseRoutemateBearing(pos.bearing);
@@ -12686,12 +12722,18 @@ async function ingestLinxupPosition(pos) {
 		};
 		io.to("dispatch").emit("location-update", locationPayload);
 		if (driverLower) io.to(driverLower).emit("location-update", locationPayload);
-		if (activeLoadId) {
+		for (const cand of driverActiveLoads) {
 			try {
-				await tryGeofenceAdvance({
+				const advanced = await tryGeofenceAdvance({
 					latitude: pos.latitude, longitude: pos.longitude,
-					driverName, loadId: activeLoadId, routemateVehicleId: vehicleId,
+					driverName, loadId: cand.loadId, routemateVehicleId: vehicleId,
+					// WAS MISSING: without speed, the departure rule can never
+					// fire, so "In Transit" would silently stop working the day
+					// Linxup replaces the Routemate poller — taking the time-out
+					// half of detention with it.
+					speedMps: pos.speed,
 				});
+				if (advanced) break;   // one transition per ping
 			} catch (e) { console.error("[linxup] geofence error:", e.message); }
 		}
 	}
@@ -16550,6 +16592,20 @@ const GEOFENCE_RADIUS = 1000; // meters
 // few metres while parked. Same threshold the driver-pay "active day" basis
 // uses for "traveled" (~5 mph), so the two notions of moving agree.
 const GEOFENCE_DEPART_SPEED_MPS = 2.235;
+
+// How far along its lifecycle a load is. Used to order a driver's active loads
+// when they carry more than one (queueing is supported, so this is routine):
+// the most-progressed load is the one they are actually working, so it gets
+// evaluated first. Sheet row order — the previous tie-break — is rate-con
+// arrival order, which reliably picks the STALEST load instead.
+// Unknown statuses rank -1 so they are asked last rather than first.
+const STATUS_PROGRESS = [
+	"assigned", "dispatched", "heading to shipper", "at shipper",
+	"loading", "in transit", "at receiver", "unloading",
+];
+function statusProgressRank(status) {
+	return STATUS_PROGRESS.indexOf(String(status || "").trim().toLowerCase());
+}
 
 // Pickup/drop-off coordinates for a load.
 //
