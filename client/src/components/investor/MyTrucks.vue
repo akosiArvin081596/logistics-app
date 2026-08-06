@@ -65,8 +65,24 @@
       <tbody>
         <tr v-for="t in trucks" :key="t.id">
           <td class="photo-cell">
-            <img v-if="t.Photo" :src="t.Photo" class="truck-thumb" :alt="t.UnitNumber" />
-            <div v-else class="truck-thumb-placeholder">&#128665;</div>
+            <!-- Click to see the vehicle full-size. Costs no extra network: the
+                 truck photo is already a base64 data URL in this payload, so the
+                 48px thumbnail and the lightbox are the SAME bytes, already
+                 loaded. Only rendered as a button when there is a photo — a
+                 clickable placeholder that opens nothing is worse than a plain one. -->
+            <img
+              v-if="t.Photo"
+              :src="t.Photo"
+              class="truck-thumb truck-thumb-clickable"
+              :alt="t.UnitNumber"
+              role="button"
+              tabindex="0"
+              :title="`View ${t.UnitNumber || 'truck'} full size`"
+              @click="zoomTruck = t"
+              @keyup.enter="zoomTruck = t"
+              @keyup.space.prevent="zoomTruck = t"
+            />
+            <div v-else class="truck-thumb-placeholder" :title="`No photo on file for ${t.UnitNumber || 'this truck'}`">&#128665;</div>
           </td>
           <td class="mono bold">{{ t.UnitNumber }}</td>
           <td>{{ t.Year || '-' }}</td>
@@ -84,6 +100,17 @@
         </tr>
       </tbody>
     </table>
+
+    <!-- Full-size vehicle photo. Same shared viewer the Expenses receipt
+         preview uses (wheel/pinch zoom, drag-pan, Esc/backdrop to close), so
+         an investor gets one consistent image experience across the portal.
+         Teleports to <body>, so its position here is cosmetic. -->
+    <ZoomableImage
+      v-if="zoomTruck"
+      :src="zoomTruck.Photo"
+      :alt="`${zoomTruck.UnitNumber || 'Truck'}${zoomTruck.Year || zoomTruck.Make || zoomTruck.Model ? ' — ' : ''}${[zoomTruck.Year, zoomTruck.Make, zoomTruck.Model].filter(Boolean).join(' ')}`"
+      @close="zoomTruck = null"
+    />
 
     <!-- Detail modal -->
     <MetricInfoDialog
@@ -158,6 +185,7 @@ import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useInvestorStore } from '../../stores/investor'
 import MetricInfoDialog from './MetricInfoDialog.vue'
+import ZoomableImage from '../shared/ZoomableImage.vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -230,6 +258,10 @@ function statusClass(s) {
 }
 
 // --- Detail modal ---
+// The truck whose photo is open full-size, or null. Holds the whole row (not
+// just the src) so the viewer's alt text can name the actual vehicle.
+const zoomTruck = ref(null)
+
 const detailType = ref('')
 function openDetail(type) { detailType.value = type }
 
@@ -311,6 +343,22 @@ async function addTruck() {
 .truck-thumb {
   width: 48px; height: 36px; object-fit: cover;
   border-radius: 4px; display: block;
+}
+/* Only applied when a photo actually exists, so the affordance never lies. */
+.truck-thumb-clickable {
+  cursor: zoom-in;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.truck-thumb-clickable:hover { transform: scale(1.08); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); }
+/* Keyboard users get the same discoverability as the mouse hover — this cell is
+   reachable by Tab and the table's other interactive elements are focusable too. */
+.truck-thumb-clickable:focus-visible {
+  outline: 2px solid var(--accent, #6366f1);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .truck-thumb-clickable { transition: none; }
+  .truck-thumb-clickable:hover { transform: none; }
 }
 .truck-thumb-placeholder {
   width: 48px; height: 36px; border-radius: 4px;
