@@ -13,24 +13,45 @@
     <span></span><span></span><span></span>
   </button>
   <main :class="['main', { 'no-sidebar': !showSidebar, 'main--mobile': isMobile && showSidebar }]">
+    <!-- Sticky "system updating" bar. Lives INSIDE <main> so it inherits the
+         sidebar offset on desktop and spans full width on mobile, and so it
+         scrolls within the content column rather than floating over the
+         sidebar. Renders nothing unless the maintenance flag is on and the
+         viewer is in the configured audience. -->
+    <MaintenanceBanner />
     <router-view />
   </main>
   <AppToast />
+  <!-- Teleports to <body>, so its position in this tree is cosmetic. Kept
+       outside <main> to make it obvious it is not part of the page flow. -->
+  <MaintenanceModal />
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import { useViewport } from './composables/useViewport'
 import { useAppShellStore } from './stores/appShell'
+import { useMaintenanceStore } from './stores/maintenance'
 import AppSidebar from './components/layout/AppSidebar.vue'
 import AppToast from './components/layout/AppToast.vue'
+import MaintenanceBanner from './components/shared/MaintenanceBanner.vue'
+import MaintenanceModal from './components/shared/MaintenanceModal.vue'
 
 const route = useRoute()
 const auth = useAuthStore()
 const { isMobile } = useViewport()
 const appShell = useAppShellStore()
+const maintenance = useMaintenanceStore()
+
+// Fetched once for the whole app. Safe to fire before the session resolves:
+// the store's `active` getter also depends on the auth store, so it stays
+// false until a session lands and then flips reactively — including on an
+// in-SPA login, which is why there is no refetch on route change.
+onMounted(() => {
+  maintenance.fetchConfig()
+})
 
 const showSidebar = computed(() => {
   if (!auth.isAuthenticated) return false

@@ -6,6 +6,8 @@
       <span class="section-sub">monthly investor settlements</span>
     </div>
 
+    <MaintenanceDisclaimer compact />
+
     <div v-if="loading" class="skeleton skeleton-card"></div>
 
     <template v-else-if="loadFailed">
@@ -476,6 +478,7 @@ import MetricInfoDialog from './MetricInfoDialog.vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../ui/dialog'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
 import { fmtYmd, fmtTimestamp } from '../../utils/datetime'
+import MaintenanceDisclaimer from '../shared/MaintenanceDisclaimer.vue'
 
 const props = defineProps({
   // Super Admin previewing an investor's portal — appended to the payouts

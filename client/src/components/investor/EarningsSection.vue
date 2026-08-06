@@ -16,6 +16,8 @@
       </div>
     </div>
 
+    <MaintenanceDisclaimer compact />
+
     <template v-if="selected">
       <!-- Earnings Card — clickable -->
       <div
@@ -699,6 +701,7 @@ import { formatCurrency as fmt } from '../../utils/format'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
+import MaintenanceDisclaimer from '../shared/MaintenanceDisclaimer.vue'
 
 const props = defineProps({
   production: { type: Object, default: () => ({}) },

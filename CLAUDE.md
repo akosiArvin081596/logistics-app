@@ -62,6 +62,12 @@ SCANKIT_BASE_URL=<optional — ScanKit.io API base; defaults to https://api.scan
 SCANKIT_API_KEY=<optional — ScanKit.io key (sk_...) for document scanning; scanner returns 503 + raw-photo fallback when unset>
 SCANKIT_ENABLED=<optional — set "true" to enable; defaults off so the feature ships dormant>
 INVOICE_AUTOGEN_ENABLED=<optional — set "true" to enable the Friday 4 PM ET auto-generate-and-submit invoice batch; defaults off (moves money) so it ships dormant>
+MAINTENANCE_NOTICE_ENABLED=<optional — set "true" to show investors the maintenance popup + red banner; defaults off so it ships dormant>
+MAINTENANCE_NOTICE_TITLE=<optional — banner/popup heading; defaults to "SYSTEM UPDATE IN PROGRESS">
+MAINTENANCE_NOTICE_MESSAGE=<optional — supporting sentence under the heading>
+MAINTENANCE_NOTICE_DISCLAIMER=<optional — the figures caveat; defaults to the client's wording, "The final settlements are still being calculated.">
+MAINTENANCE_NOTICE_AUDIENCE=<optional — "investor" (default) or "all"; anything unrecognized falls back to "investor">
+MAINTENANCE_NOTICE_VERSION=<optional — bump to re-show the popup to everyone who already dismissed it; defaults to 1>
 PORT=3000  # optional, defaults to 3000
 ```
 
@@ -244,6 +250,7 @@ REST endpoints (grouped by domain):
 - `GET /api/route` — route directions via Google Maps
 - `/api/geocode`, `/api/geocode/search`, `/api/geocode/bulk`, `/api/geocode/load/:loadId` — geocoding with SQLite cache
 - `GET /api/config/maps-key` — expose Google Maps API key to frontend
+- `GET /api/config/maintenance` — investor maintenance-notice copy (see "Investor maintenance notice" below). No auth, same reasoning as `maps-key`: static copy, fetched at SPA boot before the session resolves.
 - `GET /api/fuel/range?driver=|vehicleId=` — miles-left-in-tank from the assigned truck's latest ELD `fuel_pct` × `trucks.fuel_tank_gallons` (or 200 default) × MPG (ELD-derived, else `trucks.avg_mpg`/6.5). Returns `hasFuelData:false` (→ frontend hides the panel) when the device reports no fuel. Powers the tracking Fuel Finder.
 - `GET /api/poi/fuel-stops?loadId=|originLat=&originLng=&destLat=&destLng=[&limit=]` — diesel truck stops along a load's route (Google Places). Each stop carries `dieselPrice` (live pump price via `fuelOptions`), `priceSource` (`'station'` | `null`), and `effectivePrice` (the live price, or `null` → UI shows "price n/a"). The endpoint **ranks true-cheapest-first** (live prices ascending, then no-price stops by distance) and returns `cheapest` + `livePriceCount`. No regional-average fallback — a coarse estimate would sort as if it were the cheapest stop. `poiLimiter`-capped (`fuelOptions` bumps these to the higher Places SKU). Feeds the tracking-map POI layer + cheapest-diesel list.
 - `GET /api/weather` — weather data for coordinates
@@ -309,6 +316,14 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 | `poiLimiter` | 15 min | 60 | `GET /api/poi/fuel-stops` (each request fans out to several billed Google Places calls) |
 
 The 60s in-memory Job Tracking cache (`getJobTrackingCached()`) is the other core throttle — it absorbs bursty dashboard traffic so the Sheets 300 req/min quota isn't a real constraint day-to-day.
+
+### Investor maintenance notice
+Client ask (2026-08-06): while the app is mid-update, tell investors so — **without locking them out**. Their words: *"put a notice on top that system is updating. Make it big and bold and red so they know that this is under maintenance but don't knock him out of it."* Three surfaces, one flag:
+- **Popup on login** (`components/shared/MaintenanceModal.vue`) — dismissible four ways (X, primary button, Escape, backdrop), all funnelling through `dismissModal()`. **One-shot per session** via `sessionStorage` keyed on `MAINTENANCE_NOTICE_VERSION`, so a fresh login shows it again and bumping the version re-shows it to everyone who dismissed it.
+- **Red top banner** (`components/shared/MaintenanceBanner.vue`) — sticky, mounted inside `<main>` in `App.vue`. `z-index: 30`, i.e. **below** the mobile drawer backdrop (40) so opening the drawer dims it with the rest of the page; its mobile left-padding is computed from the hamburger's geometry so the title never hides under that button. `role="status"` + `aria-live="polite"`, never `alert`/`assertive` — it is persistent, not an interruption.
+- **Figures disclaimer** (`components/shared/MaintenanceDisclaimer.vue`, `compact` prop) — placed next to the money in `InvestorView`, `EarningsSection` and `PayoutsSection`, so an investor who dismissed the popup and scrolled past the banner still sees the caveat beside the numbers. Deliberately **not** also in `MyPayoutsView`: `PayoutsSection` already renders one there and two adjacent amber callouts read as a glitch.
+
+**Nothing gates.** No route guard, no forced acknowledgment — that is the client's hard constraint, so keep it that way. `MAINTENANCE_NOTICE_ENABLED` **defaults off**, matching the other ships-dormant flags; with it off `maintenance.active` is false and all three components render zero DOM. Copy lives in env (retune with a `pm2 restart`, no redeploy) and is served by `GET /api/config/maintenance`. `stores/maintenance.js` is the single contract: `active` gates every surface, `inAudience` resolves `MAINTENANCE_NOTICE_AUDIENCE` (`investor` also covers a Super Admin inside the read-only investor-portal preview, so the preview keeps showing what the investor sees). A failed config fetch leaves `enabled:false` — a network blip must never invent a maintenance notice.
 
 ### Load ingestion — two paths, one shape
 A load reaches Job Tracking two ways. **They must stay in lockstep** — a load that arrived one way has to be indistinguishable from one that arrived the other.

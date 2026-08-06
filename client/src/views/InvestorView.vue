@@ -58,6 +58,11 @@
 
     <!-- Dashboard Content -->
     <template v-else-if="store.data">
+      <!-- No page-level maintenance disclaimer here: EarningsSection renders
+           its own compact one directly below its header, which lands a single
+           row under this point, and PayoutsSection carries another further
+           down. Two copies of the same sentence separated only by a section
+           header read as a rendering glitch. Same call as MyPayoutsView. -->
       <EarningsSection
         :production="store.production"
         :is-super-admin="false"
