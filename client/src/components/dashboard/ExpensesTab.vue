@@ -524,7 +524,30 @@
         <div class="skeleton skeleton-card"></div>
       </template>
       <template v-else>
-        <div class="metrics-grid">
+        <!-- Reconciliation bar — the ActiveLoadsTab "Needs Review" affordance,
+             transplanted. Renders ONLY when this server actually answers the
+             "did every fuel-up meet a receipt?" question: an older build sends
+             neither array, and staying quiet there is the honest degrade,
+             because an empty queue and an unanswerable one mean opposite
+             things. Toggling one narrows the panel to that queue, exactly as
+             the load filter narrows its table. -->
+        <div v-if="fuelReviewAvailable" class="fuel-review-bar">
+          <button
+            v-for="q in reviewToggles"
+            :key="q.key"
+            type="button"
+            :style="fuelReviewToggleStyle(q.key)"
+            :aria-pressed="reviewFocus === q.key"
+            :title="reviewFocus === q.key ? q.onTitle : q.offTitle"
+            @click="toggleReviewFocus(q.key)"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            {{ q.label }} {{ queueCountText(q) }}
+          </button>
+          <span v-if="reviewClearText" class="fuel-review-clear">{{ reviewClearText }}</span>
+        </div>
+
+        <div v-if="!reviewFocus" class="metrics-grid">
           <div class="metric-card">
             <div class="metric-label">Total Fuel Spend</div>
             <div class="metric-value">${{ fuel.totalFuelSpend?.toLocaleString() || 0 }}</div>
@@ -533,18 +556,394 @@
             <div class="metric-label">Total Gallons</div>
             <div class="metric-value">{{ fuel.totalGallons || 0 }}</div>
           </div>
+          <!-- The currency sign lives INSIDE the branch: with no gallons on file
+               this divides to 0 and the old markup rendered a literal "$—". -->
           <div class="metric-card">
             <div class="metric-label">Avg $/Gallon</div>
-            <div class="metric-value">${{ fuel.avgCostPerGallon || '—' }}</div>
+            <div class="metric-value" :class="{ 'metric-value-empty': !fuel.avgCostPerGallon }">
+              {{ fuel.avgCostPerGallon ? '$' + fuel.avgCostPerGallon : '—' }}
+            </div>
+            <div v-if="!fuel.avgCostPerGallon && !fuel.totalGallons" class="metric-sub metric-sub-empty" title="Average price per gallon needs gallons to divide by. No fuel receipt on file records a volume yet — the “Receipts missing gallons” queue below is where that comes from.">
+              No gallons recorded yet
+            </div>
           </div>
+          <!-- Cost/mile is a FLOOR, not a measurement: the miles span the whole
+               truck while the spend only counts receipts we actually hold, so
+               every missing receipt pushes it down. The basis line is what stops
+               it being read as exact — and it is also the number that moves as
+               the review queue on this same screen gets worked through. When
+               there is no basis at all, the same line says so outright instead
+               of leaving a bare dash to be read as a failure. -->
           <div class="metric-card">
             <div class="metric-label">Cost/Mile</div>
-            <div class="metric-value">{{ fuel.costPerMile ? '$' + fuel.costPerMile : '—' }}</div>
+            <div class="metric-value" :class="{ 'metric-value-empty': cpm.empty }">{{ cpm.value }}</div>
+            <div
+              v-if="cpm.note"
+              class="metric-sub"
+              :class="{ 'metric-sub-empty': cpm.empty }"
+              :title="cpm.title"
+            >{{ cpm.note }}</div>
+          </div>
+        </div>
+
+        <!-- TANK CALIBRATION — configured capacity next to the capacity the
+             truck's own fills imply. An OBSERVATION beside a CONFIGURATION:
+             nothing here writes, and the copy points at the one place a human
+             changes it. #33 is configured at 300 gal and its fills imply ~117,
+             which is why the sample count sits next to the number instead of
+             being hidden behind it. -->
+        <div v-if="!reviewFocus && calibrationRows.length" class="section-card">
+          <div class="section-title cal-title">
+            <span>Tank Calibration &amp; Measured MPG</span>
+            <span v-if="calibrationCheckCount" class="cal-count-badge" title="Trucks whose implied capacity is more than 20% away from the capacity configured on the truck record, or that have no capacity configured at all.">
+              {{ calibrationCheckCount }} to review
+            </span>
+          </div>
+          <p class="cal-note">
+            Gallons implied by a full 0&rarr;100% swing in the ELD fuel level, next to the capacity set on
+            the truck. A large gap usually means the configured capacity is wrong &mdash; which quietly
+            overstates every fuel-range estimate a driver sees. Implied is an observation, not a correction:
+            change a capacity in <strong>Trucks &rarr; Edit &rarr; Fuel Tank, MPG &amp; Business Configuration</strong>.
+          </p>
+          <!-- The twin-tank explanation. Without it the numbers below look like
+               noise: #33's fills split into two clusters ~117 and ~230, so a
+               plain median lands on 143.5 and matches no real tank. Saying this
+               once, here, is what lets someone answer "why is it configured at
+               300 but implying 117?" without asking anyone. -->
+          <p v-if="calibrationBimodal" class="cal-note cal-note-flag">
+            <strong>Twin-tank pattern detected.</strong> Fills on the flagged trucks fall into two groups
+            about 2&times; apart &mdash; the signature of two saddle tanks with a sensor on only one of them.
+            A fill that tops up just the sensed tank and one that tops up both move the needle the same
+            distance for double the fuel. The figure shown is the <em>lower</em> group, i.e. the gallons
+            behind one full sweep of the sensor, because that is what converts a fuel percentage into
+            gallons and therefore what the driver's range estimate rests on. Neither group is wrong;
+            averaging them would invent a tank that doesn't exist.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Truck</th>
+                <th>Configured</th>
+                <th title="Gallons behind one full 0→100% sweep of the fuel sensor.">Implied</th>
+                <th>Implied range</th>
+                <th>Fills</th>
+                <th title="Miles per gallon measured from ELD odometer miles and pump gallons off the receipts — no tank sensor and no tank-size assumption in the path.">Measured MPG</th>
+                <th>Comparison</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="c in calibrationRows" :key="c.vehicleId || c.unitNumber" :class="{ 'cal-row-check': c.status === 'check' || c.status === 'no-config' }">
+                <td class="mono">{{ c.unitNumber }}</td>
+                <td class="mono">
+                  <span v-if="c.configured !== null">{{ c.configured }} gal</span>
+                  <span v-else class="cal-unset" title="No tank size recorded on this truck — the fuel-range estimate falls back to the 200 gal fleet default.">Not set</span>
+                </td>
+                <td class="mono">
+                  <template v-if="c.implied !== null">
+                    {{ c.implied }} gal
+                    <span
+                      v-if="c.impliedBasis === 'lower-mode'"
+                      class="cal-thin cal-basis"
+                      :title="`Per sensor sweep. Fills topping up both tanks show about 2× this. Median across all ${c.sampleCount} fills is ${c.median} gal, which is between the two groups and matches neither.`"
+                    >per sweep</span>
+                  </template>
+                  <span v-else>—</span>
+                </td>
+                <td class="mono cal-range">{{ calibrationRange(c) }}</td>
+                <td class="mono">
+                  {{ c.sampleCount }}
+                  <span v-if="c.thin" class="cal-thin" title="Fewer than 3 fills behind this figure — directional, not settled.">thin</span>
+                </td>
+                <td class="mono">
+                  <template v-if="c.receiptMpg !== null">
+                    {{ c.receiptMpg }} mpg
+                    <span class="cal-thin" :title="`Measured across ${c.mpgLegCount} tank-to-tank leg(s).`">{{ c.mpgLegCount }} legs</span>
+                  </template>
+                  <span v-else class="cal-unset" title="Not enough matched fills on this truck yet to measure MPG from receipts.">—</span>
+                </td>
+                <td>
+                  <span
+                    v-if="c.status === 'check' || c.status === 'no-config'"
+                    class="cal-badge"
+                    :title="c.status === 'no-config' ? 'Set this truck’s real capacity so the driver fuel-range estimate stops using the fleet default.' : 'Implied and configured capacity disagree by more than 20%. Worth confirming the real tank size before trusting range or MPG for this truck.'"
+                  >&#9888; {{ calibrationVerdict(c) }}</span>
+                  <span v-else class="cal-ok">{{ calibrationVerdict(c) }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- REVIEW QUEUE 1 — the ELD saw the tank rise, nothing was filed. -->
+        <div v-if="showFillsQueue" class="section-card review-card">
+          <div class="section-title cal-title">
+            <span>Fuel-ups without a receipt</span>
+            <span v-if="unmatchedFillRows.length" class="cal-count-badge">{{ unmatchedFillRows.length }}</span>
+          </div>
+          <p class="cal-note">
+            The truck's tank rose but no fuel receipt is on file for that truck and day &mdash; usually a
+            receipt that hasn't been uploaded yet. Each one is fuel spend the carrier currently can't
+            account for.
+          </p>
+          <table v-if="unmatchedFillRows.length">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Time</th>
+                <th>Truck</th>
+                <th>Tank</th>
+                <th>Odo (ELD)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="f in unmatchedFillRows" :key="f.key">
+                <td class="mono">{{ fmtYmd(f.localDay) }}</td>
+                <td class="mono">{{ f.atMs ? fmtHM(new Date(f.atMs).toISOString()) : '—' }}</td>
+                <td class="mono">
+                  {{ f.label }}
+                  <span v-if="f.showUnlinked" class="odo-src odo-src-none" title="No LogisX truck is linked to this ELD device, so the fill can't be attributed to a unit number.">unlinked</span>
+                </td>
+                <td class="mono">{{ tankRiseText(f) }}</td>
+                <td class="mono">{{ fmtOdometer(f.odometer) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="empty-msg">
+            No unmatched fuel-ups — every tank rise the ELD detected has a receipt filed against it.
+          </div>
+        </div>
+
+        <!-- REVIEW QUEUE 2 — a receipt exists, the tank never moved. -->
+        <div v-if="showReceiptsQueue" class="section-card review-card">
+          <div class="section-title cal-title">
+            <span>Receipts without a fuel-up</span>
+            <span v-if="unmatchedReceiptRows.length" class="cal-count-badge">{{ unmatchedReceiptRows.length }}</span>
+          </div>
+          <p class="cal-note">
+            A fuel receipt is on file but no matching rise was detected in that truck's tank. Most often the
+            truck on the receipt is wrong, or the truck has no ELD link so there is nothing to match against.
+            Worth a second look either way.
+          </p>
+          <!-- No Driver column: this payload joins expenses to TRUCKS, not to
+               drivers, so there is no driver on the wire. A column that renders
+               an em dash on every row is worse than no column — it reads as
+               "this receipt has no driver" rather than "we didn't ask". The
+               driver is one click away in the detail modal each row opens. -->
+          <table v-if="unmatchedReceiptRows.length">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Truck</th>
+                <th>Vendor</th>
+                <th>Gal</th>
+                <th>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="r in unmatchedReceiptRows"
+                :key="r.id"
+                class="review-row-clickable"
+                title="Open this receipt"
+                @click="openReceiptRow(r)"
+              >
+                <td class="mono">{{ fmtYmd(r.localDay) }}</td>
+                <td class="mono">{{ r.truckUnit || '—' }}</td>
+                <td>{{ r.vendor || '—' }}</td>
+                <td class="mono">{{ r.gallons !== null ? r.gallons : '—' }}</td>
+                <td class="mono">{{ r.amount !== null ? '$' + r.amount.toFixed(2) : '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="empty-msg">
+            No unmatched receipts — every fuel receipt on file lines up with a detected fuel-up.
+          </div>
+        </div>
+
+        <!-- REVIEW QUEUE 3 — a receipt with money on it and no volume.
+             Distinct from queue 2 and not merged with it: queue 2 is "we can't
+             find the fuel-up behind this receipt", this is "the receipt itself
+             is incomplete". Different diagnosis, different fix, different
+             person. This is the largest and cheapest-to-clear of the four. -->
+        <div v-if="showVolumelessQueue" class="section-card review-card">
+          <!-- Two badges, never one summed number: the amber one is work, the
+               grey one is rows a human cannot act on. A single "12" covering
+               both would send someone looking for twelve fixable receipts and
+               leave them to discover five were closed. -->
+          <div class="section-title cal-title">
+            <span>Receipts missing gallons</span>
+            <span v-if="volumelessCounts.actionable" class="cal-count-badge" title="Receipts in an open month — these can still be corrected.">{{ volumelessCounts.actionable }} to fix</span>
+            <span v-if="volumelessCounts.closed" class="closed-count-badge" title="Receipts whose month has been finalized by month-end close. Listed so the gap is visible, but they can no longer be edited.">{{ volumelessCounts.closed }} closed</span>
+          </div>
+          <p class="cal-note">
+            A fuel receipt with a dollar amount but no gallons recorded. Without the volume there is no
+            price per gallon and no tank-to-tank leg to measure against, so the truck can't establish its
+            own MPG and every range estimate its driver sees falls back to the fleet default. Each row is
+            a two-minute fix: open the receipt, read the gallons off it, type them in.
+            <template v-if="volumelessCounts.closed">
+              Rows marked <em>closed</em> sit in a finalized month and can't be edited — they stay listed
+              so the gap in the data is still visible.
+            </template>
+          </p>
+          <!-- The per-truck rollup. This is what turns a long list of individual
+               rows into a single actionable sentence about one truck — without
+               it, a reviewer has to count the Truck column by eye to notice that
+               almost all of them are the same vehicle. -->
+          <div v-if="volumelessTotals" class="vol-summary">
+            <!-- The headline is a statement of FACT about the data and stays
+                 whole — closed months included — because the money really is
+                 unaccounted for either way. The line under it is the call to
+                 action, and that one is scoped to what can actually be done. -->
+            <div class="vol-headline">
+              <strong>{{ fmtMoney(volumelessTotals.totalAmount) }}</strong> of diesel across
+              <strong>{{ volumelessTotals.count }}</strong>
+              receipt{{ volumelessTotals.count === 1 ? '' : 's' }} has no volume recorded against it.
+            </div>
+            <div v-if="volumelessCounts.closed" class="vol-split">
+              <template v-if="!volumelessShowingAll">Of the {{ volumelessRows.length }} listed below, </template>
+              <strong>{{ volumelessCounts.actionable }}</strong> can still be corrected;
+              <strong>{{ volumelessCounts.closed }}</strong>
+              {{ volumelessCounts.closed === 1 ? 'falls' : 'fall' }} in months that month-end close has
+              already finalized and are listed for reference only.
+            </div>
+            <!-- The table is not the whole story. Saying so is the difference
+                 between a reviewer working the list to zero and a reviewer
+                 believing they already have. -->
+            <div v-if="!volumelessShowingAll" class="vol-split">
+              Showing the {{ volumelessRows.length }} most recent of {{ volumelessTotals.count }}.
+            </div>
+            <div v-if="volumelessTotals.byTruck.length" class="vol-trucks">
+              <span v-for="t in volumelessTotals.byTruck" :key="t.truckUnit || 'unassigned'" class="vol-truck-chip">
+                <span class="vol-truck-unit">{{ t.truckUnit || 'No truck on receipt' }}</span>
+                <span class="vol-truck-stat">
+                  {{ t.count }} receipt{{ t.count === 1 ? '' : 's' }} &middot; {{ fmtMoney(t.totalAmount) }}
+                </span>
+              </span>
+            </div>
+          </div>
+          <!-- Driver column, unlike the queue above: this payload carries the
+               driver off the expense row itself, so the column is real here and
+               would have been an em-dash placeholder there. -->
+          <table v-if="volumelessRows.length">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Truck</th>
+                <th>Vendor</th>
+                <th>Driver</th>
+                <th>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="r in volumelessRows"
+                :key="r.id"
+                :class="r.locked === true ? 'review-row-locked' : 'review-row-clickable'"
+                :aria-disabled="r.locked === true ? 'true' : null"
+                :title="r.locked === true
+                  ? `${r.periodLabel || 'This month'} is closed — shown for reference, no longer editable`
+                  : 'Open this receipt to add the gallons'"
+                @click="openReceiptRow(r)"
+              >
+                <td class="mono">
+                  {{ fmtYmd(r.localDay) }}
+                  <span v-if="r.locked === true" class="closed-chip" :title="`${r.periodLabel || 'This month'} was finalized by month-end close.`">closed</span>
+                </td>
+                <td class="mono">{{ r.truckUnit || '—' }}</td>
+                <td>{{ r.vendor || '—' }}</td>
+                <td>{{ r.driver || '—' }}</td>
+                <td class="mono">{{ fmtMoney(r.amount) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="empty-msg">
+            No fuel receipts are missing gallons — every one on file records the volume pumped.
+          </div>
+        </div>
+
+        <!-- REVIEW QUEUE 4 — the typed odometer and the machine disagree.
+             The only queue here that isn't about a missing document: the paper
+             exists and one number on it is wrong. -->
+        <div v-if="showOdometerQueue" class="section-card review-card">
+          <div class="section-title cal-title">
+            <span>Odometer conflicts</span>
+            <span v-if="odometerCounts.actionable" class="cal-count-badge" title="Conflicts on a receipt in an open month — these can still be corrected.">{{ odometerCounts.actionable }} to fix</span>
+            <span v-if="odometerCounts.closed" class="closed-count-badge" title="Conflicts on a receipt whose month has been finalized by month-end close. Listed so the bad reading is visible, but it can no longer be edited.">{{ odometerCounts.closed }} closed</span>
+          </div>
+          <p class="cal-note">
+            The odometer typed on the receipt disagrees with what the truck's ELD read at the moment its
+            tank rose. The ELD figure is machine-read at the fill; the receipt figure was entered by hand,
+            so <strong>the receipt is the one to correct</strong> — open the row and check it against the
+            paper. One bad reading is enough to distort fleet-wide cost-per-mile on its own.
+            <template v-if="odometerCounts.closed">
+              Rows marked <em>closed</em> sit in a finalized month and can't be edited — they stay listed
+              because the reading is still wrong and still worth knowing about.
+            </template>
+          </p>
+          <!-- Deliberately NOT date-limited, and saying so here stops the next
+               reader "tidying up" the queue with a filter. The two conflicts
+               that exist in this fleet are both older than the 45-day window
+               the queues above use, so any window at all would hide exactly the
+               rows this queue was built to surface. -->
+          <p class="cal-note cal-note-flag">
+            <strong>Not limited to recent activity.</strong> The queues above are work that decays — a
+            missing receipt from three months ago is history. A wrong odometer on a finance row is not:
+            it stays wrong, and keeps distorting cost-per-mile, until a human edits it. So this list
+            reaches back over everything on file.
+          </p>
+          <table v-if="odometerConflictRows.length">
+            <thead>
+              <tr>
+                <th>Receipt date</th>
+                <th>Truck</th>
+                <th title="The reading entered by hand on the receipt. This is the value under suspicion.">On the receipt</th>
+                <th title="The truck's own odometer, read by the ELD at the moment the tank rose.">From the ELD</th>
+                <th>Difference</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="c in odometerConflictRows"
+                :key="c.id"
+                :class="c.locked === true ? 'review-row-locked' : 'review-row-clickable'"
+                :aria-disabled="c.locked === true ? 'true' : null"
+                :title="c.locked === true
+                  ? `${c.periodLabel || 'This month'} is closed — shown for reference, no longer editable`
+                  : 'Open this receipt to correct the odometer'"
+                @click="openReceiptRow(c)"
+              >
+                <td class="mono">
+                  {{ fmtYmd(c.receiptDate || c.localDay) }}
+                  <span v-if="c.locked === true" class="closed-chip" :title="`${c.periodLabel || 'This month'} was finalized by month-end close.`">closed</span>
+                </td>
+                <td class="mono">{{ c.unitNumber || '—' }}</td>
+                <!-- The suspect value is styled as suspect, not as one of two
+                     equal candidates: amber, underlined, and chipped "typed".
+                     A bare 1 sitting next to 851,991 in identical type reads as
+                     a puzzle; like this it reads as a typo. -->
+                <td class="mono odo-cell">
+                  <span class="odo-value odo-conflict-suspect">{{ fmtOdometer(c.receiptOdometer) }}</span>
+                  <span class="odo-src odo-src-receipt" title="Hand-entered by whoever filed this receipt.">typed</span>
+                  <span v-if="c.grosslyLow" class="odo-src odo-src-suspect" title="Far too low to be a tractor's odometer at all — almost certainly a mis-key rather than a stale reading.">check</span>
+                </td>
+                <td class="mono odo-cell">
+                  <span class="odo-value odo-derived">{{ fmtOdometer(c.eldOdometer) }}</span>
+                  <span class="odo-src odo-src-telemetry" title="Read from the truck's ELD at the moment the tank rose — not written on the paper.">ELD</span>
+                </td>
+                <td class="mono odo-conflict-delta">
+                  {{ conflictDeltaText(c) }}
+                  <span v-if="c.direction" class="cal-thin">receipt reads {{ c.direction }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="empty-msg">
+            No odometer conflicts — every hand-entered reading agrees with the truck's ELD.
           </div>
         </div>
 
         <!-- Savings target -->
-        <div class="compliance-card">
+        <div v-if="!reviewFocus" class="compliance-card">
           <div class="compliance-header">
             <span>Route Compliance — 15% Savings Target</span>
             <span :class="['compliance-badge', fuel.onTarget ? 'on-target' : 'off-target']">
@@ -564,7 +963,7 @@
         </div>
 
         <!-- Monthly trend -->
-        <div v-if="fuel.monthlyData?.length" class="section-card">
+        <div v-if="!reviewFocus && fuel.monthlyData?.length" class="section-card">
           <div class="section-title">Monthly Fuel Spend</div>
           <table>
             <thead>
@@ -586,8 +985,13 @@
           </table>
         </div>
 
-        <!-- Recent fills -->
-        <div v-if="fuel.recentFills?.length" class="section-card">
+        <!-- Recent fills. The Odo column carries its own provenance: only 2 of
+             130 receipts in this fleet ever had an odometer written on them (and
+             both were junk), so almost everything in this column is now filled
+             from the ELD at the moment of the fill. A derived number must never
+             read as if it were on the paper — hence the chip, and hence NO chip
+             at all when the server didn't say where the value came from. -->
+        <div v-if="!reviewFocus && fillRows.length" class="section-card">
           <div class="section-title">Recent Fuel Fills</div>
           <table>
             <thead>
@@ -596,22 +1000,42 @@
                 <th>Driver</th>
                 <th>Amount</th>
                 <th>Gal</th>
-                <th>Odo</th>
+                <th title="Odometer at the fill. Tagged with where the reading came from — the receipt, or the truck's ELD.">Odo</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="f in fuel.recentFills" :key="f.id">
-                <td class="mono">{{ f.date }}</td>
+              <tr v-for="f in fillRows" :key="f.id">
+                <!-- fmtYmd, not the raw cell: the two review tables directly
+                     above render "Jul 30, 2026" and two date formats one under
+                     the other on one panel reads as two different kinds of
+                     date. String arithmetic only — no Date(), so no day shift. -->
+                <td class="mono">{{ fmtYmd(f.date) }}</td>
                 <td>{{ f.driver }}</td>
                 <td>${{ f.amount }}</td>
                 <td>{{ f.gallons || '—' }}</td>
-                <td class="mono">{{ f.odometer || '—' }}</td>
+                <td class="mono odo-cell">
+                  <template v-if="f.odoText !== '—'">
+                    <span :class="['odo-value', { 'odo-derived': f.odoSrc && f.odoSrc.key === 'telemetry', 'odo-suspect': f.odoSuspect }]">{{ f.odoText }}</span>
+                    <span
+                      v-if="f.odoSrc"
+                      :class="['odo-src', 'odo-src-' + f.odoSrc.key]"
+                      :title="f.odoSrc.title"
+                    >{{ f.odoSrc.label }}</span>
+                    <span v-if="f.odoSuspect" class="odo-src odo-src-suspect" title="Unusually low for a tractor — worth confirming against the truck's real reading.">check</span>
+                  </template>
+                  <span v-else>—</span>
+                </td>
               </tr>
             </tbody>
           </table>
+          <p v-if="anyOdoSource" class="odo-legend">
+            <span class="odo-src odo-src-receipt">receipt</span> the reading the driver wrote on the receipt
+            &middot;
+            <span class="odo-src odo-src-telemetry">ELD</span> the truck's own odometer at the moment its tank rose &mdash; derived, not on the paper
+          </p>
         </div>
 
-        <div v-if="!fuel.recentFills?.length" class="empty-msg">
+        <div v-if="!reviewFocus && !fillRows.length" class="empty-msg">
           No fuel data yet. Drivers log fuel expenses in their app.
         </div>
       </template>
@@ -886,6 +1310,13 @@ import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import { US_STATES } from '../../utils/usStates'
 import { compressImage } from '../../lib/imageUtils'
 import { fmtTimestamp, fmtYmd, houstonToday, parseYmdLocal } from '../../utils/datetime'
+import {
+  fmtOdometer, odometerSource, isSuspectOdometer, asList,
+  isReviewAvailable, isQueueAvailable, reviewClearPhrases, queueCounts,
+  unmatchedFills, unmatchedReceipts, volumelessReceipts, volumelessSummary,
+  odometerConflicts,
+  tankCalibration, countCalibrationChecks, calibrationVerdict, anyBimodal,
+} from '../../lib/fuelReview'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -1760,6 +2191,310 @@ function isPdfReceipt(p) {
 const fuel = ref({})
 const fuelLoading = ref(true)
 
+// --- Fuel-up / receipt reconciliation -------------------------------------
+// All of it reads through lib/fuelReview so the panel and the truck record
+// agree on what "no reading" means, and so an older server (which sends none of
+// these fields) degrades to exactly the screen that shipped before, with no
+// `undefined` reaching the DOM.
+
+// '' | 'fills' | 'receipts' | 'volumeless' | 'odometer' — which review queue the
+// panel is narrowed to. Same semantic as the load board's "Needs Review only"
+// filter: one at a time, and everything unrelated gets out of the way.
+const reviewFocus = ref('')
+
+const fuelReviewAvailable = computed(() => isReviewAvailable(fuel.value))
+const unmatchedFillRows = computed(() => unmatchedFills(fuel.value))
+const unmatchedReceiptRows = computed(() => unmatchedReceipts(fuel.value))
+const volumelessRows = computed(() => volumelessReceipts(fuel.value))
+const volumelessTotals = computed(() => volumelessSummary(fuel.value))
+const odometerConflictRows = computed(() => odometerConflicts(fuel.value))
+// Actionable vs closed. Both queues prompt an edit to an expense, and an expense
+// in a finalized month cannot be edited — so a locked row is shown but never
+// offered as work. `closed` is 0 for every row until the server sends a per-row
+// lock flag, which keeps this a no-op rather than a guess.
+const volumelessCounts = computed(() => queueCounts(volumelessRows.value))
+const odometerCounts = computed(() => queueCounts(odometerConflictRows.value))
+
+// Does the table below actually show everything the summary counts?
+//
+// The summary is authoritative for the fleet-wide total (it counts server-side,
+// over rows this payload may not carry — odometerConflicts already caps at 100).
+// The actionable/closed split, by contrast, can only ever be computed from the
+// rows in hand, because the lock flag lives per row. So when the two disagree,
+// the split has to say which population it is describing — otherwise the panel
+// reads "$7,261 across 25 receipts" over a line that adds up to 5 and a table
+// with 5 rows in it, and nothing says why.
+const volumelessShowingAll = computed(() =>
+  !volumelessTotals.value || volumelessTotals.value.count === volumelessRows.value.length
+)
+const calibrationRows = computed(() => tankCalibration(fuel.value))
+const calibrationCheckCount = computed(() => countCalibrationChecks(calibrationRows.value))
+const calibrationBimodal = computed(() => anyBimodal(calibrationRows.value))
+
+// Cost/mile, in five states that must never collapse into one another.
+//
+// The server guards its own division and emits 0 when it cannot divide, so a
+// bare `costPerMile: 0` is ambiguous on its own — it means BOTH "nothing to
+// measure" and "measured, and it came to less than a cent". `costPerMileBasis`
+// is what disambiguates them, which is the whole reason it is on the wire.
+//
+// Two failure modes, opposite directions, equally bad:
+//   · printing "$0.00" over an empty basis — a number where there is no
+//     computation, which reads as a broken page rather than a dormant feature.
+//     This is what ships on deploy day: refuel detection is off by default, so
+//     nothing is matched, so there is no distance to divide by.
+//   · printing "—" over a real sub-cent result — the absence of a figure where
+//     there IS one. Seen live at 897,010 mi against the handful of receipts
+//     matched so far.
+// So: an empty basis says WHY it is empty and what fills it in; a real figure
+// under a cent says "< $0.01" and keeps its hedge.
+//
+// An ABSENT basis key (older server) is a third thing again: we cannot explain a
+// figure we were told nothing about, so it degrades silently to the bare dash
+// this card showed before — the same absent-vs-zero rule the review queues use.
+const cpm = computed(() => {
+  const raw = fuel.value?.costPerMile
+  const v = Number(raw)
+  const hasFigure = Number.isFinite(v) && v > 0
+  const b = fuel.value?.costPerMileBasis
+
+  if (!b) {
+    return { value: hasFigure ? '$' + v.toFixed(2) : '—', note: '', title: '', empty: !hasFigure }
+  }
+
+  const miles = Number(b.miles) || 0
+  const spend = Number(b.spend) || 0
+  const trucks = Number(b.trucks) || 0
+  const basisText = `${miles.toLocaleString()} mi on ${trucks} truck${trucks === 1 ? '' : 's'}`
+
+  // Nothing to measure across. Refuel detection is what produces both halves of
+  // this figure, so name it rather than leaving a dash to be interpreted.
+  if (!trucks || !miles) {
+    return {
+      value: '—',
+      note: 'Not measured yet',
+      title: 'Cost per mile is measured between consecutive fuel-ups on the same truck — the distance from the truck’s ELD odometer, the cost from the fuel receipts matched to those fuel-ups. No fuel-ups have been recorded yet, so there is no distance to divide by. This fills in on its own once refuel detection has run.',
+      empty: true,
+    }
+  }
+
+  // Distance but no cost: the ELD half is working and the receipt half is not.
+  // That is exactly what the queues below this card are for, so point at them.
+  if (!spend) {
+    return {
+      value: '—',
+      note: 'No matched receipts yet',
+      title: `The ELD mileage is recorded (${basisText}) but no fuel receipt has been matched to a fuel-up yet, so there is no cost to divide by. The review queues below this card are that same gap.`,
+      empty: true,
+    }
+  }
+
+  const hedge = `Biased low, and deliberately labelled "at least": the mileage covers everything these trucks drove, but the spend ($${spend.toLocaleString()}) only counts fuel receipts we actually hold. Every receipt still missing from the review queues below pushes this number down.`
+
+  // A real result the server's 2dp rounding flattened to zero. Showing "$0.00"
+  // would claim free diesel; showing "—" would deny a computation that happened.
+  if (!hasFigure) {
+    return {
+      value: '< $0.01',
+      note: `at least · ${basisText}`,
+      title: `Under a cent per mile — a real figure, not a missing one, and almost certainly an artefact of how few receipts are matched so far. ${hedge}`,
+      empty: false,
+    }
+  }
+
+  // Two decimals always — a bare 0.4 would print "$0.4" and read as a
+  // truncation rather than 40 cents.
+  return { value: '$' + v.toFixed(2), note: `at least · ${basisText}`, title: hedge, empty: false }
+})
+
+// The four queues as data, so the toggle bar is one loop instead of four
+// near-identical buttons that drift apart. Only the BAR is generic — each queue
+// still renders its own section with its own columns and its own copy, because
+// "no fuel-up for this receipt", "no gallons on this receipt" and "this odometer
+// disagrees with the ELD" are three different problems with three different
+// fixes and must not read as one undifferentiated pile.
+//
+// `available` is per-queue on purpose: these do not all ship together (see
+// isQueueAvailable), so one queue's silence must not suppress another's answer.
+const reviewQueues = computed(() => [
+  {
+    key: 'fills',
+    available: isQueueAvailable(fuel.value, 'fills'),
+    // The two original queues carry no lock flag on the wire, so queueCounts
+    // reports every row as actionable and their toggles render exactly as they
+    // did before close-awareness existed. Routed through the same helper anyway
+    // so that adding the flag server-side is all it would take.
+    ...queueCounts(unmatchedFillRows.value),
+    label: 'Fuel-ups without a receipt',
+    onTitle: 'Showing only fuel-ups with no receipt',
+    offTitle: 'Show only fuel-ups the ELD saw with no receipt filed',
+  },
+  {
+    key: 'receipts',
+    available: isQueueAvailable(fuel.value, 'receipts'),
+    ...queueCounts(unmatchedReceiptRows.value),
+    label: 'Receipts without a fuel-up',
+    onTitle: 'Showing only receipts with no matching fuel-up',
+    offTitle: 'Show only receipts with no matching rise in the truck’s tank',
+  },
+  {
+    key: 'volumeless',
+    available: isQueueAvailable(fuel.value, 'volumeless'),
+    ...volumelessCounts.value,
+    label: 'Receipts missing gallons',
+    onTitle: 'Showing only fuel receipts with no gallons recorded',
+    offTitle: 'Show only fuel receipts with a dollar amount but no gallons',
+  },
+  {
+    key: 'odometer',
+    available: isQueueAvailable(fuel.value, 'odometer'),
+    ...odometerCounts.value,
+    label: 'Odometer conflicts',
+    onTitle: 'Showing only receipts whose odometer the ELD contradicts',
+    offTitle: 'Show only receipts whose typed odometer disagrees with the ELD',
+  },
+])
+
+// Buttons for queues that answered and hold ROWS — including rows that are only
+// closed. A queue whose remaining entries all sit in finalized months still has
+// something a reviewer should be able to look at; it just isn't work.
+const reviewToggles = computed(() => reviewQueues.value.filter(q => q.available && q.total > 0))
+
+// The count shown on a toggle. `actionable` leads because that is what the
+// number is for; a closed tally rides alongside instead of being folded in.
+// When nothing is actionable the closed figure becomes the label outright,
+// rather than a misleading "(0)".
+function queueCountText(q) {
+  if (!q.closed) return `(${q.actionable})`
+  if (!q.actionable) return `(${q.closed} closed)`
+  return `(${q.actionable}) · ${q.closed} closed`
+}
+
+// Reassurance limited to what this payload actually established — never the old
+// fixed sentence, which would speak for queues the server never answered.
+const reviewClearText = computed(() => {
+  if (reviewToggles.value.length) return ''
+  const parts = reviewClearPhrases(fuel.value)
+  if (!parts.length) return ''
+  const joined = parts.length === 1
+    ? parts[0]
+    : parts.slice(0, -1).join(', ') + ', and ' + parts[parts.length - 1]
+  return 'All clear — ' + joined + '.'
+})
+
+// A queue shows whenever it has rows, and stays on screen when focused even if
+// a background refresh empties it — that is when the "why it's empty" message
+// earns its place.
+function queueVisible(key, rows) {
+  return reviewFocus.value === key || (!reviewFocus.value && rows.length > 0)
+}
+const showFillsQueue = computed(() => queueVisible('fills', unmatchedFillRows.value))
+const showReceiptsQueue = computed(() => queueVisible('receipts', unmatchedReceiptRows.value))
+const showVolumelessQueue = computed(() => queueVisible('volumeless', volumelessRows.value))
+const showOdometerQueue = computed(() => queueVisible('odometer', odometerConflictRows.value))
+
+function toggleReviewFocus(which) {
+  reviewFocus.value = reviewFocus.value === which ? '' : which
+}
+
+// Lifted verbatim from ActiveLoadsTab's reviewToggleStyle so the two review
+// affordances are the same object on screen: amber when active, neutral outline
+// when not.
+function fuelReviewToggleStyle(which) {
+  const on = reviewFocus.value === which
+  return {
+    display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+    padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
+    borderRadius: '6px', cursor: 'pointer', fontFamily: 'inherit',
+    border: '1px solid ' + (on ? '#f59e0b' : '#d1d5db'),
+    background: on ? '#fef3c7' : '#ffffff',
+    color: on ? '#92400e' : '#374151',
+    transition: 'all 0.15s',
+  }
+}
+
+// Display-ready recent fills. Precomputed rather than calling the formatters
+// per-cell so a row's number and its provenance chip can never disagree.
+const fillRows = computed(() =>
+  asList(fuel.value?.recentFills).map(f => ({
+    ...f,
+    odoText: fmtOdometer(f?.odometer),
+    // Always present on the wire, explicitly null when the server can't
+    // attribute the reading — and it is a stored column written in the same
+    // statement as the value, not inferred by comparing numbers, so it can't
+    // drift. No cross-check here; trust it or show no chip.
+    odoSrc: odometerSource(f?.odometerSource),
+    odoSuspect: isSuspectOdometer(f?.odometer, f?.odometerSource),
+  }))
+)
+const anyOdoSource = computed(() => fillRows.value.some(f => f.odoSrc))
+
+// Before/after when both ends are known, otherwise just the size of the jump —
+// some shapes of the reconciliation payload carry the rise without the two
+// endpoints, and "+76 pts" is still the fact the reviewer needs.
+function tankRiseText(f) {
+  if (f?.pctBefore === null || f?.pctAfter === null) {
+    return f?.risePts === null || f?.risePts === undefined ? '—' : `+${f.risePts} pts`
+  }
+  const rise = f.risePts === null ? '' : ` (+${f.risePts} pts)`
+  return `${Math.round(f.pctBefore)}% → ${Math.round(f.pctAfter)}%${rise}`
+}
+
+// The spread beside the headline figure, drawn from the same population — the
+// lower mode's own min/max on a twin-tank truck, the interquartile range
+// otherwise (a single outlier fill shouldn't make a steady truck look uncertain).
+function calibrationRange(c) {
+  if (c?.rangeLow === null || c?.rangeHigh === null) return '—'
+  if (c.rangeLow === c.rangeHigh) return `${c.rangeLow} gal`
+  return `${c.rangeLow}–${c.rangeHigh} gal`
+}
+
+// Three of the four queues (receipts, missing gallons, odometer conflicts) point
+// at an expense row, and all three link back to it through the detail modal that
+// already exists on this tab — Teleported to <body>, so it opens over the Fuel
+// Logs panel without dragging the reviewer off to another sub-tab. That modal is
+// where the actual fix happens: open the receipt image, read the gallons or the
+// real odometer off it, correct the row.
+//
+// It resolves by id against `allExpenses`, which the All Expenses filters can
+// legitimately exclude, so check first and say so: opening a modal that renders
+// nothing is worse than not opening one. This matters most for odometer
+// conflicts — that queue is deliberately not date-windowed, so its rows are
+// routinely older than whatever range the reviewer has typed into the filters.
+function openReceiptRow(r) {
+  if (r?.id == null) return
+  // A finalized month is not editable, so this row is reference-only. The row is
+  // already visibly marked and not styled as clickable; this is the backstop for
+  // a keyboard activation or a future caller, and it explains rather than no-ops
+  // silently — a row that looks disabled and also says nothing is the worst of
+  // the three options.
+  if (r.locked === true) {
+    toast(`${r.periodLabel || 'That month'} is closed — this receipt is shown for reference and can no longer be edited.`, 'warning')
+    return
+  }
+  if (!allExpenses.value.some(e => e.id === r.id)) {
+    toast('That receipt is outside the current All Expenses filters — clear them to open it.', 'warning')
+    return
+  }
+  selectedId.value = r.id
+}
+
+// Money for the review queues. Always two decimals and always grouped, so a
+// column of amounts lines up and "$5,881.54" can't be misread as "$5,881.5".
+function fmtMoney(v) {
+  return v === null || v === undefined
+    ? '—'
+    : '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+// The gap between a typed odometer and the machine's. Rendered whole — this is
+// the number that makes a six-digit disagreement register as a typo rather than
+// as two plausible readings, so it is never abbreviated to "852k".
+function conflictDeltaText(c) {
+  if (c?.deltaMi === null) return '—'
+  return Math.round(c.deltaMi).toLocaleString('en-US') + ' mi'
+}
+
 // Maintenance fund
 const maint = ref({})
 const maintLoading = ref(true)
@@ -1848,12 +2583,14 @@ async function openStateDetail(truck, stateRow) {
 
 function closeStateDetail() { stateDetail.value = null }
 
-async function loadFuel() {
-  fuelLoading.value = true
+// `quiet` skips the skeleton so a post-edit refresh doesn't blank the panel the
+// reviewer is working in — same distinction loadAll/quietReload draws.
+async function loadFuel({ quiet = false } = {}) {
+  if (!quiet) fuelLoading.value = true
   try {
     fuel.value = await api.get('/api/expenses/fuel-analytics')
-  } catch { /* empty */ }
-  fuelLoading.value = false
+  } catch { /* empty — leave the existing figures in place */ }
+  if (!quiet) fuelLoading.value = false
 }
 
 async function loadMaintenance() {
@@ -2105,6 +2842,248 @@ watch(activeSubTab, (tab) => {
   font-weight: 700;
   margin-bottom: 0.75rem;
 }
+
+/* ---- Fuel-up / receipt reconciliation ---------------------------------
+ * Amber palette borrowed wholesale from the load board's "Needs Review"
+ * treatment (#fef3c7 / #fde68a / #92400e) so a review queue looks the same
+ * wherever it appears. Nothing here is red: these are queues to work
+ * through, not failures. */
+.fuel-review-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.fuel-review-clear {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.section-title.cal-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.cal-count-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  border-radius: 10px;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+  cursor: help;
+}
+.cal-note {
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: -0.35rem 0 0.75rem;
+  max-width: 68ch;
+}
+.cal-note strong { color: var(--text); font-weight: 600; }
+/* The twin-tank explanation. Amber-tinted so it reads as "here is why these
+   numbers look odd" rather than as more body copy nobody finishes. */
+.cal-note-flag {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+  color: #78350f;
+  margin-top: -0.25rem;
+}
+.cal-note-flag strong { color: #78350f; }
+.cal-basis { color: #92400e; }
+.metric-sub {
+  margin-top: 0.2rem;
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  cursor: help;
+}
+/* An empty metric should look deliberately empty, not like a number that failed
+ * to arrive. The dash is dimmed to sit back from the real figures beside it, and
+ * the note under it is italic so it reads as a state ("not measured yet") rather
+ * than as the "at least · 19,425 mi" basis line it replaces. */
+.metric-value-empty { color: var(--text-dim); font-weight: 500; }
+.metric-sub-empty { font-style: italic; }
+
+.cal-row-check td { background: #fffbeb; }
+tr.cal-row-check:hover td { background: #fef3c7; }
+.cal-range { color: var(--text-dim); }
+.cal-unset { color: var(--text-dim); cursor: help; }
+.cal-ok { font-size: 0.75rem; color: var(--text-dim); }
+.cal-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+  cursor: help;
+}
+.cal-thin {
+  margin-left: 0.3rem;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: help;
+}
+
+.review-card { border-color: #fde68a; }
+.review-row-clickable { cursor: pointer; }
+
+/* A row in a finalized month. Quiet, not alarming — the point is "there is
+ * nothing to do here", not "something is wrong here". Deliberately still
+ * legible: the figures are the reason the row is listed at all, so this dims
+ * the row's affordance, not its content. `cursor: default` plus no hover tint
+ * is what stops it reading as clickable in the first place; the `closed` chip
+ * is what says why. */
+.review-row-locked { cursor: default; background: var(--bg); }
+.review-row-locked td { color: var(--text-dim); }
+/* Drop the amber on a closed row. The emphasis colour in these tables means
+ * "this is yours to fix", so leaving it at full strength made a locked row
+ * compete with an actionable one for attention while being the only one nobody
+ * can do anything about. Weight and the dotted underline stay, so the row still
+ * says WHICH number is the wrong one — the finding survives, the call to action
+ * doesn't. */
+.review-row-locked .odo-conflict-suspect {
+  color: var(--text-dim);
+  text-decoration-color: var(--text-dim);
+}
+.review-row-locked .odo-conflict-delta { color: var(--text-dim); }
+.closed-chip {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0 5px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.6rem;
+  font-weight: 700;
+  line-height: 1.5;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 4px;
+  vertical-align: middle;
+  cursor: help;
+  background: var(--bg);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+/* Neutral twin of .cal-count-badge. Same geometry so the two sit level in a
+ * heading, different colour so "work" and "closed" never read as one number. */
+.closed-count-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: help;
+}
+
+/* Missing-gallons rollup. The money leads, because "$5,881 of diesel with no
+   volume" is the sentence that gets the queue worked; the per-truck chips
+   underneath are what name the truck to start with. */
+.vol-summary {
+  margin: -0.25rem 0 0.85rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #fde68a;
+  border-radius: var(--radius);
+  background: #fffbeb;
+}
+.vol-headline {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #78350f;
+}
+.vol-headline strong { font-weight: 700; }
+.vol-split {
+  margin-top: 0.35rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: #92400e;
+}
+.vol-split strong { font-weight: 700; }
+.vol-trucks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+.vol-truck-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid #fcd34d;
+  border-radius: 10px;
+  background: #fff;
+  font-size: 0.7rem;
+}
+.vol-truck-unit {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  color: #92400e;
+}
+.vol-truck-stat { color: var(--text-dim); }
+
+/* Odometer conflict. The typed number is the loud one — it is the one under
+   suspicion and the one about to be edited — while the ELD reading sits back in
+   the same dimmed treatment `.odo-derived` already gives machine-read values in
+   Recent Fuel Fills. Colour is never the only signal: both cells carry a text
+   chip, and the Difference column states the gap outright. */
+.odo-conflict-suspect {
+  color: #92400e;
+  font-weight: 700;
+  text-decoration: underline dotted #b45309;
+  text-underline-offset: 2px;
+}
+.odo-conflict-delta { color: #92400e; font-weight: 600; white-space: nowrap; }
+.odo-conflict-delta .cal-thin { display: block; margin-left: 0; font-weight: 500; }
+
+/* Odometer provenance. The number stays the loud element; the chip is a
+ * quiet qualifier. An ELD-derived reading is additionally dimmed so a
+ * skim of the column separates "written on the paper" from "worked out by
+ * the system" without reading a single chip. */
+.odo-cell { white-space: nowrap; }
+.odo-value { font-weight: 600; }
+.odo-derived { font-weight: 400; color: var(--text-dim); }
+.odo-suspect { text-decoration: underline dotted #b45309; }
+.odo-src {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0 5px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.6rem;
+  font-weight: 700;
+  line-height: 1.5;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 4px;
+  cursor: help;
+  vertical-align: middle;
+}
+.odo-src-receipt { background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe; }
+.odo-src-telemetry { background: #ecfeff; color: #155e75; border: 1px solid #a5f3fc; }
+.odo-src-suspect { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+.odo-src-none { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border); }
+.odo-legend {
+  margin: 0.6rem 0 0;
+  font-size: 0.68rem;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+.odo-legend .odo-src { margin-left: 0; margin-right: 0.15rem; cursor: default; }
 
 /* Inline form */
 .inline-form {
@@ -2879,6 +3858,18 @@ tr:hover td { background: var(--surface-hover); }
  * Detail modal (selectedExpense) already fits via the Teleport we shipped
  * earlier — no change needed there.                                       */
 @media (max-width: 767px) {
+  /* Fuel Logs section tables scroll sideways instead of crushing. The two
+     review queues and the calibration readout are 5-6 columns; on a phone the
+     alternative is a column of one-character-per-line text. Applies to the
+     existing Monthly / Recent Fills tables too, which benefit the same way. */
+  .section-card { overflow-x: auto; }
+  .section-card table { min-width: 620px; }
+  .cal-note { max-width: none; }
+
+  /* Toggles stack rather than squeezing their counts onto a second line. */
+  .fuel-review-bar { flex-direction: column; align-items: stretch; }
+  .fuel-review-bar button { justify-content: center; }
+
   /* Scrollable sub-tabs (All / Fuel / Maintenance / IFTA) */
   .sub-tabs {
     overflow-x: auto;

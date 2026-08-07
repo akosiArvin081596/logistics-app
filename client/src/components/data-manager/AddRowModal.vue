@@ -92,12 +92,34 @@ const pickerOpen = ref(false)
 const pickerTarget = ref('origin')
 
 // Job Tracking specific: auto-fill defaults and hidden fields
+//
+// ⚠️ `timeZone: 'America/Chicago'` is load-bearing on these two dates, and its
+// absence was writing wrong data into the sheet.
+//
+// Without it, toLocaleDateString renders in the BROWSER's zone — wherever the
+// person adding the row happens to be sitting, which is not necessarily Houston.
+// Someone working at 08:00 in Manila is at 19:00 Houston the PREVIOUS day, so
+// the row got stamped with tomorrow's date. That matters more than it sounds:
+// "Assigned Date" is the field the financials use to decide which month a load's
+// revenue counts in (see houstonDay's comment, server.js ~5994), so across a
+// month boundary this credited revenue to the wrong month — permanently, in the
+// spreadsheet, where nothing downstream can tell it was wrong.
+//
+// The server-side writer for this same column was already fixed to Houston; this
+// client path bypassed it and kept writing viewer-local.
+//
+// Format deliberately unchanged. That column already holds three shapes across
+// ~400 rows — "7/21/2026, 12:46:22 PM" (houstonStamp, the majority), plain
+// "7/21/2026" (this path), and "2026-07-25" (houstonDay) — and parseSheetDate
+// accepts them all. Fixing the zone and the format in one change would make any
+// future bisect ambiguous, so only the zone moves here.
+const HOUSTON_TZ = 'America/Chicago'
 const JOB_TRACKING_AUTO_FILL = {
   'Job Status': 'Unassigned',
   'Phase of Progress': 'Heading to Pickup',
   'Carrier Stage': 'Waiting on Documents',
-  'Assigned Date': () => new Date().toLocaleDateString('en-US'),
-  'Status Update Date': () => new Date().toLocaleDateString('en-US'),
+  'Assigned Date': () => new Date().toLocaleDateString('en-US', { timeZone: HOUSTON_TZ }),
+  'Status Update Date': () => new Date().toLocaleDateString('en-US', { timeZone: HOUSTON_TZ }),
 }
 const JOB_TRACKING_HIDDEN = new Set([
   'Completion Date', 'Location Link', 'Documents',
