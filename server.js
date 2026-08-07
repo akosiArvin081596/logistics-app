@@ -2630,6 +2630,55 @@ db.exec(`
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_truck ON truck_assignments(truck_id)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(driver_name)`); } catch {}
 
+// Local mirror of the Google Sheet's "Job Tracking" tab, written by the n8n
+// ingestion webhook POST /api/n8n/job (~270 lines below). That endpoint has
+// always read and written this table, but NOTHING in the repo created it — it
+// existed in production only because someone made it out-of-band, so a fresh
+// install (new staging box, rebuilt VPS, disaster recovery) 500s the webhook on
+// "no such table". This CREATE closes that gap and nothing else: `IF NOT EXISTS`
+// means production, where the table is already present, is untouched.
+//
+// ⚠️ This is part of the LIVE n8n ingestion contract, so the shape is not
+// inferred from the endpoint's queries — it is a transcription of production's
+// actual `sqlite_master.sql`, read over the VPS on 2026-08-07. Getting a name or
+// type wrong here would be worse than the current state: today a fresh install
+// fails loudly, whereas a mismatched column would fail silently and wrong.
+// The 25 data columns mirror the sheet's 26 columns in order; `_payment_` is the
+// sheet's "  Payment  " header (the surrounding spaces are real) flattened, and
+// the six the endpoint never writes (phase_of_progress, carrier_stage,
+// location_link, status_update_date, completion_date, owner_id) are part of that
+// mirror and are kept so the two schemas stay identical.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS sheet_job_tracking (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		"contract_id" TEXT DEFAULT '',
+		"load_id" TEXT DEFAULT '',
+		"details" TEXT DEFAULT '',
+		"trailer_number" TEXT DEFAULT '',
+		"driver" TEXT DEFAULT '',
+		"pickup_info" TEXT DEFAULT '',
+		"pickup_appointment" TEXT DEFAULT '',
+		"pickup_address" TEXT DEFAULT '',
+		"dropoff_info" TEXT DEFAULT '',
+		"dropoff_appointment" TEXT DEFAULT '',
+		"dropoff_address" TEXT DEFAULT '',
+		"job_status" TEXT DEFAULT '',
+		"phase_of_progress" TEXT DEFAULT '',
+		"carrier_stage" TEXT DEFAULT '',
+		"_payment_" TEXT DEFAULT '',
+		"broker_contact_name" TEXT DEFAULT '',
+		"phone_number" TEXT DEFAULT '',
+		"email" TEXT DEFAULT '',
+		"location_link" TEXT DEFAULT '',
+		"documents" TEXT DEFAULT '',
+		"assigned_date" TEXT DEFAULT '',
+		"status_update_date" TEXT DEFAULT '',
+		"completion_date" TEXT DEFAULT '',
+		"truck" TEXT DEFAULT '',
+		"owner_id" TEXT DEFAULT ''
+	)
+`);
+
 // Backfill legacy expenses with truck_unit + owner_id. Older expense rows
 // pre-date the columns being stamped on insert (server.js:9370). Pass 1
 // resolves truck_unit + owner_id from truck_assignments history (driver+date).
