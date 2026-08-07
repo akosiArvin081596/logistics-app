@@ -16766,7 +16766,27 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 // GPS TRACKING & GEOFENCING
 // ============================================================
 
-const GEOFENCE_RADIUS = 1000; // meters
+// Geofence radius in metres, for BOTH the pickup and the delivery zone.
+// 3218.69 m = 2 miles, set by the client on 2026-08-06. Their reasoning held up
+// against the data: in the two times GPS auto-status had ever fired by then, one
+// landed at 881 m against the old 1000 m zone — it barely qualified. Widening
+// buys margin against imprecise rate-con geocodes and large yards.
+//
+// Env-tunable because this is a field-tuned number, not a constant: watching it
+// in production is the only way to know if it is right, and a retune should cost
+// a `pm2 restart`, not a deploy. Mirrors ROUTEMATE_POLL_LIVE_SEC.
+// The `> 0` test is load-bearing — it catches 0, negatives and NaN alike. A
+// radius of 0 would disable every geofence silently, which looks exactly like
+// the bug this feature spent months having.
+//
+// ⚠️ Area scales with the SQUARE of this: 1000 m -> 3218.69 m is 3.2× the radius
+// but 10.4× the area (3.1 -> 32.5 km²). Two consequences before you raise it
+// further: (a) the arrival hysteresis weakens, since a highway drive-by spends
+// more consecutive fixes inside the zone; (b) any load SHORTER than the radius
+// can never exit the pickup zone — see the departure guard below.
+const GEOFENCE_RADIUS = Number(process.env.GEOFENCE_RADIUS_M) > 0
+	? Number(process.env.GEOFENCE_RADIUS_M)
+	: 3218.69;
 // Departure needs the truck to actually be moving, not just to have drifted a
 // few metres while parked. Same threshold the driver-pay "active day" basis
 // uses for "traveled" (~5 mph), so the two notions of moving agree.
@@ -16959,9 +16979,35 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 			// that would mean "delivered", and the hard rule here is that a
 			// completion status is never auto-written (POD depends on it).
 			let departed = false;
-			if (!trigger && /^(at shipper|loading)$/i.test(rowStatus) && !triggers.includes("At Shipper")
+			if (!trigger && /^(at shipper|loading)$/i.test(rowStatus)
 				&& Number(speedMps) > GEOFENCE_DEPART_SPEED_MPS && routemateVehicleId) {
-				const prevFix = prevCleanFixStmt.get(routemateVehicleId);
+				// Normally departure means "no longer inside the pickup zone".
+				//
+				// SHORT-HAUL GUARD: that test alone strands any load whose total
+				// length is under GEOFENCE_RADIUS — the truck never exits the
+				// pickup circle, so In Transit never fires, and At Receiver
+				// can't fire either because its predecessor IS "in transit".
+				// The load sits at "At Shipper" forever. At 1000 m that hit
+				// hauls under ~1.2 mi (1 load in production); at 3218.69 m it
+				// would hit everything under 2 mi. So: also treat it as a
+				// departure when the truck is closer to the DELIVERY than to
+				// the PICKUP and moving.
+				//
+				// Safe for the normal case by construction: on the 220-mile
+				// median haul a truck pulling out of the shipper is nowhere
+				// near closer to the destination, so this second clause only
+				// ever engages where the two zones genuinely overlap.
+				let leftPickupZone = !triggers.includes("At Shipper");
+				if (!leftPickupZone) {
+					try {
+						const pts = resolveGeofencePoints(loadObj, headers, loadId);
+						if (pts.origin && pts.dest) {
+							const here = { latitude, longitude };
+							leftPickupZone = geolib.getDistance(here, pts.dest) < geolib.getDistance(here, pts.origin);
+						}
+					} catch { /* fall back to the plain zone-exit test */ }
+				}
+				const prevFix = leftPickupZone ? prevCleanFixStmt.get(routemateVehicleId) : null;
 				if (prevFix && checkGeofence(prevFix.latitude, prevFix.longitude, loadObj, headers, loadId).includes("At Shipper")) {
 					trigger = "In Transit";
 					departed = true;
