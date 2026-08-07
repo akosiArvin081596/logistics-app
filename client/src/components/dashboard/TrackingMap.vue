@@ -207,8 +207,15 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
-import { useGoogleMaps, createDotPin, createTruckArrow, createFuelStopPin } from '../../composables/useGoogleMaps'
+import { useGoogleMaps, createDotPin, createTruckArrow, createFuelPricePin } from '../../composables/useGoogleMaps'
 import { formatMinutes, formatClockMs } from '../../lib/duration'
+import {
+  stopPrice,
+  priceText,
+  cheapestIndex,
+  allocateStopLabels,
+  fuelStopPopupHtml,
+} from '../../lib/fuelStops'
 import DriverGlanceMetrics from './DriverGlanceMetrics.vue'
 import FuelFinderPanel from './FuelFinderPanel.vue'
 
@@ -312,6 +319,7 @@ const fuelStops = ref([])
 const showFuelStops = ref(false)
 let fuelStopMarkers = []
 let fuelStopInfoWindow = null
+let fuelZoomListener = null
 
 // Trail state (single driver)
 const trailPoints = ref([])
@@ -546,30 +554,20 @@ function clearFuelStopMarkers() {
   if (fuelStopInfoWindow) { fuelStopInfoWindow.close(); fuelStopInfoWindow = null }
 }
 
-// Escape untrusted Places text (name/address/brand) before it goes into an
-// InfoWindow's innerHTML.
-function escHtml(v) {
-  return String(v == null ? '' : v).replace(/[&<>"]/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]),
-  )
-}
-
-function buildFuelStopPopup(s) {
-  let html = '<div style="font-family:DM Sans,sans-serif;font-size:0.85rem;max-width:220px">'
-  html += `<strong>${escHtml(s.name || s.brand || 'Truck stop')}</strong>`
-  if (s.brand && s.name && !String(s.name).toLowerCase().includes(String(s.brand).toLowerCase())) {
-    html += `<div style="color:#0f766e;font-size:0.72rem;font-weight:600">${escHtml(s.brand)}</div>`
-  }
-  if (s.address) html += `<div style="color:#555;font-size:0.78rem;margin-top:2px">${escHtml(s.address)}</div>`
-  const bits = []
-  if (Number.isFinite(Number(s.aboutMilesFromRoute))) bits.push(`~${Math.round(Number(s.aboutMilesFromRoute) * 10) / 10} mi off route`)
-  // Live per-station pump price only — no regional-average fallback (a coarse
-  // regional number would look misleadingly like the cheapest stop).
-  const live = s.priceSource === 'station' && Number.isFinite(Number(s.dieselPrice))
-  if (live) bits.push(`$${Number(s.dieselPrice).toFixed(2)}/gal live diesel`)
-  if (bits.length) html += `<div style="color:#555;font-size:0.75rem;margin-top:3px">${bits.join(' &middot; ')}</div>`
-  html += '</div>'
-  return html
+// Hand out price labels to the stops that can show one without colliding, and
+// collapse the rest to the compact pump dot. Pure-geometry decision in
+// lib/fuelStops.js; this only applies the answer. Re-run on zoom — overlap in
+// Mercator pixels is pan-invariant, so panning can't change it.
+function applyFuelStopLabels() {
+  if (!map || !fuelStopMarkers.length) return
+  // Derived from the MARKER list, not fuelStops — a stop with unusable
+  // coordinates gets no marker, so the two arrays can differ in length and an
+  // index taken from one would land on the wrong pin in the other.
+  const stops = fuelStopMarkers.map((m) => m.__stop)
+  const show = allocateStopLabels(stops, map.getZoom())
+  fuelStopMarkers.forEach((m, i) => {
+    if (m.content && typeof m.content.setCompact === 'function') m.content.setCompact(!show[i])
+  })
 }
 
 function renderFuelStopMarkers() {
@@ -577,25 +575,53 @@ function renderFuelStopMarkers() {
   if (!map) return
   if (!showFuelStops.value) return
   if (!selectedDriver.value || selectedDriver.value === '__all__') return
-  for (const s of fuelStops.value) {
+
+  const stops = fuelStops.value
+  const ci = cheapestIndex(stops)
+  // Held by identity, not index: the marker loop skips stops with unusable
+  // coordinates, so positions in the two lists don't correspond.
+  const cheapestStop = ci >= 0 ? stops[ci] : null
+  const cheapestPrice = cheapestStop ? stopPrice(cheapestStop) : null
+
+  stops.forEach((s) => {
     const lat = Number(s.lat)
     const lng = Number(s.lng)
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
+    const p = priceText(s)
+    const kind = s === cheapestStop ? 'cheapest' : p != null ? 'priced' : 'unpriced'
+    const name = s.name || s.brand || 'Truck stop'
+    // One string for the hover tooltip AND the marker's accessible name. The
+    // price must be in it: a decluttered pin shows only the pump dot, so this
+    // is the only way to read that stop's price without zooming in.
+    const pinTitle = p != null
+      ? `${name} — $${p}/gal${kind === 'cheapest' ? ' (cheapest on this route)' : ''}`
+      : `${name} — no published diesel price`
     const marker = new google.maps.marker.AdvancedMarkerElement({
       position: { lat, lng },
       map,
-      content: createFuelStopPin(),
-      title: s.name || s.brand || 'Truck stop',
-      zIndex: 700,
+      content: createFuelPricePin({
+        kind,
+        // Formatted once, in the shared lib, so the pin and the sidebar row can
+        // never print two different numbers for one station.
+        label: p != null ? `$${p}` : 'n/a',
+        title: pinTitle,
+      }),
+      title: pinTitle,
+      // Cheapest on top, then priced, then the unpriced ghosts underneath — so
+      // where pins do overlap, the useful one is the one you can read.
+      zIndex: kind === 'cheapest' ? 760 : kind === 'priced' ? 730 : 700,
       gmpClickable: true,
     })
+    marker.__stop = s
     marker.addEventListener('gmp-click', () => {
       if (!fuelStopInfoWindow) fuelStopInfoWindow = new google.maps.InfoWindow()
-      fuelStopInfoWindow.setContent(buildFuelStopPopup(s))
+      fuelStopInfoWindow.setContent(fuelStopPopupHtml(s, cheapestPrice))
       fuelStopInfoWindow.open({ map, anchor: marker })
     })
     fuelStopMarkers.push(marker)
-  }
+  })
+
+  applyFuelStopLabels()
 }
 
 // ---- FuelFinderPanel event handlers ----
@@ -1960,6 +1986,11 @@ async function initMap() {
   map.addListener('dragstart', () => {
     if (followTruck.value) followSuppressed.value = true
   })
+  // Price labels are ~5x wider than the pump dot they replaced, so which stops
+  // can show one is a function of zoom. Panning never changes the answer
+  // (overlap is computed in pan-invariant Mercator pixels), so this is the only
+  // camera event the POI layer listens to.
+  fuelZoomListener = map.addListener('zoom_changed', applyFuelStopLabels)
   // Render any already-fetched locations onto the map
   syncDriverMarkers()
   // Honor the persisted follow preference on map ready
@@ -2009,6 +2040,7 @@ onUnmounted(() => {
   clearSingleLoadOverlays()
   clearAllRouteOverlays()
   clearFuelStopMarkers()
+  if (fuelZoomListener) { fuelZoomListener.remove(); fuelZoomListener = null }
   map = null
 })
 </script>
