@@ -8219,8 +8219,13 @@ function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = tr
 // Pure reporting — nothing here writes to trucks.fuel_tank_gallons or avg_mpg.
 function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 	const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+	// pct_before/pct_after are selected, not just their difference: the leg math
+	// below needs the tank's absolute LEVEL at both ends of the leg, not only how
+	// far the closing fill moved the needle. `rise` stays because the calibration
+	// filter reads it.
 	const rows = db.prepare(`
 		SELECT fe.routemate_vehicle_id, fe.start_ms, fe.local_day, fe.odometer, fe.odo_span,
+		       fe.pct_before, fe.pct_after,
 		       (fe.pct_after - fe.pct_before) AS rise, fe.matched_gallons, fe.match_basis,
 		       fe.match_distance_km, t.unit_number AS unit
 		FROM fuel_events fe
@@ -8254,6 +8259,13 @@ function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 		// it: those miles were partly paid for by a receipt we do not have, so
 		// counting them inflates the MPG. This is the difference between a
 		// believable 7 mpg and a flattering one.
+		//
+		// Each leg carries the tank LEVELS at both ends, not just the closing
+		// fill's gallons — receiptDerivedMpg() needs them to work out how much of
+		// that fill replaced burned fuel and how much simply raised the tank. See
+		// legBurnedGallons() in lib/fuel-model.js for the mass balance and the
+		// measured before/after. Passing gallons alone (what this did until now)
+		// silently asserts every fill was a full restore.
 		const fills = allFills.filter((f) => f.routemate_vehicle_id === vid);
 		const legs = [];
 		for (let i = 1; i < seq.length; i++) {
@@ -8262,7 +8274,20 @@ function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 			if (!(miles > 0) || miles > 3000) continue;
 			const gap = fills.some((f) => f.start_ms > a.start_ms && f.start_ms < b.start_ms && !f.expense_id);
 			if (gap) continue;
-			legs.push({ miles, gallons: b.matched_gallons });
+			legs.push({
+				miles,
+				gallons: b.matched_gallons,
+				// Level the leg STARTED at: where fill A left the tank. Deliberately
+				// the stored pct_after and not a "settled" reading taken a few minutes
+				// later from routemate_telemetry — that table is purged at 90 days
+				// while fuel_events persists, so a telemetry-backed refinement would
+				// quietly degrade the older half of any window. Measured, settling
+				// windows of 10-60 min moved the aggregate by less than the noise
+				// (6.64-7.32 against 6.95), so it buys nothing for that cost.
+				pctStart: a.pct_after,
+				pctBefore: b.pct_before,
+				pctAfter: b.pct_after,
+			});
 		}
 		out[vid] = {
 			unit: seq[0].unit,
@@ -23311,7 +23336,16 @@ app.get("/api/investor/payouts", requireRole("Super Admin", "Investor"), async (
 
 		const { payouts, currentMonth, totals } = await reconcileInvestorPayouts(ownerId, ctx);
 
-		res.json({ payouts, currentMonth, totals });
+		// Lock health, reported the same way the expense routes already report it
+		// (POST /api/expenses, PUT /api/expenses/bulk-status). Without it this
+		// endpoint answers 200 with a full, plausible ledger while period_locks is
+		// unreadable, and the ONLY tell is that every `phase` silently goes blank —
+		// which is also what the flag being off looks like, so the two states are
+		// indistinguishable from the outside. period_locks is the guard the whole
+		// month-close feature rests on; it should not be the quietest thing here.
+		// Absent on a healthy database, so this is purely additive.
+		const lockReadable = periodLocksReadable();
+		res.json({ payouts, currentMonth, totals, ...(lockReadable ? {} : { periodLockUnreadable: true }) });
 	} catch (err) {
 		console.error("GET /api/investor/payouts error:", err.message);
 		res.status(500).json({ error: "Failed to load investor payouts" });
@@ -23687,7 +23721,12 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 		const monthlyTotals = [...monthly.values()]
 			.sort((a, b) => (a.period < b.period ? 1 : a.period > b.period ? -1 : 0)); // period DESC
 
-		res.json({ investors, monthlyTotals, grandTotals });
+		// See GET /api/investor/payouts for the reasoning — same key, same shape,
+		// probed ONCE for the whole response rather than per investor (the answer
+		// cannot change mid-request, and on a broken table each probe re-compiles a
+		// failing statement). Absent on a healthy database.
+		const lockReadable = periodLocksReadable();
+		res.json({ investors, monthlyTotals, grandTotals, ...(lockReadable ? {} : { periodLockUnreadable: true }) });
 	} catch (err) {
 		console.error("GET /api/payouts error:", err.message);
 		res.status(500).json({ error: "Failed to load payouts" });
@@ -23767,12 +23806,41 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 		//
 		// Reopening stays exempt, same as the $0 rule above: a payout advanced by
 		// mistake yesterday must still be walkable back today, window or no window.
+		//
+		// ⚠️ THIS GUARD FAILS CLOSED, AND ONLY VIA A DOUBLE NEGATIVE. Spelled out,
+		// because the expression does not say it and the next person will be tempted
+		// to tidy it:
+		//   isPending(p)  ==  flag on && p is a past month && !isLocked(p)
+		//   isLocked(p)   ==  false on ANY error, including an unreadable table
+		// so when period_locks cannot be read, isLocked is false, isPending is TRUE,
+		// and this blocks. Blocking is the right answer — refusing to settle costs a
+		// retry, settling a month that may already be finalized costs a restated
+		// payout — but it is right by accident, not by construction.
+		//
+		// DO NOT rewrite this as `periodPhase(p) === 'pending'`. periodPhase()
+		// deliberately returns '' when the table is unreadable (it refuses to label
+		// a month it cannot look up), so that rewrite reads as "not pending", the
+		// guard stops firing, and the failure direction INVERTS silently — settling
+		// straight into a possibly-closed month. Same trap for any refactor that
+		// routes through isLocked() directly. If this ever does need restating, the
+		// fail-closed predicate to build on is periodWriteLocked(), not isLocked().
 		if (!isReopen && isPending(payout.period)) {
+			// Probed only once the guard has already fired, so the healthy path does
+			// no extra work. Two very different situations were reading identically:
+			// "the window is still open, wait for the 7th" is a normal, self-resolving
+			// state, while "we cannot tell" is a broken database that resolves only
+			// when someone fixes it. Telling an admin to wait for a date is actively
+			// misleading in the second case — the date will pass and nothing will
+			// change.
+			const lockUnreadable = !periodLocksReadable();
 			return res.status(409).json({
-				error: `${periodLabel(payout.period)} is still in final settlement — receipts can be added until ${graceEndsAt(payout.period, settlementGraceDays())}. It settles automatically after that, or close it early from the Payouts console.`,
+				error: lockUnreadable
+					? `${periodLabel(payout.period)} cannot be confirmed closed — the period lock table could not be read, so this settlement is blocked until it can be. This is a database fault, not the close window; waiting will not clear it.`
+					: `${periodLabel(payout.period)} is still in final settlement — receipts can be added until ${graceEndsAt(payout.period, settlementGraceDays())}. It settles automatically after that, or close it early from the Payouts console.`,
 				code: "PERIOD_NOT_FINALIZED",
 				period: payout.period,
 				graceEndsAt: graceEndsAt(payout.period, settlementGraceDays()),
+				...(lockUnreadable ? { periodLockUnreadable: true } : {}),
 			});
 		}
 
@@ -23881,12 +23949,26 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), (req, re
 		// rather than the row's status both closes that hole and loosens the case
 		// that matters: a finalized-but-not-yet-paid row IS adjustable, which is
 		// exactly the finalize -> correct -> pay flow the close window is for.
+		//
+		// ⚠️ FAILS CLOSED VIA THE SAME DOUBLE NEGATIVE as the settle guard in
+		// POST /api/investor/payouts/:id/status — see the long note there before
+		// touching either. Short version: isPending() is true when period_locks
+		// cannot be read (because isLocked() swallows the error and answers false),
+		// so an unreadable table blocks the adjustment. That is the safe direction,
+		// and rewriting this in terms of periodPhase() would reverse it.
 		if (isPending(payout.period)) {
+			// See the settle guard for why the unreadable case gets its own sentence:
+			// the old copy named a date the admin could wait for, which is a false
+			// statement about a month whose lock state is simply unknown.
+			const lockUnreadable = !periodLocksReadable();
 			return res.status(409).json({
-				error: `${periodLabel(payout.period)} is still open until ${graceEndsAt(payout.period, settlementGraceDays())} — log the receipt and it will be counted automatically. Adjustments apply once the period is finalized.`,
+				error: lockUnreadable
+					? `${periodLabel(payout.period)} cannot be confirmed finalized — the period lock table could not be read, so adjustments are blocked until it can be. Log the receipt as normal; this is a database fault, not the close window.`
+					: `${periodLabel(payout.period)} is still open until ${graceEndsAt(payout.period, settlementGraceDays())} — log the receipt and it will be counted automatically. Adjustments apply once the period is finalized.`,
 				code: "PERIOD_NOT_FINALIZED",
 				period: payout.period,
 				graceEndsAt: graceEndsAt(payout.period, settlementGraceDays()),
+				...(lockUnreadable ? { periodLockUnreadable: true } : {}),
 			});
 		}
 
@@ -23988,8 +24070,23 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 		const cur = currentMonthKeyCT();
 
 		// Periods that have payout rows but no lock yet — i.e. accruing or pending.
+		//
+		// `period_locks.status` is QUALIFIED, and that is the whole point of this
+		// line. Written bare as `WHERE status = 'locked'` it silently produced the
+		// wrong answer on exactly the database this screen exists to diagnose: if
+		// period_locks is rebuilt without its `status` column (the break
+		// periodLocksReadable() was written for), SQL scoping does not error — it
+		// resolves the unqualified name outward to investor_payouts.status, turning
+		// the subquery into a correlated reference that is never 'locked'. It then
+		// returns EMPTY, `NOT IN ()` matches everything, and all 14 locked months
+		// land in the `open` bucket. They win the de-dupe below too, because `open`
+		// is spread first — so every finalized month rendered as never finalized,
+		// with a blank finalizedAt, on the one page an admin opens mid-outage.
+		// Qualified, the same break throws and the route 500s: still bad, but bad in
+		// a way that says so instead of fabricating a close calendar. On a healthy
+		// database this is byte-identical.
 		const open = db.prepare(
-			"SELECT DISTINCT period FROM investor_payouts WHERE period NOT IN (SELECT period FROM period_locks WHERE status = 'locked') ORDER BY period DESC"
+			"SELECT DISTINCT period FROM investor_payouts WHERE period NOT IN (SELECT period FROM period_locks WHERE period_locks.status = 'locked') ORDER BY period DESC"
 		).all().map((r) => r.period);
 
 		res.json({
@@ -24286,21 +24383,37 @@ async function maybeCloseFinishedPeriods() {
 	// SELECT per tick.
 	if (periodCloseFailStreak > 0 && Date.now() - periodCloseLastAttempt < PERIOD_CLOSE_RETRY_MS) return;
 
-	const due = periodsDueForClose();
-	// Also retry the stamp for periods locked earlier whose snapshot never landed
-	// (step 2 failed on a previous pass — see finalizePeriod).
-	const unstamped = db.prepare(
-		`SELECT DISTINCT p.period FROM investor_payouts p
-		   JOIN period_locks l ON l.period = p.period AND l.status = 'locked'
-		  WHERE COALESCE(p.finalized_at,'') = '' ORDER BY p.period ASC`
-	).all().map((r) => r.period);
-
-	const work = [...new Set([...due, ...unstamped])];
-	if (!work.length) { periodCloseFailStreak = 0; return; }
-
+	// EVERYTHING that can throw lives inside the try, including the two SELECTs
+	// that decide what to work on. They used to sit above it, and both read
+	// `period_locks` — periodsDueForClose() through a NOT IN subquery, the
+	// unstamped retry through a JOIN — so the single failure this whole apparatus
+	// exists to survive (an unreadable lock table) escaped as a rejected promise
+	// before the streak counter, the log line, or the ACTION-NEEDED notification
+	// could fire. Verified by QA: a broken server ran past two ticks in total
+	// silence. A scheduled job that cannot report its own failure is worse than no
+	// job, because the absence of an alert reads as success.
+	//
+	// `stage` is carried so the failure copy can tell the truth about what state
+	// the books are in. The two are genuinely different situations and the old
+	// wording only described one of them.
 	periodCloseRunning = true;
 	periodCloseLastAttempt = Date.now();
+	let stage = "scan";
+	let due = [];
 	try {
+		due = periodsDueForClose();
+		// Also retry the stamp for periods locked earlier whose snapshot never landed
+		// (step 2 failed on a previous pass — see finalizePeriod).
+		const unstamped = db.prepare(
+			`SELECT DISTINCT p.period FROM investor_payouts p
+			   JOIN period_locks l ON l.period = p.period AND l.status = 'locked'
+			  WHERE COALESCE(p.finalized_at,'') = '' ORDER BY p.period ASC`
+		).all().map((r) => r.period);
+
+		const work = [...new Set([...due, ...unstamped])];
+		if (!work.length) { periodCloseFailStreak = 0; return; }
+
+		stage = "finalize";
 		// One batched pass: locks are taken for every due period up front, then
 		// each investor is reconciled ONCE and stamped across all of them.
 		const result = await finalizePeriods(work, "system");
@@ -24320,17 +24433,25 @@ async function maybeCloseFinishedPeriods() {
 		}
 		periodCloseFailStreak = 0;
 	} catch (e) {
-		// The lock is already in place for anything we got to, so the books are
-		// still safe; only the snapshot is outstanding. Retry on the next window.
+		// Two failure shapes, and they leave the books in different places:
+		//   stage 'finalize' — locks are already in place for anything we got to, so
+		//     the figures are frozen and only the snapshot is outstanding;
+		//   stage 'scan' — we never got as far as taking a lock, so NOTHING closed
+		//     this pass and a month past its window is still accruing.
+		// The second is the more urgent of the two and used to be reported as the
+		// first, which would send someone looking for a snapshot rather than for the
+		// reason no month is closing at all.
 		periodCloseFailStreak++;
-		console.error(`[period-close] close failed (streak ${periodCloseFailStreak}):`, e.message);
+		console.error(`[period-close] close failed at ${stage} (streak ${periodCloseFailStreak}):`, e.message);
 		if (periodCloseFailStreak === PERIOD_CLOSE_MAX_ATTEMPTS) {
 			try {
 				insertDispatchNotification.run(
 					"period-close",
 					"ACTION NEEDED — month close incomplete",
-					`Finalizing a period has failed ${PERIOD_CLOSE_MAX_ATTEMPTS} times (${e.message}). Affected months ARE locked, so their figures are frozen and no new receipt can move them — but the statement snapshot is missing, so statements fall back to a live recompute with a drift note. Check the Sheets connection.`,
-					JSON.stringify({ attempts: PERIOD_CLOSE_MAX_ATTEMPTS, error: e.message }),
+					stage === "scan"
+						? `The month-close sweep has failed ${PERIOD_CLOSE_MAX_ATTEMPTS} times before it could take a single lock (${e.message}). NO period has been closed on those passes, so any month past its ${settlementGraceDays()}-day window is still open and its figure can still move. This usually means period_locks is unreadable — check the database, not the Sheets connection.`
+						: `Finalizing a period has failed ${PERIOD_CLOSE_MAX_ATTEMPTS} times (${e.message}). Affected months ARE locked, so their figures are frozen and no new receipt can move them — but the statement snapshot is missing, so statements fall back to a live recompute with a drift note. Check the Sheets connection.`,
+					JSON.stringify({ attempts: PERIOD_CLOSE_MAX_ATTEMPTS, stage, error: e.message }),
 				);
 			} catch {}
 		}
@@ -24366,8 +24487,24 @@ if (PERIOD_FINALIZE_ENABLED) {
 		}
 	} catch (e) { console.error("[period-close] baseline seed failed:", e.message); }
 
-	setInterval(() => { maybeCloseFinishedPeriods().catch(() => {}); }, 60 * 1000);
-	setTimeout(() => { maybeCloseFinishedPeriods().catch(() => {}); }, 95 * 1000);
+	// The tick's rejection handler LOGS. It used to be `.catch(() => {})`, which is
+	// how the unguarded SELECTs above stayed invisible through two QA ticks: the
+	// sweep threw, the promise rejected, and the empty handler discarded it without
+	// so much as a line on stdout.
+	//
+	// maybeCloseFinishedPeriods() now owns its own try/catch/finally and should
+	// never reject, so anything arriving here is a defect in that guard itself
+	// (or in the catch block) rather than an ordinary close failure — which is
+	// exactly why it must be noisy instead of silent. Deliberately NOT wired into
+	// periodCloseFailStreak: the inner catch already counts real failures, and
+	// double-counting would trip the ACTION-NEEDED threshold early.
+	const periodCloseTick = () => {
+		maybeCloseFinishedPeriods().catch((e) => {
+			console.error("[period-close] sweep threw outside its own guard:", (e && e.message) || e);
+		});
+	};
+	setInterval(periodCloseTick, 60 * 1000);
+	setTimeout(periodCloseTick, 95 * 1000);
 	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (America/Chicago)`);
 }
 
