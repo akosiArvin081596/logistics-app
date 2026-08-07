@@ -1639,9 +1639,10 @@ async function routemateSyncTelemetry() {
 			// two loads cannot both advance off one ping. Ordering only decides
 			// who gets asked first, and it stops early on the first advance so a
 			// single ping never writes two rows.
-			const candidates = (activeLoadsByDriver[driverName.trim().toLowerCase()] || [])
-				.slice()
-				.sort((a, b) => statusProgressRank(b.status) - statusProgressRank(a.status));
+			const candidates = orderGeofenceCandidates(
+				activeLoadsByDriver[driverName.trim().toLowerCase()] || [],
+				t.latitude, t.longitude,
+			);
 			if (!candidates.length) continue;
 			for (const cand of candidates) {
 				try {
@@ -12853,7 +12854,7 @@ async function ingestLinxupPosition(pos) {
 					if (!activeLoadId) activeLoadId = lid;
 					driverActiveLoads.push({ loadId: lid, status: s });
 				}
-				driverActiveLoads.sort((a, b) => statusProgressRank(b.status) - statusProgressRank(a.status));
+				driverActiveLoads = orderGeofenceCandidates(driverActiveLoads, pos.latitude, pos.longitude);
 			}
 		} catch { /* best-effort */ }
 		const headingDeg = parseRoutemateBearing(pos.bearing);
@@ -16792,6 +16793,35 @@ const GEOFENCE_RADIUS = Number(process.env.GEOFENCE_RADIUS_M) > 0
 // uses for "traveled" (~5 mph), so the two notions of moving agree.
 const GEOFENCE_DEPART_SPEED_MPS = 2.235;
 
+// ARRIVAL speed ceiling (~10 mph). A truck cannot arrive at highway speed.
+//
+// The dwell hysteresis below asks for two consecutive fixes inside the zone,
+// which was a real filter at 1000 m — a 2 km chord is barely two fixes at 60 mph
+// on a 60 s poll. At 3218.69 m the chord is 6.44 km, about FOUR fixes, so a
+// truck merely passing a shipper on the freeway now satisfies it. Speed fixes
+// that in a way a fix count cannot: it does not degrade when the radius grows,
+// so this stays correct if the radius is retuned again.
+//
+// It also sharpens detention. Arrival now stamps when the truck actually slows
+// down at the site, not when it first crosses a line two miles out — so the
+// At Shipper -> In Transit window measures time AT the shipper rather than time
+// within two miles of it.
+//
+// Deliberately looser than GEOFENCE_DEPART_SPEED_MPS: 5 mph means "moving at
+// all", which would make a truck still rolling through the gate wait for another
+// poll. 10 mph still excludes every highway pass while letting a normal yard
+// entry qualify on the first fix inside.
+//
+// FAILS OPEN: every "no speed" shape compares false against the ceiling, so a
+// ping carrying no speed behaves exactly as it did before this existed — a
+// missing field can never cause a MISSED arrival. Two different coercions get
+// you there, which is worth stating precisely rather than hand-waving:
+// Number(undefined) and Number("abc") are NaN (and every comparison with NaN is
+// false), while Number(null) and Number("") are 0 (and 0 > 4.5 is false).
+const GEOFENCE_ARRIVE_MAX_SPEED_MPS = Number(process.env.GEOFENCE_ARRIVE_MAX_SPEED_MPS) > 0
+	? Number(process.env.GEOFENCE_ARRIVE_MAX_SPEED_MPS)
+	: 4.5;
+
 // How far along its lifecycle a load is. Used to order a driver's active loads
 // when they carry more than one (queueing is supported, so this is routine):
 // the most-progressed load is the one they are actually working, so it gets
@@ -16804,6 +16834,45 @@ const STATUS_PROGRESS = [
 ];
 function statusProgressRank(status) {
 	return STATUS_PROGRESS.indexOf(String(status || "").trim().toLowerCase());
+}
+
+// Order a driver's active loads for geofence evaluation: most-progressed first,
+// then NEAREST PICKUP as the tie-break.
+//
+// The rank sort alone leaves ties unresolved, and Array.sort is stable, so a tie
+// fell through to the input order — which is Job Tracking row order, i.e. the
+// order rate-cons happened to arrive. That is arbitrary with respect to where
+// the truck actually is. Two loads both sitting in "Dispatched" share a valid
+// predecessor for "At Shipper", so whichever came first in the sheet won, and
+// the caller breaks on the first advance. At a 1000 m radius the two pickups had
+// to be within ~1.2 mi for this to matter; at 3218.69 m it is ~4 mi — routine
+// for two loads out of the same industrial park, port terminal or rail ramp.
+//
+// Nearest-pickup does not make a genuinely ambiguous case unambiguous (two docks
+// in one yard remain a coin flip), but it is strictly better than rate-con
+// arrival order, and it costs one indexed lookup per candidate.
+//
+// Loads with no coordinates sort LAST rather than first: geofencing is a no-op
+// for them anyway, so they must never displace a load that could actually fire.
+function orderGeofenceCandidates(candidates, latitude, longitude) {
+	const distCache = new Map();
+	const pickupDist = (loadId) => {
+		if (distCache.has(loadId)) return distCache.get(loadId);
+		let d = Infinity;
+		try {
+			const row = getLoadCoordsRow(loadId);
+			if (row && Number.isFinite(row.origin_lat) && Number.isFinite(row.origin_lng)) {
+				d = geolib.getDistance({ latitude, longitude }, { latitude: row.origin_lat, longitude: row.origin_lng });
+			}
+		} catch { /* unknown distance sorts last, same as no coordinates */ }
+		distCache.set(loadId, d);
+		return d;
+	};
+	return candidates.slice().sort((a, b) => {
+		const byRank = statusProgressRank(b.status) - statusProgressRank(a.status);
+		if (byRank !== 0) return byRank;
+		return pickupDist(a.loadId) - pickupDist(b.loadId);
+	});
 }
 
 // Pickup/drop-off coordinates for a load.
@@ -17024,6 +17093,14 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 			// Arrivals only: a departure already proved the previous fix was
 			// inside the zone (that IS its signal), so re-checking it here
 			// would demand the truck be simultaneously in and out of the zone.
+			// Speed ceiling, checked BEFORE the fix-count test because it is the
+			// cheaper and stronger of the two: no DB read, and unlike a fix count
+			// it does not weaken as the radius grows. See
+			// GEOFENCE_ARRIVE_MAX_SPEED_MPS for why a count alone stopped being
+			// enough at a 2-mile radius. Arrivals only — a departure is defined
+			// by the truck moving, so applying a speed ceiling there would
+			// contradict its own trigger.
+			if (!departed && Number(speedMps) > GEOFENCE_ARRIVE_MAX_SPEED_MPS) return null;
 			if (routemateVehicleId && !departed) {
 				const prevFix = prevCleanFixStmt.get(routemateVehicleId);
 				// OFFSET 1 because the CURRENT ping was already INSERTed by
