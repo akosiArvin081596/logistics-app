@@ -399,7 +399,16 @@ export const useDriverStore = defineStore('driver', {
 
     async submitExpense(data) {
       await api.post('/api/expenses', data)
-      await this.loadData()
+      // The expense is saved at this point. A failing refresh must NOT surface
+      // as a failing submit: the form now keeps the driver's entry on error and
+      // invites a retry, and POST /api/expenses is not idempotent — so letting
+      // this throw would double-book the P&L. The socket events and the
+      // on-foreground refetch reconcile the list anyway.
+      try {
+        await this.loadData()
+      } catch {
+        // Deliberately swallowed — see above.
+      }
     },
 
     async markNotificationsRead(ids) {

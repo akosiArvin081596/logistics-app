@@ -73,20 +73,57 @@ function validateFileExt(fileName) { return ALLOWED_FILE_EXTS.has(path.extname(f
 // Checking the actual decoded bytes blocks that. Supports JPEG / PNG / WebP / GIF
 // (the formats imageToPdf can render); anything else is rejected before pdfkit
 // tries to parse it as an image.
-function isValidImageMagic(buf) {
-	if (!Buffer.isBuffer(buf) || buf.length < 12) return false;
+//
+// `sniffImageFormat` is the single magic-byte table and returns the CANONICAL
+// FILE EXTENSION for the bytes, or null. Two kinds of caller share it:
+//   - "is this an image?" → isValidImageMagic, semantics unchanged (same four
+//     formats, same >=12-byte floor) for its existing callers.
+//   - "what do I NAME this on disk?" → the extension it returns, so a
+//     client-supplied MIME label can never decide the extension we later serve
+//     the file back under. One table, so the two questions cannot drift apart.
+function sniffImageFormat(buf) {
+	if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
 	// JPEG: FF D8 FF
-	if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return true;
+	if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return "jpg";
 	// PNG: 89 50 4E 47 0D 0A 1A 0A
 	if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47 &&
-		buf[4] === 0x0D && buf[5] === 0x0A && buf[6] === 0x1A && buf[7] === 0x0A) return true;
+		buf[4] === 0x0D && buf[5] === 0x0A && buf[6] === 0x1A && buf[7] === 0x0A) return "png";
 	// WebP: "RIFF" .... "WEBP"
 	if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
-		buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return true;
+		buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return "webp";
 	// GIF: "GIF87a" or "GIF89a"
 	if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38 &&
-		(buf[4] === 0x37 || buf[4] === 0x39) && buf[5] === 0x61) return true;
-	return false;
+		(buf[4] === 0x37 || buf[4] === 0x39) && buf[5] === 0x61) return "gif";
+	return null;
+}
+function isValidImageMagic(buf) { return sniffImageFormat(buf) !== null; }
+// Do these bytes really match the extension we are about to write, for the
+// extensions the /uploads mount serves INLINE? Returns an error string, or null
+// when the file is acceptable.
+//
+// The scope is deliberate and is the same list as INLINE_SAFE_UPLOAD_EXTS below:
+// inline-served types are the only ones a browser will RENDER, so they are the
+// only ones where a lying extension buys an attacker anything. Everything else
+// under ALLOWED_FILE_EXTS (.doc/.docx/.xls/.xlsx/.csv/.txt) is forced to
+// download by the static mount, and .csv/.txt have no signature to check at all
+// — so checking them would be theatre, not defence.
+function verifyInlineServedBytes(buf, ext) {
+	const e = String(ext || "").toLowerCase();
+	if (!Buffer.isBuffer(buf) || buf.length === 0) return "File is empty or could not be decoded";
+	if (e === ".pdf") {
+		// Same "%PDF-" check the rate-con intake and savePdfReceiptToDisk use.
+		if (buf.length < 5 || buf.toString("latin1", 0, 5) !== "%PDF-") return "File is not a valid PDF";
+		return null;
+	}
+	if ([".jpg", ".jpeg", ".png", ".gif", ".webp"].includes(e)) {
+		const fmt = sniffImageFormat(buf);
+		if (!fmt) return "File is not a recognized image format";
+		// Accept any real image under any image extension (a PNG named .jpg is a
+		// mislabel, not an attack, and the byte check already proved it renders as
+		// an image). What is refused is a NON-image wearing an image extension.
+		return null;
+	}
+	return null; // attachment-served type — nothing meaningful to verify
 }
 // Cross-origin support for the driver-mobile-view client (separate Next.js
 // app at a different origin). Only the env-allowlisted origins get permissive
@@ -2593,6 +2630,55 @@ db.exec(`
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_truck ON truck_assignments(truck_id)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(driver_name)`); } catch {}
 
+// Local mirror of the Google Sheet's "Job Tracking" tab, written by the n8n
+// ingestion webhook POST /api/n8n/job (~270 lines below). That endpoint has
+// always read and written this table, but NOTHING in the repo created it — it
+// existed in production only because someone made it out-of-band, so a fresh
+// install (new staging box, rebuilt VPS, disaster recovery) 500s the webhook on
+// "no such table". This CREATE closes that gap and nothing else: `IF NOT EXISTS`
+// means production, where the table is already present, is untouched.
+//
+// ⚠️ This is part of the LIVE n8n ingestion contract, so the shape is not
+// inferred from the endpoint's queries — it is a transcription of production's
+// actual `sqlite_master.sql`, read over the VPS on 2026-08-07. Getting a name or
+// type wrong here would be worse than the current state: today a fresh install
+// fails loudly, whereas a mismatched column would fail silently and wrong.
+// The 25 data columns mirror the sheet's 26 columns in order; `_payment_` is the
+// sheet's "  Payment  " header (the surrounding spaces are real) flattened, and
+// the six the endpoint never writes (phase_of_progress, carrier_stage,
+// location_link, status_update_date, completion_date, owner_id) are part of that
+// mirror and are kept so the two schemas stay identical.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS sheet_job_tracking (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		"contract_id" TEXT DEFAULT '',
+		"load_id" TEXT DEFAULT '',
+		"details" TEXT DEFAULT '',
+		"trailer_number" TEXT DEFAULT '',
+		"driver" TEXT DEFAULT '',
+		"pickup_info" TEXT DEFAULT '',
+		"pickup_appointment" TEXT DEFAULT '',
+		"pickup_address" TEXT DEFAULT '',
+		"dropoff_info" TEXT DEFAULT '',
+		"dropoff_appointment" TEXT DEFAULT '',
+		"dropoff_address" TEXT DEFAULT '',
+		"job_status" TEXT DEFAULT '',
+		"phase_of_progress" TEXT DEFAULT '',
+		"carrier_stage" TEXT DEFAULT '',
+		"_payment_" TEXT DEFAULT '',
+		"broker_contact_name" TEXT DEFAULT '',
+		"phone_number" TEXT DEFAULT '',
+		"email" TEXT DEFAULT '',
+		"location_link" TEXT DEFAULT '',
+		"documents" TEXT DEFAULT '',
+		"assigned_date" TEXT DEFAULT '',
+		"status_update_date" TEXT DEFAULT '',
+		"completion_date" TEXT DEFAULT '',
+		"truck" TEXT DEFAULT '',
+		"owner_id" TEXT DEFAULT ''
+	)
+`);
+
 // Backfill legacy expenses with truck_unit + owner_id. Older expense rows
 // pre-date the columns being stamped on insert (server.js:9370). Pass 1
 // resolves truck_unit + owner_id from truck_assignments history (driver+date).
@@ -3736,7 +3822,60 @@ app.use("/uploads/rate-cons", requireRole("Super Admin", "Dispatcher"));
 // Every subdirectory under uploads/ contains sensitive documents (PII, signatures, banking info, SSN on W-9),
 // so the entire tree requires a session. Public onboarding flows serve PDFs via dedicated /api/... routes
 // instead of direct static URLs, so locking this down does not break any public page.
-app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads")));
+//
+// Response hardening. Everything under uploads/ is attacker-INFLUENCED bytes (a
+// driver picks the receipt file, an applicant picks the CDL scan), so the
+// headers have to hold on their own: validation and headers fail independently,
+// and files written before a validator existed are still on disk forever —
+// nothing ever unlinks them. `nosniff` stops a browser re-interpreting a
+// mislabelled or polyglot file as HTML, and anything outside the set we
+// deliberately render inline is forced to download rather than execute on our
+// own origin, where the session cookie lives. Same reasoning, and the same pair
+// of headers, as GET /api/driver/truck-documents/:id/view.
+//
+// Images and PDFs stay INLINE — receipts render in <img>, and rate-cons,
+// invoices and signed onboarding PDFs are opened in a tab or an <iframe>
+// (DocumentSignModal, InvestorSignModal, InvestorApplyView). Forcing those to
+// attachment would break the signing flows. The office-doc and text types in
+// ALLOWED_FILE_EXTS (.doc/.docx/.xls/.xlsx/.csv/.txt) are the ones that change:
+// they now download, which is what a browser already did for most of them.
+const INLINE_SAFE_UPLOAD_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf"]);
+// One rule, applied by the static mount and by every API route that re-serves a
+// STORED file out of uploads/. Those proxies exist to add an ownership check the
+// mount can't do — but they bypass the mount entirely, so without this they hand
+// the same bytes back with weaker headers than the path they were added to
+// protect. Keep them calling this rather than hand-rolling the pair.
+//
+// Callers, exhaustively (if you add one, add it here — a comment claiming
+// coverage it doesn't have is how three of these drifted apart in the first
+// place): GET /api/invoices/:id/pdf, GET /api/driver/shared-documents/:id/download,
+// GET /api/driver/truck-documents/:id/view.
+//
+// Deliberately NOT a caller: GET /api/expenses/:id/receipt-thumbnail. It serves
+// a jimp-GENERATED JPEG rather than a stored file, so it owns its own
+// Content-Type and Cache-Control; it sets nosniff inline at that site and needs
+// no disposition (it is only ever rendered in an <img>).
+function setUploadServeHeaders(res, fileNameOrPath, opts = {}) {
+	res.setHeader("X-Content-Type-Options", "nosniff");
+	const ext = path.extname(String(fileNameOrPath || "")).toLowerCase();
+	const safeName = path.basename(String(fileNameOrPath || "file")).replace(/[^a-zA-Z0-9._-]/g, "_");
+	if (INLINE_SAFE_UPLOAD_EXTS.has(ext)) {
+		if (opts.disposition !== false) res.setHeader("Content-Disposition", `inline; filename="${safeName}"`);
+	} else {
+		res.setHeader("Content-Disposition", `attachment; filename="${safeName}"`);
+	}
+}
+app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads"), {
+	setHeaders: (res, filePath) => {
+		res.setHeader("X-Content-Type-Options", "nosniff");
+		// The mount deliberately does NOT set an inline disposition — express.static
+		// already omits one, and adding a filename here would change every existing
+		// download's suggested name. Only the dangerous half is forced.
+		if (!INLINE_SAFE_UPLOAD_EXTS.has(path.extname(filePath).toLowerCase())) {
+			res.setHeader("Content-Disposition", "attachment");
+		}
+	},
+}));
 
 // NOTE: a read-only `demo_viewer` account and its lockdown middleware lived here
 // and were removed 2026-08-04, account and all.
@@ -6202,7 +6341,14 @@ function houstonDay(d = new Date()) {
 }
 
 function generateInvoiceNumber(driverName, weekStart) {
-	const initials = driverName.split(/\s+/).map(w => w[0]).join("").toUpperCase().slice(0, 3);
+	// The result lands in a PDF filename via path.join. It provably cannot
+	// traverse — `INV-` and `-${year}` always glue a `..` into a longer segment,
+	// and slice(0,3) is too short to form a bare `../` segment — but a `/` in a
+	// driver name still yields a nonexistent subdirectory and an ENOENT 500. The
+	// manual-invoice sibling already sanitises; this matches it. No-op for every
+	// real name (initials of "O'Brien"/"Mary-Jane Smith" are already A-Z), so no
+	// existing invoice number changes shape.
+	const initials = driverName.split(/\s+/).map(w => w[0]).join("").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3);
 	const d = new Date(weekStart);
 	const year = d.getFullYear();
 	// ISO week number
@@ -9990,6 +10136,10 @@ app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {
 		const pdfPath = path.join(__dirname, "uploads", "invoices", invoice.pdf_file_name);
 		if (!fs.existsSync(pdfPath)) return res.status(404).json({ error: "PDF file not found" });
 		res.setHeader("Content-Type", "application/pdf");
+		// nosniff: the Content-Type above is asserted from the DB row, not from the
+		// bytes, so a non-PDF that ever reached uploads/invoices must not be free to
+		// be re-sniffed into something executable. Disposition is already set below.
+		setUploadServeHeaders(res, invoice.pdf_file_name, { disposition: false });
 		res.setHeader("Content-Disposition", `inline; filename="${invoice.pdf_file_name}"`);
 		fs.createReadStream(pdfPath).pipe(res);
 	} catch (err) {
@@ -14108,6 +14258,10 @@ app.get("/api/driver/shared-documents/:id/download", requireAuth, (req, res) => 
 		if (!doc.file_url) return res.status(404).json({ error: "File missing" });
 		const filePath = path.join(__dirname, doc.file_url);
 		if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File missing" });
+		// Same headers the /uploads mount applies — this route bypasses it, and an
+		// admin can upload any ALLOWED_FILE_EXTS type here, so a bare sendFile would
+		// serve e.g. an .html shared doc as executable same-origin content.
+		setUploadServeHeaders(res, doc.file_name || filePath);
 		res.sendFile(filePath);
 	} catch (err) {
 		console.error("Shared doc download error:", err.message);
@@ -14167,11 +14321,15 @@ app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter
 		if (!doc.file_url) return res.status(404).json({ error: "File missing" });
 		const filePath = path.join(__dirname, doc.file_url);
 		if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File missing" });
-		res.setHeader("X-Content-Type-Options", "nosniff");
-		res.setHeader(
-			"Content-Disposition",
-			`inline; filename="${(doc.file_name || "document").replace(/[^a-zA-Z0-9._-]/g, "_")}"`
-		);
+		// Shared rule (see setUploadServeHeaders): nosniff always, inline for the
+		// formats we deliberately render, attachment for everything else. This
+		// route used to hand-roll an UNCONDITIONAL inline, so an admin-uploaded
+		// .doc/.xls/.csv/.txt truck document stayed inline here while the same
+		// bytes downloaded everywhere else. Not exploitable — nosniff plus those
+		// Content-Types can't become HTML — but this is the widest audience in the
+		// app (every assigned driver), and the product decision that matters is
+		// "PDFs and images preview", which the shared rule keeps.
+		setUploadServeHeaders(res, doc.file_name || filePath);
 		res.sendFile(filePath);
 	} catch (err) {
 		console.error("Truck doc view error:", err.message);
@@ -15730,31 +15888,71 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 // accepts both data URIs and URL paths.
 const RECEIPTS_DIR = path.join(__dirname, "uploads", "expense-receipts");
 try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
+// Image formats we are prepared to STORE AND SERVE as a receipt. Deliberately
+// narrower than isValidImageMagic (which also allows GIF, because imageToPdf can
+// render one): every other receipt consumer already agrees on exactly this set —
+// the POST /api/expenses/ocr accept regex, POST /api/documents/scan,
+// lib/receipt-ocr.js DATA_URI_RE, and MIME_BY_EXT in the two backfill scripts.
+// It also makes the ext→MIME map in POST /api/expenses/:id/extract-details
+// (`png ? : webp ? : image/jpeg`) correct BY CONSTRUCTION rather than by luck —
+// its jpeg catch-all is only right while nothing else can reach the disk. A GIF
+// is not a receipt.
+const RECEIPT_IMAGE_EXTS = new Set(["jpg", "png", "webp"]);
+const MAX_IMAGE_RECEIPT_BYTES = 20 * 1024 * 1024; // 20 MB decoded — far above any phone-camera receipt
+
+// Returns { url } on success or { error, status } on refusal — the same shape as
+// savePdfReceiptToDisk() below, so the image and PDF halves of a receipt upload
+// read and fail consistently.
+//
+// SECURITY — this is the trust boundary, and the trusted thing is the BYTES.
+// This used to take the data-URI's MIME token straight into the on-disk file
+// extension (`data:image/(\w+)` → `.svg`, `.html`, …) with no byte check at all,
+// while POST /api/expenses is only requireAuth. So any authenticated user — a
+// Driver — could store `data:image/svg;base64,<svg onload=…>` or an HTML
+// document, which uploads/ then served from our own origin to whichever
+// dispatcher or Super Admin opened the receipt: stored XSS against exactly the
+// sessions worth stealing. The label a client sends is a hint and is now used
+// for NOTHING; sniffImageFormat decides both whether we store the file and what
+// we name it.
 function saveReceiptToDisk(photoData) {
-	if (!photoData || typeof photoData !== "string") return "";
-	if (!photoData.startsWith("data:")) return photoData; // already a URL/path
-	const m = photoData.match(/^data:image\/(\w+);base64,(.+)$/);
-	if (!m) return ""; // unrecognized format — drop silently
-	const ext = (m[1] || "png").toLowerCase().replace("jpeg", "jpg");
+	if (!photoData || typeof photoData !== "string") return { url: "" }; // no receipt attached — normal
+	if (!photoData.startsWith("data:")) return { url: photoData }; // already a URL/path (legacy rows)
+	// The MIME token is captured only so a malformed URI can be told apart from a
+	// well-formed one; it is never read. Matching `[^;,]*` rather than the old
+	// `image/(\w+)` means a mislabelled payload is REFUSED here instead of
+	// slipping past the regex into the old silent drop.
+	const m = photoData.match(/^data:([^;,]*);base64,(.+)$/);
+	if (!m) return { error: "Receipt must be a base64 image data URI", status: 400 };
+	// Cheap pre-decode guard: base64 inflates ~4/3, so anything longer than this
+	// cannot decode under the byte cap — reject before buffering it.
+	if (m[2].length > Math.ceil((MAX_IMAGE_RECEIPT_BYTES * 4) / 3) + 4) {
+		return { error: "Receipt image too large (max 20 MB)", status: 413 };
+	}
 	const buf = Buffer.from(m[2], "base64");
+	if (buf.length === 0) return { error: "Receipt image could not be decoded", status: 400 };
+	if (buf.length > MAX_IMAGE_RECEIPT_BYTES) return { error: "Receipt image too large (max 20 MB)", status: 413 };
+	const ext = sniffImageFormat(buf);
+	if (!ext || !RECEIPT_IMAGE_EXTS.has(ext)) {
+		return { error: "Receipt must be a JPEG, PNG, or WebP image", status: 400 };
+	}
 	const fname = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
-	const fpath = path.join(RECEIPTS_DIR, fname);
 	try {
-		fs.writeFileSync(fpath, buf);
-		return `/uploads/expense-receipts/${fname}`;
+		fs.writeFileSync(path.join(RECEIPTS_DIR, fname), buf);
+		return { url: `/uploads/expense-receipts/${fname}` };
 	} catch (err) {
 		console.error("Receipt save failed:", err.message);
-		return ""; // fall back to no photo rather than blob in DB
+		return { error: "Failed to store receipt image", status: 500 };
 	}
 }
 
 // PDF receipts (admin/dispatcher "Log Expense" only — 2026-06-11 owner
 // meeting: toll invoices, emailed receipts, etc. arrive as PDFs). Stored in
 // the same expense-receipts dir so the per-truck ZIP bundle picks them up
-// automatically (it preserves the file extension). Unlike the image path
-// above (silent drop — legacy driver-flow behavior), PDF failures return an
+// automatically (it preserves the file extension). PDF failures return an
 // explicit error so an admin never saves an expense believing the invoice
-// attached when it didn't.
+// attached when it didn't — the image path above now does the same, so the two
+// halves behave identically. (It used to drop silently; that asymmetry was the
+// bug, and this comment used to describe it as legacy behaviour to preserve.)
 const MAX_PDF_RECEIPT_BYTES = 15 * 1024 * 1024; // 15 MB decoded
 function savePdfReceiptToDisk(photoData) {
 	const m = String(photoData).match(/^data:application\/pdf;base64,(.+)$/i);
@@ -15983,9 +16181,14 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			const near = findContentDuplicate();
 			if (near) overrodeDuplicateOf = near.id;
 		}
-		// Receipt: images keep the legacy path (silent drop on bad format —
-		// the driver flow is unchanged). PDFs are an admin/dispatcher-only
-		// addition (toll invoices etc.) and fail loudly on validation errors.
+		// Receipt: both halves now fail loudly on a bad format. PDFs are an
+		// admin/dispatcher-only addition (toll invoices etc.); images take the
+		// branch below. The image path used to DROP a bad format silently, which
+		// meant the two behaved differently for the same class of problem and,
+		// worse, that a receipt could vanish while the money was still booked —
+		// the exact failure savePdfReceiptToDisk's comment was written to avoid.
+		// A genuine JPEG/PNG/WebP is unaffected either way; the only requests
+		// that newly get a 400 are ones carrying bytes we would refuse to store.
 		let photoUrlOrPath = "";
 		if (typeof photoData === "string" && /^data:application\/pdf;base64,/i.test(photoData)) {
 			const role = req.session.user.role;
@@ -15996,7 +16199,9 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			if (savedPdf.error) return res.status(savedPdf.status || 400).json({ error: savedPdf.error });
 			photoUrlOrPath = savedPdf.url;
 		} else {
-			photoUrlOrPath = saveReceiptToDisk(photoData);
+			const savedImg = saveReceiptToDisk(photoData);
+			if (savedImg.error) return res.status(savedImg.status || 400).json({ error: savedImg.error });
+			photoUrlOrPath = savedImg.url;
 		}
 		// Best-effort geo enrichment — a failure here must NEVER fail the insert.
 		// (a) City+State known (OCR/admin) → forward geocode (cached, null-safe).
@@ -16248,6 +16453,28 @@ app.post("/api/expenses/ocr", requireAuth, expenseOcrLimiter, async (req, res) =
 		if (/^data:application\/pdf;base64,/i.test(photoData) && !/^data:application\/pdf;base64,JVBERi/i.test(photoData)) {
 			return res.status(400).json({ error: "That file isn't a readable PDF." });
 		}
+		// Same treatment for the IMAGE half, which had only the label check above:
+		// `data:image/png;base64,<an SVG>` passed straight through to Gemini. This
+		// endpoint is body-only (it writes nothing, so it is not the stored-XSS
+		// path), but the reasoning in the PDF comment applies verbatim — a
+		// mislabelled payload should fail here for free rather than after three
+		// retried vision calls. Sniffed format, not the label, and narrowed to the
+		// formats runReceiptOcr actually forwards.
+		if (!/^data:application\/pdf;base64,/i.test(photoData)) {
+			// Decode only the header, not the whole 6 MB payload. 256 chars rather
+			// than the 24 that would suffice for contiguous base64: a LINE-WRAPPED
+			// payload (RFC 2045 style, 76 chars + CRLF) carries whitespace that
+			// Buffer.from discards, so a tight window can decode to under
+			// sniffImageFormat's 12-byte floor and report a real JPEG as "not a
+			// readable image". Today's callers don't wrap, but the driver-mobile
+			// client is a separate codebase — cheap insurance against a confusing
+			// false rejection. 256 chars still decodes to ~192 bytes, not megabytes.
+			const comma = photoData.indexOf(",");
+			const imgFmt = sniffImageFormat(Buffer.from(photoData.slice(comma + 1, comma + 257), "base64"));
+			if (!imgFmt || !RECEIPT_IMAGE_EXTS.has(imgFmt)) {
+				return res.status(400).json({ error: "That file isn't a readable image." });
+			}
+		}
 		// Prompt, schema, and the Gemini call + retry/15s-timeout live in
 		// lib/receipt-ocr.js — the single point of contact for the vision API.
 		// It re-parses the data URI and signals OCR_NO_KEY when GEMINI_API_KEY
@@ -16363,7 +16590,14 @@ app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispa
 
 		const THUMBS_DIR = path.join(RECEIPTS_DIR, "thumbs");
 		const thumbPath = path.join(THUMBS_DIR, `${id}.jpg`);
-		res.set("Cache-Control", "public, max-age=86400");
+		// `private`, not `public`: this is a role-gated receipt behind requireRole,
+		// so a shared/intermediary cache must never hold it. The browser still
+		// caches it for a day, which is the whole point of the endpoint.
+		res.set("Cache-Control", "private, max-age=86400");
+		// The image/jpeg below is asserted BEFORE the bytes are produced, and the
+		// degrade path at the bottom can ship the ORIGINAL file under it. nosniff
+		// keeps that mismatch inert instead of letting a browser re-interpret it.
+		res.setHeader("X-Content-Type-Options", "nosniff");
 		res.type("image/jpeg");
 
 		// Serve a cached thumb if it's at least as new as its source.
@@ -16382,11 +16616,19 @@ app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispa
 			try { fs.mkdirSync(THUMBS_DIR, { recursive: true }); fs.writeFileSync(thumbPath, buf); } catch { /* cache write is best-effort */ }
 			return res.send(buf);
 		} catch (genErr) {
-			// Degrade to the original image so the row still renders.
+			// Degrade to the original image so the row still renders — but only if
+			// the bytes really are one, and under their OWN type rather than the
+			// image/jpeg asserted above. Receipts written before the magic-byte
+			// check existed are still on disk and nothing ever removes them, so
+			// "jimp couldn't read it" and "it isn't an image" overlap exactly here.
 			console.warn("thumbnail gen failed, serving original:", genErr && genErr.message);
 			try {
-				if (srcPath) return res.send(fs.readFileSync(srcPath));
-				if (srcBuf) return res.send(srcBuf);
+				const raw = srcPath ? fs.readFileSync(srcPath) : srcBuf;
+				const fmt = raw ? sniffImageFormat(raw) : null;
+				if (raw && fmt) {
+					res.type(fmt === "jpg" ? "image/jpeg" : `image/${fmt}`);
+					return res.send(raw);
+				}
 			} catch { /* ignore */ }
 			return res.status(404).end();
 		}
@@ -17177,11 +17419,29 @@ async function fetchDocumentBytes(doc) {
 			? doc.drive_url.replace("/uploads/", "")
 			: doc.file_name;
 	if (localName) {
-		const localPath = path.join(__dirname, "uploads", localName);
-		try {
-			if (fs.existsSync(localPath)) return fs.readFileSync(localPath);
-		} catch (e) {
-			console.error("Draft invoice: local doc read failed:", e.message);
+		const uploadsRoot = path.join(__dirname, "uploads");
+		const localPath = path.join(uploadsRoot, localName);
+		// SECURITY — containment assert, same pattern as the receipt reads.
+		// `drive_url` and `file_name` are the two columns POST /api/documents/upload
+		// just stopped being able to write traversal into, but rows written BEFORE
+		// that fix are still on disk and nothing prunes them. Neither guard above
+		// catches "/uploads/../../.env": it passes startsWith(), and .replace() is
+		// single-occurrence so only the leading segment is stripped, leaving
+		// "../../.env" to resolve to the app root — where .env,
+		// service-account-key.json and app.db all live. That matters more here than
+		// almost anywhere else, because this feeds getRateConBytes() →
+		// POST /api/loads/:loadId/draft-invoice, so the bytes are ATTACHED TO AN
+		// OUTBOUND GMAIL DRAFT addressed to the broker.
+		// Skip the local read rather than returning — a poisoned drive_url must not
+		// also disable the legitimate Drive fallback below.
+		if (!localPath.startsWith(uploadsRoot + path.sep)) {
+			console.error("Draft invoice: refused out-of-tree document path", { localName });
+		} else {
+			try {
+				if (fs.existsSync(localPath)) return fs.readFileSync(localPath);
+			} catch (e) {
+				console.error("Draft invoice: local doc read failed:", e.message);
+			}
 		}
 	}
 	// 2) Drive API (files.get alt=media) by drive_file_id.
@@ -17842,7 +18102,14 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), 
 		const legalDir = path.join(__dirname, "uploads", "legal");
 		if (!fs.existsSync(legalDir)) fs.mkdirSync(legalDir, { recursive: true });
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
-		fs.writeFileSync(path.join(legalDir, safeName), Buffer.from(base64, "base64"));
+		const legalBuf = Buffer.from(base64, "base64");
+		// Bytes must match the extension for the types uploads/ serves inline —
+		// same rule as POST /api/documents/upload. Not exploitable on its own
+		// (nosniff), but this writes into the same inline-served tree, and a
+		// mislabelled file is a broken document either way.
+		const legalErr = verifyInlineServedBytes(legalBuf, path.extname(safeName));
+		if (legalErr) return res.status(400).json({ error: legalErr });
+		fs.writeFileSync(path.join(legalDir, safeName), legalBuf);
 		const fileUrl = `/uploads/legal/${safeName}`;
 		// Determine investor_id: from request body or from session (if Investor role)
 		let invId = parseInt(investorId) || 0;
@@ -17918,7 +18185,14 @@ app.post("/api/chat/attachment", requireAuth, async (req, res) => {
 		const chatDir = path.join(__dirname, "uploads", "chat");
 		if (!fs.existsSync(chatDir)) fs.mkdirSync(chatDir, { recursive: true });
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
-		fs.writeFileSync(path.join(chatDir, safeName), Buffer.from(base64, "base64"));
+		const chatBuf = Buffer.from(base64, "base64");
+		// This route is requireAuth ONLY — a Driver can reach it — and it writes
+		// into the same inline-served tree, so the bytes get the same check as
+		// every other writer. `attachmentType` above is derived from the
+		// client-sent mimeType and is a display hint, never evidence.
+		const chatErr = verifyInlineServedBytes(chatBuf, path.extname(safeName));
+		if (chatErr) return res.status(400).json({ error: chatErr });
+		fs.writeFileSync(path.join(chatDir, safeName), chatBuf);
 		res.json({ success: true, fileUrl: `/uploads/chat/${safeName}`, attachmentType });
 	} catch (err) {
 		console.error("Chat attachment error:", err.message);
@@ -18821,13 +19095,35 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 		let fileName;
 		let driveUrl = "";
 
+		// SECURITY — path traversal. `loadId` and `docType` are both request-body
+		// strings that get interpolated straight into a filename and then
+		// path.join'ed against uploads/. Unsanitized, `docType = "/../../client/dist/a"`
+		// escapes to a directory that is served UNAUTHENTICATED (bypassing the
+		// nosniff/attachment headers on the /uploads mount entirely), and
+		// `loadId = "../../../tmp/x"` leaves the app root altogether. pm2 runs as
+		// root on a box shared with other tenants under /var/www, so this is an
+		// arbitrary-path root-owned write — and it is reachable by a DRIVER, the
+		// lowest-privilege role: loadBelongsToDriver() below validates loadId's
+		// OWNERSHIP but never its SHAPE, and docType is unchecked at every role.
+		// Same character class as the rate-con archive and the receipts ZIP export.
+		const safeLoadId = String(loadId).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100);
+		const safeDocType = String(docType).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 40) || "DOC";
+
 		if (fileType === 'document') {
 			// Direct document upload (PDF, Word, etc.) — no image conversion
 			if (clientFileName && !validateFileExt(clientFileName)) return res.status(400).json({ error: "File type not allowed" });
 			const base64 = (typeof photoData === 'string' ? photoData : '').replace(/^data:[^;]+;base64,/, "");
 			fileBuffer = Buffer.from(base64, "base64");
-			const ext = clientFileName ? path.extname(clientFileName) : '.pdf';
-			fileName = `${loadId}_${docType}_${timestamp}${ext}`;
+			const ext = (clientFileName ? path.extname(clientFileName) : '.pdf').replace(/[^A-Za-z0-9.]/g, "");
+			// Magic-byte check, closing the asymmetry with the sibling receipt path
+			// (which insists on "%PDF-"). Scoped to exactly the extensions the
+			// /uploads mount still serves INLINE — those are the only ones a browser
+			// will render, so they are the only ones where a lying extension can do
+			// anything. The office/text types are attachment-served and several of
+			// them (.csv/.txt) have no signature to check anyway.
+			const docErr = verifyInlineServedBytes(fileBuffer, ext);
+			if (docErr) return res.status(400).json({ error: docErr });
+			fileName = `${safeLoadId}_${safeDocType}_${timestamp}${ext}`;
 		} else {
 			// Image upload — convert to multi-page PDF
 			const photoArray = Array.isArray(photoData) ? photoData : [photoData];
@@ -18850,14 +19146,23 @@ app.post("/api/documents/upload", requireAuth, driverWriteLimiter, async (req, r
 				console.error("Image-to-PDF error:", pdfErr.message);
 				return res.status(400).json({ error: "The photo could not be processed. Please try taking a new photo." });
 			}
-			fileName = `${loadId}_${docType}_${timestamp}.pdf`;
+			fileName = `${safeLoadId}_${safeDocType}_${timestamp}.pdf`;
 		}
 
 		// Save to local disk
 		try {
 			const uploadsDir = path.join(__dirname, "uploads");
 			if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-			fs.writeFileSync(path.join(uploadsDir, fileName), fileBuffer);
+			// Belt-and-braces containment assert, mirroring the receipts ZIP export.
+			// The sanitizer above already makes traversal unrepresentable; this
+			// catches any future edit that widens the character class or builds the
+			// name a different way, and it fails the request rather than the write.
+			const destPath = path.join(uploadsDir, fileName);
+			if (!destPath.startsWith(uploadsDir + path.sep)) {
+				console.error("Document upload: refused out-of-tree path", { fileName });
+				return res.status(400).json({ error: "Invalid document name" });
+			}
+			fs.writeFileSync(destPath, fileBuffer);
 			driveUrl = `/uploads/${fileName}`;
 		} catch (localErr) {
 			console.error("Local file save error:", localErr.message);
