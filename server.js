@@ -411,7 +411,26 @@ catch {
 
 // Migration: add driver_pay_daily to trucks
 try { db.exec("ALTER TABLE trucks ADD COLUMN driver_pay_daily REAL DEFAULT 0"); } catch {}
-	try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_daily REAL DEFAULT 0"); } catch {}
+// ⚠️ THIS ALTER RUNS ~360 LINES BEFORE drivers_directory IS CREATED, so on a
+// FRESH database it throws `no such table`, the bare catch swallows it, and the
+// column never appears. It is kept anyway because it is the ONLY thing that
+// carries an EXISTING database — there the table was already present when this
+// line first shipped, which is exactly why the fault was invisible for so long:
+// every database anyone had ever looked at already had the column.
+//
+// The fresh-install half is now covered by `pay_daily REAL DEFAULT 0` in the
+// CREATE TABLE below. DO NOT "tidy up" the apparent duplication — the two serve
+// disjoint populations (CREATE = new installs, ALTER = existing ones) and
+// deleting either one breaks the population it was for. Moving this ALTER down
+// beside the CREATE would also work and is the tidier shape, but it is left here
+// so this comment sits at the line someone will actually find.
+//
+// What it cost: drivers_directory.pay_daily is SELECTed by the driver-pay config
+// read, the weekly invoice rate lookup, and reconcileInvestorPayouts — so a
+// brand-new deployment (a rebuilt VPS, a fresh staging box, disaster recovery, a
+// second client instance) 500s the entire payout ledger and every statement, and
+// does it on day one when nobody has a working system to compare against.
+try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_daily REAL DEFAULT 0"); } catch {}
 
 // Migration: add fuel range config (tank capacity + avg MPG) — powers the
 // fuel-range calculator (lib/fuel-model.js). 0 = unset → the model uses its
@@ -790,6 +809,13 @@ db.exec(`
 		hazmat TEXT DEFAULT '',
 		rating TEXT DEFAULT '',
 		user_id INTEGER DEFAULT 0,
+		-- Fresh installs only. The matching ALTER (~360 lines up, deliberately) is
+		-- what gives this column to databases that already exist; it cannot help
+		-- here because it runs before this table does. Both are required and
+		-- neither is redundant — see the comment beside that ALTER before removing
+		-- either. Every other drivers_directory column is added by an ALTER below
+		-- this CREATE, which is why they were unaffected.
+		pay_daily REAL DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)
 `);
@@ -20829,7 +20855,10 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 		// --- honest interval -------------------------------------------------
 		// rangeMiles above is a POINT estimate off tank x mpg, and backtesting it
 		// against this fleet's own fill history found it overstated on 123 of 125
-		// tank-to-tank legs (#33 56/56 at 1.95x, #2372 64/66, #302 3/3). Worse, the
+		// tank-to-tank legs (#33 56/56 at 1.95x, #2372 64/66, #302 3/3) — figures
+		// measured BEFORE the 2026-08-07 tank correction, after which the aggregate
+		// overstatement is #33 1.30x / #2372 0.99x / #302 0.83x. The interval is
+		// what survives that: it never depended on the tank. Worse, the
 		// error is not a constant to be divided out: at a fixed 23% #33's measured
 		// legs span p10 100 mi to p90 340 mi, a 3.4x spread driven by load weight,
 		// terrain and idle hours. So the point estimate is kept for compatibility
@@ -20889,6 +20918,12 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 // the number. The finding it was built to surface: on production data the panel
 // overstated on 123 of 125 tank-to-tank legs across the three instrumented
 // trucks (#33 56/56 at 1.95x, #2372 64/66 at 1.97x, #302 3/3 at 2.25x).
+//
+// ⚠️ THOSE ARE THE 2026-08-06 NUMBERS AND THEY HAVE MOVED. `fuel_tank_gallons`
+// was corrected on all three trucks the next day (#33 300 -> 198, #2372 200 ->
+// 100, #302 200 -> 80) and the aggregate overstatement is now #33 1.30x, #2372
+// 0.99x, #302 0.83x. Run this endpoint rather than quoting the paragraph above —
+// which is the whole reason it exists as an endpoint and not a one-off script.
 //
 // Auditing the arithmetic would have found nothing — the formula is correct and
 // its inputs are wrong — so the only thing that can answer the question is the
