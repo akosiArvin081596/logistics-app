@@ -178,6 +178,28 @@
           <button class="bulk-clear" :disabled="bulkLoading" @click="clearSelection">Clear</button>
         </div>
 
+        <!-- What the server actually committed. Lives OUTSIDE the bulk bar on
+             purpose: a successful run clears the selection, which unmounts that
+             bar, and this notice has to outlive the gesture that produced it.
+             Renders only when something did not go through — a clean batch keeps
+             its 3-second toast and adds nothing to the page.
+             role="status" + aria-live="polite", matching MaintenanceBanner: it
+             is a result to be read, not an interruption. -->
+        <div v-if="bulkOutcome" class="bulk-outcome" role="status" aria-live="polite">
+          <div class="bulk-outcome-top">
+            <strong class="bulk-outcome-headline">{{ bulkOutcomeHeadline }}</strong>
+            <button
+              type="button"
+              class="bulk-outcome-dismiss"
+              aria-label="Dismiss this result"
+              title="Dismiss"
+              @click="bulkOutcome = null"
+            >&times;</button>
+          </div>
+          <p v-for="(reason, i) in bulkOutcomeReasons" :key="i" class="bulk-outcome-reason">{{ reason }}</p>
+          <p v-if="bulkOutcomeFootnote" class="bulk-outcome-foot">{{ bulkOutcomeFootnote }}</p>
+        </div>
+
         <PaginationBar :page="page" :page-size="pageSize" :total="allExpenses.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
 
         <div v-if="allExpenses.length === 0" class="empty-msg">No expenses found.</div>
@@ -263,7 +285,18 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="e in paginatedItems" :key="e.id" class="expense-row" @click="openExpenseDetail(e)">
+            <!-- Same activation contract as the review queues below. The
+                 keydown guard in rowKeyActivate is what keeps Space working on
+                 this row's own select checkbox. -->
+            <tr
+              v-for="e in paginatedItems"
+              :key="e.id"
+              class="expense-row row-activatable"
+              tabindex="0"
+              :aria-label="`Open expense ${e.id} — ${e.driver}, ${fmtDate(e.date)}`"
+              @click="openExpenseDetail(e)"
+              @keydown="rowKeyActivate($event, () => openExpenseDetail(e))"
+            >
               <td class="select-cell" @click.stop>
                 <input
                   type="checkbox"
@@ -696,6 +729,14 @@
               </tr>
             </thead>
             <tbody>
+              <!-- DELIBERATELY not row-activatable, unlike the three queues
+                   below. This is the one queue whose rows have nothing to open:
+                   its whole subject is a fuel-up with NO receipt behind it, so
+                   there is no expense to route to. Giving these rows a tabindex
+                   for symmetry would put five stops in the tab order that answer
+                   Enter with nothing — a promise of an action that does not
+                   exist, which is the same class of untruth as a row rendering
+                   as approved when it wasn't. Leave them as data. -->
               <tr v-for="f in unmatchedFillRows" :key="f.key">
                 <td class="mono">{{ fmtYmd(f.localDay) }}</td>
                 <td class="mono">{{ f.atMs ? fmtHM(new Date(f.atMs).toISOString()) : '—' }}</td>
@@ -743,9 +784,12 @@
               <tr
                 v-for="r in unmatchedReceiptRows"
                 :key="r.id"
-                class="review-row-clickable"
+                class="review-row-clickable row-activatable"
+                tabindex="0"
                 title="Open this receipt"
+                aria-label="Open this receipt"
                 @click="openReceiptRow(r)"
+                @keydown="rowKeyActivate($event, () => openReceiptRow(r))"
               >
                 <td class="mono">{{ fmtYmd(r.localDay) }}</td>
                 <td class="mono">{{ r.truckUnit || '—' }}</td>
@@ -838,12 +882,14 @@
               <tr
                 v-for="r in volumelessRows"
                 :key="r.id"
+                class="row-activatable"
                 :class="r.locked === true ? 'review-row-locked' : 'review-row-clickable'"
+                tabindex="0"
                 :aria-disabled="r.locked === true ? 'true' : null"
-                :title="r.locked === true
-                  ? `${r.periodLabel || 'This month'} is closed — shown for reference, no longer editable`
-                  : 'Open this receipt to add the gallons'"
+                :title="reviewRowAction(r, 'Open this receipt to add the gallons')"
+                :aria-label="reviewRowAction(r, 'Open this receipt to add the gallons')"
                 @click="openReceiptRow(r)"
+                @keydown="rowKeyActivate($event, () => openReceiptRow(r))"
               >
                 <td class="mono">
                   {{ fmtYmd(r.localDay) }}
@@ -905,12 +951,14 @@
               <tr
                 v-for="c in odometerConflictRows"
                 :key="c.id"
+                class="row-activatable"
                 :class="c.locked === true ? 'review-row-locked' : 'review-row-clickable'"
+                tabindex="0"
                 :aria-disabled="c.locked === true ? 'true' : null"
-                :title="c.locked === true
-                  ? `${c.periodLabel || 'This month'} is closed — shown for reference, no longer editable`
-                  : 'Open this receipt to correct the odometer'"
+                :title="reviewRowAction(c, 'Open this receipt to correct the odometer')"
+                :aria-label="reviewRowAction(c, 'Open this receipt to correct the odometer')"
                 @click="openReceiptRow(c)"
+                @keydown="rowKeyActivate($event, () => openReceiptRow(c))"
               >
                 <td class="mono">
                   {{ fmtYmd(c.receiptDate || c.localDay) }}
@@ -962,8 +1010,13 @@
           </div>
         </div>
 
-        <!-- Monthly trend -->
-        <div v-if="!reviewFocus && fuel.monthlyData?.length" class="section-card">
+        <!-- Monthly trend. $/Gal is the one column here that is a DERIVED figure
+             rather than a total, and it is derived across two populations —
+             spend counts every receipt, gallons only the ones that recorded a
+             volume. So it carries its basis the way Cost/Mile does, and for the
+             same reason: a reader must be able to tell a measurement from a
+             quotient with half its denominator missing. -->
+        <div v-if="!reviewFocus && fuelMonthRows.length" class="section-card">
           <div class="section-title">Monthly Fuel Spend</div>
           <table>
             <thead>
@@ -971,18 +1024,43 @@
                 <th>Month</th>
                 <th>Spend</th>
                 <th>Gallons</th>
-                <th>$/Gal</th>
+                <th title="A month's spend divided by the gallons recorded that month. Receipts filed without a volume count in the spend and not in the gallons, so a month holding any of them is marked and its price reads as an upper bound.">$/Gal</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="m in fuel.monthlyData" :key="m.month">
+              <tr v-for="m in fuelMonthRows" :key="m.month">
                 <td class="mono">{{ m.month }}</td>
                 <td>${{ m.spend.toLocaleString() }}</td>
                 <td>{{ m.gallons }}</td>
-                <td>${{ m.avgPerGallon }}</td>
+                <td class="mono fuel-mo-rate">
+                  <span :class="{ 'fuel-mo-unmeasured': m.empty }" :title="m.title">{{ m.value }}</span>
+                  <span v-if="m.flag" class="cal-thin fuel-mo-flag" :title="m.title">{{ m.flag }}</span>
+                </td>
               </tr>
             </tbody>
           </table>
+          <!-- Said once, under the table, rather than repeated per row: what the
+               marks mean and where the fix lives. Renders only when a month is
+               actually marked, so a clean fleet never reads a caveat about a
+               problem it does not have. -->
+          <p v-if="fuelMonthsFlagged" class="cal-note fuel-mo-note">
+            <!-- {{ ' ' }} is load-bearing: Vue's condense mode deletes a
+                 whitespace-only text node containing a newline between two
+                 elements, which glued "recorded." to the count that follows. -->
+            <strong>$/Gal is spend divided by the gallons recorded.</strong>{{ ' ' }}
+            <template v-if="volumelessTotals">
+              {{ volumelessTotals.count }} fuel receipt{{ volumelessTotals.count === 1 ? '' : 's' }} on file
+              ({{ fmtMoney(volumelessTotals.totalAmount) }}) carr{{ volumelessTotals.count === 1 ? 'ies' : 'y' }}
+              a dollar amount and no volume,
+            </template>
+            <template v-else>Some receipts carry a dollar amount and no volume,</template>
+            so in the {{ fuelMonthsFlagged === 1 ? 'month' : 'months' }} marked
+            <em>partial</em> the denominator is short and the true price is <em>lower</em> than shown —
+            which is why those read “at most”. A month showing <em>—</em> has no recorded volume at all
+            to divide by. Both come from the
+            <strong>Receipts missing gallons</strong> queue above; clearing it is what makes these figures
+            exact.
+          </p>
         </div>
 
         <!-- Recent fills. The Odo column carries its own provenance: only 2 of
@@ -1188,7 +1266,15 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="s in t.states" :key="s.state" class="state-row" @click="openStateDetail(t, s)">
+              <tr
+                v-for="s in t.states"
+                :key="s.state"
+                class="state-row row-activatable"
+                tabindex="0"
+                :aria-label="`Open the day-by-day ${s.state} mileage for ${t.unitNumber || ('Truck #' + t.truckId)}`"
+                @click="openStateDetail(t, s)"
+                @keydown="rowKeyActivate($event, () => openStateDetail(t, s))"
+              >
                 <td class="mono bold">{{ s.state }}</td>
                 <td>{{ s.miles.toLocaleString() }}</td>
                 <td>{{ s.pct }}%</td>
@@ -2025,8 +2111,11 @@ function buildAllExpensesQuery() {
 async function loadAll() {
   allLoading.value = true
   // Full reload = filters (or data set) changed — a carried-over selection
-  // could silently target rows that are no longer on screen.
+  // could silently target rows that are no longer on screen. The bulk-result
+  // notice goes for the same reason: it says "the list below", and below is
+  // about to become a different list.
   clearSelection()
+  bulkOutcome.value = null
   goTo(1) // filters/data changed → jump back to the first page
   try {
     const data = await api.get(`/api/expenses/all${buildAllExpensesQuery()}`)
@@ -2109,34 +2198,190 @@ function pruneSelection() {
   const live = new Set(allExpenses.value.map(e => e.id))
   selectedIds.value = new Set([...selectedIds.value].filter(id => live.has(id)))
 }
+// The outcome of the last bulk action, kept ON SCREEN rather than in a toast.
+//
+// A toast is a 3-second animation (useToast clears at 3000ms). That is the right
+// weight for "12 approved" and the wrong weight for "2 of your 12 were refused
+// and are still Pending" \u2014 the second is a fact about the books that someone has
+// to act on, and it must not expire while they are scrolling. Null whenever
+// there is nothing to reconcile, so a clean run adds no chrome.
+const bulkOutcome = ref(null)
+
+// Bulk approve/reject, reconciled against what the server actually committed.
+//
+// The endpoint does NOT fail a mixed batch wholesale. It updates the rows whose
+// month is open, withholds the rows whose month month-end close has finalized,
+// and reports the split: `updated`, `skippedFinalized`, `finalizedPeriods` and a
+// ready-made `message`. Every one of those was previously discarded \u2014 the old
+// loop marked the WHOLE chunk with the new status and toasted "N approved", so
+// receipts the server had refused rendered as approved and nothing named the
+// closed month. On a healthy socket the `expenses:changed` refetch quietly
+// corrected the rows ~300ms later, which is exactly what made this hard to
+// notice; with the socket down (measured) the wrong status stayed until reload.
+//
+// The response says HOW MANY rows were withheld, never WHICH. That asymmetry is
+// the design constraint here:
+//   \u00b7 a chunk that committed in full can still be patched in place \u2014 the
+//     optimistic write is provably right for every row in it;
+//   \u00b7 a chunk that did not is re-read from the database rather than guessed at.
+// Deriving the withheld rows client-side (matching each row's month against
+// `finalizedPeriods`) was deliberately NOT done: `expenses.posted_period` books
+// a receipt whose own month is closed into the current open one, so a row dated
+// 2026-05-01 with posted_period 2026-08 is editable while its date says
+// otherwise \u2014 a live example sits in this data. Guessing gets that row exactly
+// backwards. lockState() in lib/fuelReview.js refuses the same derivation for
+// the same reason: server-told only.
 async function bulkSetStatus(status) {
   const ids = [...selectedIds.value]
   if (ids.length === 0 || bulkLoading.value) return
   bulkLoading.value = true
+  bulkOutcome.value = null
+
+  const verb = status === 'Approved' ? 'approved' : status === 'Rejected' ? 'rejected' : 'reset'
+  let sent = 0
   let updated = 0
+  let withheld = 0
+  let missing = 0
+  let lockUnreadable = false
+  let needsReread = false
+  let failure = ''
+  const periods = new Set()
+
   try {
     for (let i = 0; i < ids.length; i += BULK_CHUNK) {
       const chunk = ids.slice(i, i + BULK_CHUNK)
+      // Counted BEFORE the await, so `sent` is what was attempted rather than
+      // what came back. A chunk that throws still belongs in the denominator —
+      // otherwise a run that died half-way reports "3 of 3 approved" and the
+      // two rows nobody touched vanish from the arithmetic.
+      sent += chunk.length
       const resp = await api.put('/api/expenses/bulk-status', { ids: chunk, status })
-      updated += resp?.updated ?? chunk.length
-      // Reflect each successful chunk immediately \u2014 if a later chunk fails,
-      // the UI still matches what the server actually committed.
-      const chunkSet = new Set(chunk)
-      allExpenses.value = allExpenses.value.map(e =>
-        chunkSet.has(e.id) ? { ...e, status } : e
-      )
+
+      // `updated` ABSENT is not `updated: 0`. A server predating this field
+      // answered 200 only when it had written everything, so falling back to the
+      // chunk size preserves that server's meaning \u2014 the same absent-vs-empty
+      // rule the review queues use. Reading absent as "nothing landed" would
+      // report a completely successful run as a total failure.
+      const committed = Number(resp?.updated)
+      const reported = Number.isFinite(committed)
+      updated += reported ? committed : chunk.length
+      withheld += Number(resp?.skippedFinalized) || 0
+      missing += Number(resp?.skipped) || 0
+      // Only ever true when the server says so. `finalizedPeriods` is [] in this
+      // case by design, because those months are UNKNOWN, not closed.
+      if (resp?.periodLockUnreadable === true) lockUnreadable = true
+      if (Array.isArray(resp?.finalizedPeriods)) {
+        for (const p of resp.finalizedPeriods) if (p) periods.add(String(p))
+      }
+
+      if (reported && committed < chunk.length) {
+        needsReread = true
+      } else {
+        const chunkSet = new Set(chunk)
+        allExpenses.value = allExpenses.value.map(e =>
+          chunkSet.has(e.id) ? { ...e, status } : e
+        )
+      }
     }
-    const verb = status === 'Approved' ? 'approved' : status === 'Rejected' ? 'rejected' : 'reset'
-    toast(`${updated} expense${updated === 1 ? '' : 's'} ${verb}`, 'success')
-    clearSelection()
   } catch (err) {
-    toast(err?.message || 'Bulk update failed', 'error')
-    // Re-sync with the server so partial progress isn't misrepresented.
-    await quietReload()
-  } finally {
-    bulkLoading.value = false
+    failure = err?.message || 'Bulk update failed'
+    // A throw mid-run leaves earlier chunks committed and this one unknown.
+    needsReread = true
   }
+
+  // Re-read BEFORE reporting, so the counts in the notice and the rows beneath
+  // it are describing the same thing.
+  if (needsReread) await quietReload()
+
+  // Keep the selection only where retrying is the actual fix \u2014 a hard failure,
+  // or a lock table that could not be read. Rows withheld by a genuinely
+  // finalized month will be withheld again, so holding them selected only
+  // invites a second click that does nothing.
+  const retryable = Boolean(failure) || lockUnreadable
+  if (!retryable) clearSelection()
+  bulkLoading.value = false
+
+  if (!failure && !withheld && !missing && updated >= sent) {
+    toast(`${updated} expense${updated === 1 ? '' : 's'} ${verb}`, 'success')
+    return
+  }
+
+  bulkOutcome.value = {
+    verb, status, sent, updated, withheld, missing,
+    periods: [...periods].sort(), lockUnreadable, failure, retryable, reread: needsReread,
+  }
+  toast(
+    failure || `${updated} of ${sent} ${verb} \u2014 ${sent - updated} unchanged`,
+    failure ? 'error' : 'warning',
+  )
 }
+
+// "April 2026" / "April 2026 and May 2026" / "April 2026, May 2026 and June 2026".
+// Reuses this file's own monthLabel — the same formatter that tells a filer
+// which month a receipt was booked to — so a month reads identically wherever
+// this panel names one.
+function periodList(periods) {
+  const names = periods.map(p => monthLabel(p) || p).filter(Boolean)
+  if (names.length <= 1) return names[0] || ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+// Headline: what was asked for, against what the database now holds.
+const bulkOutcomeHeadline = computed(() => {
+  const o = bulkOutcome.value
+  if (!o) return ''
+  if (o.updated === 0) return `Nothing was ${o.verb}.`
+  return `${o.updated} of ${o.sent} ${o.verb}.`
+})
+
+// Why the rest were not \u2014 one sentence per distinct reason, never merged.
+//
+// The finalized branch and the unreadable branch say different things ON PURPOSE
+// and must stay apart. "April 2026 is finalized" is a statement about month-end
+// close; "the lock table could not be read" is a statement about a fault, and
+// the months involved are UNKNOWN \u2014 the server sends `finalizedPeriods: []`
+// there precisely so this cannot assert a close that never happened.
+const bulkOutcomeReasons = computed(() => {
+  const o = bulkOutcome.value
+  if (!o) return []
+  const out = []
+  if (o.withheld > 0) {
+    const n = `${o.withheld} receipt${o.withheld === 1 ? '' : 's'}`
+    const its = o.withheld === 1 ? 'Its status is' : 'Their statuses are'
+    if (o.lockUnreadable) {
+      out.push(`${n} could not be ${o.verb}: the month-end close table could not be read, so no month could be confirmed open and ${o.withheld === 1 ? 'it was' : 'they were'} withheld. ${its} unchanged. This is a fault reading the close table, not a closed month \u2014 which months are involved is unknown.`)
+    } else if (o.periods.length) {
+      out.push(`${n} sit in ${periodList(o.periods)}, which month-end close has finalized, so the server declined ${o.withheld === 1 ? 'it' : 'them'}. ${its} unchanged.`)
+    } else {
+      out.push(`${n} were declined by month-end close. ${its} unchanged.`)
+    }
+  }
+  if (o.missing > 0) {
+    out.push(`${o.missing} selected row${o.missing === 1 ? '' : 's'} no longer exist${o.missing === 1 ? 's' : ''} \u2014 deleted while the batch was open.`)
+  }
+  // Any shortfall the server did not attribute. Named as unexplained rather than
+  // folded into a reason it might not belong to — but NOT when the run threw,
+  // because then the shortfall already has a cause and the failure line below
+  // is it. Reporting both would count the same rows twice.
+  const unexplained = o.sent - o.updated - o.withheld - o.missing
+  if (unexplained > 0 && !o.failure) {
+    out.push(`${unexplained} further row${unexplained === 1 ? '' : 's'} ${unexplained === 1 ? 'was' : 'were'} not changed, for a reason the server did not give.`)
+  }
+  if (o.failure) {
+    out.push(`The request failed part-way through, so ${o.sent - o.updated} row${o.sent - o.updated === 1 ? '' : 's'} may not have been reached at all: ${o.failure}`)
+  }
+  return out
+})
+
+// What has already been done for the reader, and what is left to them.
+const bulkOutcomeFootnote = computed(() => {
+  const o = bulkOutcome.value
+  if (!o) return ''
+  const parts = []
+  if (o.reread) parts.push('The list below has been re-read from the database, so the statuses shown are the stored ones.')
+  if (o.retryable) parts.push('Your selection has been kept so you can retry.')
+  return parts.join(' ')
+})
 
 // expenses.date is a bare 'YYYY-MM-DD'. Routed through the shared helper because
 // new Date('2026-07-15') parses as UTC MIDNIGHT and renders as Jul 14 in every US
@@ -2306,6 +2551,123 @@ const cpm = computed(() => {
   // truncation rather than 40 cents.
   return { value: '$' + v.toFixed(2), note: `at least · ${basisText}`, title: hedge, empty: false }
 })
+
+// --- Monthly $/Gal, and why one month prints a confident wrong number -------
+//
+// GET /api/expenses/fuel-analytics divides a month's WHOLE spend by only the
+// gallons that were actually recorded (`spend / gallons`, where spend sums every
+// fuel receipt and gallons sums `e.gallons || 0`). A receipt carrying a dollar
+// amount and no volume therefore lands in the numerator and not the denominator,
+// which pushes the price UP. Not hypothetical: 2026-07 rendered $7.95/gal
+// against diesel nearer $3.50, and the 27 receipts ($6,041.54) in the "Receipts
+// missing gallons" queue on this same screen ARE the missing volume.
+//
+// Two consequences, and the fact that the error has a known DIRECTION is what
+// makes both of them statable rather than just flagged:
+//   · recorded gallons can only ever be an UNDER-count, so spend ÷ recorded is
+//     an UPPER bound — the true price is at most what is shown. Precisely the
+//     mirror of the Cost/Mile card, whose SPEND is the under-counted half and
+//     which therefore says "at least".
+//   · a month with no recorded gallons at all has nothing to divide by; the
+//     server emits 0 there and the old markup printed "$0" — a measurement that
+//     never happened, and worse than a dash because it looks like one. It now
+//     reads "—" for the same reason the Avg $/Gallon card does.
+//
+// Deliberately NOT computed here: a "corrected" price over just the receipts
+// that did record a volume. That needs `spend - volumelessAmount` as the
+// numerator, and the queue excludes DEF and non-positive rows which `spend`
+// still includes, so the subtraction is not exact. A second, more precise-
+// looking number that is quietly wrong is the defect being fixed, not a fix.
+
+// Volumeless receipts grouped by their own month. Derived from the queue rows
+// because `volumelessSummary` is fleet-wide with no month breakdown. Safe to
+// join on the month key: both sides slice the receipt's own `expenses.date`
+// (monthlyData does it server-side, the queue ships it as `localDay`), so the
+// two cannot disagree about which month a receipt falls in.
+const volumelessByMonth = computed(() => {
+  const acc = new Map()
+  for (const r of volumelessRows.value) {
+    const month = String(r.localDay || '').slice(0, 7)
+    if (!/^\d{4}-\d{2}$/.test(month)) continue
+    const cur = acc.get(month) || { count: 0, amount: 0 }
+    cur.count += 1
+    cur.amount += r.amount ?? 0
+    acc.set(month, cur)
+  }
+  return acc
+})
+
+// Precomputed per row rather than resolved per cell, for the same reason
+// fillRows is: the figure and the chip qualifying it must be derived together or
+// they can drift into disagreeing about the same month.
+const fuelMonthRows = computed(() => {
+  const known = isQueueAvailable(fuel.value, 'volumeless')
+  return asList(fuel.value?.monthlyData).map((m) => {
+    const month = String(m?.month || '')
+    const label = monthLabel(month) || month
+    const spend = Number(m?.spend) || 0
+    const gallons = Number(m?.gallons) || 0
+    const avg = Number(m?.avgPerGallon)
+    const gap = volumelessByMonth.value.get(month) || null
+    // A capped queue makes the per-month tally a FLOOR, not a count. It only
+    // strengthens the "at most" claim (more missing volume = lower true price),
+    // but the number itself still has to admit it is a floor.
+    const atLeast = gap && !volumelessShowingAll.value ? 'at least ' : ''
+    const gapText = gap
+      ? `${atLeast}${gap.count} receipt${gap.count === 1 ? '' : 's'} totalling ${fmtMoney(gap.amount)}`
+      : ''
+    const gapVerb = gap && gap.count === 1 ? 'has' : 'have'
+    const gapCarry = gap && gap.count === 1 ? 'carries' : 'carry'
+    const pointer = 'They are listed in the “Receipts missing gallons” queue above — opening one and typing the volume off the paper is what fixes this figure.'
+    const row = { month, spend, gallons }
+
+    // Nothing to divide by. The old markup printed "$0" here.
+    if (gallons <= 0) {
+      return {
+        ...row,
+        value: '—',
+        empty: true,
+        flag: gap ? 'no gallons' : '',
+        title: gap
+          ? `No fuel receipt dated ${label} recorded a volume, so there is nothing to divide its ${fmtMoney(spend)} of spend by. ${gapText} in this month ${gapCarry} a dollar amount and no gallons. ${pointer}`
+          : `No gallons are recorded against ${label}, so there is no volume to divide the spend by. A price per gallon needs both halves.`,
+      }
+    }
+
+    // Real division happened. Two decimals always — a bare 3.5 would print
+    // "$3.5" and read as a truncation rather than three-fifty.
+    const figure = Number.isFinite(avg) && avg > 0 ? '$' + avg.toFixed(2) : '< $0.01'
+    const subCent = !(Number.isFinite(avg) && avg > 0)
+
+    if (gap) {
+      return {
+        ...row,
+        // The hedge goes INLINE with the number, not under it: in a dense table
+        // a qualifier on its own line is read as decoration, and this one
+        // changes what the number means.
+        value: subCent ? figure : `at most ${figure}`,
+        empty: false,
+        flag: 'partial',
+        title: `Spend for ${label} counts every fuel receipt, but the gallons count only the receipts that recorded a volume — so the denominator is short and this figure is biased HIGH. ${gapText} in this month ${gapVerb} a dollar amount and no gallons, so the real price is lower than ${figure}. ${pointer}`,
+      }
+    }
+
+    return {
+      ...row,
+      value: figure,
+      empty: false,
+      flag: '',
+      // Only claimable when the server actually answered the question. With the
+      // queue absent this stays blank rather than asserting a completeness
+      // nobody established — the same absent-vs-empty rule as reviewClearPhrases.
+      title: known
+        ? `Every fuel receipt dated ${label} recorded its gallons, so this price rests on the month's full volume.`
+        : '',
+    }
+  })
+})
+
+const fuelMonthsFlagged = computed(() => fuelMonthRows.value.filter((r) => r.flag).length)
 
 // The four queues as data, so the toggle bar is one loop instead of four
 // near-identical buttons that drift apart. Only the BAR is generic — each queue
@@ -2477,6 +2839,55 @@ function openReceiptRow(r) {
     return
   }
   selectedId.value = r.id
+}
+
+// --- Clickable rows, made reachable from the keyboard ----------------------
+//
+// Every clickable <tr> on this tab goes through these two helpers, in one pass,
+// so the five tables cannot drift into being keyboard-operable in different
+// ways — which is the state they were in before (none of them were) and the
+// reason it was easier to leave alone than to fix half.
+//
+// The pattern is lifted from VendorLeaderboardTable.vue, the one clickable-row
+// table in this feature that already had it: `tabindex="0"` + an aria-label +
+// key activation, and deliberately NO `role="button"` on the row. A role of
+// button on a <tr> overrides its implicit `row` role, which takes its cells with
+// it — a screen reader then announces a button and loses the column structure
+// that makes a data table readable. Focusability is what these rows were
+// missing; their semantics were already right.
+
+// Activate a row from the keyboard.
+//
+// Guarded on `e.target === e.currentTarget`, which is load-bearing rather than
+// defensive: these rows contain their own controls — the All Expenses row has a
+// select checkbox and Approve/Reject buttons — and Space on a focused checkbox
+// must keep toggling it. Without the guard the keypress bubbles to the row,
+// opens the detail modal, and `preventDefault` cancels the toggle that the user
+// actually asked for. So a row only answers a key that was aimed at the row.
+//
+// preventDefault is needed for Space (which scrolls the page) and harmless for
+// Enter. Both are handled because a focusable thing that opens something is
+// expected to answer both.
+function rowKeyActivate(e, fn) {
+  if (e.target !== e.currentTarget) return
+  if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return
+  e.preventDefault()
+  fn()
+}
+
+// ONE string for the pointer tooltip and the accessible name, so the mouse and
+// the screen reader can never be told different things about the same row.
+//
+// A locked row keeps its tabindex on purpose. `aria-disabled` (unlike a real
+// `disabled`) means "present and discoverable, but not actionable" — dropping
+// such a row out of the tab order would hide from a keyboard user that it is
+// there at all, and these rows are listed precisely so the gap stays visible.
+// Activating one is already handled: openReceiptRow refuses it and says why,
+// which its own comment describes as the backstop for a keyboard activation.
+function reviewRowAction(row, openText) {
+  return row?.locked === true
+    ? `${row.periodLabel || 'This month'} is closed — shown for reference, no longer editable`
+    : openText
 }
 
 // Money for the review queues. Always two decimals and always grouped, so a
@@ -2937,6 +3348,33 @@ tr.cal-row-check:hover td { background: #fef3c7; }
   cursor: help;
 }
 
+/* Focus ring for every activatable row on this tab — ONE rule, shared by all
+   five tables, so they cannot drift into looking focused in different ways.
+   Matches VendorLeaderboardTable's .vlt-row:focus-visible exactly. The negative
+   offset keeps the ring inside the row box; drawn outside, it is clipped by the
+   table's overflow container on the horizontally-scrolling All Expenses table
+   and the top and bottom edges disappear. */
+.row-activatable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* A closed row is focusable (aria-disabled means discoverable-but-inert) but
+   must not look like work. Dimmer ring, so tabbing still shows where you are
+   without promising an action the row cannot perform. */
+.review-row-locked.row-activatable:focus-visible { outline-color: var(--text-dim); }
+
+/* Monthly $/Gal. `white-space: nowrap` so "at most $7.95" cannot wrap and leave
+   the hedge stranded on its own line, where it would read as a separate cell. */
+.fuel-mo-rate { white-space: nowrap; }
+/* A dash that is a statement, not a blank. Same treatment as .metric-value-empty
+   on the Avg $/Gallon card, so "we cannot divide" looks identical wherever this
+   panel says it. */
+.fuel-mo-unmeasured { color: var(--text-dim); cursor: help; }
+/* Amber, unlike a plain .cal-thin: this chip marks a figure that is wrong in a
+   known direction, which is a finding, not a footnote. */
+.fuel-mo-flag { color: #92400e; }
+.fuel-mo-note { margin-top: 0.6rem; }
+
 .review-card { border-color: #fde68a; }
 .review-row-clickable { cursor: pointer; }
 
@@ -3360,6 +3798,60 @@ tr:hover td { background: var(--surface-hover); }
 }
 .bulk-clear:hover:not(:disabled) { color: var(--text); }
 .bulk-btn:disabled, .bulk-clear:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Bulk result. Deliberately the SAME amber surface as .vol-summary, the panel's
+   existing "this needs your attention and is not an error" treatment — a red
+   error box would say the batch failed, which it did not: most of it committed.
+   Sits directly under the bulk bar so the result appears where the action was. */
+.bulk-outcome {
+  margin-bottom: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid #fde68a;
+  border-radius: var(--radius);
+  background: #fffbeb;
+}
+.bulk-outcome-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+.bulk-outcome-headline {
+  flex: 1;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.5;
+  color: #78350f;
+}
+.bulk-outcome-dismiss {
+  flex: none;
+  padding: 0 0.3rem;
+  margin: -0.15rem -0.2rem 0 0;
+  font-size: 1.05rem;
+  line-height: 1.2;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: #92400e;
+  cursor: pointer;
+  font-family: inherit;
+}
+.bulk-outcome-dismiss:hover { background: #fef3c7; }
+.bulk-outcome-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.bulk-outcome-reason {
+  margin-top: 0.35rem;
+  font-size: 0.74rem;
+  line-height: 1.55;
+  color: #92400e;
+}
+.bulk-outcome-foot {
+  margin-top: 0.45rem;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: #a16207;
+}
 
 .action-cell { white-space: nowrap; }
 .btn-approve, .btn-reject, .btn-undo {
