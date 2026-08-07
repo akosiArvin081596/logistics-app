@@ -23336,16 +23336,39 @@ app.get("/api/investor/payouts", requireRole("Super Admin", "Investor"), async (
 
 		const { payouts, currentMonth, totals } = await reconcileInvestorPayouts(ownerId, ctx);
 
-		// Lock health, reported the same way the expense routes already report it
-		// (POST /api/expenses, PUT /api/expenses/bulk-status). Without it this
-		// endpoint answers 200 with a full, plausible ledger while period_locks is
-		// unreadable, and the ONLY tell is that every `phase` silently goes blank —
-		// which is also what the flag being off looks like, so the two states are
-		// indistinguishable from the outside. period_locks is the guard the whole
-		// month-close feature rests on; it should not be the quietest thing here.
-		// Absent on a healthy database, so this is purely additive.
+		// Lock health. Without it this endpoint answers 200 with a full, plausible
+		// ledger while period_locks is unreadable, and the ONLY tell is that every
+		// `phase` silently goes blank — which is also what the flag being off looks
+		// like, so the two states are indistinguishable from the outside.
+		// period_locks is the guard the whole month-close feature rests on; it
+		// should not be the quietest thing here.
+		//
+		// ⚠️ PREVIEW ONLY — deliberately NOT sent to an Investor on their own GET.
+		// The expense routes look like a precedent for sending it to anyone, but
+		// the distinction that matters is CONDITIONAL vs UNCONDITIONAL, not role:
+		// Only two routes emit it today, and both answer a question the caller
+		// just asked:
+		//   POST /api/expenses        requireAuth — reachable by a Driver — but the
+		//                             flag is spread ONLY when postedPeriod is set,
+		//                             i.e. the caller just submitted a back-dated
+		//                             receipt and is being told where it landed.
+		//   PUT /api/expenses/bulk-status   Super Admin / Dispatcher, and only in
+		//                             the response to a batch they just submitted.
+		// (PUT /api/expenses/:id/status is Super Admin / Dispatcher too but does
+		// not emit the flag at all — not a precedent either way.)
+		// This route would emit on every passive page load, to an Investor, for
+		// as long as the fault lasts.
+		//
+		// The objection is commercial, not security (it is one boolean — no ids,
+		// no schema, no enumeration value). It is an automated admission, to the
+		// exact counterparty whose settlement figure is in question, that the
+		// accounting freeze was inoperative on a given date — the same fault that
+		// can move a settled payout. That belongs to a human, not a JSON key.
+		// A Super Admin previewing the portal is who needs the signal, and
+		// GET /api/payouts (Super Admin only) carries it for the console.
 		const lockReadable = periodLocksReadable();
-		res.json({ payouts, currentMonth, totals, ...(lockReadable ? {} : { periodLockUnreadable: true }) });
+		const reportLockHealth = preview.isPreview && !lockReadable;
+		res.json({ payouts, currentMonth, totals, ...(reportLockHealth ? { periodLockUnreadable: true } : {}) });
 	} catch (err) {
 		console.error("GET /api/investor/payouts error:", err.message);
 		res.status(500).json({ error: "Failed to load investor payouts" });
