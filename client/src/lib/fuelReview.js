@@ -619,6 +619,171 @@ export function mpgSource(value) {
   return MPG_SOURCES[value] || null;
 }
 
+// ---------------------------------------------------------------------------
+// Range interval + trip verdict (GET /api/fuel/range, GET /api/fuel/trip-plan)
+// ---------------------------------------------------------------------------
+
+/**
+ * How a range figure was arrived at. Ranked BEST FIRST, deliberately the same
+ * shape and ordering convention as MPG_SOURCES above so a surface that already
+ * badges `mpgSource` needs no second concept for `rangeBasis`.
+ *
+ * rank: 2 this truck's own measured fill history · 1 a derated fleet estimate
+ *       · 0 no live fuel reading at all.
+ *
+ * WHY 'estimated' IS NOT A DASH AND NOT A GUESS. On an estimated basis the
+ * server sends `typical` and `high` as null ON PURPOSE: with no measured legs
+ * there is no spread to report, and inventing one is precisely how a driver came
+ * to be shown "449 mi" of range on a truck that had about 210. So a caller must
+ * render the absence as a sentence — "we can't tell you that yet" — and must
+ * never substitute `rangeMiles` (the raw tank x mpg point estimate) to fill the
+ * hole. rangeReadout() below enforces that; it has no fallback path.
+ */
+const RANGE_BASES = {
+  measured: {
+    key: 'measured', rank: 2,
+    short: 'measured',
+    driver: "from your truck's own fill-ups",
+    title:
+      "Measured end-to-end from this truck's own refuels: ELD odometer miles against gauge points used. It needs neither the configured tank size nor an MPG figure, so it inherits the error in neither.",
+  },
+  estimated: {
+    key: 'estimated', rank: 1,
+    short: 'estimated',
+    driver: 'fleet estimate',
+    title:
+      "This truck has no usable fill history yet, so the range is the tank-size x MPG estimate cut down by the overstatement that formula was measured to carry across the fleet. It is a floor, not a forecast.",
+  },
+  unknown: {
+    key: 'unknown', rank: 0,
+    short: 'no reading',
+    driver: 'no fuel reading',
+    title: 'No live fuel level is coming from this truck, so no range can be worked out.',
+  },
+};
+
+export function rangeBasis(value) {
+  return RANGE_BASES[value] || null;
+}
+
+/**
+ * The verdict on whether a load's remaining route fits in the tank.
+ *
+ * `tone` drives colour and nothing else decides it — in particular a caller must
+ * never re-derive "can they make it" by comparing numbers itself. The server
+ * judges `clears` on the LOW end of the interval and derates an estimated basis
+ * first, so a 348-mile point estimate against a 346.9-mile route correctly comes
+ * back `insufficient`. Any client-side re-comparison would quietly undo that.
+ */
+const TRIP_VERDICTS = {
+  clears: {
+    key: 'clears', tone: 'ok',
+    driver: 'You can make this run',
+    dispatch: 'Route clears',
+    chip: 'clears',
+    title: 'The low end of the range covers the remaining route plus a reserve.',
+  },
+  tight: {
+    key: 'tight', tone: 'warn',
+    driver: 'Too close to count on — plan a stop',
+    dispatch: 'Tight — plan a stop',
+    chip: 'fuel tight',
+    title:
+      'A typical run would reach, but the low end does not. Close enough that one heavy load or one headwind decides it, so it must not be relied on.',
+  },
+  insufficient: {
+    key: 'insufficient', tone: 'bad',
+    driver: 'Not enough fuel — you need to stop',
+    dispatch: 'Will not reach — fuel stop required',
+    chip: 'stop needed',
+    title: 'Even a typical run does not reach the destination on what is in the tank.',
+  },
+  unknown: {
+    key: 'unknown', tone: 'unknown',
+    driver: "Can't tell you yet",
+    dispatch: 'No verdict',
+    chip: 'no verdict',
+    title: 'Without a live fuel reading or a route distance there is nothing to judge.',
+  },
+};
+
+export function tripVerdict(value) {
+  return TRIP_VERDICTS[value] || null;
+}
+
+/**
+ * Normalize the interval half of either fuel payload into ONE shape.
+ *
+ * Two endpoints carry the same interval in two layouts — `/api/fuel/range`
+ * flattens it (`rangeLowMiles`…) while `/api/fuel/trip-plan` nests it under
+ * `range` — and both feed the same components. Normalizing here is what keeps
+ * the "never fall back to the point estimate" rule in a single place instead of
+ * once per surface.
+ *
+ * `known` is the gate for rendering any figure at all; `hasSpread` is the gate
+ * for rendering the typical/best-case pair. They are separate because the
+ * estimated basis is `known: true, hasSpread: false` — there IS a number to
+ * plan against, there is just no distribution around it.
+ */
+function normalizeRange(src) {
+  const basisKey = src && typeof src.basis === 'string' ? src.basis : 'unknown';
+  const info = rangeBasis(basisKey);
+  const planning = toNum(src && src.planning);
+  const typical = toNum(src && src.typical);
+  const high = toNum(src && src.high);
+  return {
+    basis: info ? info.key : '',
+    basisInfo: info,
+    planning,
+    typical,
+    high,
+    low: toNum(src && src.low),
+    milesPerPoint: toNum(src && src.milesPerPoint),
+    known: planning !== null,
+    // Only a measured basis carries a distribution. Guard on the values rather
+    // than on the basis string so an unrecognised future basis that DOES send a
+    // spread still renders it, and one that doesn't stays quiet.
+    hasSpread: typical !== null && high !== null,
+  };
+}
+
+/** Interval from a GET /api/fuel/range payload. */
+export function rangeReadout(d) {
+  return normalizeRange({
+    basis: d && d.rangeBasis,
+    planning: d && d.rangePlanningMiles,
+    typical: d && d.rangeTypicalMiles,
+    high: d && d.rangeHighMiles,
+    low: d && d.rangeLowMiles,
+    milesPerPoint: d && d.milesPerFuelPoint,
+  });
+}
+
+/** Interval from a GET /api/fuel/trip-plan payload (already nested). */
+export function planRangeReadout(p) {
+  return normalizeRange(p && p.range);
+}
+
+/**
+ * Why a 'measured' basis deserves to be trusted, in the truck's own terms.
+ * Returns '' when the server sent no evidence — which is itself the reason the
+ * basis is not 'measured', so there is nothing to explain.
+ */
+export function rangeEvidenceText(ev) {
+  const legs = toNum(ev && ev.legs);
+  const miles = toNum(ev && ev.miles);
+  if (legs === null || legs <= 0) return '';
+  const fills = `${Math.round(legs)} fill-up${Math.round(legs) === 1 ? '' : 's'}`;
+  if (miles === null || miles <= 0) return fills;
+  return `${fills} · ${Math.round(miles).toLocaleString('en-US')} mi`;
+}
+
+/** "1,204" — miles for display. null/blank yields '' so callers can v-if it. */
+export function milesText(v) {
+  const n = toNum(v);
+  return n === null ? '' : Math.round(n).toLocaleString('en-US');
+}
+
 /** Plain-language verdict for the status cell. Neutral by design. */
 export function calibrationVerdict(row) {
   if (!row) return '';

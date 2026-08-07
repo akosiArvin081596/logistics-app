@@ -17,7 +17,16 @@
         </svg>
       </span>
       <span class="ff-title-text">Fuel &amp; Route</span>
-      <span v-if="rangeMilesDisplay != null" class="ff-range-badge">{{ rangeMilesDisplay }} mi left</span>
+      <!-- Collapsed, this badge is the whole panel. It carries the VERDICT when
+           there is one to give and the planning figure otherwise — never
+           `rangeMiles`, which is the tank x mpg point estimate that put "449 mi
+           left" in front of a truck with about 210. -->
+      <span
+        v-if="headerBadge"
+        class="ff-range-badge"
+        :class="'hb-' + headerBadge.tone"
+        :title="headerBadge.title"
+      >{{ headerBadge.text }}</span>
       <span class="ff-chevron" :class="{ open: !collapsed }" aria-hidden="true">&#9662;</span>
     </button>
 
@@ -33,9 +42,28 @@
           <span class="ff-ring-label">{{ Math.round(range.fuelPct) }}%</span>
         </div>
         <div class="ff-range-info">
+          <!-- The LOW end of the interval, labelled as such. Anything else here
+               is a promise the truck has not been measured keeping. -->
           <div class="ff-range-miles">
-            <span class="ff-range-num">{{ rangeMilesDisplay != null ? rangeMilesDisplay : '—' }}</span>
-            <span class="ff-unit">mi to empty</span>
+            <span class="ff-range-num">{{ interval.known ? milesText(interval.planning) : '—' }}</span>
+            <span class="ff-unit">mi to plan on</span>
+            <span
+              v-if="interval.basisInfo && interval.known"
+              class="ff-src"
+              :class="basisBadgeClass"
+              :title="interval.basisInfo.title"
+            >{{ interval.basisInfo.short }}</span>
+          </div>
+          <div v-if="interval.hasSpread" class="ff-range-spread">
+            typical {{ milesText(interval.typical) }} · best {{ milesText(interval.high) }}
+          </div>
+          <!-- Null on purpose, so it is said in words. Substituting rangeMiles
+               here would restore the original bug in one line. -->
+          <div v-else-if="interval.known" class="ff-range-spread muted">
+            no typical or best case yet — too few fill-ups on this truck
+          </div>
+          <div v-if="evidenceText" class="ff-range-evidence" title="Tank-to-tank legs behind the measured basis">
+            {{ evidenceText }}
           </div>
           <div class="ff-range-sub">
             <span v-if="range.gallonsRemaining != null">{{ round1(range.gallonsRemaining) }} / {{ round1(range.tankGallons) }} gal</span>
@@ -48,6 +76,53 @@
           </div>
         </div>
       </div>
+
+      <!-- TRIP VERDICT — "does the rest of this load's route fit in the tank?"
+           The server decides this on the low end and derates an unmeasured basis
+           first; nothing here re-compares the numbers. -->
+      <div v-if="planLoading" class="ff-loading">Checking the route against the tank…</div>
+      <div v-else-if="verdict" class="ff-plan" :class="'v-' + verdict.tone">
+        <div class="ff-plan-head" :title="verdict.title">{{ verdict.dispatch }}</div>
+        <div class="ff-plan-rows">
+          <div v-if="plan.routeMiles != null">
+            <span>route left</span>
+            <strong>{{ milesText(plan.routeMiles) }} mi</strong>
+          </div>
+          <div v-if="plan.requiredMiles != null">
+            <span>needs</span>
+            <strong>{{ milesText(plan.requiredMiles) }} mi</strong>
+            <em v-if="plan.reserveMiles != null">incl. {{ milesText(plan.reserveMiles) }} reserve</em>
+          </div>
+          <div v-if="shortfallText">
+            <span>short by</span>
+            <strong class="bad">{{ shortfallText }}</strong>
+          </div>
+          <div v-if="refuelText">
+            <span>refuel</span>
+            <strong>{{ refuelText }}</strong>
+          </div>
+          <!-- pointsNeeded is the trustworthy half of this pair: measured, and
+               free of both tank size and MPG. gallonsNeeded inherits mpgSource
+               and is a LOWER bound, so it is labelled "at least". -->
+          <div v-if="plan.pointsNeeded != null">
+            <span>gauge</span>
+            <strong>{{ plan.pointsNeeded }} points</strong>
+          </div>
+          <div v-if="plan.gallonsNeeded != null">
+            <span>fuel</span>
+            <strong>at least {{ round1(plan.gallonsNeeded) }} gal</strong>
+          </div>
+        </div>
+        <div v-for="c in planCaveats" :key="c" class="ff-plan-caveat">{{ c }}</div>
+        <!-- Kept visible, kept small, and kept explicitly out of the verdict.
+             Dispatch watched this panel read 449 last week; silently swapping in
+             a different number without saying so invites a bug report and, worse,
+             a call to the driver quoting the old figure. -->
+        <div v-if="plan.pointEstimateMiles != null" class="ff-plan-old">
+          old tank × mpg formula: {{ milesText(plan.pointEstimateMiles) }} mi — not used
+        </div>
+      </div>
+      <div v-else-if="planNote" class="ff-muted ff-plan-note">{{ planNote }}</div>
 
       <!-- #2 map toggle + #4 cheapest-diesel list -->
       <div class="ff-stops">
@@ -115,7 +190,14 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
-import { mpgSource } from '../../lib/fuelReview'
+import {
+  mpgSource,
+  rangeReadout,
+  planRangeReadout,
+  tripVerdict,
+  rangeEvidenceText,
+  milesText,
+} from '../../lib/fuelReview'
 import { priceText, cheapestIndex } from '../../lib/fuelStops'
 
 const api = useApi()
@@ -132,6 +214,9 @@ const emit = defineEmits(['stops', 'show', 'focus'])
 
 const range = ref(null)
 const rangeLoading = ref(false)
+const plan = ref(null)
+const planLoading = ref(false)
+const planNote = ref('')
 const stops = ref([])
 const stopsLoading = ref(false)
 const stopsError = ref('')
@@ -164,12 +249,83 @@ const mpgBadgeClass = computed(() =>
   !mpgSrc.value ? '' : (mpgSrc.value.rank === 2 ? 'src-best' : mpgSrc.value.rank === 1 ? 'src-eld' : 'src-est')
 )
 
-const rangeMilesDisplay = computed(() =>
-  hasFuelData.value && range.value.rangeMiles != null ? Math.round(range.value.rangeMiles) : null,
+/* ── the interval and the verdict ─────────────────────────────────────────
+   Both payloads carry the same interval in two layouts; lib/fuelReview
+   normalizes them so this panel and the driver's cannot drift on what "plan on"
+   means, and — the load-bearing part — so neither can fall back to `rangeMiles`
+   when the optimistic figures come back null. They are null on an estimated
+   basis ON PURPOSE. */
+const interval = computed(() =>
+  plan.value ? planRangeReadout(plan.value) : rangeReadout(range.value || {}),
 )
-const anyLoading = computed(() => rangeLoading.value || stopsLoading.value)
+const verdict = computed(() => (plan.value ? tripVerdict(plan.value.verdict) : null))
+const basisBadgeClass = computed(() => {
+  const b = interval.value.basisInfo
+  if (!b) return ''
+  return b.rank === 2 ? 'src-best' : b.rank === 1 ? 'src-est' : 'src-muted'
+})
+const evidenceText = computed(() =>
+  interval.value.basis === 'measured'
+    ? rangeEvidenceText(range.value && range.value.rangeEvidence)
+    : '',
+)
+
+// Collapsed-panel summary. A verdict outranks a figure, because a dispatcher
+// scanning the map wants to know which truck is in trouble, not how far each
+// one goes. 'clears' shows the figure rather than a green tick for the same
+// reason the driver's header shows nothing on a pass — an always-on badge stops
+// being read.
+const headerBadge = computed(() => {
+  const v = verdict.value
+  if (v && (v.tone === 'bad' || v.tone === 'warn')) {
+    return { tone: v.tone, text: v.chip, title: v.title }
+  }
+  if (interval.value.known) {
+    const b = interval.value.basisInfo
+    return {
+      tone: 'plain',
+      text: `${milesText(interval.value.planning)} mi plan`,
+      title: b ? b.title : '',
+    }
+  }
+  return null
+})
+
+const shortfallText = computed(() => {
+  const n = Number(plan.value && plan.value.shortfallMiles)
+  return Number.isFinite(n) && n > 0 ? `${milesText(n)} mi` : ''
+})
+const refuelText = computed(() => {
+  const p = plan.value
+  if (!p || !p.fuelStopsRecommended) return ''
+  const within = Number(p.refuelWithinMiles)
+  if (!Number.isFinite(within)) return 'before the run'
+  return within <= 0 ? 'now — before departure' : `within ${milesText(within)} mi`
+})
+const planCaveats = computed(() => {
+  const p = plan.value
+  if (!p) return []
+  const out = []
+  // Which question was answered. Planning from the pickup on a truck already
+  // rolling overstates the distance left, so a dispatcher reading a big
+  // shortfall needs to know it may be measured from the wrong end.
+  if (p.fromLivePosition === false) {
+    out.push('Measured from the load origin — no recent fix from this truck.')
+  }
+  if (p.routeSource === 'straight_line_estimate') {
+    out.push('Road distance unavailable; estimated from straight-line distance.')
+  }
+  return out
+})
+
+const anyLoading = computed(() => rangeLoading.value || stopsLoading.value || planLoading.value)
 const isEmpty = computed(
-  () => !hasFuelData.value && stops.value.length === 0 && !anyLoading.value && !stopsError.value,
+  () =>
+    !hasFuelData.value &&
+    stops.value.length === 0 &&
+    !plan.value &&
+    !anyLoading.value &&
+    !stopsError.value,
 )
 
 function round1(n) {
@@ -196,6 +352,35 @@ async function fetchRange() {
     range.value = null
   } finally {
     rangeLoading.value = false
+  }
+}
+
+// The trip verdict needs a loadId — the endpoint has no coordinate form, by
+// design (it plans the REMAINING route from the truck's own live fix). With only
+// the activeLoad coordinate fallback available there is nothing to ask, and the
+// section stays absent rather than guessing.
+async function fetchPlan() {
+  plan.value = null
+  planNote.value = ''
+  if (!props.loadId) return
+  planLoading.value = true
+  try {
+    const d = await api.get(`/api/fuel/trip-plan?loadId=${encodeURIComponent(props.loadId)}`)
+    plan.value = d && d.ok !== false ? d : null
+  } catch (e) {
+    // 400 is the routine one: a load nobody has geocoded, or a truck with no
+    // position to plan from. Named rather than silent — a dispatcher who sees no
+    // verdict has to be able to tell "fine" from "couldn't check".
+    planNote.value =
+      e?.status === 400
+        ? 'No verdict: this load has no mapped destination, or the truck has no position to plan from.'
+        : e?.status === 429
+          ? 'No verdict: too many checks just now.'
+          : e?.status === 404
+            ? ''
+            : 'No verdict: the fuel check failed.'
+  } finally {
+    planLoading.value = false
   }
 }
 
@@ -252,6 +437,7 @@ function reloadAll() {
   emit('stops', [])
   fetchRange()
   fetchStops()
+  fetchPlan()
 }
 
 watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
@@ -306,13 +492,25 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
 .ff-title-text { flex: 1 1 auto; min-width: 0; text-align: left; }
 .ff-range-badge {
   font-size: 0.62rem;
-  font-weight: 600;
-  color: #065f46;
-  background: #d1fae5;
+  font-weight: 700;
   border-radius: 10px;
   padding: 0.05rem 0.45rem;
   white-space: nowrap;
   flex-shrink: 0;
+}
+.ff-range-badge.hb-plain {
+  color: #065f46;
+  background: #d1fae5;
+}
+.ff-range-badge.hb-warn {
+  color: #7c2d12;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+}
+.ff-range-badge.hb-bad {
+  color: #fff;
+  background: #dc2626;
+  border: 1px solid #b91c1c;
 }
 .ff-chevron {
   font-size: 0.62rem;
@@ -374,7 +572,75 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
 }
 .ff-ring.low .ff-ring-label { color: #b91c1c; }
 .ff-range-info { min-width: 0; }
-.ff-range-miles { display: flex; align-items: baseline; gap: 0.3rem; }
+.ff-range-miles { display: flex; align-items: baseline; gap: 0.3rem; flex-wrap: wrap; }
+.ff-range-spread {
+  margin-top: 0.1rem;
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: #0f766e;
+  font-variant-numeric: tabular-nums;
+}
+.ff-range-spread.muted { color: #94a3b8; font-weight: 500; font-style: italic; }
+.ff-range-evidence {
+  margin-top: 0.05rem;
+  font-size: 0.62rem;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- trip verdict ---- */
+.ff-plan {
+  margin: 0 0 0.55rem;
+  padding: 0.45rem 0.55rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid;
+}
+.ff-plan-head {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  margin-bottom: 0.3rem;
+}
+.ff-plan-rows { display: flex; flex-direction: column; gap: 0.1rem; }
+.ff-plan-rows > div {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  font-size: 0.66rem;
+  color: #475569;
+}
+.ff-plan-rows span { min-width: 52px; color: #64748b; }
+.ff-plan-rows strong {
+  font-weight: 800;
+  color: #0f172a;
+  font-variant-numeric: tabular-nums;
+}
+.ff-plan-rows strong.bad { color: #b91c1c; }
+.ff-plan-rows em { font-style: normal; color: #94a3b8; font-size: 0.62rem; }
+.ff-plan-caveat {
+  margin-top: 0.3rem;
+  font-size: 0.62rem;
+  line-height: 1.35;
+  color: #64748b;
+}
+.ff-plan-old {
+  margin-top: 0.35rem;
+  padding-top: 0.3rem;
+  border-top: 1px dashed rgba(100, 116, 139, 0.3);
+  font-size: 0.6rem;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+.ff-plan-note { padding-bottom: 0.5rem; }
+
+.ff-plan.v-ok { background: #f0fdf4; border-color: #bbf7d0; }
+.ff-plan.v-ok .ff-plan-head { color: #166534; }
+.ff-plan.v-warn { background: #fffbeb; border-color: #fde68a; }
+.ff-plan.v-warn .ff-plan-head { color: #b45309; }
+.ff-plan.v-bad { background: #fef2f2; border-color: #fecaca; }
+.ff-plan.v-bad .ff-plan-head { color: #b91c1c; }
+.ff-plan.v-unknown { background: #f8fafc; border-color: #e2e8f0; }
+.ff-plan.v-unknown .ff-plan-head { color: #64748b; }
 .ff-range-num {
   font-size: 1.15rem;
   font-weight: 800;
@@ -405,6 +671,7 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
 .ff-src.src-best { background: #16a34a; color: #fff; border: 1px solid #15803d; }
 .ff-src.src-eld { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
 .ff-src.src-est { background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; }
+.ff-src.src-muted { background: #f8fafc; color: #94a3b8; border: 1px solid #e2e8f0; }
 
 /* #2 toggle + #4 list */
 .ff-stops-head {

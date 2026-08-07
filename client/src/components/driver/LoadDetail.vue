@@ -83,10 +83,28 @@
       </van-collapse-item>
       <!-- Miles left in tank + diesel stops on this route. Collapsed by default
            like everything below Status/Map — which also keeps the billed Google
-           Places lookup opt-in: DriverFuelPanel fetches nothing until `active`
-           first turns true. -->
-      <van-collapse-item title="Fuel" name="fuel">
-        <DriverFuelPanel :load-id="String(loadId || '')" :active="fuelSectionOpen" />
+           Places lookup opt-in: DriverFuelPanel fetches the stops only once
+           `active` first turns true.
+           `lazy-render=false` mounts the panel while the section is still shut
+           so it can run its ONE cheap request — "does this run fit in the tank"
+           — and hand the answer back up here. A driver who runs dry is, by
+           definition, one who never thought to open a Fuel section, so that
+           verdict has to reach the header rather than wait behind a tap. -->
+      <van-collapse-item name="fuel" :lazy-render="false">
+        <template #title>
+          <span class="fuel-title">
+            Fuel
+            <span v-if="fuelBadge" class="fuel-badge" :class="'fb-' + fuelBadge.tone">
+              {{ fuelBadge.text }}
+            </span>
+          </span>
+        </template>
+        <DriverFuelPanel
+          :load-id="String(loadId || '')"
+          :active="fuelSectionOpen"
+          :runnable="loadStillToDrive"
+          @plan="fuelPlan = $event"
+        />
       </van-collapse-item>
     </van-collapse>
 
@@ -258,9 +276,24 @@ const routeMapRef = ref(null)
 const docListRef = ref(null)
 
 // Drives DriverFuelPanel's `active` prop. The panel treats the first true as
-// its cue to fetch, so the Google Places spend only happens once the driver
-// actually opens the Fuel section.
+// its cue to fetch the STOPS, so the Google Places spend only happens once the
+// driver actually opens the Fuel section.
 const fuelSectionOpen = computed(() => openSections.value.includes('fuel'))
+
+// The trip-fuel verdict, surfaced on the collapsed section header.
+//
+// Deliberately short and deliberately not a number: the header has room for a
+// state, and a figure without its interval beside it is what this whole change
+// exists to stop. `clears` shows nothing at all — a green tick on every load
+// trains the eye to skip the strip, and then the one red badge that matters
+// gets skipped with it.
+const fuelPlan = ref(null)
+const fuelBadge = computed(() => {
+  const v = fuelPlan.value && fuelPlan.value.verdict
+  if (v === 'insufficient') return { tone: 'bad', text: 'Fuel stop needed' }
+  if (v === 'tight') return { tone: 'warn', text: 'Fuel is tight' }
+  return null
+})
 
 // TEMP — banner text/styling for the phone-GPS-for-test-load flow.
 const bannerTitle = computed(() => {
@@ -369,6 +402,13 @@ const isDispatched = computed(() => /^(dispatched)$/i.test(status.value))
 const showResponseButtons = computed(() => isDispatched.value && !props.load._accepted)
 const showAcceptedBadge = computed(() => isDispatched.value && props.load._accepted)
 const isActiveLoad = computed(() => /^(assigned|dispatched|heading to shipper|at shipper|loading|in transit|at receiver|unloading)$/i.test(status.value))
+
+// "Is there still road left on this load?" — gates the Fuel section's trip
+// check. On a delivered load that check is not merely useless but WRONG: it
+// would measure from where the truck is NOW to a destination it already reached
+// and tell a driver reviewing last month's paperwork that they haven't the fuel
+// to make it. Same status set the driver store splits Active from Historical on.
+const loadStillToDrive = computed(() => !/^(delivered|completed|pod received)$/i.test(status.value))
 
 const route = computed(() => {
   if (detailsCol.value) {
@@ -488,6 +528,34 @@ const dropoffFields = computed(() => {
 
 .detail-collapse :deep(.van-collapse-item__content) {
   padding: 0;
+}
+
+/* Fuel section header + its verdict badge. Wraps rather than truncates: the
+   badge is the part worth reading, so on a narrow phone it takes a second line
+   instead of an ellipsis. */
+.fuel-title {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+.fuel-badge {
+  padding: 0.1rem 0.45rem;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.fuel-badge.fb-warn {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+.fuel-badge.fb-bad {
+  background: #dc2626;
+  color: #fff;
+  border: 1px solid #b91c1c;
 }
 
 .detail-collapse :deep(.doc-upload) {
