@@ -1,6 +1,12 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+// Used ONLY by the period_locks fault block (137-139), which boots its own
+// throwaway server: net to claim a free port from the OS, os for a scratch
+// directory, spawn to run server.js. Nothing else in this file starts a process.
+const net = require("net");
+const os = require("os");
+const { spawn } = require("child_process");
 
 // Target port. Defaults to 3000 (local dev), but MUST be overridable: on the
 // VPS 3000 is PRODUCTION and this suite writes (it logs an expense in test 46).
@@ -43,6 +49,18 @@ try {
 	csvLib = null;
 }
 
+// The app's own SQLite driver. Tests 137-139 need it to seed and then BREAK a
+// throwaway database out-of-band — the fault they reproduce is a schema fault,
+// and there is no HTTP surface that can inflict one. Loaded defensively like the
+// three above: this is a native module, and a failed rebuild after a Node upgrade
+// must skip one block rather than take out the whole suite.
+let sqliteDriver = null;
+try {
+	sqliteDriver = require("better-sqlite3");
+} catch {
+	sqliteDriver = null;
+}
+
 // Optional directory of REAL rate-con PDFs (they contain broker pricing, so
 // they are deliberately NOT committed). Point at a local folder to run the
 // fixture-backed extraction tests 91-92; unset, they skip.
@@ -65,9 +83,12 @@ const ADMIN_PASS = process.env.TEST_ADMIN_PASS || "Password123!";
 const INVESTOR_USER = process.env.TEST_INVESTOR_USER || "max.range.inv.llc.";
 const INVESTOR_PASS = process.env.TEST_INVESTOR_PASS || "Password123!";
 
-function req(method, path, body, cookies) {
+// `port` is optional and defaults to the suite's target server. It exists for
+// tests 137-139, which drive a second, throwaway server they start themselves;
+// every other call site is unchanged and still hits PORT.
+function req(method, path, body, cookies, port) {
   return new Promise((resolve, reject) => {
-    const opts = { hostname: "localhost", port: PORT, path, method, headers: { "Content-Type": "application/json" } };
+    const opts = { hostname: "localhost", port: port || PORT, path, method, headers: { "Content-Type": "application/json" } };
     if (cookies) opts.headers.Cookie = cookies;
     const r = http.request(opts, res => {
       let d = ""; res.on("data", c => d += c);
@@ -1722,6 +1743,351 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
       && lines[1] === '"7083240","Say ""hi"", now"'
       && lines[2] === '"\'-45886",""'
       && !/(^|[^\r])\n/.test(body));
+  }
+
+  // ==========================================================================
+  // 137-142. period_locks UNREADABLE — all three money guards must still refuse.
+  //
+  // WHAT IS UNDER TEST. Three routes refuse to act on a month they cannot
+  // confirm is closed, and all three are fail-CLOSED BY ACCIDENT — each one
+  // reaches the right answer through a different double negative, and none of
+  // them is written in a way that says so.
+  //
+  //   (a) POST /api/investor/payouts/:id/status  (settle)   } both gate on
+  //   (b) PUT  /api/investor/payouts/:id/adjust  (adjust)   } isPending(period)
+  //         isLocked(p)   answers false on ANY error, including an unreadable table
+  //      -> isPending(p)  is therefore TRUE for a past month it cannot look up
+  //      -> the guard fires, and settling into a possibly-closed month is refused.
+  //      server.js names the exact wrong refactor: rewriting either as
+  //      `periodPhase(p) === 'pending'` — periodPhase returns '' when the table
+  //      cannot be read, which reads as "not pending", so the guard stops firing
+  //      and the failure direction INVERTS silently.
+  //
+  //   (c) GET /api/investor/payouts/:period/statement — a DIFFERENT expression,
+  //      `!isLocked(period) && row.status !== 'paid'`, i.e. publish only when the
+  //      period is confirmed locked or the money already moved. Unreadable table
+  //      -> isLocked false -> !isLocked true -> an unpaid period is refused. Also
+  //      correct, also by accident. ⚠️ Its adversary is NOT periodPhase (which
+  //      happens to be safe here) but the tempting "harmonize it with the other
+  //      two" edit: periodWriteLocked() means "don't WRITE here" (!readable ||
+  //      isLocked) while this route needs "can't confirm finalized" (!readable ||
+  //      !isLocked). On an unreadable table those resolve OPPOSITE ways, so
+  //      `!periodWriteLocked(period) && …` starts publishing FINAL statements
+  //      during exactly the outage that should suppress them.
+  //
+  // A comment is not a test: until this block nothing failed if someone tidied
+  // any of the three, and the failure modes are a $1,000 payout stamped paid into
+  // a month whose lock state is unknown (with `success: true` on the wire), and a
+  // PDF telling an investor a figure is FINAL when nothing was ever closed.
+  //
+  // WHY THIS BRINGS ITS OWN SERVER. Two preconditions cannot be met against the
+  // server the rest of this suite targets:
+  //   1. PERIOD_FINALIZE_ENABLED must be ON. isPending() returns false
+  //      unconditionally while the flag is off, so on a dormant server neither
+  //      guard fires and a 409 assertion would pass for the wrong reason — which
+  //      is worse than no test, because it reads as coverage.
+  //   2. period_locks has to be genuinely unreadable, and that is a SCHEMA
+  //      fault, not a row: the table is rebuilt without its `status` column so
+  //      `SELECT status FROM period_locks` throws on execution, while
+  //      `CREATE TABLE IF NOT EXISTS` sees a table already there and repairs
+  //      nothing. There is no HTTP surface that inflicts that, and doing it to
+  //      the target's database would corrupt whichever ledger the operator is
+  //      pointed at.
+  // So this block boots server.js on an OS-assigned free port against a
+  // throwaway SQLite file, seeds the two rows it needs, breaks the table, and
+  // kills the child. It never touches the target server, its database, or its
+  // rate limiters — which also means it is unaffected by the "no two runs inside
+  // 15 minutes" rule the rest of the suite lives under.
+  //
+  // Tests 113/114/115 already cover the ORDINARY pending case (readable table,
+  // month inside its grace window) against the target server, and 117 covers a
+  // real statement PDF end-to-end. This block covers the one thing none of them
+  // can reach: the lock table itself being unreadable.
+  //
+  // Opt out with SKIP_LOCK_FAULT_TEST=1. It spawns a process, and the child's
+  // boot pre-warm reads the configured spreadsheet once.
+  //
+  // Ordering is forced, not stylistic: every healthy-table control has to run
+  // BEFORE the table is broken, so the controls are 137-138 and the refusals are
+  // 139-142 rather than being grouped per route.
+  const lockFaultNames = [
+    "137. Settle and adjust are ALLOWED while period_locks is readable (positive control)",
+    "138. Statement gets PAST the lock guard while period_locks is readable (positive control)",
+    "139. Settle is REFUSED when period_locks cannot be read (409 PERIOD_NOT_FINALIZED)",
+    "140. Adjust is REFUSED when period_locks cannot be read (409 PERIOD_NOT_FINALIZED)",
+    "141. Statement is REFUSED when period_locks cannot be read (409 PERIOD_NOT_FINALIZED)",
+    "142. A PAID period still issues its statement when period_locks cannot be read",
+  ];
+  const lockFaultSkip = (why) => lockFaultNames
+    .filter(n => !results.some(r => r.name === n))
+    .forEach(n => skip(n, why));
+  // The child's own explanation of why it died — the difference between "could
+  // not boot" and "could not boot BECAUSE the service account key is missing" is
+  // the whole value of the skip reason. server.js prints a banner of ~12 endpoint
+  // lines immediately before it dies, so a naive tail returns the banner and
+  // buries the cause; prefer lines that look like a diagnosis, fall back to the
+  // tail only if none do.
+  const tailOf = (s) => {
+    const lines = String(s).split("\n").map(l => l.trim()).filter(Boolean);
+    const loud = lines.filter(l => /error|fail|cannot|exit|refus|denied|ENOENT|EADDR/i.test(l));
+    return (loud.length ? loud : lines).slice(-3).join(" | ").slice(0, 300);
+  };
+
+  if (process.env.SKIP_LOCK_FAULT_TEST === "1") {
+    lockFaultSkip("SKIP_LOCK_FAULT_TEST=1");
+  } else if (!sqliteDriver) {
+    lockFaultSkip("better-sqlite3 not loadable from this checkout");
+  } else if (!fs.existsSync(path.join(__dirname, "server.js"))) {
+    lockFaultSkip("server.js not found beside test-suite.js");
+  } else {
+    let child = null, sdb = null, scratchDir = "", childLog = "", childExited = false;
+    try {
+      scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "logisx-lockfault-"));
+      const scratchDbPath = path.join(scratchDir, "lockfault.db");
+
+      // Let the OS name a free port rather than guessing one: the suite may well
+      // be running beside a dev stack, a staging process and a sibling worktree.
+      const scratchPort = await new Promise((resolve, reject) => {
+        const probe = net.createServer();
+        probe.on("error", reject);
+        probe.listen(0, "127.0.0.1", () => {
+          const p = probe.address().port;
+          probe.close(() => resolve(p));
+        });
+      });
+
+      child = spawn(process.execPath, [path.join(__dirname, "server.js")], {
+        cwd: __dirname,
+        env: {
+          ...process.env,
+          // The three settings this test exists for. dotenv does not override an
+          // env var that is already set, so these beat anything in .env.
+          DATABASE_PATH: scratchDbPath,
+          PERIOD_FINALIZE_ENABLED: "true",
+          PORT: String(scratchPort),
+          // Its own signing key, and dev mode so the login cookie is not marked
+          // Secure (a Secure cookie over plain http never comes back, and every
+          // authenticated request below would 401).
+          SESSION_SECRET: "test-suite-period-lock-fault",
+          NODE_ENV: "development",
+          // Everything that could reach the outside world or spend money, off.
+          // GOOGLE_MAPS_API_KEY especially: the boot sweep geocodes every address
+          // on the sheet that is missing from geocode_cache, and a brand-new
+          // scratch database has an empty one — that is a billed call per address.
+          GOOGLE_MAPS_API_KEY: "",
+          GMAIL_USER: "",
+          GMAIL_APP_PASSWORD: "",
+          RATECON_RECONCILE_ENABLED: "false",
+          INVOICE_AUTOGEN_ENABLED: "false",
+          ROUTEMATE_ENABLED: "false",
+          LINXUP_ENABLED: "false",
+          FUEL_EVENTS_ENABLED: "false",
+          SCANKIT_ENABLED: "false",
+          MAINTENANCE_NOTICE_ENABLED: "false",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      child.stdout.on("data", d => { childLog += d; });
+      child.stderr.on("data", d => { childLog += d; });
+      child.on("exit", () => { childExited = true; });
+
+      // server.js EXITS if it cannot reach Google Sheets, so "did not come up"
+      // is a real outcome here, not a hypothetical. Poll until it answers.
+      const bootDeadline = Date.now() + 60000;
+      let booted = false;
+      while (Date.now() < bootDeadline && !childExited) {
+        try {
+          const h = await req("GET", "/api/auth/setup-check", null, null, scratchPort);
+          if (h.status === 200) { booted = true; break; }
+        } catch { /* not listening yet */ }
+        await new Promise(r => setTimeout(r, 250));
+      }
+      if (!booted) {
+        throw new Error((childExited ? "server.js exited during boot" : "server.js did not answer in 60s")
+          + " — " + tailOf(childLog));
+      }
+
+      // Fresh database, so the first-run setup route is what mints the admin —
+      // no password hashing in the harness, and no dependence on the fixture
+      // accounts the rest of the suite logs in with.
+      const scratchUser = "lockfault_admin", scratchPass = "Password123!";
+      const setup = await req("POST", "/api/auth/setup", { username: scratchUser, password: scratchPass }, null, scratchPort);
+      if (setup.status !== 200) throw new Error("scratch setup returned " + setup.status);
+      const scratchLogin = await req("POST", "/api/auth/login", { username: scratchUser, password: scratchPass }, null, scratchPort);
+      if (scratchLogin.status !== 200 || !scratchLogin.cookies) throw new Error("scratch login returned " + scratchLogin.status);
+      const sc = scratchLogin.cookies;
+
+      // The statement route is Super-Admin-forbidden without ?as_user_id= and
+      // resolvePreviewUser only accepts a real Investor's users.id, so the
+      // statement half of this block needs an actual Investor account. Created
+      // through the app's own route rather than by hashing a password here.
+      const invUser = "lockfault_investor";
+      const mkInv = await req("POST", "/api/users",
+        { username: invUser, password: scratchPass, role: "Investor", fullName: "Lock Fault Investor", companyName: "Lock Fault LLC" },
+        sc, scratchPort);
+      if (mkInv.status !== 200) throw new Error("scratch investor create returned " + mkInv.status);
+      const invLoginScratch = await req("POST", "/api/auth/login", { username: invUser, password: scratchPass }, null, scratchPort);
+      if (invLoginScratch.status !== 200 || !invLoginScratch.cookies) throw new Error("scratch investor login returned " + invLoginScratch.status);
+      const sci = invLoginScratch.cookies;
+
+      // Read-WRITE, deliberately. A read-only handle on a WAL database serves
+      // whatever the main file last held and silently misses everything still in
+      // the -wal — which here would mean seeding rows the server never sees.
+      sdb = new sqliteDriver(scratchDbPath);
+
+      // FIXTURE REPAIR, not a workaround for this test's own convenience. On a
+      // BRAND-NEW database drivers_directory.pay_daily does not exist: server.js
+      // runs `ALTER TABLE drivers_directory ADD COLUMN pay_daily` ~360 lines
+      // BEFORE the CREATE TABLE that makes drivers_directory, so the ALTER throws
+      // "no such table", the bare catch swallows it, and the CREATE never adds the
+      // column. Every real deployment has it (there the ALTER ran when the table
+      // already existed), so a scratch DB without it is the ONE way this database
+      // differs from production — and reconcileInvestorPayouts selects it, which
+      // would 500 every statement request below for a reason that has nothing to
+      // do with period locks. Adding it makes the fixture match production.
+      // The app bug is real and reported separately; this line is not its fix.
+      try { sdb.exec("ALTER TABLE drivers_directory ADD COLUMN pay_daily REAL DEFAULT 0"); } catch {}
+
+      const ownerId = sdb.prepare("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(scratchUser).id;
+      const invOwnerId = sdb.prepare("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(invUser).id;
+      const stamp = new Date().toISOString();
+
+      // A period each, because investor_payouts is UNIQUE(owner_id, period).
+      // EVERY one of them is a long-past month and EVERY one is LOCKED, so on a
+      // healthy table isPending() is false and isLocked() is true throughout —
+      // no guard here has any reason to fire until the table breaks. That is what
+      // makes the 409s below attributable to the fault and nothing else: not a $0
+      // row, not a still-open window, not a bad session.
+      const CONTROL_PERIOD = "2020-01", FAULT_PERIOD = "2020-02";
+      const STMT_CONTROL_PERIOD = "2020-04", STMT_FAULT_PERIOD = "2020-05", STMT_PAID_PERIOD = "2020-06";
+      const ALL_PERIODS = [CONTROL_PERIOD, FAULT_PERIOD, STMT_CONTROL_PERIOD, STMT_FAULT_PERIOD, STMT_PAID_PERIOD];
+      const insLock = sdb.prepare("INSERT OR REPLACE INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', ?, 'test-suite')");
+      const insPayout = sdb.prepare("INSERT INTO investor_payouts (owner_id, period, amount, due_date, status) VALUES (?, ?, 1000, ?, 'owed')");
+      ALL_PERIODS.forEach(p => insLock.run(p, stamp));
+      const controlId = insPayout.run(ownerId, CONTROL_PERIOD, CONTROL_PERIOD + "-15").lastInsertRowid;
+      const faultId = insPayout.run(ownerId, FAULT_PERIOD, FAULT_PERIOD + "-15").lastInsertRowid;
+
+      // The statement rows are deliberately worth $0 NET (1000 with a -1000
+      // correction). The route checks the lock guard FIRST and the "nets to $0"
+      // rule several steps later, so a zeroed row turns "got past the lock guard"
+      // into a distinct, instant, positively-identifiable answer —
+      // 409 PAYOUT_NOT_SETTLEABLE — instead of a 30-second Puppeteer render that
+      // cannot complete on most developer machines anyway (it is why test 106
+      // fails locally today). Asserting a POSITIVE marker beats asserting the
+      // absence of one, and this keeps the whole block at a couple of seconds.
+      // Producing a real PDF end-to-end is test 117's job, against the real server.
+      const zeroOut = sdb.prepare("UPDATE investor_payouts SET adjustment = -1000 WHERE id = ?");
+      const stmtControlId = insPayout.run(invOwnerId, STMT_CONTROL_PERIOD, STMT_CONTROL_PERIOD + "-15").lastInsertRowid;
+      const stmtFaultId = insPayout.run(invOwnerId, STMT_FAULT_PERIOD, STMT_FAULT_PERIOD + "-15").lastInsertRowid;
+      const stmtPaidId = insPayout.run(invOwnerId, STMT_PAID_PERIOD, STMT_PAID_PERIOD + "-15").lastInsertRowid;
+      [stmtControlId, stmtFaultId, stmtPaidId].forEach(id => zeroOut.run(id));
+      sdb.prepare("UPDATE investor_payouts SET status = 'paid', paid_at = ?, paid_by = 'test-suite' WHERE id = ?")
+        .run(stamp, stmtPaidId);
+
+      // 137. POSITIVE CONTROL, and it is not decoration: without it, tests 138
+      //      and 139 would still pass on a server where the flag was off, the
+      //      seed had failed, or every payout write 409s for some unrelated
+      //      reason. This pins "these rows are settleable and adjustable right
+      //      now" before anything is broken.
+      const cAdj = await req("PUT", `/api/investor/payouts/${controlId}/adjust`,
+        { adjustment: -1, adjustmentNote: "test-suite: control, must be accepted" }, sc, scratchPort);
+      const cSet = await req("POST", `/api/investor/payouts/${controlId}/status`, { status: "paid" }, sc, scratchPort);
+      test(lockFaultNames[0], cAdj.status === 200 && cSet.status === 200);
+
+      // 138. The statement route's own positive control. Same period shape as the
+      //      one the fault is aimed at — past, LOCKED, unpaid — so the lock guard
+      //      has nothing to fire on and the request travels past it. The proof it
+      //      travelled is PAYOUT_NOT_SETTLEABLE, a check that lives several steps
+      //      DOWNSTREAM of the guard and could not possibly answer if the guard
+      //      had returned. Without this, test 141 would still pass on a server
+      //      where every statement request 409s for an unrelated reason.
+      const cStmt = await req("GET", `/api/investor/payouts/${STMT_CONTROL_PERIOD}/statement`, null, sci, scratchPort);
+      test(lockFaultNames[1],
+        cStmt.status === 409
+        && cStmt.body?.code === "PAYOUT_NOT_SETTLEABLE");
+
+      // THE FAULT. Rebuild period_locks without its `status` column. better-sqlite3
+      // resolves columns at prepare() time and SQLite re-compiles a cached
+      // statement after a schema change, so the server's cached
+      // `SELECT status FROM period_locks WHERE period = ?` starts throwing on its
+      // very next execution — no restart, no reconnect. Every row is re-inserted
+      // so the DATA still says these periods are closed: if anything were somehow
+      // able to read the table it would conclude 'finalized' and NOT refuse. A
+      // refusal below can therefore only have come from the unreadable path.
+      sdb.exec("DROP TABLE period_locks");
+      sdb.exec("CREATE TABLE period_locks (period TEXT PRIMARY KEY, finalized_at TEXT, finalized_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+      const insBrokenLock = sdb.prepare("INSERT INTO period_locks (period, finalized_at, finalized_by) VALUES (?, ?, 'test-suite')");
+      ALL_PERIODS.forEach(p => insBrokenLock.run(p, stamp));
+
+      // 139. Settle must refuse — and the row must be untouched. The status code
+      //      alone is not enough: `periodLockUnreadable` is only set when
+      //      periodLocksReadable() comes back false, so asserting it is what
+      //      proves the fault landed rather than the guard firing for some other
+      //      reason. The database read afterwards is the one that matters most:
+      //      under the inverted guard this row comes back 'paid'.
+      const fSet = await req("POST", `/api/investor/payouts/${faultId}/status`, { status: "paid" }, sc, scratchPort);
+      const afterSet = sdb.prepare("SELECT status, paid_at FROM investor_payouts WHERE id = ?").get(faultId);
+      test(lockFaultNames[2],
+        fSet.status === 409
+        && fSet.body?.code === "PERIOD_NOT_FINALIZED"
+        && fSet.body?.periodLockUnreadable === true
+        && afterSet.status === "owed"
+        && !afterSet.paid_at);
+
+      // 140. Same for the adjust guard, which fails closed by the same double
+      //      negative and would invert with the same refactor.
+      const fAdj = await req("PUT", `/api/investor/payouts/${faultId}/adjust`,
+        { adjustment: -500, adjustmentNote: "test-suite: must be rejected" }, sc, scratchPort);
+      const afterAdj = sdb.prepare("SELECT adjustment FROM investor_payouts WHERE id = ?").get(faultId);
+      test(lockFaultNames[3],
+        fAdj.status === 409
+        && fAdj.body?.code === "PERIOD_NOT_FINALIZED"
+        && fAdj.body?.periodLockUnreadable === true
+        && Number(afterAdj.adjustment) === 0);
+
+      // 141. THE THIRD GUARD. Same fault, different expression, and the one whose
+      //      naive "fix" is most tempting: `!periodWriteLocked(period) && …`
+      //      resolves the OPPOSITE way on an unreadable table and would publish a
+      //      FINAL statement for a month nobody ever closed. Note this route's
+      //      409 carries no `periodLockUnreadable` flag (unlike the other two), so
+      //      the discrimination comes from elsewhere: `graceEndsAt` is present
+      //      only when isPending() was true, and test 138 has already proven this
+      //      exact request shape sails past the guard while the table is readable.
+      const fStmt = await req("GET", `/api/investor/payouts/${STMT_FAULT_PERIOD}/statement`, null, sci, scratchPort);
+      test(lockFaultNames[4],
+        fStmt.status === 409
+        && fStmt.body?.code === "PERIOD_NOT_FINALIZED"
+        && fStmt.body?.period === STMT_FAULT_PERIOD
+        && !!fStmt.body?.graceEndsAt);
+
+      // 142. ...and the refusal is TARGETED, not a blanket outage failure. The
+      //      `|| paid` half of the guard is what keeps every historical paid month
+      //      printable, including months that predate period_locks entirely, and
+      //      it must keep working while the table is down — a PAID statement
+      //      asserts that money moved, a fact that comes from paid_at and owes
+      //      nothing to the lock table. This runs DURING the fault with the fault
+      //      held constant, which is what rules out "everything 409s right now"
+      //      as the explanation for 141. It also pins today's behaviour against a
+      //      future "fix" that hardens this route into refusing everything.
+      const pStmt = await req("GET", `/api/investor/payouts/${STMT_PAID_PERIOD}/statement`, null, sci, scratchPort);
+      test(lockFaultNames[5],
+        pStmt.body?.code !== "PERIOD_NOT_FINALIZED"
+        && pStmt.body?.code === "PAYOUT_NOT_SETTLEABLE");
+    } catch (e) {
+      // Only the tests that never got to run are skipped — a genuine FAIL above
+      // is never converted into a skip on the way out.
+      lockFaultSkip("scratch server unavailable: " + (e && e.message ? e.message : e));
+    } finally {
+      try { if (sdb) sdb.close(); } catch {}
+      if (child) {
+        try { child.kill("SIGTERM"); } catch {}
+        await new Promise(r => setTimeout(r, 500));
+        // Targeted, by pid, and only if it is still alive. Never pkill: this
+        // machine routinely has several server.js processes running.
+        try { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); } catch {}
+      }
+      if (scratchDir) { try { fs.rmSync(scratchDir, { recursive: true, force: true }); } catch {} }
+    }
   }
 
   // Results
