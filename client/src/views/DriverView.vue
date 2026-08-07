@@ -148,12 +148,12 @@
           :driver-position="driverPosition"
           :phone-gps-mode-active="phoneGpsModeActive"
           :phone-gps-status="phoneGpsStatus"
+          :expense-submit-handler="handleExpenseSubmit"
           @back="detailRowIndex = null"
           @status-update="handleStatusUpdate"
           @uploaded="handleRefresh"
           @accept="handleAcceptLoad"
           @decline="handleDeclineLoad"
-          @expense-submit="handleExpenseSubmit"
           @enable-phone-gps="enablePhoneGps"
         />
 
@@ -302,7 +302,7 @@
           :loads="driverStore.workingLoads"
           :driver-name="driverName"
           :headers="driverStore.headers.jobTracking"
-          @submit="handleExpenseSubmit"
+          :submit-handler="handleExpenseSubmit"
         />
         <EmptyState v-else>
           No active loads.
@@ -995,12 +995,12 @@ function onVisibilityChange() {
 }
 
 async function handleExpenseSubmit(data) {
-  try {
-    await driverStore.submitExpense(data)
-    toast.show('Expense submitted')
-  } catch {
-    toast.show('Failed to submit expense', 'error')
-  }
+  // Let errors propagate so ExpenseForm keeps everything the driver typed and
+  // renders the server's own reason beside the retry button — same contract as
+  // handleSendMessage above. Swallowing it here is what produced "Failed to
+  // submit expense" with no cause on a form that had already wiped itself.
+  await driverStore.submitExpense(data)
+  toast.show('Expense submitted')
 }
 
 // Socket.IO for real-time notifications

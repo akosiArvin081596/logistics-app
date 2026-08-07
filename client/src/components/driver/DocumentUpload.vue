@@ -125,7 +125,7 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
 import { useUpload } from '../../composables/useUpload'
-import { compressImage, readFileAsDataURL, SCAN_MAX_EDGE } from '../../lib/imageUtils'
+import { compressImage, isDecodedImage, readFileAsDataURL, SCAN_MAX_EDGE } from '../../lib/imageUtils'
 
 const props = defineProps({
   loadId: { type: String, required: true },
@@ -187,16 +187,40 @@ async function handleFile(event) {
   const selected = Array.from(event.target.files || [])
   if (!selected.length) return
 
+  const refused = []
   for (const file of selected) {
     if (file.type.startsWith('image/')) {
       const data = await compressImage(file)
+      // compressImage falls back to the RAW bytes when it cannot decode a file,
+      // so a non-JPEG/PNG/WebP result here is an undecodable "image": an SVG
+      // (which passes accept="image/*" and can carry script), a mislabelled
+      // document, a HEIC even heic2any refused. Attaching it anyway files it as
+      // a page, and the server — which verifies the real magic bytes — rejects
+      // the whole upload, taking the good pages beside it down too.
+      if (!isDecodedImage(data)) {
+        refused.push(file.name || 'photo')
+        continue
+      }
       files.value.push({ data, name: file.name, type: file.type, isImage: true })
     } else {
       const data = await readFileAsDataURL(file)
+      // '' is a FileReader error on an unreadable/corrupt file — attaching it
+      // uploads an empty document under a perfectly convincing filename.
+      if (!data) {
+        refused.push(file.name || 'file')
+        continue
+      }
       files.value.push({ data, name: file.name, type: file.type, isImage: false })
     }
   }
   event.target.value = ''
+
+  // Named, so the driver knows WHICH page is missing from the grid — the others
+  // stayed attached and the upload is still worth sending.
+  if (refused.length) {
+    const what = refused.length > 1 ? 'those' : 'it'
+    toast.show(`Couldn't read ${refused.join(', ')} — try photographing ${what} with the camera instead.`, 'error')
+  }
 }
 
 function removeFile(index) {
@@ -258,8 +282,17 @@ async function handleScanFile(event) {
     // Send a higher-res input than plain uploads so ScanKit detects edges well.
     dataUrl = await compressImage(file, SCAN_MAX_EDGE)
   } catch {
+    dataUrl = ''
+  }
+  // Covers both an empty result and compressImage's raw-bytes fallback. Without
+  // this the undecodable file goes to ScanKit, fails there, and handleScanError
+  // re-attaches it as `photo-<ts>.jpg` with type 'image/jpeg' — a filename AND a
+  // media type that are both untrue. That client-declared type is exactly the
+  // trust the server-side byte check exists to end, and it would then reject the
+  // entire POD rather than this one page.
+  if (!isDecodedImage(dataUrl)) {
     scanning.value = false
-    toast.show('Could not read the captured image. Please try again.', 'error')
+    toast.show('Could not read that photo. Please take it again.', 'error')
     return
   }
   try {

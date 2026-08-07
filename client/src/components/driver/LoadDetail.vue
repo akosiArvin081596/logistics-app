@@ -211,6 +211,7 @@
             :loads="[load]"
             :driver-name="driverName"
             :headers="headers"
+            :submit-handler="expenseSubmitHandler"
             @submit="$emit('expense-submit', $event)"
           />
           <div v-if="loadExpenses.length > 0" class="expense-history">
@@ -259,6 +260,11 @@ const props = defineProps({
   truck: { type: Object, default: null },
   loadExpenses: { type: Array, default: () => [] },
   responding: { type: Boolean, default: false },
+  // Forwarded to the nested ExpenseForm as its awaitable `submit-handler`, so a
+  // failure from inside a load's Expenses section keeps the driver's entry and
+  // shows the reason — same behaviour as the standalone Expenses tab. Falls
+  // back to the `expense-submit` emit when not supplied.
+  expenseSubmitHandler: { type: Function, default: null },
   // TEMP — phone-GPS-for-test-load wiring. Removed alongside the temp block
   // in DriverView when CEO testing is done.
   phoneGpsModeActive: { type: Boolean, default: false },

@@ -81,6 +81,29 @@ export async function compressImage(file, maxEdge = DEFAULT_MAX_EDGE) {
   }
 }
 
+// True only for a data URL that came out of a REAL decode (the canvas JPEG the
+// fast path produces, or a PNG/WebP a caller passed through untouched).
+//
+// This exists because compressImage's contract is deliberately lossy about
+// failure: an undecodable file falls back to `readFileAsDataURL`, so the caller
+// gets the RAW bytes under the browser's own media type and CANNOT tell
+// "downscaled photo" from "file we could not read" by the return value alone —
+// only by the media type. Everything that reaches the fallback (an SVG, a
+// mislabelled PDF, a HEIC even heic2any refused) is rejected server-side, which
+// verifies the actual magic bytes rather than trusting this string. Test with
+// this BEFORE uploading so the common case never spends a round trip, and so
+// the person holding the phone is told to retake the photo instead of watching
+// an expense get booked with its evidence quietly dropped.
+//
+// Deliberately narrower than the server (which also accepts GIF): compressImage
+// re-encodes a decodable GIF to JPEG anyway, so the only GIF that could reach
+// here is one that failed to decode — exactly what this is meant to catch.
+export const DECODED_IMAGE_RE = /^data:image\/(jpeg|jpg|png|webp);base64,/i
+
+export function isDecodedImage(dataUrl) {
+  return DECODED_IMAGE_RE.test(dataUrl || '')
+}
+
 export function readFileAsDataURL(file) {
   return new Promise((resolve) => {
     const reader = new FileReader()

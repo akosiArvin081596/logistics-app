@@ -107,6 +107,21 @@
         </template>
       </van-field>
 
+      <!-- Photo refused before it was ever uploaded. Deliberately a persistent
+           block and not a toast: the driver has to DO something about it, and a
+           toast is gone before someone at a truck stop has looked up. It sits
+           directly under the camera button it is telling them to tap again. -->
+      <div v-if="photoError" class="form-alert form-alert-warn" role="alert">
+        <div class="form-alert-title">That photo didn&rsquo;t come through</div>
+        <div class="form-alert-body">
+          Tap the camera above and take it again. If you picked it from your
+          photo library, take a fresh photo with the camera instead.
+        </div>
+        <button type="button" class="form-alert-action" @click="dismissPhotoError">
+          Log without a receipt
+        </button>
+      </div>
+
       <div v-if="ocrLoading" class="ocr-status ocr-status-loading">
         <span class="ocr-spinner"></span>
         Reading receipt&hellip;
@@ -118,9 +133,17 @@
       </div>
     </van-cell-group>
 
+    <!-- Submit failed. The server's own words, because it knows things this form
+         cannot (a duplicate receipt, a closed month, a size cap). The heading is
+         the part that matters at 2am: everything typed above is still there. -->
+    <div v-if="submitError" class="form-alert form-alert-error" role="alert">
+      <div class="form-alert-title">Not submitted &mdash; your entry is still here</div>
+      <div class="form-alert-body">{{ submitError }}</div>
+    </div>
+
     <div class="form-submit">
       <van-button round block type="primary" native-type="submit" :loading="submitting">
-        Submit Expense
+        {{ submitError ? 'Try Again' : 'Submit Expense' }}
       </van-button>
     </div>
   </van-form>
@@ -132,12 +155,17 @@ import { ref, reactive, computed } from 'vue'
 import { Form as VanForm, Field as VanField, CellGroup as VanCellGroup, Button as VanButton, Uploader as VanUploader, Picker as VanPicker, Popup as VanPopup } from 'vant'
 import { useToast } from '../../composables/useToast'
 import { useDocumentScan } from '../../composables/useDocumentScan'
-import { compressImage } from '../../lib/imageUtils'
+import { compressImage, isDecodedImage } from '../../lib/imageUtils'
 
 const props = defineProps({
   loads: { type: Array, default: () => [] },
   driverName: { type: String, required: true },
   headers: { type: Array, default: () => [] },
+  // Awaitable submit, mirroring ChatView's `send-handler`. When supplied the
+  // form waits for the request, keeps every field on failure, and shows the
+  // reason inline beside the retry. The `submit` emit below stays as the legacy
+  // fire-and-forget path for any caller not yet moved over.
+  submitHandler: { type: Function, default: null },
 })
 
 const emit = defineEmits(['submit'])
@@ -149,6 +177,11 @@ const fileList = ref([])
 const photoBase64 = ref('')
 const showTypePicker = ref(false)
 const showLoadPicker = ref(false)
+// A photo was attached and refused, and has not been replaced yet.
+const photoError = ref(false)
+// Why the last submit failed, in the server's words. Never cleared by a
+// refetch or a re-render — only by the next attempt or a new photo.
+const submitError = ref('')
 
 const form = reactive({
   type: 'Fuel',
@@ -215,11 +248,19 @@ const ocrDetails = ref([])
 async function handlePhoto(file) {
   const blob = file && file.file
   if (!blob) return
+  photoError.value = false
+  submitError.value = ''
   // Decode + downscale to a JPEG data URL via the shared one-pass helper
   // (see imageUtils for the low-RAM OOM fix). Keep the receipt's 1024 max-edge.
   photoBase64.value = await compressImage(blob, 1024)
-  if (!photoBase64.value) {
-    toast.show("Couldn't process the photo — please retake", 'error')
+  // Two failures, one outcome. '' is an unreadable file; a non-JPEG/PNG/WebP
+  // data URL is compressImage's raw-bytes fallback, i.e. a file it could not
+  // decode at all — an SVG, a mislabelled document, a HEIC even heic2any
+  // refused. The server verifies the real magic bytes and 400s that, and the
+  // path this replaces booked the expense while silently dropping the receipt.
+  // Catch it here, while the driver still has the camera in their hand.
+  if (!photoBase64.value || !isDecodedImage(photoBase64.value)) {
+    rejectPhoto()
     return
   }
   // Enhance the receipt via ScanKit (crop + flatten lighting) before OCR — a
@@ -228,6 +269,23 @@ async function handlePhoto(file) {
   ocrLoading.value = true
   await enhanceReceiptPhoto()
   await runReceiptOcr()
+}
+
+// Drop an unusable photo and say so. Emptying fileList matters as much as the
+// message: max-count is 1, so a refused file left in the uploader HIDES the
+// camera button, and the driver cannot retake without first finding the small
+// delete cross on the thumbnail.
+function rejectPhoto() {
+  photoBase64.value = ''
+  fileList.value = []
+  photoError.value = true
+}
+
+// Conscious override: the driver has read the notice and wants to log the
+// expense without a receipt. Same shape as the bulk grid's "Save anyway" — one
+// tap, but a person has to take it, so evidence is never dropped by default.
+function dismissPhotoError() {
+  photoError.value = false
 }
 
 // Best-effort receipt enhancement. Any failure (scanning disabled, no credits,
@@ -315,7 +373,13 @@ function undoAutofill() {
   ocrApplied.value = false
 }
 
-function handleSubmit() {
+async function handleSubmit() {
+  // The submit button only *looked* guarded before: `submitting` was flipped on
+  // and off inside one synchronous block, so it never actually disabled and a
+  // double-tap posted twice. POST /api/expenses is not idempotent.
+  if (submitting.value) return
+  submitError.value = ''
+
   if (!form.loadId) {
     toast.show('Select a load for this expense', 'error')
     return
@@ -325,43 +389,106 @@ function handleSubmit() {
     toast.show('Enter a valid amount', 'error')
     return
   }
+  // A photo was attached, refused, and not replaced. Submitting now books the
+  // expense with no receipt — the same silent evidence loss the byte check
+  // exists to stop — so make dropping it a decision rather than a default.
+  if (photoError.value) {
+    toast.show('Retake the photo, or tap "Log without a receipt"', 'error')
+    return
+  }
+
+  const payload = {
+    driver: props.driverName,
+    loadId: form.loadId,
+    type: form.type,
+    amount: form.amount,
+    vendor: form.vendor,
+    description: form.description,
+    city: form.city,
+    state: form.state,
+    date: form.date,
+    photoData: photoBase64.value,
+    gallons: form.gallons || 0,
+    odometer: form.odometer || 0,
+    receiptDetails: ocrDetails.value,
+  }
+
+  // Decided against the list the driver was looking at, not the one that exists
+  // after the request: an awaited submit refetches the driver's loads, so
+  // `props.loads` can change underneath us before the reset runs.
+  const keepLoadId = props.loads.length <= 1
+
+  if (!props.submitHandler) {
+    // Legacy fire-and-forget path — the caller owns success/failure, so the
+    // form clears optimistically exactly as it always did.
+    submitting.value = true
+    try {
+      emit('submit', payload)
+      resetAfterSubmit(keepLoadId)
+    } finally {
+      submitting.value = false
+    }
+    return
+  }
 
   submitting.value = true
   try {
-    emit('submit', {
-      driver: props.driverName,
-      loadId: form.loadId,
-      type: form.type,
-      amount: form.amount,
-      vendor: form.vendor,
-      description: form.description,
-      city: form.city,
-      state: form.state,
-      date: form.date,
-      photoData: photoBase64.value,
-      gallons: form.gallons || 0,
-      odometer: form.odometer || 0,
-      receiptDetails: ocrDetails.value,
-    })
-
-    form.amount = ''
-    form.vendor = ''
-    form.description = ''
-    form.city = ''
-    form.state = ''
-    form.gallons = ''
-    form.odometer = ''
-    photoBase64.value = ''
-    fileList.value = []
-    ocrApplied.value = false
-    ocrConfidence.value = ''
-    ocrDetails.value = []
-    preOcrSnapshot.value = null
-    // Keep loadId if only one load (inside load detail)
-    if (props.loads.length > 1) form.loadId = ''
+    await props.submitHandler(payload)
+    // Only now. Clearing before the request is what turned any failure into
+    // "lost the amount, the vendor, the gallons, the odometer and the photo".
+    resetAfterSubmit(keepLoadId)
+  } catch (err) {
+    submitError.value = failureText(err)
   } finally {
     submitting.value = false
   }
+}
+
+function resetAfterSubmit(keepLoadId) {
+  form.amount = ''
+  form.vendor = ''
+  form.description = ''
+  form.city = ''
+  form.state = ''
+  form.gallons = ''
+  form.odometer = ''
+  photoBase64.value = ''
+  fileList.value = []
+  photoError.value = false
+  submitError.value = ''
+  ocrApplied.value = false
+  ocrConfidence.value = ''
+  ocrDetails.value = []
+  preOcrSnapshot.value = null
+  // Keep loadId if only one load (inside load detail)
+  if (!keepLoadId) form.loadId = ''
+}
+
+// Words that mean "the FILE was the problem". Deliberately excludes "receipt",
+// which every message on this endpoint contains — with it in, a closed-period
+// 400 ("…this receipt books to August 2026") came back telling the driver to
+// retake a photo that was never the issue. Caught in the browser, kept here as
+// the reason the list looks arbitrary.
+const PHOTO_FAILURE_RE = /image|photo|jpe?g|png|webp|format|file type|data uri/i
+
+// The server's message, verbatim — it is the only thing that knows whether this
+// was a duplicate receipt, a closed month, or a file the byte check refused, and
+// the bulk-receipt grid surfaces err.message the same way for the same reason.
+//
+// A next step is appended ONLY when the failure is attributable to the photo: a
+// media-type detail tells a driver nothing they can act on, but "take it again"
+// does. Matched on the text rather than an error code deliberately — the
+// server-side check is landing alongside this, and a wrong code guess would fail
+// silently, whereas a missed match here degrades to the verbatim message.
+function failureText(err) {
+  const msg = (err && err.message) ||
+    'Could not submit this expense. Nothing was saved — tap Try Again.'
+  const aboutPhoto = err && err.status === 400 && PHOTO_FAILURE_RE.test(msg)
+  if (!aboutPhoto) return msg
+  // Server messages don't reliably end in punctuation, and without this the two
+  // sentences run together into one unreadable line on a phone.
+  const stem = /[.!?]$/.test(msg) ? msg : `${msg}.`
+  return `${stem} Take the receipt photo again, then submit.`
 }
 </script>
 
@@ -443,6 +570,55 @@ function handleSubmit() {
   font-family: inherit;
 }
 .ocr-undo:hover {
+  opacity: 0.75;
+}
+
+/* Blocking notices: a refused photo, and a failed submit. Sized for a phone in
+   a cab — full-width, generous line-height, and a tap target that clears 44px. */
+.form-alert {
+  margin: 0.5rem 0.85rem 0.25rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid;
+  font-size: 0.8rem;
+}
+.form-alert-warn {
+  background: #fffbeb;
+  border-color: #fcd34d;
+  color: #78350f;
+}
+.form-alert-error {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #7f1d1d;
+  /* Sits outside the inset cell group, level with the submit button. */
+  margin: 0.75rem 0.75rem 0;
+}
+.form-alert-title {
+  font-weight: 700;
+  margin-bottom: 0.2rem;
+}
+.form-alert-body {
+  line-height: 1.45;
+  /* The server's message can be long and is never truncated — it is the only
+     account of what happened. */
+  overflow-wrap: anywhere;
+}
+.form-alert-action {
+  display: block;
+  margin-top: 0.6rem;
+  min-height: 44px;
+  padding: 0.5rem 0.9rem;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.form-alert-action:hover {
   opacity: 0.75;
 }
 </style>
