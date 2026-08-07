@@ -36,6 +36,16 @@
              clipping. If you need room, the fattest floors left are the actions
              column (129.8px) and Routemate (86px).
 
+             ODOMETER IS DELIBERATELY NOT A COLUMN HERE — it lives in the row's
+             detail modal instead. A column would cost roughly 80-95px of floor
+             ("ODOMETER" header ≈ 80px; a "992,938 mi" mono cell ≈ 95px) against
+             5.7px of headroom, i.e. ~14x over budget, and unlike the Tank
+             column there is nothing left to shorten to pay for it — the VIN
+             trick above was already spent. Adding it would clip ~75-90px at
+             1280 and cut the Remove button off again, reintroducing the exact
+             bug this grid was built to fix. See the Odometer row in the view
+             modal below.
+
              ⚠️ Verifying this: probe .card, NOT the table. table.scrollWidth -
              clientWidth reads 0 at every width on both builds — the table box
              grows instead of scrolling and .card{overflow:hidden} swallows it
@@ -383,6 +393,19 @@
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Truck Payment</span><span>{{ viewTruck.TruckPaymentMonthly ? '$' + Number(viewTruck.TruckPaymentMonthly).toLocaleString() + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '$250/day (default)' }}</span></div>
+          <!-- Current mileage, derived from the latest ELD fix. Never 0: half
+               the fleet has no ELD link at all, and a confident "0 mi" on a
+               working tractor is worse than admitting we don't know. -->
+          <div class="view-row">
+            <span class="view-label">Odometer</span>
+            <span v-if="odometerText(viewTruck) !== '—'" class="odo-reading" title="Latest reading from this truck's ELD.">
+              {{ odometerText(viewTruck) }}
+              <!-- A mileage with no date is unfalsifiable — the reading could be
+                   from an hour ago or from the last time the truck ran. -->
+              <span v-if="odometerAt(viewTruck)" class="odo-as-of">as of {{ odometerAt(viewTruck) }}</span>
+            </span>
+            <span v-else class="view-unset" :title="odometerHint(viewTruck)">&mdash; <span class="odo-why">{{ odometerWhy(viewTruck) }}</span></span>
+          </div>
           <div class="view-row"><span class="view-label">Fuel Tank</span><span>{{ viewTruck.FuelTankGallons ? viewTruck.FuelTankGallons + ' gal' : '200 gal (default)' }}</span></div>
           <div class="view-row"><span class="view-label">Avg MPG</span><span>{{ viewTruck.AvgMpg ? viewTruck.AvgMpg + ' mpg' : 'Auto from ELD' }}</span></div>
         </div>
@@ -408,6 +431,8 @@ import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
 import { useApi } from '../../composables/useApi'
+import { fmtOdometer } from '../../lib/fuelReview'
+import { fmtTimestamp } from '../../utils/datetime'
 
 const api = useApi()
 
@@ -488,6 +513,39 @@ function tankGallons(truck) {
 // value round-trips whichever key the server ends up emitting.
 function inServiceDate(truck) {
   return (truck?.InServiceDate ?? truck?.in_service_date ?? '') || ''
+}
+
+// Current mileage, derived server-side from the latest ELD fix. Same defensive
+// multi-spelling read as inServiceDate above, and the same tolerance for the
+// field simply not being there — an older server sends no Odometer at all, and
+// that has to look identical to "this truck has no ELD link" rather than
+// throwing or printing `undefined`.
+//
+// fmtOdometer collapses null / undefined / '' / 0 to '—' in ONE place shared
+// with the fuel panel, so the truck record and the fuel logs can't disagree on
+// what a missing reading looks like.
+function odometerText(truck) {
+  return fmtOdometer(truck?.Odometer ?? truck?.odometer, { unit: ' mi' })
+}
+
+// When the reading was taken. An ISO-Z instant from the ELD, so fmtTimestamp
+// renders it in Houston WITH a zone label — the house rule for any value that
+// carries its own zone. Blank (and the row omits the line) on an older server.
+function odometerAt(truck) {
+  const at = truck?.OdometerAt ?? truck?.odometer_at ?? ''
+  return at ? fmtTimestamp(at, { fallback: '' }) : ''
+}
+
+// Why there's no number. The two reasons are genuinely different work items —
+// one needs a device linked, the other just needs a ping — so they don't share
+// a message. 3 of 6 trucks are currently the first case.
+function odometerWhy(truck) {
+  return truck?.RoutemateVehicleId ? 'no reading yet' : 'no ELD link'
+}
+function odometerHint(truck) {
+  return truck?.RoutemateVehicleId
+    ? 'This truck is linked to an ELD device but no odometer reading has come through yet.'
+    : 'No ELD device is linked to this truck, so there is no odometer feed. Link one from the Routemate column in the fleet table.'
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -819,6 +877,15 @@ async function handleUnlink(truck) {
 .view-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
 .view-label { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
 .view-unset { color: var(--text-dim); cursor: help; }
+.odo-reading { font-family: 'JetBrains Mono', monospace; text-align: right; }
+.odo-as-of {
+  display: block;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+/* The em dash is the value; the reason is a footnote to it, not a substitute. */
+.odo-why { font-size: 0.72rem; }
 
 /* Routemate column — minimal "Linked / Link / —" affordances. */
 .rm-linked {

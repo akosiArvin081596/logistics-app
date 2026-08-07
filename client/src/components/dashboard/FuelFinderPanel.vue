@@ -41,8 +41,8 @@
             <span v-if="range.gallonsRemaining != null">{{ round1(range.gallonsRemaining) }} / {{ round1(range.tankGallons) }} gal</span>
             <span v-if="range.mpg" class="ff-mpg">
               {{ round1(range.mpg) }} mpg
-              <span class="ff-src" :class="range.mpgSource === 'eld' ? 'src-eld' : 'src-est'">
-                {{ range.mpgSource === 'eld' ? 'ELD' : 'est' }}
+              <span v-if="mpgSrc" class="ff-src" :class="mpgBadgeClass" :title="mpgSrc.title">
+                {{ mpgSrc.short }}
               </span>
             </span>
           </div>
@@ -115,6 +115,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
+import { mpgSource } from '../../lib/fuelReview'
 
 const api = useApi()
 
@@ -163,6 +164,15 @@ const fuelLow = computed(
 const ringPct = computed(() =>
   hasFuelData.value ? Math.max(0, Math.min(100, Number(range.value.fuelPct) || 0)) : 0,
 )
+// MPG provenance chip, ranked in lib/fuelReview: receipts (2) > eld (1) >
+// default (0). Was a boolean against 'eld', which would have shown the new
+// receipt-derived figure — the most accurate one available — as a grey "est".
+// Unknown/absent yields null and the chip is omitted rather than guessed.
+const mpgSrc = computed(() => mpgSource(range.value && range.value.mpgSource))
+const mpgBadgeClass = computed(() =>
+  !mpgSrc.value ? '' : (mpgSrc.value.rank === 2 ? 'src-best' : mpgSrc.value.rank === 1 ? 'src-eld' : 'src-est')
+)
+
 const rangeMilesDisplay = computed(() =>
   hasFuelData.value && range.value.rangeMiles != null ? Math.round(range.value.rangeMiles) : null,
 )
@@ -398,6 +408,10 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
   padding: 0 0.28rem;
   border-radius: 4px;
 }
+/* Solid green outranks the outline green: 'receipts' is measured from pump
+   gallons over ELD miles, with no tank sensor or tank-size guess in the path,
+   so it must not read as just another non-default. */
+.ff-src.src-best { background: #16a34a; color: #fff; border: 1px solid #15803d; }
 .ff-src.src-eld { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
 .ff-src.src-est { background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; }
 

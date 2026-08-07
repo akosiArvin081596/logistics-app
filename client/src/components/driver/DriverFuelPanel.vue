@@ -47,8 +47,8 @@
             <template #value>
               <span class="dfp-val">
                 <span class="dfp-val-num">{{ mpgLabel }}</span>
-                <span class="dfp-src" :class="isEldMpg ? 'src-known' : 'src-default'">
-                  {{ isEldMpg ? 'from your ELD' : 'fleet default' }}
+                <span v-if="mpgSrc" class="dfp-src" :class="mpgBadgeClass">
+                  {{ mpgSrc.driver }}
                 </span>
               </span>
             </template>
@@ -68,9 +68,13 @@
         </p>
 
         <!-- A driver has to know whether the range came off their own truck or
-             a fleet-wide guess before they decide to run one more hour. -->
-        <p v-if="!isEldMpg" class="dfp-note">
-          Your ELD hasn't reported enough miles to work out this truck's real MPG yet,
+             a fleet-wide guess before they decide to run one more hour.
+             Shown ONLY for the fleet default: MPG worked out from this truck's
+             own fuel receipts is the most accurate figure available, so warning
+             about it would be telling a driver to distrust the best number he
+             has ever been given. -->
+        <p v-if="isDefaultMpg" class="dfp-note">
+          There aren't enough miles or fuel receipts on this truck yet to work out its real MPG,
           so this range assumes the fleet default of {{ mpgLabel }}. Treat it as a rough estimate.
         </p>
         <p v-if="updatedLabel" class="dfp-stamp">Fuel level read {{ updatedLabel }}</p>
@@ -191,6 +195,7 @@ import { ref, computed, watch } from 'vue'
 import { Cell as VanCell, Empty as VanEmpty } from 'vant'
 import { useApi } from '../../composables/useApi'
 import { isZoned, isYmd, fmtYmd } from '../../utils/datetime'
+import { mpgSource } from '../../lib/fuelReview'
 
 const api = useApi()
 
@@ -256,7 +261,25 @@ const isDefaultTank = computed(() => tankSource.value === 'default')
 // reading "assumes the fleet default of —" is worse than no note at all. Gates
 // the badge AND the note so the two can never disagree.
 const tankKnown = computed(() => tankLabel.value !== '—')
-const isEldMpg = computed(() => !!range.value && range.value.mpgSource === 'eld')
+// MPG provenance, ranked in lib/fuelReview: receipts (2) > eld (1) > default (0).
+//
+// This was a boolean — `mpgSource === 'eld'` — until receipt-derived MPG landed.
+// Under the old test 'receipts' would have fallen to the else branch and been
+// badged "fleet default" with a "treat it as a rough estimate" note under it,
+// which is backwards: it is the only figure here measured without a tank-sensor
+// reading or a tank-size assumption in the path (6.18 and 4.76 mpg on the two
+// instrumented trucks, against 1.36 and 1.66 from the fuel_pct route).
+//
+// An unrecognised or missing value yields null → no badge, no note. Same
+// convention as tankSource above; asserting a provenance we don't understand is
+// worse than staying quiet.
+const mpgSrc = computed(() => mpgSource(range.value && range.value.mpgSource))
+const isDefaultMpg = computed(() => !!mpgSrc.value && mpgSrc.value.rank === 0)
+// Receipt-derived gets its own class so it reads as BETTER than the ELD figure,
+// not merely as another thing that isn't the default.
+const mpgBadgeClass = computed(() =>
+  !mpgSrc.value ? '' : (mpgSrc.value.rank === 2 ? 'src-best' : mpgSrc.value.rank === 1 ? 'src-known' : 'src-default')
+)
 const mpgLabel = computed(() => {
   const m = round1(range.value && range.value.mpg)
   return m === '—' ? '—' : `${m} mpg`
@@ -569,6 +592,15 @@ watch(
   background: #dcfce7;
   color: #166534;
   border: 1px solid #bbf7d0;
+}
+/* Solid green = measured from the truck's own fuel RECEIPTS: real pump gallons
+   over real ELD miles, with no fuel-percentage reading and no tank-size guess
+   anywhere in the path. Deliberately stronger than .src-known so it reads as
+   the better number rather than as a second flavour of the same caveat. */
+.src-best {
+  background: #16a34a;
+  color: #fff;
+  border: 1px solid #15803d;
 }
 .src-default {
   background: #fef3c7;

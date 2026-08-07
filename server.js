@@ -1264,6 +1264,86 @@ db.exec(`
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fuel_vid ON routemate_fuel_daily(routemate_vehicle_id)`); } catch {}
 
+// --- Refuel episodes (2026-08-07) -------------------------------------------
+// One row per detected FILL: when the tank went up, by how much, at what
+// odometer, and which uploaded fuel receipt it turned out to be.
+//
+// PERSISTED, not derived on read, and that is not a caching decision:
+// purgeOldRoutemateTelemetry() above deletes every fix older than 90 days on a
+// weekly tick, so an episode that is not written down becomes permanently
+// unrecomputable the moment its telemetry ages out. The receipts it explains
+// live in `expenses` forever.
+//
+// UNIQUE(routemate_vehicle_id, start_ms) + ON CONFLICT DO UPDATE mirrors
+// routemate_fuel_daily's idempotency (see routemateUpsertFuelDailyStmt) rather
+// than a marker table: re-running the sweep over a window that is still filling
+// must refresh that episode's peak, not insert a second copy of it. start_ms is
+// the fix BEFORE the first rise, which is stable across re-scans as long as the
+// scan window starts before it — hence the overlap in fuelEventsScanWindow().
+//
+// local_day is the HOUSTON business day (America/Chicago), NOT the truck's local
+// day. There are two day conventions in this file and they are not
+// interchangeable: getEldTravelDaysByVehicle buckets by usTzForLongitude(lng)
+// because a driver's worked day belongs where the driver was, while everything
+// business-facing — month close, invoice dating, settlement periods — is
+// Central. A refuel episode is matched against expenses.date and reported to
+// dispatch, so it is business-facing. Bucketing a fill in Arizona to
+// America/Phoenix would put it on a different day from the receipt that paid
+// for it. (usTzForLongitude is right below this in the file; it does not apply
+// here.)
+db.exec(`
+	CREATE TABLE IF NOT EXISTS fuel_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		routemate_vehicle_id TEXT NOT NULL,
+		start_ms INTEGER NOT NULL,
+		end_ms INTEGER NOT NULL,
+		local_day TEXT NOT NULL,
+		pct_before INTEGER DEFAULT 0,
+		pct_after INTEGER DEFAULT 0,
+		odometer REAL DEFAULT 0,
+		odo_span REAL DEFAULT 0,
+		latitude REAL,
+		longitude REAL,
+		expense_id INTEGER,
+		match_basis TEXT DEFAULT '',
+		match_distance_km REAL,
+		matched_gallons REAL,
+		detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE (routemate_vehicle_id, start_ms)
+	)
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_fuel_events_vid_day ON fuel_events(routemate_vehicle_id, local_day)`); } catch {}
+// PARTIAL unique index: one receipt can back at most one episode. Without it a
+// boundary episode outside the re-match window can keep a stale link to a
+// receipt this run re-links elsewhere, and the same gallons get counted on two
+// rows in fuelEventsAnalytics' tank-to-tank legs.
+try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fuel_events_expense ON fuel_events(expense_id) WHERE expense_id IS NOT NULL`); } catch {}
+// Odometer provenance, additive, same ALTER-in-try/catch idiom as the rest of
+// this file. Records WHO wrote expenses.odometer so the UI can badge a derived
+// reading differently from one a driver typed.
+//
+// This is a stored fact, not an inference, and that distinction is load-bearing:
+// the obvious shortcut is "if the expense's odometer equals its linked episode's,
+// we wrote it" — but the re-match pass clears and rebuilds links while the
+// odometer backfill is write-once and never cleared, so an episode that later
+// becomes unmatched would leave a system-written number looking hand-typed.
+// It is also what makes the backfill reversible and attributable.
+try { db.exec(`ALTER TABLE expenses ADD COLUMN odometer_source TEXT DEFAULT ''`); } catch {}
+// Alerts are once-per-episode, same shape as ratecon_reconcile_alerts: a gap
+// repeated every six hours is a gap everybody learns to ignore. resolved_at is
+// stamped when the missing receipt finally shows up.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS fuel_event_alerts (
+		event_key TEXT PRIMARY KEY,
+		routemate_vehicle_id TEXT DEFAULT '',
+		local_day TEXT DEFAULT '',
+		rise_pct INTEGER DEFAULT 0,
+		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+		alerted_at DATETIME,
+		resolved_at DATETIME
+	)
+`);
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS routemate_hos_daily (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2477,23 +2557,131 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(dri
 // Pass 2 catches rows where truck_unit is set but owner_id is stale because
 // the truck got linked to an investor *after* the expense was logged.
 // Both are idempotent via their WHERE guards.
+//
+// ⚠️ GATED ON THE PERIOD LOCK, per the same rule as the fuel odometer backfill:
+// a row in a finalized month is never written. This one matters MORE than the
+// odometer, not less — `owner_id` decides WHOSE money a receipt lands against,
+// so an unattended boot migration rewriting it in a closed month silently
+// restates an investor's finalized P&L.
+//
+// The tension is real and was escalated rather than decided here: gating means a
+// legacy row in a closed month never gets attributed, freezing a known error.
+// The answer is that freezing it is not the end state — POST /api/periods/:period/reopen
+// is the sanctioned path, it demands a reason and records who used it. So the
+// choice is not "write silently" vs "wrong forever", it is "silent rewrite" vs
+// "explicit, attributable correction". Hence the skip COUNT below: a refusal
+// that leaves no trace is just a different silent failure, so the count is
+// logged to audit_trail and exposed on GET /api/periods, where an admin is
+// already deciding whether to reopen a month.
+//
+// Ordering note: this runs long before periodLockStmt is initialised, which is
+// exactly why that statement is lazily prepared — see the comment there. Do not
+// convert it back to a module-scope const.
+const legacyExpenseBackfillHealth = {
+	ranAt: null, pass1: 0, pass2: 0,
+	skippedLockedPeriod: 0, skippedPeriods: [], error: null,
+};
 try {
-	const pass1 = db.prepare(`
+	// Candidates are resolved in JS rather than filtered in SQL so the lock rule
+	// stays in ONE primitive (expenseRowPeriodLocked) instead of being restated as
+	// a second, drifting SQL expression. posted_period + created_at are selected
+	// because that predicate fails closed without them.
+	// POSITIVE CONTROL, and it is here because this gate already failed silently
+	// once: isLocked() swallows every error and answers "not locked", so a broken
+	// lock lookup is indistinguishable from an open month and the migration would
+	// cheerfully write the whole backlog into finalized periods. Prove the table
+	// is readable first; if it is not, treat EVERY row as locked rather than
+	// trusting an answer that cannot be wrong in the safe direction.
+	//
+	// ONE implementation, shared with the fuel-odometer backfill: a second
+	// hand-rolled copy of this try/catch is how the two callers of the same
+	// fail-open predicate came to be defended differently. periodLocksReadable is
+	// a function DECLARATION, so it is hoisted and initialised and reachable from
+	// this early-boot migration — a `const` beside it would still be in the
+	// temporal dead zone here, which is the bug this whole probe descends from.
+	const lockReadable = periodLocksReadable();
+
+	const lockPartition = (rows) => {
+		const open = [], skipped = [];
+		for (const r of rows) (!lockReadable || expenseRowPeriodLocked(r) ? skipped : open).push(r);
+		return { open, skipped };
+	};
+	const noteSkips = (rows) => {
+		legacyExpenseBackfillHealth.skippedLockedPeriod += rows.length;
+		for (const r of rows) {
+			const p = expensePostedPeriod(r) || String(r.date || "").slice(0, 7) || "(unknown)";
+			if (!legacyExpenseBackfillHealth.skippedPeriods.includes(p)) legacyExpenseBackfillHealth.skippedPeriods.push(p);
+		}
+	};
+	// better-sqlite3 caps bound parameters, so the id list is chunked rather than
+	// expanded into one enormous IN (). A restored backup could make these sets
+	// large; today both are empty.
+	const runChunked = (sql, rows) => {
+		let changes = 0;
+		const stmt = (n) => db.prepare(sql.replace("__IDS__", Array(n).fill("?").join(",")));
+		for (let i = 0; i < rows.length; i += 400) {
+			const batch = rows.slice(i, i + 400).map((r) => r.id);
+			changes += stmt(batch.length).run(...batch).changes;
+		}
+		return { changes };
+	};
+
+	const pass1Candidates = db.prepare(`
+		SELECT id, date, posted_period, created_at FROM expenses
+		WHERE (truck_unit IS NULL OR truck_unit = '') AND driver IS NOT NULL AND driver != ''
+	`).all();
+	const p1 = lockPartition(pass1Candidates);
+	noteSkips(p1.skipped);
+
+	const pass1 = runChunked(`
 		UPDATE expenses
 		SET (truck_unit, owner_id) = (
 			SELECT t.unit_number, t.owner_id
 			FROM truck_assignments ta
 			JOIN trucks t ON t.id = ta.truck_id
 			WHERE LOWER(ta.driver_name) = LOWER(expenses.driver)
-			  AND ta.start_date <= expenses.date
-			  AND (ta.end_date = '' OR ta.end_date >= expenses.date)
+			  -- substr(...,1,10) is load-bearing: these two columns hold DIFFERENT
+			  -- shapes and SQLite compares them as plain strings.
+			  --   truck_assignments.start_date/end_date -> full ISO instant,
+			  --     '2026-08-06T22:30:00.000Z' (assignDriverToTruck writes
+			  --     new Date().toISOString())
+			  --   expenses.date                         -> bare day, '2026-08-06'
+			  -- Lexicographically the longer string sorts higher at position 10, so
+			  -- the raw comparison was ASYMMETRIC:
+			  --   start <= date  ->  FALSE  (opening bound excluded its own day)
+			  --   end   >= date  ->  TRUE   (closing bound included it)
+			  -- Net effect: a driver's FIRST-DAY expenses never resolved to a truck,
+			  -- so truck_unit stayed blank and owner_id stayed 0 — which drops those
+			  -- receipts out of the investor's P&L entirely and over-states their
+			  -- profit by every first-day receipt in their fleet's history. And
+			  -- 22:30Z is 17:30 Houston, so this fired on ordinary afternoon
+			  -- assignments, not only on evening ones.
+			  -- Comparing day-to-day makes both bounds inclusive of the boundary day.
+			  -- ta.end_date = '' (still active) short-circuits before the substr.
+			  AND substr(ta.start_date, 1, 10) <= expenses.date
+			  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= expenses.date)
 			ORDER BY ta.start_date DESC
 			LIMIT 1
 		)
 		WHERE (truck_unit IS NULL OR truck_unit = '')
 		  AND driver IS NOT NULL AND driver != ''
-	`).run();
-	const pass2 = db.prepare(`
+		  AND id IN (__IDS__)
+	`, p1.open);
+
+	const pass2Candidates = db.prepare(`
+		SELECT id, date, posted_period, created_at FROM expenses
+		WHERE (owner_id IS NULL OR owner_id = 0)
+		  AND truck_unit IS NOT NULL AND truck_unit != ''
+		  AND EXISTS (
+			SELECT 1 FROM trucks t
+			WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
+			  AND t.owner_id > 0
+		  )
+	`).all();
+	const p2 = lockPartition(pass2Candidates);
+	noteSkips(p2.skipped);
+
+	const pass2 = runChunked(`
 		UPDATE expenses
 		SET owner_id = (
 			SELECT t.owner_id FROM trucks t
@@ -2507,11 +2695,45 @@ try {
 			WHERE LOWER(t.unit_number) = LOWER(expenses.truck_unit)
 			  AND t.owner_id > 0
 		  )
-	`).run();
+		  AND id IN (__IDS__)
+	`, p2.open);
+
+	legacyExpenseBackfillHealth.ranAt = new Date().toISOString();
+	legacyExpenseBackfillHealth.pass1 = pass1.changes;
+	legacyExpenseBackfillHealth.pass2 = pass2.changes;
+
 	if (pass1.changes > 0 || pass2.changes > 0) {
 		console.log(`Expense backfill: pass1 ${pass1.changes} (truck_unit+owner_id), pass2 ${pass2.changes} (owner_id refresh)`);
 	}
+	// Loud on purpose, and on EVERY boot while it is non-zero. These rows are
+	// receipts that cannot be attributed to an investor until someone reopens the
+	// month — a one-time log would scroll away and the condition would persist
+	// unseen, which is the failure mode this whole branch keeps finding.
+	if (!lockReadable) {
+		legacyExpenseBackfillHealth.error = "period_locks unreadable — every candidate row was withheld";
+		console.warn("Expense backfill: period_locks could not be read; withheld ALL candidate rows rather than risk writing into a finalized month.");
+	}
+	if (legacyExpenseBackfillHealth.skippedLockedPeriod > 0) {
+		const periods = legacyExpenseBackfillHealth.skippedPeriods.sort().join(", ");
+		// The two branches must not share wording. When the table is unreadable the
+		// withheld set is EVERY candidate row, and the periods listed are simply the
+		// months those rows fall in — most of them open. Printing them as "finalized
+		// period(s)" asserts a close that never happened on live months and sends
+		// whoever reads the log hunting for a month-end that does not exist. It also
+		// prescribes the wrong fix: reopening a period does nothing here, the
+		// period_locks table itself is broken.
+		if (!lockReadable) {
+			console.warn(`Expense backfill: ACTION NEEDED — period_locks is unreadable, so all ${legacyExpenseBackfillHealth.skippedLockedPeriod} legacy receipt(s) were withheld regardless of month (rows fall in [${periods}]; their lock state is UNKNOWN, not finalized). Repair period_locks and reboot — reopening a period will not help.`);
+			logAudit({}, "legacy_expense_backfill_skipped", "expenses", "",
+				`${legacyExpenseBackfillHealth.skippedLockedPeriod} legacy receipt(s) left unattributed because period_locks could not be read; lock state unknown for [${periods}]`);
+		} else {
+			console.warn(`Expense backfill: ACTION NEEDED — ${legacyExpenseBackfillHealth.skippedLockedPeriod} legacy receipt(s) in finalized period(s) [${periods}] could not be attributed (truck_unit/owner_id). Reopen the period to correct them.`);
+			logAudit({}, "legacy_expense_backfill_skipped", "expenses", "",
+				`${legacyExpenseBackfillHealth.skippedLockedPeriod} legacy receipt(s) left unattributed because their period(s) are finalized: ${periods}`);
+		}
+	}
 } catch (e) {
+	legacyExpenseBackfillHealth.error = e.message;
 	console.warn("Expense backfill skipped:", e.message);
 }
 
@@ -6092,7 +6314,25 @@ function isPastGrace(period, days) {
 	return !!ends && todayKeyCT() > ends;
 }
 
-const periodLockStmt = db.prepare("SELECT status FROM period_locks WHERE period = ?");
+// LAZY, not a module-scope prepare — and this is a correctness fix, not style.
+// The legacy-expense backfill near the top of boot (search "Backfill legacy
+// expenses") calls isLocked() through expenseRowPeriodLocked(), and it runs
+// BEFORE this line. A `const` is in the temporal dead zone until execution
+// reaches it, so the reference threw a ReferenceError that isLocked()'s own
+// catch swallowed and turned into `false` — i.e. "not locked". The guard would
+// have looked present, logged nothing, and silently failed OPEN on the one
+// caller that most needs it to fail closed. Verified by reproduction before
+// changing it. Same reasoning as _fuelEventUpsertStmt further down.
+// The cache lives on the FUNCTION OBJECT, not in a module-scope `let`. A
+// function declaration is hoisted AND initialised, so it is reachable from the
+// early-boot migration; a `let`/`const` beside it would still be in the temporal
+// dead zone at that point and throw the very ReferenceError this is avoiding —
+// which is not theoretical, it is the bug this fix went through on the way here.
+// `db` is a const from the top of the file, long initialised by any caller.
+function periodLockStmt() {
+	if (!periodLockStmt.cached) periodLockStmt.cached = db.prepare("SELECT status FROM period_locks WHERE period = ?");
+	return periodLockStmt.cached;
+}
 
 // Deliberately NOT gated on the kill switch: a period that was finalized while
 // the feature was on stays finalized if it is later turned off. A statement was
@@ -6101,9 +6341,45 @@ const periodLockStmt = db.prepare("SELECT status FROM period_locks WHERE period 
 // never had the feature enabled the table is empty, so this is always false.
 function isLocked(period) {
 	try {
-		const row = periodLockStmt.get(String(period || ""));
+		const row = periodLockStmt().get(String(period || ""));
 		return !!row && row.status === "locked";
 	} catch { return false; }
+}
+
+// POSITIVE CONTROL for isLocked(). isLocked swallows every error and answers
+// "not locked", so a broken lookup is indistinguishable from an open month and
+// every guard downstream of it fails OPEN. That is not hypothetical — it
+// shipped once on this branch, and a DB-level break reproduces it exactly:
+// rebuild period_locks without a `status` column and the SELECT throws, while
+// `CREATE TABLE IF NOT EXISTS` sees a table already there and repairs nothing.
+//
+// The probe must .get(), not merely prepare(): SQLite re-compiles a cached
+// statement after a schema change, so a missing column surfaces only on
+// execution. '1970-01' matches no row and is therefore side-effect free.
+function periodLocksReadable() {
+	try { periodLockStmt().get("1970-01"); return true; } catch { return false; }
+}
+
+// "Withhold this write?" — the fail-CLOSED counterpart to isLocked(), and the
+// predicate every WRITE guard should be asking instead of isLocked() directly.
+//
+// Why isLocked() itself is NOT simply flipped to `return true` on error: the
+// two functions answer different questions, and only one of them can be wrong
+// in a safe direction. isLocked reports a FACT ("the table records this period
+// as closed"), and its read-only callers need that answer to stay truthful —
+// periodPhase() would label every month 'finalized' on a broken table,
+// asserting a close that never happened on live months, and the statement route
+// (which branches on !isLocked) would start publishing FINAL statements for
+// open periods. A guard, by contrast, has a safe direction: refusing to write
+// costs a retry, writing into a closed month costs a restated settlement. So
+// the questions stay apart — isLocked says what the table says,
+// periodWriteLocked decides whether a write may proceed, and only the latter
+// reads "cannot tell" as "assume closed".
+//
+// On a healthy database this is byte-identical to isLocked(): the table is
+// readable whether it is empty (flag off, ships dormant) or full.
+function periodWriteLocked(period) {
+	return !periodLocksReadable() || isLocked(period);
 }
 
 // "Month is over but still open for receipts." This is the predicate the route
@@ -6136,9 +6412,18 @@ function expensePostedPeriod(exp) {
 // the UI to fall back to `status` alone — i.e. exactly today's screens.
 // A period locked BEFORE the flag was turned off still reports 'finalized',
 // because it genuinely is.
+// '' ALSO means "cannot tell". If period_locks is unreadable this function knows
+// nothing about the close lifecycle, and the two answers it could otherwise give
+// are both assertions it cannot support: 'finalized' claims a close that may
+// never have happened, 'pending' denies one that may already have. Falling back
+// to `status` alone is the only honest output, and it is a shape every screen
+// already renders (it is the dormant state). Deliberately different from the
+// WRITE guards, which do get a default — a guard has a safe direction, a label
+// does not.
 function periodPhase(period) {
 	const p = String(period || "");
 	if (!p) return "";
+	if (!periodLocksReadable()) return "";
 	if (isLocked(p)) return "finalized";
 	if (!PERIOD_FINALIZE_ENABLED) return "";
 	return p >= currentMonthKeyCT() ? "accruing" : "pending";
@@ -6527,9 +6812,25 @@ async function generateInvoiceHandler(req, res) {
 			// Parse date and check if in week range
 			const rawDate = (row[dateCol] || "").replace(/^date:\s*/i, "").trim();
 			if (!rawDate) return true; // no date? include to be safe
-			const parsed = new Date(rawDate);
-			if (isNaN(parsed.getTime())) return true;
-			const dateStr = parsed.toISOString().split("T")[0];
+			// sheetDayKey, NOT new Date(raw).toISOString() — this is the site
+			// sheetDayKey's own header calls out by name ("invoice-week filter …
+			// an outright conversion to UTC. Same shift.").
+			//
+			// weekStart/computedWeekEnd are HOUSTON calendar days from
+			// getWeekRange. The old code turned the sheet cell into a UTC day, so
+			// an RFC-2822 stamp carrying an offset — the most common shape on
+			// completed rows — shifted forward a day on evening deliveries. A
+			// Friday 20:15 Houston delivery became the next day and fell outside
+			// weekEnd, so loadsCount was short by one and the driver was paid
+			// short by one load's rate on the PDF they receive. The autogen batch
+			// fires at 19:00 CT Friday, i.e. inside that window by design.
+			//
+			// Literal is the right semantic, not a workaround: since the
+			// 2026-08-03 cutover the server stamps Houston time, so the day
+			// written in the cell IS the business day. Converting it through any
+			// zone can only move it away from that.
+			const dateStr = sheetDayKey(rawDate);
+			if (!dateStr) return true; // unparseable? include, as before
 			return dateStr >= weekStart && dateStr <= computedWeekEnd;
 		});
 
@@ -7004,13 +7305,21 @@ function driversWithCompletedLoadsInWeek(data, headers, weekStart, weekEnd) {
 		const lid = lCol ? String(row[lCol] || "").trim().toLowerCase() : "";
 		if (lid && deletedIds.has(lid)) continue;
 		if (dtCol) {
-			const raw = String(row[dtCol] || "").replace(/^date:\s*/i, "").trim();
+			const raw = String(row[dtCol] || "").trim();
 			if (raw) {
-				const p = new Date(raw);
-				if (!isNaN(p.getTime())) {
-					const ds = p.toISOString().split("T")[0];
-					if (ds < weekStart || ds > weekEnd) continue;
-				}
+				// MUST use the same day-key as generateInvoiceHandler's week filter.
+				// This function is the safety net that cross-checks "did every
+				// driver who worked this week actually get billed" — so when it
+				// shared the handler's UTC-conversion bug it inherited the same
+				// blind spot, and a driver whose only completed load was a Friday
+				// evening delivery was invisible to BOTH. No invoice, no retry, no
+				// alert, and the batch logged success. The driver found out on
+				// payday; nothing in the system ever did.
+				//
+				// A verifier that reimplements the thing it verifies is not a
+				// verifier. If the week rule ever changes again, change it here too.
+				const ds = sheetDayKey(raw);
+				if (ds && (ds < weekStart || ds > weekEnd)) continue;
 			}
 		}
 		out.add(name);
@@ -7370,6 +7679,1204 @@ app.get("/api/admin/ratecon-reconcile", requireRole("Super Admin"), async (req, 
 	} catch (error) {
 		console.error("ratecon-reconcile error:", error.message);
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// ============================================================
+// Fuel events — detect refuels, then match them to receipts
+// ============================================================
+// The client's ask: "whenever the trucks have an increase of fuel, mark the date
+// and time, record the ODO, and correspond it with the receipts uploaded."
+//
+// Three things make that harder than it sounds, all measured on prod data:
+//   1. routemateSyncTelemetry INSERTs every poll with no dedupe on
+//      location_date_ms — 13.1x duplication on #33, 4.9x on #2372, and worst
+//      while the truck is stopped, which is when it is refuelling. Every read
+//      below therefore GROUPs BY location_date_ms first. This is the single
+//      most important line in the feature.
+//   2. A fill is a staircase of 6+ rises, not one step, so rises are coalesced
+//      into episodes (see lib/fuel-model.js detectRefuelEvents).
+//   3. expenses.date is a bare wall-clock day while telemetry is epoch ms.
+//      Houston is UTC-5/-6, so every fill after ~19:00 local lands on the NEXT
+//      UTC day — 50 of the 230 episodes in the current DB. A UTC join silently
+//      drops them: the two receipts dated 2026-08-01 are a 13:00 CT fill and a
+//      19:09 CT one, and only the first survives a UTC comparison.
+//
+// Ships flag-gated and DEFAULT OFF like every other side-effectful integration
+// here (RATECON_RECONCILE_ENABLED / ROUTEMATE_ENABLED / INVOICE_AUTOGEN_ENABLED).
+const FUEL_EVENTS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.FUEL_EVENTS_ENABLED ?? "").trim());
+// How far back each sweep re-detects. Cheap (the scan is index-driven and the
+// telemetry table only keeps 90 days) but bounded, because better-sqlite3 is
+// synchronous and every millisecond here blocks the event loop.
+const FUEL_EVENTS_SCAN_DAYS = Math.max(1, Math.min(120, parseInt(process.env.FUEL_EVENTS_SCAN_DAYS ?? "10", 10) || 10));
+// Receipts are uploaded late — one 2026-07-31 receipt was entered on 08-06 — so
+// the MATCH window is deliberately much wider than the detection window.
+const FUEL_EVENTS_MATCH_DAYS = Math.max(7, Math.min(180, parseInt(process.env.FUEL_EVENTS_MATCH_DAYS ?? "45", 10) || 45));
+const FUEL_EVENTS_INTERVAL_MS = 6 * 60 * 60 * 1000;   // 4x/day, same cadence as ratecon-reconcile
+// First-run backfill span. 95 > the 90 days purgeOldRoutemateTelemetry retains,
+// so the very first sweep recovers every episode that is still recoverable at
+// all — after that the telemetry is gone and only the fuel_events rows remain.
+const FUEL_EVENTS_BACKFILL_DAYS = 95;
+let fuelEventsRunning = false;
+const fuelEventsHealth = { lastRun: null, lastError: null, lastDetected: 0, lastPruned: 0, lastMatched: 0, lastUnmatchedFills: 0, lastUnmatchedReceipts: 0, lastBackfillSkippedLocked: 0, lastBackfillLockUnreadable: false };
+
+// --- matching thresholds, all measured -------------------------------------
+// A receipt is only a candidate for an episode if the gallons could physically
+// have produced that needle movement. gallons/(rise/100) is "gallons per 100
+// points"; outside this band the pair is nonsense. The band is wide on purpose
+// — it is a sanity gate, not the calibration — but it is what stops the classic
+// failure of pairing a 4.45 gal purchase with a 62-point rise (that would imply
+// a 7-gallon tank).
+const FUEL_MATCH_MIN_GAL_PER_100PCT = 55;
+const FUEL_MATCH_MAX_GAL_PER_100PCT = 400;
+// Below this a receipt is a top-up or a DEF purchase, not a fill worth
+// attributing. The one DEF receipt in prod is 4.45 gal.
+const FUEL_MATCH_MIN_GALLONS = 5;
+// expenses.location_lat/lng is populated on 124 of 126 fuel receipts, and it is
+// the strongest signal we have — it is what separates the two 2026-08-01 fills
+// (Cameron MO vs Oklahoma City, ~600 km apart) that gallons alone cannot. But
+// location_source is 'geocode', i.e. the CITY centroid rather than the pump, so
+// the tolerance has to absorb a city's radius plus the distance from the
+// highway exit to the station. Matched pairs run 0-27 km; 120 km keeps every
+// real one while still rejecting the wrong end of a state.
+const FUEL_MATCH_MAX_KM = 120;
+// Two candidates this close in cost are a coin flip. A wrong pairing writes a
+// wrong odometer onto a receipt and corrupts both the MPG and the calibration,
+// so a tie is left UNMATCHED and shown to a human instead.
+const FUEL_MATCH_AMBIGUITY_MARGIN = 40;
+// Only fills this large calibrate. A +6 point rise carries ±1 point of
+// quantisation, i.e. ±17% of the estimate.
+const FUEL_CALIB_MIN_RISE_PCT = 20;
+// A typed receipt odometer this far from the ELD's reading at the same fill is
+// a bad reading, not drift. Generous on purpose: the fill's own odometer is
+// sampled at the pump so the honest disagreement is single-digit miles, while
+// both real offenders in this data are out by ~850,000. Shared by the sweep's
+// odometerConflicts and the read-only snapshot so the two cannot diverge on
+// what counts as a conflict.
+const FUEL_ODOMETER_CONFLICT_MI = 500;
+
+// LAZY prepares, not module-scope ones. better-sqlite3 resolves column names at
+// prepare() time, so a module-scope prepare against a fuel_events table left
+// over from an earlier shape of this branch (CREATE TABLE IF NOT EXISTS silently
+// no-ops on a stale table) throws before app.listen() — a hard boot failure into
+// a pm2 restart loop, for a feature that is supposed to ship dormant. Deferring
+// to first use turns that into a caught error on one endpoint.
+let _fuelEventUpsertStmt = null;
+function fuelEventUpsert() {
+	if (!_fuelEventUpsertStmt) _fuelEventUpsertStmt = db.prepare(`
+		INSERT INTO fuel_events
+			(routemate_vehicle_id, start_ms, end_ms, local_day, pct_before, pct_after,
+			 odometer, odo_span, latitude, longitude)
+		VALUES (@routemate_vehicle_id, @start_ms, @end_ms, @local_day, @pct_before, @pct_after,
+			 @odometer, @odo_span, @latitude, @longitude)
+		ON CONFLICT(routemate_vehicle_id, start_ms) DO UPDATE SET
+			end_ms = excluded.end_ms,
+			local_day = excluded.local_day,
+			pct_after = excluded.pct_after,
+			odometer = excluded.odometer,
+			odo_span = excluded.odo_span,
+			latitude = excluded.latitude,
+			longitude = excluded.longitude
+	`);
+	return _fuelEventUpsertStmt;
+}
+
+// The dedupe that the whole feature rests on. MAX() over the group is safe
+// because duplicate rows for one location_date_ms are byte-identical copies of
+// the same fix (verified: COUNT(DISTINCT fuel_pct) = COUNT(DISTINCT odometer) = 1
+// for every duplicated timestamp) — this collapses re-inserts, it does not pick
+// a winner between conflicting readings.
+let _fuelEventSeriesStmt = null;
+function fuelEventSeries() {
+	if (!_fuelEventSeriesStmt) _fuelEventSeriesStmt = db.prepare(`
+		SELECT location_date_ms AS ms, MAX(fuel_pct) AS pct, MAX(odometer) AS odo,
+		       MAX(latitude) AS lat, MAX(longitude) AS lng
+		FROM routemate_telemetry
+		WHERE routemate_vehicle_id = ?
+		  AND dropped_reason = ''
+		  AND fuel_pct IS NOT NULL
+		  AND location_date_ms >= ? AND location_date_ms < ?
+		GROUP BY location_date_ms
+		ORDER BY location_date_ms ASC
+	`);
+	return _fuelEventSeriesStmt;
+}
+
+// Scan window. The lookback is padded by an hour past the requested start so an
+// episode straddling the boundary is re-detected with the SAME start_ms it had
+// last time — otherwise the upsert key shifts and one fill becomes two rows.
+function fuelEventsScanWindow(days) {
+	const now = Date.now();
+	return { fromMs: now - (days * 24 * 60 * 60 * 1000) - (60 * 60 * 1000), toMs: now + 60 * 1000 };
+}
+
+// Detect + persist episodes for every ELD-linked truck.
+// Returns { detected, pruned } — the episodes for this window, and how many
+// stale rows the re-detect removed (see the prune below).
+function detectAndPersistFuelEvents({ days = FUEL_EVENTS_SCAN_DAYS, persist = true } = {}) {
+	const { fromMs, toMs } = fuelEventsScanWindow(days);
+	const linked = db.prepare(
+		`SELECT unit_number, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id,'') <> ''`
+	).all();
+	const detected = [];
+	// The span each vehicle's telemetry ACTUALLY covers in this scan — not the
+	// requested window. This is what bounds the prune; see there for why.
+	const covered = [];
+	for (const t of linked) {
+		const samples = fuelEventSeries().all(t.vid, fromMs, toMs);
+		if (samples.length < 2) continue;
+		covered.push({ vid: t.vid, minMs: samples[0].ms, maxMs: samples[samples.length - 1].ms });
+		for (const e of fuelModel.detectRefuelEvents(samples)) {
+			detected.push({
+				// Negative synthetic id so an UNPERSISTED episode still has a stable
+				// key for the matcher's one-to-one bookkeeping. Real rows are always
+				// positive, so the two can never collide.
+				id: -(detected.length + 1),
+				routemate_vehicle_id: t.vid,
+				unit: t.unit_number,
+				start_ms: e.startMs,
+				end_ms: e.endMs,
+				// Houston business day — see the fuel_events DDL comment for why
+				// this is NOT usTzForLongitude/truck-local.
+				local_day: houstonDay(new Date(e.startMs)),
+				pct_before: e.pctBefore,
+				pct_after: e.pctAfter,
+				rise: e.rise,
+				odometer: e.odometer || 0,
+				odo_span: e.odoSpan || 0,
+				latitude: e.latitude,
+				longitude: e.longitude,
+			});
+		}
+	}
+	let pruned = 0;
+	if (persist) {
+		const up = fuelEventUpsert();
+		// What the re-detect just concluded, keyed the same way the table is.
+		const keepByVid = new Map();
+		for (const d of detected) {
+			if (!keepByVid.has(d.routemate_vehicle_id)) keepByVid.set(d.routemate_vehicle_id, new Set());
+			keepByVid.get(d.routemate_vehicle_id).add(d.start_ms);
+		}
+		const txn = db.transaction((items) => {
+			// `id` is not a column — strip it so the named-parameter bind doesn't see
+			// an extra key.
+			for (const d of items) { const { id, unit, rise, ...row } = d; up.run(row); }
+
+			// PRUNE. The upsert can only add or update, so a row the detector no
+			// longer produces would otherwise sit in the table forever — and this
+			// table is persisted, not a cache, so a tightened detector has to reach
+			// the rows already written. It is what makes a detector fix an actual
+			// correction rather than a change that only applies going forward.
+			//
+			// Scoped to the range each vehicle's telemetry ACTUALLY covers in this
+			// scan, NOT the requested window. The two differ exactly where it
+			// matters: the first-run backfill asks for 95 days while
+			// purgeOldRoutemateTelemetry retains 90, so the oldest ~5 days of the
+			// request have no samples left to re-derive from. Pruning on the
+			// requested window would delete those historical episodes and, with the
+			// telemetry gone, they could never come back — the sweep would quietly
+			// destroy the only surviving record of them. Bounding by observed
+			// coverage means we only ever delete where we genuinely re-derived.
+			//
+			// A vehicle with fewer than 2 samples contributes no coverage entry and
+			// is therefore never pruned, so an unlinked truck or a dead feed keeps
+			// its history instead of having it erased by an outage.
+			const inRange = db.prepare(
+				`SELECT id, start_ms FROM fuel_events WHERE routemate_vehicle_id = ? AND start_ms >= ? AND start_ms <= ?`);
+			const del = db.prepare(`DELETE FROM fuel_events WHERE id = ?`);
+			for (const c of covered) {
+				const keep = keepByVid.get(c.vid);
+				for (const row of inRange.all(c.vid, c.minMs, c.maxMs)) {
+					if (!keep || !keep.has(row.start_ms)) pruned += del.run(row.id).changes;
+				}
+			}
+		});
+		txn(detected);
+	}
+	return { detected, pruned };
+}
+
+// Great-circle km between a receipt and an episode; null when either lacks a fix.
+function fuelMatchDistanceKm(a, b) {
+	if (!a || !b) return null;
+	if (!Number.isFinite(a.lat) || !Number.isFinite(a.lng) || !a.lat || !a.lng) return null;
+	if (!Number.isFinite(b.latitude) || !Number.isFinite(b.longitude) || !b.latitude || !b.longitude) return null;
+	return geolib.getDistance(
+		{ latitude: a.lat, longitude: a.lng },
+		{ latitude: b.latitude, longitude: b.longitude },
+	) / 1000;
+}
+
+// 'YYYY-MM-DD' +/- n days, on the calendar (no zone math — both sides are
+// already bare Houston days by this point).
+function shiftDayKey(day, n) {
+	const d = new Date(day + "T12:00:00Z");
+	d.setUTCDate(d.getUTCDate() + n);
+	return d.toISOString().slice(0, 10);
+}
+
+// Is THIS expense row inside a closed month? The single predicate behind both
+// the write guard and the `periodLocked` flag on the wire, so the server can
+// never refuse to write a row it told the client was editable, or vice versa.
+//
+// FAILS CLOSED. `expenses` is a money table, so a row whose month cannot be
+// resolved with confidence is treated as locked rather than guessed at — the
+// cost of a wrong "locked" is one odometer a human types in, the cost of a wrong
+// "open" is a mutated finance row in a closed period nobody is looking at.
+//
+// TWO months are checked, and both are needed, because the codebase buckets an
+// expense two different ways on purpose (see EXPENSE_PERIOD_EXPR):
+//   • the SETTLEMENT month — expensePostedPeriod(), i.e. posted_period > date >
+//     created_at. Same precedence as the SQL, so this and the SUMs can never
+//     disagree about which month a row belongs to.
+//   • the OPERATIONAL month — plain `date`, which is what the monthly fuel
+//     breakdown and cost/mile actually group on.
+// A prior-period adjustment has these two point at different months by design.
+// Treating the row as open on the strength of one would still let a write alter
+// a locked month's number on whichever surface uses the other, so a row counts
+// as open only when BOTH are open.
+//
+// DELIBERATELY STRICTER THAN STRICTLY NECESSARY for the odometer backfill, and
+// this is a choice, not an oversight — do not "optimise" it away. `odometer`
+// feeds only operational surfaces (cost/mile, the monthly fuel breakdown), so a
+// settlement-month lock alone does not, today, make an odometer write unsafe.
+// It is still refused, for two reasons: one predicate serving every expense
+// write cannot be re-derived per caller without the guards drifting apart, and
+// the asymmetry is decisive — refusing costs one odometer a human can type in,
+// while permitting costs a mutated finance row in a period whose statement has
+// already gone out. If a future column genuinely needs the looser rule, add a
+// second named predicate rather than loosening this one.
+//
+// Callers must supply date + posted_period + created_at. A row SELECTed without
+// them resolves to "" and is therefore reported locked — fail-closed again, and
+// the reason every query feeding this selects all three.
+function expenseRowPeriodLocked(r) {
+	const MONTH = /^\d{4}-\d{2}$/;
+	const settlement = expensePostedPeriod(r);
+	const operational = String((r && r.date) || "").trim().slice(0, 7);
+	if (!MONTH.test(settlement) || !MONTH.test(operational)) return true;
+	// Third fail-closed rung: an unreadable lock table answers "not locked" to
+	// isLocked(), so without this the guard is present, silent, and open.
+	if (!periodLocksReadable()) return true;
+	return isLocked(settlement) || isLocked(operational);
+}
+
+// May the odometer backfill write to THIS receipt? Exactly the inverse — stated
+// as its own function so the write site reads as a permission check rather than
+// a double negative, but there is only one rule.
+function fuelBackfillAllowed(r) {
+	return !expenseRowPeriodLocked(r);
+}
+
+// A DEF purchase is not diesel. It shows up as a small-gallon "Fuel" expense and
+// would otherwise be matched to a sensor wobble.
+function isDefReceipt(r) {
+	const details = String(r.receipt_details || "");
+	if (/"(?:Product|Fuel\s*Type|Description)"\s*,\s*"value"\s*:\s*"[^"]*\bDEF\b/i.test(details)) return true;
+	return /\bDEF\b/.test(String(r.vendor || ""));
+}
+
+// Match episodes to fuel receipts, ONE-TO-ONE, over the match window.
+//
+// Greedy over a cost that ranks: exact Houston day first, then physical
+// proximity, then how well the gallons fit the truck's own typical
+// gallons-per-point. Greedy rather than a full assignment solve because the
+// candidate sets are tiny (a truck-day), and because the ambiguity guard below
+// means the marginal cases are refused rather than optimised.
+//
+// The +/-1 day fallback exists because a receipt's printed date is the STATION'S
+// local date: an evening fill in a western state can legitimately print the day
+// before the Houston day we bucketed the episode into. An exact-day candidate
+// always outranks an adjacent-day one (the 1000-point term dwarfs everything
+// else), so the fallback can never steal a match from an exact hit.
+// `writeReceipts` is separate from `persist` on purpose: a dry run still records
+// which episode matched which receipt (fuel_events is our own derived,
+// idempotent table — that is what makes a dry run inspectable at all) but never
+// touches the expenses row, which is finance data.
+// `events` lets a caller supply freshly-detected, UNPERSISTED episodes so the
+// read-only inspection path can match without writing a single row. Without it a
+// dry run on a box that has never run the sweep matches against an empty table
+// and reports nothing — which looks identical to "nothing matches".
+function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = true, writeReceipts = true, events: providedEvents = null } = {}) {
+	// Two windows, and they must be nested this way round. Episodes are scoped to
+	// local_day >= sinceDay; receipts are loaded from ONE DAY EARLIER, because the
+	// +/-1 day rule means the oldest in-scope episode can legitimately be paid for
+	// by a receipt dated the day before it. Loading them on the same boundary
+	// would leave that episode with its counterpart missing from the candidate
+	// set — and since the pass below CLEARS existing links before re-deriving
+	// them, the match would not merely fail to form, it would be erased and never
+	// come back as the window slid forward.
+	const sinceDay = shiftDayKey(houstonDay(), -days);
+	const receiptSinceDay = shiftDayKey(sinceDay, -1);
+
+	const events = providedEvents
+		? providedEvents.filter((e) => e.local_day >= sinceDay)
+			.map((e) => ({ ...e, rise: e.rise != null ? e.rise : (e.pct_after - e.pct_before) }))
+		: db.prepare(`
+			SELECT fe.id, fe.routemate_vehicle_id, fe.start_ms, fe.end_ms, fe.local_day,
+			       fe.pct_before, fe.pct_after, fe.odometer, fe.odo_span, fe.latitude, fe.longitude,
+			       (fe.pct_after - fe.pct_before) AS rise, t.unit_number AS unit
+			FROM fuel_events fe
+			JOIN trucks t ON t.routemate_vehicle_id = fe.routemate_vehicle_id
+			WHERE fe.local_day >= ?
+			ORDER BY fe.start_ms ASC
+		`).all(sinceDay);
+
+	// truck_unit is compared case-insensitively: trucks.unit_number holds both
+	// 'LogisX-#33' and 'Logisx-#91' (lowercase x), and expenses.truck_unit is a
+	// snapshot taken at insert time, so the casing is not guaranteed to agree.
+	// posted_period + created_at are selected for the period-lock guard below, NOT
+	// for matching — expensePostedPeriod() needs the same precedence
+	// (posted_period > date > created_at) that EXPENSE_PERIOD_EXPR uses, and a
+	// guard that resolved the month differently from the SUMs would be worse than
+	// no guard.
+	const receipts = db.prepare(`
+		SELECT id, date, truck_unit, gallons, amount, vendor, odometer,
+		       location_lat AS lat, location_lng AS lng, receipt_details,
+		       posted_period, created_at
+		FROM expenses
+		WHERE type = 'Fuel' AND COALESCE(date,'') <> '' AND date >= ?
+		  AND ${EXPENSE_PNL_FILTER}
+		ORDER BY date ASC, id ASC
+	`).all(receiptSinceDay);
+
+	const eligible = receipts.filter((r) => Number(r.gallons) >= FUEL_MATCH_MIN_GALLONS && !isDefReceipt(r));
+
+	// Build candidates.
+	const cands = [];
+	for (const r of eligible) {
+		const unit = String(r.truck_unit || "").trim().toLowerCase();
+		if (!unit) continue;
+		for (const e of events) {
+			if (String(e.unit || "").trim().toLowerCase() !== unit) continue;
+			if (!(e.rise > 0)) continue;
+			let dayOff = null;
+			if (r.date === e.local_day) dayOff = 0;
+			else if (r.date === shiftDayKey(e.local_day, 1) || r.date === shiftDayKey(e.local_day, -1)) dayOff = 1;
+			if (dayOff === null) continue;
+			const implied = Number(r.gallons) / (e.rise / 100);
+			if (implied < FUEL_MATCH_MIN_GAL_PER_100PCT || implied > FUEL_MATCH_MAX_GAL_PER_100PCT) continue;
+			const distKm = fuelMatchDistanceKm(r, e);
+			if (distKm !== null && distKm > FUEL_MATCH_MAX_KM) continue;
+			cands.push({ r, e, dayOff, implied, distKm });
+		}
+	}
+
+	// Per-truck reference gallons-per-point, from the big rises only, used purely
+	// as a tie-breaker. Seeded from the candidate set (not from already-matched
+	// rows) so the sweep is deterministic and does not drift run over run.
+	const seed = {};
+	for (const c of cands) {
+		if (c.e.rise >= FUEL_CALIB_MIN_RISE_PCT) (seed[c.e.unit] = seed[c.e.unit] || []).push(c.implied);
+	}
+	const refImplied = {};
+	for (const u of Object.keys(seed)) {
+		const a = seed[u].sort((x, y) => x - y);
+		refImplied[u] = a[Math.floor(a.length / 2)];
+	}
+
+	for (const c of cands) {
+		c.cost = c.dayOff * 1000
+			+ (c.distKm === null ? 300 : Math.min(c.distKm, FUEL_MATCH_MAX_KM) * 2)
+			+ (refImplied[c.e.unit] ? Math.abs(c.implied - refImplied[c.e.unit]) * 2 : 0);
+	}
+	cands.sort((a, b) => a.cost - b.cost);
+
+	const usedR = new Set(), usedE = new Set();
+	const matched = [], ambiguous = [];
+	for (const c of cands) {
+		if (usedR.has(c.r.id) || usedE.has(c.e.id)) continue;
+		// Runner-up for EITHER side of this pair. If the second-best option is
+		// nearly as good, we cannot tell them apart — refuse both.
+		let rival = Infinity;
+		for (const x of cands) {
+			if (x === c || usedR.has(x.r.id) || usedE.has(x.e.id)) continue;
+			if (x.r.id === c.r.id || x.e.id === c.e.id) rival = Math.min(rival, x.cost);
+		}
+		if (rival - c.cost < FUEL_MATCH_AMBIGUITY_MARGIN) { ambiguous.push(c); continue; }
+		usedR.add(c.r.id); usedE.add(c.e.id); matched.push(c);
+	}
+
+	// In-memory episodes carry synthetic negative ids that exist in no table, so
+	// they can never be persisted. Belt-and-braces against a future caller passing
+	// `events` and forgetting `persist: false`.
+	const canPersist = persist && !providedEvents;
+	let backfilled = 0;
+	let backfillSkippedLocked = 0;
+	// POSITIVE CONTROL, hoisted out of the write loop — the same probe the boot
+	// migration runs, for the same reason and against the same failure. isLocked()
+	// answers "not locked" on ANY error, so a DB-level break (period_locks rebuilt
+	// without its `status` column, which CREATE TABLE IF NOT EXISTS cannot repair)
+	// makes every finalized month look open and this backfill writes the lot.
+	// A DB-level fault hits both callers of that predicate, and this is the one
+	// that writes more rows, so defending only the boot path was defending against
+	// the temporal-dead-zone hazard rather than against the failure mode.
+	//
+	// Asked ONCE per sweep, not per row: the answer cannot change mid-transaction,
+	// and on a broken table a per-row probe re-compiles a failing statement for
+	// every match. Withheld rows are counted like any other lock skip, so the
+	// operator sees a number rather than a silent zero.
+	const lockReadable = !canPersist || periodLocksReadable();
+	let backfillLockUnreadable = false;
+	if (canPersist) {
+		const txn = db.transaction(() => {
+			// Clear the window first so a match that is no longer best (new receipt
+			// uploaded, episode re-detected) is not left stale.
+			// Same window as the SELECT above — clearing a wider range than we
+			// re-derive would drop links we are not about to rebuild.
+			db.prepare(`UPDATE fuel_events SET expense_id = NULL, match_basis = '', match_distance_km = NULL, matched_gallons = NULL WHERE local_day >= ?`).run(sinceDay);
+			const link = db.prepare(`UPDATE fuel_events SET expense_id = ?, match_basis = ?, match_distance_km = ?, matched_gallons = ? WHERE id = ?`);
+			// A receipt can back only one episode. The clear above covers the
+			// re-derived window; this covers an episode OUTSIDE it still holding a
+			// link to a receipt we are about to re-link, which would otherwise
+			// double-count the gallons in the tank-to-tank legs.
+			const unlinkElsewhere = db.prepare(`UPDATE fuel_events SET expense_id = NULL, match_basis = '', match_distance_km = NULL, matched_gallons = NULL WHERE expense_id = ? AND id <> ?`);
+			// Backfill the odometer onto the receipt — the literal client ask. Only
+			// where the receipt has none: 2 of 126 carry a hand-entered value and
+			// both are junk (96538 on a truck reading 992938; a bare 1.0), but
+			// silently overwriting an operator's number is not this job's call, so
+			// those surface as odometerConflicts instead — in this function's return
+			// (which the admin fuel-events endpoint renders) AND, because the
+			// SCHEDULED sweep discards that return value entirely, off the persisted
+			// table in fuelReconciliationSnapshot(), which is the copy that actually
+			// reaches a human. This claim used to be true only of the manual path.
+			//
+			// odometer_source is written in the SAME statement, so provenance can
+			// never drift from the value it describes.
+			//
+			// ⚠️ GATED ON THE PERIOD LOCK. A receipt inside a finalized month is NOT
+			// written — no odometer, no odometer_source. The 95-day first-run backfill
+			// reaches back roughly three months, and 14 months are currently locked, so
+			// ungated this would rewrite a column on finance rows in closed periods.
+			// That is not a paperwork objection: costPerMile and the monthly fuel
+			// breakdown are computed off expenses.odometer, so mutating it in a closed
+			// month changes what a historical view reports — precisely the drift the
+			// month-close exists to stop. A finalized figure has to stay reproducible.
+			//
+			// THE LINE, and do not widen it: derived telemetry may be written for a
+			// locked month; the `expenses` table may not. fuel_events rows are
+			// observational — detected from the ELD feed, owned by this feature,
+			// idempotently re-derivable — and they are what makes a closed month
+			// analysable at all, so they are deliberately still written above. The
+			// moment a write lands on a financial row, the lock governs it.
+			const backfill = db.prepare(`UPDATE expenses SET odometer = ?, odometer_source = 'telemetry' WHERE id = ? AND (odometer IS NULL OR odometer = 0)`);
+			for (const m of matched) {
+				unlinkElsewhere.run(m.r.id, m.e.id);
+				link.run(m.r.id, m.dayOff === 0 ? "exact_day" : "adjacent_day",
+					m.distKm === null ? null : Math.round(m.distKm * 10) / 10, m.r.gallons, m.e.id);
+				if (writeReceipts && m.e.odometer > 0) {
+					// `lockReadable &&` first: with the table unreadable EVERY receipt is
+					// withheld, open month or not, because "open" is exactly the answer
+					// that cannot be trusted. fuelBackfillAllowed() also fails closed on
+					// its own now, so this is belt-and-braces — but it is what makes the
+					// REASON reportable, and a lock that leaves no evidence it fired is
+					// indistinguishable from a backfill that found nothing to do.
+					if (lockReadable && fuelBackfillAllowed(m.r)) backfilled += backfill.run(m.e.odometer, m.r.id).changes;
+					else { backfillSkippedLocked++; if (!lockReadable) backfillLockUnreadable = true; }
+				}
+			}
+		});
+		txn();
+	}
+
+	const matchedEventIds = new Set(matched.map((m) => m.e.id));
+	const matchedReceiptIds = new Set(matched.map((m) => m.r.id));
+	const odometerConflicts = matched.filter((m) =>
+		Number(m.r.odometer) > 0 && m.e.odometer > 0
+		&& Math.abs(Number(m.r.odometer) - m.e.odometer) > FUEL_ODOMETER_CONFLICT_MI
+	).map((m) => ({
+		id: m.r.id, expenseId: m.r.id,
+		localDay: m.e.local_day, receiptDate: m.r.date, unitNumber: m.e.unit,
+		receiptOdometer: Number(m.r.odometer), eldOdometer: m.e.odometer,
+		periodLocked: expenseRowPeriodLocked(m.r),
+	}));
+
+	return {
+		events, receipts, eligible, matched, ambiguous, backfilled,
+		// Reported, never swallowed. A guard that quietly declines to write is the
+		// same defect as the queue that quietly discarded its own failures — an
+		// operator has to be able to see that N odometers were withheld because
+		// their months are closed, otherwise "backfilled: 0" reads as a broken
+		// feature rather than a working lock.
+		backfillSkippedLocked,
+		// WHY they were withheld, because the two reasons need different words. A
+		// finalized month is a working lock; an unreadable table is a broken
+		// database that happens to withhold the right rows for the wrong reason,
+		// and calling those months "finalized" would send someone looking for a
+		// close that never happened.
+		backfillLockUnreadable,
+		// Only sizeable fills are worth chasing a receipt for; a +6 point wobble is
+		// not a missing receipt, it is the sender moving.
+		unmatchedFills: events.filter((e) => !matchedEventIds.has(e.id) && e.rise >= FUEL_CALIB_MIN_RISE_PCT),
+		unmatchedReceipts: eligible.filter((r) => !matchedReceiptIds.has(r.id)),
+		odometerConflicts,
+		refImplied,
+	};
+}
+
+// Per-truck calibration + receipt-derived MPG, from the persisted matches.
+// Pure reporting — nothing here writes to trucks.fuel_tank_gallons or avg_mpg.
+function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
+	const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+	const rows = db.prepare(`
+		SELECT fe.routemate_vehicle_id, fe.start_ms, fe.local_day, fe.odometer, fe.odo_span,
+		       (fe.pct_after - fe.pct_before) AS rise, fe.matched_gallons, fe.match_basis,
+		       fe.match_distance_km, t.unit_number AS unit
+		FROM fuel_events fe
+		JOIN trucks t ON t.routemate_vehicle_id = fe.routemate_vehicle_id
+		WHERE fe.start_ms >= ? AND fe.expense_id IS NOT NULL AND fe.matched_gallons > 0
+		ORDER BY fe.routemate_vehicle_id, fe.start_ms ASC
+	`).all(sinceMs);
+
+	// Every sizeable fill in the window, matched or not — needed to know whether a
+	// tank-to-tank leg has an unaccounted fill inside it (see below).
+	const allFills = db.prepare(`
+		SELECT routemate_vehicle_id, start_ms, (pct_after - pct_before) AS rise, expense_id
+		FROM fuel_events WHERE start_ms >= ? AND (pct_after - pct_before) >= ?
+		ORDER BY start_ms ASC
+	`).all(sinceMs, FUEL_CALIB_MIN_RISE_PCT);
+
+	const byVid = {};
+	for (const r of rows) (byVid[r.routemate_vehicle_id] = byVid[r.routemate_vehicle_id] || []).push(r);
+
+	const out = {};
+	for (const vid of Object.keys(byVid)) {
+		const seq = byVid[vid];
+		// Calibration: only clean fills — big rise, exact-day match, location
+		// confirmed, truck parked. Reported as a RANGE with n; see
+		// summarizeCalibration for why a single number would be a lie.
+		const calVals = seq
+			.filter((r) => r.rise >= FUEL_CALIB_MIN_RISE_PCT && r.match_basis === "exact_day"
+				&& r.match_distance_km !== null && r.match_distance_km <= 25 && r.odo_span <= 5)
+			.map((r) => r.matched_gallons / (r.rise / 100));
+		// Tank-to-tank legs. A leg is DISCARDED when an unmatched fill sits inside
+		// it: those miles were partly paid for by a receipt we do not have, so
+		// counting them inflates the MPG. This is the difference between a
+		// believable 7 mpg and a flattering one.
+		const fills = allFills.filter((f) => f.routemate_vehicle_id === vid);
+		const legs = [];
+		for (let i = 1; i < seq.length; i++) {
+			const a = seq[i - 1], b = seq[i];
+			const miles = b.odometer - a.odometer;
+			if (!(miles > 0) || miles > 3000) continue;
+			const gap = fills.some((f) => f.start_ms > a.start_ms && f.start_ms < b.start_ms && !f.expense_id);
+			if (gap) continue;
+			legs.push({ miles, gallons: b.matched_gallons });
+		}
+		out[vid] = {
+			unit: seq[0].unit,
+			matchedFills: seq.length,
+			calibration: fuelModel.summarizeCalibration(calVals),
+			mpg: fuelModel.receiptDerivedMpg(legs),
+		};
+	}
+	return out;
+}
+
+// --- the wire vocabulary ------------------------------------------------------
+// ONE shape, shared by GET /api/admin/fuel-events and GET
+// /api/expenses/fuel-analytics. A debug endpoint that disagrees with the real
+// one is how the next person ends up debugging the debugger.
+//
+// Names are descriptive camelCase to match the endpoint this lands next to
+// (/api/expenses/fuel-analytics already returns totalFuelSpend,
+// avgCostPerGallon, recentFills[].loadId). In particular `truckUnit`, not
+// `truck_unit` — nothing else in that payload leaks a raw column name — and
+// `atMs`, which says what the number is instead of leaving the reader to guess
+// between epoch ms and an ISO string.
+//
+// All days are HOUSTON (America/Chicago) business days; all *Ms fields are epoch
+// milliseconds UTC.
+function fuelEventWire(e) {
+	return {
+		eventId: e.id,
+		vehicleId: e.routemate_vehicle_id,
+		unitNumber: e.unit,
+		localDay: e.local_day,
+		atMs: e.start_ms,
+		endedAtMs: e.end_ms,
+		pctBefore: e.pct_before,
+		pctAfter: e.pct_after,
+		rise: e.rise != null ? e.rise : (e.pct_after - e.pct_before),
+		odometer: e.odometer > 0 ? e.odometer : null,
+		// A fill's odometer is always machine-read; only a receipt can be typed.
+		odometerSource: "telemetry",
+	};
+}
+function fuelReceiptWire(r) {
+	return {
+		id: r.id,
+		// Alias, not a replacement. Three lists in this payload key an expense as
+		// `id` and one as `expenseId`; publishing both everywhere means a caller can
+		// use one name across all of them, and no existing reader breaks.
+		expenseId: r.id,
+		localDay: r.date,
+		truckUnit: r.truck_unit,
+		gallons: r.gallons,
+		amount: r.amount,
+		vendor: r.vendor || "",
+	};
+}
+
+// Cap on the emitted list only. The SUMMARY is always computed over the full
+// set, so `volumelessSummary.count` can legitimately exceed
+// `volumelessReceipts.length` — read the count from the summary, never from the
+// array. 500 is far above the 29 that exist, and this is a queue humans drain.
+const FUEL_VOLUMELESS_MAX_ROWS = 500;
+
+// THIRD reconciliation queue: fuel receipts carrying a dollar amount but NO
+// volume. These are not "unmatched" — they are invisible.
+//
+// `matchFuelEventsToReceipts` narrows to `eligible` (gallons >= 5, not DEF)
+// BEFORE it derives unmatchedReceipts, so a 0-gallon receipt is dropped one step
+// ahead of every queue that reports anything. 28 of #33's 54 fuel receipts are
+// in this state — $5,881.54 of diesel with a price and no gallons — and nothing
+// on any surface said so. The panel could truthfully render "every receipt has a
+// fuel-up" while that sat in a blind spot, and #33's driver falls back to the
+// fleet-default MPG with no stated reason, because gallons are the denominator.
+//
+// Kept OUT of unmatchedReceipts on purpose. "No fuel-up episode for this
+// receipt" and "no gallons on this receipt" are different defects with different
+// fixes by different people; merging them would hide the cheap one (type in the
+// number) inside the expensive one (go find out why the ELD saw nothing).
+//
+// NOT WINDOWED, for the same reason as odometerConflicts: a receipt missing its
+// gallons stays wrong until a human edits it, so a rolling window would recreate
+// exactly the blindness this exists to remove. That is not hypothetical here — 3
+// of the 29 fall outside a 45-day window, one of them dated 2017-07-15, which no
+// window short of a decade would ever surface again.
+//
+// Filters, each load-bearing:
+//   amount > 0        a $0 row is a different defect (see the client note) and
+//                     would pad the queue with rows nobody can fix by typing.
+//   not Rejected      EXPENSE_PNL_FILTER — a rejected receipt is not spend, so
+//                     it is not diesel to reconcile.
+//   not DEF           same rule and same helper as the other two receipt queues.
+//                     DEF is not diesel, so its gallons must NOT be typed in:
+//                     doing so would make it eligible and let it pair with a
+//                     sensor wobble, which FUEL_MATCH_MIN_GALLONS exists to stop.
+//                     Zero overlap in today's data; the rule still belongs here
+//                     so the three queues agree on what a diesel receipt is.
+// Deliberately NOT filtered on a present date — a dateless receipt still needs
+// its gallons, and excluding it would open a fresh blind spot inside the fix.
+//
+// Predicate lives in JS, not SQL, because isDefReceipt is a regex over
+// receipt_details/vendor that SQL cannot express: computing the summary with a
+// GROUP BY would apply a different filter from the list and the two would
+// disagree. One pass, one predicate.
+function volumelessFuelReceipts() {
+	const round2 = (n) => Math.round(n * 100) / 100;
+	// posted_period + created_at are selected for expenseRowPeriodLocked(), which
+	// fails closed on a row that lacks them — dropping either column here would
+	// silently mark the whole queue locked and make it uneditable.
+	const rows = db.prepare(`
+		SELECT e.id, e.date, e.truck_unit, e.driver, e.amount, e.vendor, e.receipt_details,
+		       e.posted_period, e.created_at
+		FROM expenses e
+		WHERE LOWER(e.type) = 'fuel'
+		  AND COALESCE(e.gallons, 0) <= 0
+		  AND COALESCE(e.amount, 0) > 0
+		  AND ${EXPENSE_PNL_FILTER}
+		ORDER BY e.date DESC, e.id DESC
+	`).all().filter((r) => !isDefReceipt(r));
+
+	// Grouped case-insensitively: trucks.unit_number holds both 'LogisX-#33' and
+	// 'Logisx-#91', and expenses.truck_unit is a snapshot taken at insert time, so
+	// one truck must not split into two buckets over casing alone.
+	const byTruck = new Map();
+	let totalAmount = 0;
+	for (const r of rows) {
+		const amount = Number(r.amount) || 0;
+		totalAmount += amount;
+		const unit = String(r.truck_unit || "").trim();
+		const key = unit.toLowerCase();
+		let g = byTruck.get(key);
+		// Rows arrive newest-first, so the casing kept is the most recent one used.
+		if (!g) byTruck.set(key, (g = { truckUnit: unit, count: 0, totalAmount: 0 }));
+		g.count++;
+		g.totalAmount += amount;
+	}
+
+	return {
+		receipts: rows.slice(0, FUEL_VOLUMELESS_MAX_ROWS).map((r) => ({
+			expenseId: r.id,
+			// `id` is a pure alias for expenseId. Every other list in this payload
+			// keys an expense as `id`, so publishing both means one name works
+			// everywhere without renaming a field a client is already reading.
+			id: r.id,
+			localDay: r.date || "",
+			truckUnit: String(r.truck_unit || "").trim(),
+			amount: r.amount,
+			vendor: r.vendor || "",
+			driver: r.driver || "",
+			// Server-resolved, never derived client-side from a month list: the set
+			// of closed months changes at every month-end and a copy in the client
+			// would rot silently into letting someone edit a finalized row.
+			periodLocked: expenseRowPeriodLocked(r),
+		})),
+		summary: {
+			count: rows.length,
+			totalAmount: round2(totalAmount),
+			byTruck: [...byTruck.values()]
+				.map((g) => ({ ...g, totalAmount: round2(g.totalAmount) }))
+				// Biggest money first. Count then unit break ties so the order is
+				// stable run to run rather than Map insertion order.
+				.sort((a, b) => b.totalAmount - a.totalAmount || b.count - a.count
+					|| a.truckUnit.localeCompare(b.truckUnit)),
+		},
+	};
+}
+
+// Read-only reconciliation snapshot straight off the persisted table — no
+// detection, no matching, no writes. Cheap enough for a dashboard poll.
+//
+// Returns null when fuel_events has never been populated. That is NOT the same
+// as "nothing to report": the client renders an absent key as "older server,
+// say nothing" and an empty array as "checked, all clear". With the sweep never
+// run, every receipt would look unmatched, so reporting [] here would show a
+// clean bill of health for a feature that is not running — and reporting the
+// receipts as unmatched would be a fleet-wide false alarm.
+function fuelReconciliationSnapshot({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
+	const everRan = db.prepare("SELECT 1 FROM fuel_events LIMIT 1").get();
+	if (!everRan) return null;
+	const sinceDay = shiftDayKey(houstonDay(), -days);
+
+	const unmatchedFills = db.prepare(`
+		SELECT fe.id, fe.routemate_vehicle_id, fe.local_day, fe.start_ms, fe.end_ms,
+		       fe.pct_before, fe.pct_after, fe.odometer, t.unit_number AS unit
+		FROM fuel_events fe
+		JOIN trucks t ON t.routemate_vehicle_id = fe.routemate_vehicle_id
+		WHERE fe.local_day >= ? AND fe.expense_id IS NULL
+		  AND (fe.pct_after - fe.pct_before) >= ?
+		ORDER BY fe.start_ms DESC
+	`).all(sinceDay, FUEL_CALIB_MIN_RISE_PCT);
+
+	// Receipts the sweep considered (real diesel volume, not DEF) and could not
+	// pair. Filtered in JS for DEF so the rule lives in exactly one place.
+	const candidateReceipts = db.prepare(`
+		SELECT e.id, e.date, e.truck_unit, e.gallons, e.amount, e.vendor, e.receipt_details
+		FROM expenses e
+		LEFT JOIN fuel_events fe ON fe.expense_id = e.id
+		WHERE e.type = 'Fuel' AND COALESCE(e.date,'') <> '' AND e.date >= ?
+		  AND e.gallons >= ? AND fe.id IS NULL
+		ORDER BY e.date DESC, e.id DESC
+	`).all(sinceDay, FUEL_MATCH_MIN_GALLONS);
+
+	// Hand-typed odometers the ELD contradicts. Read straight off the persisted
+	// join, so they are visible however the sweep last ran — the scheduled path
+	// computes conflicts and throws them away, and the admin GET only detects
+	// FUEL_EVENTS_SCAN_DAYS (10) back, so between them nobody ever saw the two
+	// that exist. Reconciling a typed reading against the machine is the whole
+	// point of the feature; it should not be the one output that never lands.
+	//
+	// DELIBERATELY NOT WINDOWED, unlike the two queues above. Those are work
+	// queues that decay — a 3-month-old missing receipt is history. A wrong
+	// odometer on a finance row is not a queue item; it stays wrong until a human
+	// edits it, and both real ones here are already older than the 45-day window
+	// (2026-05-11 reads 96,538 on a truck at 970,209; 2026-07-01 reads a bare 1).
+	// Windowing this would reproduce the exact blindness it exists to fix.
+	// Bounded anyway so the payload can never run away.
+	//
+	// odometer_source <> 'telemetry' keeps this to readings a PERSON entered: a
+	// value we backfilled ourselves disagreeing with its own episode is a
+	// re-match artifact, not an operator to go ask.
+	const odometerConflicts = db.prepare(`
+		SELECT fe.id, fe.local_day, fe.odometer AS eld_odometer,
+		       e.id AS expense_id, e.date AS receipt_date, e.odometer AS receipt_odometer,
+		       e.date, e.posted_period, e.created_at,
+		       t.unit_number AS unit
+		FROM fuel_events fe
+		JOIN expenses e ON e.id = fe.expense_id
+		JOIN trucks t ON t.routemate_vehicle_id = fe.routemate_vehicle_id
+		WHERE COALESCE(e.odometer, 0) > 0 AND fe.odometer > 0
+		  AND COALESCE(e.odometer_source, '') <> 'telemetry'
+		  AND ABS(e.odometer - fe.odometer) > ?
+		ORDER BY fe.local_day DESC
+		LIMIT 100
+	`).all(FUEL_ODOMETER_CONFLICT_MI);
+
+	// Receipts with no volume at all. Independent of fuel_events — it is a pure
+	// read over expenses — but it rides with the rest of the snapshot so it
+	// inherits the same absent-vs-[] contract and the same flag-off dormancy:
+	// with the sweep never run this whole object is null and the endpoint emits
+	// no reconciliation keys at all, exactly as before.
+	const volumeless = volumelessFuelReceipts();
+
+	return {
+		unmatchedFills: unmatchedFills.map(fuelEventWire),
+		unmatchedReceipts: candidateReceipts.filter((r) => !isDefReceipt(r)).map(fuelReceiptWire),
+		// Same wire vocabulary as the admin endpoint's odometerConflicts, so the
+		// two surfaces cannot disagree about what a conflict looks like.
+		odometerConflicts: odometerConflicts.map((r) => ({
+			id: r.expense_id, expenseId: r.expense_id,
+			localDay: r.local_day, receiptDate: r.receipt_date,
+			unitNumber: r.unit, receiptOdometer: Number(r.receipt_odometer), eldOdometer: r.eld_odometer,
+			// Same helper, same fail-closed rule as the matcher's copy above, so the
+			// two producers of this list cannot disagree about whether a row is
+			// editable.
+			periodLocked: expenseRowPeriodLocked(r),
+		})),
+		volumelessReceipts: volumeless.receipts,
+		volumelessSummary: volumeless.summary,
+	};
+}
+
+// Per-truck tank calibration for the wire, including what the truck is
+// CONFIGURED at so a human can see the disagreement without a second lookup —
+// #33 is configured at 300 gal while its fills imply a sensed span near 117.
+function fuelTankCalibrationWire({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
+	const an = fuelEventsAnalytics({ days });
+	const cfg = {};
+	for (const t of db.prepare(`SELECT routemate_vehicle_id vid, unit_number, fuel_tank_gallons FROM trucks WHERE COALESCE(routemate_vehicle_id,'') <> ''`).all()) cfg[t.vid] = t;
+	return Object.keys(an).map((vid) => {
+		const c = an[vid].calibration;
+		return {
+			vehicleId: vid,
+			unitNumber: an[vid].unit,
+			sampleCount: c.n,
+			impliedGallonsPer100Pct: { median: c.median, min: c.min, max: c.max, p25: c.p25, p75: c.p75 },
+			bimodal: c.bimodal,
+			lowerMode: c.lowerMode ? { sampleCount: c.lowerMode.n, median: c.lowerMode.median, min: c.lowerMode.min, max: c.lowerMode.max } : null,
+			configuredGallons: (cfg[vid] && cfg[vid].fuel_tank_gallons) || null,
+			receiptMpg: an[vid].mpg.mpg,
+			mpgLegCount: an[vid].mpg.legs,
+		};
+	});
+}
+
+// Receipt-derived MPG for one vehicle, for GET /api/fuel/range. Returns null
+// unless there is enough evidence to beat the configured/default value.
+const FUEL_RECEIPT_MPG_MIN_LEGS = 3;
+const FUEL_RECEIPT_MPG_MIN_MILES = 500;
+function receiptMpgForVehicle(vehicleId) {
+	if (!vehicleId) return null;
+	try {
+		const a = fuelEventsAnalytics({ days: FUEL_EVENTS_MATCH_DAYS })[vehicleId];
+		if (!a || !a.mpg || a.mpg.mpg == null) return null;
+		if (a.mpg.legs < FUEL_RECEIPT_MPG_MIN_LEGS || a.mpg.miles < FUEL_RECEIPT_MPG_MIN_MILES) return null;
+		// Same plausible class-8 band the ELD rollup is held to.
+		if (a.mpg.mpg < 3 || a.mpg.mpg > 11) return null;
+		return a.mpg;
+	} catch { return null; }
+}
+
+// The sweep. Detect -> match -> alert once per unmatched fill.
+//
+// `notify` and `markAlerted` are deliberately SEPARATE knobs, because the three
+// callers need three different combinations and folding them into one flag is a
+// live bug:
+//   normal sweep   notify + markAlerted   tell dispatch, once
+//   baseline seed  markAlerted only       stamp history as already-told WITHOUT
+//                                         mailing it; if the seed left
+//                                         alerted_at null "because it didn't
+//                                         notify", the very next sweep six hours
+//                                         later would fire all three months of
+//                                         backfilled gaps — the exact outcome
+//                                         the seed exists to prevent
+//   dryRun         neither                inspect without consuming anything
+async function sweepFuelEvents({ notify = true, markAlerted = true, persist = true, writeReceipts = true,
+	scanDays = FUEL_EVENTS_SCAN_DAYS, matchDays = FUEL_EVENTS_MATCH_DAYS, req = null } = {}) {
+	const { detected, pruned } = detectAndPersistFuelEvents({ days: scanDays, persist });
+	// With persist off nothing reached the table, so the matcher is handed the
+	// in-memory episodes instead — that is what makes the read-only path report
+	// real matches rather than an empty table's worth of nothing.
+	const m = matchFuelEventsToReceipts({
+		days: matchDays, persist, writeReceipts,
+		events: persist ? null : detected,
+	});
+	// The backfill rewrites a column on finance rows. One audit line per batch
+	// (not per row) keeps the trail useful and bounded — PUT /api/expenses/:id/vendor
+	// logs a single vendor edit, so a job touching dozens of receipts should not be
+	// the quiet one.
+	//
+	// ⚠️ An earlier revision of this comment argued the backfill did NOT need the
+	// period lock, on the grounds that odometer appears in no settlement
+	// expression. That was wrong and has been reversed — see fuelBackfillAllowed().
+	// Settlement is not the only thing a closed month has to keep still:
+	// costPerMile and the monthly fuel breakdown read expenses.odometer, so a
+	// write there changes what a historical view reports. The skip count is
+	// carried into the audit line so the trail shows what was WITHHELD as well as
+	// what was written — a lock that leaves no evidence it fired is indistinguishable
+	// from a backfill that silently found nothing to do.
+	if (persist && writeReceipts && (m.backfilled > 0 || m.backfillSkippedLocked > 0)) {
+		logAudit(req || {}, "fuel_odometer_backfill", "expenses", "",
+			`Backfilled odometer from ELD onto ${m.backfilled} fuel receipt(s) across ${m.matched.length} matched refuel episode(s)`
+			+ (m.backfillSkippedLocked > 0
+				// Two reasons, two sentences. Reusing the "finalized" wording for the
+				// unreadable case would assert a close that never happened — the same
+				// defect as the boot log that named live months as finalized.
+				? (m.backfillLockUnreadable
+					? `; WITHHELD all ${m.backfillSkippedLocked} eligible receipt(s) — period_locks could not be read, so no month could be confirmed open`
+					: `; skipped ${m.backfillSkippedLocked} receipt(s) in finalized period(s)`)
+				: ""));
+	}
+	// Loud, and separate from the audit line: an unreadable lock table is a broken
+	// database, not a working guard, and it will otherwise present as "the backfill
+	// silently stopped writing".
+	if (persist && writeReceipts && m.backfillLockUnreadable) {
+		console.warn(`[fuel-events] period_locks could not be read; withheld ALL ${m.backfillSkippedLocked} odometer backfill(s) rather than risk writing into a finalized month.`);
+	}
+
+	fuelEventsHealth.lastDetected = detected.length;
+	fuelEventsHealth.lastPruned = pruned;
+	fuelEventsHealth.lastMatched = m.matched.length;
+	fuelEventsHealth.lastUnmatchedFills = m.unmatchedFills.length;
+	fuelEventsHealth.lastUnmatchedReceipts = m.unmatchedReceipts.length;
+	// ONLY refreshed by a sweep that could actually write. A read-only inspection
+	// (persist:false — the admin GET) never reaches the backfill, so its count is
+	// structurally 0; letting that overwrite the real figure would make the health
+	// block report "0 withheld" moments after 49 were withheld, which is the same
+	// silent-misreport this branch exists to remove.
+	if (persist && writeReceipts) {
+		fuelEventsHealth.lastBackfillSkippedLocked = m.backfillSkippedLocked || 0;
+		fuelEventsHealth.lastBackfillLockUnreadable = !!m.backfillLockUnreadable;
+	}
+
+	// Resolve any previously-alerted fill that has since found its receipt.
+	const stillOpen = new Set(m.unmatchedFills.map((e) => e.routemate_vehicle_id + "@" + e.start_ms));
+	if (persist) {
+		for (const row of db.prepare("SELECT event_key FROM fuel_event_alerts WHERE resolved_at IS NULL").all()) {
+			if (!stillOpen.has(row.event_key)) {
+				db.prepare("UPDATE fuel_event_alerts SET resolved_at = CURRENT_TIMESTAMP WHERE event_key = ?").run(row.event_key);
+			}
+		}
+	}
+
+	// Alert once per fill, never repeat. The repo's own cautionary tale is the 13
+	// ignored "needs a manual check" rate-con emails.
+	const newly = [];
+	for (const e of m.unmatchedFills) {
+		const key = e.routemate_vehicle_id + "@" + e.start_ms;
+		const seen = db.prepare("SELECT event_key, alerted_at FROM fuel_event_alerts WHERE event_key = ?").get(key);
+		if (seen && seen.alerted_at) continue;
+		// `persist` also gates the alert bookkeeping: a read-only run must not
+		// resolve/un-resolve rows in fuel_event_alerts either.
+		if (persist) {
+			db.prepare(
+				`INSERT INTO fuel_event_alerts (event_key, routemate_vehicle_id, local_day, rise_pct, first_seen, alerted_at, resolved_at)
+				 VALUES (?, ?, ?, ?, COALESCE((SELECT first_seen FROM fuel_event_alerts WHERE event_key = ?), CURRENT_TIMESTAMP), ?, NULL)
+				 ON CONFLICT(event_key) DO UPDATE SET alerted_at = excluded.alerted_at, resolved_at = NULL`
+			).run(key, e.routemate_vehicle_id, e.local_day, e.rise, key, markAlerted ? new Date().toISOString() : null);
+		}
+		newly.push(e);
+	}
+
+	if (notify && newly.length) {
+		const body = newly.map((e) => `${e.unit} ${e.local_day} +${e.rise}% @ odo ${Math.round(e.odometer)}`).join("; ");
+		try {
+			insertDispatchNotification.run(
+				"fuel-event-gap",
+				`${newly.length} refuel(s) with no receipt`,
+				body,
+				JSON.stringify({ fills: newly.map((e) => ({ unit: e.unit, day: e.local_day, rise: e.rise, odometer: e.odometer })) }),
+			);
+			io.to("dispatch").emit("dispatch-notification", {
+				type: "fuel-event-gap",
+				title: `${newly.length} refuel(s) with no receipt`,
+				body,
+			});
+		} catch (err) { console.error("[fuel-events] notification failed:", err.message); }
+		console.log(`[fuel-events] ${newly.length} fill(s) with no receipt: ${body}`);
+	}
+
+	return { detected, pruned, ...m, newlyAlerted: newly };
+}
+
+async function maybeSweepFuelEvents() {
+	if (!FUEL_EVENTS_ENABLED || fuelEventsRunning) return;
+	fuelEventsRunning = true;
+	try {
+		const r = await sweepFuelEvents({ notify: true, markAlerted: true });
+		fuelEventsHealth.lastRun = new Date().toISOString();
+		fuelEventsHealth.lastError = null;
+		console.log(`[fuel-events] detected ${r.detected.length}${r.pruned ? `, pruned ${r.pruned} stale` : ""}, matched ${r.matched.length}, ${r.unmatchedFills.length} fill(s) without a receipt, ${r.ambiguous.length} left unmatched as ambiguous`);
+	} catch (e) {
+		fuelEventsHealth.lastError = e.message;
+		console.error("[fuel-events] failed:", e.message);
+	} finally {
+		fuelEventsRunning = false;
+	}
+}
+
+if (FUEL_EVENTS_ENABLED) {
+	setInterval(() => { maybeSweepFuelEvents().catch(() => {}); }, FUEL_EVENTS_INTERVAL_MS);
+	setTimeout(() => { fuelEventsBaselineSeed().catch(() => {}); }, 3 * 60 * 1000);
+	console.log(`[fuel-events] enabled — every 6h; detect ${FUEL_EVENTS_SCAN_DAYS}d, match ${FUEL_EVENTS_MATCH_DAYS}d`);
+}
+
+// Boot catch-up. On the FIRST run only it sweeps the whole retained telemetry
+// window; on every subsequent boot it is an ordinary rolling sweep.
+//
+// That distinction is a latency fix, not a tidiness one. better-sqlite3 is
+// synchronous, so the scan blocks the event loop outright: ~900 ms for 95 days
+// (125k samples) against ~140 ms for 10. The documented deploy flow pm2-restarts
+// this process during business hours, so an unconditional 95-day scan froze every
+// HTTP request and every Socket.IO frame for about a second on each deploy — and
+// re-derived, on each one, episodes that were already in the table.
+//
+// First-run scope is deliberate the other way: 95 days > the 90 the telemetry
+// purge retains, so the one chance to recover historical episodes is taken in
+// full, and matched across the same window (backfilling 95 days of episodes but
+// matching only the last 45 would leave every older receipt without the odometer
+// this feature exists to give it, with nothing to revisit them).
+//
+// Alerting is suppressed on that first run: waking up to three months of "no
+// receipt" notifications is how an alert channel dies. markAlerted still stamps
+// them, so only genuinely NEW gaps ever notify.
+async function fuelEventsBaselineSeed() {
+	try {
+		const firstEver = db.prepare("SELECT COUNT(*) AS n FROM fuel_event_alerts").get().n === 0;
+		const span = firstEver ? FUEL_EVENTS_BACKFILL_DAYS : FUEL_EVENTS_SCAN_DAYS;
+		const r = await sweepFuelEvents({
+			notify: !firstEver, markAlerted: true,
+			scanDays: span,
+			matchDays: firstEver ? FUEL_EVENTS_BACKFILL_DAYS : FUEL_EVENTS_MATCH_DAYS,
+		});
+		console.log(`[fuel-events] boot sweep (${span}d): ${r.detected.length} episode(s), ${r.matched.length} matched${r.pruned ? `, ${r.pruned} stale episode(s) pruned` : ""}${firstEver ? `, ${r.newlyAlerted.length} historical gap(s) seeded silently` : ""}`);
+	} catch (e) {
+		fuelEventsHealth.lastError = e.message;
+		console.error("[fuel-events] boot sweep failed:", e.message);
+	}
+}
+
+// Each call re-scans telemetry synchronously (~140 ms of blocked event loop for
+// the rolling window, more for a backfill) and there is no cheaper way to ask
+// the question. Same reasoning as expenseOcrLimiter/poiLimiter: the limiter is
+// the ceiling on what a refresh-loop — or a page an admin was tricked into
+// opening — can cost the whole fleet.
+const fuelEventsLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 20,
+	message: { error: "Too many fuel-event runs. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// Fuel-event sweep, Super Admin only, split across two verbs.
+//
+//   GET  /api/admin/fuel-events      ALWAYS a dry run. Detects and matches in
+//                                    memory and returns the full result, but
+//                                    writes nothing — not fuel_events, not
+//                                    expenses, not an alert row.
+//   POST /api/admin/fuel-events/run  The real sweep. Requires FUEL_EVENTS_ENABLED.
+//
+// The split is a safety property, not REST tidiness. Three things converge on
+// the old single GET: `writeReceipts` defaulted to true, so a Super Admin merely
+// opening the URL with no query string ran a full backfill against `expenses` on
+// a box where the feature was supposed to be dormant; the session cookie is
+// SameSite=None in production with no CSRF token, so any page an admin visits
+// could fire that GET via an <img> tag and land the write (CORS hides the
+// response, not the effect); and `?dryRun=true` was decided by
+// `String(req.query.dryRun)`, which the qs parser turns into "true,true" for a
+// duplicated param — failing OPEN into the live write.
+//
+// A GET that cannot write is immune to all three. The mutating path is a POST,
+// which a cross-site form cannot send as JSON without a preflight the CORS
+// allowlist rejects, and it is additionally gated on the kill switch so "ships
+// dormant" is true of the HTTP surface too, not just the scheduler.
+function fuelEventsPayload(r, { dryRun }) {
+	return {
+		enabled: FUEL_EVENTS_ENABLED,
+		dryRun,
+		scanDays: FUEL_EVENTS_SCAN_DAYS,
+		matchDays: FUEL_EVENTS_MATCH_DAYS,
+		// Every localDay below is a HOUSTON (America/Chicago) business day;
+		// every *Ms field is epoch milliseconds UTC.
+		timezone: "America/Chicago",
+		detected: r.detected.length,
+		// Stale rows the re-detect removed. Always 0 on the dry run, which persists
+		// nothing — so a non-zero value here is proof a real sweep cleaned up.
+		episodesPruned: r.pruned || 0,
+		odometersBackfilled: r.backfilled || 0,
+		// Odometers the ELD had, that a locked month refused. Sits next to the
+		// count that DID land so the pair reads as one sentence: N written, M held
+		// back because their periods are closed.
+		odometersSkippedLockedPeriod: r.backfillSkippedLocked || 0,
+		// ...unless the lock table itself could not be read, in which case the
+		// count above is EVERY eligible receipt and the months involved are not
+		// necessarily closed at all. Reported as its own flag so a reader is never
+		// left inferring "finalized" from a skip count.
+		odometersWithheldLockUnreadable: !!r.backfillLockUnreadable,
+		matched: r.matched.map((m) => ({
+			...fuelEventWire({ ...m.e, rise: m.e.rise }),
+			// m.r.odometer is the value the receipt carried BEFORE this sweep
+			// backfilled anything (receipts are SELECTed ahead of the UPDATE), so
+			// it is the one field that can still tell a typed reading from a
+			// derived one. That distinction has to travel with the number: the UI
+			// puts a provenance chip on it, and without the chip a system-derived
+			// odometer reads as something the driver wrote down.
+			odometer: Number(m.r.odometer) > 0 ? Number(m.r.odometer) : (m.e.odometer || null),
+			odometerSource: Number(m.r.odometer) > 0 ? "receipt" : "telemetry",
+			eldOdometer: m.e.odometer || null,
+			...fuelReceiptWire(m.r),
+			// fuelReceiptWire sets localDay to the RECEIPT's printed date; the
+			// episode's Houston day is the authoritative one for this row, so it
+			// is restored here and the receipt's own date kept separately.
+			localDay: m.e.local_day,
+			receiptDate: m.r.date,
+			matchBasis: m.dayOff === 0 ? "exact_day" : "adjacent_day",
+			distanceKm: m.distKm === null ? null : Math.round(m.distKm * 10) / 10,
+			impliedGallonsPer100Pct: Math.round(m.implied * 10) / 10,
+		})),
+		unmatchedFills: r.unmatchedFills.map(fuelEventWire),
+		unmatchedReceipts: r.unmatchedReceipts.map(fuelReceiptWire),
+		ambiguous: r.ambiguous.map((c) => ({
+			...fuelEventWire(c.e),
+			id: c.r.id, truckUnit: c.r.truck_unit, gallons: c.r.gallons,
+			impliedGallonsPer100Pct: Math.round(c.implied * 10) / 10,
+		})),
+		odometerConflicts: r.odometerConflicts,
+		// Same two keys, same shape, same helper as /api/expenses/fuel-analytics —
+		// so the admin inspection surface and the panel cannot disagree about which
+		// receipts are missing their gallons. Safe on the dry run too: unlike
+		// tankCalibration this reads `expenses`, not the persisted episodes, so it
+		// is fully populated whether or not the sweep wrote anything.
+		...(() => {
+			const v = volumelessFuelReceipts();
+			return { volumelessReceipts: v.receipts, volumelessSummary: v.summary };
+		})(),
+		// Only meaningful off persisted rows; a dry run has not written any.
+		tankCalibration: dryRun ? [] : fuelTankCalibrationWire(),
+		health: fuelEventsHealth,
+	};
+}
+
+// requireRole BEFORE the limiter on both verbs. Mounted the other way round, an
+// unauthenticated caller spends the 20/15-min budget on 403s and can lock the
+// Super Admin out of an admin-only maintenance route — the stranger pays nothing
+// and the only legitimate user pays everything. The repo's other limiters sit
+// ahead of their guard because they front public or near-public surfaces, where
+// the limiter IS the outer defence; here the role check is the cheaper gate and
+// the budget is worth protecting for the one role that can use it.
+app.get("/api/admin/fuel-events", requireRole("Super Admin"), fuelEventsLimiter, async (req, res) => {
+	try {
+		// persist:false makes this structurally read-only — there is no query
+		// parameter that can turn it into a write.
+		const r = await sweepFuelEvents({ notify: false, markAlerted: false, persist: false, writeReceipts: false });
+		res.json(fuelEventsPayload(r, { dryRun: true }));
+	} catch (error) {
+		console.error("[fuel-events] dry run failed:", error.message);
+		res.status(500).json({ error: "Fuel event inspection failed" });
+	}
+});
+
+app.post("/api/admin/fuel-events/run", requireRole("Super Admin"), fuelEventsLimiter, async (req, res) => {
+	if (!FUEL_EVENTS_ENABLED) {
+		return res.status(503).json({ error: "FUEL_EVENTS_ENABLED is not set — the sweep is dormant on this server" });
+	}
+	if (fuelEventsRunning) return res.status(409).json({ error: "A fuel-event sweep is already running" });
+	fuelEventsRunning = true;
+	try {
+		const r = await sweepFuelEvents({ notify: true, markAlerted: true, req });
+		fuelEventsHealth.lastRun = new Date().toISOString();
+		fuelEventsHealth.lastError = null;
+		res.json(fuelEventsPayload(r, { dryRun: false }));
+	} catch (error) {
+		fuelEventsHealth.lastError = error.message;
+		console.error("[fuel-events] manual run failed:", error.message);
+		res.status(500).json({ error: "Fuel event sweep failed" });
+	} finally {
+		fuelEventsRunning = false;
 	}
 });
 
@@ -8800,9 +10307,29 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		console.error("/api/trucks: job tracking fetch failed:", err.message);
 	}
 
+	// Live odometer, DERIVED from the latest clean ELD fix — deliberately not a
+	// trucks column. A stored mileage is stale the moment the truck moves, and
+	// nothing in the app would ever refresh it; the ELD reports one on
+	// 912,842 of 912,842 telemetry rows, so the authoritative value is already
+	// here. Trucks with no ELD link resolve to null (the UI shows "—"), never 0:
+	// 3 of the 6 trucks are unlinked and "0 miles" would read as a brand-new
+	// truck rather than "not instrumented".
+	// One indexed lookup per linked truck (idx_rm_tel_clean covers
+	// vehicle+clean+id DESC), so this is O(1) each and at most a handful.
+	const odoStmt = db.prepare(`
+		SELECT odometer, location_date_ms FROM routemate_telemetry
+		WHERE routemate_vehicle_id = ? AND dropped_reason = '' AND odometer > 0
+		ORDER BY id DESC LIMIT 1
+	`);
+	const odoByVid = {};
+	for (const vid of new Set(rows.map((t) => t.routemate_vehicle_id).filter(Boolean))) {
+		try { odoByVid[vid] = odoStmt.get(vid) || null; } catch { odoByVid[vid] = null; }
+	}
+
 	const trucks = rows.map((t) => {
 		const unitLower = (t.unit_number || "").toLowerCase();
 		const driverLower = normalizeDriverName(t.assigned_driver);
+		const odo = t.routemate_vehicle_id ? odoByVid[t.routemate_vehicle_id] : null;
 		const directCount = loadsByTruck[unitLower];
 		const loadCount = (directCount !== undefined)
 			? directCount
@@ -8841,6 +10368,9 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			AvgMpg: t.avg_mpg || 0,
 			LoadCount: loadCount,
 			RoutemateVehicleId: t.routemate_vehicle_id || '',
+			// null (not 0) when the truck has no ELD link or no fix yet — see above.
+			Odometer: odo && odo.odometer > 0 ? Math.round(odo.odometer) : null,
+			OdometerAt: odo && odo.location_date_ms ? new Date(odo.location_date_ms).toISOString() : null,
 		};
 	});
 	res.json({ trucks });
@@ -12466,7 +13996,43 @@ function sheetDayKey(val) {
 	// ISO first — the US M/D/Y branch below would misread "2026-05-13" as May 13 2020.
 	const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?)?/i);
 	if (iso) {
-		return `${iso[1]}-${p2(iso[2])}-${p2(iso[3])}`;
+		const literal = `${iso[1]}-${p2(iso[2])}-${p2(iso[3])}`;
+		// A TRAILING OFFSET makes the string an instant, not a wall clock, so its
+		// date part is only the right day for a reader sitting in that offset.
+		// Reading it literally is wrong, and wrong in the underpay direction: `Z`
+		// is what toISOString() emits, and a 19:16 Houston Friday serializes as
+		// "…-08-08T00:16:37.000Z". This helper decides the invoice week, so that
+		// load silently leaves the week it was worked and nobody is short-paid
+		// loudly enough to notice. Convert to the Houston business day, which is
+		// what every other date in the money path already means.
+		//
+		// NOTHING WRITING THIS COLUMN EMITS `Z` TODAY — this is latent, not live.
+		// It is fixed anyway because the failure is silent, in money, and the fix
+		// costs one branch.
+		//
+		// No offset stays byte-identical: a bare "YYYY-MM-DD", or a naive
+		// "…T20:16:37" with no zone, has nothing to convert FROM. Those are the
+		// overwhelming majority of real values and they are correct as-is.
+		//
+		// WHY THE RFC 2822 BRANCH BELOW STAYS LITERAL EVEN THOUGH IT ALSO CARRIES
+		// AN OFFSET — the obvious inconsistency, and it is deliberate. That shape
+		// is the pre-cutover stamp on delivered rows, and its evening values were
+		// ALREADY SETTLED on the day the cell shows; converting them now would
+		// restate closed months, which the client has ruled out ("if it is already
+		// closed and locked by the month then follow that date"). The `Z` shape has
+		// no such history: of the 69 `Z` values in the sheet (all `Assigned Date`,
+		// May–Nov 2025) every one lands 11:00–22:00 UTC, i.e. 05:00–17:00 Houston,
+		// so not one has ever fallen in the 00:00–05:59 UTC window where the day
+		// flips. Nothing was settled on the wrong day, so fixing it restates
+		// nothing — it only stops the next `Z` writer from being wrong.
+		const offset = iso[7];
+		if (!offset) return literal;
+		// "-0500" -> "-05:00"; Date's ISO parsing wants the colon form.
+		const tz = /^[+-]\d{4}$/.test(offset) ? `${offset.slice(0, 3)}:${offset.slice(3)}` : offset.toUpperCase();
+		const at = new Date(`${literal}T${p2(iso[4])}:${iso[5]}:${iso[6] ? p2(iso[6]) : "00"}${tz}`);
+		// Degrade to the literal day, never to "". An unparseable oddity must not
+		// turn a dated row into an undated one on a path that pays people.
+		return Number.isNaN(at.getTime()) ? literal : houstonDay(at);
 	}
 
 	const us = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:,?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i);
@@ -13880,8 +15446,19 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// Always the current month, never a future one: posting forward would drop
 		// the expense into a period with no earnings row to absorb it and break the
 		// ledger's paid+processing+owed+accruing == earned+adjustments identity.
+		//
+		// periodWriteLocked, not isLocked: on an unreadable lock table isLocked
+		// answers "open" for every month, so the redirect silently stops happening
+		// and late receipts book straight into closed periods — the same fail-open
+		// as the odometer backfill, on the row itself rather than one column of it.
+		// Failing closed here costs nothing anyone loses: the receipt is still
+		// written, at its true `date`, just booked to the current open month, which
+		// is the reversible direction. The `!== openPeriod` test keeps that from
+		// degenerating into stamping every receipt with its own month.
 		const naturalPeriod = String(date || "").slice(0, 7);
-		const postedPeriod = naturalPeriod && isLocked(naturalPeriod) ? currentMonthKeyCT() : "";
+		const openPeriod = currentMonthKeyCT();
+		const lockUnreadable = !periodLocksReadable();
+		const postedPeriod = naturalPeriod && naturalPeriod !== openPeriod && periodWriteLocked(naturalPeriod) ? openPeriod : "";
 
 		const result = db
 			.prepare(
@@ -13897,7 +15474,11 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// between months. Also on the audit trail: this is a settlement decision.
 		if (postedPeriod) {
 			logAudit(req, "expense_posted_to_open_period", "expense", String(result.lastInsertRowid),
-				`Receipt dated ${date} — ${naturalPeriod} is finalized, booked to ${postedPeriod} ($${parsedAmount}, ${driver})`);
+				`Receipt dated ${date} — ${naturalPeriod} ${lockUnreadable
+					// Never say "finalized" about a month we could not look up. The
+					// redirect is right either way; the REASON is a different fact.
+					? "could not be confirmed open (period_locks unreadable)"
+					: "is finalized"}, booked to ${postedPeriod} ($${parsedAmount}, ${driver})`);
 		}
 		if (overrodeDuplicateOf) {
 			logAudit(req, "expense_duplicate_override", "expense", String(result.lastInsertRowid),
@@ -13907,7 +15488,13 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		res.json({
 			success: true,
 			id: result.lastInsertRowid,
-			...(postedPeriod ? { postedPeriod, naturalPeriod, periodClosed: true } : {}),
+			// periodClosed stays reserved for a month we actually READ as closed —
+			// the client turns it into "March is closed, so it was booked to August",
+			// which must not be said about a month whose lock state is unknown. The
+			// unreadable case reports the redirect without the claim; the client's
+			// `periodClosed && postedPeriod` test then falls through to its plain
+			// confirmation rather than printing something false.
+			...(postedPeriod ? { postedPeriod, naturalPeriod, periodClosed: !lockUnreadable, periodLockUnreadable: lockUnreadable } : {}),
 		});
 	} catch (error) {
 		console.error("Error logging expense:", error.message);
@@ -18611,10 +20198,34 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 		// "was fuel_tank_gallons configured?" is exactly the kind of quiet drift the
 		// field was added to prevent.
 		const avgMpgCfg = truck && truck.avg_mpg > 0 ? Math.round(truck.avg_mpg * 100) / 100 : 0;
-		// Trust the ELD-derived MPG only in a plausible class-8 band (3–11 mpg);
-		// anything outside is contaminated telemetry (heavy idle, sensor noise) →
-		// fall back to the configured/default MPG rather than show a nonsense range.
-		if (rollupMpg >= 3 && rollupMpg <= 11) {
+		// Receipt-derived MPG wins when we have it: ELD odometer for the miles and
+		// the actual PUMP receipt for the gallons, so no fuel_pct and no tank-size
+		// guess anywhere in the chain.
+		//
+		// This is not a refinement of the rollup, it replaces a broken number.
+		// rollupOneDay() estimates gallons by summing the NEGATIVE deltas of a
+		// bouncing fuel sender; measured on this fleet, the daily drops roughly
+		// equal the daily rises (#2372 on 8/4: 188 points down, 198 up), so it
+		// roughly doubles consumption and then some — it has booked 856 gallons
+		// burned in one day, and 484 on a truck whose tank is configured at 300.
+		// That is where the 1.05–2.45 mpg currently shown to drivers comes from.
+		// Note deriveMpg() in lib/fuel-model.js is NOT the culprit: it rejects
+		// implausible values correctly and is simply overwritten here.
+		//
+		// 'receipts' is a NEW mpgSource value rather than reusing 'eld'. Different
+		// provenance deserves a different label, and this pair of *Source fields
+		// exists precisely because an unlabelled default already shipped a wrong
+		// number to drivers once. Clients that only know 'eld'/'default' must treat
+		// an unknown source as "not verified" — FuelFinderPanel/DriverFuelPanel
+		// already compare === 'eld', so they degrade to the plain badge.
+		const receiptMpg = receiptMpgForVehicle(vehicleId);
+		if (receiptMpg) {
+			estimate.mpg = receiptMpg.mpg;
+			estimate.mpgSource = "receipts";
+		} else if (rollupMpg >= 3 && rollupMpg <= 11) {
+			// Trust the ELD-derived MPG only in a plausible class-8 band (3–11 mpg);
+			// anything outside is contaminated telemetry (heavy idle, sensor noise) →
+			// fall back to the configured/default MPG rather than show a nonsense range.
 			estimate.mpg = rollupMpg;
 			estimate.mpgSource = "eld";
 		} else if (avgMpgCfg > 0) {
@@ -19852,9 +21463,22 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 			} else if (
 				existing.status === "owed" &&
 				!existing.finalized_at &&        // per-row: a month already settled on a published statement stays settled
-				!isLocked(m.month) &&            // fleet-wide: the period itself is closed
+				!periodWriteLocked(m.month) &&   // fleet-wide: the period itself is closed
 				existing.amount !== amount
 			) {
+				// periodWriteLocked, not isLocked. This one guard is what the entire
+				// month-close rests on — it is the line that freezes a settled figure
+				// against all six drift sources — and isLocked() answers "not locked"
+				// on ANY error, so an unreadable period_locks table silently re-opens
+				// every finalized month to drift, on a page GET, with no log. Failing
+				// closed instead leaves the stored amount exactly where it is, which
+				// is the same thing a working lock does.
+				//
+				// The sibling stamp above deliberately still uses isLocked(): fail-
+				// closed there would stamp finalized_at on rows in months that may be
+				// open, freezing payouts that should still be moving. It does not need
+				// the change either — with this refresh guard closed, an unstamped row
+				// cannot drift anyway.
 				// Refresh amount ONLY while the month is genuinely still open:
 				// still 'owed' AND not finalized. This is what lets a straggler
 				// receipt land in the prior month by itself during the grace window
@@ -22000,6 +23624,19 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 				})),
 			].filter((v, i, a) => a.findIndex((x) => x.period === v.period) === i)
 				.sort((a, b) => (a.period < b.period ? 1 : -1)),
+			// Work the period lock REFUSED, surfaced where an admin is already
+			// deciding whether to reopen a month. The boot backfill will not write
+			// truck_unit/owner_id into a finalized period, so a non-zero count here
+			// means N legacy receipts are unattributed to any investor until someone
+			// reopens the listed periods. Zero on every current deployment; present
+			// so the condition can never accumulate silently.
+			legacyExpenseBackfill: {
+				ranAt: legacyExpenseBackfillHealth.ranAt,
+				applied: legacyExpenseBackfillHealth.pass1 + legacyExpenseBackfillHealth.pass2,
+				skippedLockedPeriod: legacyExpenseBackfillHealth.skippedLockedPeriod,
+				skippedPeriods: [...legacyExpenseBackfillHealth.skippedPeriods].sort(),
+				error: legacyExpenseBackfillHealth.error,
+			},
 		});
 	} catch (err) {
 		console.error("GET /api/periods error:", err.message);
@@ -22024,7 +23661,7 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), async (req
 				code: "PERIOD_ACCRUING",
 			});
 		}
-		const existing = periodLockStmt.get(period);
+		const existing = periodLockStmt().get(period);
 		if (existing && existing.status === "locked") {
 			return res.status(409).json({ error: `${periodLabel(period)} is already finalized.`, code: "ALREADY_FINALIZED" });
 		}
@@ -23619,11 +25256,23 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 		// months at once. Unlike a receipt arriving late, an approve/reject is
 		// discretionary and has no deadline, so refusing is safe: do it before the
 		// period closes, or book the correction as a payout adjustment.
+		//
+		// periodWriteLocked, not isLocked: an unreadable lock table makes every
+		// month answer "open", which turns this guard off without a trace. The
+		// paragraph above is also the justification for failing closed — a status
+		// flip has no deadline, so refusing one until the lock table can be read
+		// costs a retry, while permitting it can restate a month whose statement
+		// has already been issued.
 		const expPeriod = expensePostedPeriod(expense);
-		if (isLocked(expPeriod)) {
+		if (periodWriteLocked(expPeriod)) {
+			const unreadable = !periodLocksReadable();
 			return res.status(409).json({
-				error: `This expense is booked to ${periodLabel(expPeriod)}, which is finalized. Reopen the period, or record the correction as a payout adjustment.`,
-				code: "PERIOD_FINALIZED",
+				// Two causes, two sentences, two remedies — "reopen the period" is
+				// useless advice when the period_locks table itself is the problem.
+				error: unreadable
+					? "The period lock table could not be read, so this expense's month cannot be confirmed open. Status changes are held until that is fixed."
+					: `This expense is booked to ${periodLabel(expPeriod)}, which is finalized. Reopen the period, or record the correction as a payout adjustment.`,
+				code: unreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_FINALIZED",
 				period: expPeriod,
 			});
 		}
@@ -23737,11 +25386,18 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 		// wholesale because two rows sit in a closed month. Update what's open,
 		// report what wasn't, and name the periods — a silent skip on a bulk
 		// approve reads as "all done" when it wasn't.
+		//
+		// Readability is probed ONCE for the batch — the answer cannot change
+		// mid-loop, and on a broken table a per-row probe re-compiles a failing
+		// statement for every id. Same fail-closed rule as the single-row route:
+		// with the lock table unreadable, no row is confirmed open, so none is
+		// flipped.
+		const lockReadable = periodLocksReadable();
 		const lockedRows = [];
 		const existingIds = [];
 		for (const e of existing) {
 			const p = expensePostedPeriod(e);
-			if (isLocked(p)) lockedRows.push({ id: e.id, period: p });
+			if (!lockReadable || isLocked(p)) lockedRows.push({ id: e.id, period: p });
 			else existingIds.push(e.id);
 		}
 
@@ -23761,8 +25417,16 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 			skipped: numericIds.length - existing.length,
 			...(lockedRows.length ? {
 				skippedFinalized: lockedRows.length,
-				finalizedPeriods: lockedPeriods,
-				message: `${changed} updated. ${lockedRows.length} skipped — ${lockedPeriods.map(periodLabel).join(", ")} ${lockedPeriods.length === 1 ? "is" : "are"} finalized.`,
+				// Named `finalizedPeriods` for the existing client, but only populated
+				// when they really are finalized: with the lock table unreadable these
+				// are just the months the withheld rows happen to fall in, and their
+				// lock state is unknown. Calling them finalized would report a
+				// month-end that never happened.
+				finalizedPeriods: lockReadable ? lockedPeriods : [],
+				...(lockReadable ? {} : { periodLockUnreadable: true }),
+				message: lockReadable
+					? `${changed} updated. ${lockedRows.length} skipped — ${lockedPeriods.map(periodLabel).join(", ")} ${lockedPeriods.length === 1 ? "is" : "are"} finalized.`
+					: `${changed} updated. ${lockedRows.length} skipped — the period lock table could not be read, so no month could be confirmed open.`,
 			} : {}),
 		});
 	} catch (err) {
@@ -23788,15 +25452,143 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 		const totalGallons = fuelExpenses.reduce((s, e) => s + (e.gallons || 0), 0);
 		const avgCostPerGallon = totalGallons > 0 ? totalFuelSpend / totalGallons : 0;
 
-		// Odometer-based cost per mile
-		const withOdometer = fuelExpenses.filter((e) => e.odometer > 0);
-		let costPerMile = 0;
-		if (withOdometer.length >= 2) {
-			const sorted = [...withOdometer].sort((a, b) => a.odometer - b.odometer);
-			const totalMiles = sorted[sorted.length - 1].odometer - sorted[0].odometer;
-			const milesSpend = sorted.reduce((s, e) => s + (e.amount || 0), 0);
-			costPerMile = totalMiles > 0 ? milesSpend / totalMiles : 0;
+		// Odometer provenance, read from the stored expenses.odometer_source column
+		// the backfill stamps — NOT inferred by comparing the receipt's odometer to
+		// its linked episode's. The inference is wrong in a case that really
+		// happens: the re-match pass clears and rebuilds links every sweep while the
+		// odometer backfill is write-once and never cleared, so an episode that
+		// later loses its match would leave a system-written number with no link,
+		// and the comparison would report it as hand-typed. The UI prints a
+		// "receipt" vs "ELD" chip off this value and shows NO chip when it is null,
+		// so getting it wrong puts a derived number on the paper.
+		//
+		// A row with an odometer but no stamp predates the backfill, which means a
+		// person entered it.
+		const odometerSourceFor = (e) => {
+			if (!(e.odometer > 0)) return null;                        // nothing to attribute
+			return e.odometer_source === "telemetry" ? "telemetry" : "receipt";
+		};
+
+		// Odometer-based cost per mile.
+		//
+		// ⚠️ CHANGED 2026-08-07, and the number on screen will move. This used to
+		// take (max odometer − min odometer) across ALL fuel receipts, fleet-wide.
+		// That was survivable only because exactly 2 of 126 receipts carried an
+		// odometer, so it was really (96538 − 1) — one junk reading minus another —
+		// divided into two receipts' spend, i.e. $0.00/mi. Now that matched
+		// receipts get a real odometer backfilled from the ELD, the same formula
+		// would subtract one truck's mileage from another's (#302 reads ~82k, #33
+		// ~865k, #2372 ~993k) and print a confident, meaningless number.
+		//
+		// Two guards, and BOTH are needed:
+		//   1. Group by truck, so a span is always one truck's own mileage.
+		//   2. Use only odometers we can vouch for. A bare sanity floor is not
+		//      enough: the junk 96538 on a truck that actually reads 992938 clears
+		//      any floor and, being the minimum, inflates that truck's span by
+		//      ~896,000 miles on its own.
+		//
+		// ⚠️ HOW GUARD 2 IS DECIDED CHANGED 2026-08-07, and the reason matters more
+		// than the rule. It used to reject a hand-typed reading when a fuel_events
+		// row LINKED to that receipt — i.e. "an episode contradicts it". That test
+		// depended on sweep history, not on the data:
+		//   · the link for receipt #31 is ~88 days old, so the rolling 45-day match
+		//     window never re-creates it, and the matcher CLEARS links inside its
+		//     window on every run;
+		//   · so the exclusion rested entirely on a one-time 95-day first-run
+		//     backfill, and evaporated whenever the seed had not run (deploy day),
+		//     `firstEver` was false because fuel_event_alerts was non-empty, someone
+		//     called POST /api/admin/fuel-events/run (45 days by default), or
+		//     fuel_events was emptied — which is exactly what a DB restore does.
+		// Two agents measured the SAME database as $0.32/mi and $0.00/mi purely on
+		// which sweep had run: 19,425 mi vs 897,010 mi of basis. A figure on a
+		// finance page cannot depend on that.
+		//
+		// The rule now is a PHYSICAL PLAUSIBILITY BOUND, which needs no history at
+		// all: a truck's odometer cannot move faster than a truck can be driven, so
+		// two readings are mutually consistent only if their difference fits in the
+		// days between them. Chosen over "contradict against a nearby episode"
+		// precisely because it still holds with fuel_events EMPTY. Consequence, and
+		// it is the point: cost/mile is now a pure function of the `expenses` rows
+		// (odometer, odometer_source, date, truck_unit) — the same data yields the
+		// same figure no matter what has swept before, and fuel_events is not read
+		// here at all.
+		//
+		// The bound is deliberately loose — an order of magnitude above real duty
+		// cycles — because it exists to catch a junk reading (96,538 against
+		// 992,265: 10× out), not to audit hard miles. 1200 mi/day is a team-driven
+		// ceiling; solo runs ~700 under HOS. The +1 day is the same-day allowance:
+		// two fills on one calendar date can legitimately be a full day's driving
+		// apart, so a same-day pair gets a whole day's slack rather than zero.
+		const ODOMETER_SANITY_FLOOR = 1000;
+		const ODO_MAX_MILES_PER_DAY = 1200;
+		const odoDay = (s) => {
+			const t = Date.parse(String(s || "").slice(0, 10) + "T12:00:00Z");
+			return Number.isFinite(t) ? t / 86400000 : null;
+		};
+		const odoPlausibleGap = (dayA, dayB) =>
+			ODO_MAX_MILES_PER_DAY * (Math.abs(dayA - dayB) + 1);
+		// Symmetric on purpose: which of two readings is "wrong" is not knowable
+		// from the pair, only that they cannot both belong to one odometer.
+		const odoConsistent = (a, b) =>
+			Math.abs(a.odo - b.odo) <= odoPlausibleGap(a.day, b.day);
+
+		const readingsByTruck = {};
+		for (const e of fuelExpenses) {
+			const unit = String(e.truck_unit || "").trim().toLowerCase();
+			const day = odoDay(e.date);
+			// A reading with no usable date cannot be placed on the truck's timeline,
+			// so it cannot be checked and does not contribute a span.
+			if (!unit || day === null || !(e.odometer > ODOMETER_SANITY_FLOOR)) continue;
+			(readingsByTruck[unit] = readingsByTruck[unit] || []).push({
+				odo: Number(e.odometer), day, spend: e.amount || 0,
+				telemetry: odometerSourceFor(e) === "telemetry",
+			});
 		}
+
+		let cpmMiles = 0, cpmSpend = 0, cpmTrucks = 0;
+		let odoReadingsRejected = 0, cpmTrucksExcluded = 0;
+		for (const unit of Object.keys(readingsByTruck)) {
+			const rows = readingsByTruck[unit];
+			// ELD-stamped readings anchor the timeline: they come off the vehicle bus,
+			// and odometer_source is a STORED column the backfill writes once and
+			// never clears, so the anchor survives a fuel_events wipe that the old
+			// link-based test did not.
+			const anchors = rows.filter((r) => r.telemetry);
+			let kept;
+			if (anchors.length) {
+				kept = rows.filter((r) => r.telemetry || anchors.every((a) => odoConsistent(r, a)));
+			} else {
+				// No ELD reading to anchor on, so fall back to consensus among the
+				// typed ones: keep the readings that agree with the most others. Two
+				// readings that disagree both score 0, both survive, and the span
+				// backstop below then throws the truck out — which is the honest
+				// answer, because nothing in the data says which one is wrong.
+				const scored = rows.map((r) => ({ r, agree: rows.filter((o) => o !== r && odoConsistent(r, o)).length }));
+				const best = Math.max(...scored.map((s) => s.agree));
+				kept = scored.filter((s) => s.agree === best).map((s) => s.r);
+			}
+			odoReadingsRejected += rows.length - kept.length;
+			if (kept.length < 2) continue;
+
+			let lo = Infinity, hi = -Infinity, loDay = 0, hiDay = 0, spend = 0;
+			for (const r of kept) {
+				if (r.odo < lo) { lo = r.odo; loDay = r.day; }
+				if (r.odo > hi) { hi = r.odo; hiDay = r.day; }
+				spend += r.spend;
+			}
+			if (!(hi > lo)) continue;
+			// BACKSTOP. Whatever survived above still has to describe a span a truck
+			// could actually have driven — including an all-telemetry set, because an
+			// ELD odometer can glitch too and "trusted source" is not the same as
+			// "checked". A truck that fails here contributes NOTHING rather than a
+			// plausible-looking wrong number; the exclusion is visible in
+			// costPerMileBasis instead of being buried in the average.
+			if (hi - lo > odoPlausibleGap(hiDay, loDay)) { cpmTrucksExcluded++; continue; }
+			cpmMiles += hi - lo;
+			cpmSpend += spend;
+			cpmTrucks++;
+		}
+		const costPerMile = cpmMiles > 0 ? cpmSpend / cpmMiles : 0;
 
 		// Monthly breakdown
 		const monthly = {};
@@ -23832,11 +25624,21 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 			? Math.round(((nationalAvg - actualAvg) / nationalAvg) * 10000) / 100
 			: 0;
 
+		const reconciliation = fuelReconciliationSnapshot();
+
 		res.json({
 			totalFuelSpend: Math.round(totalFuelSpend),
 			totalGallons: Math.round(totalGallons * 10) / 10,
 			avgCostPerGallon: Math.round(avgCostPerGallon * 100) / 100,
 			costPerMile: Math.round(costPerMile * 100) / 100,
+			// What the cost/mile is actually built from, so a reader can tell a real
+			// figure from one resting on two receipts. The two rejection counts are
+			// on the wire for the same reason the withheld-odometer count is: a guard
+			// that silently shrinks the basis is indistinguishable from thin data.
+			costPerMileBasis: {
+				trucks: cpmTrucks, miles: Math.round(cpmMiles), spend: Math.round(cpmSpend),
+				readingsRejected: odoReadingsRejected, trucksExcluded: cpmTrucksExcluded,
+			},
 			savingsTarget,
 			savingsVsNational,
 			onTarget: savingsVsNational >= savingsTarget,
@@ -23844,9 +25646,34 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 			byDriver,
 			recentFills: fuelExpenses.slice(0, 20).map((e) => ({
 				id: e.id, driver: e.driver, amount: e.amount,
-				gallons: e.gallons, odometer: e.odometer,
+				gallons: e.gallons,
+				odometer: e.odometer > 0 ? e.odometer : null,
+				// Always present, explicitly null when unknown — see above.
+				odometerSource: odometerSourceFor(e),
+				truckUnit: e.truck_unit || "",
 				date: e.date, loadId: e.load_id,
 			})),
+			// Reconciliation lists are OMITTED entirely (not []) when the fuel-event
+			// sweep has never populated its table: the client reads an absent key as
+			// "this server doesn't do that yet" and [] as "checked, all clear", and
+			// those must not be confused. Once the sweep has run they are always
+			// arrays, empty or not.
+			...(reconciliation ? {
+				unmatchedFills: reconciliation.unmatchedFills,
+				unmatchedReceipts: reconciliation.unmatchedReceipts,
+				// Same absent-vs-[] contract as the two queues above: omitted with the
+				// rest when the sweep has never run, an array (empty or not) once it has.
+				odometerConflicts: reconciliation.odometerConflicts,
+				// Third queue: receipts with a price and no gallons. Distinct from
+				// unmatchedReceipts by construction — the matcher's `eligible` filter
+				// requires gallons >= FUEL_MATCH_MIN_GALLONS, so a row can never appear
+				// in both. Two defects, two fixes, two lists.
+				volumelessReceipts: reconciliation.volumelessReceipts,
+				// Summary is computed over the FULL set while the list above is capped,
+				// so trust `count` here rather than volumelessReceipts.length.
+				volumelessSummary: reconciliation.volumelessSummary,
+				tankCalibration: fuelTankCalibrationWire(),
+			} : {}),
 		});
 	} catch (error) {
 		console.error("Error fetching fuel analytics:", error.message);
