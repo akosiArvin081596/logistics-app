@@ -83,7 +83,7 @@
               <button class="ff-stop" @click="$emit('focus', { lat: s.lat, lng: s.lng, name: s.name })">
                 <span class="ff-stop-main">
                   <span class="ff-stop-name">
-                    <span v-if="s.placeId && s.placeId === cheapestPlaceId" class="ff-cheapest">Cheapest</span>
+                    <span v-if="i === cheapestIdx" class="ff-cheapest">Cheapest</span>
                     <span v-if="s.brand && brandDiffersFromName(s)" class="ff-stop-brand">{{ s.brand }}</span>
                     {{ s.name || s.brand || 'Truck stop' }}
                   </span>
@@ -116,6 +116,7 @@
 import { ref, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { mpgSource } from '../../lib/fuelReview'
+import { priceText, cheapestIndex } from '../../lib/fuelStops'
 
 const api = useApi()
 
@@ -138,23 +139,13 @@ const showStops = ref(false)
 const collapsed = ref(false)
 const livePriceCount = ref(0)
 
-// The true-cheapest station is the first with a live pump price (the backend
-// returns stops already ranked cheapest-first). Badge it in the list.
-const cheapestPlaceId = computed(() => {
-  const c = stops.value.find((s) => s.priceSource === 'station')
-  return c ? c.placeId : null
-})
-function isLive(s) {
-  return s && s.priceSource === 'station'
-}
+// Price rule and cheapest-stop rule both live in lib/fuelStops.js, shared with
+// the map pins in TrackingMap.vue and the driver's card strip. The map now
+// prints these same numbers ON the pins, so a local copy of the guard here is
+// how the pin and the row beside it would come to disagree.
+const cheapestIdx = computed(() => cheapestIndex(stops.value))
 function priceOf(s) {
-  // Only real per-station pump prices are shown; no regional-estimate fallback.
-  // Guard null/undefined explicitly — Number(null) is 0, which would render a
-  // no-price station as a bogus "$0.00". Also treat 0/negative as no price.
-  const v = s == null ? null : s.effectivePrice
-  if (v == null) return null
-  const p = Number(v)
-  return Number.isFinite(p) && p > 0 ? p.toFixed(2) : null
+  return priceText(s)
 }
 
 const hasFuelData = computed(() => !!(range.value && range.value.hasFuelData))

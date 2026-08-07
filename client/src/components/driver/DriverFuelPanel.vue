@@ -196,6 +196,7 @@ import { Cell as VanCell, Empty as VanEmpty } from 'vant'
 import { useApi } from '../../composables/useApi'
 import { isZoned, isYmd, fmtYmd } from '../../utils/datetime'
 import { mpgSource } from '../../lib/fuelReview'
+import { priceText, cheapestIndex, dieselLane } from '../../lib/fuelStops'
 
 const api = useApi()
 
@@ -302,20 +303,13 @@ const noFuelText = computed(() =>
 
 /* ── stops ─────────────────────────────────────────────────────────────── */
 
-// Backend returns stops already ranked (live pump prices ascending, then the
-// unpriced ones by distance), so the first station-priced stop IS the cheapest.
-// Keyed by index rather than placeId so stops missing a placeId can't collide.
-const cheapestIdx = computed(() => stops.value.findIndex((s) => s && s.priceSource === 'station'))
+// Both rules now live in lib/fuelStops.js, shared with the dispatcher's list and
+// with the price labels on the tracking-map pins. Keyed by index rather than
+// placeId so stops missing a placeId can't collide.
+const cheapestIdx = computed(() => cheapestIndex(stops.value))
 
 function priceOf(s) {
-  // Only real per-station pump prices are shown; no regional-estimate fallback.
-  // Guard null/undefined explicitly — Number(null) is 0, which would render a
-  // no-price station as a bogus "$0.00". Also treat 0/negative as no price.
-  if (!s || s.priceSource !== 'station') return null
-  const v = s.effectivePrice
-  if (v == null) return null
-  const p = Number(v)
-  return Number.isFinite(p) && p > 0 ? p.toFixed(2) : null
+  return priceText(s)
 }
 
 function round1(n) {
@@ -336,11 +330,7 @@ function brandDiffersFromName(s) {
 // Truck-lane vs auto-lane diesel routinely differ by tens of cents; a driver
 // pulling a 53' can't use the car island anyway, so name which one this is.
 function dieselKind(s) {
-  if (!s || priceOf(s) == null) return ''
-  const t = (s.dieselType || '').toString().toUpperCase()
-  if (t === 'TRUCK_DIESEL') return 'truck lane'
-  if (t === 'DIESEL') return 'auto lane'
-  return ''
+  return dieselLane(s)
 }
 
 function priceAge(s) {
