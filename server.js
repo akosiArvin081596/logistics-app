@@ -8219,8 +8219,13 @@ function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = tr
 // Pure reporting — nothing here writes to trucks.fuel_tank_gallons or avg_mpg.
 function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 	const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+	// pct_before/pct_after are selected, not just their difference: the leg math
+	// below needs the tank's absolute LEVEL at both ends of the leg, not only how
+	// far the closing fill moved the needle. `rise` stays because the calibration
+	// filter reads it.
 	const rows = db.prepare(`
 		SELECT fe.routemate_vehicle_id, fe.start_ms, fe.local_day, fe.odometer, fe.odo_span,
+		       fe.pct_before, fe.pct_after,
 		       (fe.pct_after - fe.pct_before) AS rise, fe.matched_gallons, fe.match_basis,
 		       fe.match_distance_km, t.unit_number AS unit
 		FROM fuel_events fe
@@ -8254,6 +8259,13 @@ function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 		// it: those miles were partly paid for by a receipt we do not have, so
 		// counting them inflates the MPG. This is the difference between a
 		// believable 7 mpg and a flattering one.
+		//
+		// Each leg carries the tank LEVELS at both ends, not just the closing
+		// fill's gallons — receiptDerivedMpg() needs them to work out how much of
+		// that fill replaced burned fuel and how much simply raised the tank. See
+		// legBurnedGallons() in lib/fuel-model.js for the mass balance and the
+		// measured before/after. Passing gallons alone (what this did until now)
+		// silently asserts every fill was a full restore.
 		const fills = allFills.filter((f) => f.routemate_vehicle_id === vid);
 		const legs = [];
 		for (let i = 1; i < seq.length; i++) {
@@ -8262,7 +8274,20 @@ function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 			if (!(miles > 0) || miles > 3000) continue;
 			const gap = fills.some((f) => f.start_ms > a.start_ms && f.start_ms < b.start_ms && !f.expense_id);
 			if (gap) continue;
-			legs.push({ miles, gallons: b.matched_gallons });
+			legs.push({
+				miles,
+				gallons: b.matched_gallons,
+				// Level the leg STARTED at: where fill A left the tank. Deliberately
+				// the stored pct_after and not a "settled" reading taken a few minutes
+				// later from routemate_telemetry — that table is purged at 90 days
+				// while fuel_events persists, so a telemetry-backed refinement would
+				// quietly degrade the older half of any window. Measured, settling
+				// windows of 10-60 min moved the aggregate by less than the noise
+				// (6.64-7.32 against 6.95), so it buys nothing for that cost.
+				pctStart: a.pct_after,
+				pctBefore: b.pct_before,
+				pctAfter: b.pct_after,
+			});
 		}
 		out[vid] = {
 			unit: seq[0].unit,
@@ -8559,6 +8584,70 @@ function receiptMpgForVehicle(vehicleId) {
 		if (a.mpg.mpg < 3 || a.mpg.mpg > 11) return null;
 		return a.mpg;
 	} catch { return null; }
+}
+
+// --- Range verification: tank-to-tank burn legs -------------------------------
+// Between two consecutive refuel episodes the truck left at pct_after(A) and
+// arrived at pct_before(B) having driven odometer(B) - odometer(A) miles. That
+// pair is a measurement of miles-per-sensor-point which needs NO tank size and
+// NO MPG, so it cannot inherit the error in either. See the big comment block in
+// lib/fuel-model.js for why that primitive replaces `tank x mpg`.
+//
+// CONSECUTIVE EPISODES ONLY, deliberately. Any fill the sweep detected — matched
+// to a receipt or not — ends a leg, so a leg by construction contains no known
+// refuel. The residual risk is a fill detection MISSED entirely (one that fell
+// inside a telemetry gap; detectRefuelEvents fails closed there on purpose).
+// That failure ADDS miles without adding back points, i.e. it inflates
+// mi/point and FLATTERS the formula. Every bias in this measurement therefore
+// runs against the conclusion it supports, which is the direction we want: the
+// overstatement it reports is a floor, not a ceiling.
+//
+// Reads only fuel_events, never routemate_telemetry directly. Adjacent-sample
+// differencing on the raw feed is the known-bad method here — the sender wobbles
+// +/-1-2 points and differencing books every downward wobble as burn while
+// discarding the upward ones (5,817 "burned" points on #33 against a true net
+// drawdown of 3,077). That artifact is where routemate_fuel_daily's 1.05-2.45
+// mpg comes from. Net drawdown between two anchors cancels it.
+function burnLegsForVehicle(vehicleId, { days = FUEL_EVENTS_MATCH_DAYS } = {}) {
+	if (!vehicleId) return [];
+	try {
+		const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+		const fills = db.prepare(`
+			SELECT start_ms, local_day, pct_before, pct_after, odometer
+			FROM fuel_events
+			WHERE routemate_vehicle_id = ? AND start_ms >= ? AND odometer > 0
+			ORDER BY start_ms ASC
+		`).all(vehicleId, sinceMs);
+		const legs = [];
+		for (let i = 1; i < fills.length; i++) {
+			const a = fills[i - 1], b = fills[i];
+			legs.push({
+				label: `${a.local_day} → ${b.local_day}`,
+				miles: b.odometer - a.odometer,
+				points: a.pct_after - b.pct_before,
+			});
+		}
+		// measureBurnRate/backtestRangeFormula apply the per-leg sanity bounds
+		// (BURN_LEG_*), so nothing is filtered here — the raw pairs go to the pure
+		// module and one set of thresholds governs both callers.
+		return legs;
+	} catch { return []; }
+}
+
+// Memoized per vehicle: GET /api/fuel/range is polled by the tracking panel and
+// the driver app, and every call would otherwise re-run the scan. Same shape and
+// TTL reasoning as poiStopsCache — short enough that a fresh sweep shows up
+// within a poll cycle, long enough that a refresh loop is free.
+const burnRateCache = new Map();
+const BURN_RATE_TTL_MS = 10 * 60 * 1000;
+function burnRateForVehicle(vehicleId) {
+	if (!vehicleId) return null;
+	const hit = burnRateCache.get(vehicleId);
+	if (hit && Date.now() - hit.time < BURN_RATE_TTL_MS) return hit.burn;
+	const burn = fuelModel.measureBurnRate(burnLegsForVehicle(vehicleId));
+	burnRateCache.set(vehicleId, { burn, time: Date.now() });
+	if (burnRateCache.size > 100) burnRateCache.delete(burnRateCache.keys().next().value);
+	return burn;
 }
 
 // The sweep. Detect -> match -> alert once per unmatched fill.
@@ -20244,6 +20333,22 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			estimate.gallonsRemaining = r.gallonsRemaining;
 			estimate.rangeMiles = r.rangeMiles;
 		}
+		// --- honest interval -------------------------------------------------
+		// rangeMiles above is a POINT estimate off tank x mpg, and backtesting it
+		// against this fleet's own fill history found it overstated on 123 of 125
+		// tank-to-tank legs (#33 56/56 at 1.95x, #2372 64/66, #302 3/3). Worse, the
+		// error is not a constant to be divided out: at a fixed 23% #33's measured
+		// legs span p10 100 mi to p90 340 mi, a 3.4x spread driven by load weight,
+		// terrain and idle hours. So the point estimate is kept for compatibility
+		// (existing clients read rangeMiles) and an INTERVAL is added beside it.
+		//
+		// `rangePlanningMiles` is the low end and is the number any single-figure
+		// UI must render. Showing `typical` — never mind rangeMiles — is what put
+		// "449 mi" in front of a driver with 210 miles of fuel.
+		const burn = burnRateForVehicle(vehicleId);
+		const interval = fuelModel.rangeInterval({
+			fuelPct: estimate.fuelPct, burn, rangeMiles: estimate.rangeMiles,
+		});
 		const updatedAt = latest && latest.location_date_ms
 			? new Date(latest.location_date_ms).toISOString() : new Date().toISOString();
 		// SECURITY: the ELD vehicle id is dispatch-only and is OMITTED for the
@@ -20256,10 +20361,315 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 		// /api/driver/:driverName already returns it.
 		res.json({ ok: true, driver: driver || null,
 			...(isDriver ? {} : { vehicleId: vehicleId || null }),
-			unit: (truck && truck.unit) || null, ...estimate, updatedAt });
+			unit: (truck && truck.unit) || null, ...estimate,
+			// Interval + basis. `rangeBasis` ranks 'measured' > 'estimated' >
+			// 'unknown', the same vocabulary as mpgSource/tankSource, so a client
+			// that already badges those needs no new concept.
+			rangeLowMiles: interval.low,
+			rangeTypicalMiles: interval.typical,
+			rangeHighMiles: interval.high,
+			rangePlanningMiles: interval.planning,
+			rangeBasis: interval.basis,
+			milesPerFuelPoint: interval.milesPerPoint,
+			// Evidence behind a 'measured' basis, so the UI can say WHY it is
+			// trusted ("from 56 of this truck's own fill-ups") instead of asserting
+			// it. Null when there are no usable legs — which is itself the reason
+			// the basis is 'estimated'. Safe for every role: it is this truck's own
+			// aggregate history and carries no vehicle id or location.
+			rangeEvidence: burn && burn.usable
+				? { legs: burn.n, miles: burn.miles, milesPerPointP10: burn.p10, milesPerPointP90: burn.p90 }
+				: null,
+			updatedAt });
 	} catch (err) {
 		console.error("[fuel/range]", err.message);
 		res.status(500).json({ ok: false, error: "fuel range failed" });
+	}
+});
+
+// GET /api/fuel/verify[?vehicleId=ID] — Super Admin. Does the range panel tell
+// the truth? Backtests the displayed formula against each truck's OWN fill
+// history and reports the answer per truck.
+//
+// This is the client's ask verbatim — "we need to write a script that verifies
+// that, to make sure it's accurate" — as an endpoint rather than a script,
+// because a script answers once and an endpoint answers whenever someone doubts
+// the number. The finding it was built to surface: on production data the panel
+// overstated on 123 of 125 tank-to-tank legs across the three instrumented
+// trucks (#33 56/56 at 1.95x, #2372 64/66 at 1.97x, #302 3/3 at 2.25x).
+//
+// Auditing the arithmetic would have found nothing — the formula is correct and
+// its inputs are wrong — so the only thing that can answer the question is the
+// fill history, and that is what this reads.
+//
+// READ-ONLY by construction: it runs no sweep and issues no UPDATE, so the
+// locked-period rule has nothing to bite on here (nothing this endpoint touches
+// can write to a row in a finalized month). It reports what fuel_events already
+// holds; if the sweep has never run the answer is honestly "no evidence yet"
+// rather than a fabricated pass.
+app.get("/api/fuel/verify", requireRole("Super Admin"), (req, res) => {
+	try {
+		const only = queryStr(req.query.vehicleId);
+		const trucks = db.prepare(`
+			SELECT id, unit_number AS unit, routemate_vehicle_id AS vid, assigned_driver,
+			       fuel_tank_gallons, avg_mpg
+			FROM trucks WHERE COALESCE(routemate_vehicle_id,'') <> ''
+			${only ? "AND routemate_vehicle_id = ?" : ""}
+			ORDER BY unit_number
+		`).all(...(only ? [only] : []));
+
+		const calibrationByVid = {};
+		for (const c of fuelTankCalibrationWire()) calibrationByVid[c.vehicleId] = c;
+
+		const results = trucks.map((t) => {
+			const legs = burnLegsForVehicle(t.vid);
+			const burn = fuelModel.measureBurnRate(legs);
+			// The MPG the panel would actually use today, resolved the same way
+			// /api/fuel/range resolves it — otherwise the backtest would grade a
+			// formula nobody is looking at.
+			const receipt = receiptMpgForVehicle(t.vid);
+			const panelMpg = receipt ? receipt.mpg
+				: (t.avg_mpg > 0 ? t.avg_mpg : fuelModel.DEFAULT_MPG);
+			const panelTank = t.fuel_tank_gallons > 0 ? t.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
+			const backtest = fuelModel.backtestRangeFormula(legs, { tankGallons: panelTank, mpg: panelMpg });
+
+			// Same numbers as they stand RIGHT NOW at the truck's live fuel level,
+			// because "1.95x" is abstract and "the panel says 449, the history says
+			// 210" is not.
+			const latest = db.prepare(`
+				SELECT fuel_pct, location_date_ms FROM routemate_telemetry
+				WHERE routemate_vehicle_id = ? AND dropped_reason = '' AND fuel_pct IS NOT NULL
+				ORDER BY id DESC LIMIT 1`).get(t.vid);
+			const pct = latest ? latest.fuel_pct : null;
+			const shown = fuelModel.computeRange({ fuelPct: pct, tankGallons: panelTank, mpg: panelMpg });
+			const interval = fuelModel.rangeInterval({ fuelPct: pct, burn, rangeMiles: shown.rangeMiles });
+
+			const cal = calibrationByVid[t.vid] || null;
+			return {
+				vehicleId: t.vid,
+				unitNumber: t.unit,
+				assignedDriver: t.assigned_driver || null,
+				// What the panel is built from, and whether either half is a guess.
+				panelInputs: {
+					tankGallons: panelTank,
+					tankSource: t.fuel_tank_gallons > 0 ? "truck" : "default",
+					mpg: Math.round(panelMpg * 100) / 100,
+					mpgSource: receipt ? "receipts" : (t.avg_mpg > 0 ? "default" : "default"),
+				},
+				// The verdict.
+				backtest: {
+					legs: backtest.legs,
+					milesMeasured: backtest.milesTotal,
+					pointsMeasured: backtest.pointsTotal,
+					claimedMilesPerPoint: backtest.predictedMilesPerPoint,
+					measuredMilesPerPoint: backtest.measuredMilesPerPoint,
+					overstatementFactor: backtest.overstatementFactor,
+					medianOverstatement: backtest.medianOverstatement,
+					legsOverstated: backtest.overstatedLegs,
+					// A caller that wants to check our work rather than trust it.
+					legDetail: backtest.legDetail,
+				},
+				// Right now, on this truck.
+				live: {
+					fuelPct: pct,
+					atMs: latest ? latest.location_date_ms : null,
+					panelWouldShowMiles: shown.rangeMiles,
+					measuredLowMiles: interval.low,
+					measuredTypicalMiles: interval.typical,
+					measuredHighMiles: interval.high,
+					basis: interval.basis,
+				},
+				// Tank calibration, RE-LABELLED. impliedGallonsPer100Pct measures the
+				// volume behind the SENDER, and on a twin-tank truck that is one tank,
+				// not the truck's capacity — #33's lower mode reads ~117 while the
+				// truck has twice taken a single 202.7-gallon fill. Reporting it under
+				// a name that says "sensed" is the whole point: told "your 300 is
+				// wrong, it's 117", an operator would set 117 and be shown HALF the
+				// real range, which strands trucks just as surely. Never written back
+				// to trucks.fuel_tank_gallons — a human decides, with this in hand.
+				tankEvidence: cal ? {
+					sampleCount: cal.sampleCount,
+					sensedGallonsPer100Pct: cal.impliedGallonsPer100Pct,
+					sensedLowerMode: cal.lowerMode,
+					bimodal: cal.bimodal,
+					// Bimodal at ~2x is the twin-saddle-tank signature: fills that top
+					// up one tank vs both.
+					bimodalNote: cal.bimodal
+						? "Two populations ~2x apart — consistent with twin saddle tanks where the sender reads one. The LOWER mode is the SENSED tank, not the truck's capacity."
+						: null,
+					// Capacity inferred from the burn side instead, which is what the
+					// truck actually draws on: gal/point = (mi/point) / mpg.
+					burnImpliedGallonsPer100Pct: burn.usable && burn.milesPerPoint
+						? Math.round((burn.milesPerPoint / panelMpg) * 100) : null,
+					largestSingleFillGallons: db.prepare(`
+						SELECT MAX(gallons) g FROM expenses
+						WHERE LOWER(type)='fuel' AND gallons > 0 AND LOWER(TRIM(truck_unit)) = LOWER(TRIM(?))
+					`).get(t.unit).g || null,
+					configuredGallons: cal.configuredGallons,
+				} : null,
+			};
+		});
+
+		res.json({
+			ok: true,
+			// Absent-vs-empty, same contract as the fuel-analytics reconciliation
+			// lists: no fuel_events at all means the sweep has never run, which is a
+			// different statement from "checked, nothing to report".
+			sweepHasRun: !!db.prepare("SELECT 1 FROM fuel_events LIMIT 1").get(),
+			windowDays: FUEL_EVENTS_MATCH_DAYS,
+			trucks: results,
+		});
+	} catch (err) {
+		console.error("[fuel/verify]", err.message);
+		res.status(500).json({ ok: false, error: "fuel verification failed" });
+	}
+});
+
+// One Routes call per miss (cached 15 min by ROUTE_CACHE_TTL) and a handful of
+// indexed SQLite reads — an order of magnitude cheaper than poiLimiter's 4-8
+// billed Places calls, so the caps are correspondingly looser. Same per-user
+// keying and the same reason: a dispatch office behind one NAT must not share a
+// bucket while every driver on cellular gets a fresh one.
+const fuelPlanLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: (req) => {
+		const role = req.session?.user?.role;
+		return role === "Super Admin" || role === "Dispatcher" ? 120 : 30;
+	},
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many trip-plan requests. Try again later." },
+	standardHeaders: true,
+});
+
+// GET /api/fuel/trip-plan?loadId=ID[&vehicleId=ID] — "will this load's route fit
+// in the tank, and if not, where do I have to stop?"
+//
+// The question behind the client's message. It needs three things the range
+// panel alone cannot give: the distance still AHEAD (not the whole lane — the
+// truck is usually mid-route), the fuel that distance costs, and a verdict that
+// is allowed to say NO.
+//
+// REMAINING route, from the truck's live position. Planning from the load's
+// origin would answer a question nobody asked and would overstate the fuel
+// needed once the truck is moving; the fallback to the load origin exists only
+// for a truck with no recent fix.
+//
+// Fuel stops are NOT fetched here. GET /api/poi/fuel-stops fans out to 4-8
+// billed Places calls per cache miss, and folding that into an endpoint the
+// panel polls would multiply that cost by the poll rate. This returns
+// `fuelStopsRecommended` + `refuelWithinMiles` and lets the client make that
+// call ONCE, deliberately, through the endpoint that already owns the cache and
+// the limiter.
+//
+// SECURITY: identical scoping to /api/poi/fuel-stops, and for the same reasons.
+// A Driver must pass loadId, is ownership-checked against it, cannot pass
+// vehicleId (it is ignored, not rejected — nothing to probe), and never receives
+// the ELD vehicle id back.
+app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"), fuelPlanLimiter, async (req, res) => {
+	try {
+		const isDriver = req.session.user.role === "Driver";
+		const loadId = queryStr(req.query.loadId);
+		if (!loadId) return res.status(400).json({ ok: false, error: "loadId required" });
+
+		let truck = null;
+		if (isDriver) {
+			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (!owned) return res.status(403).json({ ok: false, error: "This load is not assigned to you" });
+			truck = resolveTruckForDriverName(
+				(req.session.user.driverName || req.session.user.driver_name || "").trim());
+		} else {
+			const vehicleIdParam = queryStr(req.query.vehicleId);
+			if (vehicleIdParam) {
+				truck = db.prepare(`SELECT id, unit_number AS unit, routemate_vehicle_id, fuel_tank_gallons, avg_mpg
+					FROM trucks WHERE routemate_vehicle_id = ? LIMIT 1`).get(vehicleIdParam);
+			} else {
+				// Fall back to whoever is actually on the load, so dispatch can ask the
+				// question without first looking up the truck.
+				const jt = await getJobTrackingCached();
+				const headers = jt.headers || [];
+				const driverCol = findCol(headers, /driver/i);
+				const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+				const target = String(loadId).trim().toLowerCase().replace(/^#/, "");
+				const row = (jt.data || []).find((r) => loadIdCol
+					&& String(r[loadIdCol] || "").trim().toLowerCase().replace(/^#/, "") === target);
+				if (row && driverCol && row[driverCol]) truck = resolveTruckForDriverName(String(row[driverCol]));
+			}
+		}
+
+		const vehicleId = (truck && truck.routemate_vehicle_id) || "";
+		const lc = db.prepare("SELECT origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE load_id = ?")
+			.get(loadId.toLowerCase().replace(/^#/, ""));
+		if (!lc || ![lc.dest_lat, lc.dest_lng].every(Number.isFinite)) {
+			return res.status(400).json({ ok: false, error: "load has no geocoded destination" });
+		}
+
+		// Live fuel + position.
+		const latest = vehicleId ? db.prepare(`
+			SELECT latitude, longitude, fuel_pct, location_date_ms FROM routemate_telemetry
+			WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 1`).get(vehicleId) : null;
+		const fixFresh = latest && latest.location_date_ms
+			&& Date.now() - latest.location_date_ms < 6 * 60 * 60 * 1000
+			&& Number.isFinite(latest.latitude) && Number.isFinite(latest.longitude);
+		const from = fixFresh
+			? { latitude: latest.latitude, longitude: latest.longitude }
+			: (Number.isFinite(lc.origin_lat) && Number.isFinite(lc.origin_lng)
+				? { latitude: lc.origin_lat, longitude: lc.origin_lng } : null);
+		if (!from) return res.status(400).json({ ok: false, error: "no position to plan from" });
+
+		let routeMiles = null;
+		try {
+			const route = await getRoute(from, { latitude: lc.dest_lat, longitude: lc.dest_lng });
+			if (route && Number.isFinite(route.distanceMiles)) routeMiles = route.distanceMiles;
+		} catch { /* fall through to the straight-line floor below */ }
+		// Routes API down -> straight-line distance, which is always SHORTER than
+		// the road. That understates the route, which would flatter the verdict, so
+		// it is inflated by 1.15 (a standard road-vs-crow factor) and labelled. A
+		// null here would drop the panel entirely at exactly the moment a driver is
+		// trying to decide whether to stop.
+		const routeSource = routeMiles != null ? "routes_api" : "straight_line_estimate";
+		if (routeMiles == null) {
+			routeMiles = Math.round(
+				(geolib.getDistance(from, { latitude: lc.dest_lat, longitude: lc.dest_lng }) / 1609.34) * 1.15 * 10) / 10;
+		}
+
+		const burn = burnRateForVehicle(vehicleId);
+		const receipt = receiptMpgForVehicle(vehicleId);
+		const mpg = receipt ? receipt.mpg
+			: (truck && truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG);
+		const tank = truck && truck.fuel_tank_gallons > 0 ? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
+		const pct = latest ? latest.fuel_pct : null;
+		const shown = fuelModel.computeRange({ fuelPct: pct, tankGallons: tank, mpg });
+
+		const plan = fuelModel.planTripFuel({
+			routeMiles, fuelPct: pct, burn, rangeMiles: shown.rangeMiles, mpg,
+		});
+
+		res.json({
+			ok: true,
+			loadId,
+			unit: (truck && truck.unit) || null,
+			...(isDriver ? {} : { vehicleId: vehicleId || null }),
+			routeSource,
+			// True when the plan is measured from where the truck is right now
+			// rather than from the load's pickup — a dispatcher reading a big number
+			// needs to know which question was answered.
+			fromLivePosition: !!fixFresh,
+			fuelPct: pct,
+			mpg: Math.round(mpg * 100) / 100,
+			mpgSource: receipt ? "receipts" : "default",
+			...plan,
+			// The point estimate the old panel would have shown, kept beside the
+			// verdict so the gap is visible rather than silently corrected.
+			pointEstimateMiles: shown.rangeMiles,
+			fuelStopsRecommended: plan.verdict === "tight" || plan.verdict === "insufficient",
+			updatedAt: latest && latest.location_date_ms
+				? new Date(latest.location_date_ms).toISOString() : null,
+		});
+	} catch (err) {
+		console.error("[fuel/trip-plan]", err.message);
+		res.status(500).json({ ok: false, error: "trip plan failed" });
 	}
 });
 
@@ -22926,7 +23336,39 @@ app.get("/api/investor/payouts", requireRole("Super Admin", "Investor"), async (
 
 		const { payouts, currentMonth, totals } = await reconcileInvestorPayouts(ownerId, ctx);
 
-		res.json({ payouts, currentMonth, totals });
+		// Lock health. Without it this endpoint answers 200 with a full, plausible
+		// ledger while period_locks is unreadable, and the ONLY tell is that every
+		// `phase` silently goes blank — which is also what the flag being off looks
+		// like, so the two states are indistinguishable from the outside.
+		// period_locks is the guard the whole month-close feature rests on; it
+		// should not be the quietest thing here.
+		//
+		// ⚠️ PREVIEW ONLY — deliberately NOT sent to an Investor on their own GET.
+		// The expense routes look like a precedent for sending it to anyone, but
+		// the distinction that matters is CONDITIONAL vs UNCONDITIONAL, not role:
+		// Only two routes emit it today, and both answer a question the caller
+		// just asked:
+		//   POST /api/expenses        requireAuth — reachable by a Driver — but the
+		//                             flag is spread ONLY when postedPeriod is set,
+		//                             i.e. the caller just submitted a back-dated
+		//                             receipt and is being told where it landed.
+		//   PUT /api/expenses/bulk-status   Super Admin / Dispatcher, and only in
+		//                             the response to a batch they just submitted.
+		// (PUT /api/expenses/:id/status is Super Admin / Dispatcher too but does
+		// not emit the flag at all — not a precedent either way.)
+		// This route would emit on every passive page load, to an Investor, for
+		// as long as the fault lasts.
+		//
+		// The objection is commercial, not security (it is one boolean — no ids,
+		// no schema, no enumeration value). It is an automated admission, to the
+		// exact counterparty whose settlement figure is in question, that the
+		// accounting freeze was inoperative on a given date — the same fault that
+		// can move a settled payout. That belongs to a human, not a JSON key.
+		// A Super Admin previewing the portal is who needs the signal, and
+		// GET /api/payouts (Super Admin only) carries it for the console.
+		const lockReadable = periodLocksReadable();
+		const reportLockHealth = preview.isPreview && !lockReadable;
+		res.json({ payouts, currentMonth, totals, ...(reportLockHealth ? { periodLockUnreadable: true } : {}) });
 	} catch (err) {
 		console.error("GET /api/investor/payouts error:", err.message);
 		res.status(500).json({ error: "Failed to load investor payouts" });
@@ -23302,7 +23744,12 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 		const monthlyTotals = [...monthly.values()]
 			.sort((a, b) => (a.period < b.period ? 1 : a.period > b.period ? -1 : 0)); // period DESC
 
-		res.json({ investors, monthlyTotals, grandTotals });
+		// See GET /api/investor/payouts for the reasoning — same key, same shape,
+		// probed ONCE for the whole response rather than per investor (the answer
+		// cannot change mid-request, and on a broken table each probe re-compiles a
+		// failing statement). Absent on a healthy database.
+		const lockReadable = periodLocksReadable();
+		res.json({ investors, monthlyTotals, grandTotals, ...(lockReadable ? {} : { periodLockUnreadable: true }) });
 	} catch (err) {
 		console.error("GET /api/payouts error:", err.message);
 		res.status(500).json({ error: "Failed to load payouts" });
@@ -23382,12 +23829,41 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 		//
 		// Reopening stays exempt, same as the $0 rule above: a payout advanced by
 		// mistake yesterday must still be walkable back today, window or no window.
+		//
+		// ⚠️ THIS GUARD FAILS CLOSED, AND ONLY VIA A DOUBLE NEGATIVE. Spelled out,
+		// because the expression does not say it and the next person will be tempted
+		// to tidy it:
+		//   isPending(p)  ==  flag on && p is a past month && !isLocked(p)
+		//   isLocked(p)   ==  false on ANY error, including an unreadable table
+		// so when period_locks cannot be read, isLocked is false, isPending is TRUE,
+		// and this blocks. Blocking is the right answer — refusing to settle costs a
+		// retry, settling a month that may already be finalized costs a restated
+		// payout — but it is right by accident, not by construction.
+		//
+		// DO NOT rewrite this as `periodPhase(p) === 'pending'`. periodPhase()
+		// deliberately returns '' when the table is unreadable (it refuses to label
+		// a month it cannot look up), so that rewrite reads as "not pending", the
+		// guard stops firing, and the failure direction INVERTS silently — settling
+		// straight into a possibly-closed month. Same trap for any refactor that
+		// routes through isLocked() directly. If this ever does need restating, the
+		// fail-closed predicate to build on is periodWriteLocked(), not isLocked().
 		if (!isReopen && isPending(payout.period)) {
+			// Probed only once the guard has already fired, so the healthy path does
+			// no extra work. Two very different situations were reading identically:
+			// "the window is still open, wait for the 7th" is a normal, self-resolving
+			// state, while "we cannot tell" is a broken database that resolves only
+			// when someone fixes it. Telling an admin to wait for a date is actively
+			// misleading in the second case — the date will pass and nothing will
+			// change.
+			const lockUnreadable = !periodLocksReadable();
 			return res.status(409).json({
-				error: `${periodLabel(payout.period)} is still in final settlement — receipts can be added until ${graceEndsAt(payout.period, settlementGraceDays())}. It settles automatically after that, or close it early from the Payouts console.`,
+				error: lockUnreadable
+					? `${periodLabel(payout.period)} cannot be confirmed closed — the period lock table could not be read, so this settlement is blocked until it can be. This is a database fault, not the close window; waiting will not clear it.`
+					: `${periodLabel(payout.period)} is still in final settlement — receipts can be added until ${graceEndsAt(payout.period, settlementGraceDays())}. It settles automatically after that, or close it early from the Payouts console.`,
 				code: "PERIOD_NOT_FINALIZED",
 				period: payout.period,
 				graceEndsAt: graceEndsAt(payout.period, settlementGraceDays()),
+				...(lockUnreadable ? { periodLockUnreadable: true } : {}),
 			});
 		}
 
@@ -23496,12 +23972,26 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), (req, re
 		// rather than the row's status both closes that hole and loosens the case
 		// that matters: a finalized-but-not-yet-paid row IS adjustable, which is
 		// exactly the finalize -> correct -> pay flow the close window is for.
+		//
+		// ⚠️ FAILS CLOSED VIA THE SAME DOUBLE NEGATIVE as the settle guard in
+		// POST /api/investor/payouts/:id/status — see the long note there before
+		// touching either. Short version: isPending() is true when period_locks
+		// cannot be read (because isLocked() swallows the error and answers false),
+		// so an unreadable table blocks the adjustment. That is the safe direction,
+		// and rewriting this in terms of periodPhase() would reverse it.
 		if (isPending(payout.period)) {
+			// See the settle guard for why the unreadable case gets its own sentence:
+			// the old copy named a date the admin could wait for, which is a false
+			// statement about a month whose lock state is simply unknown.
+			const lockUnreadable = !periodLocksReadable();
 			return res.status(409).json({
-				error: `${periodLabel(payout.period)} is still open until ${graceEndsAt(payout.period, settlementGraceDays())} — log the receipt and it will be counted automatically. Adjustments apply once the period is finalized.`,
+				error: lockUnreadable
+					? `${periodLabel(payout.period)} cannot be confirmed finalized — the period lock table could not be read, so adjustments are blocked until it can be. Log the receipt as normal; this is a database fault, not the close window.`
+					: `${periodLabel(payout.period)} is still open until ${graceEndsAt(payout.period, settlementGraceDays())} — log the receipt and it will be counted automatically. Adjustments apply once the period is finalized.`,
 				code: "PERIOD_NOT_FINALIZED",
 				period: payout.period,
 				graceEndsAt: graceEndsAt(payout.period, settlementGraceDays()),
+				...(lockUnreadable ? { periodLockUnreadable: true } : {}),
 			});
 		}
 
@@ -23603,8 +24093,23 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 		const cur = currentMonthKeyCT();
 
 		// Periods that have payout rows but no lock yet — i.e. accruing or pending.
+		//
+		// `period_locks.status` is QUALIFIED, and that is the whole point of this
+		// line. Written bare as `WHERE status = 'locked'` it silently produced the
+		// wrong answer on exactly the database this screen exists to diagnose: if
+		// period_locks is rebuilt without its `status` column (the break
+		// periodLocksReadable() was written for), SQL scoping does not error — it
+		// resolves the unqualified name outward to investor_payouts.status, turning
+		// the subquery into a correlated reference that is never 'locked'. It then
+		// returns EMPTY, `NOT IN ()` matches everything, and all 14 locked months
+		// land in the `open` bucket. They win the de-dupe below too, because `open`
+		// is spread first — so every finalized month rendered as never finalized,
+		// with a blank finalizedAt, on the one page an admin opens mid-outage.
+		// Qualified, the same break throws and the route 500s: still bad, but bad in
+		// a way that says so instead of fabricating a close calendar. On a healthy
+		// database this is byte-identical.
 		const open = db.prepare(
-			"SELECT DISTINCT period FROM investor_payouts WHERE period NOT IN (SELECT period FROM period_locks WHERE status = 'locked') ORDER BY period DESC"
+			"SELECT DISTINCT period FROM investor_payouts WHERE period NOT IN (SELECT period FROM period_locks WHERE period_locks.status = 'locked') ORDER BY period DESC"
 		).all().map((r) => r.period);
 
 		res.json({
@@ -23901,21 +24406,37 @@ async function maybeCloseFinishedPeriods() {
 	// SELECT per tick.
 	if (periodCloseFailStreak > 0 && Date.now() - periodCloseLastAttempt < PERIOD_CLOSE_RETRY_MS) return;
 
-	const due = periodsDueForClose();
-	// Also retry the stamp for periods locked earlier whose snapshot never landed
-	// (step 2 failed on a previous pass — see finalizePeriod).
-	const unstamped = db.prepare(
-		`SELECT DISTINCT p.period FROM investor_payouts p
-		   JOIN period_locks l ON l.period = p.period AND l.status = 'locked'
-		  WHERE COALESCE(p.finalized_at,'') = '' ORDER BY p.period ASC`
-	).all().map((r) => r.period);
-
-	const work = [...new Set([...due, ...unstamped])];
-	if (!work.length) { periodCloseFailStreak = 0; return; }
-
+	// EVERYTHING that can throw lives inside the try, including the two SELECTs
+	// that decide what to work on. They used to sit above it, and both read
+	// `period_locks` — periodsDueForClose() through a NOT IN subquery, the
+	// unstamped retry through a JOIN — so the single failure this whole apparatus
+	// exists to survive (an unreadable lock table) escaped as a rejected promise
+	// before the streak counter, the log line, or the ACTION-NEEDED notification
+	// could fire. Verified by QA: a broken server ran past two ticks in total
+	// silence. A scheduled job that cannot report its own failure is worse than no
+	// job, because the absence of an alert reads as success.
+	//
+	// `stage` is carried so the failure copy can tell the truth about what state
+	// the books are in. The two are genuinely different situations and the old
+	// wording only described one of them.
 	periodCloseRunning = true;
 	periodCloseLastAttempt = Date.now();
+	let stage = "scan";
+	let due = [];
 	try {
+		due = periodsDueForClose();
+		// Also retry the stamp for periods locked earlier whose snapshot never landed
+		// (step 2 failed on a previous pass — see finalizePeriod).
+		const unstamped = db.prepare(
+			`SELECT DISTINCT p.period FROM investor_payouts p
+			   JOIN period_locks l ON l.period = p.period AND l.status = 'locked'
+			  WHERE COALESCE(p.finalized_at,'') = '' ORDER BY p.period ASC`
+		).all().map((r) => r.period);
+
+		const work = [...new Set([...due, ...unstamped])];
+		if (!work.length) { periodCloseFailStreak = 0; return; }
+
+		stage = "finalize";
 		// One batched pass: locks are taken for every due period up front, then
 		// each investor is reconciled ONCE and stamped across all of them.
 		const result = await finalizePeriods(work, "system");
@@ -23935,17 +24456,25 @@ async function maybeCloseFinishedPeriods() {
 		}
 		periodCloseFailStreak = 0;
 	} catch (e) {
-		// The lock is already in place for anything we got to, so the books are
-		// still safe; only the snapshot is outstanding. Retry on the next window.
+		// Two failure shapes, and they leave the books in different places:
+		//   stage 'finalize' — locks are already in place for anything we got to, so
+		//     the figures are frozen and only the snapshot is outstanding;
+		//   stage 'scan' — we never got as far as taking a lock, so NOTHING closed
+		//     this pass and a month past its window is still accruing.
+		// The second is the more urgent of the two and used to be reported as the
+		// first, which would send someone looking for a snapshot rather than for the
+		// reason no month is closing at all.
 		periodCloseFailStreak++;
-		console.error(`[period-close] close failed (streak ${periodCloseFailStreak}):`, e.message);
+		console.error(`[period-close] close failed at ${stage} (streak ${periodCloseFailStreak}):`, e.message);
 		if (periodCloseFailStreak === PERIOD_CLOSE_MAX_ATTEMPTS) {
 			try {
 				insertDispatchNotification.run(
 					"period-close",
 					"ACTION NEEDED — month close incomplete",
-					`Finalizing a period has failed ${PERIOD_CLOSE_MAX_ATTEMPTS} times (${e.message}). Affected months ARE locked, so their figures are frozen and no new receipt can move them — but the statement snapshot is missing, so statements fall back to a live recompute with a drift note. Check the Sheets connection.`,
-					JSON.stringify({ attempts: PERIOD_CLOSE_MAX_ATTEMPTS, error: e.message }),
+					stage === "scan"
+						? `The month-close sweep has failed ${PERIOD_CLOSE_MAX_ATTEMPTS} times before it could take a single lock (${e.message}). NO period has been closed on those passes, so any month past its ${settlementGraceDays()}-day window is still open and its figure can still move. This usually means period_locks is unreadable — check the database, not the Sheets connection.`
+						: `Finalizing a period has failed ${PERIOD_CLOSE_MAX_ATTEMPTS} times (${e.message}). Affected months ARE locked, so their figures are frozen and no new receipt can move them — but the statement snapshot is missing, so statements fall back to a live recompute with a drift note. Check the Sheets connection.`,
+					JSON.stringify({ attempts: PERIOD_CLOSE_MAX_ATTEMPTS, stage, error: e.message }),
 				);
 			} catch {}
 		}
@@ -23981,8 +24510,24 @@ if (PERIOD_FINALIZE_ENABLED) {
 		}
 	} catch (e) { console.error("[period-close] baseline seed failed:", e.message); }
 
-	setInterval(() => { maybeCloseFinishedPeriods().catch(() => {}); }, 60 * 1000);
-	setTimeout(() => { maybeCloseFinishedPeriods().catch(() => {}); }, 95 * 1000);
+	// The tick's rejection handler LOGS. It used to be `.catch(() => {})`, which is
+	// how the unguarded SELECTs above stayed invisible through two QA ticks: the
+	// sweep threw, the promise rejected, and the empty handler discarded it without
+	// so much as a line on stdout.
+	//
+	// maybeCloseFinishedPeriods() now owns its own try/catch/finally and should
+	// never reject, so anything arriving here is a defect in that guard itself
+	// (or in the catch block) rather than an ordinary close failure — which is
+	// exactly why it must be noisy instead of silent. Deliberately NOT wired into
+	// periodCloseFailStreak: the inner catch already counts real failures, and
+	// double-counting would trip the ACTION-NEEDED threshold early.
+	const periodCloseTick = () => {
+		maybeCloseFinishedPeriods().catch((e) => {
+			console.error("[period-close] sweep threw outside its own guard:", (e && e.message) || e);
+		});
+	};
+	setInterval(periodCloseTick, 60 * 1000);
+	setTimeout(periodCloseTick, 95 * 1000);
 	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (America/Chicago)`);
 }
 

@@ -14,14 +14,111 @@
     <div v-if="idle" class="dfp-idle">Open this section to load fuel details.</div>
 
     <template v-else>
-      <!-- ── Miles left in tank ─────────────────────────────────────────── -->
+      <!-- ── 1. Does this run fit in the tank? ────────────────────────────
+           First, biggest and colour-coded, because it is the only question the
+           driver actually has. Everything below it is the evidence for it.
+
+           The verdict is the SERVER's, never re-derived here. It is judged on
+           the low end of the range and an unmeasured basis is derated first, so
+           a 348-mile point estimate against a 346.9-mile route comes back
+           `insufficient`. Comparing the numbers again on this side is exactly
+           how that protection would get undone. -->
+      <div v-if="planLoading" class="dfp-loading">Checking whether this run fits your fuel…</div>
+
+      <section
+        v-else-if="verdict"
+        class="dfp-verdict"
+        :class="'v-' + verdict.tone"
+        role="status"
+        aria-live="polite"
+      >
+        <p class="dfp-verdict-head">{{ verdict.driver }}</p>
+
+        <p v-if="interval.known && routeText" class="dfp-verdict-line">
+          <strong>{{ milesText(interval.planning) }} mi</strong> you can count on ·
+          <strong>{{ routeText }} mi</strong> still to drive
+        </p>
+        <p v-else-if="verdictReason" class="dfp-verdict-line">{{ verdictReason }}</p>
+
+        <!-- The instruction, not a statistic. Solid-filled so it survives
+             sunlight on a windshield-mounted phone. -->
+        <p v-if="actionText" class="dfp-verdict-action">{{ actionText }}</p>
+
+        <p v-for="c in planCaveats" :key="c" class="dfp-verdict-caveat">{{ c }}</p>
+      </section>
+
+      <p v-else-if="planNote" class="dfp-plan-note">{{ planNote }}</p>
+
+      <!-- ── 2. How far the tank goes ─────────────────────────────────── -->
       <div v-if="rangeLoading" class="dfp-loading">Reading your fuel level…</div>
 
       <template v-else-if="hasFuelData">
-        <div class="dfp-hero" :class="{ low: fuelLow }">
-          <span class="dfp-hero-num">{{ rangeMilesDisplay != null ? rangeMilesDisplay : '—' }}</span>
-          <span class="dfp-hero-unit">miles left in tank</span>
+        <div class="dfp-hero" :class="'tone-' + heroTone">
+          <span class="dfp-hero-num">{{ interval.known ? milesText(interval.planning) : '—' }}</span>
+          <span class="dfp-hero-unit">miles you can count on</span>
         </div>
+
+        <!-- The interval, drawn. Real legs at the same fuel level have run from
+             the low end to the high end — a spread no single number can carry —
+             so the bar shows the whole thing with the route laid over it. When
+             the route marker sits past the bar, "you will not get there" is
+             visible before a word is read. -->
+        <div
+          v-if="interval.hasSpread"
+          class="dfp-bar"
+          role="img"
+          :aria-label="barLabel"
+        >
+          <div class="dfp-bar-track">
+            <div class="dfp-bar-solid" :style="{ width: pctOf(interval.planning) }"></div>
+            <div
+              class="dfp-bar-band"
+              :style="{ left: pctOf(interval.planning), width: pctSpan(interval.planning, interval.high) }"
+            ></div>
+            <div v-if="interval.typical != null" class="dfp-bar-tick" :style="{ left: pctOf(interval.typical) }"></div>
+            <div
+              v-if="routeOnBar != null"
+              class="dfp-bar-route"
+              :class="{ over: routeOverruns }"
+              :style="{ left: pctOf(routeOnBar) }"
+            ></div>
+          </div>
+          <!-- Read as a caption, NOT as positional labels. Spreading these
+               across the track put "best 151" directly under the route marker
+               at 780 mi, which invites exactly the misreading the bar exists to
+               prevent. The run gets its own label on the right, coloured to
+               match its marker. -->
+          <div class="dfp-bar-legend">
+            <span class="lg-range">
+              <span class="lg-solid">count on {{ milesText(interval.planning) }}</span>
+              <template v-if="interval.typical != null"> · typical {{ milesText(interval.typical) }}</template>
+              · best {{ milesText(interval.high) }}
+            </span>
+            <span v-if="routeOnBar != null" class="lg-route" :class="{ over: routeOverruns }">
+              this run {{ routeText }} mi
+            </span>
+          </div>
+        </div>
+
+        <!-- Same three numbers in words, for the bar's non-visual twin and for
+             the estimated basis, which has no spread to draw. -->
+        <p v-if="interval.hasSpread" class="dfp-spread">
+          Plan on <strong>{{ milesText(interval.planning) }} mi</strong>. A typical run goes about
+          {{ milesText(interval.typical) }} mi; the furthest this truck has managed on this much fuel
+          is {{ milesText(interval.high) }} mi.
+        </p>
+        <!-- NOT a dash, and NOT the old tank x mpg figure. With no fill history
+             there is no spread to report, and inventing one is how "449 mi"
+             reached a driver who had about 210. -->
+        <p v-else-if="interval.known" class="dfp-spread muted">
+          We can't give you a typical or best case for this truck yet — it hasn't recorded enough
+          fill-ups. Treat {{ milesText(interval.planning) }} mi as a floor, not a forecast.
+        </p>
+
+        <p v-if="basisText" class="dfp-basis">
+          <span class="dfp-src" :class="basisBadgeClass">{{ interval.basisInfo.short }}</span>
+          {{ basisText }}
+        </p>
 
         <div class="dfp-cells">
           <van-cell title="Fuel level" :value="fuelPctLabel" />
@@ -84,8 +181,15 @@
 
       <van-empty v-else :description="noFuelText" image="search" :image-size="60" />
 
-      <!-- ── Diesel stops on this route ─────────────────────────────────── -->
-      <div class="dfp-section-title">Diesel stops on your route</div>
+      <!-- ── 3. Where to stop ──────────────────────────────────────────────
+           When the run doesn't fit, this stops being a price list and becomes
+           the answer to the question above, so it says so in its own heading —
+           a driver who has scrolled past the verdict still lands on the
+           instruction. -->
+      <div class="dfp-section-title" :class="{ urgent: stopsRequired }">
+        {{ stopsRequired ? 'Where to fuel up' : 'Diesel stops on your route' }}
+      </div>
+      <p v-if="stopsRequired && actionText" class="dfp-stops-lead">{{ actionText }}</p>
 
       <div v-if="stopsLoading" class="dfp-loading">Finding diesel stops along your route…</div>
 
@@ -156,7 +260,7 @@
            load so opening the section again costs nothing; this is the only way
            to spend another Places lookup, and it takes a deliberate tap. -->
       <button type="button" class="dfp-refresh" :disabled="busy" @click="refresh">
-        {{ busy ? 'Refreshing…' : 'Refresh fuel and stops' }}
+        {{ busy ? 'Refreshing…' : 'Refresh fuel, stops and check' }}
       </button>
     </template>
   </div>
@@ -188,6 +292,27 @@ function cacheSet(key, entry) {
   fuelCache.set(key, entry)
   while (fuelCache.size > CACHE_MAX) fuelCache.delete(fuelCache.keys().next().value)
 }
+
+// The trip plan is cached SEPARATELY from the bundle above, and that separation
+// is the point rather than an accident.
+//
+// The verdict has to reach the collapse header, i.e. before the driver opens
+// anything — a warning that only appears once you go looking is not much of a
+// warning, and "I didn't think about fuel" is the exact path that strands a
+// truck. So the plan is fetched on mount while the expensive half stays behind
+// `active`: /api/fuel/trip-plan is one route lookup the server already caches,
+// whereas /api/poi/fuel-stops fans out to several BILLED Google Places calls per
+// miss. Sharing one cache would mean either paying for Places on every load
+// view, or writing a half-filled bundle that paints "no stops found" over stops
+// nobody has looked for yet.
+const planCache = new Map()
+const planInflight = new Map()
+
+function planCacheSet(key, entry) {
+  if (planCache.has(key)) planCache.delete(key)
+  planCache.set(key, entry)
+  while (planCache.size > CACHE_MAX) planCache.delete(planCache.keys().next().value)
+}
 </script>
 
 <script setup>
@@ -195,10 +320,21 @@ import { ref, computed, watch } from 'vue'
 import { Cell as VanCell, Empty as VanEmpty } from 'vant'
 import { useApi } from '../../composables/useApi'
 import { isZoned, isYmd, fmtYmd } from '../../utils/datetime'
-import { mpgSource } from '../../lib/fuelReview'
+import {
+  mpgSource,
+  rangeReadout,
+  planRangeReadout,
+  tripVerdict,
+  rangeEvidenceText,
+  milesText,
+} from '../../lib/fuelReview'
 import { priceText, cheapestIndex, dieselLane } from '../../lib/fuelStops'
 
 const api = useApi()
+
+// Emitted whenever a verdict is known, so the collapse header above can badge it
+// — a driver who never opens this section still has to learn they won't make it.
+const emit = defineEmits(['plan'])
 
 const props = defineProps({
   loadId: { type: String, default: '' },
@@ -207,11 +343,19 @@ const props = defineProps({
   // calls per request, so the spend has to be opt-in, and the section ships
   // collapsed by default.
   active: { type: Boolean, default: false },
+  // False once the load is delivered — there is no route left to check, and a
+  // verdict computed against a destination the truck already reached would be a
+  // false alarm on a load in the history list. Defaults true so any caller that
+  // doesn't know the status still gets the check.
+  runnable: { type: Boolean, default: true },
 })
 
 const range = ref(null)
 const rangeError = ref('')
 const rangeLoading = ref(false)
+const plan = ref(null)
+const planError = ref('')
+const planLoading = ref(false)
 const stops = ref([])
 const stopsError = ref('')
 const stopsLoading = ref(false)
@@ -219,7 +363,7 @@ const livePriceCount = ref(0)
 // Has a fetch ever completed for the current props? Gates the idle state.
 const loaded = ref(false)
 
-const busy = computed(() => rangeLoading.value || stopsLoading.value)
+const busy = computed(() => rangeLoading.value || stopsLoading.value || planLoading.value)
 const idle = computed(() => !loaded.value && !busy.value)
 
 /* ── range readout ─────────────────────────────────────────────────────── */
@@ -228,9 +372,141 @@ const hasFuelData = computed(() => !!(range.value && range.value.hasFuelData))
 const fuelLow = computed(
   () => hasFuelData.value && range.value.fuelPct != null && Number(range.value.fuelPct) <= 25,
 )
-const rangeMilesDisplay = computed(() =>
-  hasFuelData.value && range.value.rangeMiles != null ? Math.round(range.value.rangeMiles) : null,
+
+/* ── the interval, and the verdict on this run ─────────────────────────────
+   ONE normalizer (lib/fuelReview) reads both payloads, so the panel cannot
+   drift from the dispatcher's copy on what "plan on" means — and, more to the
+   point, cannot quietly fall back to `rangeMiles`. That raw tank x mpg product
+   is the number that told a driver 449 miles on a tank worth about 210, and it
+   is deliberately not rendered anywhere on this screen.
+
+   The trip-plan carries its own copy of the interval, so prefer it: then the
+   headline figure and the verdict are guaranteed to come from one computation
+   rather than two requests that could straddle a fuel-level update. */
+const interval = computed(() =>
+  plan.value ? planRangeReadout(plan.value) : rangeReadout(range.value || {}),
 )
+const verdict = computed(() => (plan.value ? tripVerdict(plan.value.verdict) : null))
+
+// The headline figure takes the VERDICT's colour when there is one, and falls
+// back to the fuel gauge otherwise. Two independent colour rules on one card
+// contradict each other in the states that matter — a green "you can make it"
+// above a red range number, or an amber "too close" above one — and a driver
+// then has to work out which of the two the panel means.
+const heroTone = computed(() => {
+  if (verdict.value) return verdict.value.tone
+  return fuelLow.value ? 'bad' : 'ok'
+})
+
+const routeText = computed(() => milesText(plan.value && plan.value.routeMiles))
+const stopsRequired = computed(() => !!(plan.value && plan.value.fuelStopsRecommended))
+
+// The instruction. `refuelWithinMiles` is floored at 0 by the server, and 0 is
+// not "no limit" — it means the margin is already gone, so it has to read as
+// "now" rather than as "within 0 miles".
+const actionText = computed(() => {
+  const p = plan.value
+  if (!p || !stopsRequired.value) return ''
+  const within = Number(p.refuelWithinMiles)
+  if (!Number.isFinite(within)) return 'Fuel up before you finish this run.'
+  return within <= 0
+    ? 'Fuel up now — before you start this run.'
+    : `Fuel up within ${milesText(within)} mi.`
+})
+
+// Why there is no verdict, when there is a plan but nothing to judge. The
+// generic caveats below are true but beside the point here — a driver whose ELD
+// reports no fuel level needs to be told THAT, not that the distance was
+// measured from the pickup.
+const verdictReason = computed(() => {
+  const p = plan.value
+  if (!p || p.verdict !== 'unknown') return ''
+  if (p.fuelPct == null) {
+    return "Your truck isn't reporting a fuel level, so there's nothing to check this run against."
+  }
+  if (p.routeMiles == null) return "We don't have a distance for this run yet."
+  return ''
+})
+
+// Caveats that change what the verdict MEANS, so they sit inside its card
+// rather than in a footnote further down. Suppressed on an unknown verdict,
+// which has its own reason above.
+const planCaveats = computed(() => {
+  const p = plan.value
+  if (!p || p.verdict === 'unknown') return []
+  const out = []
+  if (p.fromLivePosition === false) {
+    out.push("Measured from this load's pickup — your truck hasn't reported a recent position.")
+  }
+  if (p.routeSource === 'straight_line_estimate') {
+    out.push('Road distance was unavailable, so this is an estimate from the straight-line distance.')
+  }
+  return out
+})
+
+// Why there is no verdict at all. Distinct from a verdict of "unknown": here we
+// never got an answer, and saying which is missing is what stops a driver
+// reading silence as "fine".
+const planNote = computed(() => {
+  if (plan.value || planLoading.value) return ''
+  return planError.value || ''
+})
+
+/* ── the interval bar ───────────────────────────────────────────────────── */
+
+// Scaled to whichever is further, the truck's best case or the run itself, so a
+// route that overruns the range stays ON the bar and visibly past the band. The
+// route marker clamps to the end rather than disappearing off it.
+const barMax = computed(() => {
+  const high = Number(interval.value.high) || 0
+  const route = Number(plan.value && plan.value.routeMiles) || 0
+  return Math.max(high, route, 1) * 1.06
+})
+const routeOnBar = computed(() => {
+  const r = Number(plan.value && plan.value.routeMiles)
+  return Number.isFinite(r) && r > 0 ? r : null
+})
+const routeOverruns = computed(
+  () => routeOnBar.value != null && routeOnBar.value > (Number(interval.value.planning) || 0),
+)
+function pctOf(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '0%'
+  return `${Math.max(0, Math.min(100, (n / barMax.value) * 100))}%`
+}
+function pctSpan(from, to) {
+  const a = Number(from)
+  const b = Number(to)
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return '0%'
+  return `${Math.max(0, Math.min(100, ((b - a) / barMax.value) * 100))}%`
+}
+const barLabel = computed(() => {
+  const i = interval.value
+  const base = `Range you can count on ${milesText(i.planning)} miles, typically ${milesText(
+    i.typical,
+  )}, at best ${milesText(i.high)} miles.`
+  return routeOnBar.value != null ? `${base} This run is ${routeText.value} miles.` : base
+})
+
+/* ── provenance ─────────────────────────────────────────────────────────── */
+
+// Ranked exactly like mpgSource — measured (2) > estimated (1) > unknown (0).
+const basisBadgeClass = computed(() => {
+  const b = interval.value.basisInfo
+  if (!b) return ''
+  return b.rank === 2 ? 'src-best' : b.rank === 1 ? 'src-default' : 'src-muted'
+})
+const basisText = computed(() => {
+  const b = interval.value.basisInfo
+  if (!b || !interval.value.known) return ''
+  if (b.rank === 2) {
+    const ev = rangeEvidenceText(range.value && range.value.rangeEvidence)
+    return ev
+      ? `Measured from your own fill-ups — ${ev}.`
+      : "Measured from this truck's own fill-ups."
+  }
+  return "A fleet-wide estimate — this truck hasn't recorded enough fill-ups to measure its own."
+})
 const fuelPctLabel = computed(() => {
   const p = hasFuelData.value ? Number(range.value.fuelPct) : NaN
   return Number.isFinite(p) ? `${Math.round(p)}%` : '—'
@@ -420,22 +696,75 @@ async function fetchStops(key) {
   }
 }
 
+// "Does this run fit in the tank?" — one cached Routes call plus indexed SQLite
+// reads, an order of magnitude cheaper than the billed Places fan-out beside it,
+// which is why it can ride along on the same open.
+//
+// Every failure here degrades to a SENTENCE, never to a blank space and never to
+// an error banner: a driver who sees nothing where a verdict should be will read
+// it as "fine". The 400s are the routine ones — a load nobody has geocoded, or a
+// truck with no recent fix — and they are the caller's normal state, not a fault.
+async function fetchPlan(key, { force = false } = {}) {
+  if (!key || !props.runnable) return { plan: null, error: '' }
+  if (!force) {
+    const hit = planCache.get(key)
+    if (hit) return hit
+    const pending = planInflight.get(key)
+    if (pending) return pending
+  }
+  const p = requestPlan(key)
+  p.then((entry) => planCacheSet(key, entry)).catch(() => {})
+  p.catch(() => {}).finally(() => {
+    if (planInflight.get(key) === p) planInflight.delete(key)
+  })
+  planInflight.set(key, p)
+  return p
+}
+
+async function requestPlan(key) {
+  try {
+    const d = await api.get(`/api/fuel/trip-plan?loadId=${encodeURIComponent(key)}`)
+    if (d && d.ok !== false) return { plan: d, error: '' }
+    return { plan: null, error: '' }
+  } catch (e) {
+    const status = e?.status
+    if (status === 400) {
+      return {
+        plan: null,
+        error:
+          "We can't check this run yet — this load hasn't been mapped, or your truck hasn't reported its position.",
+      }
+    }
+    if (status === 429) {
+      return { plan: null, error: 'Checked too many times just now — try again in a few minutes.' }
+    }
+    if (status === 404) return { plan: null, error: '' }
+    return { plan: null, error: "Couldn't check whether this run fits your fuel." }
+  }
+}
+
 function apply(entry) {
   range.value = entry.range
   rangeError.value = entry.rangeError
+  plan.value = entry.plan
+  planError.value = entry.planError
   stops.value = entry.stops
   livePriceCount.value = entry.livePriceCount
   stopsError.value = entry.stopsError
   rangeLoading.value = false
   stopsLoading.value = false
+  planLoading.value = false
   loaded.value = true
+  emit('plan', entry.plan || null)
 }
 
-async function fetchAll(key) {
-  const [r, s] = await Promise.all([fetchRange(), fetchStops(key)])
+async function fetchAll(key, { force = false } = {}) {
+  const [r, s, pl] = await Promise.all([fetchRange(), fetchStops(key), fetchPlan(key, { force })])
   return {
     range: r.range,
     rangeError: r.error,
+    plan: pl.plan,
+    planError: pl.error,
     stops: s.stops,
     livePriceCount: s.livePriceCount,
     stopsError: s.error,
@@ -452,12 +781,17 @@ async function load({ force = false } = {}) {
   }
   rangeLoading.value = true
   stopsLoading.value = true
+  // Only spinner-over the verdict when there isn't one yet: the prefetch below
+  // usually means there is, and replacing a standing "you will not make it" with
+  // a spinner every time the section is opened is the one flicker that matters.
+  planLoading.value = !plan.value
   rangeError.value = ''
   stopsError.value = ''
+  planError.value = ''
 
   let p = force ? null : inflight.get(key)
   if (!p) {
-    p = fetchAll(key).then((entry) => {
+    p = fetchAll(key, { force }).then((entry) => {
       cacheSet(key, entry)
       return entry
     })
@@ -473,10 +807,18 @@ async function load({ force = false } = {}) {
   try {
     entry = await p
   } catch {
-    // fetchRange/fetchStops already swallow their own failures into messages,
-    // so this only fires on something unexpected — degrade to an empty panel
-    // rather than leaving the spinners up forever.
-    entry = { range: null, rangeError: 'Could not load fuel details.', stops: [], livePriceCount: 0, stopsError: '' }
+    // fetchRange/fetchStops/fetchPlan already swallow their own failures into
+    // messages, so this only fires on something unexpected — degrade to an empty
+    // panel rather than leaving the spinners up forever.
+    entry = {
+      range: null,
+      rangeError: 'Could not load fuel details.',
+      plan: null,
+      planError: '',
+      stops: [],
+      livePriceCount: 0,
+      stopsError: '',
+    }
   }
   // The driver may have backed out to another load mid-flight; the result is
   // still valid for its own key (cached above) but must not land on screen.
@@ -489,12 +831,43 @@ function refresh() {
 
 defineExpose({ refresh, load })
 
-// Fires only once `active` is true, so nothing is requested while the section
-// sits collapsed. Re-opening re-runs this, but load() short-circuits on cache.
+// Fires only once `active` is true, so the BILLED Places lookup is still opt-in.
+// Re-opening re-runs this, but load() short-circuits on cache.
 watch(
   () => [props.active, props.loadId],
   () => {
     if (props.active) load()
+  },
+  { immediate: true },
+)
+
+// The verdict, and only the verdict, is fetched without waiting for the section
+// to be opened — see the planCache note above for why that is affordable and why
+// the rest is not. It emits upward so the collapse header can carry the warning;
+// the panel's own body is not rendered until the section opens either way.
+watch(
+  () => [props.loadId, props.runnable],
+  async () => {
+    const key = props.loadId || ''
+    // Clear FIRST, and emit the clear: the parent keeps the last verdict it was
+    // handed, so a load switched in place (rather than via Back, which unmounts)
+    // would otherwise leave the previous load's badge sitting on this one's
+    // header — a red "fuel stop needed" against the wrong run.
+    if (!key || !props.runnable) {
+      plan.value = null
+      planError.value = ''
+      emit('plan', null)
+      return
+    }
+    const entry = await fetchPlan(key)
+    // A different load may have been opened while this was in flight.
+    if ((props.loadId || '') !== key) return
+    // Never clobber a fuller state the section has already painted.
+    if (plan.value && !entry.plan) return
+    plan.value = entry.plan
+    planError.value = entry.error
+    planLoading.value = false
+    emit('plan', entry.plan || null)
   },
   { immediate: true },
 )
@@ -521,12 +894,96 @@ watch(
   margin: 0 0.25rem 0.5rem;
 }
 
+/* ---- verdict ----
+   Colour is never the only channel: each tone also changes the heading wording
+   and, when a stop is needed, adds the filled instruction bar. A cab is a bad
+   place to depend on hue alone — sunlight, polarised glasses, and roughly one
+   driver in twelve with a colour-vision deficiency. */
+.dfp-verdict {
+  margin: 0.25rem 0.5rem 0.85rem;
+  padding: 0.8rem 0.85rem 0.85rem;
+  border-radius: 12px;
+  border: 2px solid;
+}
+.dfp-verdict-head {
+  margin: 0;
+  font-size: 1.12rem;
+  font-weight: 800;
+  line-height: 1.25;
+}
+.dfp-verdict-line {
+  margin: 0.4rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.dfp-verdict-line strong {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.dfp-verdict-action {
+  display: block;
+  margin: 0.65rem 0 0;
+  padding: 0.6rem 0.7rem;
+  border-radius: 9px;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.3;
+  text-align: center;
+}
+.dfp-verdict-caveat {
+  margin: 0.45rem 0 0;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  opacity: 0.85;
+}
+
+.dfp-verdict.v-ok {
+  background: #f0fdf4;
+  border-color: #86efac;
+  color: #14532d;
+}
+.dfp-verdict.v-warn {
+  background: #fffbeb;
+  border-color: #fbbf24;
+  color: #7c2d12;
+}
+.dfp-verdict.v-warn .dfp-verdict-action {
+  background: #b45309;
+  color: #fff;
+}
+/* The state this whole panel exists to make unmistakable. */
+.dfp-verdict.v-bad {
+  background: #fef2f2;
+  border-color: #dc2626;
+  color: #7f1d1d;
+}
+.dfp-verdict.v-bad .dfp-verdict-action {
+  background: #dc2626;
+  color: #fff;
+}
+.dfp-verdict.v-unknown {
+  background: var(--bg, #f5f6fa);
+  border-color: var(--border, #e2e4ea);
+  color: var(--text, #1f2937);
+}
+
+.dfp-plan-note {
+  margin: 0.25rem 0.5rem 0.75rem;
+  padding: 0.6rem 0.7rem;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text-dim, #6b7085);
+  background: var(--bg, #f5f6fa);
+  border: 1px solid var(--border, #e2e4ea);
+  border-radius: 9px;
+}
+
 /* ---- range hero ---- */
 .dfp-hero {
   display: flex;
   align-items: baseline;
   gap: 0.45rem;
-  padding: 0.5rem 0.75rem 0.75rem;
+  padding: 0.5rem 0.75rem 0.4rem;
 }
 .dfp-hero-num {
   font-size: 2.35rem;
@@ -535,13 +992,124 @@ watch(
   color: #0f766e;
   font-variant-numeric: tabular-nums;
 }
-.dfp-hero.low .dfp-hero-num {
+.dfp-hero.tone-warn .dfp-hero-num {
+  color: #b45309;
+}
+.dfp-hero.tone-bad .dfp-hero-num {
   color: #dc2626;
+}
+.dfp-hero.tone-unknown .dfp-hero-num {
+  color: var(--text-dim, #6b7085);
 }
 .dfp-hero-unit {
   font-size: 0.9rem;
   font-weight: 600;
   color: var(--text-dim, #6b7085);
+}
+
+/* ---- interval bar ----
+   Solid = the miles to count on. Hatched = miles this truck has sometimes made
+   and sometimes not. The route pin is the whole point: past the solid block it
+   turns red, so "this run is beyond what I can rely on" is legible at a glance
+   without reading a number. */
+.dfp-bar {
+  padding: 0 0.75rem;
+}
+.dfp-bar-track {
+  position: relative;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--bg, #eef0f5);
+  overflow: hidden;
+}
+.dfp-bar-solid {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #0f766e;
+  border-radius: 8px 0 0 8px;
+}
+.dfp-bar-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(15, 118, 110, 0.28),
+    rgba(15, 118, 110, 0.28) 4px,
+    rgba(15, 118, 110, 0.1) 4px,
+    rgba(15, 118, 110, 0.1) 8px
+  );
+}
+.dfp-bar-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(15, 118, 110, 0.75);
+}
+.dfp-bar-route {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 3px;
+  margin-left: -1px;
+  background: #1f2937;
+  border-radius: 2px;
+  box-shadow: 0 0 0 2px #fff;
+}
+.dfp-bar-route.over {
+  background: #dc2626;
+}
+.dfp-bar-legend {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.6rem;
+  margin-top: 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-dim, #6b7085);
+  font-variant-numeric: tabular-nums;
+}
+.dfp-bar-legend .lg-solid {
+  color: #0f766e;
+}
+.dfp-bar-legend .lg-route {
+  color: #1f2937;
+}
+.dfp-bar-legend .lg-route.over {
+  color: #dc2626;
+}
+
+.dfp-spread {
+  margin: 0.55rem 0.75rem 0;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  color: var(--text, #1f2937);
+}
+.dfp-spread strong {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.dfp-spread.muted {
+  color: var(--text-dim, #6b7085);
+}
+
+.dfp-basis {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 0.75rem 0.25rem;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-dim, #6b7085);
+}
+.src-muted {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
 }
 
 .dfp-cells :deep(.van-cell) {
@@ -622,6 +1190,20 @@ watch(
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-dim, #6b7085);
+}
+/* Promoted from a section label to a heading when the stop is not optional. */
+.dfp-section-title.urgent {
+  font-size: 0.95rem;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #b91c1c;
+}
+.dfp-stops-lead {
+  margin: 0 0.75rem 0.5rem;
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #b91c1c;
 }
 
 .dfp-price-note {
