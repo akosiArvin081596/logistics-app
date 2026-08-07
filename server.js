@@ -8561,6 +8561,70 @@ function receiptMpgForVehicle(vehicleId) {
 	} catch { return null; }
 }
 
+// --- Range verification: tank-to-tank burn legs -------------------------------
+// Between two consecutive refuel episodes the truck left at pct_after(A) and
+// arrived at pct_before(B) having driven odometer(B) - odometer(A) miles. That
+// pair is a measurement of miles-per-sensor-point which needs NO tank size and
+// NO MPG, so it cannot inherit the error in either. See the big comment block in
+// lib/fuel-model.js for why that primitive replaces `tank x mpg`.
+//
+// CONSECUTIVE EPISODES ONLY, deliberately. Any fill the sweep detected — matched
+// to a receipt or not — ends a leg, so a leg by construction contains no known
+// refuel. The residual risk is a fill detection MISSED entirely (one that fell
+// inside a telemetry gap; detectRefuelEvents fails closed there on purpose).
+// That failure ADDS miles without adding back points, i.e. it inflates
+// mi/point and FLATTERS the formula. Every bias in this measurement therefore
+// runs against the conclusion it supports, which is the direction we want: the
+// overstatement it reports is a floor, not a ceiling.
+//
+// Reads only fuel_events, never routemate_telemetry directly. Adjacent-sample
+// differencing on the raw feed is the known-bad method here — the sender wobbles
+// +/-1-2 points and differencing books every downward wobble as burn while
+// discarding the upward ones (5,817 "burned" points on #33 against a true net
+// drawdown of 3,077). That artifact is where routemate_fuel_daily's 1.05-2.45
+// mpg comes from. Net drawdown between two anchors cancels it.
+function burnLegsForVehicle(vehicleId, { days = FUEL_EVENTS_MATCH_DAYS } = {}) {
+	if (!vehicleId) return [];
+	try {
+		const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+		const fills = db.prepare(`
+			SELECT start_ms, local_day, pct_before, pct_after, odometer
+			FROM fuel_events
+			WHERE routemate_vehicle_id = ? AND start_ms >= ? AND odometer > 0
+			ORDER BY start_ms ASC
+		`).all(vehicleId, sinceMs);
+		const legs = [];
+		for (let i = 1; i < fills.length; i++) {
+			const a = fills[i - 1], b = fills[i];
+			legs.push({
+				label: `${a.local_day} → ${b.local_day}`,
+				miles: b.odometer - a.odometer,
+				points: a.pct_after - b.pct_before,
+			});
+		}
+		// measureBurnRate/backtestRangeFormula apply the per-leg sanity bounds
+		// (BURN_LEG_*), so nothing is filtered here — the raw pairs go to the pure
+		// module and one set of thresholds governs both callers.
+		return legs;
+	} catch { return []; }
+}
+
+// Memoized per vehicle: GET /api/fuel/range is polled by the tracking panel and
+// the driver app, and every call would otherwise re-run the scan. Same shape and
+// TTL reasoning as poiStopsCache — short enough that a fresh sweep shows up
+// within a poll cycle, long enough that a refresh loop is free.
+const burnRateCache = new Map();
+const BURN_RATE_TTL_MS = 10 * 60 * 1000;
+function burnRateForVehicle(vehicleId) {
+	if (!vehicleId) return null;
+	const hit = burnRateCache.get(vehicleId);
+	if (hit && Date.now() - hit.time < BURN_RATE_TTL_MS) return hit.burn;
+	const burn = fuelModel.measureBurnRate(burnLegsForVehicle(vehicleId));
+	burnRateCache.set(vehicleId, { burn, time: Date.now() });
+	if (burnRateCache.size > 100) burnRateCache.delete(burnRateCache.keys().next().value);
+	return burn;
+}
+
 // The sweep. Detect -> match -> alert once per unmatched fill.
 //
 // `notify` and `markAlerted` are deliberately SEPARATE knobs, because the three
@@ -20244,6 +20308,22 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			estimate.gallonsRemaining = r.gallonsRemaining;
 			estimate.rangeMiles = r.rangeMiles;
 		}
+		// --- honest interval -------------------------------------------------
+		// rangeMiles above is a POINT estimate off tank x mpg, and backtesting it
+		// against this fleet's own fill history found it overstated on 123 of 125
+		// tank-to-tank legs (#33 56/56 at 1.95x, #2372 64/66, #302 3/3). Worse, the
+		// error is not a constant to be divided out: at a fixed 23% #33's measured
+		// legs span p10 100 mi to p90 340 mi, a 3.4x spread driven by load weight,
+		// terrain and idle hours. So the point estimate is kept for compatibility
+		// (existing clients read rangeMiles) and an INTERVAL is added beside it.
+		//
+		// `rangePlanningMiles` is the low end and is the number any single-figure
+		// UI must render. Showing `typical` — never mind rangeMiles — is what put
+		// "449 mi" in front of a driver with 210 miles of fuel.
+		const burn = burnRateForVehicle(vehicleId);
+		const interval = fuelModel.rangeInterval({
+			fuelPct: estimate.fuelPct, burn, rangeMiles: estimate.rangeMiles,
+		});
 		const updatedAt = latest && latest.location_date_ms
 			? new Date(latest.location_date_ms).toISOString() : new Date().toISOString();
 		// SECURITY: the ELD vehicle id is dispatch-only and is OMITTED for the
@@ -20256,10 +20336,315 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 		// /api/driver/:driverName already returns it.
 		res.json({ ok: true, driver: driver || null,
 			...(isDriver ? {} : { vehicleId: vehicleId || null }),
-			unit: (truck && truck.unit) || null, ...estimate, updatedAt });
+			unit: (truck && truck.unit) || null, ...estimate,
+			// Interval + basis. `rangeBasis` ranks 'measured' > 'estimated' >
+			// 'unknown', the same vocabulary as mpgSource/tankSource, so a client
+			// that already badges those needs no new concept.
+			rangeLowMiles: interval.low,
+			rangeTypicalMiles: interval.typical,
+			rangeHighMiles: interval.high,
+			rangePlanningMiles: interval.planning,
+			rangeBasis: interval.basis,
+			milesPerFuelPoint: interval.milesPerPoint,
+			// Evidence behind a 'measured' basis, so the UI can say WHY it is
+			// trusted ("from 56 of this truck's own fill-ups") instead of asserting
+			// it. Null when there are no usable legs — which is itself the reason
+			// the basis is 'estimated'. Safe for every role: it is this truck's own
+			// aggregate history and carries no vehicle id or location.
+			rangeEvidence: burn && burn.usable
+				? { legs: burn.n, miles: burn.miles, milesPerPointP10: burn.p10, milesPerPointP90: burn.p90 }
+				: null,
+			updatedAt });
 	} catch (err) {
 		console.error("[fuel/range]", err.message);
 		res.status(500).json({ ok: false, error: "fuel range failed" });
+	}
+});
+
+// GET /api/fuel/verify[?vehicleId=ID] — Super Admin. Does the range panel tell
+// the truth? Backtests the displayed formula against each truck's OWN fill
+// history and reports the answer per truck.
+//
+// This is the client's ask verbatim — "we need to write a script that verifies
+// that, to make sure it's accurate" — as an endpoint rather than a script,
+// because a script answers once and an endpoint answers whenever someone doubts
+// the number. The finding it was built to surface: on production data the panel
+// overstated on 123 of 125 tank-to-tank legs across the three instrumented
+// trucks (#33 56/56 at 1.95x, #2372 64/66 at 1.97x, #302 3/3 at 2.25x).
+//
+// Auditing the arithmetic would have found nothing — the formula is correct and
+// its inputs are wrong — so the only thing that can answer the question is the
+// fill history, and that is what this reads.
+//
+// READ-ONLY by construction: it runs no sweep and issues no UPDATE, so the
+// locked-period rule has nothing to bite on here (nothing this endpoint touches
+// can write to a row in a finalized month). It reports what fuel_events already
+// holds; if the sweep has never run the answer is honestly "no evidence yet"
+// rather than a fabricated pass.
+app.get("/api/fuel/verify", requireRole("Super Admin"), (req, res) => {
+	try {
+		const only = queryStr(req.query.vehicleId);
+		const trucks = db.prepare(`
+			SELECT id, unit_number AS unit, routemate_vehicle_id AS vid, assigned_driver,
+			       fuel_tank_gallons, avg_mpg
+			FROM trucks WHERE COALESCE(routemate_vehicle_id,'') <> ''
+			${only ? "AND routemate_vehicle_id = ?" : ""}
+			ORDER BY unit_number
+		`).all(...(only ? [only] : []));
+
+		const calibrationByVid = {};
+		for (const c of fuelTankCalibrationWire()) calibrationByVid[c.vehicleId] = c;
+
+		const results = trucks.map((t) => {
+			const legs = burnLegsForVehicle(t.vid);
+			const burn = fuelModel.measureBurnRate(legs);
+			// The MPG the panel would actually use today, resolved the same way
+			// /api/fuel/range resolves it — otherwise the backtest would grade a
+			// formula nobody is looking at.
+			const receipt = receiptMpgForVehicle(t.vid);
+			const panelMpg = receipt ? receipt.mpg
+				: (t.avg_mpg > 0 ? t.avg_mpg : fuelModel.DEFAULT_MPG);
+			const panelTank = t.fuel_tank_gallons > 0 ? t.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
+			const backtest = fuelModel.backtestRangeFormula(legs, { tankGallons: panelTank, mpg: panelMpg });
+
+			// Same numbers as they stand RIGHT NOW at the truck's live fuel level,
+			// because "1.95x" is abstract and "the panel says 449, the history says
+			// 210" is not.
+			const latest = db.prepare(`
+				SELECT fuel_pct, location_date_ms FROM routemate_telemetry
+				WHERE routemate_vehicle_id = ? AND dropped_reason = '' AND fuel_pct IS NOT NULL
+				ORDER BY id DESC LIMIT 1`).get(t.vid);
+			const pct = latest ? latest.fuel_pct : null;
+			const shown = fuelModel.computeRange({ fuelPct: pct, tankGallons: panelTank, mpg: panelMpg });
+			const interval = fuelModel.rangeInterval({ fuelPct: pct, burn, rangeMiles: shown.rangeMiles });
+
+			const cal = calibrationByVid[t.vid] || null;
+			return {
+				vehicleId: t.vid,
+				unitNumber: t.unit,
+				assignedDriver: t.assigned_driver || null,
+				// What the panel is built from, and whether either half is a guess.
+				panelInputs: {
+					tankGallons: panelTank,
+					tankSource: t.fuel_tank_gallons > 0 ? "truck" : "default",
+					mpg: Math.round(panelMpg * 100) / 100,
+					mpgSource: receipt ? "receipts" : (t.avg_mpg > 0 ? "default" : "default"),
+				},
+				// The verdict.
+				backtest: {
+					legs: backtest.legs,
+					milesMeasured: backtest.milesTotal,
+					pointsMeasured: backtest.pointsTotal,
+					claimedMilesPerPoint: backtest.predictedMilesPerPoint,
+					measuredMilesPerPoint: backtest.measuredMilesPerPoint,
+					overstatementFactor: backtest.overstatementFactor,
+					medianOverstatement: backtest.medianOverstatement,
+					legsOverstated: backtest.overstatedLegs,
+					// A caller that wants to check our work rather than trust it.
+					legDetail: backtest.legDetail,
+				},
+				// Right now, on this truck.
+				live: {
+					fuelPct: pct,
+					atMs: latest ? latest.location_date_ms : null,
+					panelWouldShowMiles: shown.rangeMiles,
+					measuredLowMiles: interval.low,
+					measuredTypicalMiles: interval.typical,
+					measuredHighMiles: interval.high,
+					basis: interval.basis,
+				},
+				// Tank calibration, RE-LABELLED. impliedGallonsPer100Pct measures the
+				// volume behind the SENDER, and on a twin-tank truck that is one tank,
+				// not the truck's capacity — #33's lower mode reads ~117 while the
+				// truck has twice taken a single 202.7-gallon fill. Reporting it under
+				// a name that says "sensed" is the whole point: told "your 300 is
+				// wrong, it's 117", an operator would set 117 and be shown HALF the
+				// real range, which strands trucks just as surely. Never written back
+				// to trucks.fuel_tank_gallons — a human decides, with this in hand.
+				tankEvidence: cal ? {
+					sampleCount: cal.sampleCount,
+					sensedGallonsPer100Pct: cal.impliedGallonsPer100Pct,
+					sensedLowerMode: cal.lowerMode,
+					bimodal: cal.bimodal,
+					// Bimodal at ~2x is the twin-saddle-tank signature: fills that top
+					// up one tank vs both.
+					bimodalNote: cal.bimodal
+						? "Two populations ~2x apart — consistent with twin saddle tanks where the sender reads one. The LOWER mode is the SENSED tank, not the truck's capacity."
+						: null,
+					// Capacity inferred from the burn side instead, which is what the
+					// truck actually draws on: gal/point = (mi/point) / mpg.
+					burnImpliedGallonsPer100Pct: burn.usable && burn.milesPerPoint
+						? Math.round((burn.milesPerPoint / panelMpg) * 100) : null,
+					largestSingleFillGallons: db.prepare(`
+						SELECT MAX(gallons) g FROM expenses
+						WHERE LOWER(type)='fuel' AND gallons > 0 AND LOWER(TRIM(truck_unit)) = LOWER(TRIM(?))
+					`).get(t.unit).g || null,
+					configuredGallons: cal.configuredGallons,
+				} : null,
+			};
+		});
+
+		res.json({
+			ok: true,
+			// Absent-vs-empty, same contract as the fuel-analytics reconciliation
+			// lists: no fuel_events at all means the sweep has never run, which is a
+			// different statement from "checked, nothing to report".
+			sweepHasRun: !!db.prepare("SELECT 1 FROM fuel_events LIMIT 1").get(),
+			windowDays: FUEL_EVENTS_MATCH_DAYS,
+			trucks: results,
+		});
+	} catch (err) {
+		console.error("[fuel/verify]", err.message);
+		res.status(500).json({ ok: false, error: "fuel verification failed" });
+	}
+});
+
+// One Routes call per miss (cached 15 min by ROUTE_CACHE_TTL) and a handful of
+// indexed SQLite reads — an order of magnitude cheaper than poiLimiter's 4-8
+// billed Places calls, so the caps are correspondingly looser. Same per-user
+// keying and the same reason: a dispatch office behind one NAT must not share a
+// bucket while every driver on cellular gets a fresh one.
+const fuelPlanLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: (req) => {
+		const role = req.session?.user?.role;
+		return role === "Super Admin" || role === "Dispatcher" ? 120 : 30;
+	},
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many trip-plan requests. Try again later." },
+	standardHeaders: true,
+});
+
+// GET /api/fuel/trip-plan?loadId=ID[&vehicleId=ID] — "will this load's route fit
+// in the tank, and if not, where do I have to stop?"
+//
+// The question behind the client's message. It needs three things the range
+// panel alone cannot give: the distance still AHEAD (not the whole lane — the
+// truck is usually mid-route), the fuel that distance costs, and a verdict that
+// is allowed to say NO.
+//
+// REMAINING route, from the truck's live position. Planning from the load's
+// origin would answer a question nobody asked and would overstate the fuel
+// needed once the truck is moving; the fallback to the load origin exists only
+// for a truck with no recent fix.
+//
+// Fuel stops are NOT fetched here. GET /api/poi/fuel-stops fans out to 4-8
+// billed Places calls per cache miss, and folding that into an endpoint the
+// panel polls would multiply that cost by the poll rate. This returns
+// `fuelStopsRecommended` + `refuelWithinMiles` and lets the client make that
+// call ONCE, deliberately, through the endpoint that already owns the cache and
+// the limiter.
+//
+// SECURITY: identical scoping to /api/poi/fuel-stops, and for the same reasons.
+// A Driver must pass loadId, is ownership-checked against it, cannot pass
+// vehicleId (it is ignored, not rejected — nothing to probe), and never receives
+// the ELD vehicle id back.
+app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"), fuelPlanLimiter, async (req, res) => {
+	try {
+		const isDriver = req.session.user.role === "Driver";
+		const loadId = queryStr(req.query.loadId);
+		if (!loadId) return res.status(400).json({ ok: false, error: "loadId required" });
+
+		let truck = null;
+		if (isDriver) {
+			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (!owned) return res.status(403).json({ ok: false, error: "This load is not assigned to you" });
+			truck = resolveTruckForDriverName(
+				(req.session.user.driverName || req.session.user.driver_name || "").trim());
+		} else {
+			const vehicleIdParam = queryStr(req.query.vehicleId);
+			if (vehicleIdParam) {
+				truck = db.prepare(`SELECT id, unit_number AS unit, routemate_vehicle_id, fuel_tank_gallons, avg_mpg
+					FROM trucks WHERE routemate_vehicle_id = ? LIMIT 1`).get(vehicleIdParam);
+			} else {
+				// Fall back to whoever is actually on the load, so dispatch can ask the
+				// question without first looking up the truck.
+				const jt = await getJobTrackingCached();
+				const headers = jt.headers || [];
+				const driverCol = findCol(headers, /driver/i);
+				const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+				const target = String(loadId).trim().toLowerCase().replace(/^#/, "");
+				const row = (jt.data || []).find((r) => loadIdCol
+					&& String(r[loadIdCol] || "").trim().toLowerCase().replace(/^#/, "") === target);
+				if (row && driverCol && row[driverCol]) truck = resolveTruckForDriverName(String(row[driverCol]));
+			}
+		}
+
+		const vehicleId = (truck && truck.routemate_vehicle_id) || "";
+		const lc = db.prepare("SELECT origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE load_id = ?")
+			.get(loadId.toLowerCase().replace(/^#/, ""));
+		if (!lc || ![lc.dest_lat, lc.dest_lng].every(Number.isFinite)) {
+			return res.status(400).json({ ok: false, error: "load has no geocoded destination" });
+		}
+
+		// Live fuel + position.
+		const latest = vehicleId ? db.prepare(`
+			SELECT latitude, longitude, fuel_pct, location_date_ms FROM routemate_telemetry
+			WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 1`).get(vehicleId) : null;
+		const fixFresh = latest && latest.location_date_ms
+			&& Date.now() - latest.location_date_ms < 6 * 60 * 60 * 1000
+			&& Number.isFinite(latest.latitude) && Number.isFinite(latest.longitude);
+		const from = fixFresh
+			? { latitude: latest.latitude, longitude: latest.longitude }
+			: (Number.isFinite(lc.origin_lat) && Number.isFinite(lc.origin_lng)
+				? { latitude: lc.origin_lat, longitude: lc.origin_lng } : null);
+		if (!from) return res.status(400).json({ ok: false, error: "no position to plan from" });
+
+		let routeMiles = null;
+		try {
+			const route = await getRoute(from, { latitude: lc.dest_lat, longitude: lc.dest_lng });
+			if (route && Number.isFinite(route.distanceMiles)) routeMiles = route.distanceMiles;
+		} catch { /* fall through to the straight-line floor below */ }
+		// Routes API down -> straight-line distance, which is always SHORTER than
+		// the road. That understates the route, which would flatter the verdict, so
+		// it is inflated by 1.15 (a standard road-vs-crow factor) and labelled. A
+		// null here would drop the panel entirely at exactly the moment a driver is
+		// trying to decide whether to stop.
+		const routeSource = routeMiles != null ? "routes_api" : "straight_line_estimate";
+		if (routeMiles == null) {
+			routeMiles = Math.round(
+				(geolib.getDistance(from, { latitude: lc.dest_lat, longitude: lc.dest_lng }) / 1609.34) * 1.15 * 10) / 10;
+		}
+
+		const burn = burnRateForVehicle(vehicleId);
+		const receipt = receiptMpgForVehicle(vehicleId);
+		const mpg = receipt ? receipt.mpg
+			: (truck && truck.avg_mpg > 0 ? truck.avg_mpg : fuelModel.DEFAULT_MPG);
+		const tank = truck && truck.fuel_tank_gallons > 0 ? truck.fuel_tank_gallons : fuelModel.DEFAULT_TANK_GALLONS;
+		const pct = latest ? latest.fuel_pct : null;
+		const shown = fuelModel.computeRange({ fuelPct: pct, tankGallons: tank, mpg });
+
+		const plan = fuelModel.planTripFuel({
+			routeMiles, fuelPct: pct, burn, rangeMiles: shown.rangeMiles, mpg,
+		});
+
+		res.json({
+			ok: true,
+			loadId,
+			unit: (truck && truck.unit) || null,
+			...(isDriver ? {} : { vehicleId: vehicleId || null }),
+			routeSource,
+			// True when the plan is measured from where the truck is right now
+			// rather than from the load's pickup — a dispatcher reading a big number
+			// needs to know which question was answered.
+			fromLivePosition: !!fixFresh,
+			fuelPct: pct,
+			mpg: Math.round(mpg * 100) / 100,
+			mpgSource: receipt ? "receipts" : "default",
+			...plan,
+			// The point estimate the old panel would have shown, kept beside the
+			// verdict so the gap is visible rather than silently corrected.
+			pointEstimateMiles: shown.rangeMiles,
+			fuelStopsRecommended: plan.verdict === "tight" || plan.verdict === "insufficient",
+			updatedAt: latest && latest.location_date_ms
+				? new Date(latest.location_date_ms).toISOString() : null,
+		});
+	} catch (err) {
+		console.error("[fuel/trip-plan]", err.message);
+		res.status(500).json({ ok: false, error: "trip plan failed" });
 	}
 });
 
