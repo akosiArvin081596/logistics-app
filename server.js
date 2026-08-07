@@ -8943,6 +8943,26 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		if (req.session.user.role === "Investor") {
 			finalOwnerId = req.session.user.id;
 		}
+		// SECURITY: an Investor may add a truck, but may NOT name its driver.
+		//
+		// assignDriverToTruck() is fleet-wide by design — it closes that driver's
+		// active assignment ANYWHERE and clears trucks.assigned_driver on every
+		// other truck holding the name, because a driver can only drive one truck.
+		// Correct for dispatch; a cross-tenant weapon here. Trucks in this fleet
+		// span four different owners, so investor 42 could create a truck naming
+		// investor 5's driver and detach him from investor 5's truck — cascading
+		// into load assignment, the driver-pay active-day basis (keyed on truck),
+		// and fuel range, none of which the investor can see or undo.
+		//
+		// Forced BEFORE the INSERT, not just before the assignment call: writing
+		// the name into trucks.assigned_driver without an assignment row would
+		// leave two trucks claiming one driver, which getInvestorDriverSet() and
+		// the fuel-range resolver both read. One variable, applied everywhere.
+		//
+		// Costs the investor nothing: their Add-Truck form sends unit/year/make/
+		// model/vin/plate only. Driver assignment is dispatch's job, via PUT
+		// /api/trucks/:id, which is already Super Admin / Dispatcher only.
+		const finalAssignedDriver = req.session.user.role === "Investor" ? "" : (assignedDriver || "");
 		if (!unitNumber || !unitNumber.trim()) {
 			return res.status(400).json({ error: "Unit number is required" });
 		}
@@ -8952,16 +8972,16 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		}
 		const validStatus = ["Active", "Inactive", "Maintenance", "OOS"].includes(status) ? status : "Active";
 		// Check if driver has an active load before allowing assignment
-		if (assignedDriver && assignedDriver.trim()) {
-			const activeCheck = await checkDriverActiveLoad(assignedDriver.trim());
+		if (finalAssignedDriver && finalAssignedDriver.trim()) {
+			const activeCheck = await checkDriverActiveLoad(finalAssignedDriver.trim());
 			if (activeCheck) return res.status(409).json({ error: activeCheck });
 		}
 		const result = db.prepare(
 			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, assignedDriver || "", notes || "", finalOwnerId, driverPayParsed.value, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0, parseFloat(fuelTankGallons) || 0, parseFloat(avgMpg) || 0, inServiceCreate);
+		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0, parseFloat(fuelTankGallons) || 0, parseFloat(avgMpg) || 0, inServiceCreate);
 		// Create truck assignment record
-		if (assignedDriver && assignedDriver.trim()) {
-			assignDriverToTruck(result.lastInsertRowid, assignedDriver.trim());
+		if (finalAssignedDriver && finalAssignedDriver.trim()) {
+			assignDriverToTruck(result.lastInsertRowid, finalAssignedDriver.trim());
 		}
 		// Audit creation, naming the in-service date. The PUT audits every change
 		// to that field because it re-books fixed costs across whole months; the
@@ -18445,30 +18465,107 @@ app.get("/api/route", requireRole("Super Admin", "Dispatcher", "Driver"), async 
 
 // ── Fuel range + POI fuel stops (tracking quick-glance / fuel finder) ────────
 
+// Express parses `?k[]=1` (and a repeated `?k=1&k=2`) into an ARRAY, so the
+// usual `(req.query.k || "").trim()` throws a TypeError and surfaces as a
+// generic 500 instead of the clean 400 the caller should get. Fail closed:
+// anything that is not a plain string reads as absent, which falls into the
+// endpoint's existing "required"/"not provided" validation. No data flows
+// either direction on this path — it is purely a wrong-status-code fix.
+function queryStr(v) {
+	return typeof v === "string" ? v.trim() : "";
+}
+
+// Resolve the truck currently assigned to a driver, for the fuel endpoints.
+//
+// Two divergences this deliberately closes, both of which read to a user as
+// "the app says I have no fuel data":
+//
+//  1. SOURCE. /api/fuel/range historically read only the active
+//     truck_assignments row, while /api/driver/:driverName reads
+//     trucks.assigned_driver. assignDriverToTruck() writes both, but the
+//     truck-document guard already accepts assigned_driver as a fallback
+//     "in case the history table lags" — mirror that here rather than show an
+//     empty fuel panel to a driver who is demonstrably in a truck.
+//  2. NAME MATCHING. This endpoint used SQL TRIM(LOWER(...)); every other
+//     driver path uses normalizeDriverName(), which ALSO collapses internal
+//     whitespace (real sheet/user rows carry typo'd double spaces — see the
+//     invoice-generator regression the helper documents). SQLite has no regex
+//     replace, so the whitespace collapse cannot be expressed in SQL: read the
+//     active rows (fleet-sized, a few dozen) and compare in JS instead.
+//     Strictly widening — every name that matched before still matches.
+//
+// Returns the truck row (id/unit/routemate_vehicle_id/fuel_tank_gallons/avg_mpg)
+// or null. Never throws on an unknown name; callers degrade to "no fuel data".
+function resolveTruckForDriverName(driverName) {
+	const target = normalizeDriverName(driverName);
+	if (!target) return null;
+	// Primary: newest active assignment (same ordering the old query used).
+	const active = db.prepare(
+		`SELECT t.id, t.unit_number AS unit, t.routemate_vehicle_id, t.fuel_tank_gallons,
+		        t.avg_mpg, ta.driver_name AS matched_name
+		 FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id
+		 WHERE ta.end_date = '' ORDER BY ta.id DESC`
+	).all();
+	const fromHistory = active.find((r) => normalizeDriverName(r.matched_name) === target);
+	if (fromHistory) return fromHistory;
+	// Fallback: the denormalized pointer on trucks itself.
+	const owned = db.prepare(
+		`SELECT id, unit_number AS unit, routemate_vehicle_id, fuel_tank_gallons,
+		        avg_mpg, assigned_driver AS matched_name
+		 FROM trucks WHERE TRIM(COALESCE(assigned_driver, '')) != '' ORDER BY id DESC`
+	).all();
+	return owned.find((r) => normalizeDriverName(r.matched_name) === target) || null;
+}
+
 // GET /api/fuel/range?driver=NAME  (or ?vehicleId=ID) — miles-left-in-tank estimate
 // from the assigned truck's latest ELD fuel% + tank size (config or 200-gal
 // default) + MPG (ELD-derived, else the truck's configured/6.5 default). Powers
 // the Fuel Finder panel; rangeMiles/gallonsRemaining come back null when the
 // truck's device reports no fuel (frontend hides the panel via hasFuelData).
-app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+//
+// BOTH assumptions are labeled, and both labels are load-bearing: `mpgSource`
+// and `tankSource` ('eld'|'default' / 'truck'|'default') tell the caller whether
+// the range rests on measured truck config or on a fleet-wide guess, so the UI
+// can badge it instead of presenting an estimate with false precision. Added for
+// tank after two trucks with an unset fuel_tank_gallons quietly took the 200-gal
+// default and displayed ~2.5x their real range (see lib/fuel-model.js).
+//
+// SECURITY — Drivers are permitted but SCOPED to themselves. Both query params
+// are IGNORED for the Driver role and the truck is resolved from the session
+// name, exactly like GET /api/driver/me/truck-photo. This matters because
+// ?vehicleId= bypasses the driver lookup entirely: honoring it for a driver
+// would turn this into "read any truck's live fuel state by guessing an id".
+// Ignoring rather than 403-ing on the params leaves no spoofable surface at all
+// — there is nothing to probe, so nothing to enumerate. Super Admin/Dispatcher
+// keep both params and the full fleet, unchanged.
+app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (req, res) => {
 	try {
-		const driver = (req.query.driver || "").trim();
-		const vehicleIdParam = (req.query.vehicleId || "").trim();
+		const isDriver = req.session.user.role === "Driver";
+		// Session name for a Driver; query param for dispatch.
+		const driver = isDriver
+			? (req.session.user.driverName || req.session.user.driver_name || "").trim()
+			: queryStr(req.query.driver);
+		const vehicleIdParam = isDriver ? "" : queryStr(req.query.vehicleId);
 		let truck = null;
 		if (vehicleIdParam) {
 			truck = db.prepare(`SELECT id, unit_number AS unit, routemate_vehicle_id, fuel_tank_gallons, avg_mpg
 				FROM trucks WHERE routemate_vehicle_id = ? LIMIT 1`).get(vehicleIdParam);
 		} else if (driver) {
-			truck = db.prepare(`SELECT t.id, t.unit_number AS unit, t.routemate_vehicle_id, t.fuel_tank_gallons, t.avg_mpg
-				FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id
-				WHERE ta.end_date = '' AND TRIM(LOWER(ta.driver_name)) = ?
-				ORDER BY ta.id DESC LIMIT 1`).get(driver.toLowerCase());
-		} else {
+			truck = resolveTruckForDriverName(driver);
+		} else if (!isDriver) {
 			return res.status(400).json({ ok: false, error: "driver or vehicleId required" });
 		}
+		// A Driver whose account has no linked driver name (or no truck) falls
+		// through with truck = null and gets the normal hasFuelData:false shape
+		// rather than a 400 — the panel simply hides, which is the same thing the
+		// UI does for a truck with no fuel sensor. A hard error here would only
+		// surface an admin-side linkage gap as a broken driver screen.
 		const vehicleId = (truck && truck.routemate_vehicle_id) || "";
 		// newest-first; fuel-model re-sorts. Pass raw truck config (0 = unset → the
-		// module resolves its own default and echoes the resolved tankGallons back).
+		// module resolves its own default and echoes the resolved tankGallons back,
+		// plus tankSource saying whether that number was configured or assumed —
+		// keep passing the raw 0 rather than substituting a default here, or the
+		// module loses the only signal it has to tell those two cases apart).
 		const rows = vehicleId ? db.prepare(
 			`SELECT odometer, fuel_pct, location_date_ms FROM routemate_telemetry
 			 WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 200`).all(vehicleId) : [];
@@ -18504,6 +18601,15 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher"), (req, res) 
 		// fuel rollup. estimateRangeForVehicle still owns the fuel-sensor detection +
 		// tank/gallons resolution; we only re-pick MPG and (when there is a live fuel
 		// reading) recompute the range from it via the same computeRange() math.
+		//
+		// MPG is re-picked here ONLY because the server can see a source the pure
+		// module cannot (the routemate_fuel_daily rollup), which forces mpgSource to
+		// be re-labeled alongside it. Tank has no such second source — the column is
+		// passed straight through and estimate.tankGallons is never reassigned below
+		// — so tankSource is set once, in the module, next to the branch that picks
+		// the value. Do NOT add a mirror-image tank override here: a second copy of
+		// "was fuel_tank_gallons configured?" is exactly the kind of quiet drift the
+		// field was added to prevent.
 		const avgMpgCfg = truck && truck.avg_mpg > 0 ? Math.round(truck.avg_mpg * 100) / 100 : 0;
 		// Trust the ELD-derived MPG only in a plausible class-8 band (3–11 mpg);
 		// anything outside is contaminated telemetry (heavy idle, sensor noise) →
@@ -18529,7 +18635,16 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher"), (req, res) 
 		}
 		const updatedAt = latest && latest.location_date_ms
 			? new Date(latest.location_date_ms).toISOString() : new Date().toISOString();
-		res.json({ ok: true, driver: driver || null, vehicleId: vehicleId || null,
+		// SECURITY: the ELD vehicle id is dispatch-only and is OMITTED for the
+		// Driver role. It is inert today — ?vehicleId= is ignored above — but
+		// shipping it to every driver hands out precisely the enumeration key that
+		// the ignore-the-param scoping exists to protect: if that blanking is ever
+		// relaxed or refactored away, the fleet's ids are already in the wild.
+		// Don't publish the key to the lock. `unit` deliberately stays: it is the
+		// placard number on the truck the driver is sitting in, and
+		// /api/driver/:driverName already returns it.
+		res.json({ ok: true, driver: driver || null,
+			...(isDriver ? {} : { vehicleId: vehicleId || null }),
 			unit: (truck && truck.unit) || null, ...estimate, updatedAt });
 	} catch (err) {
 		console.error("[fuel/range]", err.message);
@@ -18547,21 +18662,112 @@ const statementLimiter = rateLimit({
 	standardHeaders: true,
 });
 
-// Each request fans out to several billed Places calls → cap spend (mirrors scanKitLimiter).
+// Each request fans out to 4–8 `places:searchNearby` calls (MIN/MAX_WAYPOINTS in
+// lib/poi-fuel-stops.js) on the Places Enterprise + Atmosphere SKU — the most
+// expensive tier, because the field mask asks for `places.fuelOptions` to get
+// live pump prices — plus a Routes call. With drivers added this limiter is the
+// only thing between the rollout and a large Google bill, so it is both
+// per-user and role-aware.
 const poiLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
-	max: 60,
+	// Dispatch keeps the original 60: they shop fuel across the whole board and
+	// re-run lookups while planning. A Driver gets 6 — they run ONE load at a
+	// time, and with poiStopsCache below serving every repeat for that lane free
+	// of charge, 6 distinct lane lookups per 15 min is far more than an honest
+	// driver reaches. Lower is deliberate: at ~$0.16–0.32 of billed Places calls
+	// per MISS, the cap is the ceiling on what a scripted client can spend, and
+	// per-user keying means that ceiling is now per account rather than shared.
+	// requireRole runs before this middleware, so req.session.user is populated.
+	max: (req) => {
+		const role = req.session?.user?.role;
+		return role === "Super Admin" || role === "Dispatcher" ? 60 : 6;
+	},
+	// Key on the SESSION USER, not the IP (the default). IP keying is actively
+	// backwards for this endpoint: a dispatch office behind one NAT shares a
+	// single bucket, so one person planning fuel locks out everyone else, while
+	// every driver on cellular gets a fresh bucket whenever the carrier rotates
+	// their IP — i.e. the cheap callers are throttled and the expensive ones are
+	// not. Same generator as expenseOcrLimiter; falls back to IP for the
+	// unauthenticated edge.
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
 	message: { error: "Too many POI requests. Try again later." },
 	standardHeaders: true,
 });
+
+// Per-lane TTL cache for the Places fan-out. Mirrors trackResponseCache (Map +
+// TTL + FIFO cap), which exists on the public tracker for exactly this reason.
+//
+// WHY: this endpoint had a cost asymmetry — getRoute() is cached 15 min
+// (ROUTE_CACHE_TTL), but the expensive half was not, so the cheap Routes call
+// was memoized while 4-8 Places `searchNearby` calls on the Enterprise +
+// Atmosphere SKU (~$40/1,000 → ~$0.16-0.32 a request) were re-billed on every
+// single call, including repeat polls for a load whose route has not moved.
+//
+// KEYED ON THE RESOLVED COORDINATES, not the query string, and rounded to 3
+// decimals (~111 m) exactly like routeCacheKey(). Consequences, all wanted:
+//   • `?loadId=%23123` and `?loadId=123` normalize to the same load_coordinates
+//     row → same coords → SAME entry.
+//   • `limit` is NOT part of the key and never causes a refetch — we fetch the
+//     full cap once and slice on read (see POI_FETCH_CAP).
+//   • Two different loads running the same lane share one fan-out.
+//   • Re-geocoding a load moves its coords → new key → no stale route, without
+//     needing an invalidation hook.
+// A load's route is static, so this collapses repeat cost to ~zero and makes
+// the per-user rate cap a backstop rather than the only cost control.
+const poiStopsCache = new Map();
+// Aligned with ROUTE_CACHE_TTL so both halves of this endpoint expire together
+// (no window where we re-bill Places only to pair it with a stale route path).
+const POI_CACHE_TTL_MS = 15 * 60 * 1000;
+const POI_CACHE_MAX = 200;
+// Always fetch at the endpoint's max `limit` so one cached entry can serve any
+// requested limit. This is BILLING-NEUTRAL: `limit` only feeds maxResultCount
+// per call (lib/poi-fuel-stops.js), while the number of billed calls is the
+// waypoint count — clamp(ceil(routeMiles/75), 4, 8) — which `limit` cannot
+// influence. Same requests, more rows per request, one entry that fits all.
+const POI_FETCH_CAP = 25;
+function poiCacheKey(oLat, oLng, dLat, dLng) {
+	return `${oLat.toFixed(3)},${oLng.toFixed(3)}>${dLat.toFixed(3)},${dLng.toFixed(3)}`;
+}
+
 // GET /api/poi/fuel-stops?loadId=ID  (or ?originLat=&originLng=&destLat=&destLng=)[&limit=]
-// — diesel truck stops along a load's route, each stamped with its region's
-// average diesel price. Locations via Google Places; prices via EIA regional avg.
-app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher"), poiLimiter, async (req, res) => {
+// — diesel truck stops along a load's route, each stamped with its LIVE
+// per-station pump price. Locations and prices both come from Google Places
+// (`places.fuelOptions`); there is deliberately no EIA/regional-average
+// fallback — see the ranking comment below for why a coarse estimate is worse
+// than no price at all. (The old "prices via EIA regional avg" note here was
+// stale: that source was removed when live pump prices landed.)
+//
+// SECURITY — Drivers are permitted but SCOPED to their own loads: loadId is
+// REQUIRED and raw coordinate pairs are REJECTED. The same reasoning as
+// GET /api/geocode/load/:loadId, which is the precedent for this shape — pickup
+// and dropoff coordinates are competitive intel, and a free origin/dest pair is
+// worse than reading one load: it is an arbitrary route-pricing oracle for any
+// lane in the country, billed to us at 4–8 Places calls a shot. Dispatch keeps
+// the raw-coordinate form (they price prospective lanes that have no load yet).
+app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"), poiLimiter, async (req, res) => {
 	try {
 		let oLat = parseFloat(req.query.originLat), oLng = parseFloat(req.query.originLng),
 		    dLat = parseFloat(req.query.destLat), dLng = parseFloat(req.query.destLng);
-		const loadId = (req.query.loadId || "").trim();
+		const loadId = queryStr(req.query.loadId);
+		if (req.session.user.role === "Driver") {
+			if (!loadId) {
+				return res.status(400).json({ ok: false, error: "loadId required", stops: [] });
+			}
+			// Reject only coordinates that actually parsed — an empty/absent param
+			// is a harmless no-op, but any usable coordinate means the caller is
+			// trying to route somewhere other than their load.
+			if ([oLat, oLng, dLat, dLng].some(Number.isFinite)) {
+				return res.status(403).json({ ok: false, error: "Drivers must request fuel stops by loadId", stops: [] });
+			}
+			const owned = await loadBelongsToDriver(loadId, req.session.user.driverName);
+			if (!owned) return res.status(403).json({ ok: false, error: "This load is not assigned to you", stops: [] });
+			// Defense in depth: force the load_coordinates lookup below to be the
+			// only source of coordinates for this request, whatever was passed.
+			oLat = oLng = dLat = dLng = NaN;
+		}
 		if (loadId && ![oLat, oLng, dLat, dLng].every(Number.isFinite)) {
 			const lc = db.prepare("SELECT origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE load_id = ?")
 				.get(loadId.toLowerCase().replace(/^#/, ""));
@@ -18572,52 +18778,82 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher"), poiLimi
 		}
 		if (!GOOGLE_MAPS_API_KEY) return res.status(503).json({ ok: false, error: "maps_key_unset", stops: [] });
 		const limit = Math.min(parseInt(req.query.limit) || 12, 25);
-		// Sample the search waypoints along the ACTUAL driving polyline (not the
-		// straight line) so stops land on the highway. Best-effort: getRoute()
-		// returns null on any Routes API failure, and we degrade to straight-line
-		// sampling (today's behavior) rather than failing the fuel-stop lookup.
-		let routePath = null;
-		try {
-			const route = await getRoute(
-				{ latitude: oLat, longitude: oLng },
-				{ latitude: dLat, longitude: dLng },
-			);
-			if (route && Array.isArray(route.points) && route.points.length >= 2) {
-				routePath = route.points; // [{ latitude, longitude }, …] — lib normalizes
+
+		// Cache lookup sits AFTER coordinate resolution and after the Driver
+		// ownership check above, so a cache hit can never bypass authorization —
+		// same placement rule trackResponseCache follows w.r.t. its rate limiter.
+		const cacheKey = poiCacheKey(oLat, oLng, dLat, dLng);
+		const hit = poiStopsCache.get(cacheKey);
+		let priced = hit && Date.now() - hit.time < POI_CACHE_TTL_MS ? hit.stops : null;
+		const fromCache = priced !== null;
+
+		if (!fromCache) {
+			// Sample the search waypoints along the ACTUAL driving polyline (not the
+			// straight line) so stops land on the highway. Best-effort: getRoute()
+			// returns null on any Routes API failure, and we degrade to straight-line
+			// sampling (today's behavior) rather than failing the fuel-stop lookup.
+			let routePath = null;
+			try {
+				const route = await getRoute(
+					{ latitude: oLat, longitude: oLng },
+					{ latitude: dLat, longitude: dLng },
+				);
+				if (route && Array.isArray(route.points) && route.points.length >= 2) {
+					routePath = route.points; // [{ latitude, longitude }, …] — lib normalizes
+				}
+			} catch { /* degrade to straight-line sampling */ }
+			const stops = await poiFuelStops.findFuelStopsAlongRoute({
+				originLat: oLat, originLng: oLng, destLat: dLat, destLng: dLng,
+				apiKey: GOOGLE_MAPS_API_KEY, limit: POI_FETCH_CAP, routePath,
+			});
+			// Attach the live per-station diesel pump price (Google `fuelOptions`) where
+			// Google has coverage. Stations with no price data get effectivePrice: null
+			// → the UI shows "price n/a". We deliberately do NOT substitute a regional
+			// average: a coarse regional number would sort as if it were the cheapest
+			// stop and mislead the driver. Real pump price or nothing.
+			priced = (stops || []).map((s) => {
+				const hasLive = Number.isFinite(s.dieselPrice);
+				return {
+					...s,
+					priceSource: hasLive ? "station" : null,
+					effectivePrice: hasLive ? s.dieselPrice : null,
+					priceAsOf: hasLive ? (s.dieselPriceUpdated || null) : null,
+				};
+			});
+			// True-cheapest first: live-priced stations by price ascending, then the
+			// no-price stations nearest-to-route.
+			priced.sort((a, b) => {
+				const al = a.priceSource === "station", bl = b.priceSource === "station";
+				if (al && bl) return a.effectivePrice - b.effectivePrice;
+				if (al !== bl) return al ? -1 : 1;
+				return (a.aboutMilesFromRoute || 0) - (b.aboutMilesFromRoute || 0);
+			});
+			// Only cache a NON-EMPTY result. findFuelStopsAlongRoute degrades a failed
+			// waypoint to [] silently, so an empty array is ambiguous between "no
+			// truck stops on this lane" and "Places was briefly down" — pinning the
+			// latter for 15 minutes would turn a blip into an outage for that lane.
+			// An empty result simply retries on the next call.
+			if (priced.length) {
+				poiStopsCache.set(cacheKey, { stops: priced, time: Date.now() });
+				if (poiStopsCache.size > POI_CACHE_MAX) poiStopsCache.delete(poiStopsCache.keys().next().value);
 			}
-		} catch { /* degrade to straight-line sampling */ }
-		const stops = await poiFuelStops.findFuelStopsAlongRoute({
-			originLat: oLat, originLng: oLng, destLat: dLat, destLng: dLng,
-			apiKey: GOOGLE_MAPS_API_KEY, limit, routePath,
-		});
-		// Attach the live per-station diesel pump price (Google `fuelOptions`) where
-		// Google has coverage. Stations with no price data get effectivePrice: null
-		// → the UI shows "price n/a". We deliberately do NOT substitute a regional
-		// average: a coarse regional number would sort as if it were the cheapest
-		// stop and mislead the driver. Real pump price or nothing.
-		const priced = (stops || []).map((s) => {
-			const hasLive = Number.isFinite(s.dieselPrice);
-			return {
-				...s,
-				priceSource: hasLive ? "station" : null,
-				effectivePrice: hasLive ? s.dieselPrice : null,
-				priceAsOf: hasLive ? (s.dieselPriceUpdated || null) : null,
-			};
-		});
-		// True-cheapest first: live-priced stations by price ascending, then the
-		// no-price stations nearest-to-route.
-		priced.sort((a, b) => {
-			const al = a.priceSource === "station", bl = b.priceSource === "station";
-			if (al && bl) return a.effectivePrice - b.effectivePrice;
-			if (al !== bl) return al ? -1 : 1;
-			return (a.aboutMilesFromRoute || 0) - (b.aboutMilesFromRoute || 0);
-		});
-		const liveStops = priced.filter((s) => s.priceSource === "station");
+		}
+
+		// Slice on read — the cached entry always holds the full POI_FETCH_CAP set,
+		// so changing `limit` re-slices instead of re-billing. Cached stop objects
+		// are treated as READ-ONLY; nothing below mutates one.
+		const stopsOut = priced.slice(0, limit);
+		// cheapest/livePriceCount describe the rows actually returned, so they stay
+		// self-consistent with `stops` at any limit. `cheapest` is stable across
+		// limits regardless: the sort puts the globally cheapest priced station at
+		// index 0, so it survives every slice >= 1.
+		const liveStops = stopsOut.filter((s) => s.priceSource === "station");
 		res.json({
 			ok: true,
-			stops: priced,
+			stops: stopsOut,
 			cheapest: liveStops[0] || null,     // true-cheapest station with a live pump price
 			livePriceCount: liveStops.length,
+			cached: fromCache,                  // ops/QA signal: did this request bill Google?
 		});
 	} catch (err) {
 		if (err && err.code === "POI_NO_KEY") return res.status(503).json({ ok: false, error: "maps_key_unset", stops: [] });
@@ -18849,12 +19085,27 @@ app.get("/api/geocode/search", async (req, res) => {
 app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 	try {
 		const loadId = decodeURIComponent(req.params.loadId).trim().toLowerCase().replace(/^#/, "");
-		// SECURITY: drivers can only fetch coords for their own loads. Otherwise
-		// a driver could pull pickup/dropoff coordinates for any load and use
-		// them for competitive intel or location enumeration.
-		if (req.session.user.role === "Driver") {
+		// SECURITY: allow-list, not a deny-list for one role.
+		//
+		// This used to read `if (role === "Driver")`, which guarded the role
+		// someone had thought about and silently waved through every other
+		// authenticated role — including INVESTOR. And the payload below is not
+		// just coordinates: it returns `pickupAddress` and `dropoffAddress`, i.e.
+		// the shipper and receiver for any load id. That is the carrier's
+		// customer list, and load ids are visible and enumerable. An investor
+		// funds trucks; they are an outside party who happens to hold a login,
+		// and there is no reading of the product where they need it.
+		//
+		// Written as an explicit allow-list so a role added later is denied by
+		// default rather than inheriting access nobody decided to grant. No
+		// investor surface calls this endpoint — the only callers are the three
+		// dispatcher load tabs and the driver app.
+		const geoRole = req.session.user.role;
+		if (geoRole === "Driver") {
 			const owned = await loadBelongsToDriver(req.params.loadId, req.session.user.driverName);
 			if (!owned) return res.status(403).json({ error: "This load is not assigned to you" });
+		} else if (geoRole !== "Super Admin" && geoRole !== "Dispatcher") {
+			return res.status(403).json({ error: "Forbidden" });
 		}
 		let row = db.prepare("SELECT * FROM load_coordinates WHERE load_id = ?").get(loadId);
 

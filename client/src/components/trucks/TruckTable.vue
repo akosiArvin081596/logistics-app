@@ -9,15 +9,46 @@
 
     <table v-else class="truck-table">
       <thead>
+        <!-- COLUMN BUDGET — measured in a real browser with the real webfonts
+             loaded, against origin/main as a baseline. The figures that decide
+             clipping are min-content floors, not the widths this first read:
+               main      floor  998.4px   (VIN alone: 140.4px, the widest column —
+                                           an unbreakable 17-char mono token)
+               shipped   floor  928.3px   (VIN 57.5, Tank 61.5)
+             Tank costs +61.5px of floor; VIN last-6 saves -82.9px; folding Year
+             into Vehicle saves -48.8px. Net -70.1px vs main.
+
+             Available table width = viewport - 346px (240 sidebar + 64 .main
+             padding + 40 .card padding + 2 border), so 1440 -> 1094px and
+             1280 -> 934px.
+
+             THE VIN SHORTENING IS LOAD-BEARING, not cosmetic. Measured
+             counterfactual (Tank added, full VIN restored): floor 1011.2px,
+             which clips 77px at 1280 — WORSE than main. Tank does not fit
+             without it.
+
+             At 1280 main clips 64px and cuts off the Remove button; shipped
+             clips 0. This grid fixes a pre-existing bug rather than causing one.
+             The remaining cost is one extra text line on one row per width.
+
+             ⚠️ Headroom at 1280 is 5.7px (928.3 floor vs 934 available). One
+             longer owner name, driver name or a 4-digit tank tips it into
+             clipping. If you need room, the fattest floors left are the actions
+             column (129.8px) and Routemate (86px).
+
+             ⚠️ Verifying this: probe .card, NOT the table. table.scrollWidth -
+             clientWidth reads 0 at every width on both builds — the table box
+             grows instead of scrolling and .card{overflow:hidden} swallows it
+             silently. -->
         <tr>
           <th>Unit #</th>
-          <th>Make / Model</th>
-          <th>Year</th>
+          <th>Vehicle</th>
           <th>VIN</th>
           <th>Plate</th>
           <th>Status</th>
           <th>Current Driver</th>
           <th>Driver Pay</th>
+          <th title="Usable diesel capacity. Drives the fuel-range estimate drivers see; blank falls back to 200 gal.">Tank</th>
           <th>Loads</th>
           <th>Routemate</th>
           <th v-if="showOwner">Owner</th>
@@ -27,9 +58,12 @@
       <tbody>
         <tr v-for="truck in trucks" :key="truck.id" class="clickable-row" @click="viewTruck = truck">
           <td class="unit-number">{{ truck.UnitNumber }}</td>
-          <td>{{ [truck.Make, truck.Model].filter(Boolean).join(' ') || '\u2014' }}</td>
-          <td>{{ truck.Year || '\u2014' }}</td>
-          <td class="vin-cell">{{ truck.VIN || '\u2014' }}</td>
+          <td>{{ vehicleLabel(truck) }}</td>
+          <!-- Last 6, full VIN on hover + in the row's detail modal. Same short-VIN
+               convention the investor MyTrucks table already uses, and it is what
+               actually pays for the Tank column: the full 17 chars are worth
+               ~76px in a grid already ~200px past its budget at 1440. -->
+          <td class="vin-cell" :title="truck.VIN || ''">{{ shortVin(truck.VIN) }}</td>
           <td>{{ truck.LicensePlate || '\u2014' }}</td>
           <td>
             <span :class="['status-badge', statusClass(truck.Status)]">{{ truck.Status }}</span>
@@ -46,6 +80,14 @@
           <td class="mono">
             <span v-if="truck.DriverPayDaily > 0">${{ truck.DriverPayDaily }}/day</span>
             <span v-else class="pay-default" title="No custom rate set; pay calculations use the $250/day default">$250/day default</span>
+          </td>
+          <td class="mono">
+            <span v-if="tankGallons(truck)">{{ tankGallons(truck) }} gal</span>
+            <span
+              v-else
+              class="tank-default"
+              title="No tank size recorded — the fuel-range estimate falls back to 200 gal, which overstates a driver's remaining miles on any smaller tank. Set the real capacity via Edit → Fuel Tank, MPG &amp; Business Configuration."
+            >200 gal (default)</span>
           </td>
           <td class="mono">{{ truck.LoadCount ?? 0 }}</td>
           <td>
@@ -224,7 +266,24 @@
           </div>
 
           <details style="margin-bottom:0.75rem;" open>
-            <summary style="font-size:0.72rem;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em;cursor:pointer;margin-bottom:0.5rem;">Business Configuration</summary>
+            <!-- Named after the fields inside it, not the abstraction: the old
+                 "Business Configuration" gave no hint it held the fuel tank, so
+                 two trucks ran for months on the 200-gal default and drivers
+                 were shown ~2.5x their real range. Tank + MPG lead the section
+                 for the same reason. -->
+            <summary style="font-size:0.72rem;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.04em;cursor:pointer;margin-bottom:0.5rem;">Fuel Tank, MPG &amp; Business Configuration</summary>
+            <div class="edit-row">
+              <div class="edit-field">
+                <label>Fuel Tank (gallons)</label>
+                <input v-model.number="editForm.fuelTankGallons" type="number" min="0" max="500" step="any" placeholder="200 (default)" />
+                <div class="field-hint">Diesel capacity for the Live Tracking fuel-range estimate. Blank = 200 gal default.</div>
+              </div>
+              <div class="edit-field">
+                <label>Avg MPG</label>
+                <input v-model.number="editForm.avgMpg" type="number" min="0" max="20" step="any" placeholder="6.5 (default)" />
+                <div class="field-hint">Blank auto-derives MPG from ELD fuel + odometer.</div>
+              </div>
+            </div>
             <div class="edit-row">
               <div class="edit-field">
                 <label>Purchase Price ($)</label>
@@ -242,18 +301,6 @@
               <div class="edit-field">
                 <label>Maintenance Fund ($/mo)</label>
                 <input v-model.number="editForm.maintenanceFundMonthly" type="number" min="0" />
-              </div>
-            </div>
-            <div class="edit-row">
-              <div class="edit-field">
-                <label>Fuel Tank (gallons)</label>
-                <input v-model.number="editForm.fuelTankGallons" type="number" min="0" max="500" step="any" placeholder="200 (default)" />
-                <div class="field-hint">Diesel capacity for the Live Tracking fuel-range estimate. Blank = 200 gal default.</div>
-              </div>
-              <div class="edit-field">
-                <label>Avg MPG</label>
-                <input v-model.number="editForm.avgMpg" type="number" min="0" max="20" step="any" placeholder="6.5 (default)" />
-                <div class="field-hint">Blank auto-derives MPG from ELD fuel + odometer.</div>
               </div>
             </div>
             <div class="edit-field">
@@ -412,6 +459,29 @@ const editForm = reactive({
   purchasePrice: 0, titleStatus: 'Clean', maintenanceFundMonthly: 0,
   fuelTankGallons: '', avgMpg: '', inServiceDate: '',
 })
+
+// Year + make + model in one cell — "2022 Freightliner Cascadia" is how a fleet
+// writes a truck anyway, and it keeps the column COUNT at 12 with Tank added.
+// (It does not save width; see the header comment.) Same [year, make, model]
+// order the Routemate pick list and the detail-modal heading already use.
+function vehicleLabel(truck) {
+  return [truck.Year, truck.Make, truck.Model].filter(Boolean).join(' ') || '—'
+}
+
+// A VIN's last 6 are the "sequential number" fleets actually quote day to day;
+// the full 17 stay one hover (title) or one click (detail modal) away.
+function shortVin(vin) {
+  const v = String(vin || '').trim()
+  return v ? v.slice(-6) : '—'
+}
+
+// Serialized PascalCase by GET /api/trucks. 0/blank means the capacity was
+// never recorded, which is what silently sends the fuel-range estimate to the
+// 200-gal fleet default — returns 0 so the row can say so out loud.
+function tankGallons(truck) {
+  const n = Number(truck?.FuelTankGallons)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
 
 // The trucks API serializes PascalCase (InsuranceMonthly, FuelTankGallons...),
 // but in_service_date landed after this component; read both spellings so the
@@ -734,6 +804,8 @@ async function handleUnlink(truck) {
   text-transform: none; letter-spacing: normal;
 }
 .pay-default { color: var(--text-dim); font-size: 0.72rem; }
+/* Same dimmed "this is a fallback, not a fact" treatment as .pay-default. */
+.tank-default { color: var(--text-dim); font-size: 0.72rem; cursor: help; }
 .cost-warning-badge {
   display: inline-block;
   padding: 0.15rem 0.5rem; border-radius: 10px;

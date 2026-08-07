@@ -40,7 +40,7 @@
             <th>Speed</th>
             <th>Idle</th>
             <th>Fuel</th>
-            <th title="7-day average miles per gallon, derived from telemetry. Tank size assumed 200 gal.">MPG (7d)</th>
+            <th title="7-day average miles per gallon, derived from telemetry. Uses the tank size recorded for each truck; a truck with none on file falls back to 200 gal until its real capacity is entered.">MPG (7d)</th>
             <th title="Open ELD fault codes (DTCs) — click count to view + acknowledge.">Faults</th>
             <th>Last Fix</th>
             <th>Location</th>

@@ -81,6 +81,13 @@
           :destination="routeData && routeData.navigationDestination"
         />
       </van-collapse-item>
+      <!-- Miles left in tank + diesel stops on this route. Collapsed by default
+           like everything below Status/Map — which also keeps the billed Google
+           Places lookup opt-in: DriverFuelPanel fetches nothing until `active`
+           first turns true. -->
+      <van-collapse-item title="Fuel" name="fuel">
+        <DriverFuelPanel :load-id="String(loadId || '')" :active="fuelSectionOpen" />
+      </van-collapse-item>
     </van-collapse>
 
     <!-- Main accordion sections -->
@@ -221,6 +228,7 @@ import DocumentUpload from './DocumentUpload.vue'
 import DriverRouteMap from './DriverRouteMap.vue'
 import RouteAlternatives from './RouteAlternatives.vue'
 import RouteDirections from './RouteDirections.vue'
+import DriverFuelPanel from './DriverFuelPanel.vue'
 import ExpenseForm from './ExpenseForm.vue'
 import ExpenseCard from './ExpenseCard.vue'
 
@@ -248,6 +256,11 @@ const openSections = ref(['status', 'map'])
 const copiedField = ref(null)
 const routeMapRef = ref(null)
 const docListRef = ref(null)
+
+// Drives DriverFuelPanel's `active` prop. The panel treats the first true as
+// its cue to fetch, so the Google Places spend only happens once the driver
+// actually opens the Fuel section.
+const fuelSectionOpen = computed(() => openSections.value.includes('fuel'))
 
 // TEMP — banner text/styling for the phone-GPS-for-test-load flow.
 const bannerTitle = computed(() => {
