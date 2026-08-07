@@ -144,11 +144,11 @@
           </div>
           <div class="step-label">How It's Computed</div>
           <div class="modal-explain-sm">
-            We pull odometer readings and fuel-tank level estimates from Routemate ELD telemetry over the last 7 days. Tank capacity is assumed at 200 gallons. The result is miles driven divided by gallons inferred consumed.
+            We pull odometer readings and fuel-tank level estimates from Routemate ELD telemetry over the last 7 days, then convert the drop in tank level into gallons using <strong>the tank capacity recorded for that specific truck</strong>. A truck with no capacity on file falls back to 200 gallons until its real size is entered. The result is miles driven divided by gallons inferred consumed.
           </div>
           <div class="step-label">Why It's Approximate</div>
           <div class="modal-explain-sm">
-            Tank-level sensors drift, refuelling resets the baseline, and 200 gal is an industry-average assumption (actual tanks vary). For exact fuel economy, cross-check with the Fuel Analytics report which uses receipt-level data.
+            Tank-level sensors drift and refuelling resets the baseline, so any single day can read high or low. The figure is also only as good as the tank size on file &mdash; a truck still on the 200-gallon fallback will read wide of its true economy until its real capacity is recorded. For exact fuel economy, cross-check with the Fuel Analytics report, which uses receipt-level data.
           </div>
           <div class="modal-callout info">
             Use this as a trend indicator: a sudden drop in MPG can flag a maintenance issue (e.g., a clogged air filter or dragging brake) before it becomes a fault code.

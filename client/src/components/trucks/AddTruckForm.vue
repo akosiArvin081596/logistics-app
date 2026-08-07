@@ -85,8 +85,25 @@
     </div>
 
     <details style="margin-bottom:0.75rem;" open>
-      <summary class="fixed-costs-label">Business Configuration</summary>
+      <!-- Named after the fields inside it, not the abstraction: the old
+           "Business Configuration" gave no hint it held the fuel tank, so two
+           trucks ran for months on the 200-gal default and their drivers were
+           shown ~2.5x their real range. Tank + MPG lead the section for the
+           same reason. -->
+      <summary class="fixed-costs-label">Fuel Tank, MPG &amp; Business Configuration</summary>
       <div class="form-row" style="margin-top:0.5rem;">
+        <div class="form-group">
+          <label class="form-label">Fuel Tank (gallons)</label>
+          <input v-model.number="form.fuelTankGallons" class="form-input" type="number" min="0" max="500" step="any" placeholder="200 (default)" />
+          <div class="field-hint">Usable diesel capacity — powers the Live Tracking fuel-range estimate. Blank uses the 200 gal default.</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Avg MPG (optional)</label>
+          <input v-model.number="form.avgMpg" class="form-input" type="number" min="0" max="20" step="any" placeholder="6.5 (default)" />
+          <div class="field-hint">Average miles per gallon. Leave blank to auto-derive from ELD fuel + odometer.</div>
+        </div>
+      </div>
+      <div class="form-row">
         <div class="form-group">
           <label class="form-label">Purchase Price ($)</label>
           <input v-model.number="form.purchasePrice" class="form-input" type="number" min="0" placeholder="58000" />
@@ -108,18 +125,6 @@
           <label class="form-label">Driver Pay ($/day)</label>
           <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" max="10000" step="any" placeholder="250 (default)" />
           <div class="field-hint">Daily rate for this truck's driver. Leave blank to use the $250/day default.</div>
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Fuel Tank (gallons)</label>
-          <input v-model.number="form.fuelTankGallons" class="form-input" type="number" min="0" max="500" step="any" placeholder="200 (default)" />
-          <div class="field-hint">Usable diesel capacity — powers the Live Tracking fuel-range estimate. Blank uses the 200 gal default.</div>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Avg MPG (optional)</label>
-          <input v-model.number="form.avgMpg" class="form-input" type="number" min="0" max="20" step="any" placeholder="6.5 (default)" />
-          <div class="field-hint">Average miles per gallon. Leave blank to auto-derive from ELD fuel + odometer.</div>
         </div>
       </div>
       <div class="form-row">
