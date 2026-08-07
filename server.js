@@ -1329,6 +1329,22 @@ try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fuel_events_expense ON fuel
 // becomes unmatched would leave a system-written number looking hand-typed.
 // It is also what makes the backfill reversible and attributable.
 try { db.exec(`ALTER TABLE expenses ADD COLUMN odometer_source TEXT DEFAULT ''`); } catch {}
+// Gallons provenance, exactly the odometer_source precedent one line up and for
+// exactly the same reason: a volume this server RECOVERED from the receipt image
+// must stay distinguishable from one a human read off the paper and typed.
+//
+// '' = entered by a person (every row that exists today, and every future manual
+// entry — the INSERT at POST /api/expenses does not set this column).
+// 'ocr' = written by the gallons-recovery route from a Gemini reading that
+//         reproduced the row's own stored total.
+//
+// Why a stored column rather than "it has a fuel_event link, so we must have
+// written it": the recovered gallons are precisely what LETS the matcher link a
+// receipt, so that inference would be backwards — and the link is rebuilt on
+// every re-match while this write happens once. Same argument as odometer_source,
+// and the same payoff: attributable and reversible
+// (UPDATE expenses SET gallons = 0, gallons_source = '' WHERE gallons_source = 'ocr').
+try { db.exec(`ALTER TABLE expenses ADD COLUMN gallons_source TEXT DEFAULT ''`); } catch {}
 // Alerts are once-per-episode, same shape as ratecon_reconcile_alerts: a gap
 // repeated every six hours is a gap everybody learns to ignore. resolved_at is
 // stamped when the missing receipt finally shows up.
@@ -8390,14 +8406,27 @@ const FUEL_VOLUMELESS_MAX_ROWS = 500;
 // receipt_details/vendor that SQL cannot express: computing the summary with a
 // GROUP BY would apply a different filter from the list and the two would
 // disagree. One pass, one predicate.
-function volumelessFuelReceipts() {
-	const round2 = (n) => Math.round(n * 100) / 100;
+// The candidate set, as ROWS. Extracted so the queue below and the gallons
+// RECOVERY route (POST /api/admin/fuel-gallons-recovery/apply) select from one
+// predicate rather than two copies of it. They must not be able to disagree:
+// a receipt the queue calls volumeless but the recovery does not consider is a
+// row a human is told to fix and the machine silently declines to look at, and
+// the reverse is worse — the recovery writing to a row this queue never claimed.
+//
+// ⚠️ `withPhoto` DEFAULTS OFF and the recovery is the only caller that turns it
+// on. photo_data can hold an inline base64 image on a legacy row (the read path
+// in receiptDataUriForOcr still supports those), and this query has no SQL LIMIT
+// — the 500 cap is applied when mapping the wire shape, i.e. after every row is
+// already in memory. Selecting it unconditionally would make GET
+// /api/admin/fuel-events and the fuel-events sweep each load every volumeless
+// receipt's image bytes for no reason, on a list that only grows.
+function volumelessFuelReceiptRows({ withPhoto = false } = {}) {
 	// posted_period + created_at are selected for expenseRowPeriodLocked(), which
 	// fails closed on a row that lacks them — dropping either column here would
 	// silently mark the whole queue locked and make it uneditable.
-	const rows = db.prepare(`
+	return db.prepare(`
 		SELECT e.id, e.date, e.truck_unit, e.driver, e.amount, e.vendor, e.receipt_details,
-		       e.posted_period, e.created_at
+		       e.posted_period, e.created_at, e.gallons_source${withPhoto ? ", e.photo_data" : ""}
 		FROM expenses e
 		WHERE LOWER(e.type) = 'fuel'
 		  AND COALESCE(e.gallons, 0) <= 0
@@ -8405,6 +8434,11 @@ function volumelessFuelReceipts() {
 		  AND ${EXPENSE_PNL_FILTER}
 		ORDER BY e.date DESC, e.id DESC
 	`).all().filter((r) => !isDefReceipt(r));
+}
+
+function volumelessFuelReceipts() {
+	const round2 = (n) => Math.round(n * 100) / 100;
+	const rows = volumelessFuelReceiptRows();
 
 	// Grouped case-insensitively: trucks.unit_number holds both 'LogisX-#33' and
 	// 'Logisx-#91', and expenses.truck_unit is a snapshot taken at insert time, so
@@ -8966,6 +9000,465 @@ app.post("/api/admin/fuel-events/run", requireRole("Super Admin"), fuelEventsLim
 		res.status(500).json({ error: "Fuel event sweep failed" });
 	} finally {
 		fuelEventsRunning = false;
+	}
+});
+
+// ── Gallons recovery ─────────────────────────────────────────────────────────
+// Read the missing VOLUME back off the receipt images we already stored.
+//
+// The bottleneck this clears: 29 fuel receipts hold $6,131.54 of diesel with a
+// price and no gallons (28 of them on LogisX-#33). Gallons are the denominator
+// of every honest fuel number, so their absence caps everything downstream —
+// #33's tank-to-tank MPG rests on 24 of its 105 detected fills, 23 of the
+// unmatched ones sit on a day one of these receipts was bought, and
+// cost-per-mile can only be published as a floor for the same reason. These were
+// typed by hand and never OCR'd; the volume is printed on paper this server
+// already has.
+//
+// The judgement — the two corroboration gates and the ordered verdict ladder —
+// lives in lib/receipt-gallons-recovery.js and is pure. This file owns only the
+// side effects: candidate selection, the period lock, reading the file, calling
+// Gemini, the UPDATE, and the audit line.
+//
+// SHAPE: read-only GET proposes, gated POST writes — the same split as
+// /api/admin/fuel-events. The GET spends Gemini and returns proposals having
+// touched nothing; the POST re-runs the IDENTICAL pipeline and writes only what
+// IT judged. It deliberately does NOT accept gallons from the client: a route
+// that takes a number from a request body and stores it in a settlement figure
+// is a route where the corroboration is decorative. Re-reading costs one extra
+// Gemini call per receipt on a set that is 21 rows and shrinks to nothing.
+const gallonsRecovery = require("./lib/receipt-gallons-recovery");
+
+// Tighter than fuelEventsLimiter (20) because the unit of work is different: one
+// call there is ~140 ms of local CPU, one call HERE is up to 25 billed Gemini
+// vision requests. 6 per 15 min is four full passes over the entire backlog, or
+// three complete look-then-apply cycles.
+//
+// SHARED BY BOTH VERBS, and keyed per IP rather than per user — the opposite of
+// poiLimiter/expenseOcrLimiter, deliberately. Those front near-public surfaces
+// where per-user keying fixed a real bug (an office behind one NAT sharing one
+// bucket while every driver on cellular got a fresh one, i.e. the cheap callers
+// throttled and the expensive ones not). Here every caller is a Super Admin and
+// every call is expensive, so there is no cheap population to protect and the
+// thing worth capping is TOTAL Gemini spend. An IP bucket is the stricter
+// aggregate ceiling, which is the safe direction for a billed API — and it
+// matches fuelEventsLimiter, the admin-maintenance route this is modelled on.
+// Sharing one bucket across propose and apply is the same argument: a proposal
+// costs exactly what an apply costs, so it should draw on the same budget.
+const fuelGallonsLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 6,
+	message: { error: "Too many gallons-recovery runs. Try again in a few minutes." },
+	standardHeaders: true,
+});
+// Batch cap. 25 mirrors the bulk-receipt uploader's per-batch limit, and the
+// backlog is reported as `remaining` so a caller knows to come back rather than
+// assuming an empty-looking result means done.
+const FUEL_GALLONS_BATCH_DEFAULT = 25;
+const FUEL_GALLONS_BATCH_MAX = 40;
+// runReceiptOcr retries twice behind a 15 s timeout, so a pathological batch
+// could otherwise hold a request open for minutes. Past this, remaining rows are
+// returned as an explicit 'not_attempted' verdict instead of being dropped — a
+// truncated run that says so beats a complete-looking one that isn't.
+const FUEL_GALLONS_DEADLINE_MS = 120000;
+const FUEL_GALLONS_CONCURRENCY = 4;
+let fuelGallonsRunning = false;
+// Ships dormant, like every other write that costs money (INVOICE_AUTOGEN_ENABLED,
+// PERIOD_FINALIZE_ENABLED, FUEL_EVENTS_ENABLED, SCANKIT_ENABLED). Only the APPLY
+// verb is gated: the proposal stays available with the flag off, so the run can be
+// inspected in production — the hit rate, the refusals, the exact gallons — before
+// anything is allowed to touch a finance row. The reason the convention exists is
+// that guards are what you discover are wrong after deploy, and this one writes to
+// the table investor settlements are computed from.
+const FUEL_GALLONS_RECOVERY_ENABLED = String(process.env.FUEL_GALLONS_RECOVERY_ENABLED || "").toLowerCase() === "true";
+
+// A GET that SPENDS is not the same animal as a GET that reads, and the usual
+// "a read verb needs no CSRF defence" reasoning does not cover it.
+//
+// Session cookies here are sameSite:'none' + secure, there is no CSRF token in
+// this app, and GET /api/admin/fuel-gallons-recovery is a *simple* request — so
+// `<img src="…/fuel-gallons-recovery?limit=40">` on any page a logged-in Super
+// Admin happens to open fires up to 40 billed Gemini vision calls with their
+// cookie attached. CORS hides the response, not the effect. That matters more
+// than the cash: GEMINI_API_KEY is shared across Alchemy projects and rotated in
+// one place, and an exhausted key has already taken rate-con ingestion down once
+// (2026-08-05). A cross-site spend endpoint on that key is an outage lever.
+//
+// The adjacent fuel-events GET is deliberately NOT given this guard: its dry run
+// is ~140 ms of local CPU, so "a GET that cannot write is harmless" is true
+// there. It is the cost, not the verb, that makes the difference.
+//
+// `Sec-Fetch-Site` is sent by every current browser; non-browser clients (curl,
+// test-suite.js) omit it entirely. So the rule is "refuse a header that is
+// PRESENT AND CROSS-SITE", never "require the header" — which would break every
+// scripted caller to stop an attack scripted callers cannot mount anyway.
+//
+// ⚠️ Not a general CSRF defence and must not be mistaken for one. It is a
+// cost guard for the handful of routes where a read verb bills a third party.
+function refuseCrossSite(req, res, next) {
+	const site = req.get("Sec-Fetch-Site");
+	if (site && site !== "same-origin" && site !== "same-site" && site !== "none") {
+		return res.status(403).json({ error: "Cross-site request refused", code: "CROSS_SITE_REFUSED" });
+	}
+	next();
+}
+
+// The plausibility band, rebuilt per run from the fleet's own priced receipts so
+// it tracks the diesel market with nobody maintaining a constant. Uses `date`,
+// not EXPENSE_PERIOD_EXPR: this measures the WORLD (what fuel cost), not the
+// books, which is the same reason fuel cost-per-gallon is on the operational
+// basis. See the EXPENSE_PERIOD_EXPR comment.
+function fuelCpgBandFromFleet() {
+	try {
+		const rows = db.prepare(`
+			SELECT amount, gallons FROM expenses
+			WHERE LOWER(type) = 'fuel' AND COALESCE(amount,0) > 0 AND COALESCE(gallons,0) > 0
+			  AND ${EXPENSE_PNL_FILTER}
+		`).all();
+		return gallonsRecovery.cpgBand(rows);
+	} catch {
+		// A band we could not build must not become a band that accepts everything:
+		// cpgBand([]) returns the narrow fixed fallback, not an open interval.
+		return gallonsRecovery.cpgBand([]);
+	}
+}
+
+// photo_data -> a data URI Gemini can read, or an error string. Mirrors the path
+// handling in POST /api/expenses/:id/extract-details (basename strips traversal,
+// prefix re-checked, size capped before base64) with one deliberate difference:
+// PDFs are ACCEPTED here. runReceiptOcr reads application/pdf natively and one
+// of the real candidates is a PDF; refusing it would leave a recoverable row in
+// the "needs a human" pile for a reason that is not true. (No PDF is parsed
+// locally — the bytes go straight to Gemini — so this adds no parser surface.)
+//
+// RECEIPTS_DIR is declared far BELOW this function. Safe because this is only
+// ever reached from a request handler, long after module load; see the
+// periodLockStmt() comment for the time a forward `const` reference in this file
+// really did bite, and why "request-time only" is the property that matters.
+// Base64 of a 10 MB file. Both branches below are held to the same ceiling: the
+// disk branch checks st.size, the inline branch checks the string. The precedent
+// route caps only the disk path, which leaves a legacy inline row able to ship
+// its whole payload to Gemini and come back 413 (non-retryable) — a spend with a
+// guaranteed failure at the end of it.
+const RECEIPT_OCR_MAX_BYTES = 10 * 1024 * 1024;
+const RECEIPT_OCR_MAX_DATA_URI = Math.ceil(RECEIPT_OCR_MAX_BYTES * 4 / 3) + 100;
+
+function receiptDataUriForOcr(photo) {
+	const p = String(photo || "");
+	if (!p) return { error: "This row has no receipt on file, so there is nothing to read." };
+	if (/^data:(image\/(?:jpeg|jpg|png|webp)|application\/pdf);base64,/i.test(p)) {
+		if (p.length > RECEIPT_OCR_MAX_DATA_URI) return { error: "The stored receipt is too large to scan." };
+		return { uri: p };
+	}
+	if (!p.startsWith("/uploads/expense-receipts/")) {
+		return { error: "The stored receipt is not in a format this can read." };
+	}
+	const fname = path.basename(p); // strips any traversal segments
+	const abs = path.join(RECEIPTS_DIR, fname);
+	if (!abs.startsWith(RECEIPTS_DIR + path.sep)) return { error: "Invalid receipt path." };
+	let st;
+	try { st = fs.statSync(abs); } catch { return { error: "The receipt file is missing from disk." }; }
+	if (st.size > RECEIPT_OCR_MAX_BYTES) return { error: "The receipt file is too large to scan." };
+	let buf;
+	try { buf = fs.readFileSync(abs); } catch { return { error: "The receipt file could not be read." }; }
+	const ext = fname.split(".").pop().toLowerCase();
+	const mime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp"
+		: ext === "pdf" ? "application/pdf" : "image/jpeg";
+	return { uri: `data:${mime};base64,${buf.toString("base64")}` };
+}
+
+// One row's wire shape, identical for the proposal and the applied result so a
+// client renders one table either way and a diff between the two runs is
+// meaningful.
+function gallonsRecoveryWire(r) {
+	return {
+		id: r.id, expenseId: r.id,
+		localDay: r.date || "", truckUnit: String(r.truck_unit || "").trim(),
+		driver: r.driver || "", vendor: r.vendor || "", amount: r.amount,
+		verdict: r.verdict, reason: r.reason,
+		proposedGallons: r.gallons, impliedCpg: r.cpg,
+		amountDelta: r.amountDelta, dateMatches: r.dateMatches,
+		ocrVendor: r.ocrVendor || "", ocrDate: r.ocrDate || "", ocrConfidence: r.ocrConfidence || "",
+		// Only ever true on the POST, and only for a row whose UPDATE reported a
+		// changed row — see the write guard for why those are not the same thing.
+		written: !!r.written,
+	};
+}
+
+// The engine behind both verbs. `apply:false` is structurally read-only: the
+// UPDATE below is inside `if (apply)`, and there is no request parameter that
+// reaches it from the GET.
+async function runGallonsRecovery({ apply = false, ids = null, limit, req } = {}) {
+	const band = fuelCpgBandFromFleet();
+	const lockUnreadable = !periodLocksReadable();
+	const all = volumelessFuelReceiptRows({ withPhoto: true });
+
+	// An explicit id list is a SELECTION, never an admission: a row not in the
+	// candidate set above is silently absent rather than fetched by id, so the
+	// caller cannot steer this at an arbitrary expense row.
+	const wanted = Array.isArray(ids) && ids.length
+		? new Set(ids.map((n) => parseInt(n, 10)).filter(Number.isInteger))
+		: null;
+	const selected = wanted ? all.filter((r) => wanted.has(r.id)) : all;
+
+	// An explicit selection sets its own batch size. Otherwise a 30-id POST would
+	// validate (the cap is 40), quietly process the first 25, and report the other
+	// 5 only via `remaining` — a caller who named exactly the rows it wanted has
+	// already been bounded by FUEL_GALLONS_BATCH_MAX at the route.
+	if (wanted && limit == null) limit = selected.length;
+
+	// A non-positive or unparseable `limit` means "you did not ask", so it takes
+	// the default rather than being clamped up from it. `Math.max(1, n || DEFAULT)`
+	// looks equivalent and is not: -5 is truthy, so it survives the `||` and clamps
+	// to a batch of ONE. Harmless (it only ever shrinks the batch) but it makes a
+	// typo look like a nearly-empty backlog, which is the class of quiet
+	// misreporting this endpoint exists to remove.
+	const askedLimit = parseInt(limit, 10);
+	const cap = Math.min(FUEL_GALLONS_BATCH_MAX,
+		Number.isFinite(askedLimit) && askedLimit > 0 ? askedLimit : FUEL_GALLONS_BATCH_DEFAULT);
+	const batch = selected.slice(0, cap);
+	const remaining = Math.max(0, selected.length - batch.length);
+
+	const started = Date.now();
+	const results = new Array(batch.length);
+	let deadlineHit = false;
+
+	// Judge locks and missing files FIRST, with no network call. A closed month is
+	// refused before a single cent of Gemini is spent — a guard that bills before
+	// it refuses is not much of a guard — and it also means the OCR queue below
+	// contains only rows a reading could actually help.
+	const toRead = [];
+	batch.forEach((r, i) => {
+		const locked = expenseRowPeriodLocked(r);
+		if (lockUnreadable || locked) {
+			results[i] = { ...r, ...gallonsRecovery.judgeGallonsRecovery({ locked, lockUnreadable }) };
+			return;
+		}
+		const du = receiptDataUriForOcr(r.photo_data);
+		if (du.error) {
+			results[i] = { ...r, ...gallonsRecovery.judgeGallonsRecovery({ photoError: du.error }) };
+			return;
+		}
+		toRead.push({ i, r, uri: du.uri });
+	});
+
+	let cursor = 0;
+	const worker = async () => {
+		for (;;) {
+			const k = cursor++;
+			if (k >= toRead.length) return;
+			const { i, r, uri } = toRead[k];
+			if (Date.now() - started > FUEL_GALLONS_DEADLINE_MS) {
+				deadlineHit = true;
+				results[i] = {
+					...r, verdict: "not_attempted", gallons: null, cpg: null,
+					amountDelta: null, dateMatches: null,
+					reason: "The batch ran out of time before reaching this receipt. Run it again to pick it up.",
+				};
+				continue;
+			}
+			let ocr = null;
+			try { ocr = await runReceiptOcr(uri); }
+			catch (err) {
+				// CLASSIFIED, not interpolated. runReceiptOcr's message is
+				// `Gemini <status>: <first 200 chars of Google's body>`, which on a 429
+				// carries quota metric names and the GCP project number — and the
+				// string would land in a UI. Mapping to a fixed set loses nothing the
+				// admin can act on (each branch already names the remedy) and keeps the
+				// upstream body in console.error where diagnosis belongs.
+				console.error("[fuel-gallons] OCR failed for expense", r.id, err && err.message);
+				const s = err && err.status;
+				// The VERDICT comes from the judge (one producer, so the ladder cannot
+				// grow a second definition of ocr_failed); only the REASON is replaced,
+				// because the judge cannot see which upstream failure occurred.
+				results[i] = {
+					...r,
+					...gallonsRecovery.judgeGallonsRecovery({ ocr: null }),
+					reason: err && err.code === "OCR_NO_KEY" ? "Receipt scanning is not configured on this server."
+						: s === 429 ? "Receipt scanning is rate-limited or out of quota right now. Try again later."
+						: (s === 401 || s === 403) ? "Receipt scanning rejected our credentials. The API key needs attention."
+						: s === 413 ? "The receipt file is too large for the scanner."
+						: s === 400 ? "The scanner could not make sense of this file."
+						: "The receipt could not be read. See the server log for the upstream error.",
+				};
+				continue;
+			}
+			// Re-checked per row, not once per batch: a period can be finalized by
+			// the sweep while a long batch is in flight, and the row judged before
+			// the OCR call is not necessarily the row being written after it.
+			const judged = gallonsRecovery.judgeGallonsRecovery({
+				storedAmount: r.amount, storedDate: r.date, ocr, band,
+				locked: expenseRowPeriodLocked(r), lockUnreadable: !periodLocksReadable(),
+			});
+			results[i] = {
+				...r, ...judged,
+				ocrVendor: ocr.vendor || "", ocrDate: ocr.date || "", ocrConfidence: ocr.confidence || "",
+			};
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(FUEL_GALLONS_CONCURRENCY, toRead.length || 1) }, worker));
+
+	let written = 0;
+	if (apply) {
+		// WHERE re-states every precondition instead of trusting the read above.
+		// `gallons <= 0` is what makes this idempotent and non-destructive: a second
+		// run, a double-clicked button, or a race with someone typing the number in
+		// by hand all resolve to zero rows changed rather than overwriting a human.
+		// Same shape as the odometer backfill's write.
+		const upd = db.prepare(`
+			UPDATE expenses SET gallons = ?, gallons_source = 'ocr'
+			WHERE id = ? AND (gallons IS NULL OR gallons <= 0)
+		`);
+		// ⚠️ EVERY skip path below REWRITES THE VERDICT, and that is not tidiness.
+		// summarizeRecovery() runs after this loop, so a row left saying 'recovered'
+		// while `written` is false is counted in summary.recovered / recoveredGallons
+		// / recoveredAmount — the response would read "21 recovered, 1,211.93 gal"
+		// beside `written: 20`. Up to two minutes of Gemini calls separate the
+		// candidate SELECT from this loop and POST /api/expenses can write `gallons`
+		// in that window, so the divergence is reachable, not theoretical. No bad
+		// data lands either way (the UPDATE's own WHERE is what guarantees that) —
+		// but a report that overstates what it did is the exact failure this whole
+		// feature was built to remove, so it must not be possible here of all places.
+		const notWritten = (r, verdict, reason) => { r.verdict = verdict; r.reason = reason; r.gallons = null; r.written = false; };
+		for (const r of results) {
+			if (!r || r.verdict !== "recovered" || !(r.gallons > 0)) continue;
+			// Fourth and last look at the lock, immediately before the write, with the
+			// row re-read from the database. Everything above judged a snapshot taken
+			// before a batch of network calls; this is the one that is actually true
+			// at write time, and it is cheap.
+			const fresh = db.prepare("SELECT id, date, posted_period, created_at, gallons FROM expenses WHERE id = ?").get(r.id);
+			if (!fresh) { notWritten(r, "vanished", "The expense row no longer exists."); continue; }
+			if (!(Number(fresh.gallons || 0) <= 0)) {
+				notWritten(r, "already_entered", "Someone entered the gallons while this batch was running, so the reading was discarded rather than overwriting them.");
+				continue;
+			}
+			if (!periodLocksReadable() || expenseRowPeriodLocked(fresh)) {
+				notWritten(r, "locked_period", "This receipt's month closed while the batch was running, so it was not written.");
+				continue;
+			}
+			const changed = upd.run(r.gallons, r.id).changes;
+			if (changed > 0) { r.written = true; written++; }
+			// changed === 0 means the WHERE stopped it — the same race as
+			// already_entered, caught one rung later. Reported the same way for the
+			// same reason.
+			else notWritten(r, "already_entered", "The gallons were entered elsewhere between the check and the write, so nothing was overwritten.");
+		}
+		// Audited on EVERY apply attempt, including one that wrote nothing.
+		// `if (written > 0)` would make a 40-receipt run that burned 40 Gemini calls
+		// and changed nothing completely invisible — and "we tried and it all
+		// refused" is exactly the event someone investigating later needs to find.
+		//
+		// The ids go in `details` (bounded by the 40-per-call cap). The
+		// gallons_source='ocr' column makes the whole feature reversible in bulk,
+		// but backing out ONE bad row needs to know which run touched it, and a
+		// count cannot answer that. entity_id carries the count so the column stays
+		// a scannable number.
+		const wrote = results.filter((r) => r && r.written);
+		const gal = Math.round(wrote.reduce((s, r) => s + r.gallons, 0) * 100) / 100;
+		const refusedCount = results.filter(Boolean).length - wrote.length;
+		logAudit(req || {}, "fuel_gallons_recovered", "expenses", String(written),
+			written > 0
+				? `Recovered gallons from the receipt image onto ${written} fuel receipt(s) (${gal} gal), each corroborated by its own stored total. Expense ids: ${wrote.map((r) => r.id).join(", ")}. ${refusedCount} not written.`
+				: `Gallons recovery run wrote nothing: ${refusedCount} receipt(s) considered, all declined. ${JSON.stringify(gallonsRecovery.summarizeRecovery(results.filter(Boolean)).byVerdict)}`);
+	}
+
+	const wire = results.filter(Boolean).map(gallonsRecoveryWire);
+	return {
+		ok: true,
+		dryRun: !apply,
+		// The full backlog, independent of this batch, so "recovered 21" is never
+		// mistaken for "the queue is empty".
+		backlog: all.length,
+		selected: selected.length,
+		// Rows the batch never reached, WHICHEVER reason: past the size cap, or
+		// stamped not_attempted when the deadline hit. Computed after the run for
+		// that second half — `selected - batch` alone counts a deadlined row as
+		// done, and `remaining` is the number a caller decides whether to come back
+		// on, so it is the one that must not be optimistic.
+		remaining: remaining + results.filter((r) => r && r.verdict === "not_attempted").length,
+		deadlineHit,
+		written,
+		cpgBand: band,
+		periodLocksReadable: !lockUnreadable,
+		summary: gallonsRecovery.summarizeRecovery(results.filter(Boolean)),
+		receipts: wire,
+	};
+}
+
+// GET — propose. Structurally read-only: apply is hardcoded false and no query
+// parameter can flip it. Bills Gemini, which is why it is rate-limited and
+// batched; requireRole is mounted BEFORE the limiter for the same reason it is
+// on the fuel-events verbs (an unauthenticated caller must not be able to spend
+// the Super Admin's budget on 403s).
+// refuseCrossSite sits BEFORE the limiter, same reasoning as requireRole: a
+// request we are going to refuse must not first consume the budget it was trying
+// to drain.
+app.get("/api/admin/fuel-gallons-recovery", requireRole("Super Admin"), refuseCrossSite, fuelGallonsLimiter, async (req, res) => {
+	if (!GEMINI_API_KEY) return res.status(503).json({ error: "ocr_unavailable" });
+	try {
+		res.json(await runGallonsRecovery({ apply: false, limit: req.query.limit, req }));
+	} catch (error) {
+		console.error("[fuel-gallons] proposal failed:", error.message);
+		res.status(500).json({ error: "Gallons recovery inspection failed" });
+	}
+});
+
+// POST — apply. Takes a SELECTION (`ids`) or an explicit `applyAll`, never a
+// value. An empty body is a 400 rather than "write everything that passes": the
+// blunt action has to be named, the same reasoning that put a confirm on Mark
+// Paid. Gallons are re-derived here from a fresh reading, so what lands is what
+// this server judged, not what a client sent.
+// refuseCrossSite is redundant on this verb TODAY — only express.json() is
+// mounted, so a cross-site form POST arrives with an empty body and 400s on
+// SELECTION_REQUIRED. It is mounted anyway because that safety is incidental:
+// adding express.urlencoded() anywhere in this file would make `ids[]=1&ids[]=2`
+// satisfy Array.isArray and reach the write, and nothing would flag it.
+app.post("/api/admin/fuel-gallons-recovery/apply", requireRole("Super Admin"), refuseCrossSite, fuelGallonsLimiter, async (req, res) => {
+	if (!GEMINI_API_KEY) return res.status(503).json({ error: "ocr_unavailable" });
+	if (!FUEL_GALLONS_RECOVERY_ENABLED) {
+		return res.status(503).json({
+			error: "FUEL_GALLONS_RECOVERY_ENABLED is not set — recovery ships dormant on this server. The proposal endpoint still works; enable the flag to write.",
+			code: "RECOVERY_DISABLED",
+		});
+	}
+	const body = req.body || {};
+	const ids = Array.isArray(body.ids) ? body.ids : null;
+	if (!ids && body.applyAll !== true) {
+		return res.status(400).json({
+			error: "Send an `ids` array of the receipts to recover, or `applyAll: true` to take every receipt that passes both checks.",
+			code: "SELECTION_REQUIRED",
+		});
+	}
+	if (ids && !ids.length) return res.status(400).json({ error: "`ids` was empty.", code: "SELECTION_REQUIRED" });
+	if (ids && ids.length > FUEL_GALLONS_BATCH_MAX) {
+		return res.status(400).json({ error: `At most ${FUEL_GALLONS_BATCH_MAX} receipts per call.`, code: "BATCH_TOO_LARGE" });
+	}
+	// `ids: ["abc"]` would otherwise clear the empty-array check, parse to nothing,
+	// and return a cheerful 200 with `candidates: 0` — indistinguishable from "your
+	// selection is already done". A selection that names no reachable row is a
+	// malformed request, and this route's own stance is that a request which did
+	// not actually ask for anything is a 400, not a no-op.
+	if (ids && !ids.some((n) => Number.isInteger(parseInt(n, 10)))) {
+		return res.status(400).json({ error: "No usable expense ids in `ids`.", code: "SELECTION_REQUIRED" });
+	}
+	// Serialized against itself so two admins cannot run overlapping batches over
+	// the same rows. The UPDATE's `gallons <= 0` guard already makes a double
+	// write impossible; this stops the second caller paying Gemini to find that out.
+	//
+	// The GET deliberately has NO mutex, and the asymmetry is the point rather than
+	// an oversight: it writes nothing, so concurrent proposals cannot conflict —
+	// the only thing they can do is spend, and fuelGallonsLimiter is already the
+	// cap on that. A mutex there would 409 the second admin merely for opening the
+	// page, which is a worse outcome than the one it would prevent (none).
+	if (fuelGallonsRunning) return res.status(409).json({ error: "A gallons recovery run is already in progress" });
+	fuelGallonsRunning = true;
+	try {
+		res.json(await runGallonsRecovery({ apply: true, ids, limit: body.limit, req }));
+	} catch (error) {
+		console.error("[fuel-gallons] apply failed:", error.message);
+		res.status(500).json({ error: "Gallons recovery failed" });
+	} finally {
+		fuelGallonsRunning = false;
 	}
 });
 
@@ -26014,6 +26507,34 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 			return e.odometer_source === "telemetry" ? "telemetry" : "receipt";
 		};
 
+		// Gallons provenance, same contract as the odometer one above and read from
+		// the same kind of stored stamp: 'ocr' = this server read the volume off the
+		// receipt image and cross-checked it against the row's own total; 'entered' =
+		// a person typed it (every row logged before the recovery route existed, and
+		// every manual entry after it — POST /api/expenses does not stamp the column).
+		//
+		// Surfaced rather than kept internal ON PURPOSE. A recovered gallon count
+		// flows straight into cost-per-gallon, cost-per-mile and the tank-to-tank MPG
+		// a driver plans a fuel stop against; if it is indistinguishable from a
+		// hand-keyed one, nobody auditing a number that looks wrong can tell which
+		// kind of wrong they are looking at, and the whole point of stamping it is
+		// lost at the last step.
+		//
+		// ⚠️ THIS IS PROVENANCE, NOT A TRUST RATING — label it that way in any UI.
+		// 'ocr' means "read off the receipt image", NOT "verified". The amount gate
+		// proves the reading is of THAT receipt; it cannot prove the receipt is
+		// genuine, because on a driver-logged expense the same person supplies both
+		// the image and the amount it is checked against. A doctored pair passes by
+		// construction. That is not a privilege gain (a driver can already type any
+		// gallons figure at insert time, and this route only touches rows where
+		// gallons <= 0) and it cannot move settlement dollars, which key on `amount`
+		// — but a chip reading "verified" would launder a hand-made number into a
+		// machine-checked one. "Read from receipt" is the honest wording.
+		const gallonsSourceFor = (e) => {
+			if (!(e.gallons > 0)) return null;                         // nothing to attribute
+			return e.gallons_source === "ocr" ? "ocr" : "entered";
+		};
+
 		// Odometer-based cost per mile.
 		//
 		// ⚠️ CHANGED 2026-08-07, and the number on screen will move. This used to
@@ -26195,6 +26716,7 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 				odometer: e.odometer > 0 ? e.odometer : null,
 				// Always present, explicitly null when unknown — see above.
 				odometerSource: odometerSourceFor(e),
+				gallonsSource: gallonsSourceFor(e),
 				truckUnit: e.truck_unit || "",
 				date: e.date, loadId: e.load_id,
 			})),
