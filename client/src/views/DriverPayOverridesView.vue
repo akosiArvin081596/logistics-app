@@ -132,7 +132,7 @@
           >&#9664;</button>
           <select v-model.number="selectedMonthIdx" class="month-select" :title="`${months.length} months of activity`">
             <option v-for="(m, i) in months" :key="m.month" :value="i">
-              {{ monthLabel(m.month) }}{{ m.isCurrentMonth ? ' (current)' : '' }}
+              {{ monthLabel(m.month) }}{{ m.isCurrentMonth ? ' (current)' : '' }}{{ isLockedMonth(m.month) ? ' — closed' : '' }}
             </option>
           </select>
           <button
@@ -165,6 +165,21 @@
         <span v-else-if="monthDetail.source === 'mixed'" class="src-tag mixed">Partly ELD-verified</span>
         <span v-else class="src-tag est">Estimated</span>
       </div>
+
+      <!-- Closed-month notice. An override changes what a month PAYS, so once the
+           month is finalized the server refuses (409). Saying so here means the
+           refusal is expected rather than discovered. Deliberately does NOT
+           disable the calendar: a day can still be inspected, and the month the
+           override actually lands in is not always the month on screen (a day
+           inside a load assigned in another month books to THAT month), so a
+           blanket client-side disable would be wrong in both directions. -->
+      <p v-if="!lockReadable" class="period-note unknown" role="status">
+        The month-close status could not be read, so overrides are blocked until that is fixed. This is a database fault, not the close window.
+      </p>
+      <p v-else-if="selectedMonthClosed" class="period-note" role="status">
+        {{ monthLabel(selected.month) }} is closed — its statement has already been published against these figures, so pay overrides are refused.
+        Reopen the period first if it genuinely needs restating.
+      </p>
 
       <!-- Calendar grid -->
       <div class="card calendar-card">
@@ -346,10 +361,25 @@ async function loadOverrides() {
   try {
     const r = await api.get('/api/admin/driver-day-overrides')
     overrides.value = r.overrides || []
+    lockedPeriods.value = r.lockedPeriods || []
+    // `lockReadable === false` means the server cannot tell which months are
+    // closed — in which case it refuses EVERY override write. Rendering that as
+    // "nothing is locked" would promise the opposite of what happens on click,
+    // so it gets its own state.
+    lockReadable.value = r.lockReadable !== false
   } catch (err) {
     overrides.value = []
+    lockedPeriods.value = []
+    lockReadable.value = true
   }
 }
+
+// A closed month is not an error to discover by clicking. The month picker and
+// the summary banner say so up front; the server's 409 stays the enforcement.
+const lockedPeriods = ref([])
+const lockReadable = ref(true)
+const isLockedMonth = (mk) => lockedPeriods.value.includes(mk)
+const selectedMonthClosed = computed(() => !!selected.value && isLockedMonth(selected.value.month))
 
 const months = computed(() => investorStore.data?.production?.monthlyEarnings || [])
 const driverPayDetails = computed(() => investorStore.data?.production?.driverPayDetails || {})
@@ -899,6 +929,24 @@ function cellTitle(cell) {
 .src-tag.eld { background: rgba(34, 197, 94, 0.15); color: rgb(22, 163, 74); }
 .src-tag.mixed { background: rgba(234, 179, 8, 0.15); color: rgb(180, 130, 0); }
 .src-tag.est { background: var(--border); color: var(--text-dim); }
+
+/* Closed-month notice under the summary banner. Amber (a state to be aware of),
+   not red (an error that just happened) — the month being closed is normal. */
+.period-note {
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid rgba(234, 179, 8, 0.45);
+  border-radius: var(--radius);
+  background: rgba(234, 179, 8, 0.08);
+  color: rgb(146, 104, 0);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+.period-note.unknown {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.07);
+  color: rgb(185, 28, 28);
+}
 
 /* Card wrapper */
 .card {

@@ -179,12 +179,18 @@
     <ConfirmModal
       :open="showDeleteConfirm"
       title="Delete this load?"
-      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.`"
+      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed the server will refuse — reopen the period first.`"
       confirm-text="Delete"
       :danger="true"
+      :confirm-disabled="deleting"
       @confirm="runDelete"
-      @cancel="showDeleteConfirm = false"
-    />
+      @cancel="closeDeleteConfirm"
+    >
+      <!-- The server's own words, in place. A period refusal names the month and
+           the remedy; a toast that scrolls away (or, as before, a swallowed
+           error and a dialog that just sits there) loses both. -->
+      <p v-if="deleteError" class="delete-error" role="alert">{{ deleteError }}</p>
+    </ConfirmModal>
 
     <!-- Queue confirm — appears when dispatching to a driver who's already on
          a load or has queued loads. Per Deshorn King 2026-05-20. -->
@@ -450,6 +456,7 @@ const pendingAssignmentMessage = computed(() => {
 // load drops out of every KPI via excludeDroppedLoads() server-side.
 // `deleted` soft-deletes via DELETE /api/loads/:loadId.
 const showDeleteConfirm = ref(false)
+const deleteError = ref('')
 const deleting = ref(false)
 const linkCopied = ref(false)
 let linkCopiedTimer = null
@@ -489,9 +496,15 @@ async function copyTrackingLink() {
   }
 }
 
+function closeDeleteConfirm() {
+  showDeleteConfirm.value = false
+  deleteError.value = ''
+}
+
 async function runDelete() {
   if (!loadIdValue.value || deleting.value) return
   deleting.value = true
+  deleteError.value = ''
   try {
     await dashStore.deleteLoad(loadIdValue.value)
     showDeleteConfirm.value = false
@@ -500,8 +513,14 @@ async function runDelete() {
     linkCopied.value = false
     if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }
     emit('deleted', { loadId: deletedId })
-  } catch {
-    // parent can surface a toast via the store; staying silent here keeps this consistent with ActiveLoadsTab
+  } catch (err) {
+    // This used to be a bare `catch {}` that discarded the error and left the
+    // confirm sitting open, so a refused delete was indistinguishable from a
+    // slow one — the admin clicked Delete again. It matters more now: the server
+    // returns 409 PERIOD_FINALIZED naming the closed month and how to reopen it,
+    // and that sentence is the whole point of the guard.
+    deleteError.value = (err && err.message) || 'Failed to delete this load.'
+    toast(deleteError.value, 'error')
   } finally {
     deleting.value = false
   }
@@ -560,6 +579,19 @@ const deleteBtnStyle = computed(() => ({
 </script>
 
 <style scoped>
+/* Refusal text inside the delete confirm. `pre-line` because the server's
+   period message is a full sentence with a remedy and wraps to several lines. */
+.delete-error {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid #fecaca;
+  border-radius: 0.4rem;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  white-space: pre-line;
+}
 /* Sits directly above .dash-search-bar and matches its gutters so the two
    strips read as one toolbar. */
 .ratecon-slot {
