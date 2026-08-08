@@ -387,12 +387,18 @@
     <ConfirmModal
       :open="showDeleteConfirm"
       title="Delete this load?"
-      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.`"
+      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed the server will refuse — reopen the period first.`"
       confirm-text="Delete"
       :danger="true"
+      :confirm-disabled="deleting"
       @confirm="runDelete"
-      @cancel="showDeleteConfirm = false"
-    />
+      @cancel="closeDeleteConfirm"
+    >
+      <!-- The server's own words, in place. A period refusal names the month and
+           the remedy; a toast that scrolls away (or, as before, a swallowed
+           error and a dialog that just sits there) loses both. -->
+      <p v-if="deleteError" class="delete-error" role="alert">{{ deleteError }}</p>
+    </ConfirmModal>
 
     <!-- Queue confirm — appears when reassigning onto a driver who's already on
          a load. Queues behind their active work instead of replacing it.
@@ -499,6 +505,7 @@ const EDITABLE_COLS = [
 const MULTILINE_COLS = new Set(['Details', 'Pickup Info', 'Drop-off Info', 'Pickup Address', 'Drop-off Address'])
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
 const showDeleteConfirm = ref(false)
+const deleteError = ref('')
 const deleting = ref(false)
 const showOverride = ref(false)
 const overriding = ref(false)
@@ -673,7 +680,7 @@ function runCancel() {
   cancelReason.value = ''
 }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
-function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }; showDeleteConfirm.value = false }
+function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }; closeDeleteConfirm() }
 
 function openOverride() {
   if (!loadIdValue.value) return
@@ -763,17 +770,29 @@ async function submitOverride() {
   }
 }
 
+function closeDeleteConfirm() {
+  showDeleteConfirm.value = false
+  deleteError.value = ''
+}
+
 async function runDelete() {
   if (!loadIdValue.value || deleting.value) return
   deleting.value = true
+  deleteError.value = ''
   try {
     await dashStore.deleteLoad(loadIdValue.value)
     showDeleteConfirm.value = false
     const deletedId = loadIdValue.value
     closeDetail()
     emit('deleted', { loadId: deletedId })
-  } catch {
-    // swallow — parent shows toast via watcher if needed
+  } catch (err) {
+    // Was a bare `catch {}` whose comment promised a toast "via watcher" that
+    // does not exist — a failed delete produced no feedback at all and left the
+    // confirm open, which reads as a hung click. The server now returns 409
+    // PERIOD_FINALIZED naming the closed month and how to reopen it; discarding
+    // that is how an admin retries, gives up, and never learns why.
+    deleteError.value = (err && err.message) || 'Failed to delete this load.'
+    toast(deleteError.value, 'error')
   } finally {
     deleting.value = false
   }
@@ -959,6 +978,19 @@ const detailSections = computed(() => {
 </script>
 
 <style scoped>
+/* Refusal text inside the delete confirm. `pre-line` because the server's
+   period message is a full sentence with a remedy and wraps to several lines. */
+.delete-error {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid #fecaca;
+  border-radius: 0.4rem;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  white-space: pre-line;
+}
 .mobile-load-list {
   display: flex;
   flex-direction: column;

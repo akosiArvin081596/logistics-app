@@ -13548,10 +13548,51 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 	}
 });
 
+// Shared 409 for the two guards below. Kept in one place so a load delete and a
+// driver-day override refuse in the same shape (`code` + `periods`), which is
+// what lets one client-side handler render both.
+function sendPeriodRefusal(res, kind, periods, extra) {
+	if (kind === "unreadable") {
+		return res.status(409).json({
+			error: "The period lock table could not be read, so no month can be confirmed open. This change is held until that is fixed. It is a database fault, not the close window — waiting will not clear it.",
+			code: "PERIOD_LOCK_UNREADABLE",
+		});
+	}
+	if (kind === "unresolved") {
+		return res.status(409).json({
+			error: `${extra || "This change"} cannot be attributed to an accounting month, so the server cannot tell whether it lands in a closed one. Correct the dates on the row (or retry if the sheet was briefly unreadable) and try again.`,
+			code: "PERIOD_UNRESOLVED",
+		});
+	}
+	const named = (periods || []).map(periodLabel).join(", ");
+	return res.status(409).json({
+		error: `${extra || "This change"} would restate ${named} — ${periods.length === 1 ? "a month that is" : "months that are"} already finalized, with the statement published against ${periods.length === 1 ? "it" : "them"}. Reopen the period first (POST /api/periods/:period/reopen records a reason), or leave the figures as settled.`,
+		code: "PERIOD_FINALIZED",
+		periods,
+	});
+}
+
 // DELETE /api/loads/:loadId — Soft-delete a load. Row stays in the Google
 // Sheet for audit / external integrations; admin views and every KPI loop
 // filter it out via excludeDroppedLoads(). Super Admin only. Reversible
 // via `DELETE FROM deleted_loads WHERE load_id = ?` in SQL.
+//
+// ⚠️ PERIOD-GUARDED (added after PR #205's user-delete guard, same reasoning).
+// "Reversible" is not the same as "harmless": dropping the load out of
+// excludeDroppedLoads() removes its revenue AND its driver-pay active days from
+// whatever month it books in, and while reconcileInvestorPayouts() freezes the
+// headline `amount` of a locked period, the BASIS is recomputed live everywhere
+// else — /api/financials, the payout waterfall drill-down, `recomputedAmount`
+// (the drift figure printed beside the frozen one) and page 1 of the statement
+// PDF. Reopening a period also re-links an `owed` row to live earnings, so a
+// month reopened after such a delete settles at a different number with nothing
+// recording why. Measured on production 2026-08-08: 381 of 391 live loads sit in
+// a locked month, $313,922.93 of completed revenue, and the single largest
+// (load 553198052, $4,800, 2026-05) sits in a month already marked PAID.
+//
+// Ungated on PERIOD_FINALIZE_ENABLED, like every other lock guard: with the flag
+// off period_locks is empty, isLocked() is false for everything, and this costs
+// one indexed SELECT.
 app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const rawId = (req.params.loadId || "").trim();
@@ -13560,21 +13601,79 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 		}
 		const lid = rawId.toLowerCase().replace(/^#/, "");
 
-		// Best-effort lookup of the current row index for the audit record. A
-		// mismatch is fine — the Google Sheet row can shift later, but the
-		// load_id stays authoritative for filtering.
-		let rowIndex = 0;
+		// Fail CLOSED before anything else: isLocked() swallows every error and
+		// answers "not locked", so an unreadable period_locks would leave the guard
+		// present, silent and open.
+		if (!periodLocksReadable()) return sendPeriodRefusal(res, "unreadable");
+
+		// ONE sheet read serves both the guard and the audit row index. It used to
+		// be wrapped in a bare `catch {}` so a Sheets hiccup merely cost the row
+		// index; now the months depend on it, so a failed read has to refuse — the
+		// months are exactly what cannot be guessed at.
+		let jobTracking;
 		try {
-			const jobTracking = await getJobTrackingCached();
-			const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
-			if (loadIdCol) {
-				const hit = jobTracking.data.find((r) => (r[loadIdCol] || "").toString().trim().toLowerCase().replace(/^#/, "") === lid);
-				if (hit && hit._rowIndex) rowIndex = hit._rowIndex;
+			jobTracking = await getJobTrackingCached();
+		} catch (e) {
+			console.error("Load delete blocked — Job Tracking unreadable:", e.message);
+			return sendPeriodRefusal(res, "unresolved", null, `Load ${rawId}`);
+		}
+
+		const cols = jobTrackingMonthCols(jobTracking.headers);
+		// EVERY row carrying this load id, not just the first: the delete is keyed
+		// on load_id, so it drops all of them and the guard has to answer for all
+		// of them. Matched with the same `#`-stripped lowercasing the delete uses.
+		const matches = cols.loadIdCol
+			? jobTracking.data.filter((r) => (r[cols.loadIdCol] || "").toString().trim().toLowerCase().replace(/^#/, "") === lid)
+			: [];
+
+		if (matches.length) {
+			const periods = new Set();
+			let allResolved = true;
+			for (const row of matches) {
+				const p = loadRowPeriods(row, cols);
+				if (!p.resolved) allResolved = false;
+				p.periods.forEach((m) => periods.add(m));
 			}
-		} catch { /* don't block delete if sheet read hiccups */ }
+			// A row whose dates are unreadable could be booked anywhere, including a
+			// closed month. Refuse rather than guess — the same asymmetry as
+			// everywhere else: refusing costs a reopen, permitting costs a restated
+			// settlement nobody can see happen.
+			if (!allResolved) return sendPeriodRefusal(res, "unresolved", null, `Load ${rawId}`);
+			const locked = lockedAmong([...periods]);
+			if (locked.length) {
+				// SPANNING AN OPEN AND A CLOSED MONTH → refuse, never partially allow.
+				// A scoped delete is not representable: `deleted_loads` is keyed on
+				// load_id alone and excludeDroppedLoads() is the single source of truth
+				// for "is this load live?" across dashboard / financials / investor. A
+				// period-scoped exclusion would fork that predicate — the one thing
+				// CLAUDE.md explicitly protects — so the closed month would be spared at
+				// the cost of the three surfaces disagreeing about the same load. And
+				// per the month-mapping note above, spanning can ONLY happen when the
+				// assigned date is unparseable, which the check above already refused.
+				return sendPeriodRefusal(res, "finalized", locked, `Deleting load ${rawId}`);
+			}
+		}
+		// matches.length === 0 is deliberately allowed, and it is not a fail-open:
+		// the sheet read SUCCEEDED and positively showed no such row, so the insert
+		// excludes nothing and moves no month. Only an unreadable sheet refuses.
+
+		// Best-effort row index for the audit record. A mismatch is fine — the
+		// Google Sheet row can shift later, but the load_id stays authoritative.
+		const rowIndex = (matches[0] && matches[0]._rowIndex) || 0;
 
 		const deletedBy = req.session.user.username || req.session.user.full_name || "";
 		db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_by) VALUES (?, ?, ?)").run(lid, rowIndex, deletedBy);
+
+		// The most destructive load action in the app previously left NO audit row —
+		// only a dispatch notification, which is a feed item that ages out, not a
+		// record. `cancel_load` has been audited since the 2026-08-05 wrong-load
+		// incident; this is the same class of act (it removes a load from every KPI)
+		// and now leaves the same trace, including the months it was cleared against.
+		const auditedPeriods = matches.length
+			? [...new Set(matches.flatMap((r) => loadRowPeriods(r, cols).periods))].sort().join(", ")
+			: "";
+		logAudit(req, "delete_load", "load", lid,
+			`Soft-deleted load ${rawId}${rowIndex ? ` (sheet row ${rowIndex})` : ""}${matches.length ? ` — settlement month${auditedPeriods.includes(",") ? "s" : ""} ${auditedPeriods}` : " — no matching Job Tracking row"}. Reversible: DELETE FROM deleted_loads WHERE load_id = '${lid}'`);
 
 		insertDispatchNotification.run(
 			"load-deleted",
@@ -13596,6 +13695,63 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 	}
 });
 
+// WHICH settlement months does one (driver, date, action) override move?
+//
+// ⚠️ NOT simply the month the date falls in — that answer is right for `add` and
+// wrong for `remove`, which is the more common of the two.
+//   • 'add' credits a day the ELD missed, and the pay loop buckets an added day
+//     by `d.slice(0,7)` unconditionally (it is tied to no load). So: the date's
+//     own month, full stop.
+//   • 'remove' drops the day out of the counted set of every load whose window
+//     covers it — and those days are bucketed by the LOAD'S ASSIGNED month. So
+//     excluding 2026-08-01 on a load assigned in July moves JULY, and excluding
+//     2026-07-31 on a load assigned in August moves AUGUST. The date's own month
+//     can be neither of them.
+// Hence the sheet read: the covering loads are the only place the answer lives.
+// With no covering load the override is inert today, and we fall back to the
+// date's own month — the bucket it would take the moment a load with no readable
+// assigned date covers it. That is the conservative direction and costs nothing:
+// an admin excluding a day in a closed month should be reopening it either way.
+//
+// Covering loads are matched regardless of STATUS, unlike the pay loop, which
+// counts completed ones only. Status is mutable and the override row is not, so
+// a load one status change away from counting would otherwise be one status
+// change away from silently restating a closed month.
+function excludedDayPeriods({ driver, date, action, jobTracking }) {
+	const own = String(date || "").slice(0, 7);
+	if (action === "add" || !jobTracking) return [own];
+	const cols = jobTrackingMonthCols(jobTracking.headers);
+	if (!cols.driverCol) return [own];
+	const months = new Set();
+	for (const row of jobTracking.data) {
+		if (normalizeDriverName(row[cols.driverCol]) !== driver) continue;
+		if (!loadWindowDays(row, cols).includes(date)) continue;
+		loadRowPeriods(row, cols).periods.forEach((m) => months.add(m));
+	}
+	return months.size ? [...months].sort() : [own];
+}
+
+// The gate itself: `{ refuse: 'unreadable'|'unresolved'|'finalized'|null, periods }`.
+// Fails closed on an unreadable lock table and on an unreadable sheet, for the
+// same reason as the load delete — the months are exactly what cannot be guessed.
+async function excludedDayGate({ driver, date, action }) {
+	if (!periodLocksReadable()) return { refuse: "unreadable", periods: [] };
+	let jobTracking = null;
+	// An 'add' is bucketed by its own date and needs no sheet, so it is not made
+	// to depend on Sheets being up. Only 'remove' has to find its covering loads.
+	if (action !== "add") {
+		try {
+			jobTracking = await getJobTrackingCached();
+		} catch (e) {
+			console.error("Driver-day override blocked — Job Tracking unreadable:", e.message);
+			return { refuse: "unresolved", periods: [] };
+		}
+	}
+	const periods = excludedDayPeriods({ driver, date, action, jobTracking });
+	const locked = lockedAmong(periods);
+	return locked.length ? { refuse: "finalized", periods: locked } : { refuse: null, periods };
+}
+
 // POST /api/admin/excluded-days — Super Admin manually overrides a (driver, date)
 // in the active-day count. Two override types share this endpoint via `action`:
 //   - 'remove' (default): drop a day the ELD over-counted (parked-but-creeping
@@ -13605,7 +13761,10 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 // /api/investor, /api/financials, and /api/invoices/generate all consult this
 // table, so an override moves in lockstep across the investor view, company
 // P&L, and weekly invoice PDF.
-app.post("/api/admin/excluded-days", requireRole("Super Admin"), (req, res) => {
+//
+// ⚠️ PERIOD-GUARDED — see excludedDayPeriods() above for WHICH month an override
+// actually moves, which is not the month the date is in.
+app.post("/api/admin/excluded-days", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const driverNameRaw = (req.body && req.body.driverName) || "";
 		const date = (req.body && req.body.date) || "";
@@ -13615,6 +13774,13 @@ app.post("/api/admin/excluded-days", requireRole("Super Admin"), (req, res) => {
 		const driver = normalizeDriverName(driverNameRaw);
 		if (!driver) return res.status(400).json({ error: "Missing driverName" });
 		if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Invalid date — must be YYYY-MM-DD" });
+
+		// Guard BEFORE the insert. There are no transactions here, so a refusal
+		// discovered after the write is not a refusal.
+		const gate = await excludedDayGate({ driver, date, action });
+		if (gate.refuse) return sendPeriodRefusal(res, gate.refuse, gate.periods,
+			`${action === "add" ? "Crediting" : "Excluding"} ${date} for ${driverNameRaw || driver}`);
+
 		const excludedBy = req.session.user.username || req.session.user.full_name || "";
 		const result = db.prepare(
 			"INSERT OR IGNORE INTO excluded_driver_days (driver_name, excluded_date, reason, excluded_by, action) VALUES (?, ?, ?, ?, ?)"
@@ -13635,7 +13801,12 @@ app.post("/api/admin/excluded-days", requireRole("Super Admin"), (req, res) => {
 // DELETE /api/admin/excluded-days/:id — Super Admin restores a previously
 // overridden day. Works for both 'remove' and 'add' overrides — dropping the
 // row reverts the active-day count to whatever ELD+loads compute on their own.
-app.delete("/api/admin/excluded-days/:id", requireRole("Super Admin"), (req, res) => {
+//
+// ⚠️ PERIOD-GUARDED, and this direction is the one that bites in practice: both
+// override rows on production today target 2026-05-15/16, a month that is locked
+// AND whose payout is marked PAID. Restoring either puts a $150 active day back
+// into a settled month.
+app.delete("/api/admin/excluded-days/:id", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id, 10);
 		if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
@@ -13643,6 +13814,17 @@ app.delete("/api/admin/excluded-days/:id", requireRole("Super Admin"), (req, res
 			"SELECT id, driver_name, excluded_date, reason, COALESCE(action, 'remove') AS action FROM excluded_driver_days WHERE id = ?"
 		).get(id);
 		if (!row) return res.status(404).json({ error: "Not found" });
+
+		// Undoing an override moves exactly the months applying it moved — the day
+		// goes back where it was — so the same predicate answers both directions.
+		const gate = await excludedDayGate({
+			driver: normalizeDriverName(row.driver_name),
+			date: (row.excluded_date || "").trim(),
+			action: row.action,
+		});
+		if (gate.refuse) return sendPeriodRefusal(res, gate.refuse, gate.periods,
+			`Restoring ${row.excluded_date} for ${row.driver_name}`);
+
 		db.prepare("DELETE FROM excluded_driver_days WHERE id = ?").run(id);
 		const auditAction = row.action === "add" ? "restore_added_driver_day" : "restore_driver_day";
 		logAudit(req, auditAction, "driver_active_day", `${row.driver_name}:${row.excluded_date}`, row.reason || "");
@@ -13684,7 +13866,19 @@ app.get("/api/admin/driver-day-overrides", requireRole("Super Admin"), (req, res
 				});
 		} catch {}
 		const drivers = [...seen.values()].sort((a, b) => a.localeCompare(b));
-		res.json({ overrides, drivers });
+		// Closed months, so the page can say so BEFORE an admin clicks. Without
+		// this the only signal is the 409, i.e. the guard is discovered by tripping
+		// it. Sent as a plain list of 'YYYY-MM'; `lockReadable:false` means "cannot
+		// tell", which the UI must render as an unknown rather than as "all open" —
+		// the server would refuse every write in that state.
+		let lockedPeriods = [];
+		const lockReadable = periodLocksReadable();
+		if (lockReadable) {
+			try {
+				lockedPeriods = db.prepare("SELECT period FROM period_locks WHERE status = 'locked' ORDER BY period").all().map((r) => r.period);
+			} catch { lockedPeriods = []; }
+		}
+		res.json({ overrides, drivers, lockedPeriods, lockReadable });
 	} catch (error) {
 		console.error("Error listing driver day overrides:", error.message);
 		res.status(500).json({ error: error.message });
@@ -14341,6 +14535,138 @@ function getAllExcludedDriverDays() {
 		});
 	} catch { /* table missing on first boot — fall through */ }
 	return map;
+}
+
+// ---------------------------------------------------------------------------
+// WHICH MONTHS DOES A LOAD (OR A DRIVER-DAY OVERRIDE) ACTUALLY MOVE?
+//
+// Both mechanisms below — the load soft-delete and the excluded/added-day
+// override — silently restate a month's settlement, so both need a period-lock
+// guard. A guard is only as good as its month mapping, and the mapping here is
+// NOT the obvious one. Getting it wrong is worse than having no guard: it would
+// refuse the deletes that are safe and wave through the ones that are not.
+//
+// The rule the money math actually uses (GET /api/investor, GET /api/financials
+// and the payouts drill-down are all identical here, deliberately):
+//   • REVENUE counts in the month the load was ASSIGNED, not delivered. That is
+//     a deliberate choice to match the dashboard, and it is why "it delivered in
+//     August" tells you nothing about which month a load books in.
+//   • DRIVER PAY counts active days = a completed load's pickup→delivery window
+//     ∩ ELD travel — and each of those days is then bucketed by
+//     `assignedMonthKey || day.slice(0,7)`, i.e. it lands in the load's ASSIGNED
+//     month too, NOT in the month the day physically falls in.
+// So for a load with a readable assigned date, revenue and driver pay agree and
+// the load touches exactly ONE month. A load can reach TWO months only when its
+// assigned date cannot be parsed, at which point the days fall back to their own
+// calendar months and a window straddling a month boundary splits. Measured on
+// production 2026-08-08: 0 of 391 live loads are in that state. The two-month
+// case is therefore not a workflow being blocked — it IS the unreadable-data
+// case, which fails closed anyway.
+//
+// ⚠️ The three parsers below are a deliberate copy of the pair already inlined in
+// the /api/investor and /api/financials handlers (which are byte-identical to
+// each other). They live inside those closures and cannot be called from here.
+// The copy is the point: a guard that parsed dates its own way would answer for
+// a different month than the SUM it is protecting — the same failure the
+// truckChargeFromMonth note in userDeleteLockBlockers() describes. If the parse
+// rule ever changes, every copy changes together or this guard silently drifts
+// off the money it is guarding.
+function jtParseSheetDate(val) {
+	if (!val) return null;
+	const s = String(val).trim();
+	// ISO first — the US M/D/Y regex below would mis-read "2026-05-13".
+	const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+	if (iso) {
+		const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
+		return isNaN(d) ? null : d;
+	}
+	const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+	if (!m) return null;
+	let yr = parseInt(m[3]);
+	if (yr < 100) yr += 2000;
+	const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
+	return isNaN(d) ? null : d;
+}
+function jtFmtDate(d) {
+	return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+function jtExpandDateRange(start, end) {
+	const dates = [];
+	const s = new Date(start); s.setHours(12, 0, 0, 0);
+	const e = end ? new Date(end) : new Date(start);
+	e.setHours(12, 0, 0, 0);
+	if (e < s) return [jtFmtDate(s)];
+	const MAX_SPAN = 31 * 24 * 3600 * 1000; // same runaway guard as the pay loop
+	if (e - s > MAX_SPAN) e.setTime(s.getTime() + MAX_SPAN);
+	const cur = new Date(s);
+	while (cur <= e) { dates.push(jtFmtDate(cur)); cur.setDate(cur.getDate() + 1); }
+	return dates;
+}
+
+// The same column regexes the money endpoints resolve, in the same order.
+// `dateCol` in particular MUST keep the status-update/completion/assigned
+// alternation ahead of the bare /date/i fallback: on the production sheet the
+// header order is [20] Assigned Date, [21] Status Update Date, [22] Completion
+// Date and headers.find() returns the FIRST match — so this resolves to
+// "Assigned Date", which is what puts revenue in the assigned month.
+function jobTrackingMonthCols(headers) {
+	const h = headers || [];
+	return {
+		loadIdCol: findCol(h, /load.?id|job.?id/i),
+		dateCol: findCol(h, /status.*update.*date|completion.*date|assigned.*date/i) || findCol(h, /date/i),
+		driverCol: findCol(h, /^driver$/i),
+		pickupDateCol: findCol(h, /pickup.*appo|pickup.*date/i),
+		dropoffDateCol: findCol(h, /drop.?off.*appo|drop.?off.*date|delivery.*date/i),
+	};
+}
+
+// The load's assigned month, or "" when the cell cannot be read as a date.
+// `|| new Date(v)` is copied from the money math on purpose and is load-bearing:
+// production carries assigned dates like "Date: Tue, 1 Jul 2025 11:33:05 -0500"
+// that the strict parser rejects and the lenient Date constructor accepts. Drop
+// that fallback and this guard calls those rows unresolvable while the P&L
+// happily books them into July.
+function loadAssignedMonthKey(row, cols) {
+	if (!cols.dateCol || !row[cols.dateCol]) return "";
+	const d = jtParseSheetDate(row[cols.dateCol]) || new Date(row[cols.dateCol]);
+	return d && !isNaN(d) ? jtFmtDate(d).slice(0, 7) : "";
+}
+
+// The active-day window a load contributes, as "YYYY-MM-DD" strings. Mirrors the
+// pay loop: pickup appointment → drop-off appointment, pickup falling back to the
+// assigned date when blank. Deliberately NOT gated on the completed status the
+// pay loop checks — status is mutable, and a load one status change away from
+// counting should not be one status change away from being deletable out of a
+// closed month. A wider window here can only ever refuse more, never permit more.
+function loadWindowDays(row, cols) {
+	let pickup = jtParseSheetDate(cols.pickupDateCol ? row[cols.pickupDateCol] : null);
+	const dropoff = jtParseSheetDate(cols.dropoffDateCol ? row[cols.dropoffDateCol] : null);
+	if (!pickup && cols.dateCol && row[cols.dateCol]) {
+		pickup = jtParseSheetDate(row[cols.dateCol]) || new Date(row[cols.dateCol]);
+	}
+	if (!pickup || isNaN(pickup)) return [];
+	return jtExpandDateRange(pickup, dropoff || pickup);
+}
+
+// Every settlement month one Job Tracking row feeds. `resolved:false` means the
+// row's dates are unreadable — i.e. the guard cannot answer, which its callers
+// treat as a refusal and never as "affects nothing".
+function loadRowPeriods(row, cols) {
+	const assigned = loadAssignedMonthKey(row, cols);
+	if (assigned) return { periods: [assigned], resolved: true };
+	// No assigned month: revenue drops out entirely (the P&L needs that key to
+	// bucket at all) and the active days fall back to their own calendar months —
+	// the only path by which one load reaches two periods.
+	const months = [...new Set(loadWindowDays(row, cols).map((d) => d.slice(0, 7)))].sort();
+	return { periods: months, resolved: months.length > 0 };
+}
+
+// Of a set of candidate months, the ones period_locks records as closed.
+// Callers must have checked periodLocksReadable() first — isLocked() answers
+// "not locked" on an unreadable table, so this alone is not a guard.
+function lockedAmong(periods) {
+	const MONTH = /^\d{4}-\d{2}$/;
+	return [...new Set((periods || []).filter((p) => MONTH.test(p) && isLocked(p)))].sort();
 }
 
 // Compute per-driver FIFO queues from Job Tracking + load_responses.
