@@ -23472,16 +23472,64 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		// When this month will close, so the accrual card can say "closes Sep 7"
 		// rather than the vaguer "not yet payable until the period closes".
 		graceEndsAt: graceEndsAt(currentMonthKey, graceDays),
+		// EXACT components and `curCarry.raw`, exactly like the settled rows above.
+		// This block was the one place left re-deriving the split from an already
+		// ROUNDED netProfit, and it was a dollar off in production.
+		//
+		// The open month of a live investor (Johnny Rocks Spirits, 2026-08): revenue
+		// 1800 − driverPay 150 − fixedCosts 6149.16 − tripExpenses 400 = −4899.16,
+		// halved = −2449.58, rounded ONCE = −2450. That −2450 is what
+		// `amountInProgress` publishes and what `lossDeferred` (2450) agrees with.
+		// The old `monthShare` first rounded netProfit to −4899, then halved it to
+		// −2449.5 — and Math.round rounds a negative half TOWARD ZERO (−2449.5 →
+		// −2449, not −2450). So the card's own expandable breakdown contradicted the
+		// shortfall sentence printed directly above it by $1. The breakdown was the
+		// odd one out of three published figures, which is why the fix belongs here
+		// and NOT in the settlement: rounding once at the end is strictly more
+		// accurate than halving a pre-rounded part, and `amountInProgress` is already
+		// the number this month will settle at when it closes.
+		//
+		// ⚠️ Not a rare coincidence for this investor. fixedCosts 6149.16 is two real
+		// trucks (#33 3043.33 + #91 3105.83), so against whole-dollar revenue the raw
+		// net always ends in cents that put the halved figure exactly on a .5
+		// boundary — every page load was wrong, not one in a hundred.
+		//
+		// ⚠️ Nothing about the money moves. `amountInProgress`, `payableIfClosedNow`,
+		// `lossCarriedIn` and `lossDeferred` are untouched; `totals` never reads this
+		// object; and `breakdown` is display-only (its sole consumer is the accrual
+		// card's waterfall in PayoutsSection.vue). The settled rows' `breakdown` — not
+		// this one — is what finalizePeriods() snapshots into `finalized_breakdown`,
+		// so no stored or frozen figure can see this change and the ledger identity
+		// in test-suite.js 53 cannot either.
+		//
+		// The components were also MIXED — revenue/driverPay/tripExpenses arrive
+		// pre-rounded from monthlyEarnings while fixedCosts does not — so the
+		// drill-down did not even sum to its own netProfit line (−4899.16 of parts
+		// under a −4899 total) while the waterfall renders every row to the cent.
+		// `(cur.exact || cur)` is the same expression the settled rows use; the
+		// `|| cur` fallback keeps an older monthlyEarnings shape (no `exact` block)
+		// rendering rather than emitting undefined.
+		//
+		// A sub-dollar gap between `netProfit × splitPct` and `monthShare` REMAINS by
+		// design (−4899.16 × 50% = −2449.58 vs −2450): that is the single settlement
+		// rounding, and the settled rows have carried exactly the same property since
+		// they were fixed. Publishing the exact netProfit beside it is what discloses
+		// that gap instead of hiding it behind a second rounding.
 		breakdown: cur ? {
-			revenue: cur.revenue,
-			driverPay: cur.driverPay,
-			fixedCosts: cur.fixedCosts,
-			tripExpenses: cur.tripExpenses,
-			maintFundCost: cur.maintFundCost || 0,
-			complianceCost: cur.complianceCost || 0,
-			netProfit: cur.netProfit,
+			revenue: (cur.exact || cur).revenue,
+			driverPay: (cur.exact || cur).driverPay,
+			fixedCosts: (cur.exact || cur).fixedCosts,
+			tripExpenses: (cur.exact || cur).tripExpenses,
+			maintFundCost: (cur.exact || cur).maintFundCost || 0,
+			complianceCost: (cur.exact || cur).complianceCost || 0,
+			netProfit: (cur.exact || cur).netProfit,
 			splitPct,
-			monthShare: Math.round(cur.netProfit * ((parseFloat(config.investor_split_pct) || 50) / 100)),
+			// curCarry.raw is Math.round(cur.investorEarnings) — the SAME quantity
+			// amountInProgress publishes, so the two can no longer disagree. Safe
+			// against the `{raw: 0}` fallback on the line above: carryByPeriod is
+			// built from every monthlyEarnings entry, so whenever `cur` is truthy
+			// (the only case this object is emitted at all) the real slot exists.
+			monthShare: curCarry.raw,
 		} : null,
 	};
 
