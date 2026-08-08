@@ -73,6 +73,20 @@ const RATECON_FIXTURE_DIR = process.env.RATECON_FIXTURE_DIR || "";
 //   RUN_WRITE_TESTS=1 node test-suite.js
 const RUN_WRITE_TESTS = process.env.RUN_WRITE_TESTS === "1";
 
+// A minimal but structurally valid PDF, base64 — a few hundred bytes.
+//
+// Module scope because TWO unrelated guards need a real PDF, and they must not
+// drift apart:
+//   - /api/loads/ratecon/extract checks the "JVBERi" prefix of the base64 STRING
+//     before decoding, to keep a non-PDF from reaching (and billing) Gemini.
+//     Tests 63/64/71/73 ride its accept-path; test 66 is the matching refusal.
+//   - /api/chat/attachment DECODES and requires the bytes to start with "%PDF-"
+//     (verifyInlineServedBytes, added by PR #189), because /uploads serves .pdf
+//     inline. Tests 24 / 24b.
+// "JVBERi0xLjQK" decodes to "%PDF-1.4\n", so this one fixture satisfies both.
+const tinyPdfB64 =
+  "JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgMjAwIDIwMF0+PmVuZG9iagp0cmFpbGVyPDwvUm9vdCAxIDAgUj4+CiUlRU9GCg==";
+
 // Accounts the suite logs in with. No seed script in this repo creates
 // "admin"/"max.range.inv.llc." — they only exist in whichever local DB the
 // suite was first written against, which makes the whole harness unrunnable
@@ -216,13 +230,35 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   const ie = await req("POST", "/api/expenses", { driver: "test", type: "Fuel", amount: 10, date: "2026-04-11" }, ic);
   test("22. Investor blocked from expenses", ie.status === 403);
 
-  // 23. Bad file extension rejected
+  // 23. Bad file extension rejected. The payload is irrelevant here — ".php" is
+  //     refused by validateFileExt() before anything decodes the bytes — so the
+  //     throwaway "dGVzdA==" ("test") is exactly right for THIS test.
   const bf = await req("POST", "/api/chat/attachment", { fileData: "dGVzdA==", fileName: "hack.php" }, ac);
   test("23. Bad file extension rejected", bf.status === 400);
 
-  // 24. Good file extension allowed
-  const gf = await req("POST", "/api/chat/attachment", { fileData: "dGVzdA==", fileName: "doc.pdf" }, ac);
+  // 24. Good file extension accepted — the allow-list ADMITS a permitted type.
+  //     The payload must therefore be a genuine PDF. It used to be "dGVzdA==",
+  //     i.e. the four bytes "test" named doc.pdf; once PR #189 added the byte
+  //     check (verifyInlineServedBytes: a .pdf must really start with "%PDF-")
+  //     the server started refusing it — correctly, since that is precisely the
+  //     lying-extension upload the check exists to stop. The test then failed
+  //     while reading like an allow-list regression, which is the worst kind of
+  //     stale fixture: it reports the wrong component. Send real PDF bytes so
+  //     this asserts the extension gate and not the byte gate.
+  const gf = await req("POST", "/api/chat/attachment", { fileData: tinyPdfB64, fileName: "doc.pdf" }, ac);
   test("24. Good file extension accepted", gf.status === 200);
+
+  // 24b. The inverse, and the behaviour PR #189 actually added: an allow-listed
+  //      extension whose BYTES lie. /uploads serves .pdf inline, so "not a PDF,
+  //      named .pdf" is the case the byte check exists for, and nothing else in
+  //      this harness covers it. Test 66 also asserts a magic-prefix refusal, but
+  //      on /api/loads/ratecon/extract — a different function on a different
+  //      route, inspecting the base64 STRING to protect Gemini spend and never
+  //      writing to the inline-served tree. Distinct guard, so not a duplicate.
+  //      Keeping 24 and 24b adjacent is the point: together they show the two
+  //      gates are independent, so a future failure names the right one.
+  const gfLying = await req("POST", "/api/chat/attachment", { fileData: "dGVzdA==", fileName: "doc.pdf" }, ac);
+  test("24b. Good extension with non-matching bytes rejected", gfLying.status === 400);
 
   // 25. Canceled jobs excluded from dashboard
   const unassigned = dash.body?.unassignedJobs || [];
@@ -608,11 +644,8 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   // and leave nothing behind. The one creating test is opt-in (73).
   // ==========================================================================
 
-  // A minimal but structurally valid PDF, base64. Its "JVBERi" magic prefix is
-  // what /extract validates, so this exercises the accept-path of that check
-  // while the payload stays a few hundred bytes.
-  const tinyPdfB64 =
-    "JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgMjAwIDIwMF0+PmVuZG9iagp0cmFpbGVyPDwvUm9vdCAxIDAgUj4+CiUlRU9GCg==";
+  // tinyPdfB64 (the "JVBERi" accept-path payload for /extract) is declared at
+  // module scope — see the note there; tests 24/24b share it.
 
   // Read the Job Tracking sheet ONCE for this whole block: the row total (for
   // the "nothing was written" invariant), plus real headers/rows so the
