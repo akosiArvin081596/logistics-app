@@ -16,23 +16,42 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=1" />
   <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Dancing+Script:wght@400;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <!-- Fonts fetch early at high priority but MUST NOT block first paint, and the
+       flip from preloaded-to-applied happens in src/lib/fonts.js.
+
+       This replaced `rel="stylesheet" media="print" onload="this.media='all'"`.
+       That dodge worked, but an inline event handler is the one thing a CSP
+       cannot whitelist — nonces and hashes apply to <script> elements, not to
+       on* attributes — so it was the sole blocker on a `script-src` without
+       'unsafe-inline', i.e. on a policy that actually stops injected script.
+
+       Do NOT "simplify" this to a plain <link rel="stylesheet">. Measured on the
+       production build over a warm connection, that costs 284-1096 ms of first
+       contentful paint, and 3344 ms when fonts.googleapis.com is slow, because
+       it hands a third party a veto over first paint. This pattern measures
+       64-108 ms fast / 88 ms slow — i.e. identical to the handler it replaces.
+
+       No `crossorigin` here on purpose: the preload's CORS mode has to match the
+       stylesheet request it is reused for, and adding it would double-fetch. -->
+  <link id="app-fonts" rel="preload" as="style"
+        href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Dancing+Script:wght@400;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <!-- Styles for the pre-boot loader below, which used to be style="" attributes
+       on the elements themselves. Referenced from the HTML, not imported from
+       main.js: `vite build` folds this into the entry CSS either way, but the
+       DEV server injects main.js's CSS via JavaScript, and a <link> here is what
+       keeps the loader styled during a cold dev boot. See the file itself. -->
+  <link rel="stylesheet" href="/src/assets/app-loader.css">
 </head>
 <body>
   <div id="app">
-    <div id="app-loader" style="
-      position:fixed;inset:0;display:flex;flex-direction:column;
-      align-items:center;justify-content:center;
-      background:#0f0f0f;gap:1rem;
-    ">
-      <svg width="40" height="40" viewBox="0 0 40 40" style="animation:spin 0.9s linear infinite">
+    <div id="app-loader">
+      <svg class="app-loader-spinner" width="40" height="40" viewBox="0 0 40 40">
         <circle cx="20" cy="20" r="16" fill="none" stroke="#1e293b" stroke-width="4"/>
         <circle cx="20" cy="20" r="16" fill="none" stroke="#34d399" stroke-width="4"
           stroke-dasharray="60 44" stroke-linecap="round"/>
       </svg>
-      <span style="font-family:system-ui,sans-serif;font-size:0.78rem;color:#4b5563;letter-spacing:0.08em;text-transform:uppercase">Loading</span>
+      <span class="app-loader-label">Loading</span>
     </div>
-    <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
   </div>
   <script type="module" src="/src/main.js"></script>
 </body>
