@@ -12281,24 +12281,54 @@ function userUpdateLockBlockers(user, next) {
 	const nextName = next.driverName === undefined ? null : String(next.driverName);
 	const nameChanging = nextName !== null && nextName !== (user.driver_name || "");
 
-	// (1) expenses — the rows the delete guard protects, reached by UPDATE.
+	// (1) The rows the delete guard protects, reached by UPDATE.
+	//
+	// ⚠️ THE WHOLE CASCADE IS LOCK-CHECKED, NOT JUST `expenses`. This route used
+	// to hand-roll its own 8-statement rename and this guard modelled exactly one
+	// of those tables. Both are now DRIVER_RENAME_TARGETS — the write goes
+	// through applyDriverRenameSqlite() and the check through
+	// planDriverRenameSqlite() over that same list — so a target can never again
+	// be written by a route whose guard has not examined it. `invoices` is the
+	// concrete one that was missing: a single production driver carries 13 rows,
+	// 8 of them already PAID, in months that are finalized.
 	if (nameChanging && oldName) {
-		const rows = db.prepare(
-			"SELECT id, date, posted_period, created_at FROM expenses WHERE LOWER(driver) = ?"
-		).all(oldName);
-		const locked = rows.filter(expenseRowPeriodLocked);
 		const blanking = !nextName.trim();
-		if (locked.length) {
+		const plan = planDriverRenameSqlite(oldName, { userId: user.id });
+		for (const b of plan.blockers) {
 			blockers.push({
-				table: "expenses",
-				code: "PERIOD_FINALIZED",
-				rows: locked.length,
-				periods: blockedExpensePeriods(locked),
-				detail: blanking
-					? `${locked.length} expense row${locked.length === 1 ? "" : "s"} booked to a finalized month would be left filed under "${user.driver_name}" with no account behind them`
-					: `${locked.length} expense row${locked.length === 1 ? "" : "s"} booked to a finalized month would be re-attributed from "${user.driver_name}" to "${nextName.trim()}"`,
+				table: b.table,
+				// ⚠️ CARRY THE PLANNER'S CODE. Hardcoding PERIOD_FINALIZED here
+				// relabelled INVOICE_ALREADY_PAID, INVOICE_WEEK_COLLISION and
+				// TARGET_UNREADABLE on the way out, which silently undid the whole
+				// point of splitting them: the paid-invoice remedy below tests for
+				// INVOICE_ALREADY_PAID and could never match, so an admin holding a
+				// paid invoice in an OPEN month was told to reopen a period — an
+				// audited, money-touching settlement event — that would not help.
+				// The response-level `code` is still selected below and still
+				// prefers PERIOD_FINALIZED, so the wire contract is unchanged.
+				code: b.code,
+				rows: b.rows,
+				...(b.paidRows ? { paidRows: b.paidRows } : {}),
+				// namedLockedPeriods() says "(unrecognized date)" where
+				// blockedExpensePeriods() says "(unknown)". This route's 409 body
+				// filters on "(unknown)", so normalise rather than teach the
+				// handler a second sentinel — the response shape is unchanged.
+				periods: b.periods.map((p) => (p === "(unrecognized date)" ? "(unknown)" : p)),
+				// The suffix only reads correctly on a PERIOD_FINALIZED detail,
+				// which is a noun phrase ("12 expense rows … booked to a finalized
+				// month"). The others are already complete sentences and gluing
+				// "would be re-attributed from X to Y" onto them produces
+				// "…would violate the one-invoice-per-driver-week index would be
+				// re-attributed from…". Pass those through untouched.
+				detail: b.code !== "PERIOD_FINALIZED"
+					? b.detail
+					: blanking
+						? `${b.detail} would be left filed under "${user.driver_name}" with no account behind them`
+						: `${b.detail} would be re-attributed from "${user.driver_name}" to "${nextName.trim()}"`,
 			});
-		} else if (blanking) {
+		}
+		const expenseRows = (plan.targets.expenses && plan.targets.expenses.rows) || 0;
+		if (blockers.length === 0 && blanking) {
 			// STRANDING, and it does NOT need a locked month to do harm. These rows
 			// are in an open period, so nothing is restated today — but clearing the
 			// name detaches them from the only account that resolves them, and the
@@ -12309,9 +12339,9 @@ function userUpdateLockBlockers(user, next) {
 			// `expenses.driver` value resolves to a live account — and that invariant
 			// is worth keeping true.
 			//
-			// ⚠️ NOT `expenses` ALONE. The cascade below touches eight tables and the
-			// blank skips all eight, so checking one of them keeps the invariant true
-			// for one of them. These three are the ones where an orphan has a
+			// ⚠️ NOT `expenses` ALONE. The cascade touches every DRIVER_RENAME_TARGETS
+			// leg and the blank skips all of them, so checking one keeps the invariant
+			// true for one. These three are the ones where an orphan has a
 			// consequence a person would notice:
 			//   • expenses  — money; the whole reason this guard exists.
 			//   • documents — PODs and rate-cons. getRateConBytes() reads this table
@@ -12325,7 +12355,7 @@ function userUpdateLockBlockers(user, next) {
 			// on a stale notification would refuse a legitimate change for nothing.
 			// They are still COUNTED and reported, so the admin sees the full picture.
 			const attached = {
-				expenses: rows.length,
+				expenses: expenseRows,
 				documents: db.prepare("SELECT COUNT(*) AS n FROM documents WHERE LOWER(driver) = ?").get(oldName).n,
 				trucks: db.prepare("SELECT COUNT(*) AS n FROM trucks WHERE LOWER(assigned_driver) = ?").get(oldName).n,
 			};
@@ -12397,7 +12427,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// "" is the honest value for a cleared name.
 		const driverName = req.body.driverName === undefined ? undefined : String(req.body.driverName ?? "");
 
-		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+		// `let`, not `const` — this is a PRE-await snapshot used only to decide
+		// whether a rename is wanted and to take the sheet count. It is re-read
+		// after the last await, below, before any guard runs against it.
+		let user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
 		if (!user) return res.status(404).json({ error: "User not found" });
 
 		// The String() above makes every type SAFE; this makes the odd ones LOUD.
@@ -12431,10 +12464,107 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// whole check-then-act runs synchronously and cannot interleave. This is
 		// the same defect the setup route closes with db.transaction(); it needed
 		// closing here as well, and reordering is the cheaper half of that fix.
+		//
+		// ⚠️ THE SAME RULE BINDS EVERY LATER await. Every await in this handler
+		// lives in this block or the sheet read immediately below it — all of them
+		// above the guards. The Job Tracking read was first written inside guard
+		// (d) and that was a straight reinstatement of this bug — worse, in fact:
+		// bcrypt yields ~100 ms, while a cold sheet read is a network round trip
+		// (up to GOOGLE_API_TIMEOUT_MS, and ~150 s in the documented dead-socket
+		// mode), and the racing request needs no `password` field to slip through.
+		// If you add another await, put it here too, and re-read `user` after it —
+		// see the note on that re-read. Everything from the first guard to the
+		// commit must be synchronous.
 		let passwordHash = null;
 		if (password) {
 			const bcryptMod = await import("bcryptjs");
 			passwordHash = await bcryptMod.hash(password, 10);
+		}
+
+		// Pre-resolved here, consumed synchronously by guard (d). `null` means
+		// "could not be determined" and guard (d) refuses on it — a sheet we cannot
+		// read is a sheet we cannot prove is clean.
+		//
+		// ⚠️ RAW VALUES, NOT getJobTrackingCached(). That helper returns
+		// deduplicateLoads() output, which keeps only the last row per load id — so
+		// a duplicate-load-id row carrying the old driver name is invisible to it
+		// while being a real row fix-driver-name would rewrite. Counting the deduped
+		// view would let guard (d) pass and leave the sheet half-renamed, i.e. the
+		// partial rename would arrive THROUGH the guard that exists to stop it.
+		// GET /api/admin/scan-duplicates exists because duplicate ids really occur.
+		const wantsRename = driverName !== undefined
+			&& String(driverName).trim()
+			&& driverName !== (user.driver_name || "")
+			&& (user.driver_name || "").trim();
+		let sheetRowsUnderOldName = null;
+		// ⚠️ THE NEW NAME IS COUNTED TOO, and it is a money check, not symmetry.
+		// Guard (e) below looks for the target name in SQLite; Job Tracking is the
+		// one place it cannot see. This route now writes four PERIOD-LESS money
+		// targets — trucks.assigned_driver, truck_assignments, carrier_driver_history
+		// and drivers_directory — which are exactly the name set getInvestorDriverSet()
+		// matches against the sheet's driver column. So a rename onto a name that
+		// already has LOADS but no SQLite rows would silently pull those loads into
+		// this account's investor scope and pay basis, including inside closed
+		// months, with nothing to block on because none of the four carries a
+		// period. fix-driver-name already folds this count into its merge detection
+		// (sheetRowsAlreadyNewName); this is the same check, one sheet read.
+		let sheetRowsUnderNewName = 0;
+		if (wantsRename) {
+			const oldLowerForSheet = (user.driver_name || "").trim().toLowerCase();
+			const newLowerForSheet = driverName.trim().toLowerCase();
+			try {
+				const sheetsApi = await getSheets();
+				const resp = await sheetsApi.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+				const rows = resp.data.values || [];
+				const headers = rows[0] || [];
+				let idx = headers.findIndex((h) => /^driver$/i.test(String(h || "").trim()));
+				if (idx === -1) idx = headers.findIndex((h) => /driver/i.test(String(h || "")));
+				if (idx !== -1) {
+					let n = 0, m = 0;
+					for (let i = 1; i < rows.length; i++) {
+						const cell = String(rows[i][idx] || "").trim().toLowerCase();
+						if (cell === oldLowerForSheet) n++;
+						// Only a DIFFERENT name can be a merge — on a case-only
+						// rename these are the same rows, counted once as `n`.
+						if (newLowerForSheet !== oldLowerForSheet && cell === newLowerForSheet) m++;
+					}
+					sheetRowsUnderOldName = n;
+					sheetRowsUnderNewName = m;
+				}
+			} catch (e) {
+				console.error("PUT /api/users/:id: Job Tracking read failed, the rename will be refused:", e.message);
+			}
+		}
+
+		// ⚠️ RE-READ THE ACCOUNT AFTER THE LAST await, AND GUARD ONLY ON THIS COPY.
+		// "No await between the guard and the write" is only half the rule. The
+		// other half is "no state read BEFORE the last await": the row fetched at
+		// the top of this handler is a snapshot, and every guard below reasons
+		// about it — role, driver_name, id. While this request was parked on
+		// bcrypt (~100 ms) and then on the Sheets read (up to
+		// GOOGLE_API_TIMEOUT_MS, and ~150 s in the documented dead-socket mode),
+		// another request can have promoted, demoted or renamed this very account.
+		// Two outcomes, both reached without racing the guards themselves:
+		//   • guard (a) tests a STALE role, so it skips the last-Super-Admin check
+		//     and writes role='Driver' → zero Super Admins, a terminal state;
+		//   • the cascade uses a STALE driver_name as `oldName`, matches nothing,
+		//     and `UPDATE users` then sets the new name → account says one thing,
+		//     every finance row says another. The orphan this guard set exists to
+		//     prevent, arriving through it.
+		// Re-reading here costs one indexed lookup and makes every guard below
+		// operate on post-await state. `stale` keeps the pre-await copy only for
+		// the sheet count already taken against it.
+		const stale = user;
+		user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+		if (!user) return res.status(404).json({ error: "User not found" });
+		// The account changed under us mid-request. Refusing is the only safe
+		// answer: the sheet count above was taken against the OLD name, and the
+		// caller's intent was formed against a row that no longer exists.
+		if (user.driver_name !== stale.driver_name || user.role !== stale.role) {
+			return res.status(409).json({
+				error: "This account was modified by another request while this one was in progress. Nothing was changed — reload and try again.",
+				code: "CONCURRENT_MODIFICATION",
+			});
 		}
 
 		const ROLES = ["Super Admin", "Dispatcher", "Driver", "Investor"];
@@ -12508,7 +12638,13 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			const named = [...new Set(finalized.flatMap((b) => b.periods))].sort();
 			const periods = named.filter((p) => p !== "(unknown)");
 			const unresolved = named.length !== periods.length;
-			const paidRows = lock.blockers.reduce((n, b) => n + (b.paidRows || 0), 0);
+			// An INVOICE_ALREADY_PAID blocker carries its count in `rows`, not
+			// `paidRows` — every row in it is paid by construction. Omitting it here
+			// left `paidRows === 0` for "expenses locked + invoices paid in an open
+			// month", so the reopen remedy printed for a condition reopening cannot
+			// fix, and the admin reopened a closed month for nothing.
+			const paidRows = lock.blockers.reduce(
+				(n, b) => n + (b.paidRows || 0) + (b.code === "INVOICE_ALREADY_PAID" ? b.rows : 0), 0);
 			const who = user.driver_name || user.username || `user ${id}`;
 
 			// PERIOD_FINALIZED wins the response code when both legs fire — it is the
@@ -12521,14 +12657,33 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			].filter(Boolean).join(" ");
 
 			const remedy = [];
-			if (paidRows) {
+			// ⚠️ The PAID remedy is per-TABLE, not per-count. `paidRows` is summed
+			// across every blocker, so a paid *invoice* used to print the investor
+			// -payout sentence ("keep the Investor role") — an instruction with
+			// nothing to do with a driver's weekly invoice. Ask which table froze.
+			const paidPayoutRows = lock.blockers.filter((b) => b.table === "investor_payouts").reduce((n, b) => n + (b.paidRows || 0), 0);
+			const paidInvoiceRows = lock.blockers.filter((b) => b.table === "invoices").reduce((n, b) => n + (b.paidRows || 0) + (b.code === "INVOICE_ALREADY_PAID" ? b.rows : 0), 0);
+			if (paidPayoutRows) {
 				remedy.push("Payouts already marked PAID cannot be detached from their investor — this account has to keep the Investor role.");
-			} else {
+			}
+			if (paidInvoiceRows) {
+				remedy.push(`${paidInvoiceRows} invoice${paidInvoiceRows === 1 ? " has" : "s have"} already been PAID — money moved against a document naming this driver, so ${paidInvoiceRows === 1 ? "it cannot" : "they cannot"} be re-attributed.`);
+			}
+			if (!paidRows) {
 				if (periods.length) remedy.push(`Reopen the affected period${periods.length === 1 ? "" : "s"} first — POST /api/periods/:period/reopen records a reason.`);
 				if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
 			}
 			if (code === "DRIVER_NAME_IN_USE") {
 				remedy.push("Re-file or delete those receipts first, or leave the driver name in place — it is the only link between them and this account.");
+			}
+			// Without these, a refusal whose ONLY blocker is a hard one arrives with
+			// an empty remedy — a description and no action. fix-driver-name prints
+			// a rationale for both; match it.
+			if (lock.blockers.some((b) => b.code === "INVOICE_WEEK_COLLISION")) {
+				remedy.push("Two live weekly invoices share a billing week for this driver under different spellings — soft-delete or correct the duplicate first, or the one-invoice-per-driver-week index would reject the rename.");
+			}
+			if (lock.blockers.some((b) => b.code === "TARGET_UNREADABLE")) {
+				remedy.push("A money-bearing table could not be read, so it cannot be confirmed free of finalized-month rows. Fix the database error and retry — this is held rather than guessed.");
 			}
 
 			return res.status(409).json({
@@ -12540,6 +12695,103 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			});
 		}
 
+		// (d) ⚠️ THE SHEET LEG THIS ROUTE DOES NOT HAVE.
+		// A rename is not finished when SQLite is finished. The Job Tracking
+		// `Driver` column is where load revenue and the active-day pay basis live,
+		// and PUT /api/admin/fix-driver-name rewrites it inside the same
+		// all-or-nothing sweep as the database. This route never has, and giving
+		// it one would mean duplicating that route's sheet transaction, its
+		// 502/PARTIAL_RENAME reporting, its dry run and its merge-reversal recipe
+		// — four things that must not exist twice.
+		//
+		// So the rule is the one fix-driver-name already states: applied to EVERY
+		// target or none. If Job Tracking still carries rows under the old name,
+		// finishing here would produce exactly the partial rename that route calls
+		// the one outcome this feature must never produce — the pay math then
+		// falls back to defaults for whatever it can no longer resolve, silently
+		// turning a percentage driver into a day-rate one inside closed months.
+		// Refuse, and name the route that can do it completely.
+		//
+		// Consumes the count taken ABOVE the guards — see the note beside it. This
+		// block must stay synchronous. Fails CLOSED: a sheet we cannot read is a
+		// sheet we cannot prove is clean.
+		if (wantsRename) {
+			if (sheetRowsUnderOldName === null) {
+				return res.status(409).json({
+					error: "Job Tracking could not be read, so it cannot be confirmed free of the old driver name. A rename that lands only in the database is the partial rename that restates closed months. Try again, or use PUT /api/admin/fix-driver-name.",
+					code: "SHEET_UNREADABLE",
+				});
+			}
+			if (sheetRowsUnderOldName > 0) {
+				return res.status(409).json({
+					error: `Cannot rename "${user.driver_name}" to "${driverName.trim()}" here: ${sheetRowsUnderOldName} Job Tracking row${sheetRowsUnderOldName === 1 ? "" : "s"} still carry the old name, and this route does not write the sheet. Renaming only the database is a partial rename — the pay math would resolve those loads to default rates inside months that are already closed. Use PUT /api/admin/fix-driver-name, which renames the sheet and the database together and offers ?dryRun=true first.`,
+					code: "RENAME_REQUIRES_SHEET",
+					sheetRows: sheetRowsUnderOldName,
+					route: "PUT /api/admin/fix-driver-name",
+				});
+			}
+
+			// (e) ⚠️ A RENAME ONTO A NAME THAT ALREADY OWNS ROWS IS A MERGE.
+			// Guard (b) above only asks whether another *account* holds the name.
+			// That is not the same question: `drivers_directory` has its own CRUD
+			// and its own lifecycle, so a name with rows but no user row is the
+			// ORDINARY case, not an exotic one — and the cascade below would fold
+			// two identities' invoices, expenses and pay history into one bucket
+			// with nothing left to tell them apart. fix-driver-name treats exactly
+			// this as the one outcome it cannot undo by re-running, which is why it
+			// carries merge detection, a dry run and a by-id reversal recipe. This
+			// route has none of those, so it refuses and points at the one that does
+			// rather than performing an irreversible merge silently.
+			//
+			// ⚠️ TWO CARVE-OUTS, OR THIS REFUSES THE MOST ORDINARY RENAME.
+			// (1) caseOnly — the scan matches case-insensitively, so for
+			//     "shorn king" -> "Shorn King" the new-name query returns the very
+			//     rows being renamed. That is a self-match, not a merge;
+			//     fix-driver-name skips the scan for exactly this reason.
+			// (2) the account's OWN rows. The `users_full_name` leg is
+			//     `LOWER(full_name) = ? AND role='Driver' AND id = ?`, so renaming
+			//     `driver_name` to the value already in this account's `full_name`
+			//     — i.e. `jsmith` -> `John Smith`, the single most common real
+			//     rename — self-matches. Same for this person's own
+			//     `drivers_directory` and `job_applications` rows. Dropping the two
+			//     `users` legs is sound here and not a hole: a genuine clash on
+			//     `users.driver_name` is guard (b) DRIVER_NAME_TAKEN's job, and
+			//     `users.full_name` is id-scoped so it cannot merge anyone.
+			// Without these the route fails CLOSED but tells the admin something
+			// factually untrue, which is how a guard gets deleted six months on.
+			const newLowerForMerge = driverName.trim().toLowerCase();
+			const caseOnlyRename = newLowerForMerge === (user.driver_name || "").trim().toLowerCase();
+			const scan = caseOnlyRename ? { mergeTargets: {}, mergeRows: 0 } : driverRenameMergeScan(newLowerForMerge, { userId: id });
+			// (3) `job_applications` — matched on `full_name`, so a driver who
+			//     applied through POST /api/public/apply as "John Smith" and holds
+			//     the account `jsmith` self-matches their OWN application. It is
+			//     money:false and carries no uniqueness, so it cannot represent a
+			//     merge worth refusing. `drivers_directory` deliberately STAYS in:
+			//     it is money-bearing AND `driver_name` is NOT NULL UNIQUE, so a
+			//     genuine second row there would make the cascade throw.
+			const MERGE_SCAN_SELF_MATCH_KEYS = new Set(["users", "users_full_name", "job_applications"]);
+			const mergeTargets = {};
+			let mergeRows = 0;
+			for (const [k, n] of Object.entries(scan.mergeTargets)) {
+				if (MERGE_SCAN_SELF_MATCH_KEYS.has(k)) continue;
+				mergeTargets[k] = n; mergeRows += n;
+			}
+			// Job Tracking rows already under the target name — see the counter above.
+			if (!caseOnlyRename && sheetRowsUnderNewName > 0) {
+				mergeTargets["JobTracking_sheet"] = sheetRowsUnderNewName;
+				mergeRows += sheetRowsUnderNewName;
+			}
+			if (mergeRows > 0) {
+				return res.status(409).json({
+					error: `Cannot rename "${user.driver_name}" to "${driverName.trim()}" here: "${driverName.trim()}" already owns ${mergeRows} row${mergeRows === 1 ? "" : "s"}, so this is a MERGE of two driver identities, not a rename — and it cannot be undone by swapping the names back. Use PUT /api/admin/fix-driver-name?dryRun=true, which detects the merge, shows exactly what it would combine, and records a by-id reversal recipe.`,
+					code: "DRIVER_RENAME_IS_MERGE",
+					mergeRows,
+					mergeTargets,
+					route: "PUT /api/admin/fix-driver-name",
+				});
+			}
+		}
+
 		const updates = [];
 		const params = [];
 
@@ -12549,7 +12801,14 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		}
 		if (driverName !== undefined) {
 			updates.push("driver_name = ?");
-			params.push(driverName);
+			// TRIMMED, to match what the cascade writes everywhere else
+			// (driverRenameNewValue trims). Storing "  John Smith  " here while
+			// every other table holds "John Smith" is self-healing — consumers trim
+			// the needle — but the divergence costs nothing to remove, and
+			// `users.driver_name` is what lands in the session as `driverName`,
+			// which the one-sided fold in the invoice ownership checks compares
+			// against a raw column.
+			params.push(driverName.trim());
 		}
 		if (email !== undefined) {
 			updates.push("email = ?");
@@ -12574,26 +12833,51 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			return res.status(400).json({ error: "No valid fields to update" });
 		}
 
-		params.push(id);
-		db.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).run(...params);
-
-		// Past the guards: every row below is in an open month, and the new name
-		// (if any) belongs to nobody else.
+		// Past the guards: every row below is in an open month, the new name (if
+		// any) belongs to nobody else, and Job Tracking is already clean of the old
+		// one.
+		//
+		// ⚠️ THE CASCADE RUNS BEFORE `UPDATE users`, AND BOTH IN ONE TRANSACTION.
+		// Order first: the cascade matches on the account's CURRENT driver_name, so
+		// writing `users` first would blank the very value the `users` and
+		// `users_full_name` legs match on and they would find nothing. Running the
+		// cascade first also lets an explicit `fullName` in the request win over the
+		// cascade's display-name sync, which is the caller's stated intent.
+		// Atomicity second: this app has no transactions by default and a throw
+		// between the two halves used to leave the finance rows moved and the
+		// account not renamed — the same split DELETE was given a transaction for
+		// in #212. Everything here is synchronous (bcrypt was hoisted above the
+		// guards), so one db.transaction() covers it.
 		const renamed = {};
-		// Cascade driver name rename across all tables
+		const doRename = driverName !== undefined
+			&& driverName !== (user.driver_name || "")
+			&& (user.driver_name || "").trim()
+			&& driverName.trim();
+		try {
+			db.transaction(() => {
+				if (doRename) {
+					// THE SHARED CASCADE — the identical call
+					// PUT /api/admin/fix-driver-name makes. Scoped by userId so the two
+					// name-matched `users` legs can only touch THIS account.
+					const { counts } = applyDriverRenameSqlite({
+						oldName: user.driver_name, newName: driverName, userId: id,
+					});
+					Object.assign(renamed, counts);
+				}
+				params.push(id);
+				db.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+			})();
+		} catch (e) {
+			// Logged, not echoed: a constraint failure names the index and its
+			// columns, and the house pattern is a generic body plus a stable code.
+			console.error("PUT /api/users/:id: rollback, nothing written:", e.message);
+			return res.status(500).json({
+				error: "The update was rolled back — nothing was changed.",
+				code: "UPDATE_ROLLED_BACK",
+			});
+		}
+
 		if (driverName !== undefined && driverName !== (user.driver_name || "")) {
-			const oldName = (user.driver_name || "").trim().toLowerCase();
-			const newName = driverName.trim();
-			if (oldName && newName) {
-				renamed.expenses = db.prepare("UPDATE expenses SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName).changes;
-				renamed.messages_from = db.prepare(`UPDATE messages SET "from" = ? WHERE LOWER("from") = ?`).run(newName, oldName).changes;
-				renamed.messages_to = db.prepare(`UPDATE messages SET "to" = ? WHERE LOWER("to") = ?`).run(newName, oldName).changes;
-				renamed.notifications = db.prepare("UPDATE notifications SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName, oldName).changes;
-				renamed.driver_locations = db.prepare("UPDATE driver_locations SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName).changes;
-				renamed.load_responses = db.prepare("UPDATE load_responses SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName, oldName).changes;
-				renamed.trucks = db.prepare("UPDATE trucks SET assigned_driver = ? WHERE LOWER(assigned_driver) = ?").run(newName, oldName).changes;
-				renamed.documents = db.prepare("UPDATE documents SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName).changes;
-			}
 			// Sync renamed driver to Carrier Database sheet.
 			// ⚠️ Only when there IS a name. This ran unconditionally, so clearing the
 			// driver name reached syncDriverToCarrierSheet("") → `UPDATE
@@ -12601,17 +12885,27 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			// row's own key and stranding it in a second table. The directory has its
 			// own CRUD endpoints and its own lifecycle; a cleared account link is not
 			// an instruction to erase the carrier record.
-			if (newName) {
-				syncDriverToCarrierSheet(driverName, { oldName: user.driver_name, email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
+			//
+			// ⚠️ `oldName` is the NEW name on a rename, and that is not a typo.
+			// `drivers_directory.driver_name` is now a cascade target, so by this
+			// point the row has ALREADY been renamed. Passing the old name would
+			// match nothing and fall into this helper's `action:"add"` branch —
+			// which is `INSERT OR IGNORE` against a NOT NULL UNIQUE column, so it
+			// does not duplicate the row; it silently does NOTHING, and the email /
+			// company / truck-unit sync that is the whole point of the call is
+			// skipped with no error. The lookup has to use the name the row carries
+			// now.
+			if (driverName.trim()) {
+				syncDriverToCarrierSheet(driverName, { oldName: doRename ? driverName : user.driver_name, email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
 			}
 		} else if (user.role === "Driver" && user.driver_name && (email !== undefined || companyName !== undefined)) {
 			// Name didn't change but email/company did
 			syncDriverToCarrierSheet(user.driver_name, { email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
 		}
 
-		// This route rewrites finance rows across eight tables and left no trace at
-		// all — "who renamed this driver, and what moved with them" was
-		// unanswerable. Field-level before→after, plus the per-table cascade counts
+		// This route rewrites finance rows across every DRIVER_RENAME_TARGETS leg
+		// and left no trace at all — "who renamed this driver, and what moved with
+		// them" was unanswerable. Field-level before→after, plus the cascade counts
 		// for the same reason the delete logs them: "updated a user" does not tell
 		// a later reader that 94 receipts changed hands. The password is recorded
 		// as an event only, never a value.
@@ -15180,11 +15474,27 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 // targets" means — the drift that let the old handler UPDATE drivers_directory
 // while reporting nothing about it.
 //
-// `match`/`writes` reproduce the ORIGINAL statements exactly, including their
-// inconsistencies: `notifications` and `load_responses` are matched on an exact
-// lowercase value and WRITTEN lowercase (those two tables store names folded),
-// every other target matches case-insensitively and writes the trimmed name.
-// That asymmetry is load-bearing convention, not a bug to fix in passing.
+// `match` and `writes` are INDEPENDENT and both matter. Every target matches
+// case-insensitively — a rename must find a row whatever case it was stored in,
+// and this app's storage case is a function of WHEN the row was written, not of
+// which column it is in (see the watermark note on `notifications` below).
+// `writes` then puts back the value that column's OWN writers use: lowercase
+// where the INSERT path folds the name (`notifications`, `load_responses`,
+// `invoices`), the trimmed display form everywhere else. Matching narrowly is
+// how a rename silently half-lands; writing the wrong convention is how it
+// mints a row no other code path could produce.
+//
+// ⚠️ THIS LIST IS THE ONLY DEFINITION OF "RENAME A DRIVER" IN THE APP, and it
+// is reached by TWO routes: PUT /api/admin/fix-driver-name and
+// PUT /api/users/:id. It used to be reached by one — the users route carried
+// its own hand-written cascade of 8 UPDATEs against 7 tables, so a rename made
+// there left `invoices`, `truck_assignments`, `carrier_driver_history`,
+// `drivers_directory`, `driver_onboarding`, `load_ratings`, `job_applications`,
+// `users.full_name`, `routemate_dvir` and `routemate_hos_daily` pointing at the
+// old name. That is the partial rename the header note above calls the one
+// outcome this feature must never produce, and it was reachable from the Users
+// screen. Both routes now go through planDriverRenameSqlite() and
+// applyDriverRenameSqlite() below. Add a target HERE and both routes get it.
 //
 // Table and column names here are hardcoded literals, never request input, so
 // interpolating them into SQL is safe; every VALUE is bound.
@@ -15204,11 +15514,32 @@ const DRIVER_RENAME_TARGETS = [
 		why: "displayed identity of that same account" },
 	{ key: "expenses", table: "expenses", column: "driver", match: "ci", writes: "trimmed", money: true, period: "expense",
 		why: "deductible basis for percentage pay + every expense P&L SUM" },
-	{ key: "invoices", table: "invoices", column: "driver", match: "ci", writes: "trimmed", money: true, period: "invoice",
+	// ⚠️ WRITES LOWERCASE, and that is not cosmetic. Both INSERT paths normalise:
+	// generateInvoiceHandler stores `driverName.toLowerCase()` and the manual
+	// route stores `payee.toLowerCase()`, so lowercase IS this column's
+	// convention. Writing the display form here mints a row no other writer
+	// could produce — and `idx_invoices_driver_week` is a UNIQUE index on
+	// (driver, week_start) with SQLite's default BINARY collation, so a
+	// mixed-case row sits OUTSIDE the one-invoice-per-driver-week constraint
+	// that protects every lowercase row. `PUT /api/invoices/:id/restore` and
+	// `generateInvoiceNumber()` both compare `driver = ?` exactly for the same
+	// reason. Production already carries one such row (see the case-watermark
+	// note below); this is what stops a rename minting the next one.
+	{ key: "invoices", table: "invoices", column: "driver", match: "ci", writes: "lower", money: true, period: "invoice",
 		why: "weekly driver invoices, including ones already marked Paid" },
 	// --- OPERATIONAL / COSMETIC: no settlement figure reads these ---
-	{ key: "notifications", table: "notifications", column: "driver_name", match: "exact_lower", writes: "lower", money: false, period: "none" },
-	{ key: "load_responses", table: "load_responses", column: "driver_name", match: "exact_lower", writes: "lower", money: false, period: "none" },
+	// ⚠️ MATCHED CASE-INSENSITIVELY, WRITTEN LOWERCASE — the two halves are
+	// independent and both are load-bearing. These columns were matched on an
+	// exact lowercase value (`"driver_name" = ?`), which silently skipped every
+	// row written before the app started folding these names at INSERT time.
+	// That watermark is datable: `notifications` flips at id 54 (2026-05-09
+	// 13:05) and `load_responses` at id 15 (2026-05-11 14:47), exactly once each,
+	// with no interleaving. On the local snapshot the exact-match form missed 37
+	// notifications and 12 load_responses for one driver — rows a rename left
+	// pointing at the old name while reporting success. Match wide, write in the
+	// column's own convention.
+	{ key: "notifications", table: "notifications", column: "driver_name", match: "ci", writes: "lower", money: false, period: "none" },
+	{ key: "load_responses", table: "load_responses", column: "driver_name", match: "ci", writes: "lower", money: false, period: "none" },
 	{ key: "messages_from", table: "messages", column: "from", match: "ci", writes: "trimmed", money: false, period: "none" },
 	{ key: "messages_to", table: "messages", column: "to", match: "ci", writes: "trimmed", money: false, period: "none" },
 	{ key: "driver_onboarding", table: "driver_onboarding", column: "driver_name", match: "ci", writes: "trimmed", money: false, period: "none" },
@@ -15220,10 +15551,23 @@ const DRIVER_RENAME_TARGETS = [
 	{ key: "routemate_hos_daily", table: "routemate_hos_daily", column: "driver_name", match: "ci", writes: "trimmed", money: false, period: "none" },
 ];
 
-function driverRenameWhereSql(t) {
-	if (t.match === "exact_lower") return `"${t.column}" = ?`;
-	if (t.match === "ci_driver_role") return `LOWER("${t.column}") = ? AND role = 'Driver'`;
-	return `LOWER("${t.column}") = ?`;
+// `opts.userId` narrows the two `users` legs to a single account. Only
+// PUT /api/users/:id passes it, and it is a NARROWING, never a widening: that
+// route is editing one known account by id, whereas the `users` legs match by
+// NAME, so unscoped they could rewrite a different account that happens to
+// carry the same `full_name` (`ci_driver_role` matches any Driver, not just the
+// one being edited). fix-driver-name has no id and keeps the name-matched form
+// it has always had. Every other target is name-matched for both callers.
+function driverRenameWhereSql(t, opts = {}) {
+	const scope = opts.userId != null && t.table === "users" ? " AND id = ?" : "";
+	if (t.match === "exact_lower") return `"${t.column}" = ?${scope}`;
+	if (t.match === "ci_driver_role") return `LOWER("${t.column}") = ? AND role = 'Driver'${scope}`;
+	return `LOWER("${t.column}") = ?${scope}`;
+}
+// Bind args for the WHERE above, in order. Kept beside it so the placeholder
+// count and the argument count cannot drift apart.
+function driverRenameWhereArgs(t, nameLower, opts = {}) {
+	return opts.userId != null && t.table === "users" ? [nameLower, opts.userId] : [nameLower];
 }
 function driverRenameNewValue(t, newName) {
 	return t.writes === "lower" ? newName.trim().toLowerCase() : newName.trim();
@@ -15261,6 +15605,276 @@ function namedLockedPeriods(candidates) {
 		if (!named) out.add("(unrecognized date)");
 	}
 	return [...out].sort();
+}
+
+// ============================================================
+// THE SHARED DRIVER-RENAME CASCADE — one plan, one executor, two callers
+// ============================================================
+// Extracted from PUT /api/admin/fix-driver-name so PUT /api/users/:id can run
+// the SAME rename instead of its own shorter one. The two had drifted to 8
+// targets versus 19; patching the shorter list would only reset that clock,
+// because nothing structural stopped the next target being added to one route
+// and not the other. Now DRIVER_RENAME_TARGETS is the single definition and
+// both routes are thin callers of these three functions.
+
+// Cap on the ids / sheet ranges written into one audit row, so a fleet-wide
+// rename cannot grow the audit_trail entry unboundedly. Past the cap the recipe
+// says it was truncated rather than lying by omission. Module scope because the
+// executor and the handler's sheet-range recipe must use the SAME number.
+const DRIVER_RENAME_ID_CAP = 500;
+
+// Blocker codes that NO caller may wave through — not with
+// acknowledgeLockedPeriods, and not via the caseOnly money-neutral carve-out.
+// A locked period is a business decision someone can own; these two are not.
+// See the note beside `hardBlockers` in the fix-driver-name handler.
+const DRIVER_RENAME_HARD_BLOCK_CODES = new Set(["INVOICE_WEEK_COLLISION", "TARGET_UNREADABLE"]);
+
+// Count every target and judge the month-end lock on the two that carry a
+// period. Read-only — no writes, no side effects — so it is safe to call from a
+// guard, which is exactly what both routes do before their first write.
+function planDriverRenameSqlite(oldLower, opts = {}) {
+	const targets = {};
+	const blockers = [];
+	for (const t of DRIVER_RENAME_TARGETS) {
+		const where = driverRenameWhereSql(t, opts);
+		const args = driverRenameWhereArgs(t, oldLower, opts);
+		let total = 0;
+		try { total = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${where}`).get(...args).n; }
+		catch (e) {
+			targets[t.key] = { rows: 0, error: e.message, money: !!t.money };
+			// ⚠️ FAIL CLOSED ON A MONEY TARGET. Recording `rows: 0` and moving on
+			// reports the rename safe because the table could not be read — the one
+			// direction this must not fail, and the direction every other lock
+			// predicate here (expenseRowPeriodLocked, invoiceRowPeriodLocked,
+			// periodLocksReadable) deliberately avoids. It also disagrees with the
+			// executor, which only swallows a missing table/column and throws on
+			// everything else. A non-money target staying silent is fine: no
+			// settlement figure reads it, and a genuine write failure still aborts
+			// the transaction.
+			if (t.money) blockers.push({
+				target: `${t.table}.${t.column}`, table: t.table, code: "TARGET_UNREADABLE",
+				rows: 0, periods: [],
+				detail: `${t.table}.${t.column} could not be read (${e.message}), so it cannot be confirmed free of finalized-month rows`,
+			});
+			continue;
+		}
+		const entry = { rows: total, money: !!t.money, period: t.period };
+		if (t.why) entry.why = t.why;
+		if (total && t.money && t.period === "expense") {
+			const er = db.prepare(`SELECT id, date, posted_period, created_at, amount FROM "${t.table}" WHERE ${where}`).all(...args);
+			const lockedRows = er.filter(expenseRowPeriodLocked);
+			entry.lockedRows = lockedRows.length;
+			if (lockedRows.length) {
+				entry.lockedAmount = Math.round(lockedRows.reduce((s, r) => s + (Number(r.amount) || 0), 0) * 100) / 100;
+				blockers.push({
+					target: `${t.table}.${t.column}`, table: t.table, code: "PERIOD_FINALIZED",
+					rows: lockedRows.length, amount: entry.lockedAmount,
+					periods: namedLockedPeriods(lockedRows.map((r) => [expensePostedPeriod(r), String(r.date || "").trim().slice(0, 7)])),
+					detail: `${lockedRows.length} expense row${lockedRows.length === 1 ? "" : "s"} ($${entry.lockedAmount.toFixed(2)}) booked to a finalized month`,
+				});
+			}
+		} else if (total && t.money && t.period === "invoice") {
+			const ir = db.prepare(`SELECT id, week_start, week_end, paid_at, status FROM "${t.table}" WHERE ${where}`).all(...args);
+			const lockedRows = ir.filter(invoiceRowPeriodLocked);
+			entry.lockedRows = lockedRows.length;
+			entry.paidRows = lockedRows.filter((r) => String(r.paid_at || "").trim()).length;
+			// ⚠️ SPLIT BY *WHY* THE ROW IS FROZEN. invoiceRowPeriodLocked() freezes
+			// on `paid_at` INDEPENDENTLY of any lock, so a paid invoice in an OPEN
+			// month has no locked period to name — namedLockedPeriods() then emits
+			// its "cannot resolve a month" sentinel, and the caller reads that as
+			// "correct the unreadable dates", sending an admin to fix a date that is
+			// perfectly fine. The honest reason is "this invoice is already paid",
+			// and it has a different remedy: none.
+			const monthLocked = (r) => {
+				const s = String(r.week_start || "").slice(0, 7), e2 = String(r.week_end || "").slice(0, 7);
+				const M = /^\d{4}-\d{2}$/;
+				return (M.test(s) && isLocked(s)) || (M.test(e2) && isLocked(e2));
+			};
+			const lockedByPeriod = lockedRows.filter(monthLocked);
+			const paidOnly = lockedRows.filter((r) => !monthLocked(r) && String(r.paid_at || "").trim());
+			const unresolvable = lockedRows.filter((r) => !monthLocked(r) && !String(r.paid_at || "").trim());
+			if (lockedByPeriod.length) blockers.push({
+				target: `${t.table}.${t.column}`, table: t.table, code: "PERIOD_FINALIZED",
+				rows: lockedByPeriod.length, paidRows: lockedByPeriod.filter((r) => String(r.paid_at || "").trim()).length,
+				periods: namedLockedPeriods(lockedByPeriod.map((r) => [String(r.week_end || "").slice(0, 7), String(r.week_start || "").slice(0, 7)])),
+				detail: `${lockedByPeriod.length} invoice${lockedByPeriod.length === 1 ? "" : "s"} in a finalized month would be re-attributed`,
+			});
+			if (paidOnly.length) blockers.push({
+				target: `${t.table}.${t.column}`, table: t.table, code: "INVOICE_ALREADY_PAID",
+				rows: paidOnly.length, periods: [],
+				detail: `${paidOnly.length} invoice${paidOnly.length === 1 ? "" : "s"} already marked PAID would be re-attributed — money moved against a document naming this driver`,
+			});
+			if (unresolvable.length) blockers.push({
+				target: `${t.table}.${t.column}`, table: t.table, code: "PERIOD_FINALIZED",
+				rows: unresolvable.length, periods: namedLockedPeriods(unresolvable.map(() => [])),
+				detail: `${unresolvable.length} invoice${unresolvable.length === 1 ? "" : "s"} carry a billing week the server cannot resolve to a month`,
+			});
+			// ⚠️ COLLISION PRE-FLIGHT against idx_invoices_driver_week — a UNIQUE
+			// index on (driver, week_start) scoped to live weekly invoices. The
+			// match is case-insensitive and every matched row is written the SAME
+			// value, so two rows that share a week_start fold onto one index entry
+			// and the UPDATE throws mid-transaction. Caught HERE because of where
+			// the throw would land: for fix-driver-name the sheet is written FIRST,
+			// so an unprobed collision surfaces as PARTIAL_RENAME — the one outcome
+			// that route must never produce.
+			//
+			// ⚠️ IT MUST PROBE old ∪ new, NOT JUST old. Two distinct collisions
+			// exist and probing only the old name catches the lesser one:
+			//   • old-vs-old  — two spellings of the SAME name sharing a week. This
+			//     is the caseOnly rename, which runs unguarded.
+			//   • old-vs-NEW  — a row already under the target name sharing a week
+			//     with one being renamed onto it. fix-driver-name PERMITS merges
+			//     (isMerge only sets a warning, never blocks), so this is the
+			//     reachable case, and the old-name-only probe returns [] for it.
+			// `opts.newLower` is optional so a caller that has no target name
+			// (nobody today) still gets the old-vs-old half.
+			try {
+				const collideSql = opts.newLower
+					? `SELECT week_start, COUNT(*) AS n FROM "${t.table}" WHERE (LOWER("${t.column}") = ? OR LOWER("${t.column}") = ?) AND deleted_at = '' AND is_manual = 0 GROUP BY week_start HAVING n > 1`
+					: `SELECT week_start, COUNT(*) AS n FROM "${t.table}" WHERE ${where} AND deleted_at = '' AND is_manual = 0 GROUP BY week_start HAVING n > 1`;
+				const collideArgs = opts.newLower ? [oldLower, opts.newLower] : args;
+				const clashes = db.prepare(collideSql).all(...collideArgs);
+				if (clashes.length) {
+					entry.weekCollisions = clashes.map((c) => c.week_start);
+					blockers.push({
+						target: `${t.table}.${t.column}`, table: t.table, code: "INVOICE_WEEK_COLLISION",
+						rows: clashes.reduce((s, c) => s + c.n, 0), periods: [],
+						weeks: entry.weekCollisions,
+						detail: `${clashes.length} billing week${clashes.length === 1 ? "" : "s"} (${entry.weekCollisions.join(", ")}) already hold more than one live weekly invoice for this driver under different spellings; folding them to one name would violate the one-invoice-per-driver-week index`,
+					});
+				}
+			} catch { /* index or columns absent on this database — nothing to collide */ }
+		}
+		targets[t.key] = entry;
+	}
+	return { targets, blockers };
+}
+
+// Does the NEW name already own rows? Then this is a merge of two identities,
+// not a rename, and it cannot be undone by swapping the arguments. See the
+// merge note in the fix-driver-name handler — and the Deshorn/Shorn trap in the
+// header, which is precisely the case a similarity heuristic gets wrong.
+function driverRenameMergeScan(newLower, opts = {}) {
+	const mergeTargets = {};
+	let mergeRows = 0;
+	for (const t of DRIVER_RENAME_TARGETS) {
+		let n = 0;
+		try {
+			n = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${driverRenameWhereSql(t, opts)}`)
+				.get(...driverRenameWhereArgs(t, newLower, opts)).n;
+		} catch { n = 0; }
+		if (n) { mergeTargets[t.key] = n; mergeRows += n; }
+	}
+	return { mergeTargets, mergeRows };
+}
+
+// Replace `oldName` with `newName` in free text, matching case-insensitively
+// but ONLY on a whole-word boundary.
+//
+// ⚠️ THIS IS THE DESHORN/SHORN GUARD, and it is not hypothetical: "Shorn King"
+// is a literal substring of "Deshorn King" — two DIFFERENT people, confirmed by
+// the business owner — so the plain SQL `REPLACE(title, 'Shorn King', X)` this
+// replaces would rewrite a notification about Deshorn to "DeX". Production
+// carries 0 such rows today, so the corruption is latent rather than live; it
+// becomes live the first time dispatch names the former driver in a
+// notification. SQLite's LIKE cannot express a word boundary and REPLACE() has
+// no boundary form, so the decision is made here in JS and only the rows that
+// genuinely change are written. Every other leg of the cascade compares whole
+// values for equality and is immune by construction — these two substring legs
+// are the only place the trap is reachable.
+function replaceNameOnWordBoundary(text, oldName, newName) {
+	const s = String(text == null ? "" : text);
+	const needle = String(oldName).toLowerCase();
+	if (!needle) return s;
+	const hay = s.toLowerCase();
+	// \p{M} is in the class alongside \p{L}/\p{N} so a COMBINING MARK counts as
+	// part of a word: in NFD, "José" is "Jose" + U+0301, and without \p{M} a
+	// rename of "Jose" would match inside it and leave the accent stranded on the
+	// replacement. Boundaries are read as whole CODE POINTS (codePointAt / the
+	// preceding pair) rather than s[i], because s[i] is a UTF-16 code unit and an
+	// astral letter next to the match would present as a lone surrogate, which no
+	// \p{...} class matches — so "𝐀Shorn King" would read as a boundary and be
+	// rewritten. Neither is exploitable; both are display-text corruption.
+	const WORDY = /[\p{L}\p{N}\p{M}]/u;
+	const charBefore = (idx) => {
+		if (idx <= 0) return "";
+		const lo = s.charCodeAt(idx - 1);
+		if (lo >= 0xDC00 && lo <= 0xDFFF && idx >= 2) {
+			const hi = s.charCodeAt(idx - 2);
+			if (hi >= 0xD800 && hi <= 0xDBFF) return s.slice(idx - 2, idx);
+		}
+		return s[idx - 1];
+	};
+	const charAt = (idx) => (idx >= s.length ? "" : String.fromCodePoint(s.codePointAt(idx)));
+	const isWordChar = (ch) => ch !== "" && WORDY.test(ch);
+	let out = "";
+	let i = 0;
+	for (;;) {
+		const at = hay.indexOf(needle, i);
+		if (at === -1) { out += s.slice(i); return out; }
+		const end = at + needle.length;
+		const before = charBefore(at);
+		const after = charAt(end);
+		if (isWordChar(before) || isWordChar(after)) {
+			// Part of a longer name ("Deshorn King"). Copy it through untouched.
+			out += s.slice(i, end);
+		} else {
+			out += s.slice(i, at) + newName;
+		}
+		i = end;
+	}
+}
+
+// The executor. Every target plus the two dispatch_notifications substring legs,
+// in ONE transaction, so 21 independent seams commit or roll back together.
+// Returns per-target `changes` — and, when `collectIds`, the ids it moved, which
+// are the only reversal recipe a merge has.
+function applyDriverRenameSqlite({ oldName, newName, userId = null, collectIds = false }) {
+	const oldTrim = String(oldName).trim();
+	const newTrim = String(newName).trim();
+	const oldLower = oldTrim.toLowerCase();
+	const opts = userId != null ? { userId } : {};
+	const counts = {};
+	const changedIds = {};
+	const ID_CAP = DRIVER_RENAME_ID_CAP;
+	db.transaction(() => {
+		for (const t of DRIVER_RENAME_TARGETS) {
+			const where = driverRenameWhereSql(t, opts);
+			const args = driverRenameWhereArgs(t, oldLower, opts);
+			try {
+				if (collectIds) {
+					try {
+						const ids = db.prepare(`SELECT id FROM "${t.table}" WHERE ${where}`).all(...args).map((r) => r.id);
+						if (ids.length) changedIds[t.key] = ids.length > ID_CAP ? { truncated: true, of: ids.length, ids: ids.slice(0, ID_CAP) } : ids;
+					} catch { /* table has no `id` column — the count still records the leg */ }
+				}
+				counts[t.key] = db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE ${where}`)
+					.run(driverRenameNewValue(t, newTrim), ...args).changes;
+			} catch (e) {
+				// A table that does not exist on this database is not a reason to
+				// abort a rename of the ones that do; a genuine write failure still
+				// throws out of the transaction.
+				if (/no such table|no such column/i.test(e.message)) { counts[t.key] = 0; continue; }
+				throw e;
+			}
+		}
+		// The two substring legs. Counts here are rows whose text ACTUALLY
+		// changed, not rows matched by LIKE — the boundary check above can
+		// legitimately match a row and rewrite nothing.
+		for (const col of ["title", "body"]) {
+			const key = `dispatch_notif_${col}`;
+			counts[key] = 0;
+			let rows = [];
+			try { rows = db.prepare(`SELECT id, "${col}" AS v FROM dispatch_notifications WHERE "${col}" LIKE ?`).all(`%${oldTrim}%`); }
+			catch (e) { if (/no such table|no such column/i.test(e.message)) continue; throw e; }
+			const upd = db.prepare(`UPDATE dispatch_notifications SET "${col}" = ? WHERE id = ?`);
+			for (const r of rows) {
+				const next = replaceNameOnWordBoundary(r.v, oldTrim, newTrim);
+				if (next !== r.v) { upd.run(next, r.id); counts[key]++; }
+			}
+		}
+	})();
+	return { counts, changedIds };
 }
 
 app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {
@@ -15344,46 +15958,20 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			detail: `${sheetLockedMonths.length} load row${sheetLockedMonths.length === 1 ? "" : "s"} in a finalized month — these carry the revenue and the active days the month's driver pay was computed from`,
 		});
 
-		for (const t of DRIVER_RENAME_TARGETS) {
-			const where = driverRenameWhereSql(t);
-			let total = 0;
-			try { total = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${where}`).get(oldLower).n; }
-			catch (e) { plan.sqlite[t.key] = { rows: 0, error: e.message, money: !!t.money }; continue; }
-			const entry = { rows: total, money: !!t.money, period: t.period };
-			if (t.why) entry.why = t.why;
-			if (total && t.money && t.period === "expense") {
-				const er = db.prepare(`SELECT id, date, posted_period, created_at, amount FROM "${t.table}" WHERE ${where}`).all(oldLower);
-				const lockedRows = er.filter(expenseRowPeriodLocked);
-				entry.lockedRows = lockedRows.length;
-				if (lockedRows.length) {
-					entry.lockedAmount = Math.round(lockedRows.reduce((s, r) => s + (Number(r.amount) || 0), 0) * 100) / 100;
-					blockers.push({
-						target: `${t.table}.${t.column}`, rows: lockedRows.length, amount: entry.lockedAmount,
-						periods: namedLockedPeriods(lockedRows.map((r) => [expensePostedPeriod(r), String(r.date || "").trim().slice(0, 7)])),
-						detail: `${lockedRows.length} expense row${lockedRows.length === 1 ? "" : "s"} ($${entry.lockedAmount.toFixed(2)}) booked to a finalized month`,
-					});
-				}
-			} else if (total && t.money && t.period === "invoice") {
-				const ir = db.prepare(`SELECT id, week_start, week_end, paid_at, status FROM "${t.table}" WHERE ${where}`).all(oldLower);
-				const lockedRows = ir.filter(invoiceRowPeriodLocked);
-				entry.lockedRows = lockedRows.length;
-				entry.paidRows = lockedRows.filter((r) => String(r.paid_at || "").trim()).length;
-				if (lockedRows.length) blockers.push({
-					target: `${t.table}.${t.column}`, rows: lockedRows.length, paidRows: entry.paidRows,
-					periods: namedLockedPeriods(lockedRows.map((r) => [String(r.week_end || "").slice(0, 7), String(r.week_start || "").slice(0, 7)])),
-					detail: `${lockedRows.length} invoice${lockedRows.length === 1 ? "" : "s"}${entry.paidRows ? ` (${entry.paidRows} already PAID)` : ""} in a finalized month would be re-attributed`,
-				});
-			}
-			plan.sqlite[t.key] = entry;
-		}
-		// The REPLACE legs are substring rewrites, not key rewrites, so they get
-		// no lock analysis. Their counts are rows MATCHED by LIKE — SQLite's LIKE
-		// folds ASCII case while REPLACE() does not, so on a case-only rename
-		// these report rows touched by the statement, not rows whose text changed.
+		// Every SQLite target, counted and lock-judged by the SHARED planner —
+		// the same call PUT /api/users/:id makes, so the two routes cannot
+		// disagree about what a rename touches or which months it would restate.
+		const sqlPlan = planDriverRenameSqlite(oldLower, { newLower });
+		Object.assign(plan.sqlite, sqlPlan.targets);
+		blockers.push(...sqlPlan.blockers);
+
+		// The two substring legs get no lock analysis — they rewrite display text,
+		// not a key. Counted by LIKE here (a superset: the executor's word-boundary
+		// check may decline some of these rows, see replaceNameOnWordBoundary).
 		for (const col of ["title", "body"]) {
 			let n = 0;
 			try { n = db.prepare(`SELECT COUNT(*) AS n FROM dispatch_notifications WHERE "${col}" LIKE ?`).get(`%${oldTrim}%`).n; } catch { n = 0; }
-			plan.sqlite[`dispatch_notif_${col}`] = { rows: n, money: false, period: "none", note: "substring REPLACE; count is rows matched by LIKE, not rows whose text changed" };
+			plan.sqlite[`dispatch_notif_${col}`] = { rows: n, money: false, period: "none", note: "substring rewrite; count is rows matched by LIKE — the executor skips any match that is part of a longer name" };
 		}
 
 		// Global, undated money targets — reported explicitly so the "there is no
@@ -15411,13 +15999,9 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		// "shorn king" -> "Shorn King" the new-name query returns the very rows
 		// being renamed, which is a self-match, not a merge.
 		let mergeRows = 0;
-		const mergeTargets = {};
+		let mergeTargets = {};
 		if (!caseOnly) {
-			for (const t of DRIVER_RENAME_TARGETS) {
-				let n = 0;
-				try { n = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${driverRenameWhereSql(t)}`).get(newLower).n; } catch { n = 0; }
-				if (n) { mergeTargets[t.key] = n; mergeRows += n; }
-			}
+			({ mergeTargets, mergeRows } = driverRenameMergeScan(newLower));
 			if (sheetRowsAlreadyNewName) { mergeTargets["JobTracking_sheet"] = sheetRowsAlreadyNewName; mergeRows += sheetRowsAlreadyNewName; }
 		}
 		const isMerge = mergeRows > 0;
@@ -15430,7 +16014,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			// BLOCKS it — reporting the locked rows it touches under `blockers`
 			// would make a provably safe repair read as a dangerous one. The
 			// count is still surfaced, just not as an obstacle.
-			blockers: caseOnly ? [] : blockers,
+			blockers: caseOnly ? blockers.filter((b) => DRIVER_RENAME_HARD_BLOCK_CODES.has(b.code)) : blockers,
 			lockedRowsInScope: blockers.reduce((s, b) => s + (b.rows || 0), 0),
 			isMerge,
 			mergeTargets,
@@ -15440,7 +16024,24 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			totalSqliteRows: Object.values(plan.sqlite).reduce((s, e) => s + (e.rows || 0), 0),
 		};
 		if (isMerge) verdict.mergeWarning = `"${newTrim}" already has ${mergeRows} row(s). This MERGES two driver identities and cannot be undone by re-running with the names swapped — that would rename ${newTrim}'s existing history too. The audit line records the exact ids and sheet ranges changed.`;
-		if (caseOnly) {
+		// ⚠️ HARD BLOCKERS OUTRANK BOTH ESCAPE HATCHES — the caseOnly carve-out AND
+		// acknowledgeLockedPeriods. Neither is a decision a human is entitled to
+		// make here: INVOICE_WEEK_COLLISION means the UPDATE would throw against a
+		// UNIQUE index whatever anyone consents to, and since the sheet is written
+		// FIRST the throw lands as PARTIAL_RENAME. TARGET_UNREADABLE means the
+		// disclosure could not be computed, and this route already holds that
+		// "consent to a disclosure that could not be computed is not consent" for
+		// PERIOD_LOCK_UNREADABLE. Note caseOnly is the MOST likely collision
+		// trigger, not the least: folding "Shorn King" and "shorn king" together is
+		// precisely what puts two rows on one index entry.
+		const hardBlockers = blockers.filter((b) => DRIVER_RENAME_HARD_BLOCK_CODES.has(b.code));
+		if (hardBlockers.length) {
+			verdict.decision = "block";
+			verdict.code = hardBlockers[0].code;
+			verdict.rationale = hardBlockers[0].code === "INVOICE_WEEK_COLLISION"
+				? "Two live weekly invoices for this driver share a billing week under different spellings. Folding them to one name violates idx_invoices_driver_week, and because the sheet is written first the failure would land as a PARTIAL_RENAME. Soft-delete or correct the duplicate invoice first."
+				: "A money-bearing target could not be read, so it cannot be confirmed free of finalized-month rows. Refusing — the same reasoning as PERIOD_LOCK_UNREADABLE.";
+		} else if (caseOnly) {
 			verdict.decision = "allow";
 			verdict.rationale = "Case/whitespace-only rename: every settlement join key folds case (LOWER / normalizeDriverName), so no locked month's figure can move.";
 		} else if (!locksReadable) {
@@ -15468,7 +16069,9 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			return res.status(409).json({
 				error: verdict.code === "PERIOD_LOCK_UNREADABLE"
 					? "Cannot verify which accounting periods are closed — refusing the rename."
-					: `Rename withheld: it reaches ${blockers.length} finalized-period target${blockers.length === 1 ? "" : "s"}.`,
+					: DRIVER_RENAME_HARD_BLOCK_CODES.has(verdict.code)
+						? `Rename refused: ${hardBlockers.map((b) => b.detail).join("; ")}.`
+						: `Rename withheld: it reaches ${blockers.length} finalized-period target${blockers.length === 1 ? "" : "s"}.`,
 				code: verdict.code, oldName: oldTrim, newName: newTrim, plan, verdict,
 			});
 		}
@@ -15506,37 +16109,17 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 			}
 		}
 
-		const sqlFixes = {};
-		// Only collected for a MERGE, where the ids ARE the reversal recipe (the
-		// name alone no longer identifies which rows moved). A pure rename needs
-		// none — every row under the new name came from the old one, so swapping
-		// the arguments is an exact undo. Capped so one audit row cannot grow
-		// unbounded; past the cap the recipe says so rather than lying by omission.
-		const changedIds = {};
-		const ID_CAP = 500;
+		// The SHARED executor — one transaction across every target, the same call
+		// PUT /api/users/:id makes. `collectIds` is only worth paying for on a
+		// MERGE, where the ids ARE the reversal recipe (the name alone no longer
+		// identifies which rows moved). A pure rename needs none: every row under
+		// the new name came from the old one, so swapping the arguments undoes it.
+		let sqlFixes = {};
+		let changedIds = {};
 		try {
-			db.transaction(() => {
-				for (const t of DRIVER_RENAME_TARGETS) {
-					try {
-						if (isMerge) {
-							try {
-								const ids = db.prepare(`SELECT id FROM "${t.table}" WHERE ${driverRenameWhereSql(t)}`).all(oldLower).map((r) => r.id);
-								if (ids.length) changedIds[t.key] = ids.length > ID_CAP ? { truncated: true, of: ids.length, ids: ids.slice(0, ID_CAP) } : ids;
-							} catch { /* table has no `id` column — count in sqlFixes still records the leg */ }
-						}
-						sqlFixes[t.key] = db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE ${driverRenameWhereSql(t)}`)
-							.run(driverRenameNewValue(t, newTrim), oldLower).changes;
-					} catch (e) {
-						// A table that does not exist on this database is not a
-						// reason to abort a rename of the ones that do; a genuine
-						// write failure still throws out of the transaction.
-						if (/no such table|no such column/i.test(e.message)) { sqlFixes[t.key] = 0; continue; }
-						throw e;
-					}
-				}
-				sqlFixes.dispatch_notif_title = db.prepare("UPDATE dispatch_notifications SET title = REPLACE(title, ?, ?) WHERE title LIKE ?").run(oldTrim, newTrim, `%${oldTrim}%`).changes;
-				sqlFixes.dispatch_notif_body = db.prepare("UPDATE dispatch_notifications SET body = REPLACE(body, ?, ?) WHERE body LIKE ?").run(oldTrim, newTrim, `%${oldTrim}%`).changes;
-			})();
+			({ counts: sqlFixes, changedIds } = applyDriverRenameSqlite({
+				oldName: oldTrim, newName: newTrim, collectIds: isMerge,
+			}));
 		} catch (e) {
 			// Transaction rolled back: SQLite is untouched, the sheet is not.
 			const reversal = `Sheet only: set Job Tracking column ${colLtr} back to "${oldTrim}" on the ${sheetChanged} row(s) matching "${newTrim}". SQLite was rolled back and needs nothing.`;
@@ -15563,7 +16146,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 		logAudit(req, "fix_driver_name", "driver", oldTrim, JSON.stringify({
 			oldName: oldTrim, newName: newTrim, caseOnly, moneyNeutral: caseOnly, isMerge,
 			sheetRowsChanged: sheetChanged, sheetColumn: `${colLtr} (${headers[driverColIdx]})`,
-			sheetRanges: sheetRanges.length > ID_CAP ? { truncated: true, of: sheetRanges.length, ranges: sheetRanges.slice(0, ID_CAP) } : sheetRanges,
+			sheetRanges: sheetRanges.length > DRIVER_RENAME_ID_CAP ? { truncated: true, of: sheetRanges.length, ranges: sheetRanges.slice(0, DRIVER_RENAME_ID_CAP) } : sheetRanges,
 			sqlite: sqlFixes,
 			changedIds: isMerge ? changedIds : undefined,
 			lockedPeriodsTouched: verdict.decision === "allow-acknowledged" ? blockers.map((b) => ({ target: b.target, rows: b.rows, periods: b.periods })) : [],
