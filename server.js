@@ -11879,6 +11879,371 @@ function parseInServiceDate(raw) {
 	return { value: day };
 }
 
+// ============================================================
+// Truck edits / truck deletion and the month-end lock
+// ============================================================
+// A truck row is not a dated record. It is an INPUT that every closed month
+// re-reads, and `trucks` carries no per-month history — so ONE current value is
+// multiplied across the whole ledger. getMonthlyFixedCosts() bills
+// truckMonthlyFixed(t) into every month from truckChargeFromMonth(t) onward, and
+// trucksByDriver keys driver_pay_daily by the truck's CURRENT assigned_driver
+// with no time dimension at all. Editing one field therefore restates months
+// that were finalized — and on production two of them (2026-05, 2026-06) back
+// payouts already marked PAID.
+//
+// Not hypothetical on this codebase: activating a truck retroactively billed its
+// fixed costs into every still-open month, because created_at is not the
+// in-service date. That is why in_service_date and truckChargeFromMonth exist,
+// and it cost ~$1,553 on one investor's July before it was found.
+//
+// ⚠️ BE PRECISE OR BE DISABLED. The Trucks UI PUTs the ENTIRE truck object on
+// every save (TruckTable.vue → handleSaveEdit sends all 20 fields), so "the
+// field is present in the body" is true of every field on every edit. A guard
+// written that way would 409 a typo fix in `notes` and be switched off within a
+// week — which would be strictly worse than no guard, because the next person
+// would conclude the whole idea does not work. Every check below therefore fires
+// only on a field whose value actually CHANGES, and only for the months that
+// change with it. Renaming an un-linked truck, re-photographing one, correcting
+// a VIN, or editing a truck that only ever ran in the open month all stay 200.
+
+// The closed months, newest first. Presence of a status='locked' row IS the lock
+// (see isLocked) — 'reopened' rows deliberately do not count.
+function lockedPeriodsDesc() {
+	return db.prepare("SELECT period FROM period_locks WHERE status = 'locked' ORDER BY period DESC").all().map((r) => r.period);
+}
+
+// Which CLOSED months this truck's monthly fixed costs are billed into.
+//
+// ⚠️ Mirrors getMonthlyFixedCosts()'s gate exactly:
+//         if (truckKey && monthKey < truckKey) continue;
+// The `truckKey &&` short-circuit means an EMPTY charge-from month never skips
+// anything — the money math reads "no usable in-service date" as "charge this
+// truck in EVERY month". A guard that read the same "" as "never charged" would
+// wave through precisely the truck with the most exposure. That exact inversion
+// shipped once in the user-delete guard (PR #205) and had to be corrected there;
+// `from ? … : locked.slice()` is the same fix, stated positively.
+function truckFixedCostLockedMonths(truck, locked) {
+	const from = truckChargeFromMonth(truck) || "";
+	return from ? locked.filter((p) => p >= from) : locked.slice();
+}
+
+// maintenance_fund / compliance_fees rows for a unit, bucketed into the month
+// the P&L books them in. Uses the SAME COALESCE precedence as the monthly
+// queries (mf: date > created_at; cf: paid_date > due_date > created_at) and the
+// same row filters (mf.type='service', cf.status='Paid'), so this helper and the
+// SUMs it protects cannot disagree about which month a fee belongs to.
+//
+// A row whose month will not resolve is returned as blocking with m = "", not
+// dropped: strftime() answers NULL on a malformed date and `locked.includes(null)`
+// is false, so filtering the other way round would fail OPEN on exactly the rows
+// nobody can vouch for.
+//
+// Both tables are empty in production today (0 rows, verified 2026-08-08), so
+// this is $0 and cannot produce a false positive now. It is here because the
+// delete that would destroy these rows is permanent — neither table has a
+// deleted_at nor a soft-delete peer — and the screens that fill them are live.
+function truckFeeLockedRows(unitNumber, locked) {
+	const unit = String(unitNumber || "").trim().toLowerCase();
+	if (!unit) return { maintenance: [], compliance: [] };
+	// NULL → "" so every caller sees one shape for "no month". strftime() answers
+	// NULL, and a null leaking into a `periods` array sorts and serializes
+	// differently from the string the message formatters expect.
+	const blocked = (rows) => rows.map((r) => ({ ...r, m: r.m || "" })).filter((r) => !r.m || locked.includes(r.m));
+	return {
+		maintenance: blocked(db.prepare(
+			"SELECT id, amount, strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m FROM maintenance_fund WHERE LOWER(truck) = ? AND type = 'service'"
+		).all(unit)),
+		compliance: blocked(db.prepare(
+			"SELECT id, amount, strftime('%Y-%m', COALESCE(NULLIF(paid_date, ''), NULLIF(due_date, ''), strftime('%Y-%m-%d', created_at))) AS m FROM compliance_fees WHERE LOWER(truck) = ? AND status = 'Paid'"
+		).all(unit)),
+	};
+}
+
+// The CLOSED months in which a driver's pay would be repriced by a change to
+// this truck's daily rate.
+//
+// trucksByDriver maps driver → the truck's driver_pay_daily with NO time
+// dimension, so a new rate applies to every month that driver has active days
+// in — including months they spent on a different truck. Scoped off
+// truck_assignments fleet-wide (a tiny table) rather than off the current
+// pairing, for that reason.
+//
+// A driver named on the truck with no assignment history at all yields every
+// locked month: an unbounded history is not a bounded one, and this is a guard,
+// so it takes the safe direction.
+function driverPayLockedMonths(driverName, locked) {
+	const name = String(driverName || "").trim();
+	if (!name || !locked.length) return [];
+	const rows = db.prepare(
+		"SELECT start_date, end_date FROM truck_assignments WHERE LOWER(driver_name) = LOWER(?)"
+	).all(name);
+	if (!rows.length) return locked.slice();
+	const nowKey = currentMonthKeyCT();
+	const hit = new Set();
+	for (const r of rows) {
+		// start_date/end_date are ISO strings ('2026-05-13T10:47:01.338Z'), so a
+		// bare slice is the month. Never round-trip through Date(): a bare or
+		// UTC-midnight value reads back one month early in Houston, which is the
+		// same off-by-one-month that truckChargeFromMonth documents.
+		const from = String(r.start_date || "").slice(0, 7);
+		const to = String(r.end_date || "").slice(0, 7) || nowKey;
+		if (!/^\d{4}-\d{2}$/.test(from)) return locked.slice(); // unreadable window → cannot bound it
+		for (const p of locked) if (p >= from && p <= to) hit.add(p);
+	}
+	return [...hit].sort();
+}
+
+// One 409 body for all three routes in this area, shaped like the user-delete
+// guard's so a client can branch on `code` alone.
+function periodBlockedResponse(res, what, blockers, remedy) {
+	const periods = [...new Set(blockers.flatMap((b) => b.periods))].filter(Boolean).sort();
+	const unresolved = blockers.some((b) => b.periods.some((p) => !p));
+	return res.status(409).json({
+		error: `${what}: ${blockers.map((b) => b.detail).join("; ")}. ` +
+			(periods.length ? `${periods.map(periodLabel).join(", ")} ${periods.length === 1 ? "is" : "are"} finalized. ` : "") +
+			(unresolved ? "Some rows carry a date the server cannot resolve to a month, so they are withheld until it is corrected. " : "") +
+			remedy,
+		code: "PERIOD_FINALIZED",
+		periods,
+		unresolved,
+		blockers,
+	});
+}
+
+function periodLockUnreadableResponse(res, what) {
+	return res.status(409).json({
+		error: `The period lock table could not be read, so no month can be confirmed open. ${what} is held until that is fixed.`,
+		code: "PERIOD_LOCK_UNREADABLE",
+	});
+}
+
+// Everything a PUT /api/trucks/:id would restate inside a finalized month.
+// `changed` holds ONLY the fields whose stored value actually differs, keyed by
+// COLUMN name and carrying the value that would be written. `blockers: []` means
+// the edit touches no closed month and may proceed.
+function truckEditLockBlockers(truck, changed) {
+	// Fail CLOSED, for the reason PUT /api/expenses/:id/status spells out:
+	// isLocked() swallows every error and answers "not locked", so an unreadable
+	// period_locks silently turns this guard off.
+	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
+	const locked = lockedPeriodsDesc();
+	if (!locked.length) return { unreadable: false, blockers: [] };
+
+	const has = (f) => Object.prototype.hasOwnProperty.call(changed, f);
+	const blockers = [];
+	const fixedMonths = truckFixedCostLockedMonths(truck, locked);
+	const monthly = truckMonthlyFixed(truck).total;
+	const unit = truck.unit_number || `#${truck.id}`;
+	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+	// Does this truck's fixed cost reach a month's P&L at all? Both queries that
+	// build it filter `status = 'Active'`, so a truck that is Inactive before AND
+	// after the edit contributes $0 to every month and none of the amount fields
+	// can restate anything — that edit is genuinely safe and is allowed through.
+	// Either side being Active is enough to matter: the flip itself is what adds
+	// or removes the whole ~$3k/mo from every closed month.
+	const nextStatus = has("status") ? changed.status : truck.status;
+	const chargesFixed = truck.status === "Active" || nextStatus === "Active";
+
+	// (1) status — the on/off switch for the entire fixed-cost row, and the field
+	// behind the original incident. Also gates the maintenance/compliance joins
+	// (`t.status = 'Active'`), so flipping it moves those rows too.
+	if (has("status") && chargesFixed) {
+		const fees = truckFeeLockedRows(truck.unit_number, locked);
+		const feeRows = [...fees.maintenance, ...fees.compliance];
+		const months = [...fixedMonths, ...feeRows.map((r) => r.m)];
+		if (months.length) blockers.push({
+			field: "status", from: truck.status, to: changed.status,
+			periods: [...new Set(months)].sort(),
+			detail: `${truck.status} → ${changed.status} moves ${money(monthly)}/mo of fixed costs` +
+				(feeRows.length ? ` and ${feeRows.length} maintenance/compliance row${feeRows.length === 1 ? "" : "s"}` : "") +
+				` in or out of ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"} (${money(monthly * fixedMonths.length)})`,
+		});
+	}
+
+	// (2) owner_id — which investor's closed months carry this truck's fixed
+	// costs, and (via getInvestorDriverSet) which drivers' revenue and expenses
+	// count as theirs. Re-parenting does not change the fleet total; it moves the
+	// money between two settled ledgers, which is worse, not better.
+	if (has("owner_id") && chargesFixed && fixedMonths.length) {
+		blockers.push({
+			field: "owner_id", from: truck.owner_id, to: changed.owner_id,
+			periods: fixedMonths.slice().sort(),
+			detail: `owner ${truck.owner_id || "(fleet)"} → ${changed.owner_id || "(fleet)"} moves ${money(monthly * fixedMonths.length)} of fixed costs between investors across ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"}`,
+		});
+	}
+
+	// (3) the five fixed-cost amounts. There is no per-month history for any of
+	// them: truckMonthlyFixed() reads the CURRENT value and getMonthlyFixedCosts()
+	// multiplies it across every month from the in-service month onward. A new
+	// insurance premium is therefore retroactive to the truck's first month by
+	// construction, and cannot be scoped to the open one.
+	const AMOUNT_FIELDS = [
+		["insurance_monthly", "insurance"],
+		["eld_monthly", "ELD fee"],
+		["truck_payment_monthly", "truck payment"],
+		["hvut_annual", "HVUT"],
+		["irp_annual", "IRP"],
+	];
+	for (const [col, label] of AMOUNT_FIELDS) {
+		if (!has(col) || !chargesFixed || !fixedMonths.length) continue;
+		const after = truckMonthlyFixed({ ...truck, [col]: changed[col] }).total;
+		if (after === monthly) continue; // rounds to the same monthly figure — nothing moves
+		blockers.push({
+			field: col, from: truck[col] || 0, to: changed[col],
+			periods: fixedMonths.slice().sort(),
+			detail: `${label} ${money(truck[col] || 0)} → ${money(changed[col])} restates ${money(Math.abs(after - monthly) * fixedMonths.length)} across ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"}`,
+		});
+	}
+
+	// (4) in_service_date — the one period-affecting field with a principled
+	// partial answer, because it is the only one that names a MONTH rather than an
+	// amount. Moving it changes which months are billed, so the months at risk are
+	// the SYMMETRIC DIFFERENCE of "billed before" and "billed after", not the whole
+	// history. Pushing 2026-08-04 → 2026-08-20 on a truck that has never been
+	// billed into a closed month moves nothing and is allowed; pulling a truck's
+	// start back into a finalized month, or forward out of one, is refused.
+	// This is what makes the correction the field was invented for still possible
+	// after the books close.
+	if (has("in_service_date") && chargesFixed) {
+		const after = truckFixedCostLockedMonths({ ...truck, in_service_date: changed.in_service_date }, locked);
+		const beforeSet = new Set(fixedMonths), afterSet = new Set(after);
+		const moved = [...new Set([...fixedMonths, ...after])].filter((p) => beforeSet.has(p) !== afterSet.has(p)).sort();
+		if (moved.length) blockers.push({
+			field: "in_service_date",
+			from: String(truck.in_service_date || "") || "(unset — bills from created_at)",
+			to: changed.in_service_date || "(unset — bills from created_at)",
+			periods: moved,
+			detail: `in-service date ${String(truck.in_service_date || "") || "unset"} → ${changed.in_service_date || "unset"} ${afterSet.size < beforeSet.size ? "removes" : "adds"} ${money(monthly * moved.length)} of fixed costs ${afterSet.size < beforeSet.size ? "from" : "to"} ${moved.length} finalized month${moved.length === 1 ? "" : "s"}`,
+		});
+	}
+
+	// (5) unit_number — the join key, twice over, and the reason "renaming a truck
+	// is harmless" is false here.
+	//   (a) maintenance_fund / compliance_fees match on LOWER(mf.truck) =
+	//       LOWER(t.unit_number); a rename detaches every fee row from the truck,
+	//       so an investor's closed months lose those dollars outright.
+	//   (b) the ELD active-day basis builds `LOWER(unit_number) → routemate_vehicle_id`
+	//       and looks the sheet's Truck column up in it. Historical Job Tracking
+	//       rows carry the OLD string, so a rename breaks the link for every past
+	//       load — and getEldTravelDaysByVehicle() is coverage-aware, so a window
+	//       with no pings falls back to the FULL scheduled window. Renaming a
+	//       linked truck therefore silently RAISES driver pay in every closed month.
+	// A case-only rename is a no-op for both (both sides are LOWER()ed) and is not
+	// blocked. A truck with no ELD link and no fee rows can be renamed freely.
+	if (has("unit_number")) {
+		const fees = truckFeeLockedRows(truck.unit_number, locked);
+		const feeRows = [...fees.maintenance, ...fees.compliance];
+		const eldLinked = String(truck.routemate_vehicle_id || "").trim() !== "";
+		const months = [...feeRows.map((r) => r.m), ...(eldLinked ? fixedMonths : [])];
+		if (months.length) blockers.push({
+			field: "unit_number", from: truck.unit_number, to: changed.unit_number,
+			periods: [...new Set(months)].sort(),
+			detail: `renaming ${truck.unit_number} → ${changed.unit_number} ` +
+				(eldLinked ? `breaks the ELD link every past load row resolves through, which re-derives driver pay in ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"}` : "") +
+				(eldLinked && feeRows.length ? " and " : "") +
+				(feeRows.length ? `detaches ${feeRows.length} maintenance/compliance row${feeRows.length === 1 ? "" : "s"} worth ${money(feeRows.reduce((s, r) => s + (r.amount || 0), 0))}` : ""),
+		});
+	}
+
+	// (6) driver_pay_daily — activeDays × THIS rate, for every month the driver
+	// worked. `resolveDailyRate` lets the driver's own drivers_directory rate win,
+	// so a truck rate that is already being overridden changes nothing and is
+	// allowed through.
+	if (has("driver_pay_daily")) {
+		const driver = normalizeDriverName(truck.assigned_driver);
+		const struct = driver ? (getDriverPayStructures()[driver] || null) : null;
+		const before = resolveDailyRate(struct && struct.payDaily, truck.driver_pay_daily);
+		const after = resolveDailyRate(struct && struct.payDaily, changed.driver_pay_daily);
+		const months = before === after ? [] : driverPayLockedMonths(truck.assigned_driver, locked);
+		if (months.length) blockers.push({
+			field: "driver_pay_daily", from: truck.driver_pay_daily || 0, to: changed.driver_pay_daily,
+			periods: months,
+			detail: `daily pay ${money(before)} → ${money(after)} reprices ${truck.assigned_driver}'s active days across ${months.length} finalized month${months.length === 1 ? "" : "s"}`,
+		});
+	}
+
+	// DELIBERATELY NOT GUARDED, and each for a stated reason:
+	//   • assigned_driver — IS retroactive (it decides whose months are priced at
+	//     this truck's rate, and feeds getInvestorDriverSet). It is also the field
+	//     dispatch rewrites daily, and EVERY past month on this database is now
+	//     locked, so guarding it would refuse every reassignment forever. That is
+	//     the guard-gets-disabled outcome. The real fix is to price a historical
+	//     month off the truck_assignments row that was active THEN instead of off
+	//     the current pairing — a change to the pay math, not a refusal here.
+	//   • fuel_tank_gallons / avg_mpg — reach the fuel range, verify and trip-plan
+	//     endpoints only; no settlement figure reads either (checked).
+	//   • maintenance_fund_monthly — a reserve BUDGET, deliberately omitted from
+	//     the P&L (see the notes at getMonthlyFixedCosts' fleet-totals block).
+	//   • admin_fee_pct — stored and echoed by GET /api/trucks; no money math
+	//     reads it, server-side or client-side.
+	//   • make / model / year / vin / license_plate / notes / photo / title_status
+	//     / purchase_price — never read by any aggregator.
+	return { unreadable: false, blockers };
+}
+
+// Everything DELETE /api/trucks/:id would destroy or restate that a FINALIZED
+// month still depends on. Refuses the WHOLE delete, like the user-delete guard:
+// there is one trucks row and it either exists or it does not, so "delete what
+// is safe" would mean dropping the maintenance rows from open months while
+// keeping the truck, or vice versa — a half-deleted truck whose fee rows now
+// point at nothing. Not decomposable, so not partially applied.
+function truckDeleteLockBlockers(truck) {
+	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
+	const locked = lockedPeriodsDesc();
+	if (!locked.length) return { unreadable: false, blockers: [] };
+
+	const blockers = [];
+	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+	const fixedMonths = truck.status === "Active" ? truckFixedCostLockedMonths(truck, locked) : [];
+	const monthly = truckMonthlyFixed(truck).total;
+
+	// (1) the trucks row itself. It carries no period — it is an INPUT to every
+	// locked month, and removing it deletes that month's fixed-cost line, drops
+	// the truck out of getInvestorDriverSet (so its driver's revenue and expenses
+	// stop counting as this investor's), and breaks the ELD link the active-day
+	// basis resolves through.
+	if (fixedMonths.length && monthly > 0) {
+		blockers.push({
+			table: "trucks", rows: 1, periods: fixedMonths.slice().sort(),
+			detail: `deleting ${truck.unit_number} removes ${money(monthly)}/mo of fixed costs from ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"} (${money(monthly * fixedMonths.length)})`,
+		});
+	}
+
+	// (2) driver pay — the rate lives on the truck, so deleting it drops the
+	// driver back to their own rate, or to the legacy $250 default.
+	{
+		const driver = normalizeDriverName(truck.assigned_driver);
+		const struct = driver ? (getDriverPayStructures()[driver] || null) : null;
+		const before = resolveDailyRate(struct && struct.payDaily, truck.driver_pay_daily);
+		const after = resolveDailyRate(struct && struct.payDaily, 0);
+		const months = before === after ? [] : driverPayLockedMonths(truck.assigned_driver, locked);
+		if (months.length) blockers.push({
+			table: "trucks.driver_pay_daily", rows: 1, periods: months,
+			detail: `${truck.assigned_driver}'s pay reverts ${money(before)} → ${money(after)}/day across ${months.length} finalized month${months.length === 1 ? "" : "s"}`,
+		});
+	}
+
+	// (3)+(4) maintenance_fund and compliance_fees — HARD deletes. Neither table
+	// has a deleted_at nor a soft-delete peer, so these rows are the part of this
+	// operation that is not merely a restatement but permanent loss, exactly like
+	// the `expenses` leg of the user delete.
+	const fees = truckFeeLockedRows(truck.unit_number, locked);
+	for (const [table, rows, what] of [
+		["maintenance_fund", fees.maintenance, "maintenance service payment"],
+		["compliance_fees", fees.compliance, "paid compliance fee"],
+	]) {
+		if (!rows.length) continue;
+		const sum = rows.reduce((s, r) => s + (r.amount || 0), 0);
+		blockers.push({
+			table, rows: rows.length, periods: [...new Set(rows.map((r) => r.m))].sort(),
+			detail: `${rows.length} ${what}${rows.length === 1 ? "" : "s"} worth ${money(sum)} booked to a finalized month would be permanently deleted`,
+		});
+	}
+
+	return { unreadable: false, blockers };
+}
+
 // Truck Database: add a new truck
 app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {
 	try {
@@ -11992,6 +12357,51 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			return res.status(400).json({ error: inServiceCheck.error });
 		}
 		const inServiceParsed = inServiceCheck.value;
+
+		// ⚠️ GUARD BEFORE THE FIRST WRITE. assignDriverToTruck() runs inside the
+		// field loop below and writes truck_assignments + trucks.assigned_driver
+		// the moment it is reached, and this app has no transactions — a refusal
+		// discovered after that point is not a refusal.
+		//
+		// `changed` carries ONLY fields whose stored value actually differs, parsed
+		// exactly the way the UPDATE below parses them, so the guard answers for
+		// the values that would really land. This is the whole reason the guard is
+		// usable: the Trucks UI sends all 20 fields on every save, so anything
+		// keyed on presence rather than difference would refuse every edit.
+		const changed = {};
+		const diff = (col, next) => { if (next !== (truck[col] || 0)) changed[col] = next; };
+		if (unitNumber !== undefined && String(unitNumber).trim().toLowerCase() !== String(truck.unit_number || "").trim().toLowerCase()) {
+			changed.unit_number = String(unitNumber).trim();
+		}
+		// Same recognized-values test as the write below, so an unrecognized status
+		// (silently ignored there) cannot be blocked here.
+		if (status !== undefined && ["Active", "Inactive", "Maintenance", "OOS"].includes(status) && status !== truck.status) {
+			changed.status = status;
+		}
+		if (ownerId !== undefined) diff("owner_id", parseInt(ownerId) || 0);
+		if (insuranceMonthly !== undefined) diff("insurance_monthly", parseFloat(insuranceMonthly) || 0);
+		if (eldMonthly !== undefined) diff("eld_monthly", parseFloat(eldMonthly) || 0);
+		if (truckPaymentMonthly !== undefined) diff("truck_payment_monthly", parseFloat(truckPaymentMonthly) || 0);
+		if (hvutAnnual !== undefined) diff("hvut_annual", parseFloat(hvutAnnual) || 0);
+		if (irpAnnual !== undefined) diff("irp_annual", parseFloat(irpAnnual) || 0);
+		if (driverPayParsed) diff("driver_pay_daily", driverPayParsed.value);
+		if (inServiceParsed !== undefined && inServiceParsed !== String(truck.in_service_date || "").trim()) {
+			changed.in_service_date = inServiceParsed;
+		}
+		const lock = truckEditLockBlockers(truck, changed);
+		if (lock.unreadable) return periodLockUnreadableResponse(res, "Editing a truck");
+		if (lock.blockers.length) {
+			// Refuse the WHOLE edit rather than writing the safe fields and dropping
+			// the rest: one row, one UPDATE, and a partial save that the form reports
+			// as successful is how a number nobody chose ends up in the database. The
+			// message names each offending field so the operator can revert exactly
+			// those and save the remainder — that is where the decomposition belongs.
+			return periodBlockedResponse(res,
+				`Cannot apply this change to ${truck.unit_number || `truck #${id}`}`,
+				lock.blockers,
+				`Reopen the affected period${lock.blockers.some((b) => b.periods.filter(Boolean).length > 1) ? "s" : ""} first — POST /api/periods/:period/reopen records a reason — or revert the field${lock.blockers.length === 1 ? "" : "s"} named above (${lock.blockers.map((b) => b.field).join(", ")}) and save the rest of the edit, which is not blocked.`);
+		}
+
 		const updates = [];
 		const params = [];
 
@@ -12077,6 +12487,18 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			const fmtDay = (v) => (v ? v : "unset (falls back to created_at)");
 			logAudit(req, "update_truck_in_service_date", "truck", String(id),
 				`In-service date for ${truck.unit_number}: ${fmtDay(String(truck.in_service_date || "").trim())} → ${fmtDay(inServiceParsed)}`);
+		}
+		// Re-parenting a truck moves its whole fixed-cost history between two
+		// investors' ledgers. It is as consequential as a pay-rate or status change
+		// and, until now, was the only one of the three that left no trail.
+		if (Object.prototype.hasOwnProperty.call(changed, "owner_id")) {
+			const ownerName = (oid) => {
+				if (!oid) return "(fleet / no owner)";
+				const u = db.prepare("SELECT username, company_name FROM users WHERE id = ?").get(oid);
+				return u ? `${u.company_name || u.username} (#${oid})` : `#${oid}`;
+			};
+			logAudit(req, "update_truck_owner", "truck", String(id),
+				`Owner for ${truck.unit_number}: ${ownerName(truck.owner_id)} → ${ownerName(changed.owner_id)}`);
 		}
 		// Log driver assignment change to history + sync to Carrier Database sheet
 		if (assignedDriver !== undefined) {
@@ -12171,19 +12593,88 @@ app.get("/api/trucks/:id/driver-files", requireRole("Super Admin", "Dispatcher")
 });
 
 // Truck Database: delete a truck
+//
+// This hard-deletes the truck, its legal documents, and every maintenance_fund /
+// compliance_fees row keyed to its unit number. None of those three tables has a
+// deleted_at or a soft-delete peer, so the finance rows are unrecoverable — and
+// the trucks row is an input every closed month re-reads (see the notes above
+// truckEditLockBlockers). The guard therefore runs before the first DELETE and
+// refuses the whole operation; see truckDeleteLockBlockers for why it is not
+// partially applied.
 app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
 	if (!truck) return res.status(404).json({ error: "Truck not found" });
-	const unit = (truck.unit_number || "").trim().toLowerCase();
-	if (unit) {
-		db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id);
-		db.prepare("DELETE FROM maintenance_fund WHERE LOWER(truck) = ?").run(unit);
-		db.prepare("DELETE FROM compliance_fees WHERE LOWER(truck) = ?").run(unit);
+
+	const lock = truckDeleteLockBlockers(truck);
+	if (lock.unreadable) return periodLockUnreadableResponse(res, "Deleting a truck");
+	if (lock.blockers.length) {
+		// ⚠️ The remedy deliberately does NOT say "set it Inactive instead". That is
+		// the obvious advice and it is wrong: the fixed-cost queries select
+		// `WHERE status = 'Active'`, with no month dimension, so flipping a truck
+		// Inactive strips its costs out of EVERY closed month it ran in — the same
+		// restatement this refusal exists to stop, which is why the edit guard
+		// refuses that flip too. Telling an operator to do something the sibling
+		// guard then blocks is how a guard earns a reputation for being broken.
+		//
+		// KNOWN GAP, stated rather than papered over: there is today no way to
+		// retire a truck without restating its history. `in_service_date` gives a
+		// truck a first billed month; nothing gives it a LAST one. The fix is the
+		// mirror column — a retired-from month fed through truckChargeFromMonth's
+		// companion at the four fixed-cost gates — after which retiring a truck
+		// becomes an open-month edit and this refusal stops being a dead end.
+		return periodBlockedResponse(res,
+			`Cannot delete ${truck.unit_number || `truck #${id}`}`,
+			lock.blockers,
+			"Leave the truck in place — a closed month's figures are attributed to it, and marking it Inactive would strip those same months instead. If it genuinely has to go, reopen the affected periods first (POST /api/periods/:period/reopen records a reason).");
 	}
-	db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
+
+	// ⚠️ SEPARATE BUG, found end-to-end while testing the guard above, and it is
+	// live: `truck_assignments.truck_id` and `trailers.truck_id` are both
+	// FOREIGN KEY … REFERENCES trucks(id) with `PRAGMA foreign_keys` ON, so the
+	// final `DELETE FROM trucks` THROWS for any truck that has ever had a driver
+	// assigned or a trailer attached — which on production is every one of the six.
+	// The three cascade deletes ran first, so the failure destroyed the truck's
+	// legal documents and its entire maintenance/compliance history, left the
+	// truck itself alive, and answered the caller "Internal server error". A
+	// delete that cannot succeed was still destroying data on every attempt.
+	//
+	// Refused up front with a 409 that says what is holding the row, rather than
+	// made to succeed: detaching assignment history or re-parenting a trailer as a
+	// side effect of a delete is a bigger decision than this handler should take.
+	const refs = [
+		["truck_assignments", db.prepare("SELECT COUNT(*) n FROM truck_assignments WHERE truck_id = ?").get(id).n, "assignment history row"],
+		["trailers", db.prepare("SELECT COUNT(*) n FROM trailers WHERE truck_id = ?").get(id).n, "attached trailer"],
+	].filter(([, n]) => n > 0);
+	if (refs.length) {
+		return res.status(409).json({
+			error: `Cannot delete ${truck.unit_number || `truck #${id}`}: it still has ${refs.map(([, n, what]) => `${n} ${what}${n === 1 ? "" : "s"}`).join(" and ")}. Detach ${refs.some(([t]) => t === "trailers") ? "the trailer(s) " : ""}first — until then the database itself refuses the delete, and every attempt used to destroy the truck's documents and fee history on the way to failing.`,
+			code: "TRUCK_REFERENCED",
+			references: Object.fromEntries(refs.map(([t, n]) => [t, n])),
+		});
+	}
+
+	const unit = (truck.unit_number || "").trim().toLowerCase();
+	const removed = {};
+	// One transaction, so a constraint this handler has not anticipated rolls the
+	// cascade back instead of half-applying it. There are no transactions anywhere
+	// else in this file, but there is also nowhere else that hard-deletes finance
+	// rows as a prelude to a statement that can throw.
+	db.transaction(() => {
+		if (unit) {
+			removed.legal_documents = db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id).changes;
+			removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(truck) = ?").run(unit).changes;
+			removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(truck) = ?").run(unit).changes;
+		}
+		db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
+	})();
+	// Like the user delete, this previously left no trace at all — "a truck was
+	// removed" does not tell a later reader that its service history went too.
+	logAudit(req, "delete_truck", "truck", String(id),
+		`Truck ${truck.unit_number || `#${id}`} (${truck.status}, owner ${truck.owner_id || "fleet"}) deleted; cascade: ` +
+		(Object.entries(removed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ") || "no rows"));
 	notifyChange("trucks");
-	res.json({ success: true });
+	res.json({ success: true, removed });
 });
 
 // ============================================================
@@ -28323,13 +28814,99 @@ app.post("/api/compliance/fees", requireRole("Super Admin", "Dispatcher"), (req,
 	}
 });
 
+// JS mirror of the month bucket every compliance query uses:
+//   strftime('%Y-%m', COALESCE(NULLIF(paid_date,''), NULLIF(due_date,''), strftime('%Y-%m-%d', created_at)))
+// Kept adjacent to that SQL on purpose — if one changes, the other has to, and a
+// guard that resolved the month its own way would answer for a different month
+// than the SUM it protects. Returns "" when the row's date will not resolve,
+// which SQLite reports as a NULL month (the row then counts in NO month at all).
+function compliancePostedPeriod(fee) {
+	const pick = String(fee.paid_date || "").trim() || String(fee.due_date || "").trim() || String(fee.created_at || "");
+	const p = pick.slice(0, 7);
+	return /^\d{4}-\d{2}$/.test(p) ? p : "";
+}
+
 // PUT /api/compliance/fees/:id — Mark fee as paid
+//
+// This route writes BOTH halves of a compliance deduction: `status = 'Paid'` is
+// what makes the fee count at all (every query filters on it), and `paid_date`
+// is the head of the COALESCE that decides WHICH MONTH it counts in. So marking
+// a fee paid with a date inside a finalized month silently deducts its amount
+// from that month's investor earnings, and re-paying an already-Paid fee moves
+// the amount from one closed month to another.
+//
+// The everyday case is deliberately still allowed: a fee whose due_date sits in
+// a closed month, paid today, books to the CURRENT month (paid_date wins the
+// COALESCE) and touches nothing finalized. "You paid it this month, it books
+// this month" is both the correct accounting and the common one, and refusing it
+// would make the guard useless overhead. Only a paid_date that lands in — or
+// moves out of — a closed month is refused.
 app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
-		const { paidDate } = req.body;
+		const id = parseInt(req.params.id);
+		const fee = db.prepare("SELECT * FROM compliance_fees WHERE id = ?").get(id);
+		// Previously this returned {success:true} for any id, having changed
+		// nothing — an admin marking the wrong row paid got the same answer as one
+		// who marked the right one.
+		if (!fee) return res.status(404).json({ error: "Compliance fee not found" });
+
+		// Houston day: paid_date is the month bucket for the investor compliance
+		// deduction. Validate it, because an unparseable value is not merely
+		// untidy — strftime() answers NULL on it, so the fee drops out of EVERY
+		// month's total and silently stops being deducted at all.
+		const paidDate = String(req.body.paidDate || "").trim() || houstonDay();
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(paidDate)) {
+			return res.status(400).json({ error: "paidDate must be YYYY-MM-DD" });
+		}
+
+		// Fail CLOSED on an unreadable period_locks, matching every other write
+		// guard: isLocked() answers "not locked" on any error, so a broken table
+		// would turn this off silently.
+		if (!periodLocksReadable()) return periodLockUnreadableResponse(res, "Marking a compliance fee paid");
+
+		// Does this fee reach a month's total at all? The investor branch INNER
+		// JOINs `t.status = 'Active'`; the fleet branch is `LOWER(truck) NOT IN
+		// (inactive unit numbers)`, which INCLUDES orphan rows whose `truck` string
+		// matches no truck. So the only rows that count in neither are those keyed
+		// to a truck that exists and is not Active — for those, no month moves.
+		const parked = String(fee.truck || "").trim()
+			? db.prepare("SELECT 1 FROM trucks WHERE LOWER(unit_number) = LOWER(?) AND status != 'Active'").get(String(fee.truck).trim())
+			: null;
+		if (!parked) {
+			// Where it books today (only if it is already counted, i.e. Paid) and
+			// where it would book after this write. paid_date heads the COALESCE, so
+			// the destination month is always the month of `paidDate`.
+			const before = fee.status === "Paid" ? compliancePostedPeriod(fee) : null;
+			const after = compliancePostedPeriod({ ...fee, paid_date: paidDate });
+			const blocked = [];
+			// "" = the stored date will not resolve to a month. Refuse rather than
+			// guess, for the same reason expenseRowPeriodLocked() fails closed on a
+			// malformed date: one unreadable row is cheap to fix, and a guard that
+			// waves through what it cannot read is not a guard.
+			if (before === "") blocked.push({ when: "current", period: "" });
+			else if (before && isLocked(before)) blocked.push({ when: "current", period: before });
+			if (after && isLocked(after) && after !== before) blocked.push({ when: "new", period: after });
+			if (blocked.length) {
+				return periodBlockedResponse(res,
+					`Cannot mark ${fee.type || "this fee"}${fee.truck ? ` on ${fee.truck}` : ""} paid`,
+					[{
+						table: "compliance_fees", rows: 1, feeId: id, amount: fee.amount,
+						periods: blocked.map((b) => b.period),
+						detail: blocked.map((b) => b.when === "current"
+							? (b.period ? `$${fee.amount} is currently deducted from ${periodLabel(b.period)}, which is finalized` : `this fee carries a date the server cannot resolve to a month, so it is currently deducted from none`)
+							: `paying it on ${paidDate} would deduct $${fee.amount} from ${periodLabel(b.period)}, which is finalized`).join("; "),
+					}],
+					`Use a paid date inside the current open month, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.`);
+			}
+		}
+
 		db.prepare(
 			`UPDATE compliance_fees SET status = 'Paid', paid_date = ? WHERE id = ?`
-		).run(paidDate || houstonDay(), req.params.id); // Houston day: paid_date is the month bucket for the investor compliance deduction
+		).run(paidDate, id);
+		// A compliance fee is a deduction from an investor's month. Which month it
+		// lands in was previously decided, and changed, with no trail.
+		logAudit(req, "update_compliance_fee", "compliance_fee", String(id),
+			`${fee.type || "Fee"}${fee.truck ? ` on ${fee.truck}` : ""} $${fee.amount}: ${fee.status} → Paid, paid date ${String(fee.paid_date || "").trim() || "(unset)"} → ${paidDate}`);
 
 		res.json({ success: true });
 	} catch (error) {
