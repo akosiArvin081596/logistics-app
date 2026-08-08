@@ -92,8 +92,45 @@ Helper scripts in `scripts/`:
   `NODE_ENV=production`, and requires `--yes-local-db`. Deliberately does NOT wipe/reseed: loads live
   in Google Sheets, so a truncate destroys the fixture chain and cannot rebuild it.
 - `seed-staging.js` — seed a staging DB.
+- `refresh-env.js` + `refresh-local.sh` / `refresh-staging.sh` — rebuild LOCAL/STAGING from
+  current `main` plus a trimmed, sanitized production snapshot. See "Environment refresh" below
+  and `scripts/README-env-refresh.md`.
+- `backup-db.js` — consistent, verified, gzipped snapshot of a LIVE `app.db` via SQLite's Online
+  Backup API (a plain `cp` misses `-wal`). Driven nightly by `backup.sh` at 02:00 into
+  `backups/`; those files are what the refresh scripts read.
 - `geocode-loads.js` — backfill geocodes for rows in "Job Tracking".
 - `generate-timeline-docx.py` / `generate-timeline-apr13-apr17.py` — one-off Python scripts rendering session-timeline `.docx` reports from HTML/markdown (needs `python-docx`).
+
+### Environment refresh (local + staging)
+`./scripts/refresh-local.sh` and, on the VPS from `/var/www/logisx-staging`,
+`./scripts/refresh-staging.sh --yes [--restart]`. Both bring the checkout to `origin/main`,
+rebuild the client, and hand the database half to `scripts/refresh-env.js`. Full runbook,
+including the drift audit that motivated it, in **`scripts/README-env-refresh.md`**.
+
+- **The source is the nightly snapshot** (`/var/www/logistics-app/backups/app.db.*.gz`), never
+  the live production `app.db` — that file already has a consistent Online-Backup-API copy that
+  passed `integrity_check`, so re-snapshotting the live file adds risk for nothing.
+- **The spreadsheet gate is the load-bearing safety.** `refresh-env.js` reads the `.env` beside
+  its `--to` target and **refuses** when `SPREADSHEET_ID` is missing or is production's — because
+  `server.js` falls through to the production sheet when it is unset, so a refreshed DB next to
+  such an `.env` is a production writer on first boot. It checks the resolved **ID**, never the
+  directory name, for the same reason the staging sheet is *titled* "logisx-production" and is
+  not production. It also refuses an `.env` that can send mail (`GMAIL_USER` +
+  `GMAIL_APP_PASSWORD`, override `--allow-mail`) or that has `INVOICE_AUTOGEN_ENABLED=true`.
+- **⚠️ Telemetry is trimmed to 45 days by default, and that is not a neutral shrink.**
+  `routemate_telemetry` is 99.7% of all rows (933,893 of ~936,000). Trimming does *not* zero old
+  driver pay — `getEldTravelDaysByVehicle()` is coverage-aware, so a window with **no** pings
+  falls back to the **full scheduled window**. Months older than the cutoff therefore pay *more*
+  than production and their investor payouts come out *lower*. Bounded in practice (15 months are
+  already locked and frozen), but **never reconcile a historical month on a trimmed copy** — pass
+  `--telemetry-all`.
+- **Sanitization is asserted, not assumed**: sessions cleared, every password re-hashed to the
+  harness default (`Password123!`, so `test-suite.js` runs with no extra step), emails rewritten
+  to RFC-2606 `.invalid` (can never resolve), bank/tax/identity fields and signatures redacted,
+  investor onboarding `access_token`s regenerated, `driver_locations` emptied. The run fails if a
+  routable address, a session, or a bank account number survives.
+- **Not copied:** `uploads/` (receipts/PODs/rate-cons are on disk — they 404 in a refreshed
+  environment, and the tree is unredacted PII) and the Google Sheets themselves.
 
 Shared server-side modules live in `lib/` (required from `server.js`):
 - `ifta-states.js` — US state bounding-box lookup used by the IFTA mileage classifier.
