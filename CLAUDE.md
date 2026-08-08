@@ -34,10 +34,14 @@ ssh root@76.13.22.110 "cd /var/www/logistics-app && git pull --ff-only origin ma
 ```
 A staging process (`logisx-staging`) also runs on the same VPS.
 
-**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured. Integration harness at `test-suite.js` — **143** HTTP tests against a running server. Prepare fixtures first, or nearly everything fails at the login on test 2:
+**Tests & linting:** No Jest/Mocha/Vitest/ESLint configured. Integration harness at `test-suite.js` — **144** HTTP tests against a running server. Prepare fixtures first, or nearly everything fails at the login on test 2.
+
+**⚠️ The suite WRITES — point the server at a copy, never the live sheet.** Test 46 logs an expense, so this is not a read-only harness. Production's `.env` sets **no `SPREADSHEET_ID` at all**, so `server.js` falls through to its hardcoded production default (`1ey1n0AA…`) — meaning *any* server started without an explicit override (this suite's, a helper script's, a stray `npm start`) writes to the live Dispatch Management sheet. **And never identify a sheet by its title:** the VPS `logisx-staging` process uses a sheet *titled* **"logisx-production"**. Its ID is not production — the title is a leftover from how the copy was made — but read in a hurry it says the opposite of the truth. Check the ID, never the name. The safe local copy, used in the command below, is `156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0` ("Dispatch Management (LOCAL)"). Same class of accident on the port: the suite defaults to **3000, which is production on the VPS** — pass `TEST_PORT` (and the server's `PORT`) to run anywhere else.
+
 ```bash
 node scripts/prepare-test-fixtures.js --yes-local-db   # sets known passwords on existing accounts
-npm start                                              # separate terminal
+# separate terminal — the override IS the safety; without it the server uses the PRODUCTION sheet
+SPREADSHEET_ID=156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0 npm start
 TEST_ADMIN_USER=super_admin TEST_INVESTOR_USER=johnny.rocks.spirits.llc \
   TEST_DISPATCHER_USER=amir_serrano TEST_DISPATCHER_PASS='Password123!' node test-suite.js
 ```
@@ -53,6 +57,8 @@ Required files at project root:
 SPREADSHEET_ID=<optional — Google Sheet ID for the main Dispatch Management sheet; defaults to the production sheet when unset>
 ARCHIVE_SPREADSHEET_ID=<optional — Google Sheet ID for the read-only archive; defaults to the production archive when unset>
 GOOGLE_DRIVE_FOLDER_ID=<Drive folder ID for POD uploads — optional, uploads skip Drive if empty>
+GOOGLE_API_TIMEOUT_MS=<optional — per-request ceiling on EVERY Sheets/Drive call and the OAuth token exchange; default 15000. Applied twice and independently by node-fetch (to response headers, then over the body read), so a slow body is not charged the server's think time. A timed-out request retries on a fresh socket for GET/PUT only — never POST, which would duplicate a values.append.>
+GOOGLE_SOCKET_IDLE_MS=<optional — idle timeout on FREE (pooled) sockets only; default 5000, matching Node >=19's own https.globalAgent. In-flight requests are unaffected. Do NOT raise it: that widens the window in which a stale keep-alive socket can be drawn. Both added after the 2026-08-06 dashboard outage, where a request handed to a half-open pooled socket blocked ~150 s (a TCP retransmission budget) while Google answered the same read in ~470 ms. See the note beside google.options() in server.js before changing either.>
 GOOGLE_MAPS_API_KEY=<Google Maps API key — required for maps, routing, geocoding, and places>
 GMAIL_USER=<Gmail address for sending onboarding/outreach emails>
 GMAIL_APP_PASSWORD=<Gmail app password for nodemailer>
