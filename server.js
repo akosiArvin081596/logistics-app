@@ -11142,18 +11142,203 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 
 // Invoice PDFs are served by the authenticated /uploads mount (see top of file).
 
+// ============================================================
+// POST /api/auth/setup — the unauthenticated Super Admin minter
+// ============================================================
+// This is the only route in the app that creates a Super Admin with no session,
+// no role check and (until now) no rate limit. Its entire safety rested on one
+// predicate: `SELECT COUNT(*) FROM users == 0`. That is a statement about the
+// CURRENT contents of one table, and the contents of a table are not a security
+// boundary — anything that empties `users` re-arms an open admin minter on the
+// production hostname. Three ways that happens, none of them exotic:
+//
+//   1. app.db is missing or renamed. better-sqlite3 CREATES the file, the boot
+//      migrations rebuild every table, `users` is empty, and the next HTTP
+//      request from anyone on the internet mints a Super Admin.
+//   2. The accounts are deleted through the API. DELETE /api/users/:id had no
+//      self-delete and no last-admin guard (both added below), so a Super Admin
+//      could remove every account including their own.
+//   3. A restore, a botched refresh, or a hand-edit that truncates the table.
+//
+// And there is no way back. CLAUDE.md documents
+// `scripts/reset-super-admin-password.js`, but that file does not exist in this
+// repo — recovery from "no Super Admin" today means hand-editing app.db on the
+// VPS. So the failure is symmetric and both halves are severe: leave it open and
+// a stranger owns the fleet; close it wrongly and the owner is locked out of
+// their own system with no scripted way in.
+//
+// THE FIX HAS TWO HALVES, AND THE FIRST ONE IS THE IMPORTANT HALF.
+//
+// (i) Route 2 is closed STRUCTURALLY, upstream of here: DELETE /api/users/:id
+//     now refuses self-deletion and refuses the last Super Admin, and
+//     PUT /api/users/:id refuses to DEMOTE the last Super Admin (without that
+//     twin the delete guard is one PUT away from irrelevant). Between them, an
+//     API caller can no longer reach a zero-administrator state at all — which
+//     means this endpoint can no longer be re-armed through the API.
+//
+// (ii) A LATCH for the rest. usersEverExisted() asks a question that emptying
+//     `users` does not change: is this database still carrying a live system's
+//     data? Evidence is taken from tables only an AUTHENTICATED user can write —
+//     if there are expenses, trucks, settled payouts or an audit trail, then
+//     accounts existed, and a `users` table that is now empty was truncated,
+//     badly restored or hand-edited. A genuinely fresh install has none of them,
+//     answers no, and setup works exactly as before.
+//
+// ⚠️ WHAT THE LATCH HONESTLY DOES NOT COVER: route 1, a missing app.db. No
+// content-based test can, because there is no content left to test — the file is
+// new and every table is empty, which is indistinguishable from a fresh install
+// BECAUSE IT IS ONE. That residual window is defended by `setupLimiter` (5 per
+// 15 min), by the audit row this route now writes, and by the fact that a
+// dataless production app is noticed in minutes. Do not try to close it with a
+// stricter content test; the only real fix is not losing the file (see
+// scripts/backup-db.js).
+//
+// ⚠️ AND DO NOT "IMPROVE" THIS WITH sqlite_sequence. `users.id` is INTEGER
+// PRIMARY KEY AUTOINCREMENT, so its high-water mark looks like an ideal durable
+// latch — it survives DELETE and reads 413 against 12 live rows in production.
+// It is a trap. The CHECK-constraint probe at the top of this file inserts and
+// deletes a throwaway `__test_sa__` row on EVERY BOOT, so the sequence advances
+// once per restart whether or not a user was ever created: a brand-new database
+// reads 1 after the first boot, 2 after the second. Measured on a virgin scratch
+// DB while testing this change — the first draft of this function used exactly
+// that signal and refused first-time setup on a fresh install, i.e. it caused
+// the owner-lockout half of the failure it exists to prevent. `invoices` and
+// `investor_applications` carry the same kind of boot probe; the tables below
+// deliberately carry none.
+//
+// The owner's way back is `SETUP_RECOVERY_TOKEN`: with the latch armed, setup
+// proceeds only for a caller presenting that value. Setting an env var requires
+// shell access to the VPS — i.e. it is already available to whoever owns the box
+// and to nobody else, the same authority a password-reset script would have
+// needed. Unset (the normal state, including production) the latch is simply
+// closed. This is the deliberate answer to "locking the owner out is as bad as
+// letting a stranger in": the door is shut to the network and openable from the
+// machine.
+
+// Tables that CANNOT be written without an authenticated session, and that carry
+// no boot-time probe row. A row in any of them is proof that accounts existed.
+// Deliberately excludes `job_applications` / `investor_applications`, which the
+// public /apply and /invest forms can populate with no account at all.
+const LIVE_SYSTEM_EVIDENCE_TABLES = ["audit_trail", "expenses", "trucks", "investor_payouts", "documents"];
+
+// "Is this database still carrying a live system's data?"
+//
+// ⚠️ FAILS CLOSED on an unreadable `users` table. An error there is
+// indistinguishable from an empty table to a naive count, and the two answers
+// are "inconvenience a fresh install" versus "publish an unauthenticated admin
+// minter".
+function usersEverExisted() {
+	// (1) Live accounts. Also the fail-closed rung: if this throws we cannot tell
+	// whether the system is live, so we assume it is.
+	try {
+		if (db.prepare("SELECT COUNT(*) AS cnt FROM users").get().cnt > 0) return true;
+	} catch { return true; }
+	// (2) Evidence left behind by accounts that are now gone. Table names are
+	// hardcoded literals from the const above — never request input — because
+	// SQLite cannot parameterise an identifier.
+	//
+	// ⚠️ "ABSENT" AND "UNREADABLE" ARE DIFFERENT ANSWERS, and a bare catch cannot
+	// tell them apart. Swallowing every error read a corrupted page, a partial
+	// restore, or a period_locks-style schema break on ONE of these tables as
+	// "no evidence" — and answering "no evidence" republishes the unauthenticated
+	// admin minter. So the existence of the table is established first, from
+	// sqlite_master: a table that genuinely is not there contributes nothing (an
+	// older or partial schema is a legitimate "no"), while a table that IS there
+	// and still cannot be read fails CLOSED. Same reasoning as periodLocksReadable()
+	// — the probe has to execute, not merely prepare, because SQLite only
+	// surfaces a schema break on execution.
+	for (const t of LIVE_SYSTEM_EVIDENCE_TABLES) {
+		let present = false;
+		try {
+			present = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(t);
+		} catch { return true; } // cannot even read the schema — assume live
+		if (!present) continue;
+		try {
+			if (db.prepare(`SELECT 1 FROM "${t}" LIMIT 1`).get()) return true;
+		} catch {
+			console.error(`[setup] evidence table "${t}" exists but is unreadable — treating this database as live`);
+			return true;
+		}
+	}
+	return false;
+}
+
+// ⚠️ AN ENTROPY FLOOR, NOT A STYLE RULE. This value is the single control
+// standing between the network and a Super Admin on a latched database, and
+// `safeEqual` compares length first — so a short token both is guessable and
+// leaks its length by timing. `SETUP_RECOVERY_TOKEN=recover` would otherwise be
+// accepted. Anything under 24 characters is treated as UNSET, which fails in the
+// safe direction: the latch simply stays shut and the operator gets a startup
+// warning telling them why, rather than a door they believe is locked.
+const SETUP_TOKEN_MIN_LEN = 24;
+const SETUP_RECOVERY_TOKEN = (() => {
+	const raw = String(process.env.SETUP_RECOVERY_TOKEN || "").trim();
+	if (raw && raw.length < SETUP_TOKEN_MIN_LEN) {
+		console.warn(`[setup] SETUP_RECOVERY_TOKEN is only ${raw.length} characters; ignoring it. Use at least ${SETUP_TOKEN_MIN_LEN} (e.g. \`openssl rand -hex 32\`).`);
+		return "";
+	}
+	return raw;
+})();
+
 // Check if any users exist (for first-time setup)
 app.get("/api/auth/setup-check", (req, res) => {
 	const count = db.prepare("SELECT COUNT(*) AS cnt FROM users").get().cnt;
-	res.json({ needsSetup: count === 0 });
+	// `needsSetup` now means "setup would actually SUCCEED", not "the table is
+	// empty" — otherwise a latched system renders a setup form that can only 403.
+	//
+	// ⚠️ DELIBERATELY REPORTS NOTHING ELSE. This route is unauthenticated and
+	// unlimited, so an added `locked` flag would have been a free, pollable oracle
+	// for "this instance has lost its accounts but still holds data" — precisely
+	// the state in which SETUP_RECOVERY_TOKEN is the only remaining control, and
+	// exactly the moment an attacker would want to know about. A latched system
+	// now renders the ordinary login page, which is both the correct thing for a
+	// human to see and silent about why. Rate-limiting this GET was the
+	// alternative and is worse: the SPA calls it on every boot, so any cap tight
+	// enough to matter breaks normal use. The response shape is unchanged from
+	// before this feature, so no client changes.
+	res.json({ needsSetup: count === 0 && !usersEverExisted() });
 });
 
 // First-time setup — create initial admin account
-app.post("/api/auth/setup", async (req, res) => {
+const setupLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 5,
+	message: { error: "Too many setup attempts. Try again in 15 minutes." },
+	standardHeaders: true,
+});
+app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 	try {
 		const count = db.prepare("SELECT COUNT(*) AS cnt FROM users").get().cnt;
 		if (count > 0) {
+			// Unchanged status and wording — this is the branch every live system
+			// takes today and the SPA already handles it.
 			return res.status(400).json({ error: "Setup already completed" });
+		}
+
+		// Zero live users, but this database has had users before. Refuse unless
+		// the caller can prove shell-level ownership of the box.
+		if (usersEverExisted()) {
+			const header = String(req.get("x-setup-token") || req.get("authorization") || "")
+				.replace(/^Bearer\s+/i, "").trim();
+			const presented = header || String((req.body && req.body.setupToken) || "").trim();
+			// Constant-time, and the empty case is refused EXPLICITLY rather than by
+			// comparison: safeEqual("", "") is true, so without the two emptiness
+			// checks an unset SETUP_RECOVERY_TOKEN would admit a caller who sends
+			// nothing — the exact inversion of what the latch is for.
+			if (!SETUP_RECOVERY_TOKEN || !presented || !safeEqual(presented, SETUP_RECOVERY_TOKEN)) {
+				console.warn("[setup] refused: this database has had accounts before and no valid recovery token was presented");
+				// Audited, not just logged. The successful mint below writes an audit
+				// row, but a distributed guess against this token would have been
+				// invisible in audit_trail — which is the one place anyone looks after
+				// the fact. Records THAT an attempt happened and whether a token was
+				// offered at all; never the value, and never whether one is configured.
+				logAudit(req, "setup_refused", "user", "",
+					`Setup refused on a latched database; recovery token ${presented ? "presented and rejected" : "not presented"}`);
+				return res.status(403).json({
+					error: "Setup is closed on this system. This database has had accounts before, so first-time setup cannot be used to create an administrator. Restore an account from a backup, or set SETUP_RECOVERY_TOKEN on the server and retry.",
+					code: "SETUP_LOCKED",
+				});
+			}
 		}
 
 		const { username, password, email } = req.body;
@@ -11162,13 +11347,26 @@ app.post("/api/auth/setup", async (req, res) => {
 		}
 
 		const hash = await bcrypt.hash(password, 10);
-		db.prepare(
-			"INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (?, ?, 'Super Admin', '', ?)",
-		).run(username, hash, email || "");
 
-		const newUser = db.prepare("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(username);
-		req.session.user = {
-			id: newUser ? newUser.id : 0,
+		// ⚠️ RE-CHECK INSIDE THE TRANSACTION. better-sqlite3 is synchronous, so the
+		// count above and the INSERT below would be atomic — except `await
+		// bcrypt.hash` sits between them and yields the event loop for ~100 ms. Two
+		// concurrent setup requests could both see count 0, both await, and both
+		// insert: two Super Admins out of one open window, one of them unknown to
+		// whoever opened it. The re-read and the INSERT are one synchronous
+		// transaction, so exactly one can win.
+		const newId = db.transaction((u, h, e) => {
+			if (db.prepare("SELECT COUNT(*) AS cnt FROM users").get().cnt > 0) return null;
+			return db.prepare(
+				"INSERT INTO users (username, password_hash, role, driver_name, email) VALUES (?, ?, 'Super Admin', '', ?)",
+			).run(u, h, e).lastInsertRowid;
+		})(username, hash, email || "");
+		if (newId === null) {
+			return res.status(400).json({ error: "Setup already completed" });
+		}
+
+		const userSnapshot = {
+			id: Number(newId) || 0,
 			username,
 			role: "Super Admin",
 			driverName: "",
@@ -11177,7 +11375,28 @@ app.post("/api/auth/setup", async (req, res) => {
 			companyName: "",
 		};
 
-		res.json({ success: true, role: "Super Admin" });
+		// Minting a Super Admin is the most privileged event in the app and it
+		// previously left no trace at all. Logged with the new account's identity
+		// rather than 'system'.
+		logAudit({ session: { user: userSnapshot } }, "setup_super_admin", "user", newId,
+			`First-time setup created Super Admin "${username}"`);
+
+		// Rotate the session ID before attaching the new identity, mirroring
+		// POST /api/auth/change-password. `saveUninitialized: false` already means
+		// an unknown cookie gets a fresh ID, so plain fixation does not stick — but
+		// this is the one route in the app that mints a Super Admin, and "the ID
+		// that carries admin was never chosen by the caller" is worth being
+		// explicit about rather than inheriting from a session-store setting.
+		req.session.regenerate((regenErr) => {
+			if (regenErr) {
+				console.error("setup: session regenerate failed:", regenErr.message);
+				// The account exists and is usable — say so rather than implying the
+				// setup failed and inviting a retry that will now 400.
+				return res.status(500).json({ error: "Administrator created, but the session could not be started. Please log in." });
+			}
+			req.session.user = userSnapshot;
+			req.session.save(() => res.json({ success: true, role: "Super Admin" }));
+		});
 	} catch (error) {
 		console.error("Error during setup:", error.message);
 		res.status(500).json({ error: error.message });
@@ -11391,22 +11610,381 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	res.json({ users });
 });
 
-// Admin: delete a user
+// ============================================================
+// PUT /api/users/:id — the same cascade, by UPDATE instead of DELETE
+// ============================================================
+// DELETE /api/users/:id got a month-end guard and an audit line (see the block
+// above that route). This one rewrites the SAME finance rows — `UPDATE expenses
+// SET driver = ?` and seven sibling tables — and had neither. Three distinct
+// losses, and the first of them DEFEATS the delete guard rather than merely
+// duplicating the hole:
+//
+// 1. `driverName: ""` STRANDS THE ROWS THE DELETE GUARD PROTECTS. The cascade
+//    below only fires `if (oldName && newName)`, so a blank writes
+//    `users.driver_name = ''` and touches nothing else — `expenses.driver` still
+//    reads "Howard Reddie". The delete then resolves its cascade name as
+//    `user.driver_name || user.username`, which with the name blanked falls back
+//    to the USERNAME ("LogisX-0621"). That matches zero expense rows, so
+//    userDeleteLockBlockers() finds nothing to block on and the delete succeeds.
+//    Measured on production 2026-08-08: 75 rows / $18,381.23 across three
+//    finalized months for that one account, 165 rows / $38,476.33 fleet-wide.
+//    They are not deleted — they are left keyed to a driver-name string with no
+//    account behind it, unreachable from every admin screen, and silently
+//    re-adopted by the next user created with that name. That is the precise
+//    outcome the delete guard's own comment calls "strictly worse than a refused
+//    delete", reached through the side door.
+//
+// 2. A RENAME REWRITES LOCKED MONTHS. `expenses.driver` is not a label; it is
+//    the join key. getDeductibleExpensesByDriverMonth() groups on it to compute
+//    percentage-driver pay, /api/financials bills per-driver pay from it, and
+//    the payout drill-down itemises trip expenses by it. Renaming inside a
+//    finalized month restates who was paid what in a month whose statement has
+//    already gone out — the DELETE case's harm, with an UPDATE.
+//
+// 3. A ROLE FLIP ORPHANS SETTLED PAYOUTS WITHOUT DELETING ANYTHING.
+//    listSettlableInvestors() drives GET /api/payouts off `users WHERE role =
+//    'Investor'`. Demote an Investor and their settled months vanish from every
+//    payouts surface while sitting in `investor_payouts`, and the console's
+//    grandTotals.totalPaid quietly falls by that amount. Production has 19
+//    finalized payout rows across 3 investors, 2 of them already marked PAID.
+//    PR #205 closed this as a two-step (`PUT role` then `DELETE`) by keying the
+//    delete's blockers on user.id; the single-step UPDATE was left open and is
+//    closed here.
+//
+// Same shape as the delete guard by design: reuses expenseRowPeriodLocked() and
+// blockedExpensePeriods() rather than re-deriving either (a second copy of a
+// rule is how two callers of it come to disagree), fails CLOSED on an unreadable
+// period_locks, runs BEFORE the first write because this app has no
+// transactions, and is NOT gated on PERIOD_FINALIZE_ENABLED — on a database that
+// never enabled the feature `period_locks` is empty and behaviour is
+// byte-identical.
+//
+// One precision on "byte-identical", inherited from the delete guard and true of
+// it too: an empty `period_locks` silences the LOCK rungs, not the FAIL-CLOSED
+// one. A receipt whose `date` resolves to no month at all is still withheld,
+// because expenseRowPeriodLocked() cannot certify a month it cannot read. That
+// is the intended reading and is reported honestly — such a row is labelled
+// "(unknown)" and gets its own sentence in the 409 rather than being folded into
+// the finalized list. It is also not a live concern: all 174 production expense
+// rows carry a well-formed date (checked read-only 2026-08-08), so on that
+// database, dormant or not, this rung never fires.
+
+// Drop every stored session belonging to a user, optionally sparing one sid.
+//
+// ⚠️ WITHOUT THIS, DEMOTING OR DELETING AN ADMIN DOES ALMOST NOTHING.
+// requireRole() reads `req.session.user.role` and never re-reads the database,
+// and the session cookie lives for 24 h. So a Super Admin who is demoted — or
+// whose account row is deleted outright — keeps passing
+// requireRole("Super Admin") on their existing cookie and can simply
+// `PUT /api/users/:self {"role":"Super Admin"}` themselves back, or mint a new
+// admin with POST /api/users. The LAST_SUPER_ADMIN guards never fire, because
+// the caller IS transacting as a valid Super Admin as far as the session is
+// concerned. The delete case is the worse one: the row is gone, so the account
+// does not even appear in GET /api/users while still holding the role.
+//
+// The same gap made the standard incident response — "reset their password" —
+// useless: it left the attacker's session logged in.
+//
+// This is the purge POST /api/auth/change-password already performs; it is
+// lifted here so the three routes that can invalidate an identity all revoke it
+// the same way. Connect-style stores serialise the session as JSON in `sess`,
+// hence json_extract. Never throws — a failed purge must not turn a completed
+// role change into a 500.
+function purgeUserSessions(userId, exceptSid) {
+	try {
+		const sql = "DELETE FROM sessions WHERE json_extract(sess, '$.user.id') = ?" + (exceptSid ? " AND sid != ?" : "");
+		const args = exceptSid ? [userId, exceptSid] : [userId];
+		return db.prepare(sql).run(...args).changes;
+	} catch (err) {
+		console.error("session purge failed:", err.message);
+		return 0;
+	}
+}
+
+// Everything PUT /api/users/:id would restate, orphan or strand. `blockers: []`
+// means the update is safe to run.
+function userUpdateLockBlockers(user, next) {
+	// Fail CLOSED, for the reason PUT /api/expenses/:id/status spells out:
+	// isLocked() swallows every error and answers "not locked", so an unreadable
+	// period_locks silently turns this guard off.
+	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
+
+	const blockers = [];
+
+	// ⚠️ The EXACT string this route's cascade matches on — `LOWER(driver) = ?`,
+	// with no whitespace collapsing and NO username fallback. The delete's
+	// cascade name is `driver_name || username`; this one is `driver_name` alone.
+	// That divergence is not incidental — it is the mechanism of hole (1) above,
+	// so the guard has to model each route's own string rather than share one.
+	const oldName = (user.driver_name || "").trim().toLowerCase();
+	const nextName = next.driverName === undefined ? null : String(next.driverName);
+	const nameChanging = nextName !== null && nextName !== (user.driver_name || "");
+
+	// (1) expenses — the rows the delete guard protects, reached by UPDATE.
+	if (nameChanging && oldName) {
+		const rows = db.prepare(
+			"SELECT id, date, posted_period, created_at FROM expenses WHERE LOWER(driver) = ?"
+		).all(oldName);
+		const locked = rows.filter(expenseRowPeriodLocked);
+		const blanking = !nextName.trim();
+		if (locked.length) {
+			blockers.push({
+				table: "expenses",
+				code: "PERIOD_FINALIZED",
+				rows: locked.length,
+				periods: blockedExpensePeriods(locked),
+				detail: blanking
+					? `${locked.length} expense row${locked.length === 1 ? "" : "s"} booked to a finalized month would be left filed under "${user.driver_name}" with no account behind them`
+					: `${locked.length} expense row${locked.length === 1 ? "" : "s"} booked to a finalized month would be re-attributed from "${user.driver_name}" to "${nextName.trim()}"`,
+			});
+		} else if (blanking) {
+			// STRANDING, and it does NOT need a locked month to do harm. These rows
+			// are in an open period, so nothing is restated today — but clearing the
+			// name detaches them from the only account that resolves them, and the
+			// next user created with that name inherits them silently. Refusing costs
+			// an admin one extra step (delete or re-file the rows, or just leave the
+			// name in place); permitting it is how the tables acquire their first
+			// orphan. Production currently has ZERO orphaned driver names — every
+			// `expenses.driver` value resolves to a live account — and that invariant
+			// is worth keeping true.
+			//
+			// ⚠️ NOT `expenses` ALONE. The cascade below touches eight tables and the
+			// blank skips all eight, so checking one of them keeps the invariant true
+			// for one of them. These three are the ones where an orphan has a
+			// consequence a person would notice:
+			//   • expenses  — money; the whole reason this guard exists.
+			//   • documents — PODs and rate-cons. getRateConBytes() reads this table
+			//     to attach a rate-con to an invoice, so orphaning it makes a load
+			//     silently un-invoiceable by its second source.
+			//   • trucks.assigned_driver — the truck goes on displaying a driver name
+			//     that resolves to no account.
+			// `messages`, `notifications`, `driver_locations` and `load_responses` are
+			// deliberately NOT included: they are operational chatter with no
+			// downstream reader that cares whose account they belong to, and blocking
+			// on a stale notification would refuse a legitimate change for nothing.
+			// They are still COUNTED and reported, so the admin sees the full picture.
+			const attached = {
+				expenses: rows.length,
+				documents: db.prepare("SELECT COUNT(*) AS n FROM documents WHERE LOWER(driver) = ?").get(oldName).n,
+				trucks: db.prepare("SELECT COUNT(*) AS n FROM trucks WHERE LOWER(assigned_driver) = ?").get(oldName).n,
+			};
+			const informational = {
+				messages: db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).get(oldName, oldName).n,
+				notifications: db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE LOWER(driver_name) = ?").get(oldName).n,
+				driver_locations: db.prepare("SELECT COUNT(*) AS n FROM driver_locations WHERE LOWER(driver) = ?").get(oldName).n,
+				load_responses: db.prepare("SELECT COUNT(*) AS n FROM load_responses WHERE LOWER(driver_name) = ?").get(oldName).n,
+			};
+			const total = Object.values(attached).reduce((a, b) => a + b, 0);
+			if (total) {
+				const named = Object.entries(attached).filter(([, n]) => n > 0).map(([t, n]) => `${n} ${t}`).join(", ");
+				blockers.push({
+					table: "expenses",
+					code: "DRIVER_NAME_IN_USE",
+					rows: total,
+					periods: [],
+					counts: { ...attached, ...informational },
+					detail: `${named} row${total === 1 ? "" : "s"} filed under "${user.driver_name}" would be detached from this account`,
+				});
+			}
+		}
+	}
+
+	// (2) investor_payouts — the role-flip leg. Queried by owner_id and NEVER by
+	// role, exactly as PR #205 does: `investor_payouts.owner_id` references
+	// users.id and nothing in that table records a role, so a guard keyed on the
+	// role column answers for a different set of rows than the one at risk. The
+	// block fires when the NEW role is anything other than Investor, which also
+	// catches a user whose stored role has already drifted away from their
+	// payouts. Changing a role TO Investor is the repair and is never blocked.
+	if (next.role && next.role !== user.role && next.role !== "Investor") {
+		const rows = db.prepare(
+			"SELECT period, status, COALESCE(paid_at, '') AS paid_at, COALESCE(finalized_at, '') AS finalized_at FROM investor_payouts WHERE owner_id = ?"
+		).all(user.id);
+		// Three independent reasons a row counts as frozen, same as the delete
+		// guard: paid_at (money moved), finalized_at (a statement was published),
+		// isLocked() (the month is shut however far this row got).
+		const frozen = rows.filter((r) => r.paid_at || r.finalized_at || isLocked(r.period));
+		const paidRows = frozen.filter((r) => r.paid_at).length;
+		if (frozen.length) blockers.push({
+			table: "investor_payouts",
+			code: "PERIOD_FINALIZED",
+			rows: frozen.length,
+			paidRows,
+			periods: [...new Set(frozen.map((r) => r.period))].sort(),
+			detail: `${frozen.length} settled payout row${frozen.length === 1 ? "" : "s"}${paidRows ? ` (${paidRows} already PAID)` : ""} would drop out of the payouts console — GET /api/payouts lists Investors only, and these rows would stay in the table unreachable`,
+		});
+	}
+
+	return { unreadable: false, blockers };
+}
+
 // Admin: update a user's role, driverName, or email
 app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
-		const { role, driverName, email, password, fullName, companyName } = req.body;
+		const { role, email, password, fullName, companyName } = req.body;
+		// ⚠️ COERCED ONCE, HERE, AND USED EVERYWHERE BELOW — guards and cascade
+		// alike. Any non-string that reached this route took a third path belonging
+		// to neither branch: the guard read String(123) as a rename to "123" and
+		// let it through, then `UPDATE users` wrote it, then the cascade reached
+		// `driverName.trim()` and threw — a 500 AFTER the name had changed, with
+		// the cascade skipped and no audit line. That is exactly the stranding this
+		// route exists to prevent, arriving via a crash. `null` was the obvious
+		// case and was fixed first; `123`, `true` and `{}` are the same bug, and
+		// `[]` only escaped because String([]) === "". A single String() covers all
+		// of them. Every reader of the column already does `driver_name || ""`, so
+		// "" is the honest value for a cleared name.
+		const driverName = req.body.driverName === undefined ? undefined : String(req.body.driverName ?? "");
 
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
 		if (!user) return res.status(404).json({ error: "User not found" });
 
+		// The String() above makes every type SAFE; this makes the odd ones LOUD.
+		// Coercion alone would have quietly renamed a driver to "123" or
+		// "[object Object]" and cascaded eight tables to match — no crash and no
+		// stranding, so the security hole is closed either way, but also no way for
+		// the caller to learn they sent the wrong thing. A JSON client putting a
+		// number here is a bug, not an intent, and this route rewrites finance rows.
+		// `null` stays legal: it is the documented way to clear the name.
+		if (req.body.driverName !== undefined && req.body.driverName !== null && typeof req.body.driverName !== "string") {
+			return res.status(400).json({
+				error: "driverName must be a string, or null to clear it.",
+				code: "INVALID_DRIVER_NAME",
+			});
+		}
+
+		// ⚠️ HASH BEFORE THE GUARDS, NOT BETWEEN THEM AND THE WRITE.
+		// This handler is async and `await bcrypt.hash` is its only yield point.
+		// Sitting where it used to — after the guards, before `UPDATE users` — it
+		// held the event loop open for ~100 ms in the middle of a check-then-act,
+		// and the last-Super-Admin guard is exactly the check that cannot survive
+		// that. With two Super Admins A and B:
+		//   PUT /api/users/A {"role":"Driver","password":"…"}  guard sees B, yields
+		//   PUT /api/users/B {"role":"Driver"}                  runs fully sync,
+		//                                                       guard sees A, demotes B
+		//   A resumes and demotes A                             → ZERO Super Admins
+		// Only one of the two requests needs a password field, and DELETE
+		// /api/users/:id is fully synchronous so it fits inside the window too. The
+		// resulting state is terminal — see the note on POST /api/auth/setup.
+		// Hashing first leaves NO await between the guards and the write, so the
+		// whole check-then-act runs synchronously and cannot interleave. This is
+		// the same defect the setup route closes with db.transaction(); it needed
+		// closing here as well, and reordering is the cheaper half of that fix.
+		let passwordHash = null;
+		if (password) {
+			const bcryptMod = await import("bcryptjs");
+			passwordHash = await bcryptMod.hash(password, 10);
+		}
+
+		const ROLES = ["Super Admin", "Dispatcher", "Driver", "Investor"];
+		// An unrecognised role used to fall through the `if (role && …)` below and
+		// be silently dropped: the request returned 200 and nothing changed, so a
+		// typo read to the admin as "the role change didn't stick". POST
+		// /api/users 400s on the same input; match it.
+		if (role !== undefined && role !== null && role !== "" && !ROLES.includes(role)) {
+			return res.status(400).json({ error: "Invalid role", code: "INVALID_ROLE" });
+		}
+		// The role that will actually be written — the guards below must reason
+		// about that value and not about the raw body.
+		const nextRole = ROLES.includes(role) ? role : null;
+
+		// ⚠️ ALL GUARDS BEFORE THE FIRST WRITE. No transactions in this app, so a
+		// refusal discovered halfway through the cascade is not a refusal.
+
+		// (a) Demoting the last Super Admin locks everyone out of the system, and
+		// it is the same hole as deleting them — DELETE /api/users/:id refuses that
+		// (below), so without this the refusal is one PUT away from irrelevant:
+		//   PUT /api/users/1 {"role":"Driver"}  →  no Super Admin left, no delete
+		//   needed. There is no scripted recovery (see POST /api/auth/setup) and
+		// POST /api/users itself requires a Super Admin, so this state is terminal.
+		//
+		// The pair is COMPLETE, and that is checkable rather than hopeful: grep the
+		// file for `UPDATE users SET` and the only statement that can write `role`
+		// is the one below; grep for `DELETE FROM users` and the only one reachable
+		// over HTTP is DELETE /api/users/:id (the other is the boot-time
+		// CHECK-constraint probe, matched on the literal username '__test_sa__').
+		// Two write paths, two guards — so "zero Super Admins" is unreachable
+		// through the API. Re-run those two greps before adding a third path.
+		if (nextRole && nextRole !== user.role && user.role === "Super Admin") {
+			const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
+			if (others === 0) {
+				return res.status(409).json({
+					error: `Cannot change the role of ${user.username}: this is the only Super Admin account. Promote another user to Super Admin first, or the system will be left with nobody who can manage users.`,
+					code: "LAST_SUPER_ADMIN",
+				});
+			}
+		}
+
+		// (b) Two accounts cannot share a driver_name. The cascade below matches on
+		// `LOWER(driver) = oldName`, so renaming onto a name someone else already
+		// holds MERGES two people's expenses, documents, messages and load
+		// responses into one bucket with no record of which rows came from where —
+		// and the merge is irreversible, because after it there is nothing left to
+		// tell them apart. Refused here rather than in the cascade so it costs
+		// nothing when it does not apply.
+		if (driverName !== undefined && String(driverName).trim() && String(driverName).trim().toLowerCase() !== (user.driver_name || "").trim().toLowerCase()) {
+			const clash = db.prepare(
+				"SELECT id, username FROM users WHERE id <> ? AND TRIM(LOWER(driver_name)) = ?"
+			).get(id, String(driverName).trim().toLowerCase());
+			if (clash) {
+				return res.status(409).json({
+					error: `Cannot set the driver name to "${String(driverName).trim()}": it already belongs to ${clash.username} (user ${clash.id}). Two accounts sharing a driver name merge their expenses and documents irreversibly.`,
+					code: "DRIVER_NAME_TAKEN",
+				});
+			}
+		}
+
+		// (c) The month-end lock on this route's cascade.
+		const lock = userUpdateLockBlockers(user, { driverName, role: nextRole });
+		if (lock.unreadable) {
+			return res.status(409).json({
+				error: "The period lock table could not be read, so no month can be confirmed open. This change is held until that is fixed.",
+				code: "PERIOD_LOCK_UNREADABLE",
+			});
+		}
+		if (lock.blockers.length) {
+			const finalized = lock.blockers.filter((b) => b.code === "PERIOD_FINALIZED");
+			const named = [...new Set(finalized.flatMap((b) => b.periods))].sort();
+			const periods = named.filter((p) => p !== "(unknown)");
+			const unresolved = named.length !== periods.length;
+			const paidRows = lock.blockers.reduce((n, b) => n + (b.paidRows || 0), 0);
+			const who = user.driver_name || user.username || `user ${id}`;
+
+			// PERIOD_FINALIZED wins the response code when both legs fire — it is the
+			// stronger statement and the one with a defined remedy.
+			const code = finalized.length ? "PERIOD_FINALIZED" : lock.blockers[0].code;
+
+			const cause = [
+				periods.length ? `${periods.map(periodLabel).join(", ")} ${periods.length === 1 ? "is" : "are"} finalized.` : "",
+				unresolved ? "Some rows carry a date the server cannot resolve to a month, so they are withheld until it is corrected." : "",
+			].filter(Boolean).join(" ");
+
+			const remedy = [];
+			if (paidRows) {
+				remedy.push("Payouts already marked PAID cannot be detached from their investor — this account has to keep the Investor role.");
+			} else {
+				if (periods.length) remedy.push(`Reopen the affected period${periods.length === 1 ? "" : "s"} first — POST /api/periods/:period/reopen records a reason.`);
+				if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
+			}
+			if (code === "DRIVER_NAME_IN_USE") {
+				remedy.push("Re-file or delete those receipts first, or leave the driver name in place — it is the only link between them and this account.");
+			}
+
+			return res.status(409).json({
+				error: `Cannot update ${who}: ${lock.blockers.map((b) => b.detail).join("; ")}. ${cause} ${remedy.join(" ")}`.replace(/\s+/g, " ").trim(),
+				code,
+				periods,
+				unresolved,
+				blockers: lock.blockers,
+			});
+		}
+
 		const updates = [];
 		const params = [];
 
-		if (role && ["Super Admin", "Dispatcher", "Driver", "Investor"].includes(role)) {
+		if (nextRole) {
 			updates.push("role = ?");
-			params.push(role);
+			params.push(nextRole);
 		}
 		if (driverName !== undefined) {
 			updates.push("driver_name = ?");
@@ -11424,11 +12002,11 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			updates.push("company_name = ?");
 			params.push(companyName);
 		}
-		if (password) {
-			const bcrypt = await import("bcryptjs");
-			const hash = await bcrypt.hash(password, 10);
+		if (passwordHash) {
+			// Already computed above the guards — deliberately. Do not move the
+			// hashing back down here; see the note beside it.
 			updates.push("password_hash = ?");
-			params.push(hash);
+			params.push(passwordHash);
 		}
 
 		if (updates.length === 0) {
@@ -11438,29 +12016,67 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		params.push(id);
 		db.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).run(...params);
 
+		// Past the guards: every row below is in an open month, and the new name
+		// (if any) belongs to nobody else.
+		const renamed = {};
 		// Cascade driver name rename across all tables
 		if (driverName !== undefined && driverName !== (user.driver_name || "")) {
 			const oldName = (user.driver_name || "").trim().toLowerCase();
 			const newName = driverName.trim();
 			if (oldName && newName) {
-				db.prepare("UPDATE expenses SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName);
-				db.prepare(`UPDATE messages SET "from" = ? WHERE LOWER("from") = ?`).run(newName, oldName);
-				db.prepare(`UPDATE messages SET "to" = ? WHERE LOWER("to") = ?`).run(newName, oldName);
-				db.prepare("UPDATE notifications SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName, oldName);
-				db.prepare("UPDATE driver_locations SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName);
-				db.prepare("UPDATE load_responses SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName, oldName);
-				db.prepare("UPDATE trucks SET assigned_driver = ? WHERE LOWER(assigned_driver) = ?").run(newName, oldName);
-				db.prepare("UPDATE documents SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName);
+				renamed.expenses = db.prepare("UPDATE expenses SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName).changes;
+				renamed.messages_from = db.prepare(`UPDATE messages SET "from" = ? WHERE LOWER("from") = ?`).run(newName, oldName).changes;
+				renamed.messages_to = db.prepare(`UPDATE messages SET "to" = ? WHERE LOWER("to") = ?`).run(newName, oldName).changes;
+				renamed.notifications = db.prepare("UPDATE notifications SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName, oldName).changes;
+				renamed.driver_locations = db.prepare("UPDATE driver_locations SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName).changes;
+				renamed.load_responses = db.prepare("UPDATE load_responses SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName, oldName).changes;
+				renamed.trucks = db.prepare("UPDATE trucks SET assigned_driver = ? WHERE LOWER(assigned_driver) = ?").run(newName, oldName).changes;
+				renamed.documents = db.prepare("UPDATE documents SET driver = ? WHERE LOWER(driver) = ?").run(newName, oldName).changes;
 			}
-			// Sync renamed driver to Carrier Database sheet
-			syncDriverToCarrierSheet(driverName, { oldName: user.driver_name, email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
+			// Sync renamed driver to Carrier Database sheet.
+			// ⚠️ Only when there IS a name. This ran unconditionally, so clearing the
+			// driver name reached syncDriverToCarrierSheet("") → `UPDATE
+			// drivers_directory SET driver_name = ''`, blanking the Carrier Database
+			// row's own key and stranding it in a second table. The directory has its
+			// own CRUD endpoints and its own lifecycle; a cleared account link is not
+			// an instruction to erase the carrier record.
+			if (newName) {
+				syncDriverToCarrierSheet(driverName, { oldName: user.driver_name, email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
+			}
 		} else if (user.role === "Driver" && user.driver_name && (email !== undefined || companyName !== undefined)) {
 			// Name didn't change but email/company did
 			syncDriverToCarrierSheet(user.driver_name, { email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
 		}
 
+		// This route rewrites finance rows across eight tables and left no trace at
+		// all — "who renamed this driver, and what moved with them" was
+		// unanswerable. Field-level before→after, plus the per-table cascade counts
+		// for the same reason the delete logs them: "updated a user" does not tell
+		// a later reader that 94 receipts changed hands. The password is recorded
+		// as an event only, never a value.
+		const diff = [];
+		if (nextRole && nextRole !== user.role) diff.push(`role "${user.role}" -> "${nextRole}"`);
+		if (driverName !== undefined && driverName !== (user.driver_name || "")) diff.push(`driverName "${user.driver_name || ""}" -> "${driverName}"`);
+		if (email !== undefined && email !== (user.email || "")) diff.push(`email "${user.email || ""}" -> "${email}"`);
+		if (fullName !== undefined && fullName !== (user.full_name || "")) diff.push(`fullName "${user.full_name || ""}" -> "${fullName}"`);
+		if (companyName !== undefined && companyName !== (user.company_name || "")) diff.push(`companyName "${user.company_name || ""}" -> "${companyName}"`);
+		if (password) diff.push("password reset");
+		// Revoke the target's live sessions whenever their IDENTITY changed —
+		// a role move or a password reset. Without this the demotion is advisory:
+		// see the note on purgeUserSessions(). Self-edits spare the current sid so
+		// an admin does not log themselves out mid-request; every OTHER session of
+		// theirs still goes, which is the point when a cookie has been stolen.
+		let sessionsRevoked = 0;
+		if ((nextRole && nextRole !== user.role) || passwordHash) {
+			sessionsRevoked = purgeUserSessions(id, Number(req.session?.user?.id) === id ? req.sessionID : null);
+		}
+
+		const cascade = Object.entries(renamed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ");
+		logAudit(req, "update_user", "user", id,
+			`${user.role} ${user.username}: ${diff.join("; ") || "no field change"}${cascade ? `; cascade: ${cascade}` : ""}${sessionsRevoked ? `; sessions revoked: ${sessionsRevoked}` : ""}`);
+
 		notifyChange("users");
-		res.json({ success: true });
+		res.json({ success: true, renamed });
 	} catch (error) {
 		console.error("Error updating user:", error.message);
 		res.status(500).json({ error: error.message });
@@ -11739,6 +12355,57 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// receipts out of a closed month.
 	const name = (user.driver_name || user.username || "").trim().toLowerCase();
 
+	// ============================================================
+	// AVAILABILITY GUARDS — checked first, because they are unconditional
+	// ============================================================
+	// The period guard below refuses a delete that would restate a closed month,
+	// and that refusal has a remedy (reopen the period). These two have none, and
+	// the state they prevent is terminal: with no Super Admin, POST /api/users
+	// requires a Super Admin, PUT /api/users/:id requires a Super Admin, and
+	// POST /api/auth/setup refuses because `users` is not empty. CLAUDE.md points
+	// at scripts/reset-super-admin-password.js for exactly this, but that file
+	// does not exist in the repo — the only way back is hand-editing app.db on the
+	// VPS. Production runs TWO Super Admin accounts (`super_admin`, `ford_seeman`),
+	// so this is two clicks away, not a theoretical.
+	//
+	// They are ordered before the period guard on purpose: when both apply, "you
+	// cannot delete the last administrator" is the answer that helps, and the
+	// period message would send an admin off to reopen a month for a delete that
+	// was never going to be allowed.
+
+	// (a) Self-deletion. There is no legitimate use: it destroys the acting
+	// session mid-request, and a Super Admin who deletes themselves cannot undo
+	// it. Another Super Admin can always do it deliberately, which is also the
+	// second pair of eyes this action deserves.
+	//
+	// ⚠️ Matched on id OR username. `req.session.user.id` has been written by
+	// every login for a long time, but sessions are persisted in SQLite and
+	// outlive deploys, so a session predating that field would compare
+	// `undefined === 3` and fail OPEN — the one direction this guard must not
+	// fail. The username comparison is the belt to that brace.
+	const actor = req.session?.user || {};
+	const isSelf = Number(actor.id) === id ||
+		(!!actor.username && !!user.username && String(actor.username).trim().toLowerCase() === String(user.username).trim().toLowerCase());
+	if (isSelf) {
+		return res.status(409).json({
+			error: "You cannot delete your own account. Ask another Super Admin to do it, so the system is never left without an administrator by a single click.",
+			code: "CANNOT_DELETE_SELF",
+		});
+	}
+
+	// (b) The last Super Admin. Mirrored on PUT /api/users/:id, which refuses to
+	// DEMOTE the last one — without that twin this check is one PUT away from
+	// irrelevant (`PUT {"role":"Driver"}` then DELETE).
+	if (user.role === "Super Admin") {
+		const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
+		if (others === 0) {
+			return res.status(409).json({
+				error: `Cannot delete ${user.username}: this is the only Super Admin account. Promote another user to Super Admin first — with none, nobody can create users, manage the fleet, or recover access.`,
+				code: "LAST_SUPER_ADMIN",
+			});
+		}
+	}
+
 	// ⚠️ GUARD BEFORE THE FIRST WRITE. This app has no transactions (see
 	// CLAUDE.md), so a refusal discovered mid-cascade is not a refusal — the
 	// expenses are already gone by then.
@@ -11795,25 +12462,57 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// Past the guard: every row below belongs to an open month (or carries no
 	// period at all — messages, notifications, driver_locations, load_responses
 	// and the assigned_driver clear are operational, not accounting, rows).
+	//
+	// ⚠️ ONE TRANSACTION. The guard above decides the delete is safe AS A WHOLE,
+	// and this route has no try/catch — so before this wrapper a throw anywhere in
+	// the cascade (or in the final DELETE) left the finance rows gone and the
+	// users row intact, unhandled-500, with no audit line. That is precisely the
+	// "half-deleted user" the guard's own comment calls strictly worse than a
+	// refused delete: receipts keyed to a driver-name string with no account
+	// behind them. better-sqlite3 transactions are synchronous and every statement
+	// here is synchronous, so this is a straight wrap — and it rolls the whole
+	// thing back on any error instead of leaving the wreck.
+	//
+	// The Sheets sync is deliberately OUTSIDE and AFTER: it is a network call to
+	// Google, it must not be inside a write lock, and it must not run at all if
+	// the local delete rolled back.
 	const removed = {};
-	if (name) {
-		removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
-		removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
-		removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
-		removed.driver_locations = db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name).changes;
-		removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
-		removed.documents = db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name).changes;
-		removed.trucks_unassigned = db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ?").run(name).changes;
+	try {
+		db.transaction(() => {
+			if (name) {
+				removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
+				removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
+				removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
+				removed.driver_locations = db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name).changes;
+				removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
+				removed.documents = db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name).changes;
+				removed.trucks_unassigned = db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ?").run(name).changes;
+			}
+			if (user.role === "Investor") {
+				removed.trucks_reparented = db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id).changes;
+				removed.investor_config = db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id).changes;
+			}
+			db.prepare("DELETE FROM users WHERE id = ?").run(id);
+		})();
+	} catch (err) {
+		console.error("delete user cascade failed, rolled back:", err.message);
+		return res.status(500).json({
+			error: "The delete could not be completed and was rolled back. Nothing was removed.",
+			code: "DELETE_ROLLED_BACK",
+		});
 	}
-	if (user.role === "Investor") {
-		removed.trucks_reparented = db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id).changes;
-		removed.investor_config = db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id).changes;
-	}
+
+	// The account is gone from `users`, but requireRole() reads the SESSION, not
+	// the database — so without this the deleted admin keeps a working Super Admin
+	// cookie for up to 24 h, on an account that no longer appears in GET
+	// /api/users. See purgeUserSessions(). Self-delete is already refused above,
+	// so there is no current sid to spare here.
+	removed.sessions = purgeUserSessions(id, null);
+
 	// Sync: remove driver from Carrier Database sheet
 	if (user.role === "Driver" && user.driver_name) {
 		syncDriverToCarrierSheet(user.driver_name, { action: "delete" });
 	}
-	db.prepare("DELETE FROM users WHERE id = ?").run(id);
 	// The most destructive action in the app previously left no trace at all.
 	// The per-table counts are the point: "deleted a user" does not tell a later
 	// reader that 40 receipts went with it.
