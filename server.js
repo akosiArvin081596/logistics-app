@@ -27403,6 +27403,16 @@ app.post("/api/expenses/ai/query", requireRole("Super Admin", "Dispatcher"), exp
 		} catch (err) {
 			if (err && err.code === "AI_NO_KEY") return res.status(503).json({ error: "AI is not configured" });
 			if (err && err.code === "AI_BAD_INPUT") return res.status(400).json({ error: "Invalid question" });
+			// A rejected key or an exhausted quota is a SERVICE problem, not a bad
+			// request — it is the same state as having no key at all, which already
+			// answers 503 and makes the panel hide itself. 502 left the card stuck on
+			// a generic failure with a retry that could never succeed. Same branch and
+			// the same reasoning as POST /api/expenses/ocr. `kind` is set by
+			// lib/gemini-errors.js; a request WE malformed stays a loud 502 below.
+			if (err && err.kind === "unavailable") {
+				console.error(`Expense AI query unavailable (Gemini ${err.status}${err.reason ? " " + err.reason : ""}):`, err.message);
+				return res.status(503).json({ error: "AI is temporarily unavailable" });
+			}
 			console.error("Expense AI query-spec failed:", err && err.message);
 			return res.status(502).json({ error: "AI request failed" });
 		}
@@ -27488,6 +27498,16 @@ app.get("/api/expenses/ai/insights", requireRole("Super Admin", "Dispatcher"), i
 			insights = await expenseAi.generateInsights(aggregates);
 		} catch (err) {
 			if (err && err.code === "AI_NO_KEY") return res.status(503).json({ error: "AI is not configured" });
+			// A rejected key or an exhausted quota is a SERVICE problem, not a bad
+			// request — it is the same state as having no key at all, which already
+			// answers 503 and makes the panel hide itself. 502 left the card stuck on
+			// a generic failure with a retry that could never succeed. Same branch and
+			// the same reasoning as POST /api/expenses/ocr. `kind` is set by
+			// lib/gemini-errors.js; a request WE malformed stays a loud 502 below.
+			if (err && err.kind === "unavailable") {
+				console.error(`Expense AI insights unavailable (Gemini ${err.status}${err.reason ? " " + err.reason : ""}):`, err.message);
+				return res.status(503).json({ error: "AI is temporarily unavailable" });
+			}
 			console.error("Expense AI insights failed:", err && err.message);
 			return res.status(502).json({ error: "AI request failed" });
 		}
