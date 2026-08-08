@@ -1,0 +1,124 @@
+# Stale remote branches deleted 2026-08-09
+#
+# WHY: a LlamaCloud API key (llx-****) was committed on 2026-04-06 (af031dd) and
+# removed on 2026-08-08 by PR #204 (019d3a3). origin/main is clean, but these
+# branch tips were never rebased, so each still served the key at HEAD in a
+# PUBLIC repo. Deleting them removes the key from every live ref except the
+# blob's own SHA. The key is being revoked separately -- that is what actually
+# closes the exposure. No history rewrite was performed (deliberately: GitHub
+# still renders the key in PR #204's diff and keeps orphaned objects addressable
+# by SHA, neither of which a rewrite touches).
+#
+# SELECTION: `git branch -r --contains af031dd` MINUS `--contains 019d3a3`,
+# excluding origin/main and origin/HEAD. 97 branches. 96 of the 97 served the
+# leaked blob (9abcf48, Dispatch-v2-fixed.json) at HEAD; the exception is noted
+# below. No open PR pointed at any of them (checked: 0 open, 210 merged, 9 closed).
+#
+# RECOVERY: every branch is recoverable by SHA for as long as GitHub retains the
+# object (they are not gc'd while reachable from a reflog or referenced anywhere):
+#     git push origin <sha>:refs/heads/<branch>
+# Restoring a branch republishes the key at its tip -- rebase onto main first.
+#
+# NOTE: fix/n8n-retire-llamaparse is the source branch of PR #204 itself. It is
+# in the set only because it carries af031dd without carrying main's SQUASH
+# commit 019d3a3; its tip blob is already the clean one. It is a merged PR
+# branch, so it is deleted as ordinary hygiene, not as an exposure.
+#
+# Format: branch<TAB>sha-at-deletion
+chore/env-refresh-local-staging	5bde28e475074f76863c6fb1cdb3186405f96370
+chore/gitignore-secret-hardening	a6a710692ff0988cb12ee4da1bdddb581535d98a
+chore/repo-hygiene	8bf5302d12a8337543f1c7c30a3f5a2ad2c6c6f4
+develop	e3efd786e32e7f17c82be17cfc7f754d7b2dd5b2
+development	ea8931b8430571149c8c09d8186a4af8cfee5841
+docs/pod-upload-runbooks	20a8442ba78456720960cc6984350520bce6bd21
+feat/active-loads-reassign-queue	269c3d62e8d8806d6e393757c5f2c4f8e6b15477
+feat/auto-weekly-invoices	55ef95cb0409f74fd68976fa7158f867bcf1fa27
+feat/billing-automation	7a0919c34bb793dee1c7d21b1fca7b3d50acaad5
+feat/bison-invoice-draft	89353a44c9ba3edc03797e3ddfd0d21294b0596a
+feat/bulk-receipt-scan	edf755d3659793764726fb46a0cffd464f820944
+feat/client-tracker-pickup-delivery-times	d9ef5d1c9e5878f251887af575312aabc77c3676
+feat/completed-loads-delivery-date	d69a7f0ff18b3a3031a812c7169c4894ff2dc636
+feat/completed-loads-export	ce2b4af2e279bd7f3049904356cda94392e0d180
+feat/dashboard-data-fixes	9d45d20e0b92555b3984f9277da0baea1d348bfe
+feat/driver-custom-daily-rate	89e372ccb5e316d3560a2a6690ce67faad267ccc
+feat/duplicate-receipt-detection	e4b59af71fee4d91f7e55b9dbcd52d271d8422ef
+feat/eld-apollo-migration	7d3442b354a8a85ababb8ecd5ab14d0aca539fd8
+feat/expense-intelligence	153c612fac9e164d63e266c146414bacca3da8d6
+feat/expense-location-backend	ce02a59d3abb53b40971894268404e18c56928a1
+feat/expense-location-backfill	61750f6dee630e8b0037194dcfd9fd7a67923832
+feat/expense-location-zoom-admin	4627edec35b76aa50c97d6ac531f87747a344695
+feat/expense-location-zoom-driver	03fc4d0a60cc8c132a2a6c318ad8b85d03140987
+feat/expenses-bulk-approve-admin-uploads	1780d0c43cc8254a0e5141923610b33c08b0ea33
+feat/financials-month-drilldown	7e51fc14fe2048ddb195a55746a096f81102683b
+feat/gallons-recovery-ui	f4e3f5340365ad3c4ee9c5682cb6c2bd724778aa
+feat/geofence-1000m-tracking-eta	1ab5d72fe261de14233cf65f60c882c63bbdee9b
+feat/investor-load-reports	4ec74388d56cb23be898e00fd507eaffc1dafc00
+feat/investor-monthly-statements	6c719e0eeecfaae22bd28854e6c3a486aeb8a9d9
+feat/investor-myloads-order	9d61a78b47b05e341c9d126c3c86e91c0e610b9c
+feat/investor-payout-adjustments	44d6c485f4bf01110f53b7e89ccd7d693c7888ad
+feat/investor-payouts	cd086df8d59246d4713f5939049a2fb4dbcb3b91
+feat/invoice-adjust-financials-monthly	3ddb89d34d6dbe5dd34e51e08d3f669e635a5a16
+feat/invoice-logo	9714c160080ce2c7fc01dafbb74d593a18718199
+feat/invoices-edit-delete-create-report	477869c2968e7c0f9d1cb2d7e7cd3e29183bfed7
+feat/load-status-timeline	ff9d0e29edcdd671c7b5b14b49d20f8229d16ba9
+feat/n8n-prevention-tooling	b49bee72cca51103c1f9fb8783636e4c213826cf
+feat/needs-review-badge	b7a7d6dc1684b9baa84bffe4bed15f76c489828c
+feat/payout-adjusted-total-columns	738c2c549c842b77efc36064911db7bb7005a3ad
+feat/payouts-nav	feab73322570977243c81a10b6a4fce11a0d642f
+feat/pod-management	02543b79e6a1e41bc52bf84678eaaf1fc613e56a
+feat/pod-scanner-mode	009cb2cb4d44dbc78b68849dc66cac6f75383f78
+feat/pod-upload-fastreturn-health	7795bad6db9e06ad4588c5eca8c1421a709ed1ef
+feat/pod-upload-resilience	c3a54f6c6e61a6dbb354dcdf1a4cef7f0921f4b4
+feat/public-tracker-status-timeline	1b89304215383059c26019dbb403e7032a82e585
+feat/queue-defer-accept	0bc61de572647e45c5056504f8781717404d6173
+feat/ratecon-drop-and-broker-invoices	2dcea23e868e4146982a9e0fce1d1e38e85f61a2
+feat/settlement-period-close	2709561b89e0e9a464822d22e0222006b035364c
+feat/tracker-timezone-normalize	acf0ff4df101537d03c100ed5a095be9012f6844
+feat/tracking-eta-fuel-hos-active-only	d5cbc9d5447f1a11eefdeea311cf577bafc5916a
+feat/tracking-fuel-poi	2a314e6ba899c0c615d9476b6192669a27ab38d3
+feat/trucks-custom-daily-rate	7535b94f29cdba280c0b59a80339c34e394d3550
+feat/wt-a	f0542846a558f5466771e7ed57cae9f1f0fae028
+feat/wt-b	ea8931b8430571149c8c09d8186a4af8cfee5841
+feat/wt-c	7148181a5209bfab20ca54eb5f4207b290ee2af3
+feat/wt-d	cbc5c491bc8a527b0e10d1fa7fb3c7995821a49a
+fix/api-del-method	74b2977cd6903f59e214932adbb7a84ce6d581d8
+fix/bison-draft-messaging	171cda83042aaa1c7d6b254a7c71c7f75da955c5
+fix/bison-invoice-attach-ratecon	6f98c9b9db587def686fa7860ef4048ae2c3e1bb
+fix/bison-invoice-ratecon-errors	5b23e26417e575cde4307252d30f535984f7960a
+fix/bulk-upload-error-state-deadlock	76a8d7520c06751cb8a2aae22a73cff43245cb1b
+fix/clamp-payout-adjustments	dfb522620c6467ea8d7f5c50d90f6315df9f674b
+fix/completed-delivery-date-timezone	56aa58ae357569a0121831f866478376cc2f8de4
+fix/confirm-modal-pointer-events	8e8abbfe5e6b0975aa794ee83208b353ecd3c378
+fix/csv-raw-tab-guard	abc9d4c24cb86c1bda0ae1e052c8821582ee87da
+fix/dispatch-route-eta-phase	e2972a05d0b0ab58fc7649807aba2dc481bdc90c
+fix/driver-payload-bloat	ee3296108332c260d4e68564451ada57536a7888
+fix/driver-stale-load-removal	2558bca288416b5913d2f98024c6de3e506e3201
+fix/driver-status-heading-to-shipper	e689fcc1cb52f959a4a8bfe268f783f61fef2ad6
+fix/expense-dates-and-gallons	ebd286c3781450276d3a5406617c9a3cc6aefb59
+fix/expense-ocr-coverage	3a80dc4a335bed39176552d56f664c8e51fa42fe
+fix/investor-accrual-breakdown-rounding	5a6083c577b20429aab795541837d35a007573a4
+fix/investor-export-direct-url	4aec90f838d8816637e6c8047399480e827e1384
+fix/investor-export-download-filename	26c7cb5649a2447fc7fcf56739e97bdffd98237a
+fix/investor-inactive-revenue	75e94e34ff9cb55f779e3a5b64da047769b58a99
+fix/investor-load-report-broker-net	a6c5f0da0b32058c1e30522b70eb0bcfec6954ad
+fix/investor-owed-excludes-open-month	39994fa8ada83e66c8c4855b663cd511c0d3bbce
+fix/investor-report-direct-url	a3abe5f4fc88f3f3c22aac84577dd84cfe68eba8
+fix/n8n-completeness-gate	e50eb664b7e6e6872e36c20d85576f4dbff1f459
+fix/n8n-dispatch-hardening	a262077b69a6cba16b9094e8fa936b8646a1cb09
+fix/n8n-pdf-filter-and-edit-button	3b69b1fc67e88e6d414fc7c63b7ecc9d3ebc7780
+fix/n8n-retire-llamaparse	2a288ade2e98fdfbc0126d52025e48c3496860cb
+fix/n8n-retry-counter-multi	bfb36a2f110aeee1022e5e1e5e432e33a74bb4da
+fix/onboarding-signed-requires-document	64becb63f38b63b453461cf2a5eea2cecca293c3
+fix/onboarding-templates-out-of-uploads	474bf32b5e58efaf4d97c4a7689f4bcb58765549
+fix/payout-adjustment-indicator	499656e6fa7ca1f40a41dd36cf0d9cc308602b40
+fix/payout-loss-carryforward	99ff4f2e95591974f3a81b885c8a618f8faf7dac
+fix/remove-divergent-investor-earnings	b89bf3fbb7c200052691d27f8bbd9ed5d6c92976
+fix/route-fetch-race	365a8b12698d38eeada76372f82e3f9fe30e5ef9
+fix/split-maps-browser-key	2b226f0b393bb1f75b3b44c775bdd79aaf9439b7
+fix/user-delete-period-lock-guard	a65133151ab107a616293a7662ab4a06fbee5cf1
+hotfix/n8n-pdf-filter-and-edit-button	6c2da4ed6a4f7345f95c2873f1b8c048ad619155
+hotfix/needs-review-badge	1ba50525f2713795d81c6b0522097fb3c897e1fd
+refactor/client-csp-remove-inline	7d942190a93d97ea2c61fb5ad14ce8183e02966b
+rescue/expense-content-duplicate-guard	850677307614a09e0e5032c6d65bf7cc53e0281a
+review/all-pending	59b4145c7e369854b967715a6499d326ceac2129
+test/payout-ledger-regression-cases	f28bcf7a726f9fbb5a75ab3d415f9a0a23b324ba
