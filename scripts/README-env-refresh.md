@@ -12,6 +12,20 @@ cd /var/www/logisx-staging && ./scripts/refresh-staging.sh --yes           # sta
 cd /var/www/logisx-staging && ./scripts/refresh-staging.sh --yes --restart # and restart pm2
 ```
 
+**Bootstrapping staging before these scripts are on `main`.** `refresh-staging.sh` runs
+`git reset --hard origin/main`, which rewrites the working tree it is executing from — so on the
+first run, when `main` does not yet contain these files, copy both into an untracked directory
+inside the staging tree and run from there:
+
+```bash
+scp scripts/refresh-env.js scripts/refresh-staging.sh <vps>:/var/www/logisx-staging/.env-refresh-tmp/
+ssh <vps> 'cd /var/www/logisx-staging && bash .env-refresh-tmp/refresh-staging.sh --yes --restart'
+```
+
+That path specifically, not `/tmp`: `git reset --hard` leaves untracked files alone, and node
+resolves `require()` from the *module's* directory upwards, so a copy in `/tmp` cannot find
+`better-sqlite3`. The script handles being invoked from its own stash directory.
+
 Both wrappers call `scripts/refresh-env.js`, which does the database half and holds every
 safety gate. You can call it directly:
 
@@ -170,19 +184,56 @@ email a real driver the moment a code path fires, whatever the database says —
 `GMAIL_APP_PASSWORD`, or `INVOICE_AUTOGEN_ENABLED=true`, and warns on `N8N_*` secrets. Staging
 currently has none of these, which is correct; keep it that way.
 
+### ⚠️ `GOOGLE_DRIVE_FOLDER_ID` was the leak nobody was looking for
+
+Until 2026-08-08 staging's `.env` held the **same** `GOOGLE_DRIVE_FOLDER_ID` as production, so
+every POD or document uploaded on staging was written into the **production** Drive folder. The
+spreadsheet was correctly separated and the Drive folder silently was not. It is now empty on
+staging, which is a supported configuration — uploads skip Drive and the local-first `documents`
+row still records them. **Check this whenever you stand up a new environment: separating the
+sheet is not the same as separating the storage.**
+
+The `GEMINI_API_KEY` is likewise shared with production (verified by hash). That is left in
+place because expense OCR is not flag-gated and would be untestable without it, and
+`expenseOcrLimiter` bounds the spend — but be aware staging OCR draws on production's quota,
+and an exhausted key took rate-con ingestion down on 2026-08-05.
+
+### Flags actually set on staging (2026-08-08)
+
+Production runs nine. Staging runs the three that compute purely against its own sanitized
+SQLite copy; the other six are held off because each can reach a real person, move money, spend
+a shared billed key, or is inert without a credential staging deliberately lacks:
+
+| Flag | Staging | Why |
+|---|---|---|
+| `PERIOD_FINALIZE_ENABLED` | **on** | Month-close math, local DB only. |
+| `FUEL_EVENTS_ENABLED` | **on** | Telemetry sweep, local DB only. Needed for `rangeBasis:'measured'`. |
+| `MAINTENANCE_NOTICE_ENABLED` | **on** | UI copy only. |
+| `INVOICE_AUTOGEN_ENABLED` | off | Auto-submits invoices on a timer and emails a summary. Moves money. `refresh-env.js` refuses an `.env` that has it on. |
+| `RATECON_RECONCILE_ENABLED` | off | Connects to the real `info@logisx.com` mailbox and **sends alert mail**. |
+| `FUEL_GALLONS_RECOVERY_ENABLED` | off | Spends billed Gemini calls on the shared key, and reads receipt images from `uploads/`, which staging does not have. The read-only GET proposal works regardless. |
+| `SCANKIT_ENABLED` | off | No key here, and it is credit-billed. |
+| `ROUTEMATE_ENABLED` | off | No key here; would only log errors. Superseded by the Linxup push path. |
+| `LINXUP_ENABLED` | off | No token here, and Linxup pushes to production's endpoint. Inert either way. |
+
 Recommended non-production `.env` (staging shown; local is the same with the LOCAL sheet id):
 
 ```
 PORT=3003
 SPREADSHEET_ID=1Ny1q0nY-sYxgjH_4KqzEdWXUNp8etfW7M-G7h_MNA9Y
 ARCHIVE_SPREADSHEET_ID=1IG3yTknz91EesmyMog-d63UT5LkmpBYxHFEWSuDlgn8
-NODE_ENV=development        # required, or every auth smoke test 401s
+GOOGLE_DRIVE_FOLDER_ID=                 # EMPTY on purpose — see the warning above
 SESSION_SECRET=<anything non-production>
+PERIOD_FINALIZE_ENABLED=true
+FUEL_EVENTS_ENABLED=true
+MAINTENANCE_NOTICE_ENABLED=true
 # deliberately absent: GMAIL_USER, GMAIL_APP_PASSWORD, N8N_WEBHOOK_SECRET,
 #                      N8N_EXTRACT_SECRET, INVOICE_AUTOGEN_ENABLED
-# safe to enable for testing: PERIOD_FINALIZE_ENABLED, FUEL_EVENTS_ENABLED,
-#                             MAINTENANCE_NOTICE_ENABLED, SCANKIT_ENABLED (billed)
 ```
+
+`NODE_ENV` is deliberately **unset** on staging: `server.js` only reads it to decide session
+cookie `secure` / `sameSite`, and unset gives `secure:false` + `sameSite:'lax'`, which is what
+staging needs over plain HTTP. Setting it to `production` there would 401 every login.
 
 ---
 
