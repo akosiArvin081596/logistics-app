@@ -198,10 +198,16 @@
             <td class="col-remove">
               <span v-if="row.saveStatus === 'saving'" class="bulk-row-msg">…</span>
               <div v-else class="bulk-cell-actions">
-                <button v-if="row.saveStatus === 'timeout'" type="button" class="bulk-retry" :disabled="saving || processing" :title="row.saveError" @click="retryRow(row)">Retry</button>
+                <!-- Covers BOTH 'timeout' and 'error'. The desktop grid used to
+                     offer Retry only for 'timeout' and render a mute "!" for
+                     'error', while the save bar said "failed to save — retry or
+                     remove" and the mobile card DID have the button: the primary
+                     admin surface named an action it didn't provide. retryRow()
+                     keeps the two apart where it counts (a timeout confirms
+                     first, an error doesn't). -->
+                <button v-if="canRetry(row)" type="button" class="bulk-retry" :disabled="saving || processing" :title="row.saveError" @click="retryRow(row)">Retry</button>
                 <button v-else-if="row.saveStatus === 'maybe-duplicate'" type="button" class="bulk-retry bulk-anyway" :disabled="saving || processing" :title="row.saveError" @click="saveAnyway(row)">Save anyway</button>
                 <span v-else-if="row.saveStatus === 'duplicate'" class="bulk-row-msg dup" :title="row.saveError">dup</span>
-                <span v-else-if="row.saveStatus === 'error'" class="bulk-row-msg err" :title="row.saveError">!</span>
                 <span v-else-if="row.saveStatus === 'invalid'" class="bulk-row-msg err" :title="row.saveError">fix</span>
                 <!-- Saved, but into a different month than its date implies,
                      because its own month is closed. Not an error — but the
@@ -311,7 +317,7 @@
           <div v-if="row.saveError" class="bulk-card-err">{{ row.saveError }}</div>
           <div class="bulk-card-actions">
             <button v-if="row.saveStatus === 'maybe-duplicate'" type="button" class="bulk-retry bulk-anyway" :disabled="saving || processing" :title="row.saveError" @click="saveAnyway(row)">Save anyway</button>
-            <button v-else-if="row.saveStatus === 'timeout' || row.saveStatus === 'error'" type="button" class="bulk-retry" :disabled="saving || processing" @click="retryRow(row)">Retry</button>
+            <button v-else-if="canRetry(row)" type="button" class="bulk-retry" :disabled="saving || processing" :title="row.saveError" @click="retryRow(row)">Retry</button>
             <button type="button" class="bulk-btn-ghost bulk-clear" :disabled="saving || processing" @click="removeRow(row.key)">Remove</button>
           </div>
         </div>
@@ -446,12 +452,34 @@ function monthName(period) {
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
 }
 
-// Rows that must NOT be re-sent by Save All: already saved, parked timeouts
-// (ambiguous — may have landed), and server-confirmed duplicates (a re-send
-// would just 409 again).
+// ── Row save-state machine ─────────────────────────────────────────────────
+// saveStatus: null (pending) → 'saving' → one of
+//   'saved' | 'error' | 'timeout' | 'duplicate' | 'maybe-duplicate'
+// plus 'invalid', set by saveAll's pre-flight validation (the row is never sent).
+//
+// Rows that must NOT be re-sent by a blanket Save All: already saved, parked
+// timeouts (ambiguous — may have landed), and server-confirmed duplicates (a
+// re-send would just 409 again).
 // 'maybe-duplicate' joins these: it must never be resent by a blanket Save All,
 // only by the row's conscious "Save anyway".
+//
+// ⚠️ 'error' is deliberately ABSENT and must stay absent. A 4xx/5xx means the
+// insert did NOT happen, so the row is safe to re-send. Adding it here without
+// also giving the desktop grid a per-row Retry is what strands an errored row:
+// it would drop out of BOTH savableCount and saveAll's pending set at once,
+// leaving Remove as the only way out of a row that never wrote anything.
 const NON_SAVABLE = new Set(['saved', 'timeout', 'duplicate', 'maybe-duplicate'])
+
+// States the per-row Retry button can re-arm, and the one distinction that
+// matters more than any other here — whether money may ALREADY be booked:
+//   'error'   → the server refused. Nothing was written. Safe to re-send.
+//   'timeout' → the response was lost. The insert MAY have landed.
+// POST /api/expenses is not idempotent, which is why 'timeout' stays in
+// NON_SAVABLE (never auto-retried, and confirm-gated even by hand) while
+// 'error' does not.
+const RETRYABLE = new Set(['error', 'timeout'])
+const WRITE_AMBIGUOUS = new Set(['timeout'])
+const canRetry = (row) => RETRYABLE.has(row.saveStatus)
 
 const defaultDriver = ref('')
 const rows = ref([])
@@ -469,8 +497,10 @@ let hydrating = false // true while loading a draft, so the load doesn't re-save
 const atCapacity = computed(() => rows.value.length >= MAX_BATCH)
 const progressPct = computed(() => (progress.total ? Math.round((progress.done / progress.total) * 100) : 0))
 // Savable = everything not already saved and not parked awaiting a manual
-// decision (timeouts) and not a confirmed duplicate. This is what Save All
-// acts on and what the button counts.
+// decision (timeouts, possible duplicates) and not a confirmed duplicate. This
+// is what Save All acts on and what the button counts.
+// 'error' and 'invalid' ARE savable: neither wrote anything, so both are cleared
+// and re-sent by the next Save All. See NON_SAVABLE.
 const savableCount = computed(() => rows.value.filter(r => !NON_SAVABLE.has(r.saveStatus)).length)
 const anyInvalid = computed(() => rows.value.some(r => r.saveStatus === 'invalid'))
 const anyFailed = computed(() => rows.value.some(r => r.saveStatus === 'error'))
@@ -992,26 +1022,58 @@ async function saveOne(row) {
       row.saveStatus = 'maybe-duplicate'
       row.saveError = err?.message || 'This may already be logged'
       row.duplicateOf = err?.data?.existingId || null
-    } else if (err?.status === 0) {
-      // A timeout/abort (status 0) is AMBIGUOUS — the server may have inserted the
-      // row before the response was lost. POST /api/expenses is not idempotent, so
-      // a blind retry double-books into the P&L. Park it in a distinct 'timeout'
-      // state that is excluded from auto-retry; the admin verifies in All Expenses
-      // and consciously hits per-row Retry only if it truly didn't land.
+    } else if (!(err?.status > 0)) {
+      // NO HTTP RESPONSE CAME BACK — the request was aborted (useApi's timeout
+      // converts that to status 0) OR fetch itself rejected, which it does for a
+      // connection dropped mid-flight, a DNS failure or a refused socket. useApi
+      // rethrows that TypeError untouched, so `status` is UNDEFINED, not 0.
+      //
+      // The old test was `status === 0`, which caught only the abort half and let
+      // every network-level failure fall through to 'error' — i.e. straight into
+      // Save All's auto-retry. A socket dropped AFTER the server committed the
+      // INSERT is exactly as ambiguous as a timeout, and POST /api/expenses is not
+      // idempotent, so that path could double-book the P&L.
+      //
+      // Both halves are unknowable from here, so both park in 'timeout': excluded
+      // from auto-retry, re-sent only by the row's own confirm-gated Retry.
       row.saveStatus = 'timeout'
-      row.saveError = 'Timed out — it MAY have saved. Check All Expenses before retrying this row.'
+      row.saveError = 'Connection lost — it MAY have saved. Check All Expenses before retrying this row.'
     } else {
-      // A normal error (4xx/5xx) means the insert didn't happen, so it stays auto-retryable.
+      // A real HTTP status came back (4xx/5xx), so the server answered and the
+      // insert did not happen. Safe to leave auto-retryable.
       row.saveStatus = 'error'
       row.saveError = err?.message || 'Failed to save'
     }
   }
 }
 
-// Conscious per-row retry for a parked 'timeout' (or 'error') row: reset it to a
-// clean savable state so the next Save All picks it up. Deliberately manual so a
-// possibly-already-saved row is never resent without the admin's say-so.
+// Conscious per-row retry. Only RE-ARMS the row (back to pending) — the actual
+// send is still the next Save All, so nothing is posted behind the admin's back.
+//
+// Two states share this button and they are NOT equally safe:
+//   'error'   — a 4xx/5xx. The server refused; nothing was inserted. Re-arm freely.
+//   'timeout' — status 0. The response was lost, so the insert MAY have landed.
+//               POST /api/expenses is not idempotent, so this one asks first —
+//               the same "confirm the one action that moves money" rule the
+//               payouts console applies to Mark Paid.
 function retryRow(row) {
+  // Ignore anything the button isn't offered for ('duplicate' would just 409
+  // again; 'saved' is already money in the P&L).
+  if (!canRetry(row)) return
+  if (WRITE_AMBIGUOUS.has(row.saveStatus)) {
+    const what = row.vendor || row.fileName || 'this receipt'
+    const ok = window.confirm(
+      `"${what}" timed out — it MAY already have been saved.\n\n` +
+      `Check All Expenses before re-sending, or it could be booked twice.\n\n` +
+      `Re-send it anyway?`,
+    )
+    if (!ok) return
+  }
+  // A duplicate override is never inherited by a re-send: "Save anyway" answered
+  // a question about ONE attempt, and after a failure the answer has to be given
+  // again. Same rule hydrateDraft applies to a batch resumed on another device.
+  row.allowDuplicate = false
+  row.duplicateOf = null
   row.saveStatus = null
   row.saveError = ''
 }
