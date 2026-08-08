@@ -82,12 +82,46 @@ export function createDotPin(color, size = 14) {
   return el
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+/**
+ * Build an SVG node with presentation attributes.
+ *
+ * Two things this exists to enforce:
+ *
+ * 1. `document.createElement('svg')` silently produces an HTMLUnknownElement
+ *    that renders as nothing. SVG needs the namespace, hence createElementNS.
+ * 2. `style` is deliberately NOT passed through here — callers set
+ *    `node.style.cssText` instead, as the other 15 sites in this file already
+ *    do. That distinction is the whole point of this helper: a CSSOM write is
+ *    not subject to `style-src`, while a style ATTRIBUTE is — whether it was
+ *    hand-written, set via setAttribute, or created by the HTML parser from an
+ *    innerHTML string. The markers below used to take the third route, which is
+ *    why they, and not the cssText assignments, blocked the CSP.
+ */
+function svgEl(tag, attrs = {}) {
+  const node = document.createElementNS(SVG_NS, tag)
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v)
+  return node
+}
+
 // Fuel-pump glyph, shared by every fuel-stop marker variant below.
 const PUMP_PATH =
   'M19.77 7.23l.01-.01-3.72-3.72L15 4.56l2.11 2.11c-.94.36-1.61 1.26-1.61 2.33 0 1.38 1.12 2.5 2.5 2.5.36 0 .69-.08 1-.21v7.21c0 .55-.45 1-1 1s-1-.45-1-1V14c0-1.1-.9-2-2-2h-1V5c0-1.1-.9-2-2-2H6c-1.1 0-2 .9-2 2v16h9v-7.5h1.5v5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V9c0-.69-.28-1.32-.73-1.77zM12 10H6V5h6v5z'
 
+// Returns an <svg> ELEMENT (it used to return a markup string) — callers
+// appendChild it rather than assigning innerHTML.
 function pumpSvg(px, fill) {
-  return `<svg viewBox="0 0 24 24" width="${px}" height="${px}" fill="${fill}" aria-hidden="true" style="flex:0 0 auto"><path d="${PUMP_PATH}"/></svg>`
+  const svg = svgEl('svg', {
+    viewBox: '0 0 24 24',
+    width: px,
+    height: px,
+    fill,
+    'aria-hidden': 'true',
+  })
+  svg.style.cssText = 'flex:0 0 auto;'
+  svg.appendChild(svgEl('path', { d: PUMP_PATH }))
+  return svg
 }
 
 // Helper: diesel truck-stop marker (fuel pump glyph in a teal badge) for
@@ -98,7 +132,7 @@ function pumpSvg(px, fill) {
 export function createFuelStopPin(size = 24, bg = '#0f766e') {
   const el = document.createElement('div')
   el.style.cssText = `display:flex;align-items:center;justify-content:center;width:${size}px;height:${size}px;background:${bg};border:2px solid #fff;border-radius:50%;box-shadow:0 1px 4px rgba(0,0,0,0.35);cursor:pointer;`
-  el.innerHTML = pumpSvg(Math.round(size * 0.55), '#fff')
+  el.appendChild(pumpSvg(Math.round(size * 0.55), '#fff'))
   return el
 }
 
@@ -171,7 +205,7 @@ export function createFuelPricePin({ kind = 'priced', label = '', title = '' } =
 
   const pill = document.createElement('div')
   pill.style.cssText = `display:flex;align-items:center;gap:3px;padding:2px 6px;background:${s.bg};border:${s.borderW}px solid ${s.border};border-radius:7px;color:${s.fg};font-size:${s.font}px;font-weight:${kind === 'unpriced' ? 600 : 800};line-height:1.35;white-space:nowrap;font-variant-numeric:tabular-nums;${kind === 'unpriced' ? 'font-style:italic;' : ''}`
-  pill.innerHTML = pumpSvg(kind === 'unpriced' ? 10 : 11, s.fg)
+  pill.appendChild(pumpSvg(kind === 'unpriced' ? 10 : 11, s.fg))
   const text = document.createElement('span')
   text.textContent = label
   pill.appendChild(text)
@@ -236,15 +270,44 @@ export function createTruckArrow({ color = '#16a34a', heading = 0, moving = true
   const el = document.createElement('div')
   el.style.cssText = `position:relative;width:${size}px;height:${size}px;cursor:pointer;`
 
+  const DROP_SHADOW = 'filter:drop-shadow(0 1px 2px rgba(0,0,0,0.35));'
+
   // Rotating arrow lives in its own wrapper so heading transitions don't
   // drag the unrotated parked-square sibling when the truck is stopped.
   const arrow = document.createElement('div')
   arrow.style.cssText = `position:absolute;inset:0;display:flex;align-items:center;justify-content:center;transition:transform 1000ms linear;will-change:transform;transform-origin:50% 50%;`
-  arrow.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" style="filter:drop-shadow(0 1px 2px rgba(0,0,0,0.35));"><path d="M12 2 L19 20 L12 16 L5 20 Z" fill="${color}" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>`
+  const arrowSvg = svgEl('svg', { viewBox: '0 0 24 24', width: size, height: size })
+  arrowSvg.style.cssText = DROP_SHADOW
+  arrowSvg.appendChild(svgEl('path', {
+    d: 'M12 2 L19 20 L12 16 L5 20 Z',
+    fill: color,
+    stroke: '#fff',
+    'stroke-width': '1.5',
+    'stroke-linejoin': 'round',
+  }))
+  arrow.appendChild(arrowSvg)
 
   const parked = document.createElement('div')
   parked.style.cssText = `position:absolute;inset:0;display:flex;align-items:center;justify-content:center;`
-  parked.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" style="filter:drop-shadow(0 1px 2px rgba(0,0,0,0.35));"><rect x="5" y="5" width="14" height="14" rx="3" fill="${color}" stroke="#fff" stroke-width="1.5"/><text x="12" y="16" text-anchor="middle" font-family="DM Sans,sans-serif" font-size="11" font-weight="700" fill="#fff">P</text></svg>`
+  const parkedSvg = svgEl('svg', { viewBox: '0 0 24 24', width: size, height: size })
+  parkedSvg.style.cssText = DROP_SHADOW
+  parkedSvg.appendChild(svgEl('rect', {
+    x: '5', y: '5', width: '14', height: '14', rx: '3',
+    fill: color,
+    stroke: '#fff',
+    'stroke-width': '1.5',
+  }))
+  const parkedLabel = svgEl('text', {
+    x: '12', y: '16',
+    'text-anchor': 'middle',
+    'font-family': 'DM Sans,sans-serif',
+    'font-size': '11',
+    'font-weight': '700',
+    fill: '#fff',
+  })
+  parkedLabel.textContent = 'P'
+  parkedSvg.appendChild(parkedLabel)
+  parked.appendChild(parkedSvg)
 
   el.appendChild(arrow)
   el.appendChild(parked)

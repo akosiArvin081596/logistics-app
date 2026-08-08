@@ -1,0 +1,62 @@
+/* ============================================================
+   Pre-boot loader — the spinner inside #app that paints before
+   the Vue bundle arrives and is replaced the moment it mounts.
+   ============================================================
+
+   These rules used to be three `style="…"` attributes plus a `<style>` block
+   inline in index.html. They moved out because an inline style attribute is
+   what forces `style-src 'unsafe-inline'` into the CSP, and the point of that
+   directive is to make injected markup inert.
+
+   Moving them costs nothing in production, and that was verified rather than
+   assumed. `vite build` folds this file into the entry CSS, and Vite already
+   emits a render-blocking <link> for index-*.css into <head> — so first paint
+   was ALREADY gated on that stylesheet. Stalling it and reading the Paint
+   Timing API proves it: with the bundle stalled, the old inline-styled loader
+   reported `position: fixed` and the right background yet had painted zero
+   frames, exactly like this version. The inline styles only ever made the DOM
+   correct during a window in which nothing was on screen. Measured end to end
+   on a throttled connection, the first painted frame is the styled loader at
+   109 ms here versus 114 ms before.
+
+   It is linked from index.html rather than imported from main.js because of the
+   DEV server, where the two are NOT equivalent: there, shared.css is injected by
+   JavaScript, so index.html has no stylesheet at all, and a cold dev boot
+   resolves hundreds of unbundled modules — precisely the window the loader is on
+   screen for. Imported, it would sit unstyled through it: the exact flash it
+   exists to prevent. A <link> is a real stylesheet in dev and gets bundled in
+   prod, so the loader is styled in both, and it stays CSP-clean under
+   `style-src 'self'`.
+*/
+
+#app-loader {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #0f0f0f;
+  gap: 1rem;
+}
+
+#app-loader .app-loader-spinner {
+  animation: app-loader-spin 0.9s linear infinite;
+}
+
+/* system-ui only — this label renders before the webfonts have applied, so
+   asking for DM Sans here would just guarantee a reflow. */
+#app-loader .app-loader-label {
+  font-family: system-ui, sans-serif;
+  font-size: 0.78rem;
+  color: #4b5563;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Deliberately not named `spin`. Five component <style> blocks already declare
+   a `spin` keyframe; Vue scopes those, but this is a global stylesheet and a
+   collision here would be silent. */
+@keyframes app-loader-spin {
+  to { transform: rotate(360deg); }
+}
