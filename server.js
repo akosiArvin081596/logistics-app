@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const http = require("http");
+const https = require("https");
 const { Server } = require("socket.io");
 const { google } = require("googleapis");
 const path = require("path");
@@ -3349,6 +3350,141 @@ const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON
 
 // ============================================================
+// Google API transport — dead keep-alive sockets
+// ============================================================
+// 2026-08-06 outage: the Operations Dashboard rendered skeletons and browsers
+// gave up; /api/dashboard and /api/trucks 504'd through nginx, then 499'd.
+// Google was healthy throughout — on the same box a raw values.get for the full
+// Job Tracking tab returned 200 in ~470 ms (291 KB), token fetch 140 ms, TCP
+// connect 17 ms on both v4 and v6 — and SQLite-only endpoints stayed at ~230 ms,
+// so the event loop was never blocked. What hung was the app's own first read
+// after the 60 s cache expired: ~150 seconds. That number is the tell. It is a
+// TCP retransmission budget, not an API delay. The process had accumulated dead
+// keep-alive sockets to Google; a request handed to a half-open socket blocked
+// until the OS gave up, then succeeded on a fresh one and repopulated the cache
+// — hence "works for exactly a minute, then hangs for the next unlucky user".
+// A pm2 restart took the cold read from 150 s to 494 ms.
+//
+// TWO mechanisms. The second is the one that actually fixes the outage; the
+// first is prevention that was, until now, an accident of the Node version.
+//
+//   1. PREVENTION — a keep-alive agent that reaps FREE sockets after a short
+//      idle. Node's own http.Agent already implements what agentkeepalive calls
+//      `freeSocketTimeout`: `timeout` is applied via socket.setTimeout(), and
+//      the agent's handler destroys the socket ONLY while it sits in the free
+//      pool (see _http_agent.js onTimeout), so it can never kill a slow but
+//      working call. Measured: a 3 s in-flight request under a 1 s agent
+//      timeout finished normally at 3012 ms, while an idle pooled socket went
+//      1 → 0. No new dependency needed.
+//
+//      ⚠️ Be clear about what this is worth. From Node 19 on, https.globalAgent
+//      ALREADY defaults to { keepAlive: true, timeout: 5000 } — so on a modern
+//      Node the reaper was largely there and the outage happened anyway, which
+//      is exactly why (2) is the load-bearing half. What this buys is that the
+//      behaviour stops being implicit: on Node <= 18 the same globalAgent had
+//      keepAlive:false, so the pooling characteristics of the app's PRIMARY
+//      datastore silently depended on which major Node the VPS happened to run.
+//      It also gives Google its own pool instead of sharing globalAgent with
+//      every other outbound call in the process (Gemini, ScanKit, Routemate,
+//      Maps/Places). GOOGLE_SOCKET_IDLE_MS defaults to 5 s to MATCH Node's own
+//      default — deliberately never looser, or we would widen the stale window
+//      we are trying to close. It costs nothing in practice: the calls in a
+//      dashboard burst are milliseconds apart and still share a socket, and the
+//      60 s Job Tracking cache means a cold read opens a fresh connection
+//      anyway (17 ms connect, measured).
+//
+//   2. CONTAINMENT — a per-request timeout with retry. This is the actual fix.
+//      A reaper only helps a socket that sat idle long enough to be reaped; it
+//      does nothing for one that dies a second after being parked, or dies
+//      mid-flight when the peer vanishes with no FIN and no RST. There is no
+//      request timeout anywhere on this path today, so the only bound is the
+//      kernel's retransmission budget — the 150 s we measured.
+//
+// ⚠️ The timeout MUST NOT be an AbortController. gaxios refuses to retry an
+// AbortError by design (`if (err.name === 'AbortError') return false` in
+// gaxios/build/src/retry.js), so aborting would fail a user's page instead of
+// retrying it — the opposite of what we want. The `timeout` option is handled
+// by node-fetch v2 underneath gaxios and raises a plain FetchError
+// ('request-timeout'), which gaxios classifies as a no-response error and DOES
+// retry. Do not "modernise" this into `signal`.
+//
+// Why 15 s: node-fetch applies `timeout` twice and independently — once until
+// response headers arrive (cleared at req.on('response')) and again over the
+// body read — so the 291 KB Job Tracking body gets its own full budget and is
+// never charged for the server's think time. The largest real call is ~470 ms
+// end to end and the worst legitimate latency this repo has ever recorded for
+// it is the "2-5s" noted on the cache below, so 15 s is ~3x the worst real
+// case per phase. It also matches the ceiling already used by every other
+// integration here (routemate-client, Gemini OCR, ScanKit). Worst case for a
+// genuinely unreachable Google is 15 + 0.1 + 15 + 0.5 + 15 ≈ 45.6 s — still
+// inside nginx's 60 s, so an outage now surfaces as a real error with a real
+// message rather than as a 504.
+const GOOGLE_API_TIMEOUT_MS = Number(process.env.GOOGLE_API_TIMEOUT_MS) || 15000;
+const GOOGLE_SOCKET_IDLE_MS = Number(process.env.GOOGLE_SOCKET_IDLE_MS) || 5000;
+
+const googleAgentOptions = {
+	keepAlive: true,
+	// The free-socket reaper. See (1) above — in-flight requests are unaffected.
+	timeout: GOOGLE_SOCKET_IDLE_MS,
+	// maxSockets is deliberately left at Node's default (Infinity). Capping it
+	// would add head-of-line queueing to the hot path of ~185 endpoints — a new
+	// failure mode, in a change whose whole point is removing one.
+	maxFreeSockets: 16,
+	// LIFO (Node's default, pinned here because it matters): reuse the most
+	// recently used socket, which is the one least likely to have gone stale.
+	scheduling: "lifo",
+};
+const googleHttpsAgent = new https.Agent(googleAgentOptions);
+const googleHttpAgent = new http.Agent(googleAgentOptions);
+// node-fetch accepts `agent` as a function of the parsed URL, which keeps this
+// correct if a Google endpoint is ever reached over plain http (and survives
+// gaxios/googleapis-common's deep `extend()` merges, which copy functions and
+// class instances by reference rather than cloning them).
+function googleAgentFor(parsedUrl) {
+	return parsedUrl && parsedUrl.protocol === "http:" ? googleHttpAgent : googleHttpsAgent;
+}
+
+// Retries were previously invisible — the outage produced no log line at all.
+// Throttled to one line per 30 s with a running count, in the spirit of
+// logRoutemateSyncFailure: enough to see "we are burning dead sockets", not
+// enough to flood the log during a real Google outage.
+const googleRetryLog = { count: 0, lastLoggedAt: 0 };
+function onGoogleRetryAttempt(err) {
+	googleRetryLog.count += 1;
+	const now = Date.now();
+	if (now - googleRetryLog.lastLoggedAt < 30_000) return;
+	googleRetryLog.lastLoggedAt = now;
+	const status = err && err.response && err.response.status;
+	console.warn(
+		`[google-api] retrying request (${googleRetryLog.count} retries so far): ` +
+		`${(err && err.message) || "unknown error"}${status ? ` [status ${status}]` : " [no response]"}`,
+	);
+}
+
+// These are gaxios' own defaults, written out so the important one is visible.
+// ⚠️ httpMethodsToRetry deliberately EXCLUDES POST. Sheets appends
+// (values.append) and batchUpdate are POSTs, and retrying an append after a
+// timeout would duplicate the row — i.e. duplicate a load. values.update is a
+// PUT and is idempotent (fixed range, fixed values), so it stays retryable.
+// Do not add POST here.
+const GOOGLE_RETRY_CONFIG = {
+	retry: 3,
+	noResponseRetries: 2,
+	httpMethodsToRetry: ["GET", "HEAD", "PUT", "OPTIONS", "DELETE"],
+	onRetryAttempt: onGoogleRetryAttempt,
+};
+
+// google.options() is merged into EVERY googleapis request (googleapis-common
+// apirequest.js reads context.google._options first), so this covers Sheets and
+// Drive — the same client stack with the same failure mode — plus anything
+// added later, with no per-call-site change across ~185 endpoints.
+google.options({
+	timeout: GOOGLE_API_TIMEOUT_MS,
+	agent: googleAgentFor,
+	retryConfig: GOOGLE_RETRY_CONFIG,
+});
+
+// ============================================================
 // Google Sheets Auth Setup (cached — created once, reused)
 // ============================================================
 const auth = new google.auth.GoogleAuth({
@@ -3362,6 +3498,26 @@ const auth = new google.auth.GoogleAuth({
 		// drive.file. Verified the service account can list/read that folder.
 		"https://www.googleapis.com/auth/drive.readonly",
 	],
+	// The OAuth token exchange does NOT go through google.options() — the JWT
+	// client hands gtoken its own transporter, which talks to oauth2.googleapis.com
+	// over the same pooled-socket stack and so has the same failure mode. A dead
+	// socket there fails a user's request just as surely; it is merely rarer,
+	// because the access token is cached for its lifetime.
+	clientOptions: {
+		transporterOptions: {
+			timeout: GOOGLE_API_TIMEOUT_MS,
+			agent: googleAgentFor,
+			retry: true,
+			retryConfig: {
+				...GOOGLE_RETRY_CONFIG,
+				// POST is safe to retry HERE and only here: the sole POST this
+				// transporter makes is the JWT→access-token exchange, which has no
+				// side effect to duplicate. Without it a timed-out token fetch
+				// would not retry at all (POST is excluded above, for good reason).
+				httpMethodsToRetry: ["GET", "HEAD", "PUT", "OPTIONS", "DELETE", "POST"],
+			},
+		},
+	},
 });
 
 let sheetsClient = null;
@@ -22086,18 +22242,61 @@ app.get("/api/weather", requireAuth, async (req, res) => {
 
 // Job Tracking sheet cache — avoids hitting Google Sheets API on every investor request (2-5s).
 // TTL 60s. Invalidated by mutation endpoints (dispatch, status update, load edit) via jtCacheInvalidate().
+//
+// The cache had no in-flight coalescing, so every concurrent cold miss fired
+// its own full-tab fetch. One dashboard page load is several simultaneous
+// 291 KB reads where one would do — and during the 2026-08-06 dead-socket
+// outage each of those was an independent chance to draw a half-open socket,
+// so the stampede was also a blast-radius multiplier. _jtInflight collapses
+// them onto one request.
+//
+// ⚠️ A REJECTED promise must never be cached. Parking a failed fetch in
+// _jtCache (or leaving it in _jtInflight) would serve the failure to every
+// later caller and turn a single blip into a persistent outage — strictly
+// worse than the stampede. Hence: _jtCache is written only after a successful
+// parse, and _jtInflight is cleared in a `finally`, so the next caller after a
+// failure starts a clean attempt.
 let _jtCache = null;
+let _jtInflight = null;
+let _jtEpoch = 0;
 const JT_CACHE_TTL = 60_000;
 async function getJobTrackingCached() {
 	if (_jtCache && (Date.now() - _jtCache.at) < JT_CACHE_TTL) return _jtCache.data;
-	const sheets = await getSheets();
-	const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
-	const parsed = parseSheet(response.data);
-	parsed.data = deduplicateLoads(parsed.data, parsed.headers);
-	_jtCache = { data: parsed, at: Date.now() };
-	return parsed;
+	// Join the read already in flight rather than starting a second one.
+	if (_jtInflight) return _jtInflight;
+
+	// Snapshot the epoch: if a mutation invalidates the cache while this read is
+	// in flight, the result is a PRE-mutation snapshot and must not be written
+	// back — that would silently undo jtCacheInvalidate() and pin stale data for
+	// another 60s. (Latent before coalescing too; it just bit one caller instead
+	// of all of them.)
+	const epoch = _jtEpoch;
+	const attempt = (async () => {
+		const sheets = await getSheets();
+		const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const parsed = parseSheet(response.data);
+		parsed.data = deduplicateLoads(parsed.data, parsed.headers);
+		if (_jtEpoch === epoch) _jtCache = { data: parsed, at: Date.now() };
+		return parsed;
+	})();
+	_jtInflight = attempt;
+	try {
+		return await attempt;
+	} finally {
+		// Guard the identity check: a jtCacheInvalidate() during the read may
+		// already have dropped this attempt and a newer one may own the slot.
+		if (_jtInflight === attempt) _jtInflight = null;
+	}
 }
-function jtCacheInvalidate() { _jtCache = null; }
+function jtCacheInvalidate() {
+	_jtCache = null;
+	_jtEpoch += 1;
+	// Detach any read that started before this mutation so callers arriving
+	// afterwards fetch fresh data instead of joining a stale request. Callers
+	// already joined keep the older snapshot — exactly what they would have got
+	// from their own pre-mutation request before coalescing existed.
+	_jtInflight = null;
+}
 
 // ============================================================
 // INVESTOR PAYOUTS — settlement helpers
