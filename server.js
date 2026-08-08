@@ -5310,12 +5310,26 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		} catch (genErr) {
 			// Signature kept, claim refused — and because `signed` stays 0 the
 			// signedCount check below cannot flip this investor to fully_onboarded.
-			db.prepare("UPDATE investor_onboarding_documents SET signature_text=?, signature_image=?, signing_error=?, signing_failed_at=?, signed_pdf_url='' WHERE application_id=? AND doc_key=?")
+			//
+			// `AND signed = 0` is what stops a LOSING writer clobbering a WINNER.
+			// The client aborts at 20 s (useApi.js) while renderPolicy allows 30 s,
+			// and Express does not abort a handler on client disconnect — so the
+			// signer sees "try again", taps Sign, and the retry can succeed while
+			// the first request is still rendering. Without this guard that first
+			// request's late failure would blank signed_pdf_url on a row that is
+			// genuinely signed, which reads downstream exactly like the bug this
+			// PR fixes (checkAndCompleteOnboarding drops docs with no url) and
+			// would re-open the alert on a document that is fine.
+			const failWrite = db.prepare("UPDATE investor_onboarding_documents SET signature_text=?, signature_image=?, signing_error=?, signing_failed_at=?, signed_pdf_url='' WHERE application_id=? AND doc_key=? AND signed = 0")
 				.run(signatureText.trim(), signatureImage || "", genErr.message, now, appId, docKey);
-			alertOnboardingDocFailure({
-				scope: "investor-application", ownerId: appId, docKey,
-				docName: docRow.doc_name, reason: genErr.message,
-			});
+			// Only alert for a document that is actually unsigned. 0 changes means
+			// another request already signed it; there is nothing wrong to report.
+			if (failWrite.changes > 0) {
+				alertOnboardingDocFailure({
+					scope: "investor-application", ownerId: appId, docKey,
+					docName: docRow.doc_name, reason: genErr.message,
+				});
+			}
 			return res.status(503).json({
 				error: "We saved your signature but could not generate the signed document. Nothing was lost — please try again in a moment.",
 				code: genErr.code || "DOCUMENT_RENDER_FAILED",
@@ -6563,13 +6577,27 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 			// Keep the signature, refuse the claim. `signed` stays 0, so
 			// checkAndCompleteOnboarding() cannot advance the driver to
 			// documents_signed on a document we do not actually hold.
-			db.prepare(
-				"UPDATE onboarding_documents SET signature_text = ?, signing_error = ?, signing_failed_at = ?, signed_pdf_url = '' WHERE user_id = ? AND doc_key = ?"
+			//
+			// `AND signed = 0` is what stops a LOSING writer clobbering a WINNER.
+			// The client aborts at 20 s (useApi.js) while renderPolicy allows 30 s,
+			// and Express does not abort a handler on client disconnect — so the
+			// driver sees "try again", taps Sign, and the retry can succeed while
+			// the first request is still rendering. Without this guard that first
+			// request's late failure would blank signed_pdf_url on a row that is
+			// genuinely signed, which reads downstream exactly like the bug this
+			// PR fixes (checkAndCompleteOnboarding drops docs with no url) and
+			// would re-open the alert on a document that is fine.
+			const failWrite = db.prepare(
+				"UPDATE onboarding_documents SET signature_text = ?, signing_error = ?, signing_failed_at = ?, signed_pdf_url = '' WHERE user_id = ? AND doc_key = ? AND signed = 0"
 			).run(signatureText.trim(), genErr.message, nowIso, userId, docKey);
-			alertOnboardingDocFailure({
-				scope: "driver", ownerId: userId, docKey,
-				docName: docRow.doc_name, reason: genErr.message,
-			});
+			// Only alert for a document that is actually unsigned. 0 changes means
+			// another request already signed it; there is nothing wrong to report.
+			if (failWrite.changes > 0) {
+				alertOnboardingDocFailure({
+					scope: "driver", ownerId: userId, docKey,
+					docName: docRow.doc_name, reason: genErr.message,
+				});
+			}
 			return res.status(503).json({
 				error: "We saved your signature but could not generate the signed document. Nothing was lost — please try again in a moment.",
 				code: genErr.code || "DOCUMENT_RENDER_FAILED",
