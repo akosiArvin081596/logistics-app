@@ -12304,13 +12304,25 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 //
 // WHY IT MUST KEEP WORKING. Driver-name drift is a real, recurring failure here
 // — GET /api/admin/scan-driver-mismatches exists solely to find it, and
-// normalizeDriverName() exists because the names arrive dirty. Production today
-// carries a live example: Job Tracking holds one 2026-04 row under "Deshorn
-// King" and 45 rows under "Shorn King", and only the latter has a
-// drivers_directory row, a users row and a truck. That single stray row's
-// revenue and active day currently attribute to a driver who does not exist in
-// any table. Refusing every rename freezes that mistake permanently, so
-// "just block it" is the wrong guard.
+// normalizeDriverName() exists because the names arrive dirty. Refusing every
+// rename freezes those mistakes permanently, so "just block it" is the wrong
+// guard.
+//
+// ⚠️ BUT NOT EVERY NEAR-MATCH IS DRIFT, AND THE LIVE EXAMPLE IS A TRAP.
+// Job Tracking holds one 2026-04 row under "Deshorn King" ($4,600, load
+// 350176308) and 45 rows under "Shorn King". Only the latter has a
+// drivers_directory row, a users row and a truck, so every automated signal —
+// scan-driver-mismatches included — reads "Deshorn" as a typo of "Shorn".
+// IT IS NOT. Confirmed by the business owner 2026-08-08: Deshorn King and
+// Shorn King are TWO DIFFERENT PEOPLE. Shorn King is the only currently active
+// driver; Deshorn is a FORMER driver, which is exactly why he has no
+// directory/user/truck row — not a data gap, just someone who left. That row is
+// correct history and must NOT be merged. Doing so would move one person's
+// $4,600 load, its revenue and its active day onto another person's pay record,
+// inside a closed month.
+// This is the case the merge detection below exists for: a name-similarity
+// heuristic cannot tell "same person, typed twice" from "two people, similar
+// names", and only a human knows which. Never auto-resolve a near-match.
 //
 // WHAT THE LOCK ACTUALLY HAS TO STOP. A rename that lands on EVERY target moves
 // no money: each month's totals are unchanged and only the label moves. A
@@ -12579,9 +12591,12 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 
 		// ⚠️ MERGE DETECTION — a rename INTO a name that already has rows is not a
 		// rename, it is a merge of two drivers, and it is NOT reversible by
-		// swapping the arguments. Verified end-to-end: merging one stray "Deshorn
-		// King" row into "Shorn King" and then re-issuing the call with the names
-		// swapped moved 44 sheet rows and 702 database rows instead of the 1 and 1
+		// swapping the arguments. Verified end-to-end ON A SCRATCH COPY, using the
+		// real "Deshorn King" / "Shorn King" pair — who are TWO DIFFERENT PEOPLE
+		// (see the trap note above; that merge must never be run for real).
+		// Merging the one "Deshorn King" row into "Shorn King" and then re-issuing
+		// the call with the names swapped moved 44 sheet rows and 702 database
+		// rows instead of the 1 and 1
 		// it had changed — i.e. the obvious undo silently renames the OTHER
 		// driver's entire history. So the merge case gets its own reversal recipe
 		// (the exact ids and A1 ranges touched), and is called out in the plan
