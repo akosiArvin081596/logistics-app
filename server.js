@@ -11335,6 +11335,16 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 // transactions, and is NOT gated on PERIOD_FINALIZE_ENABLED — on a database that
 // never enabled the feature `period_locks` is empty and behaviour is
 // byte-identical.
+//
+// One precision on "byte-identical", inherited from the delete guard and true of
+// it too: an empty `period_locks` silences the LOCK rungs, not the FAIL-CLOSED
+// one. A receipt whose `date` resolves to no month at all is still withheld,
+// because expenseRowPeriodLocked() cannot certify a month it cannot read. That
+// is the intended reading and is reported honestly — such a row is labelled
+// "(unknown)" and gets its own sentence in the 409 rather than being folded into
+// the finalized list. It is also not a live concern: all 174 production expense
+// rows carry a well-formed date (checked read-only 2026-08-08), so on that
+// database, dormant or not, this rung never fires.
 
 // Everything PUT /api/users/:id would restate, orphan or strand. `blockers: []`
 // means the update is safe to run.
