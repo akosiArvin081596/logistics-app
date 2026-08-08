@@ -79,13 +79,17 @@ export const useSheetsStore = defineStore('sheets', {
       return result
     },
 
+    // Returns the server's response so the view can report `preserved` — the
+    // broker/contact columns a non-Super-Admin was served redacted, which the
+    // server restores rather than writing the redacted copy back over the record.
     async saveRow(rowIndex, values) {
-      await api.put(
+      const result = await api.put(
         `/api/data/${rowIndex}?sheet=${encodeURIComponent(this.currentSheet)}`,
         { values }
       )
       this.editingRow = null
       await this.loadData()
+      return result
     },
 
     // `reason` is required by the server (400 DELETE_REASON_REQUIRED without it)

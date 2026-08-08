@@ -199,10 +199,21 @@ function handleCancel() {
 
 async function handleSave(rowIndex, values) {
   try {
-    await store.saveRow(rowIndex, values)
-    toast('Row updated', 'success')
-  } catch {
-    toast('Failed to update row', 'error')
+    const result = await store.saveRow(rowIndex, values)
+    // Columns whose redacted value the server put back instead of writing. Say
+    // so — silently discarding an edit and reporting success is worse than
+    // refusing it.
+    if (result?.preserved?.length) {
+      toast(`Row updated. ${result.preserved.join(', ')} left unchanged (hidden from your role).`, 'success')
+    } else {
+      toast('Row updated', 'success')
+    }
+  } catch (err) {
+    // Same reasoning as confirmDelete below: an edit to a finalized month comes
+    // back as 409 PERIOD_FINALIZED naming the month AND the money-bearing column
+    // that triggered it, and tells you to reopen the period. "Failed to update
+    // row" throws away every actionable part of that.
+    toast((err && err.message) || 'Failed to update row', 'error')
   }
 }
 
@@ -215,8 +226,10 @@ async function handleAdd(values) {
     } else {
       toast('Row added successfully', 'success')
     }
-  } catch {
-    toast('Failed to add row', 'error')
+  } catch (err) {
+    // A row backdated into a finalized month is refused here too — keep the
+    // modal open (the values are still there) and say why.
+    toast((err && err.message) || 'Failed to add row', 'error')
   }
 }
 

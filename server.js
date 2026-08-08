@@ -15853,6 +15853,13 @@ const SHEET_ROW_REASON_MAX = 500;
 // able to write an unbounded row. A 26-column Job Tracking row serializes to
 // roughly 1-2 KB, so this truncates nothing real.
 const SHEET_ROW_AUDIT_DETAILS_MAX = 8000;
+// Ceiling on the width of a row a write may submit. Google Sheets itself stops at
+// 18,278 columns (ZZZ), so this refuses nothing a real sheet can hold; it exists
+// so an unbounded `values` array cannot amplify through the diff + audit builder.
+const SHEET_ROW_MAX_CELLS = 20000;
+// Most changed cells one audit row will describe. A 26-column sheet cannot reach
+// it; it bounds what the audit builder materialises when `values` is wide.
+const SHEET_ROW_AUDIT_MAX_CHANGES = 200;
 
 // Tabs whose rows feed an accounting month, and therefore get the period guard.
 //
@@ -15886,6 +15893,14 @@ async function isPeriodGuardedGid(sheets, sheetId) {
 	return false;
 }
 
+// One capped field for an audit payload. Hoisted out of buildSheetDeleteAudit so
+// the update audit below caps identically — two truncation implementations on the
+// same table is how one of them quietly stops parsing.
+function capAuditField(v, n) {
+	const s = String(v == null ? "" : v);
+	return s.length > n ? s.slice(0, n) + "…[truncated]" : s;
+}
+
 // The audit `details` payload, built so that TRUNCATION CANNOT COST THE ROW
 // CONTENTS — which are the entire point of the record.
 //
@@ -15896,10 +15911,7 @@ async function isPeriodGuardedGid(sheets, sheetId) {
 // snapshots are serialized FIRST and given their own budget, everything else is
 // capped per field, and the result is parse-checked before it is returned.
 function buildSheetDeleteAudit(payload) {
-	const cap = (v, n) => {
-		const s = String(v == null ? "" : v);
-		return s.length > n ? s.slice(0, n) + "…[truncated]" : s;
-	};
+	const cap = capAuditField;
 	const out = {
 		outcome: payload.outcome,
 		sheet: cap(payload.sheet, 200),
@@ -16161,6 +16173,17 @@ function sheetRowSnapshot(headers, row) {
 	return cells;
 }
 
+// A raw cell array as the header-keyed object shape GET /api/data returns, so
+// the update route can ask sanitizeBrokerColumns() what a non-Super-Admin was
+// actually served for this row — rather than re-deriving the redaction rule and
+// getting it subtly different. (sanitizeBrokerColumns picks its columns by
+// header NAME, so an object is the shape it needs.)
+function rowObjectFromCells(headers, cells) {
+	const obj = {};
+	(headers || []).forEach((h, i) => { obj[h] = (cells || [])[i] == null ? "" : String(cells[i]); });
+	return obj;
+}
+
 // May this row be deleted? Returns null to allow, else the 409 body.
 //
 // REUSES periodWriteLocked(), NOT expenseRowPeriodLocked(). Reusing the shared
@@ -16227,6 +16250,392 @@ function sheetRowDeleteBlocker(guarded, headers, row) {
 		// the sheet for audit, drops it from every KPI, and reverses.
 		error: `This row's figures belong to ${locked.map(periodLabel).join(", ")}, which ${locked.length === 1 ? "is" : "are"} finalized — deleting the row would restate a closed month and cannot be undone. Remove the load reversibly with DELETE /api/loads/:loadId (soft delete; keeps the row for audit), or reopen the period first with POST /api/periods/:period/reopen, which records a reason.`,
 	};
+}
+
+// ============================================================
+// PUT /api/data/:rowIndex — the same accounting event as the delete above
+// ============================================================
+// Rewriting a closed month's payment restates that month exactly as deleting the
+// row would, and until now this route had neither guard nor audit line. What it
+// must NOT do is refuse every edit to an old row: 96.7% of Job Tracking books
+// into a locked month, so a blanket refusal would stop dispatch fixing a typo in
+// an address or a note on almost the whole sheet. So the guard is scoped to the
+// cells that actually move money or move the month.
+//
+// ⚠️ THE FIELD LIST IS READ OUT OF THE MONEY MATH, NOT CHOSEN. Every regex below
+// is copied from GET /api/investor's own column resolution (mirrored verbatim in
+// GET /api/financials), which is the code that decides what a row contributes:
+//
+//   r[statusCol]      completedStatuses.test(st) gates BOTH revenue and driver
+//                     pay; CANCELED_STATUS_RE in excludeDroppedLoads() drops the
+//                     row from every aggregate. One word here is the whole load.
+//   r[jtRateCol]      `amt` — the revenue itself.
+//   r[jtDateCol]      `assignedMonthKey` — WHICH month the revenue and the pay
+//                     days book to. Moving it moves money between months.
+//   r[pickupDateCol]  the pickup→dropoff window driver-pay active days come from.
+//   r[dropoffDateCol]
+//   r[jtDriverCol]    who is paid, and — via getInvestorDriverSet() — which
+//                     investor's portal the load appears in at all.
+//   r[jtTruckCol]     revenueByTruckMonth, the ELD vehicle whose travel days are
+//                     intersected with the window, and trucks.driver_pay_daily.
+//   r[ownerIdCol]     the PRIMARY investor scope in /api/investor's filter — an
+//                     explicit value wins over the driver-name fallback, so one
+//                     digit here moves a whole load between investors.
+//   r[loadIdCol]      the join key to deleted_loads (so editing it can silently
+//                     UN-soft-delete a load and restore its revenue),
+//                     load_coordinates, invoices and completedLoadIds.
+//
+// The date entry is deliberately WIDER than the resolved date column: it is the
+// same /date|appo|appt/i superset loadRowAccountingMonths() reads. That is not
+// belt-and-braces, it is required for internal consistency — the month set is
+// computed from ALL date-ish columns, so if "Completion Date" were editable
+// without the guard, an edit could change the row's computed month set while the
+// changed-cell test called it harmless.
+//
+// Everything else on the production sheet — Contract ID, Details, Trailer Number,
+// Pickup/Drop-off Info, both Addresses, Broker Contact Name, Phone Number, Email,
+// Location Link, Documents, output — feeds no aggregate anywhere in this file and
+// stays freely editable in a closed month. That is the point.
+const JT_MONEY_COLUMN_PATTERNS = [
+	// Money. The UNION of every money regex that reads this sheet, not just
+	// /api/investor's: /api/dashboard and generateInvoiceHandler use
+	// /payment|rate|amount|pay/i and the tax CSV uses
+	// /rate|amount|revenue|pay|charge|price|cost/i. On today's 26 columns all
+	// three resolve to the same cell ("  Payment  ") so the union changes nothing
+	// now — it is here so a later column named Payout, Charge, Price or Cost feeds
+	// money and is guarded on the day it appears, rather than silently not.
+	{ re: /payment|rate|amount|revenue|pay|charge|price|cost/i, why: "the load's payment amount" },
+	// Month. The superset loadRowAccountingMonths() reads, not just the one
+	// findCol() happens to resolve today.
+	{ re: /date|appo|appt/i, why: "a date that decides which month this load books to" },
+	// Attribution.
+	{ re: /status/i, why: "the status that decides whether this load counts as revenue at all" },
+	{ re: /driver|operator/i, why: "the driver who is paid for this load" },
+	{ re: /truck|unit[._\s-]?number|vehicle/i, why: "the truck the revenue and ELD pay days are attributed to" },
+	{ re: /owner/i, why: "the Owner ID that decides which investor is credited" },
+	{ re: /load.?id|job.?id/i, why: "the load id every other table joins on" },
+];
+
+// Why this header is guarded, or null if editing it moves no figure.
+function guardedColumnReason(header) {
+	const h = String(header == null ? "" : header);
+	if (!h.trim()) return null;
+	for (const p of JT_MONEY_COLUMN_PATTERNS) if (p.re.test(h)) return p.why;
+	return null;
+}
+
+// The row as it will exist AFTER the write. values.update writes `values` from
+// column A, so a SHORT array leaves the tail of the row untouched — an edit that
+// sends 12 cells cannot be judged as if it had blanked columns 13..26.
+function sheetRowAfterUpdate(before, values) {
+	const b = Array.isArray(before) ? before : [];
+	const v = Array.isArray(values) ? values : [];
+	const out = [];
+	for (let i = 0; i < Math.max(b.length, v.length); i++) out.push(i < v.length ? v[i] : b[i]);
+	return out;
+}
+
+// Which guarded cells this write actually changes, with their before/after.
+// Compared as EXACT strings, untrimmed: a trailing space written into the status
+// cell is a real change to the cell, and the conservative direction here is to
+// notice more changes, never fewer.
+function changedGuardedCells(headers, before, after) {
+	const hs = Array.isArray(headers) ? headers : [];
+	const b = Array.isArray(before) ? before : [];
+	const a = Array.isArray(after) ? after : [];
+	const out = [];
+	for (let i = 0; i < Math.max(hs.length, b.length, a.length); i++) {
+		const from = b[i] == null ? "" : String(b[i]);
+		const to = a[i] == null ? "" : String(a[i]);
+		if (from === to) continue;
+		const why = guardedColumnReason(hs[i]);
+		if (!why) continue;
+		// "(unnamed)", NOT `col${i + 1}`: the audit stores the 0-based `index`
+		// beside this, and a label that looks like a 1-based column number next to
+		// a 0-based one is an off-by-one waiting to happen for whoever reverses
+		// this by hand. The index is the address; the label is only a name.
+		out.push({ column: String(hs[i] == null ? "" : hs[i]).trim() || "(unnamed)", index: i, why, from, to });
+	}
+	return out;
+}
+
+// May this row be rewritten? Returns null to allow, else the 409 body.
+//
+// ⚠️ THE UNION OF BEFORE AND AFTER IS THE WHOLE POINT, and it is what makes this
+// more than the delete guard with a different verb. A delete has only a `before`.
+// An update has both, and each direction is a different way to restate a closed
+// month:
+//   • BEFORE locked  — the row's figures are counted in a finalized month today,
+//     so changing its payment/status/driver restates that month. (What the delete
+//     guard catches.)
+//   • AFTER locked   — the row sits in an OPEN month and the edit moves it INTO a
+//     closed one, e.g. rewriting Assigned Date 2026-08-03 → 2026-07-28. A guard
+//     reading only the current row sees an open month, allows it, and books fresh
+//     revenue into a month whose statements have already been published. Nothing
+//     in the before-state is locked, so a before-only guard cannot see this at
+//     all — it is invisible by construction, not merely missed.
+//
+// Reuses periodWriteLocked() through the same sheetRowDeleteBlocker() rungs, and
+// loadRowAccountingMonths() for the month set — deliberately NOT a second
+// resolver. Fails closed on an unreadable period_locks and on a row whose months
+// cannot be resolved, on EITHER side. Not gated on PERIOD_FINALIZE_ENABLED,
+// matching isLocked() and the delete guard.
+function sheetRowUpdateBlocker(guarded, headers, before, after, changes) {
+	if (!guarded) return null;
+	// Nothing money-bearing changed. A note, an address, a phone number, a
+	// trailer number — none of these reach any aggregate, so there is no closed
+	// month to protect and the edit goes through however old the row is. This is
+	// the early return that keeps the guard from being a blanket freeze on 96.7%
+	// of the sheet.
+	if (!changes.length) return null;
+
+	if (!periodLocksReadable()) {
+		return {
+			code: "PERIOD_LOCK_UNREADABLE",
+			periods: [],
+			error: "The period lock table could not be read, so no month can be confirmed open. Edits to a load's money or dates are held until that is fixed; edits to notes, addresses and contacts are unaffected.",
+		};
+	}
+
+	// Both sides, and an unresolvable answer on either is a refusal. `null` (a
+	// date cell the server cannot read) and `[]` (no date at all) say the same
+	// thing: this row cannot be SHOWN to sit outside a closed period.
+	//
+	// EXCEPT when the row is genuinely BLANK, which is the same carve-out
+	// sheetRowIsEmpty() gives the delete guard and for the same reason: an empty
+	// row contributes $0 to every total, so there is no closed month to restate
+	// and only the AFTER state can do harm. Without this, filling in a blank row
+	// is refused forever — the before can never resolve, because there is nothing
+	// there to resolve. (A failed read also produces `[]`, which is why the caller
+	// refuses it as ROW_READ_FAILED before this function is ever reached.)
+	const beforeBlank = sheetRowIsEmpty(before);
+	const beforeMonths = beforeBlank ? [] : loadRowAccountingMonths(headers, before);
+	const afterMonths = loadRowAccountingMonths(headers, after);
+	const unresolved = (m) => !m || !m.length;
+	if ((!beforeBlank && unresolved(beforeMonths)) || unresolved(afterMonths)) {
+		// A blank `before` is not "unresolved" for reporting purposes either — it is
+		// simply empty, and only the after state brought us here.
+		const beforeBad = !beforeBlank && unresolved(beforeMonths);
+		const which = beforeBad && unresolved(afterMonths) ? "before and after this edit"
+			: beforeBad ? "as it stands" : "as this edit would leave it";
+		// Name the offending cells. Uses the SAME sheetCellMonths() primitive the
+		// resolver does, so what is reported here and what poisoned the row can
+		// never disagree. Measured on production 2026-08-08 this hits 2 of 421 rows,
+		// both carrying a bare time with no date in the appointment columns
+		// ("07:00 Appt.", "14:00").
+		const bad = [];
+		const hs = Array.isArray(headers) ? headers : [];
+		for (let i = 0; i < hs.length; i++) {
+			if (!/date|appo|appt/i.test(String(hs[i] || ""))) continue;
+			for (const side of [before, after]) {
+				const cell = (side || [])[i];
+				if (sheetCellMonths(cell) === null) {
+					const label = `${String(hs[i]).trim()} = ${JSON.stringify(String(cell))}`;
+					if (!bad.includes(label)) bad.push(label);
+				}
+			}
+		}
+		return {
+			code: "PERIOD_UNRESOLVED",
+			periods: [],
+			unreadable: bad,
+			// ⚠️ DO NOT restore the old "correct the date cell" wording. Correcting a
+			// date IS a guarded change, and this branch fires on the BEFORE state too,
+			// so that instruction pointed straight back at the refusal that produced
+			// it — a dead end dressed up as a remedy. The honest answer is that the
+			// app cannot certify this row, so the repair happens in the spreadsheet.
+			error: `This row's dates cannot be resolved to an accounting month ${which}, so it cannot be shown to sit outside a closed period${bad.length ? ` — ${bad.join("; ")}` : ""}. Note this row may also belong to a month that is already finalized. Repair the date cell directly in the spreadsheet, then retry; fields that carry no figures (notes, addresses, contacts, trailer) remain editable here in the meantime.`,
+		};
+	}
+
+	const lockedBefore = beforeMonths.filter((mk) => periodWriteLocked(mk));
+	const lockedAfter = afterMonths.filter((mk) => periodWriteLocked(mk));
+	const locked = [...new Set([...lockedBefore, ...lockedAfter])].sort();
+	if (!locked.length) return null;
+
+	// Name the direction, because the two have different remedies: restating a
+	// month you are already in is usually a correction, while moving a load into
+	// a closed month is usually a mistyped date.
+	const movedIn = lockedAfter.filter((mk) => !lockedBefore.includes(mk));
+	const parts = [];
+	if (lockedBefore.length) parts.push(`this load's figures are counted in ${lockedBefore.map(periodLabel).join(", ")}`);
+	if (movedIn.length) parts.push(`this edit would move it into ${movedIn.map(periodLabel).join(", ")}`);
+	return {
+		code: "PERIOD_FINALIZED",
+		periods: locked,
+		changed: changes.map((c) => ({ column: c.column, why: c.why })),
+		error: `${parts.join(", and ")} — ${locked.length === 1 ? "a month that is" : "months that are"} finalized. This edit changes ${changes.map((c) => `${c.column} (${c.why})`).join("; ")}, so it would restate a closed month. Reopen the period first with POST /api/periods/:period/reopen, which records a reason — or edit only the fields that carry no figures (notes, addresses, contacts, trailer), which are never blocked.`,
+	};
+}
+
+// The audit `details` for a row rewrite. Same discipline as
+// buildSheetDeleteAudit: the thing that makes the record USEFUL is serialized
+// FIRST and given its own budget, everything else is capped per field, and the
+// result is parse-checked — so a long `error` or a wide row can never push the
+// before/after values off the end.
+//
+// The before/after pairs are what make this reversible by hand, and they are why
+// this route does NOT require a `reason` the way the delete does: a delete is
+// irreversible and the reason is the only surviving record of intent, whereas an
+// update's previous value is right here in the audit row. Adding a mandatory
+// reason would also have broken every existing caller for no recovery gain.
+function buildSheetUpdateAudit(payload) {
+	const cap = capAuditField;
+	// ⚠️ ORDER IS NOT ENOUGH — the GUARDED cells need PRIORITY, and the list needs
+	// a count cap. Serializing `changed` first only helps if the overflow path
+	// drops the right entries: without this, padding an UNGUARDED cell (Details,
+	// an address) past the byte budget wipes the before/after of the guarded
+	// change in the same request — the money cell, i.e. the only one anybody will
+	// ever come looking for. So guarded entries sort first and the tail is cut,
+	// which also bounds how much this builder can materialise on a route with no
+	// rate limiter.
+	const all = (payload.changed || []).slice()
+		.sort((a, b) => (b.why ? 1 : 0) - (a.why ? 1 : 0));
+	const kept = all.slice(0, SHEET_ROW_AUDIT_MAX_CHANGES);
+	const droppedForCount = all.length - kept.length;
+	const out = {
+		outcome: payload.outcome,
+		sheet: cap(payload.sheet, 200),
+		rowIndex: payload.rowIndex,
+		// The reversal instructions, first.
+		changed: kept.map((c) => ({
+			column: cap(c.column, 120),
+			// The 0-based column index, because the header text alone is not a
+			// reliable address: Job Details' column A header is blank in production,
+			// duplicate headers exist in the wild, and "  Payment  " only identifies
+			// a column once you know it was trimmed. Whoever reverses this by hand
+			// needs the position.
+			col: c.index,
+			from: cap(c.from, 500),
+			to: cap(c.to, 500),
+			...(c.why ? { why: cap(c.why, 160) } : {}),
+		})),
+		guardedChangeCount: (payload.guardedChanged || []).length,
+		guardedColumns: (payload.guardedChanged || []).slice(0, SHEET_ROW_AUDIT_MAX_CHANGES).map((c) => cap(c.column, 120)),
+		...(droppedForCount > 0 ? { changesOmitted: droppedForCount } : {}),
+		...(payload.periods && payload.periods.length ? { periods: payload.periods } : {}),
+		...(payload.code ? { code: payload.code } : {}),
+		...(payload.snapshotUnavailable ? { snapshotUnavailable: true } : {}),
+		...(payload.error ? { error: cap(payload.error, 500) } : {}),
+	};
+	let json = JSON.stringify(out);
+	if (json.length > SHEET_ROW_AUDIT_DETAILS_MAX) {
+		// Still over budget. Drop from the TAIL — which, after the sort above, is
+		// the unguarded cells — one at a time, rather than flattening every entry
+		// and losing the guarded before/after along with the noise. Drop whole
+		// structures, never cut a string in half, and SAY how many went.
+		let dropped = droppedForCount;
+		while (out.changed.length > 1 && JSON.stringify(out).length > SHEET_ROW_AUDIT_DETAILS_MAX) {
+			out.changed.pop();
+			dropped++;
+			out.changesOmitted = dropped;
+		}
+		json = JSON.stringify(out);
+		if (json.length > SHEET_ROW_AUDIT_DETAILS_MAX) {
+			// One entry alone is over budget (a single enormous cell). Only now give
+			// up the values, and say so.
+			out.truncated = `before/after omitted for ${out.changed.length} cell(s) — payload exceeded ${SHEET_ROW_AUDIT_DETAILS_MAX} bytes`;
+			out.changed = out.changed.map((c) => ({ column: c.column, col: c.col }));
+			json = JSON.stringify(out);
+		}
+	}
+	try { JSON.parse(json); } catch { return JSON.stringify({ outcome: payload.outcome, sheet: String(payload.sheet), auditSerializationFailed: true }); }
+	return json;
+}
+
+// A tab title quoted for A1 notation. Titles carrying spaces need it, and an
+// embedded apostrophe is escaped by doubling.
+function a1SheetPrefix(title) {
+	return `'${String(title).replace(/'/g, "''")}'`;
+}
+
+// 0-based column index → A1 column letters. Not String.fromCharCode(65 + i):
+// that silently produces punctuation past column Z, and Job Tracking is already
+// 26 columns wide.
+function a1ColumnLetter(index) {
+	let n = Math.max(0, Math.floor(index)) + 1;
+	let out = "";
+	while (n > 0) {
+		const rem = (n - 1) % 26;
+		out = String.fromCharCode(65 + rem) + out;
+		n = Math.floor((n - 1) / 26);
+	}
+	return out;
+}
+
+// Resolve the requested ?sheet= to a REAL tab, the way the Sheets range parser
+// itself resolves it.
+//
+// ⚠️ THIS IS THE SAME CLASS OF FAIL-OPEN #209 FIXED FOR THE DELETE, IN A NEW
+// FORM, and it is worse here because it needs no quirk to trigger. Verified
+// against a real spreadsheet: A1 range notation matches a tab title
+// CASE-INSENSITIVELY — `job tracking!A1` and `JOB TRACKING!A1` both resolve to
+// 'Job Tracking'. getSheetId() is an EXACT-title Map lookup, so
+// `?sheet=job%20tracking` gives it `undefined`, isPeriodGuardedGid() compares
+// `1036643096 === undefined` → false, and the guard switches itself off while the
+// write lands squarely on Job Tracking. A1 quoting (`?sheet='Job Tracking'`) is
+// the same bypass by another spelling. Both are closed by canonicalizing here and
+// then using the canonical title for BOTH the guard and the write, so the two can
+// never be talking about different tabs.
+//
+// (A double space or a leading space is rejected outright by the range parser —
+// "Unable to parse range" — so those cannot reach a write at all.)
+//
+// Fails CLOSED: if the tab list cannot be read, the sheet is treated as guarded
+// and the raw name is kept, because "I could not look up the tabs" must never
+// read as "this is not Job Tracking".
+async function resolveSheetTargetForWrite(sheets, requested) {
+	const raw = String(requested == null ? "" : requested);
+	// Strip one layer of A1 quoting before matching, undoubling '' → '.
+	const unquoted = /^'.*'$/.test(raw) ? raw.slice(1, -1).replace(/''/g, "'") : raw;
+	const match = (titles) => titles.find((t) => t === raw)
+		|| titles.find((t) => t === unquoted)
+		|| titles.find((t) => t.toLowerCase() === unquoted.toLowerCase());
+
+	let titles;
+	try {
+		// Populates sheetIdCache, i.e. the same cache getSheetId()/the delete use.
+		await getSheetId(sheets, PERIOD_GUARDED_SHEETS[0]);
+		titles = [...sheetIdCache.keys()];
+	} catch {
+		return { title: raw, guarded: true, resolved: false, metaUnreadable: true };
+	}
+	if (!titles.length) return { title: raw, guarded: true, resolved: false, metaUnreadable: true };
+
+	let hit = match(titles);
+	if (!hit) {
+		// ⚠️ getSheetId() short-circuits on a populated sheetIdCache and NEVER
+		// refreshes it, so a tab created after boot is missing from the cache and
+		// would 400 UNKNOWN_SHEET here while GET and POST /api/data happily work on
+		// it — until someone hits GET /api/tabs or the process restarts. Refresh
+		// once before concluding a tab does not exist. A miss is rare (it means a
+		// genuinely unknown name), so this costs nothing on the normal path.
+		try {
+			const meta = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+			for (const s of meta.data.sheets || []) sheetIdCache.set(s.properties.title, s.properties.sheetId);
+			titles = [...sheetIdCache.keys()];
+			hit = match(titles);
+		} catch {
+			return { title: raw, guarded: true, resolved: false, metaUnreadable: true };
+		}
+	}
+	if (!hit) return { title: raw, guarded: true, resolved: false, metaUnreadable: false };
+	// ⚠️ DECIDE `guarded` ON THE GID, not on `PERIOD_GUARDED_SHEETS.includes(hit)`.
+	// That string test was this function's own bug: everything above goes to real
+	// trouble to match the tab CASE-INSENSITIVELY, and then an exact-case
+	// `includes()` would undo it — rename the tab to "JOB TRACKING" in the Sheets
+	// UI and `hit` becomes "JOB TRACKING", `includes()` returns false, and the
+	// guard silently switches off while getJobTrackingCached() keeps working
+	// (range:"Job Tracking" still resolves) so the app looks perfectly healthy.
+	// That is exactly finding L1/L2 of #209's own review, reintroduced. The delete
+	// route decides on the gid via isPeriodGuardedGid() and fails CLOSED under the
+	// same drift; reusing it here makes the two routes fail in the same direction
+	// instead of opposite ones.
+	const gid = sheetIdCache.get(hit);
+	const guarded = Number.isInteger(gid)
+		? await isPeriodGuardedGid(sheets, gid)
+		: true;   // no gid for a title we just matched — fail closed
+	return { title: hit, guarded, resolved: true, metaUnreadable: false };
 }
 
 // Admin: batch delete specific rows from a sheet (for removing stale duplicates)
@@ -16911,14 +17320,23 @@ app.get("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) 
 // CREATE — Append a new row
 app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const sheetName = getSheetName(req);
 		const { values, coordinates } = req.body; // values = array of cell values, coordinates = optional {loadId, originLat, originLng, destLat, destLng, pickupAddress, dropoffAddress}
 
 		const sheets = await getSheets();
 
+		// ⚠️ Canonicalize ?sheet= for the SAME reason PUT does. A1 range notation
+		// matches a tab title case-insensitively, so `?sheet=job tracking` appended
+		// to Job Tracking while `sheetName === "Job Tracking"` was false — silently
+		// skipping BOTH the Owner ID validation and the duplicate-Load-ID check
+		// below. Falls back to the raw name when the tab list cannot be read, which
+		// is the pre-existing behaviour.
+		const requestedSheet = getSheetName(req);
+		const appendTarget = await resolveSheetTargetForWrite(sheets, requestedSheet);
+		const sheetName = appendTarget.resolved ? appendTarget.title : requestedSheet;
+
 		// Validate Owner ID + check for duplicate Load ID in Job Tracking
 		let warning = "";
-		if (sheetName === "Job Tracking") {
+		if (appendTarget.guarded) {
 			let hdrs = [];
 			try {
 				const headerResp = await sheets.spreadsheets.values.get({
@@ -16927,7 +17345,10 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 				});
 				hdrs = (headerResp.data.values || [[]])[0];
 			} catch { /* header fetch failed — skip both checks */ }
-			const ownerErr = validateOwnerIdCell(sheetName, hdrs, values);
+			// "Job Tracking" literal, not `sheetName`: on the metaUnreadable fallback
+			// sheetName is the raw request string, which would make this a no-op in
+			// the one window where the tab identity is least certain.
+			const ownerErr = validateOwnerIdCell("Job Tracking", hdrs, values);
 			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
 			try {
 				const lidIdx = hdrs.findIndex((h) => /load.?id|job.?id/i.test(h));
@@ -16951,6 +17372,52 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 			} catch { /* non-critical: dup-check is best-effort */ }
 		}
 
+		// ⚠️ AN APPEND INTO A CLOSED MONTH IS THE SAME ACCOUNTING EVENT AS AN EDIT,
+		// and leaving it open makes the cheapest way to restate a finalized month
+		// "append", not "edit". A row with a completed status, an amount and an
+		// Assigned Date inside a locked month books fresh revenue into that month —
+		// /api/investor, /api/financials and the payout statement's composition are
+		// all live recomputes, so they all move, while the frozen
+		// investor_payouts.amount does not. The statement then disagrees with the
+		// figure it settles.
+		//
+		// Reuses the update guard with an EMPTY before, which is exactly right: a
+		// new row has no prior figures, so only the "moved INTO a closed month" leg
+		// can fire, and sheetRowIsEmpty([]) makes the blank-before carve-out apply.
+		// Note this constrains the API only — n8n writes to the sheet directly and
+		// is unaffected either way.
+		let appendHeaders = null;
+		if (appendTarget.guarded) {
+			const hdrs = await (async () => {
+				try {
+					const hr = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${a1SheetPrefix(sheetName)}!1:1` });
+					return ((hr.data.values || [[]])[0]) || [];
+				} catch { return null; }
+			})();
+			if (!hdrs || !hdrs.length) {
+				return res.status(409).json({
+					error: "The sheet's header row could not be read, so the new row cannot be shown to belong to an open month. Try again.",
+					code: "ROW_READ_FAILED",
+				});
+			}
+			appendHeaders = hdrs;
+			const appendChanges = changedGuardedCells(hdrs, [], values);
+			const appendBlocker = sheetRowUpdateBlocker(true, hdrs, [], values, appendChanges);
+			if (appendBlocker) {
+				logAudit(req, "create_sheet_row_blocked", "sheet_row", `${sheetName}!new`, buildSheetUpdateAudit({
+					outcome: "blocked", sheet: sheetName, rowIndex: null,
+					changed: appendChanges.map((c) => ({ column: c.column, index: c.index, from: "", to: c.to, why: c.why })),
+					guardedChanged: appendChanges, code: appendBlocker.code, periods: appendBlocker.periods,
+				}));
+				return res.status(409).json({
+					error: appendBlocker.error.replace("This row's figures are counted in", "This new row's figures would be counted in"),
+					code: appendBlocker.code,
+					periods: appendBlocker.periods,
+					...(appendBlocker.unreadable ? { unreadable: appendBlocker.unreadable } : {}),
+				});
+			}
+		}
+
 		const response = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: `${sheetName}`,
@@ -16959,6 +17426,18 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 				values: [values],
 			},
 		});
+
+		// The append had no audit line either — and unlike the update there is no
+		// prior value to record, so the row's own contents ARE the record.
+		logAudit(req, "create_sheet_row", "sheet_row", `${sheetName}!${(response.data.updates && response.data.updates.updatedRange) || "new"}`, buildSheetUpdateAudit({
+			outcome: "created", sheet: sheetName, rowIndex: null,
+			changed: values.map((v, i) => ({
+				column: (appendHeaders && String(appendHeaders[i] || "").trim()) || "(unnamed)",
+				index: i, from: "", to: v == null ? "" : String(v),
+				why: appendHeaders ? (guardedColumnReason(appendHeaders[i]) || "") : "",
+			})),
+			guardedChanged: appendHeaders ? changedGuardedCells(appendHeaders, [], values) : [],
+		}));
 
 		// Save coordinates to load_coordinates if provided
 		if (sheetName === "Job Tracking" && coordinates && coordinates.loadId) {
@@ -16981,61 +17460,319 @@ app.post("/api/data", requireRole("Super Admin", "Dispatcher"), async (req, res)
 });
 
 // UPDATE — Update a specific row
+//
+// Period-guarded and audited: see sheetRowUpdateBlocker() above for WHICH cells
+// are guarded and why the list is read out of the money math rather than chosen.
 app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const sheetName = getSheetName(req);
-		const rowIndex = parseInt(req.params.rowIndex);
-		const { values } = req.body;
+		const requestedSheet = getSheetName(req);
+		// Number(), not parseInt(): parseInt("5abc") is 5 and parseInt("2.9") is 2,
+		// so a malformed index silently rewrote a real row. Same fix #209 applied to
+		// the delete.
+		const rowIndex = Number(req.params.rowIndex);
+		const { values } = req.body || {};
+
+		if (!Array.isArray(values)) {
+			return res.status(400).json({ error: "values must be an array of cell values", code: "VALUES_REQUIRED" });
+		}
+		// The body limit is 50mb (raised for base64 photos), and `values` was
+		// previously bounded only by that. The diff and the audit builder both walk
+		// max(headers, before, after) and buildSheetUpdateAudit stringifies the
+		// payload before it can test the size cap — so one authenticated request
+		// carrying a multi-million-element array materialises it several times over
+		// on a single-process server. Sheets itself tops out at 18,278 columns
+		// (ZZZ), so nothing real is refused here.
+		if (values.length > SHEET_ROW_MAX_CELLS) {
+			return res.status(400).json({
+				error: `A row cannot have more than ${SHEET_ROW_MAX_CELLS} cells (received ${values.length}).`,
+				code: "ROW_TOO_WIDE",
+			});
+		}
+		// ⚠️ ROW 1 IS THE HEADER ROW, and rewriting it is strictly worse here than
+		// deleting it. Every column in this app is resolved by matching header TEXT
+		// (findCol), so renaming "  Payment  " re-points the revenue column for
+		// /api/investor, /api/financials, /api/dashboard and the invoice batch at
+		// once — the entire P&L changes with no data row touched, and no period
+		// guard fires because no row was edited.
+		if (!Number.isInteger(rowIndex) || rowIndex < 2) {
+			return res.status(400).json({
+				error: "rowIndex must be a whole number of 2 or more — row 1 is the header row, and rewriting it re-points every column this app resolves by header text.",
+				code: "INVALID_ROW_INDEX",
+			});
+		}
 
 		const sheets = await getSheets();
 
-		// Validate Job Tracking Owner ID early — reject investors.id typos
-		// before any writes happen.
-		if (sheetName === "Job Tracking") {
-			let hdrs = [];
-			try {
-				const headerResp = await sheets.spreadsheets.values.get({
-					spreadsheetId: SPREADSHEET_ID,
-					range: "Job Tracking!1:1",
-				});
-				hdrs = (headerResp.data.values || [[]])[0];
-			} catch { /* header fetch failed — skip */ }
-			const ownerErr = validateOwnerIdCell(sheetName, hdrs, values);
+		// Resolve ?sheet= to a real tab, then use the canonical title for the guard,
+		// the reads AND the write, so they can never disagree about which tab this
+		// is. See the ⚠️ on resolveSheetTargetForWrite.
+		const target = await resolveSheetTargetForWrite(sheets, requestedSheet);
+		if (!target.resolved && !target.metaUnreadable) {
+			return res.status(400).json({
+				error: `Unknown sheet tab '${requestedSheet}'.`,
+				code: "UNKNOWN_SHEET",
+			});
+		}
+		const sheetName = target.title;
+		const guarded = target.guarded;
+		const a1 = a1SheetPrefix(sheetName);
+
+		// ONE read for the header row AND the full target row. Replaces the two
+		// separate gets this route used to make, and gives the guard and the audit
+		// line the "before" they both need.
+		let headers = [];
+		let before = [];
+		let snapshotUnavailable = false;
+		try {
+			const pre = await sheets.spreadsheets.values.batchGet({
+				spreadsheetId: SPREADSHEET_ID,
+				ranges: [`${a1}!1:1`, `${a1}!${rowIndex}:${rowIndex}`],
+			});
+			const vr = pre.data.valueRanges || [];
+			headers = ((vr[0] && vr[0].values) || [[]])[0] || [];
+			before = ((vr[1] && vr[1].values) || [[]])[0] || [];
+			// ⚠️ An empty-but-successful read must not unlock the write — the same
+			// fail-open #209's review caught on the delete batch. A guarded tab always
+			// has a header row, so no header means the read failed, and with no
+			// "before" the guard cannot know which cells changed OR which month the
+			// row books to today. Both are exactly what it needs.
+			if (!headers.length) snapshotUnavailable = true;
+		} catch (err) {
+			snapshotUnavailable = true;
+			if (!guarded && req.session.user.role !== "Super Admin") throw err;
+		}
+		if (snapshotUnavailable && guarded) {
+			return res.status(409).json({
+				error: "The current contents of this row could not be read, so the edit cannot be shown to leave closed months alone and cannot be recorded reversibly. Try again.",
+				code: "ROW_READ_FAILED",
+			});
+		}
+
+		// Validate Job Tracking Owner ID early — reject investors.id typos before any
+		// writes happen. (Reuses the headers just read.)
+		//
+		// Keyed on `guarded`, NOT on `sheetName === "Job Tracking"`: when the tab
+		// list cannot be read, resolveSheetTargetForWrite falls back to the raw
+		// request string, so `?sheet=job tracking` would make that equality false
+		// while values.batchGet and the write both still land on Job Tracking (A1
+		// notation is case-insensitive) — skipping this check in exactly the window
+		// where least is known. validateOwnerIdCell is a no-op on any tab without an
+		// "Owner ID" header, so widening it costs nothing.
+		if (guarded) {
+			const ownerErr = validateOwnerIdCell("Job Tracking", headers, values);
 			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
 		}
 
-		// For non-Admin users, preserve original broker/phone column values
-		// so sanitized data doesn't overwrite the full JSON
+		// For non-Admin users, preserve original broker/phone column values so the
+		// sanitized copy they were served doesn't overwrite the full record.
+		//
+		// ⚠️ THIS WAS A NO-OP UNTIL NOW, and it was losing data. The old code read
+		// `${sheetName}!A${rowIndex}` — in A1 notation that is the single CELL A5,
+		// not row 5 (verified against a real spreadsheet: it returns 1 value where
+		// `5:5` returns 25). So `currentValues[i]` was undefined for every column
+		// past A, the `&& currentValues[i]` test never passed, and nothing was ever
+		// spliced back. Measured against production's layout, what a Dispatcher then
+		// wrote back was lossy: sanitizeBrokerColumns() picks its column with
+		// `headers.find(/phone|contact/i)`, which matches "Broker Contact Name"
+		// (it contains "Contact") BEFORE "Phone Number" — so the column actually
+		// redacted is Broker Contact Name, reduced by sanitizeBrokerContact() to
+		// `{"Name":…}`, and saving the row wrote that stripped copy over the stored
+		// `{"Name":…,"Email":…}`. ("Phone Number" is never reached, and so was never
+		// blanked.) Reading the real row above is what fixes it; the splice itself is
+		// unchanged, and its own /broker|phone|contact/i covers both columns.
+		//
+		// ⚠️ RESTORE ONLY WHAT WAS REDACTED, not every matching column. Because the
+		// splice had never once run, "preserve broker columns" had never actually
+		// restricted anybody — and both columns are editable in the Active Loads
+		// modal a Dispatcher uses. A blanket restore would silently discard their
+		// edit, answer {success:true}, and let the UI show the change until the next
+		// refresh. So the value is put back only when the caller sent back exactly
+		// the redacted copy GET /api/data served them; a genuine edit goes through.
+		const preserved = [];
 		if (req.session.user.role !== "Super Admin") {
-			const headerRes = await sheets.spreadsheets.values.get({
-				spreadsheetId: SPREADSHEET_ID,
-				range: `${sheetName}!1:1`,
-			});
-			const headers = (headerRes.data.values && headerRes.data.values[0]) || [];
-			const currentRowRes = await sheets.spreadsheets.values.get({
-				spreadsheetId: SPREADSHEET_ID,
-				range: `${sheetName}!A${rowIndex}`,
-			});
-			const currentValues = (currentRowRes.data.values && currentRowRes.data.values[0]) || [];
+			const servedRow = sanitizeBrokerColumns(headers, [rowObjectFromCells(headers, before)])[0] || {};
 			headers.forEach((h, i) => {
-				if (/broker|phone|contact/i.test(h) && currentValues[i] && i < values.length) {
-					values[i] = currentValues[i];
+				if (!/broker|phone|contact/i.test(h) || !before[i] || i >= values.length) return;
+				const stored = String(before[i]);
+				const served = servedRow[h] === undefined ? stored : String(servedRow[h]);
+				// Nothing was hidden from them for this column — let them edit it.
+				if (served === stored) return;
+				// They sent the redacted copy straight back: that is the round-trip
+				// this splice exists to catch, not an edit.
+				if (String(values[i] == null ? "" : values[i]) === served) {
+					values[i] = before[i];
+					preserved.push(String(h).trim() || `col${i + 1}`);
 				}
 			});
 		}
 
-		const response = await sheets.spreadsheets.values.update({
-			spreadsheetId: SPREADSHEET_ID,
-			range: `${sheetName}!A${rowIndex}`,
-			valueInputOption: "USER_ENTERED",
-			requestBody: {
-				values: [values],
-			},
+		// Diff AFTER the splice — the spliced values are what actually get written,
+		// so they are what has to be judged and what has to be audited.
+		const after = sheetRowAfterUpdate(before, values);
+		const changes = changedGuardedCells(headers, before, after);
+
+		const auditDetails = (outcome, extra) => buildSheetUpdateAudit({
+			outcome,
+			sheet: sheetName,
+			rowIndex,
+			// Every changed cell, guarded or not — the audit's job is to make the
+			// write reversible by hand, and a corrected address is as much a change
+			// as a corrected payment.
+			changed: (() => {
+				const out = [];
+				for (let i = 0; i < Math.max(headers.length, before.length, after.length); i++) {
+					const from = before[i] == null ? "" : String(before[i]);
+					const to = after[i] == null ? "" : String(after[i]);
+					if (from === to) continue;
+					out.push({ column: String(headers[i] == null ? "" : headers[i]).trim() || "(unnamed)", index: i, from, to, why: guardedColumnReason(headers[i]) || "" });
+				}
+				return out;
+			})(),
+			guardedChanged: changes,
+			snapshotUnavailable,
+			...extra,
 		});
+
+		// ⚠️ A LOAD ID CHANGE REACHES A ROW THIS GUARD NEVER LOOKED AT.
+		// sheetRowUpdateBlocker judges the months of the EDITED row only, but
+		// deduplicateLoads() runs inside getJobTrackingCached() — which every
+		// aggregate reads — and it resolves a collision by keeping the LAST row with
+		// that id. So retyping an open-month row's Load ID to match a completed load
+		// sitting in a finalized month shadows that row out of every total: both
+		// sides of the edited row are open, `locked` is empty, and the guard allows
+		// it while a closed month quietly loses the revenue. The reverse (making a
+		// duplicate unique again) re-admits the shadowed row's money the same way.
+		// Load ID is the one guarded column whose edit moves a DIFFERENT row's
+		// contribution, so the same-row test cannot see it by construction.
+		//
+		// Refusing the collision outright is both the cheap fix and the correct rule
+		// on its own: POST /api/loads/from-ratecon already 409s DUPLICATE_LOAD for
+		// exactly this, and two live rows sharing a load id is a bug in any month.
+		// Only fires when the Load ID actually CHANGES, so the 116 duplicate rows
+		// already on the production sheet stay editable.
+		if (guarded) {
+			const lidChange = changes.find((c) => /load.?id|job.?id/i.test(c.column));
+			if (lidChange) {
+				const norm = (v) => String(v == null ? "" : v).trim().toLowerCase().replace(/^#/, "");
+				const target = norm(lidChange.to);
+				if (target) {
+					let collision = null;
+					try {
+						const colLetter = a1ColumnLetter(lidChange.index);
+						const all = await sheets.spreadsheets.values.get({
+							spreadsheetId: SPREADSHEET_ID,
+							range: `${a1}!${colLetter}:${colLetter}`,
+						});
+						const cells = (all.data.values || []).map((r) => (r && r[0]) || "");
+						for (let i = 1; i < cells.length; i++) {
+							if (i + 1 === rowIndex) continue;   // the row being edited
+							if (norm(cells[i]) === target) { collision = i + 1; break; }
+						}
+					} catch (err) {
+						// Fail CLOSED: an unread Load ID column means the collision cannot
+						// be ruled out, and this is the one check standing between a
+						// retyped id and a silently shadowed locked-month load.
+						logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "LOAD_ID_CHECK_FAILED", error: err.message }));
+						return res.status(409).json({
+							error: "This edit changes the Load ID, and the existing load ids could not be read to check for a collision. Try again.",
+							code: "LOAD_ID_CHECK_FAILED",
+						});
+					}
+					if (collision) {
+						logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "DUPLICATE_LOAD" }));
+						return res.status(409).json({
+							error: `Load ID '${lidChange.to}' already exists on row ${collision}. Two rows sharing a load id are collapsed to one everywhere the app totals revenue, so this would silently drop that row's figures — including out of a finalized month. Use a unique load id.`,
+							code: "DUPLICATE_LOAD",
+							conflictRowIndex: collision,
+						});
+					}
+				}
+			}
+		}
+
+		const blocker = sheetRowUpdateBlocker(guarded, headers, before, after, changes);
+		if (blocker) {
+			// Record the attempt. `super_admin` is a shared login, so a refusal that
+			// left no trace would make a repeated attempt to rewrite a closed month
+			// invisible in the one place anyone looks afterwards.
+			logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: blocker.code, periods: blocker.periods }));
+			return res.status(409).json({
+				error: blocker.error,
+				code: blocker.code,
+				periods: blocker.periods,
+				...(blocker.changed ? { changed: blocker.changed } : {}),
+				// Which date cells could not be read, so the caller can fix the right
+				// one without parsing it back out of the prose.
+				...(blocker.unreadable ? { unreadable: blocker.unreadable } : {}),
+			});
+		}
+
+		// ⚠️ RE-READ IMMEDIATELY BEFORE WRITING, for the same reason
+		// POST /api/admin/remove-rows does. Row indices are POSITIONAL: a delete
+		// landing between the snapshot above and the write below shifts every
+		// following row up, so row 214 — judged as an open-month load — becomes what
+		// was row 215, and this request overwrites a row the guard never evaluated
+		// while the audit records a `before` describing a different load. `values.update`
+		// leaves a plausible-looking row where a delete at least leaves a hole, and
+		// `super_admin` is a SHARED login, so two people on it is the normal case.
+		if (guarded) {
+			let fresh = null;
+			try {
+				const re = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: `${a1}!${rowIndex}:${rowIndex}`,
+				});
+				fresh = ((re.data.values || [[]])[0]) || [];
+			} catch (err) {
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "ROW_READ_FAILED", error: err.message }));
+				return res.status(409).json({
+					error: "The row could not be re-read immediately before writing, so it cannot be confirmed to be the row that was checked. Try again.",
+					code: "ROW_READ_FAILED",
+				});
+			}
+			const same = (a, b) => {
+				const n = Math.max(a.length, b.length);
+				for (let i = 0; i < n; i++) if (String(a[i] == null ? "" : a[i]) !== String(b[i] == null ? "" : b[i])) return false;
+				return true;
+			};
+			if (!same(fresh, before)) {
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "SHEET_CHANGED" }));
+				return res.status(409).json({
+					error: `Row ${rowIndex} changed while this edit was being checked — another write, or a deleted row shifting the sheet up, means this index no longer points at the row that was validated. Re-open the row and try again.`,
+					code: "SHEET_CHANGED",
+				});
+			}
+		}
+
+		let response;
+		try {
+			response = await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `${a1}!A${rowIndex}`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: {
+					values: [values],
+				},
+			});
+		} catch (err) {
+			// Audit the failed attempt too. A timed-out Sheets write leaves it
+			// genuinely unknown whether the row changed, and that is precisely when
+			// the before/after values are worth having.
+			logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+			throw err;
+		}
+
+		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
+		// The 60s Job Tracking cache would otherwise keep serving the old figures.
+		if (guarded) jtCacheInvalidate();
 
 		res.json({
 			success: true,
 			updatedCells: response.data.updatedCells,
+			// Columns whose redacted value was put back rather than written. Told to
+			// the caller instead of silently swallowed, so a UI can mark them
+			// read-only rather than showing an edit that did not happen.
+			...(preserved.length ? { preserved } : {}),
 		});
 	} catch (error) {
 		console.error("Error updating row:", error.message);
