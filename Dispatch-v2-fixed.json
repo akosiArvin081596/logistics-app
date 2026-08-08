@@ -754,45 +754,6 @@
     },
     {
       "parameters": {
-        "url": "https://maps.googleapis.com/maps/api/distancematrix/json",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "origins",
-              "value": "={{ $('Normalize Load Fields').item.json.output['Pickup Address'] }}"
-            },
-            {
-              "name": "destinations",
-              "value": "={{ $('Normalize Load Fields').item.json.output['Drop-off Address'] }}"
-            },
-            {
-              "name": "units",
-              "value": "imperial"
-            },
-            {
-              "name": "key",
-              "value": "__REDACTED__SET_IN_N8N__KEY__"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        3104,
-        1120
-      ],
-      "id": "2d876aab-6284-43ea-9587-bf59a4b67cb0",
-      "name": "Get Distance Matrix",
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2000,
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
         "operation": "appendOrUpdate",
         "documentId": {
           "__rl": true,
@@ -1451,19 +1412,6 @@
       ],
       "id": "email-input-passthrough-001",
       "name": "Email Input"
-    },
-    {
-      "parameters": {
-        "jsCode": "const rows = $input.first().json.rows;\nconst element = rows && rows[0] && rows[0].elements && rows[0].elements[0];\n\nif (!element || element.status !== 'OK') {\n  return [{ json: {\n    distance_miles: 0,\n    distance_text: 'N/A',\n    payment: 0,\n    rate_per_mile: '0',\n    details: 'Distance unavailable'\n  }}];\n}\n\nconst distanceMiles = Math.round(element.distance.value / 1609.34);\nconst rateStr = $('Normalize Load Fields').first().json.output.Rate || '0';\nconst payment = parseFloat(rateStr.replace(/[\\$,]/g, ''));\nconst ratePerMile = distanceMiles > 0 ? (payment / distanceMiles).toFixed(2) : '0';\n\nconst pickup = $('Normalize Load Fields').first().json.output['Pickup Address'] || '';\nconst dropoff = $('Normalize Load Fields').first().json.output['Drop-off Address'] || '';\n\nfunction cityStateZip(addr) {\n  const match = addr.match(/([^,]+),\\s*([A-Z]{2})\\s*(\\d{5})/i);\n  if (match) return `${match[1].trim()}, ${match[2].toUpperCase()} ${match[3]}`;\n  const parts = addr.split(',');\n  return parts.length >= 2 ? parts.slice(-2).join(',').trim() : addr;\n}\n\nreturn [{ json: {\n  distance_miles: distanceMiles,\n  distance_text: element.distance.text,\n  payment: payment,\n  rate_per_mile: ratePerMile,\n  details: `${cityStateZip(pickup)} - ${cityStateZip(dropoff)}`\n}}];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        3328,
-        1120
-      ],
-      "id": "377bbe76-a82b-4132-a93c-62bdd2184dae",
-      "name": "Calculate RPM + Details"
     },
     {
       "parameters": {
@@ -2187,18 +2135,6 @@
         ]
       ]
     },
-    "Get Distance Matrix": {
-      "main": [
-        [
-          {
-            "node": "Calculate RPM + Details",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        []
-      ]
-    },
     "Update Job Details (Distance)": {
       "main": [
         [
@@ -2230,11 +2166,6 @@
             "index": 0
           }
         ]
-      ]
-    },
-    "Calculate RPM + Details": {
-      "main": [
-        []
       ]
     },
     "AI Agent": {
