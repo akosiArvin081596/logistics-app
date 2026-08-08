@@ -88,9 +88,13 @@ export const useSheetsStore = defineStore('sheets', {
       await this.loadData()
     },
 
-    async deleteRow(rowIndex) {
+    // `reason` is required by the server (400 DELETE_REASON_REQUIRED without it)
+    // and is stored in audit_trail alongside the deleted row's contents — a
+    // sheet row delete is irreversible, so the record has to say why.
+    async deleteRow(rowIndex, reason) {
       await api.del(
-        `/api/data/${rowIndex}?sheet=${encodeURIComponent(this.currentSheet)}`
+        `/api/data/${rowIndex}?sheet=${encodeURIComponent(this.currentSheet)}`,
+        { body: JSON.stringify({ reason }) }
       )
       await this.loadData()
     },

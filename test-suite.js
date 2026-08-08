@@ -924,7 +924,15 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     // hazard for anything else).
     let cleaned = false;
     if (typeof b73.rowIndex === "number") {
-      const del = await req("DELETE", "/api/data/" + b73.rowIndex + "?sheet=" + encodeURIComponent("Job Tracking"), null, ac);
+      // `reason` is REQUIRED by DELETE /api/data/:rowIndex (400
+      // DELETE_REASON_REQUIRED without it) and is written to audit_trail with
+      // the deleted row's contents. Without it this cleanup 400s and leaves the
+      // row it just created behind, in a sheet the suite is meant to leave as it
+      // found it. The row is dated in the current (open) month, so the period
+      // guard passes; a suite run against a sheet whose current month has been
+      // finalized will get a 409 here, and that refusal is correct.
+      const del = await req("DELETE", "/api/data/" + b73.rowIndex + "?sheet=" + encodeURIComponent("Job Tracking"),
+        { reason: "test-suite cleanup: removing the load test 73 just created" }, ac);
       cleaned = del.status === 200;
     }
     test("73. Create-from-ratecon creates a load end to end (and is cleaned up)", created && cleaned);

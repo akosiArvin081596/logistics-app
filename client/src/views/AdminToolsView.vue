@@ -466,9 +466,19 @@ function canRemoveRow(group, row) {
 }
 
 async function removeRow(group, row) {
-  if (!confirm(`Remove row ${row.row} (${row.rawId}, ${row.status}) from Job Tracking?`)) return
+  if (!confirm(
+    `Permanently remove row ${row.row} (${row.rawId}, ${row.status}) from Job Tracking?\n\n` +
+    'This deletes the row from the sheet and shifts every row below it up. It cannot be undone.'
+  )) return
   try {
-    await store.removeRows('Job Tracking', [row.row])
+    // The reason is required and lands in the audit trail beside the deleted
+    // cells. Naming the duplicate group is what makes the entry reconstructable
+    // later — "removed as a duplicate of <load>" is the whole justification.
+    await store.removeRows(
+      'Job Tracking',
+      [row.row],
+      `Duplicate scanner: row ${row.row} removed as a duplicate of load ${group.loadId} (status ${row.status})`
+    )
     toast(`Row ${row.row} removed`)
     group.rows = group.rows.filter((r) => r.row !== row.row)
     if (group.rows.length <= 1) {
@@ -476,8 +486,11 @@ async function removeRow(group, row) {
       store.duplicates.total = store.duplicates.groups.length
       store.duplicates.dangerous = store.duplicates.groups.filter((g) => g.dangerous).length
     }
-  } catch {
-    toast('Failed to remove row', 'error')
+  } catch (err) {
+    // Surface the server's message. A row inside a finalized month comes back as
+    // 409 PERIOD_FINALIZED naming the month and pointing at the reversible soft
+    // delete; "Failed to remove row" would hide the one actionable part.
+    toast((err && err.message) || 'Failed to remove row', 'error')
   }
 }
 
