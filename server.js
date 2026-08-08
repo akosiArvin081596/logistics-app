@@ -2343,6 +2343,16 @@ db.exec(`
 `);
 // Migration: add signed_pdf_url column
 try { db.exec("ALTER TABLE onboarding_documents ADD COLUMN signed_pdf_url TEXT DEFAULT ''"); } catch { /* exists */ }
+// Migration: why a render failure is now RECORDED rather than swallowed.
+// `signed = 1` is a legal assertion — "this person signed this contract, and we
+// hold the document". Until 2026-08-08 the sign routes set it unconditionally,
+// so a missing template or a Puppeteer crash produced a row asserting a signed
+// W-9 with no W-9 behind it. Nothing surfaced that until an audit or a dispute
+// went looking for the file, which is the worst possible time to find out.
+// These two columns hold the other half of the truth: we captured the signature
+// but could not produce the artifact, and here is why. See writeSignedArtifact().
+try { db.exec("ALTER TABLE onboarding_documents ADD COLUMN signing_error TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE onboarding_documents ADD COLUMN signing_failed_at TEXT DEFAULT ''"); } catch { /* exists */ }
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_payment_info (
@@ -2591,6 +2601,30 @@ db.exec(`
 	)
 `);
 try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signature_image TEXT DEFAULT ''"); } catch { /* exists */ }
+// Same pair as onboarding_documents above — an investor's master agreement and
+// vehicle lease are held to the same standard as a driver's contractor agreement.
+try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signing_error TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signing_failed_at TEXT DEFAULT ''"); } catch { /* exists */ }
+
+// A failed signing is only useful if somebody hears about it. Alerts are
+// once-per-(scope, owner, doc), the same shape as fuel_event_alerts and
+// ratecon_reconcile_alerts: the repo's own cautionary tale is the 13 ignored
+// "needs a manual check" rate-con emails, and a legal-document gap repeated on
+// every retry would earn the same fate. resolved_at is stamped when the document
+// is finally produced, so a signer who simply retried closes their own alert.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS onboarding_doc_alerts (
+		alert_key TEXT PRIMARY KEY,
+		scope TEXT DEFAULT '',
+		owner_id INTEGER,
+		doc_key TEXT DEFAULT '',
+		doc_name TEXT DEFAULT '',
+		reason TEXT DEFAULT '',
+		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+		alerted_at DATETIME,
+		resolved_at DATETIME
+	)
+`);
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_payment_info (
@@ -4706,16 +4740,21 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			db.prepare(`INSERT INTO investor_payment_info (application_id, bank_name, account_type, routing_number, account_number, account_name)
 				VALUES (?, ?, ?, ?, ?, ?)`).run(appId, banking.bank_name, banking.account_type || "", banking.routing_number, banking.account_number, banking.account_name || "");
 
-			// Onboarding — fully onboarded immediately
-			db.prepare("INSERT INTO investor_onboarding (application_id, status, onboarded_at) VALUES (?, 'fully_onboarded', ?)").run(appId, now);
+			// Onboarding — status is decided AFTER the PDFs render, below. It used
+			// to be written 'fully_onboarded' here, in the same breath as the
+			// signed = 1 rows, which meant a wholly failed document set still
+			// produced a "fully onboarded" investor.
+			db.prepare("INSERT INTO investor_onboarding (application_id, status, onboarded_at) VALUES (?, 'documents_pending', ?)").run(appId, now);
 
-			// Documents — all signed
-			const insertDoc = db.prepare("INSERT INTO investor_onboarding_documents (application_id, doc_key, doc_name, signed, signature_text, signature_image, signed_at, signed_pdf_url) VALUES (?, ?, ?, 1, ?, ?, ?, ?)");
+			// Documents — signature captured, NOT yet signed. This transaction runs
+			// before a single PDF exists, so `signed = 1` here was a promise about
+			// work that had not happened; the generation loop below then swallowed
+			// its own errors, so the promise was never checked. Rows start at 0 and
+			// are promoted one by one, only against a verified artifact.
+			const insertDoc = db.prepare("INSERT INTO investor_onboarding_documents (application_id, doc_key, doc_name, signed, signature_text, signature_image, signed_at, signed_pdf_url) VALUES (?, ?, ?, 0, ?, ?, ?, '')");
 			for (const doc of INVESTOR_ONBOARDING_DOCS) {
 				const sig = signatures[doc.key];
-				const signedFileName = `${doc.key}-inv-${appId}-signed.pdf`;
-				const signedPdfUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
-				insertDoc.run(appId, doc.key, doc.name, sig.text.trim(), sig.image || "", now, signedPdfUrl);
+				insertDoc.run(appId, doc.key, doc.name, sig.text.trim(), sig.image || "", now);
 			}
 
 			return appId;
@@ -4751,37 +4790,65 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			accountType: banking?.account_type || "",
 		};
 
+		// Promote each document to signed = 1 only once its artifact is on disk.
+		// A failure here does NOT fail the request: the application, banking and
+		// signatures are already committed, so a 500 would tell the applicant it
+		// went wrong and invite a duplicate submission of the very record we just
+		// stored. Instead the failed document stays unsigned and alerts, which is
+		// recoverable, while everything the applicant typed is kept.
+		const failedDocs = [];
 		for (const doc of INVESTOR_ONBOARDING_DOCS) {
 			const sig = signatures[doc.key];
 			const signedFileName = `${doc.key}-inv-${appId}-signed.pdf`;
 			const signedPath = path.join(signedDir, signedFileName);
-			try {
+			const render = () => {
 				if (doc.key === "w9") {
-					const pdfBytes = await fillW9Form({ ...appData, signatureText: sig.text.trim(), signatureImage: sig.image });
-					if (pdfBytes) fs.writeFileSync(signedPath, pdfBytes);
-				} else if (doc.key === "master_agreement") {
-					const pdfBuffer = await renderPolicy("master_agreement", {
-						...appData,
-						signatureText: sig.text.trim(),
-						signatureImage: sig.image,
-						signedAt,
-					});
-					fs.writeFileSync(signedPath, pdfBuffer);
-				} else if (doc.key === "vehicle_lease") {
-					const pdfBuffer = await renderPolicy("vehicle_lease", {
-						...appData,
-						signatureText: sig.text.trim(),
-						signatureImage: sig.image,
-						signedAt,
-					});
-					fs.writeFileSync(signedPath, pdfBuffer);
+					return fillW9Form({ ...appData, signatureText: sig.text.trim(), signatureImage: sig.image });
 				}
+				if (doc.key === "master_agreement" || doc.key === "vehicle_lease") {
+					return renderPolicy(doc.key, {
+						...appData,
+						signatureText: sig.text.trim(),
+						signatureImage: sig.image,
+						signedAt,
+					});
+				}
+				const e = new Error(`No renderer registered for investor document "${doc.key}"`);
+				e.code = "DOCUMENT_RENDERER_MISSING";
+				throw e;
+			};
+			try {
+				const signedPdfUrl = await writeSignedArtifact({
+					render, signedPath,
+					publicUrl: `/uploads/investor-onboarding-signed/${signedFileName}`,
+					label: doc.name || doc.key,
+				});
+				db.prepare("UPDATE investor_onboarding_documents SET signed = 1, signed_pdf_url = ?, signing_error = '', signing_failed_at = '' WHERE application_id = ? AND doc_key = ?")
+					.run(signedPdfUrl, appId, doc.key);
 			} catch (pdfErr) {
-				console.error(`PDF generation failed for ${doc.key}:`, pdfErr.message);
+				db.prepare("UPDATE investor_onboarding_documents SET signing_error = ?, signing_failed_at = ? WHERE application_id = ? AND doc_key = ?")
+					.run(pdfErr.message, new Date().toISOString(), appId, doc.key);
+				alertOnboardingDocFailure({
+					scope: "investor-application", ownerId: appId, docKey: doc.key,
+					docName: doc.name, reason: pdfErr.message,
+				});
+				failedDocs.push(doc.name || doc.key);
 			}
 		}
 
-		res.json({ success: true, applicationId: appId });
+		// Only a complete, verified document set earns 'fully_onboarded'.
+		const signedDocCount = INVESTOR_ONBOARDING_DOCS.length - failedDocs.length;
+		if (!failedDocs.length) {
+			db.prepare("UPDATE investor_onboarding SET status = 'fully_onboarded' WHERE application_id = ?").run(appId);
+		}
+
+		res.json({
+			success: true,
+			applicationId: appId,
+			documentsSigned: signedDocCount,
+			documentsTotal: INVESTOR_ONBOARDING_DOCS.length,
+			documentsPending: failedDocs,
+		});
 
 		// Send emails (async, don't block response)
 		const vehicleRows = vehiclesArr.map((v, i) => `<tr>
@@ -4808,7 +4875,7 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 						<tr><td style="padding:4px 0;color:#64748b;width:140px">Company</td><td style="padding:4px 0;font-weight:600">${legal_name}${dba ? ` (DBA: ${dba})` : ""}</td></tr>
 						${entity_type ? `<tr><td style="padding:4px 0;color:#64748b">Entity Type</td><td style="padding:4px 0">${entity_type}</td></tr>` : ""}
 						<tr><td style="padding:4px 0;color:#64748b">Fleet Size</td><td style="padding:4px 0">${vehiclesArr.length} vehicle(s)</td></tr>
-						<tr><td style="padding:4px 0;color:#64748b">Documents</td><td style="padding:4px 0;color:#16a34a;font-weight:600">3/3 Signed</td></tr>
+						<tr><td style="padding:4px 0;color:#64748b">Documents</td><td style="padding:4px 0;color:${failedDocs.length ? "#b45309" : "#16a34a"};font-weight:600">${signedDocCount}/${INVESTOR_ONBOARDING_DOCS.length} Signed</td></tr>
 					</table>
 				</div>
 				<h3 style="font-size:15px;margin:24px 0 8px;color:#0f172a">What happens next?</h3>
@@ -4891,11 +4958,121 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			return fs.existsSync(filepath) ? { filename: `${doc.name}.pdf`, path: filepath } : null;
 		}).filter(Boolean);
 
-		sendEmail("info@logisx.com", `New Investor Application: ${legal_name}`, adminHtml, pdfAttachments);
+		// Say it out loud rather than quietly attaching fewer PDFs than the email
+		// claims — a short attachment list is exactly the kind of thing nobody
+		// notices until the document is needed.
+		const docWarningHtml = failedDocs.length
+			? `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:700px;margin:0 auto 12px;padding:14px 18px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#991b1b">
+					<b>ACTION NEEDED — ${failedDocs.length} document(s) NOT signed.</b><br>
+					${failedDocs.map(n => `&bull; ${n}`).join("<br>")}<br><br>
+					The applicant's signature was captured, but the PDF could not be generated, so these are recorded as <b>unsigned</b> and are not attached. Regenerate them before approving this investor.
+				</div>`
+			: "";
+
+		sendEmail(
+			"info@logisx.com",
+			`${failedDocs.length ? "ACTION NEEDED — " : ""}New Investor Application: ${legal_name}`,
+			docWarningHtml + adminHtml,
+			pdfAttachments,
+		);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
 });
+
+// --- Signed-document integrity -------------------------------------------------
+// One rule, three call sites (driver sign, investor sign, investor bulk apply):
+// a document is marked `signed = 1` ONLY when a signed artifact demonstrably
+// exists on disk. Everything below exists to make that rule impossible to
+// forget, because the old shape — render, then UPDATE signed = 1 regardless —
+// read as correct at every one of those sites.
+//
+// Verifying the FILE rather than trusting the generator is deliberate: it
+// collapses every failure mode into one check. fillW9Form() returns null on a
+// missing template (it does not throw), renderPolicy() throws on a missing
+// template or field map, pdf-lib throws on a corrupt template, Puppeteer can
+// crash or time out mid-render, and fs can fail on a full or read-only disk.
+// Only the last of those is visible from "did the write call return", so the
+// artifact itself is the single thing worth asserting on.
+const SIGNED_ARTIFACT_MIN_BYTES = 1000; // a real signed PDF is 8 KB+; this only catches truncation
+
+// Renders, writes, and then PROVES the artifact — returns the public URL, or
+// throws a tagged error the callers turn into a recorded failure. Never returns
+// a URL it has not just stat'd.
+async function writeSignedArtifact({ render, signedPath, publicUrl, label }) {
+	let bytes;
+	try {
+		bytes = await render();
+	} catch (err) {
+		const e = new Error(`${label}: render failed — ${err.message}`);
+		e.code = "DOCUMENT_RENDER_FAILED";
+		throw e;
+	}
+	// fillW9Form returns null when no template resolves. That null is the exact
+	// path that used to slip through as a "signed" W-9 with signed_pdf_url = "".
+	if (!bytes || !bytes.length) {
+		const e = new Error(`${label}: generator produced no PDF (template missing or unreadable)`);
+		e.code = "DOCUMENT_TEMPLATE_MISSING";
+		throw e;
+	}
+	const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+	// Same magic-prefix reasoning as the rate-con upload gate: cheap, and it
+	// catches a generator that returned an error page instead of a document.
+	if (buf.subarray(0, 4).toString("latin1") !== "%PDF") {
+		const e = new Error(`${label}: generator output is not a PDF`);
+		e.code = "DOCUMENT_RENDER_FAILED";
+		throw e;
+	}
+	try {
+		fs.writeFileSync(signedPath, buf);
+		const stat = fs.statSync(signedPath);
+		if (!stat.size || stat.size < SIGNED_ARTIFACT_MIN_BYTES) {
+			throw new Error(`wrote only ${stat.size} bytes`);
+		}
+	} catch (err) {
+		const e = new Error(`${label}: could not store the signed PDF — ${err.message}`);
+		e.code = "DOCUMENT_STORE_FAILED";
+		throw e;
+	}
+	return publicUrl;
+}
+
+// Once-per-(scope, owner, doc) alert, mirroring sweepFuelEvents(). A signer who
+// hits a transient failure and retries successfully closes their own alert via
+// resolveOnboardingDocAlert(), so ops only ever sees gaps that are still open.
+function alertOnboardingDocFailure({ scope, ownerId, docKey, docName, reason }) {
+	const key = `${scope}:${ownerId}:${docKey}`;
+	try {
+		const seen = db.prepare("SELECT alert_key, alerted_at, resolved_at FROM onboarding_doc_alerts WHERE alert_key = ?").get(key);
+		// Once per OPEN episode, not once per key. fuel_event_alerts can test
+		// `alerted_at` alone because its key carries a timestamp, so every episode
+		// is a new row; this key is (scope, owner, doc) and therefore stable, so
+		// the same test would mean a document that failed, got regenerated, and
+		// broke again would never alert a second time.
+		if (seen && seen.alerted_at && !seen.resolved_at) return;
+		db.prepare(
+			`INSERT INTO onboarding_doc_alerts (alert_key, scope, owner_id, doc_key, doc_name, reason, first_seen, alerted_at, resolved_at)
+			 VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT first_seen FROM onboarding_doc_alerts WHERE alert_key = ?), CURRENT_TIMESTAMP), ?, NULL)
+			 ON CONFLICT(alert_key) DO UPDATE SET reason = excluded.reason, alerted_at = excluded.alerted_at, resolved_at = NULL`
+		).run(key, scope, ownerId, docKey, docName || docKey, reason, key, new Date().toISOString());
+
+		const title = `ACTION NEEDED — unsigned document: ${docName || docKey}`;
+		const body = `${scope} ${ownerId} completed signing "${docName || docKey}" but the PDF could not be produced, so it is NOT marked signed. The signature was saved and the document can be regenerated. Reason: ${reason}`;
+		insertDispatchNotification.run("onboarding-doc-failed", title, body, JSON.stringify({ scope, ownerId, docKey }));
+		io.to("dispatch").emit("dispatch-notification", { type: "onboarding-doc-failed", title, body });
+	} catch (err) {
+		// An alerting failure must never mask the signing failure itself.
+		console.error("[onboarding] alert bookkeeping failed:", err.message);
+	}
+	console.error(`[onboarding] ACTION NEEDED — ${scope} ${ownerId} doc "${docKey}" signed but NOT stored: ${reason}`);
+}
+
+function resolveOnboardingDocAlert({ scope, ownerId, docKey }) {
+	try {
+		db.prepare("UPDATE onboarding_doc_alerts SET resolved_at = CURRENT_TIMESTAMP WHERE alert_key = ? AND resolved_at IS NULL")
+			.run(`${scope}:${ownerId}:${docKey}`);
+	} catch { /* non-fatal */ }
+}
 
 // Helper: fill W-9 PDF form fields
 async function fillW9Form({ legalName = "", dba = "", entityType = "", address = "", einSsn = "", signatureText = "", signatureImage, effectiveDate = "" }) {
@@ -5048,7 +5225,7 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 		const signedFileName = `${docKey}-inv-${appId}-signed.pdf`;
 		const signedPath = path.join(signedDir, signedFileName);
-		let signedPdfUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
+		const publicUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
 
 		// Save vehicle info if provided (for Exhibit A)
 		const vehiclesArr = Array.isArray(vehicleInfo) ? vehicleInfo : (vehicleInfo ? [vehicleInfo] : []);
@@ -5064,62 +5241,91 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 				JSON.stringify(vehiclesArr), appId);
 		}
 
-		if (docKey === "w9") {
-			const pdfBytes = await fillW9Form({
-				legalName: application?.legal_name || "", dba: application?.dba || "",
-				entityType: application?.entity_type || "", address: application?.address || "",
-				einSsn: application?.ein_ssn || "", signatureText: signatureText.trim(),
-				signatureImage, effectiveDate,
-			});
-			if (pdfBytes) {
-				fs.writeFileSync(signedPath, pdfBytes);
-			} else {
-				signedPdfUrl = "";
+		const render = () => {
+			if (docKey === "w9") {
+				return fillW9Form({
+					legalName: application?.legal_name || "", dba: application?.dba || "",
+					entityType: application?.entity_type || "", address: application?.address || "",
+					einSsn: application?.ein_ssn || "", signatureText: signatureText.trim(),
+					signatureImage, effectiveDate,
+				});
 			}
-		} else if (docKey === "master_agreement" || docKey === "vehicle_lease") {
-			const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
-			// Load any stored vehicles (from vehicles_json or the vehicle_* fallback columns)
-			let storedVehicles = vehiclesArr;
-			if (!storedVehicles.length) {
-				try { storedVehicles = JSON.parse(application?.vehicles_json || "[]"); } catch { storedVehicles = []; }
-				if (!storedVehicles.length && application?.vehicle_year) {
-					storedVehicles = [{
-						year: application.vehicle_year, make: application.vehicle_make, model: application.vehicle_model,
-						vin: application.vehicle_vin, mileage: application.vehicle_mileage,
-						titleState: application.vehicle_title_state, liens: application.vehicle_liens,
-						registeredOwner: application.vehicle_registered_owner,
-					}];
+			if (docKey === "master_agreement" || docKey === "vehicle_lease") {
+				const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
+				// Load any stored vehicles (from vehicles_json or the vehicle_* fallback columns)
+				let storedVehicles = vehiclesArr;
+				if (!storedVehicles.length) {
+					try { storedVehicles = JSON.parse(application?.vehicles_json || "[]"); } catch { storedVehicles = []; }
+					if (!storedVehicles.length && application?.vehicle_year) {
+						storedVehicles = [{
+							year: application.vehicle_year, make: application.vehicle_make, model: application.vehicle_model,
+							vin: application.vehicle_vin, mileage: application.vehicle_mileage,
+							titleState: application.vehicle_title_state, liens: application.vehicle_liens,
+							registeredOwner: application.vehicle_registered_owner,
+						}];
+					}
 				}
+				const payInfo = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
+				return renderPolicy(docKey, {
+					legalName: application?.legal_name || "",
+					dba: application?.dba || "",
+					entityType: application?.entity_type || "",
+					address: application?.address || "",
+					contactPerson: application?.contact_person || "",
+					contactTitle: application?.contact_title || "",
+					phone: application?.phone || "",
+					email: application?.email || "",
+					einSsn: application?.ein_ssn || "",
+					yearsInOperation: application?.years_in_operation || "",
+					fleetSize: application?.fleet_size || "",
+					vehicles: storedVehicles,
+					bankName: payInfo?.bank_name || "",
+					bankRouting: payInfo?.routing_number || "",
+					bankAccount: payInfo?.account_number || "",
+					accountType: payInfo?.account_type || "",
+					effectiveDate,
+					signatureText: signatureText.trim(),
+					signatureImage,
+					signedAt,
+				});
 			}
-			const payInfo = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
-			const pdfBuffer = await renderPolicy(docKey, {
-				legalName: application?.legal_name || "",
-				dba: application?.dba || "",
-				entityType: application?.entity_type || "",
-				address: application?.address || "",
-				contactPerson: application?.contact_person || "",
-				contactTitle: application?.contact_title || "",
-				phone: application?.phone || "",
-				email: application?.email || "",
-				einSsn: application?.ein_ssn || "",
-				yearsInOperation: application?.years_in_operation || "",
-				fleetSize: application?.fleet_size || "",
-				vehicles: storedVehicles,
-				bankName: payInfo?.bank_name || "",
-				bankRouting: payInfo?.routing_number || "",
-				bankAccount: payInfo?.account_number || "",
-				accountType: payInfo?.account_type || "",
-				effectiveDate,
-				signatureText: signatureText.trim(),
-				signatureImage,
-				signedAt,
-			});
-			fs.writeFileSync(signedPath, pdfBuffer);
-		}
+			// No silent fall-through. The old if/else-if chain had no else, so a
+			// docKey outside these three rendered NOTHING and still wrote
+			// signed = 1 with a signed_pdf_url pointing at a file that was never
+			// created — a phantom document that only 404s when someone opens it.
+			const e = new Error(`No renderer registered for investor document "${docKey}"`);
+			e.code = "DOCUMENT_RENDERER_MISSING";
+			throw e;
+		};
 
 		const now = new Date().toISOString();
-		db.prepare("UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signature_image=?, signed_at=?, signed_pdf_url=? WHERE application_id=? AND doc_key=?")
+		let signedPdfUrl;
+		try {
+			signedPdfUrl = await writeSignedArtifact({
+				render,
+				signedPath,
+				publicUrl,
+				label: docRow.doc_name || docKey,
+			});
+		} catch (genErr) {
+			// Signature kept, claim refused — and because `signed` stays 0 the
+			// signedCount check below cannot flip this investor to fully_onboarded.
+			db.prepare("UPDATE investor_onboarding_documents SET signature_text=?, signature_image=?, signing_error=?, signing_failed_at=?, signed_pdf_url='' WHERE application_id=? AND doc_key=?")
+				.run(signatureText.trim(), signatureImage || "", genErr.message, now, appId, docKey);
+			alertOnboardingDocFailure({
+				scope: "investor-application", ownerId: appId, docKey,
+				docName: docRow.doc_name, reason: genErr.message,
+			});
+			return res.status(503).json({
+				error: "We saved your signature but could not generate the signed document. Nothing was lost — please try again in a moment.",
+				code: genErr.code || "DOCUMENT_RENDER_FAILED",
+				retryable: true,
+			});
+		}
+
+		db.prepare("UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signature_image=?, signed_at=?, signed_pdf_url=?, signing_error='', signing_failed_at='' WHERE application_id=? AND doc_key=?")
 			.run(signatureText.trim(), signatureImage || "", now, signedPdfUrl, appId, docKey);
+		resolveOnboardingDocAlert({ scope: "investor-application", ownerId: appId, docKey });
 
 		// Check if all docs signed → advance status
 		const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
@@ -6280,7 +6486,7 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 		const signedFileName = `${docKey}-${userId}-signed.pdf`;
 		const signedPath = path.join(signedDir, signedFileName);
-		let signedPdfUrl = `/uploads/onboarding-signed/${signedFileName}`;
+		const publicUrl = `/uploads/onboarding-signed/${signedFileName}`;
 
 		// All 4 policy docs now share a single HTML → Puppeteer → PDF pipeline.
 		// W-9 stays on pdf-lib because it's an IRS AcroForm fill, not a generated layout.
@@ -6292,45 +6498,48 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 		const resolvedFullName = user?.driver_name || application?.full_name || signatureText.trim();
 
-		if (docKey === "contractor_agreement") {
-			// Contractor agreement has banking info — persist it before rendering
-			if (paymentInfo) {
-				db.prepare(`INSERT OR REPLACE INTO driver_payment_info
-					(user_id, payment_method, check_name, bank_name, bank_address, bank_phone, bank_routing, bank_account, bank_acct_name, account_type)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-				).run(userId, paymentInfo.paymentMethod || "", paymentInfo.checkName || "",
-					paymentInfo.bankName || "", paymentInfo.bankAddress || "", paymentInfo.bankPhone || "",
-					paymentInfo.bankRouting || "", paymentInfo.bankAccount || "", paymentInfo.bankAcctName || "",
-					paymentInfo.accountType || "");
+		// Contractor agreement has banking info — persist it before rendering, and
+		// keep it even if the render then fails: it is the signer's own data and
+		// re-typing bank details is exactly the work we don't want to lose.
+		if (docKey === "contractor_agreement" && paymentInfo) {
+			db.prepare(`INSERT OR REPLACE INTO driver_payment_info
+				(user_id, payment_method, check_name, bank_name, bank_address, bank_phone, bank_routing, bank_account, bank_acct_name, account_type)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			).run(userId, paymentInfo.paymentMethod || "", paymentInfo.checkName || "",
+				paymentInfo.bankName || "", paymentInfo.bankAddress || "", paymentInfo.bankPhone || "",
+				paymentInfo.bankRouting || "", paymentInfo.bankAccount || "", paymentInfo.bankAcctName || "",
+				paymentInfo.accountType || "");
+		}
+
+		const render = () => {
+			if (docKey === "contractor_agreement") {
+				return renderPolicy("contractor_agreement", {
+					fullName: resolvedFullName,
+					address: application?.address || "",
+					effectiveDate,
+					signatureText: signatureText.trim(),
+					signatureImage: signatureImage || null,
+					paymentMethod: paymentInfo?.paymentMethod || "",
+					checkName: paymentInfo?.checkName || "",
+					bankName: paymentInfo?.bankName || "",
+					bankAddress: paymentInfo?.bankAddress || "",
+					bankPhone: paymentInfo?.bankPhone || "",
+					bankRouting: paymentInfo?.bankRouting || "",
+					bankAccount: paymentInfo?.bankAccount || "",
+					bankAcctName: paymentInfo?.bankAcctName || "",
+					accountType: paymentInfo?.accountType || "",
+				});
 			}
-			const pdfBuffer = await renderPolicy("contractor_agreement", {
-				fullName: resolvedFullName,
-				address: application?.address || "",
-				effectiveDate,
-				signatureText: signatureText.trim(),
-				signatureImage: signatureImage || null,
-				paymentMethod: paymentInfo?.paymentMethod || "",
-				checkName: paymentInfo?.checkName || "",
-				bankName: paymentInfo?.bankName || "",
-				bankAddress: paymentInfo?.bankAddress || "",
-				bankPhone: paymentInfo?.bankPhone || "",
-				bankRouting: paymentInfo?.bankRouting || "",
-				bankAccount: paymentInfo?.bankAccount || "",
-				bankAcctName: paymentInfo?.bankAcctName || "",
-				accountType: paymentInfo?.accountType || "",
-			});
-			fs.writeFileSync(signedPath, pdfBuffer);
-		} else if (docKey === "equipment_policy" || docKey === "mobile_policy" || docKey === "substance_policy") {
-			const pdfBuffer = await renderPolicy(docKey, {
-				fullName: resolvedFullName,
-				effectiveDate,
-				signatureText: signatureText.trim(),
-				signatureImage: signatureImage || null,
-			});
-			fs.writeFileSync(signedPath, pdfBuffer);
-		} else {
+			if (docKey === "equipment_policy" || docKey === "mobile_policy" || docKey === "substance_policy") {
+				return renderPolicy(docKey, {
+					fullName: resolvedFullName,
+					effectiveDate,
+					signatureText: signatureText.trim(),
+					signatureImage: signatureImage || null,
+				});
+			}
 			// W-9: fill form fields (same as investor) + overlay signature and date
-			const pdfBytes = await fillW9Form({
+			return fillW9Form({
 				legalName: resolvedFullName,
 				entityType: "Sole Prop",
 				address: application?.address || "",
@@ -6339,17 +6548,39 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (r
 				signatureImage: signatureImage || undefined,
 				effectiveDate,
 			});
-			if (pdfBytes) {
-				fs.writeFileSync(signedPath, pdfBytes);
-			} else {
-				signedPdfUrl = "";
-			}
-		}
+		};
 
 		const nowIso = new Date().toISOString();
+		let signedPdfUrl;
+		try {
+			signedPdfUrl = await writeSignedArtifact({
+				render,
+				signedPath,
+				publicUrl,
+				label: docRow.doc_name || docKey,
+			});
+		} catch (genErr) {
+			// Keep the signature, refuse the claim. `signed` stays 0, so
+			// checkAndCompleteOnboarding() cannot advance the driver to
+			// documents_signed on a document we do not actually hold.
+			db.prepare(
+				"UPDATE onboarding_documents SET signature_text = ?, signing_error = ?, signing_failed_at = ?, signed_pdf_url = '' WHERE user_id = ? AND doc_key = ?"
+			).run(signatureText.trim(), genErr.message, nowIso, userId, docKey);
+			alertOnboardingDocFailure({
+				scope: "driver", ownerId: userId, docKey,
+				docName: docRow.doc_name, reason: genErr.message,
+			});
+			return res.status(503).json({
+				error: "We saved your signature but could not generate the signed document. Nothing was lost — please try again in a moment.",
+				code: genErr.code || "DOCUMENT_RENDER_FAILED",
+				retryable: true,
+			});
+		}
+
 		db.prepare(
-			"UPDATE onboarding_documents SET signed = 1, signature_text = ?, signed_at = ?, signed_pdf_url = ? WHERE user_id = ? AND doc_key = ?"
+			"UPDATE onboarding_documents SET signed = 1, signature_text = ?, signed_at = ?, signed_pdf_url = ?, signing_error = '', signing_failed_at = '' WHERE user_id = ? AND doc_key = ?"
 		).run(signatureText.trim(), nowIso, signedPdfUrl, userId, docKey);
+		resolveOnboardingDocAlert({ scope: "driver", ownerId: userId, docKey });
 
 		const updated = await checkAndCompleteOnboarding(userId);
 		res.json({ success: true, onboarding: updated });
