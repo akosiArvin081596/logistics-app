@@ -5,6 +5,7 @@ const https = require("https");
 const { Server } = require("socket.io");
 const { google } = require("googleapis");
 const path = require("path");
+const os = require("os");
 const fs = require("fs");
 const bcrypt = require("bcryptjs");
 const session = require("express-session");
@@ -4187,9 +4188,16 @@ function normalizedUploadPath(req) {
 	// Backslashes are separators to some layers and literal to others; fold them
 	// so they cannot be used to dodge the prefix test below.
 	const collapsed = rel.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+	// ⚠️ Reject `..` BEFORE normalizing, not after. path.posix.normalize absorbs
+	// a `..` on an absolute path, so a post-normalize test can only ever fire on
+	// one normalize could not resolve — i.e. it was dead code. It also matters
+	// for what reaches express.static: `/uploads/../uploads/onboarding-signed/x`
+	// normalizes to a path that no longer carries the guarded prefix, so it
+	// would fall through unguarded, stopped only by `send`'s own traversal
+	// check. That is a dependency doing our authorization. Refuse it here.
+	if (collapsed.split("/").includes("..")) return null;
 	const norm = path.posix.normalize(collapsed).replace(/\/{2,}/g, "/");
 	if (!norm.startsWith("/")) return null;      // escaped the mount
-	if (norm.split("/").includes("..")) return null;
 	return norm;
 }
 
@@ -4256,16 +4264,25 @@ function guardInvestorSignedDoc(req, res, next, url) {
 		if (isConfidential) auditConfidentialRead(req, "investor_onboarding_document", row.id, `${row.doc_key} (application ${row.application_id})`);
 		return next();
 	}
-	let owner = null;
+	// ⚠️ MEMBERSHIP TEST, not fetch-one-then-compare.
+	// `investors.application_id` is `INTEGER DEFAULT 0` with NO unique index
+	// (the only unique index on that table is idx_inv_carrier), so `.get()`
+	// returns an ARBITRARY row when two investors share an application_id — it
+	// would admit whichever one SQLite happened to return and refuse the real
+	// owner. Asking the database "is this user an owner of this application?"
+	// is correct regardless of how many rows match, and it removes the
+	// coercion question with it.
+	const uid = Number(user && user.id);
+	if (!(uid > 0)) return res.status(404).end();
+	let owns = null;
 	try {
-		owner = db.prepare("SELECT user_id FROM investors WHERE application_id = ? AND COALESCE(user_id,0) > 0").get(row.application_id);
+		owns = db.prepare(
+			"SELECT 1 FROM investors WHERE application_id = ? AND user_id = ? AND COALESCE(user_id,0) > 0"
+		).get(row.application_id, uid);
 	} catch {
 		return res.status(404).end();
 	}
-	// Same positive-integer rule as the driver guard above, for the same reason.
-	const uid = Number(user && user.id);
-	const oid = Number(owner && owner.user_id);
-	if (uid > 0 && oid > 0 && uid === oid) return next();
+	if (owns) return next();
 	return res.status(404).end();
 }
 
@@ -4621,7 +4638,18 @@ app.get("/api/applications/:id", requireRole("Super Admin"), (req, res) => {
 			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
 			WHERE ja.id = ?`).get(Number(req.params.id));
 		if (!row) return res.status(404).json({ error: "Application not found" });
-		res.json(maskingEnabled() ? piiMask.maskFields(row, { ssn: "ssn", drivers_license: "license" }) : row);
+		// ⚠️ The base64 identity documents come out UNCONDITIONALLY, before any
+		// masking decision. Masking the licence NUMBER while shipping a
+		// PHOTOGRAPH of the licence in the same object is not a control — the
+		// scan carries the number, the DOB, the address, the face and the
+		// signature. The sibling route (GET /api/drivers-directory/:id/documents)
+		// already strips exactly these three; this one did not.
+		// Verified before removing: no admin screen renders them. The only
+		// client references are the applicant's own upload form
+		// (StepPersonalInfo.vue / ApplyView.vue) and DriverKit.vue, which uses
+		// the `*_type` columns rather than the blobs.
+		const { cdl_front, cdl_back, medical_card, ...safeRow } = row;
+		res.json(maskingEnabled() ? piiMask.maskFields(safeRow, { ssn: "ssn", drivers_license: "license" }) : safeRow);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -4661,6 +4689,10 @@ app.get("/api/applications/:id/sensitive", requireRole("Super Admin"), piiReveal
 		// recorded — the request is what is being audited, not the delivery.
 		logAudit(req, "reveal_application_pii", "job_application", id,
 			`Revealed SSN + licence for ${row.full_name || "application " + id} from ${req.ip || "unknown ip"}`);
+		// The whole point of this route is that the value is NOT ambient, so it
+		// must not be left in a browser or proxy cache. Without a directive a
+		// JSON 200 is heuristically cacheable.
+		res.setHeader("Cache-Control", "no-store");
 		res.json({ id: row.id, ssn: row.ssn || "", drivers_license: row.drivers_license || "" });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -6279,7 +6311,19 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 		// /investor-applications put every investor's tax id in the browser —
 		// without anyone clicking into a record. Masked here for the same reason
 		// and by the same rule as the detail route below.
-		res.json(maskingEnabled() ? apps.map((a) => piiMask.maskFields(a, { ein_ssn: "taxId" })) : apps);
+		//
+		// ⚠️ access_token is dropped UNCONDITIONALLY — not masked, and not
+		// subject to PII_MASK_ENABLED. `SELECT ia.*` was shipping it beside the
+		// tax id, and it is worse than the tax id: it is a NON-EXPIRING bearer
+		// credential that verifyInvestorToken() accepts with no session at all,
+		// authorizing the signed W-9 PDF, e-signing as that investor, and
+		// POST …/banking — which rewrites where money is sent. Masking the SSN
+		// while publishing that is the same "half a credential redacted" mistake
+		// this change fixes in the admin email.
+		res.json(apps.map((a) => {
+			const { access_token, ...safe } = a;
+			return maskingEnabled() ? piiMask.maskFields(safe, { ein_ssn: "taxId" }) : safe;
+		}));
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -6305,7 +6349,9 @@ app.get("/api/investor-applications/:id", requireRole("Super Admin"), (req, res)
 		// values move to GET /api/investor-applications/:id/sensitive, which is
 		// audited. Only `/status` writes to this record, so a masked value can
 		// never be read back and saved over the real one.
-		const outApp = maskingEnabled() ? piiMask.maskFields(application, { ein_ssn: "taxId" }) : application;
+		// access_token dropped unconditionally — see the list route above.
+		const { access_token: _tok, ...safeApplication } = application;
+		const outApp = maskingEnabled() ? piiMask.maskFields(safeApplication, { ein_ssn: "taxId" }) : safeApplication;
 		const outBank = maskingEnabled()
 			? piiMask.maskFields(banking, { routing_number: "routing", account_number: "account" })
 			: banking;
@@ -6328,6 +6374,7 @@ app.get("/api/investor-applications/:id/sensitive", requireRole("Super Admin"), 
 		const banking = db.prepare("SELECT routing_number, account_number FROM investor_payment_info WHERE application_id = ?").get(appId) || {};
 		logAudit(req, "reveal_investor_pii", "investor_application", appId,
 			`Revealed EIN/SSN + banking for ${application.legal_name || "application " + appId} from ${req.ip || "unknown ip"}`);
+		res.setHeader("Cache-Control", "no-store");   // see the twin route above
 		res.json({
 			id: application.id,
 			ein_ssn: application.ein_ssn || "",
@@ -12472,10 +12519,21 @@ app.get("/api/db/download", requireRole("Super Admin"), dbAdminLimiter, (req, re
 	// record — the intent is what is being audited, not the byte count.
 	logAudit(req, "db_download", "database", "app.db", `Full database export requested from ${req.ip || "unknown ip"}`);
 	// Backup to a temp file to capture WAL contents.
+	//
 	// Per-request filename: the path used to be a fixed "app_backup.db", so two
 	// concurrent downloads raced on one file and the first to finish unlinked it
 	// out from under the second.
-	const tmpPath = path.join(__dirname, `app_backup-${Date.now()}-${crypto.randomBytes(4).toString("hex")}.db`);
+	//
+	// ⚠️ NOT in __dirname. A unique name plus the application directory is a bad
+	// pair: the old fixed name was one file that got overwritten, whereas unique
+	// names ACCUMULATE, and every one is a complete ~313 MB copy of the database
+	// — every SSN, routing and account number in the system. Any aborted
+	// download or crash leaves one behind, in the repo working tree, matched by
+	// no .gitignore rule (`app.db*` does not cover `app_backup*`) and therefore
+	// stageable by `git add -A`. os.tmpdir() is outside the repo and is what
+	// gets cleared by the OS; `app_backup*.db` is also now gitignored, because
+	// two independent guards are cheap and this one leaks the whole database.
+	const tmpPath = path.join(os.tmpdir(), `app_backup-${Date.now()}-${crypto.randomBytes(8).toString("hex")}.db`);
 	db.backup(tmpPath).then(() => {
 		res.download(tmpPath, "app.db", () => {
 			try { fs.unlinkSync(tmpPath); } catch {}
@@ -12511,12 +12569,22 @@ app.get("/api/db/query/:table", requireRole("Super Admin"), dbAdminLimiter, (req
 	// exactly — never as a substring, or `account_type` would be masked too).
 	// This is a diagnostic browser; it has never needed the full digits, and the
 	// values are still reachable deliberately through the audited reveal route.
-	const masked = maskingEnabled() ? rows.map(piiMask.maskUnknownRow) : rows;
-	if (masked !== rows) {
-		// Only worth an audit row when this table actually held something.
-		const touched = masked.some((r, i) => JSON.stringify(r) !== JSON.stringify(rows[i]));
-		if (touched) logAudit(req, "db_query_sensitive", "database", table, `Read ${masked.length} row(s) from ${table} (sensitive columns masked)`);
+	// `maskUnknownRow` returns the SAME object when a row held nothing sensitive
+	// and a new one when it masked something, so identity is the cheap test for
+	// "did this table contain anything worth recording?". An earlier version
+	// compared the ARRAYS (`masked !== rows`), which is always true because
+	// .map() always allocates — a guard that never guarded, and it then ran a
+	// JSON.stringify deep-compare over as many as 500 rows.
+	let masked = rows;
+	let touched = false;
+	if (maskingEnabled()) {
+		masked = rows.map((r) => {
+			const out = piiMask.maskUnknownRow(r);
+			if (out !== r) touched = true;
+			return out;
+		});
 	}
+	if (touched) logAudit(req, "db_query_sensitive", "database", table, `Read ${masked.length} row(s) from ${table} (sensitive columns masked)`);
 	res.json({ table, total: count.total, limit, offset, rows: masked });
 });
 
@@ -12990,7 +13058,16 @@ app.put("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 		status || existing.status, (notes ?? existing.notes).trim(),
 		(entityType ?? existing.entity_type).trim(), (address ?? existing.address).trim(),
 		(phone ?? existing.phone).trim(), (email ?? existing.email).trim(),
-		(einSsn ?? existing.ein_ssn).trim(), (taxClassification ?? existing.tax_classification).trim(),
+		// ⚠️ A MASKED VALUE MUST NEVER BE SAVED OVER THE REAL ONE.
+		// Safe today only by accident: GET /api/investors maps to a restricted
+		// shape with no ein_ssn, so nothing round-trips. The moment anyone
+		// follows the masking pattern used elsewhere in this file and surfaces
+		// investors.ein_ssn into a GET that an edit form reads, this line writes
+		// "••••1234" over the tax id — silently, and irreversibly.
+		// Enforced here rather than documented as an invariant, so every future
+		// masking decision is safe by construction.
+		(piiMask.isMasked(einSsn) ? existing.ein_ssn : (einSsn ?? existing.ein_ssn)).trim(),
+		(taxClassification ?? existing.tax_classification).trim(),
 		(contactPerson ?? existing.contact_person).trim(), (contactTitle ?? existing.contact_title).trim(), id
 	);
 	notifyChange("investors");
