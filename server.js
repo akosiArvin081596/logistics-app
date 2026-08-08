@@ -21,7 +21,7 @@ const { ipKeyGenerator } = require("express-rate-limit");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const { PDFDocument: PdfLibDocument, rgb, StandardFonts } = require("pdf-lib");
-const { renderPolicy } = require("./lib/policy-renderer");
+const { renderPolicy, safeSignatureImage } = require("./lib/policy-renderer");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
@@ -5518,10 +5518,46 @@ app.post("/api/public/investor-onboarding/:id/banking", (req, res) => {
 });
 
 // Stateless PDF preview — generates document from posted form data, no DB writes
-app.post("/api/public/investor-preview-pdf/:docKey", async (req, res) => {
+// A Puppeteer render is the most expensive thing an anonymous caller can trigger:
+// each call takes a page in the shared Chromium and burns real CPU/RAM on a VPS that
+// also runs production. This route was shipped with NO auth, NO token and NO limiter,
+// making it the cheapest denial-of-service surface in the app.
+//
+// requireAuth is deliberately NOT the fix: the whole point is that a PROSPECTIVE
+// investor previews their agreements on /invest before any account exists (see
+// fetchPreview / openReviewPdf in client/src/views/InvestorApplyView.vue). The guard
+// is therefore a rate limit plus a concurrency cap.
+//
+// 30 / 15 min: a thorough applicant opens, signs, re-opens and reviews 3 documents,
+// which is ~12 calls; 30 leaves ~2.5x headroom while capping a scripted loop.
+// publicFormLimiter's 10 would break a normal applicant, so it is not reused here.
+const pdfPreviewLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	message: { error: "Too many preview requests. Try again later." },
+	standardHeaders: true,
+});
+
+// The rate limit is per-IP, so on its own it does NOT bound total work -- a
+// distributed loop still lands N concurrent Chromium tabs and OOMs the box. This caps
+// how many ANONYMOUS renders may be in flight process-wide, which is the actual
+// resource bound. Authenticated renders (onboarding signing, invoice generation, the
+// Friday auto-invoice batch) do not pass through here and are unaffected.
+const PDF_PREVIEW_MAX_INFLIGHT = 3;
+let pdfPreviewInflight = 0;
+app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (req, res) => {
 	try {
 		const { docKey } = req.params;
 		const { legal_name, dba, entity_type, address, contact_person, contact_title, phone, email, ein_ssn, years_in_operation, fleet_size, vehicles, banking, signatureText, signatureImage } = req.body;
+
+		// signatureImage is assigned to img.src inside the Puppeteer page, so any
+		// non-data: value is a URL the SERVER fetches -- blind SSRF from an endpoint
+		// that needs no credential at all. renderPolicy() drops it defensively too,
+		// but refuse it here so a caller gets a clear 400 rather than a silently
+		// unsigned PDF, and so the render is never even started.
+		if (signatureImage && !safeSignatureImage(signatureImage)) {
+			return res.status(400).json({ error: "signatureImage must be an inline base64 image data URI" });
+		}
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 		const signedAt = signatureText ? new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" }) : undefined;
 		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
@@ -5549,7 +5585,21 @@ app.post("/api/public/investor-preview-pdf/:docKey", async (req, res) => {
 		};
 
 		if (docKey === "master_agreement" || docKey === "vehicle_lease") {
-			const pdfBuffer = await renderPolicy(docKey, appData);
+			// Only the Puppeteer branch is capped. The w9 branch below is pdf-lib
+			// (no browser, milliseconds) and stays available under load.
+			if (pdfPreviewInflight >= PDF_PREVIEW_MAX_INFLIGHT) {
+				res.setHeader("Retry-After", "5");
+				return res.status(503).json({ error: "Preview renderer busy. Try again in a moment." });
+			}
+			pdfPreviewInflight++;
+			let pdfBuffer;
+			try {
+				pdfBuffer = await renderPolicy(docKey, appData);
+			} finally {
+				// finally, not after the await: a render that throws must still
+				// release its slot or the cap leaks to a permanent 503.
+				pdfPreviewInflight--;
+			}
 			res.setHeader("Content-Type", "application/pdf");
 			const filename = docKey === "master_agreement" ? "Master Agreement.pdf" : "Vehicle Lease.pdf";
 			res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
