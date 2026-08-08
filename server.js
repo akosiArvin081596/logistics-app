@@ -3564,7 +3564,44 @@ const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 // The Draft Bison Invoice route matches by order number to attach the rate-con.
 const RATECON_DRIVE_FOLDER_ID =
 	process.env.RATECON_DRIVE_FOLDER_ID || "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL";
+// The SERVER key. Every outbound Google Maps Platform call in this file and in
+// lib/poi-fuel-stops.js uses this one: Geocoding, Distance Matrix, Routes, and
+// Places (New) searchNearby/searchText.
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
+
+// The BROWSER key — the only value GET /api/config/maps-key ever hands out.
+//
+// Why this is a separate variable and not a tidier way to spell the same one:
+// the two halves of this app CANNOT share a restricted key, because Google's
+// two restriction types are mutually exclusive by construction.
+//
+//   • An HTTP-referrer-restricted key is refused outright by the legacy web
+//     services ("API keys with referer restrictions cannot be used with this
+//     API") and, having no Referer to match, by Routes/Places (New) as well.
+//     So a referrer restriction breaks EVERY server-side call above.
+//   • An IP-restricted key cannot be used by the Maps JavaScript API at all,
+//     so an IP restriction breaks every map, and the Places Autocomplete on
+//     the public /apply and /invest forms.
+//
+// One key therefore cannot be restricted at all — which is exactly the state
+// this variable exists to end. Splitting them lets the browser key carry a
+// referrer allowlist + a narrow API allowlist (Maps JavaScript + Places), and
+// the server key carry an IP allowlist + the expensive APIs. That also takes
+// Places (New) searchNearby — the priciest SKU in the app, ~$0.16-0.32 per
+// fan-out — off the key that is published to every visitor.
+//
+// Falls back to the server key when unset, so deploying this changes nothing
+// until a second key actually exists in the console. Ships dormant, matching
+// SCANKIT_ENABLED / PERIOD_FINALIZE_ENABLED and every other flag here.
+//
+// ⚠️ Never use this constant for an outbound call, and never let the server key
+// reach a response body. The endpoint below is deliberately unauthenticated —
+// three PUBLIC surfaces need it before any session exists (/apply, /invest and
+// the /track/:loadId customer tracker) — so whatever it serves is, by design,
+// world-readable. That is fine for a restricted browser key and is precisely
+// what must never be true of the server key.
+const GOOGLE_MAPS_BROWSER_KEY =
+	process.env.GOOGLE_MAPS_BROWSER_KEY || GOOGLE_MAPS_API_KEY;
 
 // Gemini OCR — optional. When GEMINI_API_KEY is unset, the expense OCR
 // endpoint returns 503 and the driver form silently falls back to manual
@@ -22055,9 +22092,17 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"
 	}
 });
 
-// GET /api/config/maps-key — expose Google Maps API key for client-side map rendering
+// GET /api/config/maps-key — expose the BROWSER Google Maps key for client-side
+// map rendering. Unauthenticated on purpose: /apply, /invest and the public
+// /track/:loadId tracker all load a map before any session exists, so adding
+// requireAuth here breaks three public surfaces and is not the fix it looks
+// like. Anything served here is world-readable — see GOOGLE_MAPS_BROWSER_KEY.
+//
+// no-store so the key is never parked in a shared/proxy cache: a rotation must
+// take effect on the next page load, not whenever an intermediary expires it.
 app.get("/api/config/maps-key", (req, res) => {
-	res.json({ key: GOOGLE_MAPS_API_KEY });
+	res.set("Cache-Control", "no-store");
+	res.json({ key: GOOGLE_MAPS_BROWSER_KEY });
 });
 
 // --- Investor maintenance notice --------------------------------------------
