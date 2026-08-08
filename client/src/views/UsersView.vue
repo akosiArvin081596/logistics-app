@@ -98,8 +98,12 @@ async function handleDeleteUser(id) {
   try {
     await store.deleteUser(id)
     toast('User deleted')
-  } catch {
-    toast('Failed to delete user', 'error')
+  } catch (err) {
+    // Surface the server's own words. A delete blocked by the month-end lock
+    // returns 409 PERIOD_FINALIZED with the exact rows and periods at stake;
+    // collapsing that to "Failed to delete user" is how an admin retries, gives
+    // up, and never learns a closed month was the reason.
+    toast(err?.message || 'Failed to delete user', 'error')
   }
 }
 
