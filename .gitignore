@@ -22,6 +22,12 @@ app.db.docgen*
 app.db.production*
 app.db.prod-capture*
 logisxdb.db
+# Temp copies written by GET /api/db/download. These are FULL database dumps —
+# every SSN, routing and account number — and the name does not start with
+# "app.db", so none of the rules above match it. It now writes to os.tmpdir()
+# instead of __dirname; this rule is the second guard, kept because a single
+# stray copy in the working tree is a whole-database leak.
+app_backup*.db
 
 # Production/staging DB snapshots pulled down for screenshot capture
 scripts/docs/app.db.*
