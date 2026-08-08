@@ -93,7 +93,23 @@
           </span>
         </div>
 
-        <!-- Current month: accruing, not yet payable -->
+        <!-- Current month: accruing, not yet payable.
+
+             ⚠️ THE SIGNED `amountInProgress` HERE IS DELIBERATE — DO NOT
+             "align" it with the investor's own card. This is the Super Admin
+             console: admins settle money and must see a month running at a
+             deficit (a live investor sat at -$2,450). The investor-facing
+             component renders `payableIfClosedNow` instead, which is clamped at
+             $0 and never negative.
+
+             The asymmetry is the design: ADMINS SEE THE TRUTH, INVESTORS SEE
+             WHAT THEY WOULD BE PAID. It will look like an inconsistency to
+             whoever reads these two files next, which is exactly why it is
+             written down at both render sites. The server deliberately does not
+             clamp either, because `amountInProgress` is an accrual and a term
+             in the ledger identity test-suite.js 53 asserts. See the long note
+             beside hasProjection in
+             components/investor/PayoutsSection.vue. -->
         <div v-if="inv.currentMonth" class="current-card">
           <div class="current-main">
             <span class="current-label">{{ inv.currentMonth.periodLabel }}</span>

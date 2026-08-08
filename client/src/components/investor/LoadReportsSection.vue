@@ -1,12 +1,22 @@
 <!--
   LoadReportsSection — weekly & monthly load reports + totals owed for the
   investor portal. Fetches GET /api/investor/load-report (per-period load lists +
-  gross revenue). Broker identity is never shown. "Your Share" is the authoritative
+  gross revenue). Broker identity is never shown. "Your Net Result" is the authoritative
   NET investor earnings from the dashboard's monthlyEarnings (passed in via
   :production): the monthly total, and per completed load its rate-weighted slice
   of that month's net — so every figure reconciles with EarningsSection / the rest
   of the portal. Weekly has no monthly-net mapping, so it shows loads + gross only.
   Exports pass the same net back as ?net=YYYY-MM:amount so the PDF/CSV reconcile too.
+
+  EVERY FIGURE IN THIS SECTION IS P&L, NOT A PAYABLE, except the banner's "Still
+  owed to you". The Net Result tile was named "Your Share (net)" and printed in
+  green: on a month running at -$2,450 that read as money owed, which is
+  indistinguishable from the complaint the payout carry-forward work exists to
+  answer. The rule this section now follows, and which any figure added here must
+  follow: an investor should be able to tell WITHOUT knowing our vocabulary which
+  numbers are money they will receive and which are how the business performed.
+  Money received lives in PayoutsSection and in "Still owed to you"; everything
+  else here is performance, is named as such, and never borrows the green.
 
   The banner reads the PAYOUT LEDGER (investorStore's payouts slice, from GET
   /api/investor/payouts) — the exact same source the Payouts section renders, so
@@ -49,9 +59,21 @@
       </div>
       <template v-if="!ledgerLoading">
         <span class="lr-owed-context">Earned {{ fmtMoney(earnedToDate) }}<template v-if="adjustments"> · Adjustments {{ signedMoney(adjustments) }}</template> · Paid out {{ fmtMoney(paidToDate) }}<template v-if="processingNow"> · Processing {{ fmtMoney(processingNow) }}</template><template v-if="carriedLoss"> · {{ fmtMoney(carriedLoss) }} loss carried forward</template></span>
-        <span class="lr-owed-accruing" v-if="accruing">
-          {{ accruingLabel }} accruing: {{ fmtMoney(accruing) }} — not payable until the month closes
-        </span>
+        <!-- The NUMBER here is deliberately the signed accrual and must stay
+             that way — it is a term in the identity this banner exists to
+             demonstrate (see the header comment). Only the wording and colour
+             are sign-aware.
+
+             "not payable UNTIL the month closes" is true of a positive accrual
+             and quietly false of a negative one: it promises a payment that
+             will never arrive, since a loss defers instead of becoming
+             payable. And #4d7c5a is a green, so a loss was printed in the tone
+             used for money received. -->
+        <span
+          class="lr-owed-accruing"
+          :class="{ 'lr-accruing-loss': accruing < 0 }"
+          v-if="accruing"
+        >{{ accruingNote }}</span>
       </template>
     </div>
 
@@ -85,9 +107,20 @@
           <div class="lr-card-value">{{ fmtMoney(sel.grossRevenue) }}</div>
           <div class="lr-card-note" v-if="inTransitCount">delivered loads only</div>
         </div>
+        <!-- P&L, NOT a payable. "Your Share (net)" was a payout phrase on a
+             performance figure: at -$2,450 it read as money owed one way or the
+             other, which is the confusion the Payouts card was just fixed to
+             stop causing. The number is right and stays; the label was the lie.
+             Sits third behind Loads and Gross Revenue, so a performance name
+             also makes the row read as one consistent set of metrics.
+
+             The colour was the louder half of the bug — `.accent` is green, so
+             a loss rendered in the same tone this portal uses for money
+             received. Green now requires a positive result. -->
         <div class="lr-card" v-if="monthlyNet != null">
-          <div class="lr-card-label">Your Share (net)</div>
-          <div class="lr-card-value accent">{{ fmtMoney(monthlyNet) }}</div>
+          <div class="lr-card-label">Your Net Result</div>
+          <div class="lr-card-value" :class="monthlyNet < 0 ? 'loss' : 'accent'">{{ fmtMoney(monthlyNet) }}</div>
+          <div class="lr-card-note">month&rsquo;s performance &mdash; not a payout</div>
         </div>
       </div>
 
@@ -99,8 +132,13 @@
         <table class="lr-table">
           <thead>
             <tr>
+              <!-- "Your Net", matching the tile: this column is that same
+                   figure allocated per load, so two names for one quantity
+                   would undo the relabel above. Values stay as they are — a
+                   per-load net is legitimately informative, and unlike the tile
+                   these cells were never coloured as money received. -->
               <th>Load</th><th>Status</th><th>Route</th>
-              <th class="num">Rate</th><th class="num">Your Share</th>
+              <th class="num">Rate</th><th class="num">Your Net</th>
             </tr>
           </thead>
           <tbody>
@@ -157,6 +195,21 @@ const adjustments = computed(() => investorStore.payoutTotals.totalAdjustments |
 const carriedLoss = computed(() => investorStore.payoutTotals.carriedLossOutstanding || 0)
 const accruing = computed(() => investorStore.accruingThisMonth)
 const accruingLabel = computed(() => investorStore.currentMonth?.periodLabel || 'This month')
+// Wording only — `accruing` itself stays signed so the four components still
+// sum back to Earned. A positive accrual genuinely becomes payable at close, so
+// that sentence is unchanged. A negative one never does: it defers into a
+// future month's payout, so "not payable until the month closes" would promise
+// a payment that isn't coming, and "accruing" reads as something accruing TO
+// the investor rather than a shortfall. Says "not an amount you owe" out loud
+// because that is the specific misreading a leading minus sign invites — the
+// one that started this whole thread.
+const accruingNote = computed(() => {
+  const v = accruing.value
+  if (!v) return ''
+  return v > 0
+    ? `${accruingLabel.value} accruing: ${fmtMoney(v)} — not payable until the month closes`
+    : `${accruingLabel.value} so far: ${fmtMoney(v)} — the month is running at a loss, not an amount you owe`
+})
 const sel = computed(() => periods.value[selectedIdx.value] || null)
 // Gross Revenue counts delivered loads only, so the Loads tile must too.
 // completedCount/inTransitCount are newer server fields — fall back to deriving
@@ -181,8 +234,8 @@ const monthlyNet = computed(() => {
 
 // Allocate the month's authoritative net investor earnings (monthlyNet) across
 // its completed loads, rate-weighted, as whole dollars that sum EXACTLY to
-// monthlyNet (largest-remainder) so the rows reconcile with the "Your Share
-// (net)" card above. {} when there's no monthly net (e.g. the weekly view) —
+// monthlyNet (largest-remainder) so the rows reconcile with the "Your Net
+// Result" card above. {} when there's no monthly net (e.g. the weekly view) —
 // never a gross-based estimate. Mirrors allocateNet() in server.js — keep in sync.
 function allocateNet(loads, net) {
   const out = {}
@@ -303,6 +356,8 @@ fetchReport()
 .lr-owed-value { font-size: 1.35rem; font-weight: 800; color: #15803d; }
 .lr-owed-context { font-size: 0.74rem; font-weight: 500; color: #4d7c5a; }
 .lr-owed-accruing { font-size: 0.74rem; font-weight: 500; color: #4d7c5a; font-style: italic; }
+/* Same rule as the Net Result tile: the green is reserved for money received. */
+.lr-owed-accruing.lr-accruing-loss { color: #b91c1c; }
 
 .lr-msg { color: #64748b; font-size: 0.88rem; padding: 0.8rem 0; }
 
@@ -319,6 +374,11 @@ fetchReport()
 .lr-card-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: #94a3b8; }
 .lr-card-value { font-size: 1.2rem; font-weight: 700; color: #0f172a; margin-top: 2px; }
 .lr-card-value.accent { color: #15803d; }
+/* A losing month must not render in the green this portal uses for money
+   received. Red is the P&L convention for a loss and is the fastest signal that
+   this tile reports performance, not a payable. #b91c1c is the negative already
+   used elsewhere (PayoutsSection .hist-down / .amt-negative). */
+.lr-card-value.loss { color: #b91c1c; }
 .lr-card-note { font-size: 0.68rem; font-weight: 500; color: #94a3b8; margin-top: 1px; }
 .lr-note { font-size: 0.74rem; color: #94a3b8; margin: 0.1rem 0 0.5rem; }
 

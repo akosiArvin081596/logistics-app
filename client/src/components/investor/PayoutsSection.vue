@@ -16,11 +16,29 @@
     </template>
 
     <template v-else>
-      <!-- Current month (in progress, not yet payable) -->
+      <!-- Current month (in progress, not yet payable).
+
+           The investor sees `payableIfClosedNow`, NEVER the raw signed
+           `amountInProgress` this used to render — see hasProjection in the
+           script for why, and why views/PayoutsView.vue deliberately still
+           shows the signed figure to admins. -->
       <div v-if="currentMonth" class="current-card">
         <div class="current-main">
           <span class="current-label">{{ currentMonth.periodLabel }}</span>
-          <span class="current-amount mono">{{ fmt(currentMonth.amountInProgress) }}</span>
+          <!-- No fallback to amountInProgress when the projection is absent: an
+               older server without these keys renders no figure at all, because
+               the only other number available is the one that caused the bug. -->
+          <span
+            v-if="hasProjection"
+            class="current-amount mono"
+            aria-describedby="current-payable-basis"
+          >{{ fmt(projectedPayable) }}</span>
+        </div>
+        <!-- Immediately under the figure, so the amount is never read bare. It
+             is a projection of an OPEN month: "$0" on its own would be taken as
+             a settled fact, and this month can still swing either way. -->
+        <div v-if="hasProjection" id="current-payable-basis" class="current-basis">
+          Projected payout if the month closed today
         </div>
         <div class="current-meta">
           <span class="status-pill st-progress">in progress</span>
@@ -28,6 +46,12 @@
             Accruing this month &mdash; not yet payable until the period closes<template v-if="currentMonth?.graceEndsAt">, with receipts accepted through {{ fmtDate(currentMonth.graceEndsAt) }}</template>.
           </span>
         </div>
+        <!-- What the clamp hides. A bare $0 is honest about the payout and
+             silent about the deficit behind it, so an investor would meet the
+             shortfall for the first time as a REDUCED payout months later —
+             which is the same "I wasn't told" failure the carry-forward feature
+             was built to fix. -->
+        <p v-if="carryNote" class="current-carry">{{ carryNote }}</p>
 
         <!-- Same earnings waterfall as the past-months rows, so the in-progress
              figure is explained too: expenses come out before the split. -->
@@ -504,6 +528,70 @@ const payouts = computed(() => investorStore.payouts)
 const currentMonth = computed(() => investorStore.currentMonth)
 const totals = computed(() => investorStore.payoutTotals)
 
+// ---- The open month's headline figure -------------------------------------
+// An investor sees `payableIfClosedNow` (never negative), NOT the signed
+// `amountInProgress` this card used to render. A loss-making open month reads
+// -$2,450 there, which an investor takes as "you owe us" when it means "this
+// month is behind" — the same shape as the complaint carry-forward exists to
+// answer.
+//
+// The server deliberately does NOT clamp it, and this must not be "fixed"
+// there: `amountInProgress` is an ACCRUAL and a term in the ledger identity
+// (paid+processing+owed+accruing == earned+adjustments+carriedLoss) that
+// test-suite.js 53 asserts, so clamping puts the identity out by exactly the
+// loss. Two surfaces therefore keep the signed figure ON PURPOSE — don't unify
+// them with this one:
+//   • views/PayoutsView.vue — the Super Admin console. Admins settle money and
+//     need the truth, including a month running at a deficit.
+//   • LoadReportsSection.vue — the reconciliation banner, whose whole job is
+//     showing the four components summing to Earned. It labels the figure
+//     "accruing … not payable", which is the honest frame for a signed accrual.
+//
+// typeof check, not truthiness or `!= null`: 0 is the single likeliest correct
+// value of this field, so `||`/falsy tests would treat the main case as absent;
+// and a null/undefined/string from an older server must fall through to
+// "render nothing" rather than back to the raw signed value.
+//
+// Math.max(0, …) is belt-and-braces, not distrust of today's server: this is a
+// PAYABLE, and the carry-forward model's invariant is that a loss defers rather
+// than inverting, so a negative here would be a server regression. If that
+// invariant ever broke, an unclamped render would put the original bug back on
+// screen in a strictly worse frame — a negative number now explicitly captioned
+// "Projected payout". The signed truth stays visible to the people who act on
+// it (admin console, reconciliation banner, this card's own breakdown), so the
+// clamp costs no observability.
+const projectedPayable = computed(() => {
+  const v = currentMonth.value?.payableIfClosedNow
+  return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, v) : null
+})
+const hasProjection = computed(() => projectedPayable.value !== null)
+
+// The sentence that keeps the clamp honest. Same precedence as the settled
+// rows in the table below (deferred wins over carriedIn) so a month reads the
+// same way before and after it settles — only the mood changes, because
+// nothing here has happened yet:
+//   • deferred  — this month is behind. Phrased conditionally ("still short
+//     when the month closes"): it is NOT yet a carried loss, and saying it is
+//     would publish a settlement fact that a load delivering on the 28th erases.
+//   • carriedIn — this month is profitable but paying down an EARLIER loss,
+//     which is why a good month can still project $0. Without this line that
+//     zero is simply inexplicable.
+// Gated on hasProjection: with no projection there is no $0 on screen to explain.
+const carryNote = computed(() => {
+  if (!hasProjection.value) return ''
+  const cm = currentMonth.value || {}
+  const deferred = Number(cm.lossDeferred) || 0
+  const carriedIn = Number(cm.lossCarriedIn) || 0
+  if (deferred > 0) {
+    return `${fmt(deferred)} short so far — the rest of the month's earnings go against that first. `
+      + 'Anything still short when the month closes carries into a later payout.'
+  }
+  if (carriedIn > 0) {
+    return `${fmt(carriedIn)} of this month's earnings is going to an earlier month's loss.`
+  }
+  return ''
+})
+
 const busyId = ref(null)
 
 // Which past-month row has its earnings breakdown open (single-open accordion).
@@ -975,6 +1063,34 @@ onMounted(loadPayouts)
   font-size: 0.74rem;
   color: #64748b;
   font-style: italic;
+}
+/* Caption for the headline figure. Its own full-width line rather than a column
+   inside .current-main: that row is space-between + flex-wrap, so nesting a
+   two-line block in it collapses to a ragged shrink-to-fit column the moment it
+   wraps. Right-aligned so it sits directly under the amount at every width —
+   .current-main pins the figure to the right edge, and left-aligning this put
+   the qualifier a full card-width away from the number on desktop, which left
+   "$0" reading bare to anyone scanning the money column. That is the exact
+   misreading this whole change exists to prevent. */
+.current-basis {
+  margin-top: 0.15rem;
+  font-size: 0.7rem;
+  color: #64748b;
+  text-align: right;
+}
+/* Carried-loss disclosure. Amber — the portal's "this figure is still moving"
+   family (.status-pill.st-owed, .phase-note, MaintenanceDisclaimer) — but a
+   left-rule annotation rather than a filled callout, so it can't be mistaken
+   for a second maintenance banner when that flag is on. Weightier than the
+   table's .inv-carry (0.7rem grey italic), because there the note annotates a
+   figure that is already explained, while here it IS the explanation. */
+.current-carry {
+  margin: 0.6rem 0 0;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--amber, #f59e0b);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: #92400e;
 }
 
 /* Totals */
