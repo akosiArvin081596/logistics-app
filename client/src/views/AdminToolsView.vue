@@ -514,14 +514,57 @@ function formatDate(ts) {
   })
 }
 
+// Preview BEFORE confirming. The old flow asked "Rename X to Y everywhere?"
+// with no idea what "everywhere" meant — on production that is ~45 sheet rows
+// and ~700 SQLite rows for a single driver, most of them inside finalized
+// months. The server's dry run reports exactly that and writes nothing.
 async function fixName(oldName, newName) {
-  if (!confirm(`Rename "${oldName}" to "${newName}" everywhere?`)) return
+  let preview
   try {
-    const result = await store.fixDriverName(oldName, newName)
+    preview = await store.fixDriverName(oldName, newName, { dryRun: true })
+  } catch (e) {
+    toast(e.message || 'Could not preview the rename', 'error')
+    return
+  }
+
+  const v = preview.verdict || {}
+  const lines = [
+    `Rename "${oldName}" to "${newName}" everywhere?`,
+    '',
+    `Job Tracking sheet: ${preview.plan?.sheet?.rows ?? 0} row(s)`,
+    `Local database: ${v.totalSqliteRows ?? 0} row(s)`,
+    '',
+    v.caseOnly
+      ? 'Case/spacing-only fix — no settlement figure can move.'
+      : 'Substantive rename — this changes the key the pay math joins on.',
+  ]
+  // A merge is a different decision from a rename and used to look identical here.
+  if (v.isMerge) lines.push('', `MERGE: "${newName}" already has ${v.mergeRows} row(s). The two drivers' histories are combined, and this CANNOT be undone by renaming back.`)
+
+  let reason = ''
+  if (v.decision === 'block' && v.code === 'PERIOD_FINALIZED') {
+    lines.push('', 'THIS REACHES CLOSED ACCOUNTING MONTHS:')
+    for (const b of v.blockers || []) lines.push(`  • ${b.detail} [${(b.periods || []).join(', ')}]`)
+    lines.push('', 'It is applied to every target or none — a partial rename would silently')
+    lines.push('restate those months. Continuing records the restatement on the audit trail.')
+    if (!confirm(lines.join('\n'))) return
+    reason = (prompt('Why is this rename necessary? (recorded on the audit trail, min 10 characters)') || '').trim()
+    if (reason.length < 10) { toast('A reason of at least 10 characters is required', 'error'); return }
+  } else if (v.decision === 'block') {
+    toast(v.rationale || 'Rename refused', 'error')
+    return
+  } else if (!confirm(lines.join('\n'))) return
+
+  try {
+    const result = await store.fixDriverName(oldName, newName, {
+      reason, acknowledgeLockedPeriods: !!reason,
+    })
     toast(`Fixed ${result.fixed} sheet rows`)
     await runMismatchScan()
-  } catch {
-    toast('Failed to fix name', 'error')
+  } catch (e) {
+    // Surface the server's message — a 409 lock refusal and a PARTIAL_RENAME
+    // split are very different events and must not read identically.
+    toast(e.message || 'Failed to fix name', 'error')
   }
 }
 </script>

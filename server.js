@@ -12291,70 +12291,477 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 	res.json({ logs });
 });
 
+// ============================================================
+// PUT /api/admin/fix-driver-name — a rename is a JOIN-KEY rewrite
+// ============================================================
+// The driver NAME is the join key the settlement math runs on. There is no
+// driver id anywhere in the pay basis: /api/investor, /api/financials and
+// POST /api/invoices/generate all resolve a driver by matching the Job Tracking
+// sheet's `Driver` string against `drivers_directory` (pay structure),
+// `trucks.assigned_driver` (daily rate) and `expenses.driver` (the deductible).
+// So this route does not "tidy a label" — it rewrites the key 23 write targets
+// are joined on, in one sweep, with no transaction spanning the two stores.
+//
+// WHY IT MUST KEEP WORKING. Driver-name drift is a real, recurring failure here
+// — GET /api/admin/scan-driver-mismatches exists solely to find it, and
+// normalizeDriverName() exists because the names arrive dirty. Production today
+// carries a live example: Job Tracking holds one 2026-04 row under "Deshorn
+// King" and 45 rows under "Shorn King", and only the latter has a
+// drivers_directory row, a users row and a truck. That single stray row's
+// revenue and active day currently attribute to a driver who does not exist in
+// any table. Refusing every rename freezes that mistake permanently, so
+// "just block it" is the wrong guard.
+//
+// WHAT THE LOCK ACTUALLY HAS TO STOP. A rename that lands on EVERY target moves
+// no money: each month's totals are unchanged and only the label moves. A
+// rename that lands on SOME targets silently restates closed months, because
+// the pay math falls back to defaults for whatever it can no longer resolve:
+//   • drivers_directory missed  -> payStructures[name] undefined -> "fixed",
+//     0% — a percentage driver silently becomes a day-rate driver.
+//   • trucks.assigned_driver missed -> resolveDailyRate(undefined, undefined)
+//     -> the $250 legacy default.
+// On production both are live money: "Shorn King" is fixed at pay_daily 300
+// while his truck reads 250 (a $50/day swing across 42 sheet rows in locked
+// months), and "Rodney Brown" is a 20% percentage driver whose truck reads
+// driver_pay_daily 20 (net × 20% vs activeDays × $20 are unrelated numbers).
+// Fifteen periods are locked (2025-05..2026-07); owner 5's 2026-05 and 2026-06
+// payouts are marked PAID. So the partial rename is the harm, not the rename.
+//
+// ⚠️ WHICH IS WHY THIS DOES NOT OFFER "RENAME ONLY THE OPEN PERIODS".
+// It is the obvious-looking design and it is strictly more dangerous than
+// either extreme. Only `expenses`, `invoices` and the sheet rows carry a date;
+// `drivers_directory`, `trucks`, `truck_assignments`, `carrier_driver_history`
+// and `users` carry NO period at all, and they are exactly the pay-structure
+// and rate lookups. There is no "open-periods-only" version of them — renaming
+// them moves every month at once. Scoping the dated targets while the undated
+// ones move globally therefore MANUFACTURES the divergence described above,
+// inside months whose statements have already been published. Partial is the
+// one outcome this route must never produce, so the choice is deliberately
+// all-or-nothing.
+//
+// THE DISCRIMINATOR THAT KEEPS THE ROUTE USABLE: every money join key is
+// case-insensitive. getDeductibleExpensesByDriverMonth uses LOWER(driver);
+// getDriverPayStructures uses LOWER(driver_name); the investor/financials
+// driver key and trucksByDriver use normalizeDriverName(); getInvestorDriverSet
+// uses trim().toLowerCase(); generateInvoiceHandler uses LOWER(...) on all
+// three of its lookups. So a rename that changes only case or surrounding
+// whitespace CANNOT move a settlement figure — it is money-neutral by
+// construction — and that is precisely the class scan-driver-mismatches
+// reports most ("Case mismatch", "Multiple variants in sheet"). Those run
+// unguarded. Anything else is substantive and meets the lock.
+//
+// ⚠️ A RENAME INTO AN EXISTING NAME IS A MERGE, and it is the one outcome here
+// that cannot be undone by re-running the route. See the merge-detection note
+// further down — it is flagged in the plan, warned about in the response, and
+// given its own by-id reversal recipe in the audit line.
+//
+// Deliberately NOT gated on PERIOD_FINALIZE_ENABLED, matching isLocked() and
+// the DELETE /api/users/:id guard: on a database that never enabled the feature
+// period_locks is empty and behaviour is byte-identical.
+
+// Every SQLite target this route writes, declared once so the dry run, the
+// guard, the executor and the audit line cannot disagree about what "all
+// targets" means — the drift that let the old handler UPDATE drivers_directory
+// while reporting nothing about it.
+//
+// `match`/`writes` reproduce the ORIGINAL statements exactly, including their
+// inconsistencies: `notifications` and `load_responses` are matched on an exact
+// lowercase value and WRITTEN lowercase (those two tables store names folded),
+// every other target matches case-insensitively and writes the trimmed name.
+// That asymmetry is load-bearing convention, not a bug to fix in passing.
+//
+// Table and column names here are hardcoded literals, never request input, so
+// interpolating them into SQL is safe; every VALUE is bound.
+const DRIVER_RENAME_TARGETS = [
+	// --- MONEY-BEARING: the settlement math joins on these ---
+	{ key: "drivers_directory", table: "drivers_directory", column: "driver_name", match: "ci", writes: "trimmed", money: true, period: "none",
+		why: "pay structure — getDriverPayStructures() decides fixed vs percentage and pay_daily" },
+	{ key: "trucks_assigned_driver", table: "trucks", column: "assigned_driver", match: "ci", writes: "trimmed", money: true, period: "none",
+		why: "daily rate (trucks.driver_pay_daily) + getInvestorDriverSet leg 1" },
+	{ key: "truck_assignments", table: "truck_assignments", column: "driver_name", match: "ci", writes: "trimmed", money: true, period: "none",
+		why: "getInvestorDriverSet leg 1b — which drivers an investor's payout covers" },
+	{ key: "carrier_driver_history", table: "carrier_driver_history", column: "driver_name", match: "ci", writes: "trimmed", money: true, period: "none",
+		why: "getInvestorDriverSet leg 3 (historical pairings)" },
+	{ key: "users", table: "users", column: "driver_name", match: "ci", writes: "trimmed", money: true, period: "none",
+		why: "session driverName — every /me-scoped driver route resolves the truck through it" },
+	{ key: "users_full_name", table: "users", column: "full_name", match: "ci_driver_role", writes: "trimmed", money: true, period: "none",
+		why: "displayed identity of that same account" },
+	{ key: "expenses", table: "expenses", column: "driver", match: "ci", writes: "trimmed", money: true, period: "expense",
+		why: "deductible basis for percentage pay + every expense P&L SUM" },
+	{ key: "invoices", table: "invoices", column: "driver", match: "ci", writes: "trimmed", money: true, period: "invoice",
+		why: "weekly driver invoices, including ones already marked Paid" },
+	// --- OPERATIONAL / COSMETIC: no settlement figure reads these ---
+	{ key: "notifications", table: "notifications", column: "driver_name", match: "exact_lower", writes: "lower", money: false, period: "none" },
+	{ key: "load_responses", table: "load_responses", column: "driver_name", match: "exact_lower", writes: "lower", money: false, period: "none" },
+	{ key: "messages_from", table: "messages", column: "from", match: "ci", writes: "trimmed", money: false, period: "none" },
+	{ key: "messages_to", table: "messages", column: "to", match: "ci", writes: "trimmed", money: false, period: "none" },
+	{ key: "driver_onboarding", table: "driver_onboarding", column: "driver_name", match: "ci", writes: "trimmed", money: false, period: "none" },
+	{ key: "job_applications", table: "job_applications", column: "full_name", match: "ci", writes: "trimmed", money: false, period: "none" },
+	{ key: "load_ratings", table: "load_ratings", column: "driver_name", match: "ci", writes: "trimmed", money: false, period: "none" },
+	{ key: "documents", table: "documents", column: "driver", match: "ci", writes: "trimmed", money: false, period: "none" },
+	{ key: "driver_locations", table: "driver_locations", column: "driver", match: "ci", writes: "trimmed", money: false, period: "none" },
+	{ key: "routemate_dvir", table: "routemate_dvir", column: "driver_name", match: "ci", writes: "trimmed", money: false, period: "none" },
+	{ key: "routemate_hos_daily", table: "routemate_hos_daily", column: "driver_name", match: "ci", writes: "trimmed", money: false, period: "none" },
+];
+
+function driverRenameWhereSql(t) {
+	if (t.match === "exact_lower") return `"${t.column}" = ?`;
+	if (t.match === "ci_driver_role") return `LOWER("${t.column}") = ? AND role = 'Driver'`;
+	return `LOWER("${t.column}") = ?`;
+}
+function driverRenameNewValue(t, newName) {
+	return t.writes === "lower" ? newName.trim().toLowerCase() : newName.trim();
+}
+
+// Is this invoice frozen? Same shape and the same fail-closed discipline as
+// expenseRowPeriodLocked(), for a table whose period lives in a different pair
+// of columns. A Sat–Fri billing week straddles a month boundary, so BOTH ends
+// are checked — locking either month freezes the row. `paid_at` freezes
+// independently of any lock: money moved and a document named this driver.
+// `approved_at` deliberately does NOT freeze — approval is a sign-off, not a
+// payment, and an approved-but-unpaid invoice in an open month is still fair
+// game, mirroring how a finalized-but-unpaid payout stays adjustable.
+function invoiceRowPeriodLocked(r) {
+	const MONTH = /^\d{4}-\d{2}$/;
+	if (String((r && r.paid_at) || "").trim()) return true;
+	const start = String((r && r.week_start) || "").trim().slice(0, 7);
+	const end = String((r && r.week_end) || "").trim().slice(0, 7);
+	if (!MONTH.test(start) && !MONTH.test(end)) return true; // cannot tell -> assume closed
+	if (!periodLocksReadable()) return true;
+	return (MONTH.test(start) && isLocked(start)) || (MONTH.test(end) && isLocked(end));
+}
+
+// Which locked months to NAME for a set of blocked rows. Only a month that
+// isLocked() may be named — a row withheld on a fail-closed rung says
+// "(unrecognized date)" instead, so the refusal never tells an admin to reopen
+// a period that was never closed. Same distinction blockedExpensePeriods()
+// draws for the user-delete guard.
+function namedLockedPeriods(candidates) {
+	const MONTH = /^\d{4}-\d{2}$/;
+	const out = new Set();
+	for (const list of candidates) {
+		let named = false;
+		for (const p of list) if (MONTH.test(p) && isLocked(p)) { out.add(p); named = true; }
+		if (!named) out.add("(unrecognized date)");
+	}
+	return [...out].sort();
+}
+
 app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {
 	try {
-		const { oldName, newName } = req.body;
-		if (!oldName || !newName) return res.status(400).json({ error: "oldName and newName required" });
+		const { oldName, newName, reason, acknowledgeLockedPeriods } = req.body || {};
+		// ?dryRun=true, a QUERY parameter and never a body field. The house
+		// precedent is GET /api/admin/ratecon-reconcile?dryRun=true; the
+		// draft-invoice route learned the hard way that a body-only flag gets
+		// dropped by a caller that "knows" the endpoint and performs the real,
+		// irreversible thing instead.
+		const dryRun = String(req.query.dryRun || "") === "true";
+		if (!oldName || !newName) return res.status(400).json({ error: "oldName and newName required", code: "MISSING_NAMES" });
+		const oldTrim = String(oldName).trim();
+		const newTrim = String(newName).trim();
+		if (!oldTrim || !newTrim) return res.status(400).json({ error: "oldName and newName cannot be blank", code: "MISSING_NAMES" });
+		if (oldTrim === newTrim) return res.status(400).json({ error: "oldName and newName are identical — nothing to rename", code: "NO_CHANGE" });
+		const oldLower = oldTrim.toLowerCase();
 
+		// Money-neutral by construction (see the header note): every settlement
+		// join folds case, so only case/outer-whitespace changed means no figure
+		// can move. Tested on trim().toLowerCase() rather than
+		// normalizeDriverName() on purpose — normalizeDriverName also collapses
+		// INTERNAL whitespace, but getInvestorDriverSet does not, so
+		// "Howard  Reddie" -> "Howard Reddie" would move an investor's driver
+		// set and must be treated as substantive.
+		const caseOnly = oldLower === newTrim.toLowerCase();
+
+		// ---- Plan: read every target, count rows, judge the lock. No writes. ----
 		const sheets = await getSheets();
-		const resp = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking",
-		});
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
 		const rows = resp.data.values || [];
-		if (rows.length === 0) return res.json({ fixed: 0 });
+		const headers = rows[0] || [];
+		// Prefer the EXACT header. The loose /driver/i (what this route used)
+		// matches whichever driver-ish column comes first, so a sheet that ever
+		// gains a "Driver Phone" ahead of "Driver" would have this route rewrite
+		// phone numbers. scan-driver-mismatches already reads /^driver$/i; the
+		// loose form is kept only as a fallback so no existing sheet breaks.
+		let driverColIdx = headers.findIndex((h) => /^driver$/i.test(String(h || "").trim()));
+		let matchedBy = "exact";
+		if (driverColIdx === -1) { driverColIdx = headers.findIndex((h) => /driver/i.test(String(h || ""))); matchedBy = "loose"; }
+		if (driverColIdx === -1) return res.status(400).json({ error: "Driver column not found", code: "DRIVER_COLUMN_NOT_FOUND" });
+		// colLetter(), not String.fromCharCode(65 + idx) — the latter emits "["
+		// at index 26 and silently writes to a garbage range on any sheet wider
+		// than Z. Job Tracking is 26 columns today, i.e. exactly one column away.
+		const colLtr = colLetter(driverColIdx);
 
-		const headers = rows[0];
-		const driverColIdx = headers.findIndex((h) => /driver/i.test(h));
-		if (driverColIdx === -1) return res.status(400).json({ error: "Driver column not found" });
+		// Revenue and the active-day bucket both key on Assigned Date (see
+		// /api/financials), so that is the month a sheet row belongs to.
+		const dateColIdx = headers.findIndex((h) => /^assigned date$/i.test(String(h || "").trim()));
+		const sheetMonthOf = (val) => {
+			const s = String(val || "").trim();
+			const iso = s.match(/^(\d{4})-(\d{1,2})-\d{1,2}/);
+			if (iso) return `${iso[1]}-${String(iso[2]).padStart(2, "0")}`;
+			const us = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+			if (!us) return "";
+			let yr = parseInt(us[3], 10); if (yr < 100) yr += 2000;
+			return `${yr}-${String(parseInt(us[1], 10)).padStart(2, "0")}`;
+		};
 
-		const colLtr = String.fromCharCode(65 + driverColIdx);
-		const updates = [];
+		const newLower = newTrim.toLowerCase();
+		const sheetUpdates = [];
+		const sheetLockedMonths = [];
+		let sheetRowsAlreadyNewName = 0;
 		for (let i = 1; i < rows.length; i++) {
-			if ((rows[i][driverColIdx] || "").trim().toLowerCase() === oldName.trim().toLowerCase()) {
-				updates.push({
-					range: `Job Tracking!${colLtr}${i + 1}`,
-					values: [[newName.trim()]],
+			const cell = (rows[i][driverColIdx] || "").trim().toLowerCase();
+			if (cell === newLower) sheetRowsAlreadyNewName++;
+			if (cell !== oldLower) continue;
+			sheetUpdates.push({ range: `Job Tracking!${colLtr}${i + 1}`, values: [[newTrim]] });
+			const mk = dateColIdx === -1 ? "" : sheetMonthOf(rows[i][dateColIdx]);
+			// Fail closed: an unparseable Assigned Date could be any month, and
+			// on production 183 of 421 rows have one.
+			if (!mk || isLocked(mk)) sheetLockedMonths.push([mk]);
+		}
+
+		const locksReadable = periodLocksReadable();
+		const plan = { sheet: { rows: sheetUpdates.length, lockedRows: sheetLockedMonths.length, money: true, period: "row" }, sqlite: {} };
+		const blockers = [];
+		if (sheetLockedMonths.length) blockers.push({
+			target: "Job Tracking (sheet)", rows: sheetLockedMonths.length,
+			periods: namedLockedPeriods(sheetLockedMonths),
+			detail: `${sheetLockedMonths.length} load row${sheetLockedMonths.length === 1 ? "" : "s"} in a finalized month — these carry the revenue and the active days the month's driver pay was computed from`,
+		});
+
+		for (const t of DRIVER_RENAME_TARGETS) {
+			const where = driverRenameWhereSql(t);
+			let total = 0;
+			try { total = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${where}`).get(oldLower).n; }
+			catch (e) { plan.sqlite[t.key] = { rows: 0, error: e.message, money: !!t.money }; continue; }
+			const entry = { rows: total, money: !!t.money, period: t.period };
+			if (t.why) entry.why = t.why;
+			if (total && t.money && t.period === "expense") {
+				const er = db.prepare(`SELECT id, date, posted_period, created_at, amount FROM "${t.table}" WHERE ${where}`).all(oldLower);
+				const lockedRows = er.filter(expenseRowPeriodLocked);
+				entry.lockedRows = lockedRows.length;
+				if (lockedRows.length) {
+					entry.lockedAmount = Math.round(lockedRows.reduce((s, r) => s + (Number(r.amount) || 0), 0) * 100) / 100;
+					blockers.push({
+						target: `${t.table}.${t.column}`, rows: lockedRows.length, amount: entry.lockedAmount,
+						periods: namedLockedPeriods(lockedRows.map((r) => [expensePostedPeriod(r), String(r.date || "").trim().slice(0, 7)])),
+						detail: `${lockedRows.length} expense row${lockedRows.length === 1 ? "" : "s"} ($${entry.lockedAmount.toFixed(2)}) booked to a finalized month`,
+					});
+				}
+			} else if (total && t.money && t.period === "invoice") {
+				const ir = db.prepare(`SELECT id, week_start, week_end, paid_at, status FROM "${t.table}" WHERE ${where}`).all(oldLower);
+				const lockedRows = ir.filter(invoiceRowPeriodLocked);
+				entry.lockedRows = lockedRows.length;
+				entry.paidRows = lockedRows.filter((r) => String(r.paid_at || "").trim()).length;
+				if (lockedRows.length) blockers.push({
+					target: `${t.table}.${t.column}`, rows: lockedRows.length, paidRows: entry.paidRows,
+					periods: namedLockedPeriods(lockedRows.map((r) => [String(r.week_end || "").slice(0, 7), String(r.week_start || "").slice(0, 7)])),
+					detail: `${lockedRows.length} invoice${lockedRows.length === 1 ? "" : "s"}${entry.paidRows ? ` (${entry.paidRows} already PAID)` : ""} in a finalized month would be re-attributed`,
+				});
+			}
+			plan.sqlite[t.key] = entry;
+		}
+		// The REPLACE legs are substring rewrites, not key rewrites, so they get
+		// no lock analysis. Their counts are rows MATCHED by LIKE — SQLite's LIKE
+		// folds ASCII case while REPLACE() does not, so on a case-only rename
+		// these report rows touched by the statement, not rows whose text changed.
+		for (const col of ["title", "body"]) {
+			let n = 0;
+			try { n = db.prepare(`SELECT COUNT(*) AS n FROM dispatch_notifications WHERE "${col}" LIKE ?`).get(`%${oldTrim}%`).n; } catch { n = 0; }
+			plan.sqlite[`dispatch_notif_${col}`] = { rows: n, money: false, period: "none", note: "substring REPLACE; count is rows matched by LIKE, not rows whose text changed" };
+		}
+
+		// Global, undated money targets — reported explicitly so the "there is no
+		// open-periods-only version of this" argument is visible in the response
+		// and not only in this comment.
+		const globalMoneyTargets = DRIVER_RENAME_TARGETS
+			.filter((t) => t.money && t.period === "none" && (plan.sqlite[t.key]?.rows || 0) > 0)
+			.map((t) => `${t.table}.${t.column}`);
+
+		// ⚠️ MERGE DETECTION — a rename INTO a name that already has rows is not a
+		// rename, it is a merge of two drivers, and it is NOT reversible by
+		// swapping the arguments. Verified end-to-end: merging one stray "Deshorn
+		// King" row into "Shorn King" and then re-issuing the call with the names
+		// swapped moved 44 sheet rows and 702 database rows instead of the 1 and 1
+		// it had changed — i.e. the obvious undo silently renames the OTHER
+		// driver's entire history. So the merge case gets its own reversal recipe
+		// (the exact ids and A1 ranges touched), and is called out in the plan
+		// because "fix a typo" and "combine two people's pay history" are different
+		// decisions and used to look identical at the call site.
+		//
+		// Case-only is excluded because the match is case-insensitive: for
+		// "shorn king" -> "Shorn King" the new-name query returns the very rows
+		// being renamed, which is a self-match, not a merge.
+		let mergeRows = 0;
+		const mergeTargets = {};
+		if (!caseOnly) {
+			for (const t of DRIVER_RENAME_TARGETS) {
+				let n = 0;
+				try { n = db.prepare(`SELECT COUNT(*) AS n FROM "${t.table}" WHERE ${driverRenameWhereSql(t)}`).get(newLower).n; } catch { n = 0; }
+				if (n) { mergeTargets[t.key] = n; mergeRows += n; }
+			}
+			if (sheetRowsAlreadyNewName) { mergeTargets["JobTracking_sheet"] = sheetRowsAlreadyNewName; mergeRows += sheetRowsAlreadyNewName; }
+		}
+		const isMerge = mergeRows > 0;
+
+		const verdict = {
+			caseOnly,
+			moneyNeutral: caseOnly,
+			lockedPeriodsReadable: locksReadable,
+			// A case-only rename cannot move a settlement figure, so nothing
+			// BLOCKS it — reporting the locked rows it touches under `blockers`
+			// would make a provably safe repair read as a dangerous one. The
+			// count is still surfaced, just not as an obstacle.
+			blockers: caseOnly ? [] : blockers,
+			lockedRowsInScope: blockers.reduce((s, b) => s + (b.rows || 0), 0),
+			isMerge,
+			mergeTargets,
+			mergeRows,
+			globalMoneyTargets,
+			totalSheetRows: sheetUpdates.length,
+			totalSqliteRows: Object.values(plan.sqlite).reduce((s, e) => s + (e.rows || 0), 0),
+		};
+		if (isMerge) verdict.mergeWarning = `"${newTrim}" already has ${mergeRows} row(s). This MERGES two driver identities and cannot be undone by re-running with the names swapped — that would rename ${newTrim}'s existing history too. The audit line records the exact ids and sheet ranges changed.`;
+		if (caseOnly) {
+			verdict.decision = "allow";
+			verdict.rationale = "Case/whitespace-only rename: every settlement join key folds case (LOWER / normalizeDriverName), so no locked month's figure can move.";
+		} else if (!locksReadable) {
+			verdict.decision = "block";
+			verdict.code = "PERIOD_LOCK_UNREADABLE";
+			verdict.rationale = "period_locks is unreadable, so which months are closed cannot be determined. Refusing — an acknowledgement of a disclosure that could not be computed is not consent.";
+		} else if (!blockers.length) {
+			verdict.decision = "allow";
+			verdict.rationale = "Substantive rename, but no target row falls in a finalized month.";
+		} else {
+			verdict.decision = acknowledgeLockedPeriods === true && String(reason || "").trim().length >= 10 ? "allow-acknowledged" : "block";
+			verdict.code = verdict.decision === "block" ? "PERIOD_FINALIZED" : undefined;
+			verdict.rationale = "Substantive rename reaching finalized months. It is applied to EVERY target or none: the pay-structure and rate lookups (drivers_directory, trucks, truck_assignments, carrier_driver_history, users) carry no period, so a period-scoped rename would leave closed months resolving those to defaults — a percentage driver silently becomes a day-rate driver. Re-send with acknowledgeLockedPeriods:true and a reason (>=10 chars) to restate these months on the record.";
+		}
+
+		if (dryRun) {
+			return res.json({
+				dryRun: true, oldName: oldTrim, newName: newTrim,
+				driverColumn: { index: driverColIdx, header: headers[driverColIdx], letter: colLtr, matchedBy },
+				plan, verdict,
+				wouldWrite: verdict.decision !== "block",
+			});
+		}
+		if (verdict.decision === "block") {
+			return res.status(409).json({
+				error: verdict.code === "PERIOD_LOCK_UNREADABLE"
+					? "Cannot verify which accounting periods are closed — refusing the rename."
+					: `Rename withheld: it reaches ${blockers.length} finalized-period target${blockers.length === 1 ? "" : "s"}.`,
+				code: verdict.code, oldName: oldTrim, newName: newTrim, plan, verdict,
+			});
+		}
+
+		// ---- Execute. SHEET FIRST, then ALL of SQLite in ONE transaction. ----
+		// Ordering is deliberate and is the whole partial-failure story. The
+		// Sheets call is the failure-prone half (quota, and the half-open
+		// keep-alive socket that caused the 2026-08-06 stall); the SQLite half is
+		// local, synchronous and transactional. Putting the LIKELY failure FIRST
+		// means the likely outcome of a failure is "nothing was written, retry",
+		// and better-sqlite3's transaction collapses 21 statements into one
+		// commit — so 23 independent seams become exactly ONE:
+		//   sheet fails            -> nothing written at all      (502, clean)
+		//   sheet ok, SQLite fails -> txn rolls back; sheet moved  (500, split)
+		//   both ok                -> 200
+		// The split case is reported precisely rather than compensated with a
+		// second sheet write: a compensating write is itself a call to the API
+		// that just failed, and doubling writes on the flaky half to cover the
+		// rarer failure trades a reported inconsistency for an unreported one.
+		// The audit line below carries the exact reversal recipe either way.
+		let sheetChanged = 0;
+		if (sheetUpdates.length > 0) {
+			try {
+				await sheets.spreadsheets.values.batchUpdate({
+					spreadsheetId: SPREADSHEET_ID,
+					requestBody: { valueInputOption: "USER_ENTERED", data: sheetUpdates },
+				});
+				sheetChanged = sheetUpdates.length;
+			} catch (e) {
+				console.error("fix-driver-name: sheet write failed, nothing written:", e.message);
+				return res.status(502).json({
+					error: `Job Tracking write failed — nothing was changed anywhere. ${e.message}`,
+					code: "SHEET_WRITE_FAILED", oldName: oldTrim, newName: newTrim, changed: { sheet: 0, sqlite: {} },
 				});
 			}
 		}
 
-		// Also fix drivers_directory in SQLite
-		db.prepare("UPDATE drivers_directory SET driver_name = ? WHERE LOWER(driver_name) = LOWER(?)").run(newName.trim(), oldName.trim());
-
-		if (updates.length > 0) {
-			await sheets.spreadsheets.values.batchUpdate({
-				spreadsheetId: SPREADSHEET_ID,
-				requestBody: { valueInputOption: "USER_ENTERED", data: updates },
+		const sqlFixes = {};
+		// Only collected for a MERGE, where the ids ARE the reversal recipe (the
+		// name alone no longer identifies which rows moved). A pure rename needs
+		// none — every row under the new name came from the old one, so swapping
+		// the arguments is an exact undo. Capped so one audit row cannot grow
+		// unbounded; past the cap the recipe says so rather than lying by omission.
+		const changedIds = {};
+		const ID_CAP = 500;
+		try {
+			db.transaction(() => {
+				for (const t of DRIVER_RENAME_TARGETS) {
+					try {
+						if (isMerge) {
+							try {
+								const ids = db.prepare(`SELECT id FROM "${t.table}" WHERE ${driverRenameWhereSql(t)}`).all(oldLower).map((r) => r.id);
+								if (ids.length) changedIds[t.key] = ids.length > ID_CAP ? { truncated: true, of: ids.length, ids: ids.slice(0, ID_CAP) } : ids;
+							} catch { /* table has no `id` column — count in sqlFixes still records the leg */ }
+						}
+						sqlFixes[t.key] = db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE ${driverRenameWhereSql(t)}`)
+							.run(driverRenameNewValue(t, newTrim), oldLower).changes;
+					} catch (e) {
+						// A table that does not exist on this database is not a
+						// reason to abort a rename of the ones that do; a genuine
+						// write failure still throws out of the transaction.
+						if (/no such table|no such column/i.test(e.message)) { sqlFixes[t.key] = 0; continue; }
+						throw e;
+					}
+				}
+				sqlFixes.dispatch_notif_title = db.prepare("UPDATE dispatch_notifications SET title = REPLACE(title, ?, ?) WHERE title LIKE ?").run(oldTrim, newTrim, `%${oldTrim}%`).changes;
+				sqlFixes.dispatch_notif_body = db.prepare("UPDATE dispatch_notifications SET body = REPLACE(body, ?, ?) WHERE body LIKE ?").run(oldTrim, newTrim, `%${oldTrim}%`).changes;
+			})();
+		} catch (e) {
+			// Transaction rolled back: SQLite is untouched, the sheet is not.
+			const reversal = `Sheet only: set Job Tracking column ${colLtr} back to "${oldTrim}" on the ${sheetChanged} row(s) matching "${newTrim}". SQLite was rolled back and needs nothing.`;
+			logAudit(req, "fix_driver_name_partial", "driver", oldTrim, JSON.stringify({
+				oldName: oldTrim, newName: newTrim, caseOnly, outcome: "PARTIAL — sheet written, SQLite rolled back",
+				sheetRowsChanged: sheetChanged, sqliteError: e.message, reversal,
+				acknowledgedLockedPeriods: verdict.decision === "allow-acknowledged", reason: String(reason || "").trim(),
+			}));
+			console.error("fix-driver-name: SQLite transaction failed after sheet write:", e.message);
+			return res.status(500).json({
+				error: `Partial rename. Job Tracking was updated (${sheetChanged} row(s)) but the SQLite half rolled back, so the data is now split across two names. ${e.message}`,
+				code: "PARTIAL_RENAME", partial: true, oldName: oldTrim, newName: newTrim,
+				changed: { sheet: sheetChanged, sqlite: {} }, notChanged: Object.keys(plan.sqlite), reversal,
 			});
 		}
 
-		// Also fix SQLite tables
-		const oldLower = oldName.trim().toLowerCase();
-		const newLower = newName.trim().toLowerCase();
-		const sqlFixes = {};
-		sqlFixes.notifications = db.prepare("UPDATE notifications SET driver_name = ? WHERE driver_name = ?").run(newLower, oldLower).changes;
-		sqlFixes.expenses = db.prepare("UPDATE expenses SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.load_responses = db.prepare("UPDATE load_responses SET driver_name = ? WHERE driver_name = ?").run(newLower, oldLower).changes;
-		sqlFixes.messages_from = db.prepare("UPDATE messages SET \"from\" = ? WHERE LOWER(\"from\") = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.messages_to = db.prepare("UPDATE messages SET \"to\" = ? WHERE LOWER(\"to\") = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.users = db.prepare("UPDATE users SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.users_full_name = db.prepare("UPDATE users SET full_name = ? WHERE LOWER(full_name) = ? AND role = 'Driver'").run(newName.trim(), oldLower).changes;
-		sqlFixes.truck_assignments = db.prepare("UPDATE truck_assignments SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.driver_onboarding = db.prepare("UPDATE driver_onboarding SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.trucks_assigned_driver = db.prepare("UPDATE trucks SET assigned_driver = ? WHERE LOWER(assigned_driver) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.job_applications = db.prepare("UPDATE job_applications SET full_name = ? WHERE LOWER(full_name) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.load_ratings = db.prepare("UPDATE load_ratings SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.carrier_driver_history = db.prepare("UPDATE carrier_driver_history SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.documents = db.prepare("UPDATE documents SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.driver_locations = db.prepare("UPDATE driver_locations SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.invoices = db.prepare("UPDATE invoices SET driver = ? WHERE LOWER(driver) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.routemate_dvir = db.prepare("UPDATE routemate_dvir SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.routemate_hos_daily = db.prepare("UPDATE routemate_hos_daily SET driver_name = ? WHERE LOWER(driver_name) = ?").run(newName.trim(), oldLower).changes;
-		sqlFixes.dispatch_notif_title = db.prepare("UPDATE dispatch_notifications SET title = REPLACE(title, ?, ?) WHERE title LIKE ?").run(oldName.trim(), newName.trim(), `%${oldName.trim()}%`).changes;
-		sqlFixes.dispatch_notif_body = db.prepare("UPDATE dispatch_notifications SET body = REPLACE(body, ?, ?) WHERE body LIKE ?").run(oldName.trim(), newName.trim(), `%${oldName.trim()}%`).changes;
+		// Per-target counts, so the sweep is reversible by hand from the log alone.
+		// The recipe BRANCHES on merge, because the naive swap is actively wrong
+		// there — see the merge-detection note above.
+		const sheetRanges = sheetUpdates.map((u) => u.range);
+		const reversal = isMerge
+			? `MERGE — do NOT re-run with the names swapped (that would also rename ${newTrim}'s pre-existing rows). Reverse by id: for each key in changedIds, UPDATE <table> SET <column> = '${oldTrim}' WHERE id IN (...). Sheet: set the listed sheetRanges back to "${oldTrim}".`
+			: `PUT /api/admin/fix-driver-name {"oldName":"${newTrim}","newName":"${oldTrim}"} — an exact undo, because every row now under "${newTrim}" came from "${oldTrim}".`;
+		logAudit(req, "fix_driver_name", "driver", oldTrim, JSON.stringify({
+			oldName: oldTrim, newName: newTrim, caseOnly, moneyNeutral: caseOnly, isMerge,
+			sheetRowsChanged: sheetChanged, sheetColumn: `${colLtr} (${headers[driverColIdx]})`,
+			sheetRanges: sheetRanges.length > ID_CAP ? { truncated: true, of: sheetRanges.length, ranges: sheetRanges.slice(0, ID_CAP) } : sheetRanges,
+			sqlite: sqlFixes,
+			changedIds: isMerge ? changedIds : undefined,
+			lockedPeriodsTouched: verdict.decision === "allow-acknowledged" ? blockers.map((b) => ({ target: b.target, rows: b.rows, periods: b.periods })) : [],
+			acknowledgedLockedPeriods: verdict.decision === "allow-acknowledged",
+			reason: String(reason || "").trim(),
+			reversal,
+		}));
 
-		res.json({ fixed: updates.length, oldName, newName, sqlite: sqlFixes });
+		res.json({
+			fixed: sheetChanged, oldName: oldTrim, newName: newTrim, sqlite: sqlFixes,
+			caseOnly, moneyNeutral: caseOnly, isMerge,
+			mergeWarning: verdict.mergeWarning,
+			acknowledgedLockedPeriods: verdict.decision === "allow-acknowledged",
+			lockedPeriodsRestated: verdict.decision === "allow-acknowledged" ? blockers : [],
+			driverColumn: { index: driverColIdx, header: headers[driverColIdx], letter: colLtr, matchedBy },
+			reversal,
+		});
 	} catch (error) {
 		console.error("Error fixing driver name:", error.message);
 		res.status(500).json({ error: error.message });
