@@ -3815,6 +3815,53 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		const insPayType = (obj.PayType || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
 		const insPayPct = Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0));
 		const insPayDaily = Math.max(0, parseFloat(obj.PayDaily) || 0);
+
+		// ⚠️ THIS IS AN UPDATE VERB IN DISGUISE, and it was the way around the
+		// guard on the PUT. `driver_name` is UNIQUE, so INSERT OR REPLACE on an
+		// existing name is a DELETE followed by an INSERT: every column the body
+		// omits reverts to this handler's default rather than being preserved.
+		// One call —
+		//     POST /api/drivers-directory {"headers":["Driver"],"values":["Shorn King"]}
+		// — therefore rewrites pay_daily 300 → 0, which resolveDailyRate turns
+		// into the truck's 250, restating 50 invoiced active days across four
+		// finalized months. Same money, same table, same roles as the PUT; only
+		// the verb differs. So the replace path runs the SAME predicate, with the
+		// new values as the change set.
+		//
+		// ⚠️ MATCHED CASE-INSENSITIVELY, WHICH IS WIDER THAN THE CONSTRAINT — on
+		// purpose. `driver_name TEXT NOT NULL UNIQUE` carries no COLLATE NOCASE,
+		// so the UNIQUE is BINARY: posting "SHORN KING" over "Shorn King" does
+		// NOT replace, it inserts a SECOND row. That is the more dangerous half,
+		// because getDriverPayStructures() keys on LOWER(driver_name) and builds
+		// a plain object — so the duplicate silently WINS the key and its
+		// pay_daily 0 overrides the real row's 300 across every closed month,
+		// with the original row still sitting there looking correct. Matching on
+		// LOWER(TRIM(...)) catches both the true replace and that shadowing
+		// insert; over-reporting is the only safe direction for a guard.
+		//
+		// Left deliberately unfixed and stated instead: the replace also CHANGES
+		// THE ROW ID, orphaning legal_documents.driver_id and the profile picture
+		// on disk. That is a real defect, but converting this to a genuine UPSERT
+		// is a behaviour change beyond a period guard, and every path that would
+		// move money through it is now refused.
+		const dirExisting = db.prepare("SELECT * FROM drivers_directory WHERE LOWER(TRIM(driver_name)) = LOWER(TRIM(?))").get(obj.Driver || "");
+		if (dirExisting) {
+			const replaceRow = {
+				driver_name: obj.Driver || "", carrier_name: obj["Carrier Name"] || "",
+				pay_type: insPayType, pay_percentage: insPayPct, pay_daily: insPayDaily,
+			};
+			const dirChanged = directoryChangedColumns(dirExisting, replaceRow);
+			if (Object.keys(dirChanged).length) {
+				const lock = directoryEditLockBlockers(dirExisting, dirChanged);
+				if (lock.unreadable) return periodLockUnreadableResponse(res, "Replacing a driver's record");
+				if (lock.blockers.length) {
+					return periodBlockedResponse(res,
+						`Cannot replace the existing record for ${dirExisting.driver_name}`,
+						lock.blockers, DIRECTORY_LOCK_REMEDY);
+				}
+			}
+		}
+
 		db.prepare(`INSERT OR REPLACE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating, status, pay_type, pay_percentage, pay_daily)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
@@ -3840,8 +3887,13 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		if (!values || !headers) return res.status(400).json({ error: "values and headers required" });
 		const obj = {};
 		headers.forEach((h, i) => { obj[h] = values[i] || ""; });
-		// Keep existing status / pay fields if the client didn't send them
-		const current = db.prepare("SELECT status, pay_type, pay_percentage, pay_daily, carrier_name FROM drivers_directory WHERE id = ?").get(id);
+		// Keep existing status / pay fields if the client didn't send them.
+		// SELECT * (was: five columns) because the period guard also needs
+		// driver_name, and a 404 because this route previously answered
+		// {success:true} for any id at all, having updated zero rows — the same
+		// silent no-op PUT /api/compliance/fees/:id was given a 404 for in #210.
+		const current = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
+		if (!current) return res.status(404).json({ error: "Driver not found" });
 		const nextStatus = obj.Status || current?.status || "active";
 		const sentPayType = (obj.PayType || "").toLowerCase();
 		const nextPayType = sentPayType === "fixed" || sentPayType === "percentage"
@@ -3857,6 +3909,32 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		const nextCarrier = obj["Carrier Name"] && obj["Carrier Name"].trim()
 			? obj["Carrier Name"]
 			: (current?.carrier_name || "");
+
+		// ⚠️ THE MONTH-END LOCK. drivers_directory is the SENIOR half of driver
+		// pay: resolveDailyRate(drivers_directory.pay_daily, trucks.driver_pay_daily)
+		// gives this table priority, and pay_type decides whether a day rate is
+		// used at all. #210 guarded the truck's half and named this one as the
+		// highest-value follow-up, because editing here restates a closed month
+		// without ever touching a guarded route.
+		//
+		// Only the five money-visible columns are diffed, and each check fires
+		// only when its own value actually moves — a phone number, an address or
+		// a rating edit never reaches this. See directoryEditLockBlockers.
+		const nextRow = {
+			driver_name: obj.Driver || "", carrier_name: nextCarrier,
+			pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily,
+		};
+		const dirChanged = directoryChangedColumns(current, nextRow);
+		if (Object.keys(dirChanged).length) {
+			const lock = directoryEditLockBlockers(current, dirChanged);
+			if (lock.unreadable) return periodLockUnreadableResponse(res, "Editing a driver's record");
+			if (lock.blockers.length) {
+				return periodBlockedResponse(res,
+					`Cannot edit ${current.driver_name || `driver #${id}`}`,
+					lock.blockers, DIRECTORY_LOCK_REMEDY);
+			}
+		}
+
 		db.prepare(`UPDATE drivers_directory SET driver_name=?, carrier_name=?, state=?, city=?, zip=?, address=?, phone=?, cell=?, email=?, dot=?, mc=?, trucks=?, hazmat=?, rating=?, status=?, pay_type=?, pay_percentage=?, pay_daily=? WHERE id=?`)
 			.run(obj.Driver || "", nextCarrier, obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
@@ -3865,6 +3943,15 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		// Sync carrier-driver history on write (not on read)
 		if (obj.Driver && nextCarrier) {
 			syncCarrierDriverHistory([{ ...obj, "Carrier Name": nextCarrier }], "Driver", "Carrier Name");
+		}
+		// A change to any of the five settlement columns previously left no trace
+		// at all — "the directory was edited" does not tell a later reader that a
+		// driver's rate or pay formula moved. Only logged when one of them
+		// actually changed, so routine contact edits stay out of the trail.
+		if (Object.keys(dirChanged).length) {
+			logAudit(req, "update_driver_pay", "driver", String(id),
+				`${current.driver_name || `#${id}`}: ` +
+				Object.keys(dirChanged).map((c) => `${c} ${JSON.stringify(current[c] ?? "")} → ${JSON.stringify(nextRow[c])}`).join(", "));
 		}
 		notifyChange("drivers");
 		res.json({ success: true });
@@ -3933,6 +4020,26 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) 
 	try {
 		const id = parseInt(req.params.id);
 		if (!id || id <= 0) return res.status(400).json({ error: "Invalid driver id" });
+
+		// ⚠️ The third door onto the same money, and the widest: deleting the row
+		// is the pay-structure half of a rename with no destination. The money
+		// math falls back to `payStructures[driver] || { payType: "fixed",
+		// payPercentage: 0 }` and resolveDailyRate's $250, so a percentage driver
+		// silently becomes a day-rate driver in every closed month — and unlike
+		// the PUT there is nothing left to read the old terms off afterwards.
+		// Judged BEFORE the file unlinks below, which are irreversible.
+		const dirRow = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
+		if (!dirRow) return res.status(404).json({ error: "Driver not found" });
+		{
+			const lock = directoryDeleteLockBlockers(dirRow);
+			if (lock.unreadable) return periodLockUnreadableResponse(res, "Deleting a driver's record");
+			if (lock.blockers.length) {
+				return periodBlockedResponse(res,
+					`Cannot delete ${dirRow.driver_name || `driver #${id}`}`,
+					lock.blockers, DIRECTORY_LOCK_REMEDY);
+			}
+		}
+
 		// Cascade: remove any shared documents uploaded to this driver (files + rows)
 		const orphanedDocs = db.prepare("SELECT file_url FROM legal_documents WHERE driver_id = ?").all(id);
 		for (const doc of orphanedDocs) {
@@ -3942,8 +4049,8 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), (req, res) 
 				if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 			} catch (err) { console.error("Failed to unlink driver doc on cascade:", err.message); }
 		}
-		// Cascade: remove profile picture if any
-		const existingDriver = db.prepare("SELECT profile_picture_url FROM drivers_directory WHERE id = ?").get(id);
+		// Cascade: remove profile picture if any (dirRow was read above for the lock)
+		const existingDriver = dirRow;
 		if (existingDriver?.profile_picture_url) {
 			try {
 				const picPath = path.join(__dirname, existingDriver.profile_picture_url);
@@ -13355,6 +13462,564 @@ function truckDeleteLockBlockers(truck) {
 		});
 	}
 
+	// (5) the INVESTOR DRIVER SET — gated on neither the fixed-cost total nor the
+	// in-service date, the same split check (2b) of the edit guard makes.
+	//
+	// ⚠️ THIS IS WHAT STOPS THE DELETE GUARD LEANING ON THE FOREIGN KEY. Checks
+	// (1)-(4) above all measure DOLLARS ON THE TRUCK, so a truck carrying none
+	// produces no blocker at all — and measured on production (read-only,
+	// 2026-08-08) three of the six do exactly that: INV-24-A ($0/mo, driver
+	// Lesline Johnson, resolved rate unchanged by the delete), LogisX-TEST ($0/mo)
+	// and Logisx-#91 (which bills $3,105.83/mo but only from 2026-08, an open
+	// month). Every one of those deletes is currently refused ONLY by the
+	// TRUCK_REFERENCED foreign-key check further down, which exists for an
+	// unrelated reason — so anyone who later makes that path detach-and-proceed
+	// silently reopens this.
+	//
+	// The harm is real even at $0: getInvestorDriverSet() is
+	//     SELECT DISTINCT assigned_driver FROM trucks WHERE owner_id = ?
+	// with no status filter and no month dimension, and that set scopes the
+	// investor's revenue, trip expenses and driver pay in EVERY month. Deleting
+	// the truck can therefore drop a driver's entire history out of an investor's
+	// closed months while removing $0 of fixed costs.
+	//
+	// Scoped precisely: an owner who still reaches the driver through another
+	// truck, an active assignment, the drivers_directory carrier name or
+	// carrier_driver_history keeps them, so only a membership held SOLELY by this
+	// truck blocks. On production today that is nobody — leg 3 holds each of the
+	// three — which is exactly why this is cheap to be right about now.
+	{
+		const driver = String(truck.assigned_driver || "").trim();
+		if (driver && Number(truck.owner_id) > 0) {
+			const heldBefore = investorsHoldingDriver(driver);
+			const heldAfter = investorsHoldingDriver(driver, { excludeTruckId: truck.id });
+			const lost = [...heldBefore].filter((id) => !heldAfter.has(id));
+			const months = lost.length ? driverPayLockedMonths(driver, locked) : [];
+			if (months.length) {
+				blockers.push({
+					table: "trucks.owner_id", rows: 1, effect: "driver_set", periods: months.slice().sort(),
+					detail: `deleting ${truck.unit_number} drops ${driver} out of investor ledger${lost.length === 1 ? "" : "s"} ` +
+						`${lost.sort((a, b) => a - b).join(", ")}, removing their revenue, expenses and pay from ` +
+						`${months.length} finalized month${months.length === 1 ? "" : "s"}`,
+				});
+			}
+		}
+	}
+
+	return { unreadable: false, blockers };
+}
+
+// ============================================================
+// The same lock, for the two routes that reach the SAME money by a different
+// door: drivers_directory (the pay STRUCTURE) and POST /api/trucks (creating
+// the restatement PUT /api/trucks/:id refuses).
+// ============================================================
+// truckEditLockBlockers guards the truck's rate. It is not the whole rate:
+//   resolveDailyRate(drivers_directory.pay_daily, trucks.driver_pay_daily)
+// gives the DIRECTORY value priority — check (6) above relies on exactly that
+// to let a truck-rate edit through when the driver already overrides it. So the
+// directory is the senior half of the same number, and it was unguarded:
+// PUT /api/drivers-directory/:id rewrote pay_daily, and pay_type flipped the
+// whole pay FORMULA (activeDays × rate  vs  net revenue × pct) retroactively,
+// with no lock, no audit line and no 409.
+
+// Which investors' ledgers currently contain this driver.
+//
+// The INVERSE of getInvestorDriverSet(): that answers "which drivers belong to
+// investor N", this answers "which investors claim driver D". The inversion is
+// what makes a membership DELTA computable, and a delta is the only honest
+// question here — getInvestorDriverSet has **no month dimension at all**, so a
+// change to membership reaches every closed month at once and "which months"
+// can only come from the driver, never from the change itself.
+//
+// All four legs are reproduced, because a guard that watched only the leg it
+// was written for would wave through the edit that moves the driver on another:
+//   1  trucks.assigned_driver WHERE owner_id = N
+//   1b active truck_assignments on that owner's trucks
+//   2  drivers_directory.carrier_name == users.company_name   (ci, trimmed)
+//   3  carrier_driver_history.carrier_name == users.company_name — and note
+//      leg 3 has NO ended_at filter, so once a pairing is written it is
+//      permanent. That is why `extraHistoryCarrier` exists: the directory
+//      write calls syncCarrierDriverHistory(), which APPENDS, so the "after"
+//      state of a carrier edit includes a leg-3 membership the caller never
+//      asked for and can never remove through this API.
+//
+// `excludeTruckId` models a truck about to be deleted; `carrierOverride` /
+// `nameOverride` model a drivers_directory row about to be written.
+//
+// The investor universe is the UNION of role='Investor' and every distinct
+// trucks.owner_id — deliberately wider than either alone. Keying on the role
+// column only would repeat #205's mistake in reverse (owner_id records no
+// role), and keying on owner_id only would miss an investor held purely by
+// carrier name, which is legs 2 and 3 entirely.
+function investorsHoldingDriver(driverName, opts = {}) {
+	const lc = normalizeDriverName(opts.nameOverride !== undefined ? opts.nameOverride : driverName);
+	const held = new Set();
+	if (!lc) return held;
+	const excludeTruckId = Number(opts.excludeTruckId) || 0;
+
+	const investors = new Map(); // id -> company_name (may be "")
+	for (const u of db.prepare("SELECT id, COALESCE(company_name, '') AS company_name FROM users WHERE role = 'Investor'").all()) {
+		investors.set(u.id, u.company_name);
+	}
+	for (const t of db.prepare("SELECT DISTINCT owner_id FROM trucks WHERE COALESCE(owner_id, 0) > 0").all()) {
+		if (!investors.has(t.owner_id)) {
+			const u = db.prepare("SELECT COALESCE(company_name, '') AS company_name FROM users WHERE id = ?").get(t.owner_id);
+			investors.set(t.owner_id, u ? u.company_name : "");
+		}
+	}
+
+	// legs 1 + 1b — the truck side. normalizeDriverName() on both sides, matching
+	// trucksByDriver; getInvestorDriverSet itself uses trim().toLowerCase(), and
+	// normalizeDriverName ALSO collapses internal whitespace, so this is strictly
+	// wider — the correct direction for a guard.
+	//
+	// `carrierLegsOnly` answers the separate question "would the carrier legs
+	// still hold this driver if the truck legs went away", which is what decides
+	// whether detaching a truck actually moves a ledger or merely duplicates a
+	// membership the carrier name already grants.
+	if (!opts.carrierLegsOnly) {
+		for (const t of db.prepare("SELECT id, owner_id, assigned_driver FROM trucks WHERE COALESCE(owner_id, 0) > 0").all()) {
+			if (t.id === excludeTruckId) continue;
+			if (normalizeDriverName(t.assigned_driver) === lc) held.add(t.owner_id);
+		}
+		for (const r of db.prepare(
+			"SELECT t.owner_id AS owner_id, ta.driver_name AS driver_name FROM truck_assignments ta " +
+			"JOIN trucks t ON t.id = ta.truck_id " +
+			"WHERE COALESCE(t.owner_id, 0) > 0 AND ta.end_date = '' AND ta.driver_name != '' AND ta.truck_id != ?"
+		).all(excludeTruckId)) {
+			if (normalizeDriverName(r.driver_name) === lc) held.add(r.owner_id);
+		}
+	}
+
+	// legs 2 + 3 — the carrier side. Both compare against users.company_name
+	// case-insensitively after a trim, exactly as getInvestorDriverSet does.
+	const carriers = new Set();
+	const dirCarrier = opts.carrierOverride !== undefined
+		? String(opts.carrierOverride || "")
+		: (db.prepare("SELECT carrier_name FROM drivers_directory WHERE LOWER(TRIM(driver_name)) = ?").get(lc) || {}).carrier_name || "";
+	if (String(dirCarrier).trim()) carriers.add(String(dirCarrier).trim().toLowerCase());
+	for (const h of db.prepare("SELECT carrier_name, driver_name FROM carrier_driver_history").all()) {
+		if (normalizeDriverName(h.driver_name) === lc && String(h.carrier_name || "").trim()) {
+			carriers.add(String(h.carrier_name).trim().toLowerCase());
+		}
+	}
+	if (opts.extraHistoryCarrier !== undefined && String(opts.extraHistoryCarrier || "").trim()) {
+		carriers.add(String(opts.extraHistoryCarrier).trim().toLowerCase());
+	}
+	for (const [id, company] of investors) {
+		const c = String(company || "").trim().toLowerCase();
+		if (c && carriers.has(c)) held.add(id);
+	}
+	return held;
+}
+
+// The truck-side daily rates resolveDailyRate() could be handed for this driver.
+//
+// Mirrors the money math's `trucksByDriver[d] = t.driver_pay_daily || 250`
+// exactly, including that `|| 250` (which agrees with resolveDailyRate's own
+// `t > 0 ? t : 250`, so a zero rate resolves the same either way). Returns
+// EVERY matching truck rather than the loop's last-wins single value: a guard
+// that picked one truck could miss a divergence on another, and over-reporting
+// is the only safe direction. `[undefined]` when the driver drives nothing —
+// that is what the money math passes, and resolveDailyRate turns it into $250.
+function truckDailyRateCandidates(driverName) {
+	const lc = normalizeDriverName(driverName);
+	if (!lc) return [undefined];
+	const rates = db.prepare("SELECT assigned_driver, driver_pay_daily FROM trucks").all()
+		.filter((t) => normalizeDriverName(t.assigned_driver) === lc)
+		.map((t) => t.driver_pay_daily || 250);
+	return rates.length ? rates : [undefined];
+}
+
+// A drivers_directory row's pay structure, normalized EXACTLY as
+// getDriverPayStructures() normalizes it. Comparing raw column values instead
+// would 409 a no-op: 'Fixed' → 'fixed', '20' → 20 and 300 → 300.0 all read as
+// changes to a naive diff and as identity to the money math.
+function directoryPayStruct(row) {
+	return {
+		payType: String((row && row.pay_type) || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed",
+		payPercentage: Math.max(0, Math.min(100, Number(row && row.pay_percentage) || 0)),
+		payDaily: Math.max(0, Number(row && row.pay_daily) || 0),
+	};
+}
+
+// The pay structure the money math falls back to when a driver has NO
+// drivers_directory row — `payStructures[driver] || { payType: "fixed",
+// payPercentage: 0 }`, whose payDaily is undefined and so resolves to the truck
+// rate. This is what a delete, and what a substantive rename, leave behind.
+const DIRECTORY_DEFAULT_STRUCT = { payType: "fixed", payPercentage: 0, payDaily: 0 };
+
+// The five drivers_directory columns any settlement figure reads. Declared once
+// so the PUT, the POST's replace path and the DELETE cannot drift about which
+// columns the lock reasons over — the same drift that let the old rename
+// handler write this table while reporting nothing about it.
+const DIRECTORY_PERIOD_COLUMNS = ["driver_name", "carrier_name", "pay_type", "pay_percentage", "pay_daily"];
+
+// `changed` for directoryEditLockBlockers: ONLY the money-visible columns whose
+// stored value actually differs. The two REAL columns are compared as numbers
+// so '300' and 300 are one value; the three TEXT ones are compared raw, and the
+// checks that consume them do their own case-insensitive normalization (a
+// 'Fixed' → 'fixed' or a whitespace-only rename lands here as a difference and
+// is then correctly scored as moving no money).
+function directoryChangedColumns(before, after) {
+	const changed = {};
+	for (const col of DIRECTORY_PERIOD_COLUMNS) {
+		const b = before ? before[col] : undefined;
+		const a = after[col];
+		if (col === "pay_percentage" || col === "pay_daily") {
+			if ((Number(b) || 0) !== (Number(a) || 0)) changed[col] = a;
+		} else if (String(b || "") !== String(a || "")) {
+			changed[col] = a;
+		}
+	}
+	return changed;
+}
+
+// One remedy string for all three drivers_directory refusals. It deliberately
+// does NOT suggest "delete the row and re-add it" or "rename it instead" —
+// both are refused by the sibling guards here for the same reason, and pointing
+// an operator at something another guard then blocks is how a guard earns a
+// reputation for being broken.
+const DIRECTORY_LOCK_REMEDY =
+	"A driver's pay structure has no per-month history, so there is no version of this edit that touches only the open month. " +
+	"Record the new terms from the current month onward, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).";
+
+// Everything a write to drivers_directory would restate inside a finalized
+// month. Same contract as truckEditLockBlockers: `changed` holds ONLY columns
+// whose value actually differs, `blockers: []` means the write may proceed.
+//
+// ⚠️ BE PRECISE OR BE DISABLED, for the same reason and with sharper teeth than
+// the trucks route: DriverTable.vue PUTs `headers: this.headers` — the full
+// 18-column array straight back from the GET — so EVERY column is present in
+// EVERY body, including on an edit that only fixes a phone number. A guard
+// keyed on presence would 409 a typo fix and be switched off in a week.
+//
+// The retroactivity map, and why each line is where it is:
+//
+//   RETROACTIVE — guarded:
+//     pay_type         flips the FORMULA, not a rate: fixed pays
+//                      activeDays × resolveDailyRate(...), percentage pays
+//                      max(0, revenue − deductibles) × pct. The two are
+//                      unrelated numbers, so this is the largest single move
+//                      available anywhere in this file.
+//     pay_daily        wins OVER trucks.driver_pay_daily in resolveDailyRate,
+//                      for every month the driver has active days in.
+//     pay_percentage   the multiplier, whenever percentage is the formula on
+//                      either side of the edit.
+//     driver_name      the join key getDriverPayStructures() indexes on
+//                      (LOWER(driver_name)). This route renames ONE table, so a
+//                      rename here is exactly the PARTIAL rename that
+//                      PUT /api/admin/fix-driver-name refuses to produce: the
+//                      structure detaches, payStructures[name] goes undefined,
+//                      and a percentage driver silently becomes a $250/day
+//                      fixed driver in every closed month.
+//     carrier_name     getInvestorDriverSet leg 2 matches it against
+//                      users.company_name, and the handler's
+//                      syncCarrierDriverHistory() call writes leg 3 as well.
+//                      Moves a driver's revenue, expenses and pay BETWEEN
+//                      investor ledgers — never changes a fleet total, which
+//                      is worse, not better.
+//
+//   NOT RETROACTIVE — deliberately allowed:
+//     state, city, zip, address, phone, cell   read only by the invoice PDF's
+//                                              address block and the geocode
+//                                              helper; no aggregator.
+//     email, dot, mc, trucks, hazmat, rating   never read by any money path.
+//     status                                   checked: every read of this
+//                                              table either SELECTs * for a
+//                                              listing or names the pay and
+//                                              contact columns. Nothing
+//                                              filters on status, so it gates
+//                                              no figure.
+//     profile_picture_url                      not written by this route.
+function directoryEditLockBlockers(row, changed) {
+	// Fail CLOSED — isLocked() swallows its errors and answers "not locked", so
+	// an unreadable period_locks would silently turn this guard off.
+	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
+	const locked = lockedPeriodsDesc();
+	if (!locked.length) return { unreadable: false, blockers: [] };
+
+	const has = (f) => Object.prototype.hasOwnProperty.call(changed, f);
+	const blockers = [];
+	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+	const nameNow = String((row && row.driver_name) || "");
+	const nameNext = has("driver_name") ? String(changed.driver_name || "") : nameNow;
+	const before = directoryPayStruct(row);
+	const after = directoryPayStruct({ ...row, ...changed });
+
+	// The months this driver's pay reaches. Same helper the truck guard uses, so
+	// the two cannot disagree about a driver's exposure — including its
+	// deliberate over-reporting (every month from the FIRST assignment onward,
+	// and every locked month for a driver with no assignment history at all).
+	const monthsNow = driverPayLockedMonths(nameNow, locked);
+
+	// (1) pay_type — the formula switch.
+	if (before.payType !== after.payType && monthsNow.length) {
+		blockers.push({
+			field: "pay_type", from: before.payType, to: after.payType,
+			periods: monthsNow.slice().sort(),
+			detail: `${nameNow}'s pay formula changes ${before.payType} → ${after.payType} ` +
+				`(${before.payType === "percentage" ? "revenue share" : "day rate"} → ${after.payType === "percentage" ? "revenue share" : "day rate"}), ` +
+				`re-deriving their pay across ${monthsNow.length} finalized month${monthsNow.length === 1 ? "" : "s"}`,
+		});
+	}
+
+	// (2) pay_daily — only when the RESOLVED rate actually moves, and only when a
+	// day rate is what gets paid on one side or the other. A pay_daily edit on a
+	// driver who is on percentage both before and after changes nothing the money
+	// math reads, and is allowed through; so is raising pay_daily on a driver
+	// whose truck rate already equalled it.
+	if (before.payDaily !== after.payDaily && (before.payType === "fixed" || after.payType === "fixed")) {
+		const rates = truckDailyRateCandidates(nameNow);
+		let worst = null;
+		for (const r of rates) {
+			const b = resolveDailyRate(before.payDaily, r);
+			const a = resolveDailyRate(after.payDaily, r);
+			if (b !== a && (!worst || Math.abs(a - b) > Math.abs(worst.a - worst.b))) worst = { a, b };
+		}
+		if (worst && monthsNow.length) {
+			blockers.push({
+				field: "pay_daily", from: before.payDaily, to: after.payDaily,
+				periods: monthsNow.slice().sort(),
+				detail: `${nameNow}'s daily rate ${money(worst.b)} → ${money(worst.a)} reprices every active day ` +
+					`across ${monthsNow.length} finalized month${monthsNow.length === 1 ? "" : "s"}`,
+			});
+		}
+	}
+
+	// (3) pay_percentage — only meaningful while percentage is the formula.
+	if (before.payPercentage !== after.payPercentage &&
+		(before.payType === "percentage" || after.payType === "percentage") && monthsNow.length) {
+		blockers.push({
+			field: "pay_percentage", from: before.payPercentage, to: after.payPercentage,
+			periods: monthsNow.slice().sort(),
+			detail: `${nameNow}'s revenue share ${before.payPercentage}% → ${after.payPercentage}% ` +
+				`restates their pay across ${monthsNow.length} finalized month${monthsNow.length === 1 ? "" : "s"}`,
+		});
+	}
+
+	// (4) driver_name — a rename of THIS TABLE ONLY, i.e. a partial rename.
+	//
+	// ⚠️ Case and whitespace are free, and that is what keeps this usable. Every
+	// money join key is case-insensitive (getDriverPayStructures LOWER()s,
+	// trucksByDriver and this guard normalizeDriverName(), getInvestorDriverSet
+	// trim().toLowerCase()), so a rename that changes only case or spacing CANNOT
+	// move a settlement figure — it is money-neutral by construction, and it is
+	// the commonest correction this screen is used for.
+	//
+	// A substantive rename is refused only when there is something to detach: a
+	// row already at the defaults, with no carrier, resolves identically whether
+	// the money math finds it or not, so renaming it moves nothing. That is not a
+	// courtesy — it is the same "does the value the math reads actually change"
+	// test as every other check here.
+	if (normalizeDriverName(nameNow) !== normalizeDriverName(nameNext)) {
+		const structDetaches = before.payType !== DIRECTORY_DEFAULT_STRUCT.payType ||
+			before.payPercentage !== DIRECTORY_DEFAULT_STRUCT.payPercentage ||
+			before.payDaily !== DIRECTORY_DEFAULT_STRUCT.payDaily;
+		const carrierDetaches = investorsHoldingDriver(nameNow, { carrierOverride: (row && row.carrier_name) || "" }).size >
+			investorsHoldingDriver(nameNow, { carrierOverride: "" }).size;
+		const months = [...new Set([...monthsNow, ...driverPayLockedMonths(nameNext, locked)])].sort();
+		if ((structDetaches || carrierDetaches) && months.length) {
+			blockers.push({
+				field: "driver_name", from: nameNow, to: nameNext,
+				periods: months,
+				detail: `renaming ${nameNow} → ${nameNext} here renames ONLY drivers_directory, so ` +
+					(structDetaches
+						? `their pay structure (${before.payType}${before.payType === "percentage" ? ` ${before.payPercentage}%` : before.payDaily ? ` ${money(before.payDaily)}/day` : ""}) stops being found and the math falls back to its defaults`
+						: `their carrier link to an investor's ledger is dropped`) +
+					` across ${months.length} finalized month${months.length === 1 ? "" : "s"}`,
+			});
+		}
+	}
+
+	// (5) carrier_name — investor-ledger membership.
+	//
+	// Compared as a MEMBERSHIP SET, never as a string. A carrier edit that
+	// matches no investor's company_name before or after moves nothing and is a
+	// free-text correction; one that starts or stops matching moves a whole
+	// driver's revenue, expenses and pay between two settled ledgers. Only the
+	// former is common, and only the latter is refused.
+	if (has("carrier_name")) {
+		const heldBefore = investorsHoldingDriver(nameNow, { carrierOverride: (row && row.carrier_name) || "" });
+		const heldAfter = investorsHoldingDriver(nameNow, {
+			carrierOverride: changed.carrier_name,
+			// the handler's own syncCarrierDriverHistory() APPENDS this pairing to
+			// leg 3, which has no ended_at filter — so the "after" state carries a
+			// membership that outlives any later correction to this column.
+			extraHistoryCarrier: changed.carrier_name,
+		});
+		const moved = [...new Set([...heldBefore, ...heldAfter])].filter((id) => heldBefore.has(id) !== heldAfter.has(id));
+		if (moved.length && monthsNow.length) {
+			blockers.push({
+				field: "carrier_name", from: (row && row.carrier_name) || "", to: changed.carrier_name || "",
+				periods: monthsNow.slice().sort(),
+				detail: `carrier ${(row && row.carrier_name) || "(none)"} → ${changed.carrier_name || "(none)"} ` +
+					`${heldAfter.size > heldBefore.size ? "adds" : "removes"} ${nameNow}'s revenue, expenses and pay ` +
+					`${heldAfter.size > heldBefore.size ? "to" : "from"} investor ledger${moved.length === 1 ? "" : "s"} ${moved.sort((a, b) => a - b).join(", ")} ` +
+					`across ${monthsNow.length} finalized month${monthsNow.length === 1 ? "" : "s"}`,
+			});
+		}
+	}
+
+	return { unreadable: false, blockers };
+}
+
+// Deleting a drivers_directory row is the pay-structure half of a rename, with
+// no destination — payStructures[name] goes undefined and the money math falls
+// back to `{ payType: "fixed", payPercentage: 0 }` plus resolveDailyRate's
+// $250. Expressed through the SAME predicate rather than a fresh one, so the
+// delete cannot come to disagree with the edit about what "moves money" means.
+function directoryDeleteLockBlockers(row) {
+	const res = directoryEditLockBlockers(row, {
+		pay_type: DIRECTORY_DEFAULT_STRUCT.payType,
+		pay_percentage: DIRECTORY_DEFAULT_STRUCT.payPercentage,
+		pay_daily: DIRECTORY_DEFAULT_STRUCT.payDaily,
+		carrier_name: "",
+	});
+	// Re-label so the 409 reads as a deletion rather than five separate edits.
+	const who = String((row && row.driver_name) || "").trim() || "this driver";
+	for (const b of res.blockers) b.detail = `deleting ${who}: ${b.detail}`;
+	return res;
+}
+
+// Everything POST /api/trucks would restate inside a finalized month by
+// CREATING a row. The mirror of truckEditLockBlockers, and it exists because a
+// create can manufacture exactly the state the edit refuses to reach.
+//
+// ⚠️⚠️ `created_at` IS AN INPUT TO THIS GUARD AND MUST BE THE VALUE THE INSERT
+// WILL ACTUALLY STORE. truckChargeFromMonth() reads in_service_date first and
+// created_at second, and returns "" when it has NEITHER — and "" means
+// "charge this truck in EVERY month" to getMonthlyFixedCosts (the `truckKey &&`
+// short-circuit), which truckFixedCostLockedMonths faithfully mirrors. So
+// evaluating a not-yet-inserted row, whose created_at is undefined, yields ALL
+// fifteen locked months and 409s every single truck creation — the guard would
+// be switched off within a day. Passing the stamp the row is about to get is
+// what makes this agree with the math it protects, and it is the same
+// ""-means-everything inversion that had to be corrected in #205 and again in
+// the truck edit guard, arriving here from the opposite direction.
+//
+// The everyday create stays 200 by construction: with in_service_date blank the
+// charge-from month is the CURRENT month, and the current month is never
+// locked, so fixedMonths is empty. What is refused is a create that back-dates
+// in_service_date into a closed month, or that re-parents a driver.
+function truckCreateLockBlockers(truck) {
+	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
+	const locked = lockedPeriodsDesc();
+	if (!locked.length) return { unreadable: false, blockers: [] };
+
+	const blockers = [];
+	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+	const chargesFixed = truck.status === "Active";
+	const fixedMonths = chargesFixed ? truckFixedCostLockedMonths(truck, locked) : [];
+	const monthly = truckMonthlyFixed(truck).total;
+
+	// (1) fixed costs booked backwards. parseInServiceDate caps the FUTURE at 24
+	// months but has no lower bound, and none is added here: a truck that
+	// genuinely entered service in a closed month should be allowed to say so
+	// while it bills nothing. The test is therefore what the money math would
+	// actually book, not how old the date is.
+	//
+	// Today this cannot fire on the amounts, because the INSERT carries no
+	// insurance/ELD/payment/HVUT/IRP — they default to 0, so monthly is 0 on
+	// every create. It is written against truckMonthlyFixed() rather than against
+	// today's column list so that adding any of those five fields to this route's
+	// body starts the guard working instead of silently opening a hole.
+	if (fixedMonths.length && monthly > 0) {
+		blockers.push({
+			field: "in_service_date", from: "(new truck)", to: String(truck.in_service_date || "") || "(unset — bills from created_at)",
+			periods: fixedMonths.slice().sort(),
+			detail: `creating ${truck.unit_number} Active from ${truckChargeFromMonth(truck) || "its creation month"} books ` +
+				`${money(monthly)}/mo of fixed costs into ${fixedMonths.length} finalized month${fixedMonths.length === 1 ? "" : "s"} (${money(monthly * fixedMonths.length)})`,
+		});
+	}
+
+	// (1b) maintenance/compliance rows the UNIT NUMBER would adopt. Both fee
+	// tables join on LOWER(truck) = LOWER(unit_number) and both are gated on
+	// `t.status = 'Active'`, so creating an Active truck whose unit string
+	// already appears in them pulls those dollars into whatever months they are
+	// dated to. Both tables are empty in production today (0 rows, re-verified
+	// 2026-08-08), which is precisely why the check is cheap to be right about
+	// now: it cannot produce a false positive, and the screens that fill them are
+	// live while neither table has a soft-delete peer.
+	if (chargesFixed) {
+		const fees = truckFeeLockedRows(truck.unit_number, locked);
+		const feeRows = [...fees.maintenance, ...fees.compliance];
+		if (feeRows.length) {
+			blockers.push({
+				field: "unit_number", from: "(new truck)", to: truck.unit_number,
+				periods: [...new Set(feeRows.map((r) => r.m))].sort(),
+				detail: `unit ${truck.unit_number} already has ${feeRows.length} maintenance/compliance row${feeRows.length === 1 ? "" : "s"} ` +
+					`worth ${money(feeRows.reduce((s, r) => s + (r.amount || 0), 0))} booked to finalized months; creating an Active truck with this ` +
+					`unit number attaches them to it`,
+			});
+		}
+	}
+
+	// (2) the driver's daily rate. assignDriverToTruck() clears
+	// trucks.assigned_driver on every OTHER truck holding the name, so the new
+	// row becomes the truck the pay math reads for this driver — its
+	// driver_pay_daily replaces the old truck's for every month they worked.
+	// Allowed when the driver's own drivers_directory.pay_daily already overrides
+	// the truck rate, since then the truck number never reaches the pay.
+	const driverName = String(truck.assigned_driver || "").trim();
+	if (driverName) {
+		const struct = getDriverPayStructures()[normalizeDriverName(driverName)] || null;
+		const beforeRates = truckDailyRateCandidates(driverName);
+		let worst = null;
+		for (const r of beforeRates) {
+			const b = resolveDailyRate(struct && struct.payDaily, r);
+			const a = resolveDailyRate(struct && struct.payDaily, truck.driver_pay_daily);
+			if (b !== a && (!worst || Math.abs(a - b) > Math.abs(worst.a - worst.b))) worst = { a, b };
+		}
+		const months = worst ? driverPayLockedMonths(driverName, locked) : [];
+		if (months.length) {
+			blockers.push({
+				field: "driver_pay_daily", from: worst.b, to: worst.a,
+				periods: months.slice().sort(),
+				detail: `assigning ${driverName} to a new truck at ${money(worst.a)}/day replaces the ${money(worst.b)}/day ` +
+					`their current truck sets, repricing their active days across ${months.length} finalized month${months.length === 1 ? "" : "s"}`,
+			});
+		}
+
+		// (3) the investor driver set, gated on NEITHER the in-service date nor the
+		// fixed-cost total — the same split truckEditLockBlockers check (2b) makes,
+		// and for the same reason. getInvestorDriverSet is
+		//     SELECT DISTINCT assigned_driver FROM trucks WHERE owner_id = ?
+		// with no status filter and no month dimension, so a brand-new $0 truck
+		// created in the open month still re-parents its driver's ENTIRE history.
+		// Both directions move: the new owner gains the driver, and
+		// assignDriverToTruck() detaches them from their previous truck, so the
+		// previous owner loses them.
+		const heldBefore = investorsHoldingDriver(driverName);
+		const byCarrier = investorsHoldingDriver(driverName, { carrierLegsOnly: true });
+		const heldAfter = new Set(heldBefore);
+		// leg 1 on the truck being created…
+		if (Number(truck.owner_id) > 0) heldAfter.add(Number(truck.owner_id));
+		// …and leg 1/1b lost on whatever truck assignDriverToTruck() will detach.
+		// An owner whose carrier name still names this driver keeps them through
+		// legs 2/3, so only a membership held SOLELY by the detached truck moves.
+		for (const t of db.prepare("SELECT owner_id, assigned_driver FROM trucks WHERE COALESCE(owner_id, 0) > 0").all()) {
+			if (normalizeDriverName(t.assigned_driver) !== normalizeDriverName(driverName)) continue;
+			if (Number(t.owner_id) === Number(truck.owner_id)) continue;
+			if (!byCarrier.has(t.owner_id)) heldAfter.delete(t.owner_id);
+		}
+		const moved = [...new Set([...heldBefore, ...heldAfter])].filter((id) => heldBefore.has(id) !== heldAfter.has(id));
+		const setMonths = moved.length ? driverPayLockedMonths(driverName, locked) : [];
+		if (setMonths.length) {
+			blockers.push({
+				field: "owner_id", from: [...heldBefore].sort((a, b) => a - b).join(", ") || "(none)",
+				to: [...heldAfter].sort((a, b) => a - b).join(", ") || "(none)",
+				effect: "driver_set",
+				periods: setMonths.slice().sort(),
+				detail: `creating this truck for ${Number(truck.owner_id) > 0 ? `owner ${truck.owner_id}` : "the fleet"} with ${driverName} aboard moves their ` +
+					`revenue, expenses and pay between investor ledger${moved.length === 1 ? "" : "s"} ${moved.sort((a, b) => a - b).join(", ")} ` +
+					`across ${setMonths.length} finalized month${setMonths.length === 1 ? "" : "s"}`,
+			});
+		}
+	}
+
 	return { unreadable: false, blockers };
 }
 
@@ -13418,6 +14083,55 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			const activeCheck = await checkDriverActiveLoad(finalAssignedDriver.trim());
 			if (activeCheck) return res.status(409).json({ error: activeCheck });
 		}
+
+		// ⚠️ THE MONTH-END LOCK, on the CREATE verb. PUT /api/trucks/:id refuses to
+		// back-date a truck's in-service month, re-parent it to another investor
+		// or reprice its driver inside a finalized month — and this route could
+		// manufacture all three states from nothing, with the same roles.
+		//
+		// ⚠️⚠️ `created_at` MUST be the value the INSERT is about to store.
+		// truckChargeFromMonth() falls back to created_at, and returns "" when it
+		// has neither date — which getMonthlyFixedCosts reads as "charge this
+		// truck in EVERY month" (the `truckKey &&` short-circuit), so
+		// truckFixedCostLockedMonths faithfully returns ALL fifteen locked months
+		// for a row with no created_at. Evaluating the not-yet-inserted object
+		// would therefore 409 every ordinary truck creation, and the guard would
+		// be switched off within a day. Supplying the stamp SQLite is about to
+		// write is what makes this agree with the math it protects — the same
+		// ""-means-everything inversion corrected in #205 and in the truck EDIT
+		// guard, reached here from the opposite direction.
+		//
+		// Format matches SQLite's CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS', UTC),
+		// because truckChargeFromMonth parses it with new Date() and reads local
+		// getFullYear/getMonth — so the guard and the money math read one string
+		// through one code path. With in_service_date blank this resolves to the
+		// CURRENT month, which is never locked, so the everyday create stays 200.
+		const createStamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+		const createLock = truckCreateLockBlockers({
+			id: 0,
+			unit_number: unitNumber.trim(),
+			status: validStatus,
+			owner_id: finalOwnerId,
+			assigned_driver: finalAssignedDriver,
+			driver_pay_daily: driverPayParsed.value,
+			in_service_date: inServiceCreate,
+			created_at: createStamp,
+			// The five fixed-cost amounts are NOT in this route's body, so they
+			// default to 0 and truckMonthlyFixed() totals 0 today. Named explicitly
+			// rather than left undefined so that adding any of them to this handler
+			// starts the guard working instead of silently opening a hole.
+			insurance_monthly: 0, eld_monthly: 0, truck_payment_monthly: 0,
+			hvut_annual: 0, irp_annual: 0,
+			routemate_vehicle_id: "",
+		});
+		if (createLock.unreadable) return periodLockUnreadableResponse(res, "Adding a truck");
+		if (createLock.blockers.length) {
+			return periodBlockedResponse(res,
+				`Cannot add ${unitNumber.trim()}`,
+				createLock.blockers,
+				"Add the truck with an in-service date in the current month, and assign its driver once the affected periods are open — or reopen them first (POST /api/periods/:period/reopen records a reason).");
+		}
+
 		const result = db.prepare(
 			"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 		).run(unitNumber.trim(), make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value, parseFloat(purchasePrice) || 0, titleStatus || "Clean", parseFloat(maintenanceFundMonthly) || 0, parseFloat(fuelTankGallons) || 0, parseFloat(avgMpg) || 0, inServiceCreate);
