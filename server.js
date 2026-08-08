@@ -11151,31 +11151,258 @@ app.get("/api/load-ratings/averages", requireRole("Super Admin", "Dispatcher"), 
 	res.json({ averages });
 });
 
+// ============================================================
+// DELETE /api/users/:id — the cascade, and the month-end lock on it
+// ============================================================
+// Deleting one user hard-deletes rows from six tables, re-parents an investor's
+// trucks and drops their config. Three of those reach into a CLOSED accounting
+// period, and until this guard existed they did it with no error, no warning and
+// no audit line.
+//
+// Measured against production on 2026-08-08 (15 periods locked, 2025-05 through
+// 2026-07 — only 2026-08 open): deleting the driver "Howard Reddie" would have
+// hard-deleted 75 expense rows worth $18,381.23 across three finalized months,
+// two of which (2026-05, 2026-06) back payouts already marked PAID. `expenses`
+// has no deleted_at and no soft-delete table, so none of it is recoverable.
+//
+// WHY THE EXISTING FREEZE IS NOT ENOUGH. reconcileInvestorPayouts() stops
+// refreshing `amount` once a period is locked, so the ledger's headline figure
+// does not move. But the lock freezes the FIGURE, not the BASIS, and everything
+// that re-derives the basis does move: /api/financials, the payout drill-down
+// waterfall, `recomputedAmount` (the drift disclosure printed beside the frozen
+// figure — deleting the receipts manufactures a drift that never happened), and
+// the statement PDF's page-1 composition. And the freeze is revocable by design:
+// POST /api/periods/:period/reopen re-links an `owed` row to live earnings, so a
+// month reopened after this delete settles at a different number with nothing
+// recording why. Deleting the basis turns a reversible freeze into permanent,
+// silent loss.
+//
+// REFUSE THE WHOLE DELETE — do not delete-what-is-safe. The adjacent bulk
+// precedent (PUT /api/expenses/bulk-status) skips locked rows and names the
+// periods, and that is right THERE because each id is an independent unit of
+// work: approving 48 of 50 expenses is a coherent outcome. A user delete is not
+// decomposable — there is one users row and it either exists or it does not.
+// "Delete what is safe" here means open-month receipts destroyed, closed-month
+// receipts kept, and the users row gone: the survivors are finance rows keyed by
+// a driver-name string with no account behind them, unreachable from every admin
+// screen, and silently re-adopted by the next user created with that name. A
+// half-deleted user is strictly worse than a refused delete. What IS borrowed
+// from the bulk precedent is its spirit — name the periods and the row counts,
+// so the refusal is diagnosable instead of opaque.
+
+// Which months to NAME for a set of blocked expense rows: the ones that are
+// genuinely locked, and "(unknown)" for a row that expenseRowPeriodLocked()
+// refused on its fail-closed rung rather than on a real lock.
+//
+// The distinction is not cosmetic, and getting it wrong was caught in testing:
+// a receipt with an empty `date` still resolves a SETTLEMENT month through
+// expensePostedPeriod()'s created_at fallback, so the naive "label it with
+// whichever month resolved" produced `2026-08` — the CURRENT, OPEN month — on a
+// row that was withheld because its operational month was unreadable. The
+// refusal was right; the sentence attached to it told an admin to reopen a
+// period that was never closed. Only a month that isLocked() may be named as
+// the reason, and a row blocked by fail-closed says so.
+function blockedExpensePeriods(rows) {
+	const MONTH = /^\d{4}-\d{2}$/;
+	const out = new Set();
+	for (const r of rows) {
+		let named = false;
+		for (const p of [expensePostedPeriod(r), String(r.date || "").trim().slice(0, 7)]) {
+			if (MONTH.test(p) && isLocked(p)) { out.add(p); named = true; }
+		}
+		if (!named) out.add("(unknown)");
+	}
+	return [...out].sort();
+}
+
+// Everything DELETE /api/users/:id would destroy or restate that a FINALIZED
+// month still depends on. `blockers: []` means the delete is safe to run.
+//
+// `cascadeName` MUST be the exact string the cascade's DELETEs match on — see
+// the note at the call site. A guard that resolved the name its own way would be
+// answering for a different set of rows than the DELETEs remove.
+function userDeleteLockBlockers(user, cascadeName) {
+	// Fail CLOSED, for the reason PUT /api/expenses/:id/status spells out:
+	// isLocked() swallows every error and answers "not locked", so an unreadable
+	// period_locks silently turns this guard off. Refusing costs a retry;
+	// permitting is unrecoverable.
+	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
+
+	const blockers = [];
+
+	// (1) expenses — the direct violation, and the only cascaded table whose rows
+	// each carry a period of their own. expenseRowPeriodLocked() is the shared
+	// predicate (settlement month OR operational month, fails closed on a
+	// malformed date), NOT a fresh one: a second copy of a rule is how two
+	// callers of it come to disagree. A DELETE removes the row from BOTH bases at
+	// once, so checking both is exactly right here rather than merely strict.
+	if (cascadeName) {
+		const rows = db.prepare(
+			"SELECT id, date, posted_period, created_at FROM expenses WHERE LOWER(driver) = ?"
+		).all(cascadeName);
+		const locked = rows.filter(expenseRowPeriodLocked);
+		if (locked.length) blockers.push({
+			table: "expenses",
+			rows: locked.length,
+			periods: blockedExpensePeriods(locked),
+			detail: `${locked.length} expense row${locked.length === 1 ? "" : "s"} booked to a finalized month would be permanently deleted`,
+		});
+	}
+
+	// (2) investor_payouts — NOT in the cascade, and that is precisely the
+	// problem. The rows survive the delete and become unreachable:
+	// listSettlableInvestors() drives GET /api/payouts off `users WHERE role =
+	// 'Investor'`, and GET /api/investor/payouts needs a live users.id. So a
+	// settled month drops out of every surface while sitting in the table, and
+	// the console's grandTotals.totalPaid quietly falls by that amount. Orphaning
+	// a paid settlement is, to anyone reading this app, indistinguishable from
+	// deleting it.
+	//
+	// Three independent reasons a row counts as frozen: `paid_at` (money moved),
+	// `finalized_at` (a statement was published against it), and isLocked() (the
+	// month is shut regardless of how far this investor's own row got).
+	if (user.role === "Investor") {
+		const rows = db.prepare(
+			"SELECT period, status, COALESCE(paid_at, '') AS paid_at, COALESCE(finalized_at, '') AS finalized_at FROM investor_payouts WHERE owner_id = ?"
+		).all(user.id);
+		const frozen = rows.filter((r) => r.paid_at || r.finalized_at || isLocked(r.period));
+		const paidRows = frozen.filter((r) => r.paid_at).length;
+		if (frozen.length) blockers.push({
+			table: "investor_payouts",
+			rows: frozen.length,
+			paidRows,
+			periods: [...new Set(frozen.map((r) => r.period))].sort(),
+			detail: `${frozen.length} settled payout row${frozen.length === 1 ? "" : "s"}${paidRows ? ` (${paidRows} already PAID)` : ""} would be orphaned — left in the table but gone from the payouts console`,
+		});
+	}
+
+	// (3) trucks — `UPDATE trucks SET owner_id = 0` re-parents the investor's
+	// whole fleet. A truck row carries no period, so it is not a locked ROW; it
+	// is an INPUT to every locked month, and moving it restates each one's fixed
+	// costs (insurance / ELD / truck payment / HVUT / IRP) on every surface that
+	// recomputes. Scoped to trucks that could actually have been charged inside a
+	// locked month via truckChargeFromMonth() — the same start-of-billing rule
+	// the earnings math uses — so a truck added this month never blocks a delete.
+	if (user.role === "Investor") {
+		const lockedPeriods = db.prepare(
+			"SELECT period FROM period_locks WHERE period_locks.status = 'locked' ORDER BY period DESC"
+		).all().map((r) => r.period);
+		const newestLock = lockedPeriods[0] || "";
+		if (newestLock) {
+			const charged = db.prepare(
+				"SELECT id, unit_number, in_service_date, created_at FROM trucks WHERE owner_id = ?"
+			).all(user.id).filter((t) => {
+				const from = truckChargeFromMonth(t);
+				return from && from <= newestLock;
+			});
+			if (charged.length) blockers.push({
+				table: "trucks",
+				rows: charged.length,
+				units: charged.map((t) => t.unit_number).filter(Boolean),
+				periods: lockedPeriods.filter((p) => charged.some((t) => truckChargeFromMonth(t) <= p)).sort(),
+				detail: `${charged.length} truck${charged.length === 1 ? "" : "s"} (${charged.map((t) => t.unit_number || `#${t.id}`).join(", ")}) would be re-parented to no owner, restating the fixed costs inside finalized months`,
+			});
+		}
+	}
+
+	return { unreadable: false, blockers };
+}
+
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
 	if (!user) return res.status(404).json({ error: "User not found" });
+	// The EXACT string every cascade DELETE below matches on, and the same value
+	// handed to the guard. Deliberately NOT normalizeDriverName(): the cascade
+	// compares with a bare LOWER(driver) = ?, which does not collapse internal
+	// whitespace, so a guard that normalized would report on a wider set than the
+	// DELETEs actually remove — and could clear a delete as safe while it took
+	// receipts out of a closed month.
 	const name = (user.driver_name || user.username || "").trim().toLowerCase();
+
+	// ⚠️ GUARD BEFORE THE FIRST WRITE. This app has no transactions (see
+	// CLAUDE.md), so a refusal discovered mid-cascade is not a refusal — the
+	// expenses are already gone by then.
+	const lock = userDeleteLockBlockers(user, name);
+	if (lock.unreadable) {
+		return res.status(409).json({
+			error: "The period lock table could not be read, so no month can be confirmed open. User deletion is held until that is fixed.",
+			code: "PERIOD_LOCK_UNREADABLE",
+		});
+	}
+	if (lock.blockers.length) {
+		const named = [...new Set(lock.blockers.flatMap((b) => b.periods))].sort();
+		const periods = named.filter((p) => p !== "(unknown)");
+		const unresolved = named.length !== periods.length;
+		const paidRows = lock.blockers.reduce((n, b) => n + (b.paidRows || 0), 0);
+		const hasTrucks = lock.blockers.some((b) => b.table === "trucks");
+		const who = user.driver_name || user.username || `user ${id}`;
+
+		// The closed months get named; rows the guard withheld WITHOUT being able to
+		// name a month get their own sentence. Those are a data problem (an
+		// unreadable date on a receipt), not a month-end problem, and folding them
+		// into the finalized list would send an admin to reopen a period that is
+		// open — the exact mislabel blockedExpensePeriods() exists to prevent.
+		const cause = [
+			periods.length ? `${periods.map(periodLabel).join(", ")} ${periods.length === 1 ? "is" : "are"} finalized.` : "",
+			unresolved ? "Some rows carry a date the server cannot resolve to a month, so they are withheld until it is corrected." : "",
+		].filter(Boolean).join(" ");
+
+		// Three causes, three answers. A locked month can be REOPENED — a real,
+		// audited, reason-carrying action — so that refusal is "not without saying
+		// why", not "never". Truck ownership should be TRANSFERRED deliberately
+		// rather than silently dropped to nobody. A payout actually marked PAID has
+		// no escape at all: the payee of money that left the bank has to stay
+		// attributable, which is why there is deliberately no force flag here.
+		const remedy = [];
+		if (paidRows) {
+			remedy.push("Payouts already marked PAID cannot be detached from their investor — this account has to stay in place.");
+		} else {
+			if (periods.length) remedy.push(`Reopen the affected period${periods.length === 1 ? "" : "s"} first — POST /api/periods/:period/reopen records a reason.`);
+			if (hasTrucks) remedy.push("Re-assign the trucks to their new owner deliberately, rather than letting this delete drop them to no owner.");
+			if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
+			remedy.push("Or leave the account in place — a closed month's figures are attributed to it.");
+		}
+
+		return res.status(409).json({
+			error: `Cannot delete ${who}: ${lock.blockers.map((b) => b.detail).join("; ")}. ${cause} ${remedy.join(" ")}`.replace(/\s+/g, " ").trim(),
+			code: "PERIOD_FINALIZED",
+			periods,
+			unresolved,
+			blockers: lock.blockers,
+		});
+	}
+
+	// Past the guard: every row below belongs to an open month (or carries no
+	// period at all — messages, notifications, driver_locations, load_responses
+	// and the assigned_driver clear are operational, not accounting, rows).
+	const removed = {};
 	if (name) {
-		db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name);
-		db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name);
-		db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name);
-		db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name);
-		db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name);
-		db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name);
-		db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ?").run(name);
+		removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
+		removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
+		removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
+		removed.driver_locations = db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name).changes;
+		removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
+		removed.documents = db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name).changes;
+		removed.trucks_unassigned = db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ?").run(name).changes;
 	}
 	if (user.role === "Investor") {
-		db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id);
-		db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id);
+		removed.trucks_reparented = db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id).changes;
+		removed.investor_config = db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id).changes;
 	}
 	// Sync: remove driver from Carrier Database sheet
 	if (user.role === "Driver" && user.driver_name) {
 		syncDriverToCarrierSheet(user.driver_name, { action: "delete" });
 	}
 	db.prepare("DELETE FROM users WHERE id = ?").run(id);
+	// The most destructive action in the app previously left no trace at all.
+	// The per-table counts are the point: "deleted a user" does not tell a later
+	// reader that 40 receipts went with it.
+	logAudit(req, "delete_user", "user", id,
+		`${user.role} ${user.username}${user.driver_name ? ` (${user.driver_name})` : ""} deleted; cascade: ` +
+		(Object.entries(removed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ") || "no rows"));
 	notifyChange("users");
-	res.json({ success: true });
+	res.json({ success: true, removed });
 });
 
 // List investor users (for owner dropdown)
