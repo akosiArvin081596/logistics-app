@@ -27,6 +27,11 @@ logisxdb.db
 scripts/docs/app.db.*
 
 # User uploads (PII — receipts, photos, signed docs)
+# Runtime data only. Do NOT track anything under here: a tracked file inside an
+# ignored tree survives `git add` but not `rm -rf uploads`, and `git check-ignore`
+# reports it as "not ignored" (it skips tracked files), so the trap is invisible.
+# The six onboarding template PDFs used to sit here and were twice deleted by a
+# routine cleanup — they now live in onboarding-templates/pdf/. See that README.
 uploads/
 
 # Local backups and ad-hoc test artifacts

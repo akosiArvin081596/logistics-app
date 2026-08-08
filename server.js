@@ -4863,8 +4863,20 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 
 // Helper: fill W-9 PDF form fields
 async function fillW9Form({ legalName = "", dba = "", entityType = "", address = "", einSsn = "", signatureText = "", signatureImage, effectiveDate = "" }) {
-	const templatePath = path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf");
-	if (!fs.existsSync(templatePath)) return null;
+	// Template lives at onboarding-templates/pdf/, NOT under uploads/ — uploads/ is
+	// gitignored, so these TRACKED template PDFs sat inside an ignored tree and were
+	// twice deleted by a routine `rm -rf uploads` cleanup. See
+	// onboarding-templates/README.md before moving them back.
+	// The legacy path is kept as a fallback on purpose: when the template is missing
+	// this returns null, and BOTH callers still mark the document signed — a driver
+	// would be recorded as having signed a W-9 that was never produced. The fallback
+	// covers the deploy window (old process, new checkout) and any box that has not
+	// yet pulled the new path.
+	const templatePath = [
+		path.join(__dirname, "onboarding-templates", "pdf", "fw9.pdf"),
+		path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf"),
+	].find((p) => fs.existsSync(p));
+	if (!templatePath) return null;
 	const templateBytes = fs.readFileSync(templatePath);
 	const pdfDoc = await PdfLibDocument.load(templateBytes);
 	const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
