@@ -36,6 +36,7 @@ const expenseAi = require("./lib/expense-ai");
 const fuelModel = require("./lib/fuel-model");
 const poiFuelStops = require("./lib/poi-fuel-stops");
 const rateconNormalize = require("./lib/ratecon-normalize");
+const receiptDuplicates = require("./lib/receipt-duplicates");
 const { geminiFailure } = require("./lib/gemini-errors");
 const { csvRows } = require("./lib/csv");
 
@@ -8900,6 +8901,99 @@ function volumelessFuelReceipts() {
 	};
 }
 
+// FOURTH reconciliation queue: the same PURCHASE booked twice.
+//
+// `receipt_hash` only catches identical BYTES, and the same receipt reaches the
+// app as two different images all the time (a phone HEIC converted client-side
+// vs the copy the driver texted an admin; a ScanKit-enhanced pass vs the raw
+// fallback). $1,115.35 of production spend is double-booked across 5 pairs that
+// slipped through exactly that way, every one of them found by hand.
+//
+// ⚠️ REPORT-ONLY. This function READS and returns a wire shape; it never
+// updates, voids, merges or deletes a receipt, and nothing downstream of it
+// does either. That is deliberate and load-bearing: three of the five real
+// duplicates sit in months that are already FINALIZED, and the house rule is
+// that nothing writes to a row in a closed accounting period. A human decides
+// what to do with each pair, through the surfaces that already enforce the
+// lock. `periodLocked` is published per row so the queue says up front which
+// ones are even actionable.
+//
+// A DETECTION QUEUE AND NOT A CREATE-TIME BLOCK — also deliberately. The errors
+// are not symmetric: a false positive stops a driver at a truck stop with a
+// receipt he cannot file, a false negative is a line on a report somebody
+// reconciles later. Money already booked twice is recoverable; a driver who
+// learns the app rejects real receipts starts working around it. The create-time
+// check stays what it is — an opt-in WARNING with a conscious override, on the
+// two admin surfaces that can offer "save anyway".
+//
+// lib/receipt-duplicates.js owns the decision (and documents why truck+day+
+// amount alone is too aggressive, with the production counter-examples). This
+// function owns only the query, the lock, the suppression and the wire shape.
+//
+// ⚠️ NOT FILTERED TO FUEL, and not keyed on `type`. Two of the five real
+// duplicates are not typed Fuel — the $15.25 Pilot pair is `Other`, and the $400
+// QuikTrip pair is typed `Maintenance` on both sides while carrying 97.59
+// gallons of diesel. It rides on the fuel panel because that is where the other
+// three receipt queues live, but the defect is not fuel-specific.
+const FUEL_DUPLICATE_MAX_GROUPS = 200; // list cap only; the summary counts them all
+
+function duplicateReceiptGroups() {
+	// EXPENSE_PNL_FILTER: a rejected receipt is not spend, so it cannot be spend
+	// booked twice. posted_period + created_at are selected for
+	// expenseRowPeriodLocked(), which fails closed without them.
+	const rows = db.prepare(`
+		SELECT e.id, e.date, e.type, e.driver, e.truck_unit, e.amount, e.gallons,
+		       e.vendor, e.vendor_normalized, e.status, e.posted_period, e.created_at
+		FROM expenses e
+		WHERE ${EXPENSE_PNL_FILTER}
+		ORDER BY e.date DESC, e.id DESC
+	`).all();
+
+	// A pair somebody already looked at and consciously kept is CLOSED, not
+	// re-litigated on every poll. That signal already exists — `allowDuplicate`
+	// writes an `expense_duplicate_override` audit line at create time — so this
+	// reuses it rather than inventing a dismissal table. Fails OPEN (an empty
+	// suppression set) if the read throws: over-reporting a queue is recoverable,
+	// silently hiding double-booked money is the failure this exists to end.
+	let suppressedIds = new Set();
+	try {
+		suppressedIds = new Set(
+			db.prepare(`SELECT entity_id FROM audit_trail WHERE action = 'expense_duplicate_override' AND entity = 'expense'`)
+				.all().map((r) => Number(r.entity_id)).filter(Number.isFinite),
+		);
+	} catch { /* fail open — see above */ }
+
+	const groups = receiptDuplicates.findDuplicateGroups(rows, { suppressedIds });
+	return {
+		groups: groups.slice(0, FUEL_DUPLICATE_MAX_GROUPS).map((g) => ({
+			key: g.key,
+			truckUnit: g.truckUnit,
+			driver: g.driver,
+			localDay: g.date,
+			amount: g.amount,
+			excessAmount: g.excessAmount,
+			confidence: g.confidence,
+			reasons: g.reasons,
+			// Server-resolved per row, never derived client-side from a month list:
+			// three of the five real duplicates sit in months that are already closed,
+			// so "which of these can I actually act on" is the first question anyone
+			// draining this queue asks.
+			rows: g.rows.map((r) => ({
+				id: r.id, expenseId: r.id,
+				localDay: r.date || "", type: r.type || "",
+				truckUnit: String(r.truck_unit || "").trim(),
+				driver: r.driver || "",
+				amount: r.amount, gallons: Number(r.gallons) || 0,
+				vendor: r.vendor || "",
+				periodLocked: expenseRowPeriodLocked(r),
+			})),
+		})),
+		// Computed over the FULL set while the list above is capped, so read the
+		// counts here and never from groups.length.
+		summary: receiptDuplicates.summarizeDuplicates(groups),
+	};
+}
+
 // Read-only reconciliation snapshot straight off the persisted table — no
 // detection, no matching, no writes. Cheap enough for a dashboard poll.
 //
@@ -9370,6 +9464,14 @@ function fuelEventsPayload(r, { dryRun }) {
 		...(() => {
 			const v = volumelessFuelReceipts();
 			return { volumelessReceipts: v.receipts, volumelessSummary: v.summary };
+		})(),
+		// Same reasoning, same helper as /api/expenses/fuel-analytics: the admin
+		// inspection surface and the panel must not be able to disagree about which
+		// receipts are double-booked. Safe on the dry run — it reads `expenses`, not
+		// the persisted episodes.
+		...(() => {
+			const d = duplicateReceiptGroups();
+			return { duplicateReceipts: d.groups, duplicateSummary: d.summary };
 		})(),
 		// Only meaningful off persisted rows; a dry run has not written any.
 		tankCalibration: dryRun ? [] : fuelTankCalibrationWire(),
@@ -16439,22 +16541,60 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// twice, so this keeps every real case while dropping the largest
 		// false-positive class (two trucks hitting one brand on one day for the
 		// same round prepaid amount — $500/$30 are exactly such amounts).
+		//
+		// ⚠️ THE MERCHANT IS NOT REQUIRED TO MATCH, and that is the fix. This used
+		// to be `WHERE vendor_normalized = ?`, gated on the incoming row having a
+		// vendor at all — so it could only ever fire when BOTH sides named the same
+		// merchant. Measured against production that is the minority case: of the
+		// five pairs actually double-booked, three have no merchant on one side
+		// (the copy that was typed blind, without the receipt OCR'd) and one has no
+		// merchant on either. The check was structurally incapable of seeing four of
+		// the five. Matching is now truck/driver + day + amount, with
+		// lib/receipt-duplicates.js deciding — which is what keeps this from
+		// becoming the too-aggressive key: a pair whose merchants BOTH exist and
+		// differ, or whose gallons both exist and differ, is exonerated in JS rather
+		// than never being looked at.
+		//
+		// Still a WARNING and still opt-in: this widens what gets flagged, never
+		// what gets blocked, and `allowDuplicate: true` overrides it exactly as
+		// before. Nothing here edits or voids the existing row.
 		const wantsDuplicateCheck = req.body?.checkDuplicate === true && req.body?.allowDuplicate !== true;
-		const findContentDuplicate = () =>
-			db
+		const incomingRow = { vendor_normalized: vendorNormalized, gallons: parseFloat(gallons) || 0 };
+		const findContentDuplicate = () => {
+			// Same driver, same day, same amount — the candidate set, still SCOPED TO
+			// ONE DRIVER (two trucks hitting one brand on one day for the same round
+			// prepaid amount is the largest false-positive class, and $200/$400 are
+			// exactly such amounts). Bounded because a candidate set is a truck-day.
+			const candidates = db
 				.prepare(
-					`SELECT id, driver, amount, date, vendor FROM expenses
-					 WHERE vendor_normalized = ? AND date = ? AND ROUND(amount, 2) = ROUND(?, 2)
+					`SELECT id, driver, amount, date, vendor, vendor_normalized, gallons FROM expenses
+					 WHERE date = ? AND ROUND(amount, 2) = ROUND(?, 2)
 					   AND LOWER(TRIM(COALESCE(driver, ''))) = LOWER(TRIM(?))
 					   AND COALESCE(status, '') != 'Rejected'
-					 ORDER BY id DESC LIMIT 1`,
+					 ORDER BY id DESC LIMIT 20`,
 				)
-				.get(vendorNormalized, date, parsedAmount, driver || "");
-		if (wantsDuplicateCheck && vendorNormalized && parsedAmount > 0) {
+				.all(date, parsedAmount, driver || "");
+			// Report the STRONGEST match, not the newest: with two candidates on one
+			// truck-day the one that agrees on a merchant is the one worth naming.
+			let best = null, bestRank = 0;
+			for (const c of candidates) {
+				const verdict = receiptDuplicates.judgeReceiptPair(incomingRow, c);
+				if (!verdict.duplicate) continue;
+				const rank = receiptDuplicates.CONFIDENCE_RANK[verdict.confidence] || 0;
+				if (rank > bestRank) { bestRank = rank; best = c; }
+			}
+			return best;
+		};
+		if (wantsDuplicateCheck && parsedAmount > 0) {
 			const near = findContentDuplicate();
 			if (near) {
 				return res.status(409).json({
-					error: `Looks like this was already logged — expense #${near.id} (${near.vendor || vendorNormalized}, ${near.date}, $${near.amount}${near.driver ? `, ${near.driver}` : ""}). Save anyway if it is a separate purchase.`,
+					// Names the EXISTING row's merchant, or says it has none — never
+					// falls back to the incoming row's. The whole point of this widening
+					// is that the two sides often disagree about the merchant, so
+					// printing ours over theirs would describe a row that does not exist
+					// and make the warning impossible to check against the receipt.
+					error: `Looks like this was already logged — expense #${near.id} (${near.vendor || "no merchant recorded"}, ${near.date}, $${near.amount}${near.driver ? `, ${near.driver}` : ""}). Save anyway if it is a separate purchase.`,
 					code: "POSSIBLE_DUPLICATE",
 					existingId: near.id,
 					existing: { id: near.id, driver: near.driver, amount: near.amount, date: near.date, vendor: near.vendor },
@@ -16464,8 +16604,15 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// An override books money against a warning a human dismissed. The original
 		// duplicates took a manual audit to find; leave something greppable so the
 		// next one doesn't.
+		// The `vendorNormalized &&` precondition is gone here too, and not just for
+		// symmetry: this audit line is what CLOSES the row's group in the duplicate
+		// queue (duplicateReceiptGroups suppresses on it). Left gated on the
+		// merchant, an override of a blank-merchant warning would book the money and
+		// leave the queue nagging about a pair a human had already settled — i.e.
+		// exactly the rows this widening newly catches would be the ones that could
+		// never be dismissed.
 		let overrodeDuplicateOf = null;
-		if (req.body?.allowDuplicate === true && vendorNormalized && parsedAmount > 0) {
+		if (req.body?.allowDuplicate === true && parsedAmount > 0) {
 			const near = findContentDuplicate();
 			if (near) overrodeDuplicateOf = near.id;
 		}
@@ -27503,6 +27650,16 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 				volumelessSummary: reconciliation.volumelessSummary,
 				tankCalibration: fuelTankCalibrationWire(),
 			} : {}),
+			// FOURTH queue — the same purchase booked twice. Deliberately OUTSIDE the
+			// `reconciliation ?` spread above: that block is omitted wholesale until
+			// the fuel-event sweep has populated its table, and this queue never reads
+			// fuel_events. Riding inside it would hide $1,115.35 of already
+			// double-booked money on every deployment where the sweep is off — which
+			// is the state of the snapshot this was measured against.
+			...(() => {
+				const d = duplicateReceiptGroups();
+				return { duplicateReceipts: d.groups, duplicateSummary: d.summary };
+			})(),
 		});
 	} catch (error) {
 		console.error("Error fetching fuel analytics:", error.message);
