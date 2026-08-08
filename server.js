@@ -39,6 +39,30 @@ const rateconNormalize = require("./lib/ratecon-normalize");
 const receiptDuplicates = require("./lib/receipt-duplicates");
 const { geminiFailure } = require("./lib/gemini-errors");
 const { csvRows } = require("./lib/csv");
+const piiMask = require("./lib/pii-mask");
+
+// ---------------------------------------------------------------------------
+// PII_MASK_ENABLED — deliberately defaults ON, unlike every other flag here.
+//
+// The repo convention is ships-dormant, and that convention is right for the
+// features it was written for: they move money (INVOICE_AUTOGEN_ENABLED,
+// PERIOD_FINALIZE_ENABLED), send mail, or spend on a metered API. Defaulting
+// those off fails safe.
+//
+// For a control that withholds SSNs and bank numbers, off IS the failure. A
+// masking layer that ships disabled is not a control, it is a comment. So the
+// default is inverted and the flag is a KILL SWITCH instead: if masking turns
+// out to obstruct a real admin workflow, `PII_MASK_ENABLED=false` plus a
+// `pm2 restart logistics-app` restores the previous behaviour in seconds, with
+// no redeploy.
+//
+// The reason that tradeoff is safe to take is that masking removes no
+// CAPABILITY. Every masked value stays reachable through the audited reveal
+// route below, so the change is "the full digits are now a deliberate,
+// recorded act" rather than "the full digits are gone".
+// ---------------------------------------------------------------------------
+const PII_MASK_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.PII_MASK_ENABLED ?? "").trim());
+function maskingEnabled() { return PII_MASK_ENABLED; }
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
 function colLetter(idx) {
@@ -3902,13 +3926,24 @@ app.get("/api/drivers-directory/:id/documents", requireRole("Super Admin", "Disp
 		if (fullApplication) {
 			const isSuperAdmin = req.session.user.role === "Super Admin";
 			if (isSuperAdmin) {
-				ssn = fullApplication.ssn || null;
+				// MASKED by default. The client used to receive the full SSN and
+				// hide it behind a reveal toggle, which meant every open of this
+				// panel put a plaintext SSN in the network tab, the browser cache
+				// and any HAR attached to a support ticket — for a login that is
+				// shared, so nothing could say who had seen it.
+				// The full value is still available, from
+				// GET /api/applications/:id/sensitive, which is rate-limited and
+				// writes an audit row per reveal.
+				ssn = fullApplication.ssn
+					? (maskingEnabled() ? piiMask.maskSsn(fullApplication.ssn) : fullApplication.ssn)
+					: null;
 			}
 			// Strip SSN + heavy base64 document fields. Driver's license number is
 			// also sensitive PII — only Super Admins see it; Dispatchers get the
 			// rest of the application detail without the DL#.
 			const { ssn: _drop, cdl_front, cdl_back, medical_card, drivers_license, ...safeApp } = fullApplication;
-			application = isSuperAdmin ? { ...safeApp, drivers_license } : safeApp;
+			const dl = drivers_license && maskingEnabled() ? piiMask.maskLicense(drivers_license) : drivers_license;
+			application = isSuperAdmin ? { ...safeApp, drivers_license: dl } : safeApp;
 		}
 
 		res.json({
@@ -4081,7 +4116,226 @@ function requireRole(...roles) {
 // MUST stay ABOVE the general /uploads handler below — express matches in
 // registration order, so if the static handler is registered first it answers
 // and this guard never runs.
+// ⚠️ SUPERSEDED — this line is retained ONLY as defence in depth. It does not
+// hold on its own, and anything relying on it is relying on a hole.
+// `app.use("/uploads/rate-cons", …)` matches on the request's LITERAL path
+// shape, but `express.static` mounted at `/uploads` normalizes and decodes
+// before resolving a file. The two disagree, and the gap between them is
+// reachable: `/uploads//rate-cons/<id>.pdf` and
+// `/uploads/rate-cons%2F<id>.pdf` both MISS this guard and are then served by
+// the static mount. Measured, not theorized — both returned 200 with the file
+// body to a Driver session.
+// The real gate is the app.use("/uploads", …) guard below (see
+// normalizedUploadPath / GUARDED_UPLOAD_DIRS), which runs at the SAME mount
+// point as express.static and normalizes the path the same way, so no path
+// shape can be protected by one and served by the other.
 app.use("/uploads/rate-cons", requireRole("Super Admin", "Dispatcher"));
+
+// ---------------------------------------------------------------------------
+// Signed onboarding PDFs — OWNERSHIP, not merely a session.
+//
+// Exactly the same hole as the rate-cons one directly above, against strictly
+// more sensitive bytes. `uploads/onboarding-signed/` holds the signed W-9s,
+// which have the driver's SSN typed into the IRS form fields, and the
+// contractor agreements, which carry bank routing + account numbers.
+// Filenames are `${docKey}-${userId}-signed.pdf` — a five-key vocabulary
+// crossed with a small sequential integer — so the URL is enumerable, not
+// secret. Under the general /uploads mount (requireAuth only) ANY logged-in
+// session, including a Driver or an Investor, could walk them.
+//
+// The `confidential` flag already existed and already marks w9 and
+// contractor_agreement — but it was only ever applied as a LISTING filter
+// (GET /api/investor/driver-documents). A listing filter is not an access
+// control when the URL it hides is guessable; this is where that flag becomes
+// enforceable.
+//
+// AUTHORITY IS THE DATABASE, NOT THE FILENAME. Resolving `signed_pdf_url` back
+// to its row is both more robust than parsing ids out of a filename and
+// strictly safer: measured on production, 54 of the 88 files in these two
+// directories are ORPHANS with no row at all (re-signs and removed accounts —
+// nothing ever unlinks the old file). Those resolve to no owner, so they are
+// refused. That breaks no UI path, because every surface builds its link from
+// a row's `signed_pdf_url`; a file with no row has nothing pointing at it.
+//
+// Verified against production before shipping: 25/25 driver rows resolve to a
+// live user and 9/9 investor rows resolve to an investor with a user_id, so no
+// live document loses its reader.
+//
+// 404, never 403, on refusal — a 403 confirms "this document exists", which is
+// the one bit an enumerator is fishing for.
+// ---------------------------------------------------------------------------
+
+// ⚠️ THE GUARD MUST BE MOUNTED WHERE express.static IS, NOT ON A SUB-PATH.
+//
+// The first version of this used app.use("/uploads/onboarding-signed", …), and
+// it was bypassable two ways, both confirmed against a running server returning
+// the victim's file body to a Driver:
+//     /uploads//onboarding-signed/w9-<id>-signed.pdf     (extra slash)
+//     /uploads/onboarding-signed%2Fw9-<id>-signed.pdf    (encoded separator)
+// Express decides whether a sub-path mount matches using the request's literal
+// path, while express.static DECODES and NORMALIZES before resolving a file. So
+// any path shape the two disagree about is protected by neither.
+//
+// The fix is structural, not another pattern to blacklist: one guard at
+// `/uploads`, doing its own decode + normalize, so the string this function
+// judges is the same string express.static will resolve. Everything below is
+// decided on `norm`, never on the raw request.
+function normalizedUploadPath(req) {
+	let rel;
+	try { rel = decodeURIComponent(req.path || ""); } catch { return null; }   // malformed escape → refuse
+	if (!rel || rel.includes("\0")) return null;
+	// Backslashes are separators to some layers and literal to others; fold them
+	// so they cannot be used to dodge the prefix test below.
+	const collapsed = rel.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+	const norm = path.posix.normalize(collapsed).replace(/\/{2,}/g, "/");
+	if (!norm.startsWith("/")) return null;      // escaped the mount
+	if (norm.split("/").includes("..")) return null;
+	return norm;
+}
+
+// A read of someone else's confidential document is the event worth keeping.
+// `super_admin` is a shared login, so this row cannot say WHICH person read it
+// — but it does say that the SSN on a specific document was served, and when,
+// which is strictly more than existed before. Successful reads of your own
+// documents are not logged; that is ordinary use and would bury the signal.
+function auditConfidentialRead(req, entity, entityId, label) {
+	try { logAudit(req, "read_confidential_document", entity, entityId, label); } catch {}
+}
+
+// Driver signed docs. `id` here is the row's own id; ownership is `user_id`.
+function guardDriverSignedDoc(req, res, next, url) {
+	let row;
+	try {
+		row = db.prepare(
+			"SELECT id, user_id, doc_key, confidential FROM onboarding_documents WHERE signed_pdf_url = ?"
+		).get(url);
+	} catch {
+		return res.status(404).end();   // unreadable table → fail closed
+	}
+	if (!row) return res.status(404).end();
+
+	const user = req.session.user;
+	// Both sides must be POSITIVE integers. Number() is deliberately paired with
+	// a `> 0` test rather than a bare truthiness check: `Number(undefined)` is
+	// NaN (safe, never equal) but `Number(null)` and `Number("")` are both 0, so
+	// a row with a null user_id would match a session whose id coerced to 0.
+	// Neither value should ever be 0 — ids are AUTOINCREMENT from 1 — so
+	// requiring it costs nothing and removes the coincidence.
+	const uid = Number(user && user.id);
+	const owner = Number(row.user_id);
+	if (uid > 0 && owner > 0 && uid === owner) return next();
+	if (user.role === "Super Admin") {
+		if (row.confidential) auditConfidentialRead(req, "onboarding_document", row.id, `${row.doc_key} (driver user ${row.user_id})`);
+		return next();
+	}
+	// Dispatchers review the policy documents (equipment/mobile/substance) and
+	// are already denied SSN and licence number at
+	// GET /api/drivers-directory/:id/documents. Handing them the W-9 PDF would
+	// walk straight around that decision, so `confidential` is what they cannot
+	// cross.
+	if (user.role === "Dispatcher" && !row.confidential) return next();
+	return res.status(404).end();
+}
+
+// Investor signed docs. No `confidential` column on this table; the W-9 is the
+// one carrying a tax id, so it is named directly.
+function guardInvestorSignedDoc(req, res, next, url) {
+	let row;
+	try {
+		row = db.prepare(
+			"SELECT id, application_id, doc_key FROM investor_onboarding_documents WHERE signed_pdf_url = ?"
+		).get(url);
+	} catch {
+		return res.status(404).end();
+	}
+	if (!row) return res.status(404).end();
+
+	const isConfidential = String(row.doc_key || "").toLowerCase() === "w9";
+	const user = req.session.user;
+	if (user.role === "Super Admin") {
+		if (isConfidential) auditConfidentialRead(req, "investor_onboarding_document", row.id, `${row.doc_key} (application ${row.application_id})`);
+		return next();
+	}
+	let owner = null;
+	try {
+		owner = db.prepare("SELECT user_id FROM investors WHERE application_id = ? AND COALESCE(user_id,0) > 0").get(row.application_id);
+	} catch {
+		return res.status(404).end();
+	}
+	// Same positive-integer rule as the driver guard above, for the same reason.
+	const uid = Number(user && user.id);
+	const oid = Number(owner && owner.user_id);
+	if (uid > 0 && oid > 0 && uid === oid) return next();
+	return res.status(404).end();
+}
+
+// Directory → rule. Prefixes are matched against the NORMALIZED path, so every
+// encoding of the same file lands on the same rule.
+//
+// WHY ONLY THESE TWO (plus rate-cons), and what was considered and left:
+//   uploads/onboarding/ holds DRUG TEST results — medical data, and arguably
+//   the most sensitive tree here. It is deliberately NOT guarded, because the
+//   property that made the signed docs exploitable is absent: those filenames
+//   are `${docKey}-${userId}-signed.pdf` over a five-key vocabulary and a small
+//   sequential id, i.e. enumerable in a few hundred requests, whereas a drug
+//   test is `drug-test-${userId}-${Date.now()}.<ext>` and guessing it means
+//   guessing the millisecond it was uploaded. Its URL is also only ever handed
+//   to Super Admin / Dispatcher. So it is a secret-URL, which is weak but not
+//   free, against a guard that would need its own ownership rule and its own
+//   regression surface.
+//   ⚠️ That reasoning is entirely about the FILENAME, not about sensitivity. If
+//   anything ever makes those names predictable — a rename, a backfill, a
+//   migration that drops the timestamp, or a listing endpoint that hands the
+//   url to a Driver — add it here immediately.
+const GUARDED_UPLOAD_DIRS = [
+	{ dir: "/onboarding-signed/", guard: guardDriverSignedDoc },
+	{ dir: "/investor-onboarding-signed/", guard: guardInvestorSignedDoc },
+];
+
+app.use("/uploads", requireAuth, (req, res, next) => {
+	const norm = normalizedUploadPath(req);
+	if (norm === null) return res.status(404).end();
+
+	// ⚠️ THE DIRECTORY TEST IS CASE-INSENSITIVE, AND THAT IS LOAD-BEARING.
+	// `/uploads/Onboarding-Signed/w9-<id>-signed.pdf` served the victim's file
+	// past a case-SENSITIVE version of this check — confirmed against a running
+	// server. Two independent reasons it must not be case-sensitive:
+	//   1. macOS (every dev machine here) has a case-insensitive filesystem, so
+	//      express.static happily resolves the mixed-case directory.
+	//   2. Express's own mount matching is case-insensitive by default, which is
+	//      the same reason the /uploads/rate-cons sub-path mount never held.
+	// Production's ext4 would refuse the mixed-case path by accident, which is
+	// precisely the problem: that is the filesystem enforcing authorization, and
+	// it stops being true the moment anything is moved, containerized onto an
+	// overlay/CIFS mount, or run on a Mac.
+	const probe = norm.toLowerCase();
+
+	// Rate cons: same role rule as the (now redundant) sub-path mount above,
+	// re-applied here because that mount does not survive a normalized path.
+	// 403 rather than 404 preserves the existing behaviour for this directory —
+	// a rate con's existence is already implied by the load id, so there is
+	// nothing to conceal, unlike a person's W-9.
+	if (probe.startsWith("/rate-cons/")) {
+		const role = req.session.user.role;
+		if (role !== "Super Admin" && role !== "Dispatcher") return res.status(403).json({ error: "Forbidden" });
+		return next();
+	}
+
+	for (const { dir, guard } of GUARDED_UPLOAD_DIRS) {
+		if (!probe.startsWith(dir)) continue;
+		// Sliced from `norm`, not `probe`: the directory is matched loosely but
+		// the FILENAME keeps its original case, so the lookup below is an exact
+		// match against the stored signed_pdf_url. A filename whose case differs
+		// finds no row and is refused — fail closed, which is the right answer
+		// for a request that only resolves on a case-insensitive filesystem.
+		const file = norm.slice(dir.length);
+		// These directories are flat. A nested path is not a legitimate shape.
+		if (!file || file.includes("/")) return res.status(404).end();
+		return guard(req, res, next, "/uploads" + dir + file);
+	}
+	next();
+});
+
 // Authenticated static serving for uploads (drug tests, signed PDFs, invoices, legal docs, etc.)
 // Every subdirectory under uploads/ contains sensitive documents (PII, signatures, banking info, SSN on W-9),
 // so the entire tree requires a session. Public onboarding flows serve PDFs via dedicated /api/... routes
@@ -4294,7 +4548,14 @@ app.get("/api/applications", requireRole("Super Admin"), (req, res) => {
 			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
 			${whereClause}
 			ORDER BY ja.created_at DESC`).all();
-		res.json(apps);
+		// This list already excludes `ssn` by column choice. `drivers_license`
+		// was not excluded, so every licence number in the system shipped on
+		// page load — and ApplicationsView renders it in full (no client-side
+		// mask, unlike the SSN). Masked here; the audited reveal returns it.
+		// `dob` is deliberately NOT masked: it is a routine part of reviewing a
+		// driver application (DOT eligibility, matching a CDL), and a masked
+		// date of birth is unreadable rather than merely redacted.
+		res.json(maskingEnabled() ? apps.map((a) => piiMask.maskFields(a, { drivers_license: "license" })) : apps);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -4346,7 +4607,12 @@ app.post("/api/applications/:id/restore", requireRole("Super Admin"), (req, res)
 });
 
 // Detail endpoint — returns full record including base64 images, signature,
-// SSN, skills, references, availability, etc. Used by the detail modal.
+// skills, references, availability, etc. Used by the detail modal.
+//
+// SSN and driver's licence number are MASKED (see GET /api/applications/:id/sensitive
+// below for the audited full read). The detail modal already rendered the SSN
+// through a client-side `maskSSN()`, so nothing on screen changes — the
+// difference is that the digits are no longer in the payload that produced it.
 app.get("/api/applications/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		const row = db.prepare(`SELECT ja.*, do.user_id AS onboarding_user_id, do.status AS onboarding_status, do.drug_test_result,
@@ -4355,7 +4621,47 @@ app.get("/api/applications/:id", requireRole("Super Admin"), (req, res) => {
 			LEFT JOIN driver_onboarding do ON do.application_id = ja.id
 			WHERE ja.id = ?`).get(Number(req.params.id));
 		if (!row) return res.status(404).json({ error: "Application not found" });
-		res.json(row);
+		res.json(maskingEnabled() ? piiMask.maskFields(row, { ssn: "ssn", drivers_license: "license" }) : row);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/applications/:id/sensitive — the deliberate, recorded full read.
+//
+// This route is the reason masking everywhere else costs no capability: an
+// operator who genuinely needs the digits (verifying an I-9, chasing a payroll
+// mismatch) still gets them in one click. What changes is that the read is now
+// an EVENT rather than a side effect of opening a page.
+//
+// That distinction is the whole point of this work. `super_admin` is a shared
+// login, so the audit row cannot name a person — but "the SSN on application 7
+// was revealed at 14:02 from this IP" is a fact that did not exist before, and
+// it is the fact an investigation actually starts from.
+//
+// Rate-limited on the same 15-minute window as the other admin reads. A human
+// verifying a document does this a handful of times; 20 is generous for that
+// and still turns a scripted sweep of every application into a 429.
+// ---------------------------------------------------------------------------
+const piiRevealLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 20,
+	message: { error: "Too many reveal requests. Try again later." },
+	standardHeaders: true,
+});
+
+app.get("/api/applications/:id/sensitive", requireRole("Super Admin"), piiRevealLimiter, (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid application id" });
+		const row = db.prepare("SELECT id, full_name, ssn, drivers_license FROM job_applications WHERE id = ?").get(id);
+		if (!row) return res.status(404).json({ error: "Application not found" });
+		// Logged BEFORE the response is written, so an aborted request is still
+		// recorded — the request is what is being audited, not the delivery.
+		logAudit(req, "reveal_application_pii", "job_application", id,
+			`Revealed SSN + licence for ${row.full_name || "application " + id} from ${req.ip || "unknown ip"}`);
+		res.json({ id: row.id, ssn: row.ssn || "", drivers_license: row.drivers_license || "" });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -4929,6 +5235,18 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		sendEmail(email, "LogisX - Investor Application Received", applicantHtml);
 
 		// Email B: Admin notification (detailed + attachments)
+		//
+		// EIN/SSN and the routing number are MASKED here. They were not before,
+		// while the account number beside them was — half a credential redacted
+		// and the other half printed, which reads as deliberate and is not.
+		// Routing + account together are what authorize an ACH debit, so masking
+		// only one of the pair protects nothing.
+		//
+		// This is the one leak on this route that is genuinely unrecoverable:
+		// once sent, the plaintext lives in a Gmail mailbox outside this
+		// application forever, beyond the reach of anything done to app.db. The
+		// reviewer loses nothing — the full record is one click away in the app,
+		// behind a login and an audit row, which the mailbox is not.
 		const adminHtml = `
 		<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:700px;margin:0 auto;color:#1e293b">
 			<div style="background:#0f2847;padding:24px 32px;border-radius:12px 12px 0 0">
@@ -4946,7 +5264,7 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 					${contact_person ? `<tr><td style="padding:5px 0;color:#64748b">Contact Person</td><td style="padding:5px 0">${contact_person}${contact_title ? " (" + contact_title + ")" : ""}</td></tr>` : ""}
 					<tr><td style="padding:5px 0;color:#64748b">Phone</td><td style="padding:5px 0">${phone}</td></tr>
 					<tr><td style="padding:5px 0;color:#64748b">Email</td><td style="padding:5px 0"><a href="mailto:${email}">${email}</a></td></tr>
-					${ein_ssn ? `<tr><td style="padding:5px 0;color:#64748b">EIN/SSN</td><td style="padding:5px 0">${ein_ssn}</td></tr>` : ""}
+					${ein_ssn ? `<tr><td style="padding:5px 0;color:#64748b">EIN/SSN</td><td style="padding:5px 0">${piiMask.maskTaxId(ein_ssn)}</td></tr>` : ""}
 					${tax_classification ? `<tr><td style="padding:5px 0;color:#64748b">Tax Classification</td><td style="padding:5px 0">${tax_classification}</td></tr>` : ""}
 					${years_in_operation ? `<tr><td style="padding:5px 0;color:#64748b">Years in Operation</td><td style="padding:5px 0">${years_in_operation}</td></tr>` : ""}
 					${industry_experience ? `<tr><td style="padding:5px 0;color:#64748b">Industry Experience</td><td style="padding:5px 0">${industry_experience}</td></tr>` : ""}
@@ -4970,8 +5288,8 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 				<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
 					<tr><td style="padding:5px 0;color:#64748b;width:180px">Bank</td><td style="padding:5px 0">${banking.bank_name}</td></tr>
 					${banking.account_type ? `<tr><td style="padding:5px 0;color:#64748b">Account Type</td><td style="padding:5px 0">${banking.account_type}</td></tr>` : ""}
-					<tr><td style="padding:5px 0;color:#64748b">Routing Number</td><td style="padding:5px 0">${banking.routing_number}</td></tr>
-					<tr><td style="padding:5px 0;color:#64748b">Account Number</td><td style="padding:5px 0">${"••••" + banking.account_number.slice(-4)}</td></tr>
+					<tr><td style="padding:5px 0;color:#64748b">Routing Number</td><td style="padding:5px 0">${piiMask.maskRouting(banking.routing_number)}</td></tr>
+					<tr><td style="padding:5px 0;color:#64748b">Account Number</td><td style="padding:5px 0">${piiMask.maskAccount(banking.account_number)}</td></tr>
 					${banking.account_name ? `<tr><td style="padding:5px 0;color:#64748b">Name on Account</td><td style="padding:5px 0">${banking.account_name}</td></tr>` : ""}
 				</table>
 
@@ -5956,7 +6274,12 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 			LEFT JOIN investor_onboarding io ON io.application_id = ia.id
 			WHERE ia.status != 'Draft'
 			ORDER BY ia.created_at DESC`).all();
-		res.json(apps);
+		// The LIST leaks more than the detail view did: `SELECT ia.*` carries
+		// ein_ssn for EVERY application and fires on page load, so simply opening
+		// /investor-applications put every investor's tax id in the browser —
+		// without anyone clicking into a record. Masked here for the same reason
+		// and by the same rule as the detail route below.
+		res.json(maskingEnabled() ? apps.map((a) => piiMask.maskFields(a, { ein_ssn: "taxId" })) : apps);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -5976,7 +6299,41 @@ app.get("/api/investor-applications/:id", requireRole("Super Admin"), (req, res)
 		try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
 		const banking = db.prepare("SELECT bank_name, account_type, routing_number, account_number, account_name FROM investor_payment_info WHERE application_id=?").get(appId) || {};
 		const documents = db.prepare("SELECT doc_key, doc_name, signed, signature_text, signed_at, signed_pdf_url FROM investor_onboarding_documents WHERE application_id=? ORDER BY id").all(appId);
-		res.json({ application, vehicles, banking, documents });
+		// `ein_ssn` was rendered in full by both consumers of this route
+		// (InvestorTable.vue, InvestorApplicationsView.vue) with no mask at all —
+		// not even the cosmetic client-side one the account number had. Full
+		// values move to GET /api/investor-applications/:id/sensitive, which is
+		// audited. Only `/status` writes to this record, so a masked value can
+		// never be read back and saved over the real one.
+		const outApp = maskingEnabled() ? piiMask.maskFields(application, { ein_ssn: "taxId" }) : application;
+		const outBank = maskingEnabled()
+			? piiMask.maskFields(banking, { routing_number: "routing", account_number: "account" })
+			: banking;
+		res.json({ application: outApp, vehicles, banking: outBank, documents });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// The investor twin of GET /api/applications/:id/sensitive — same reasoning,
+// same limiter, same audit row. Kept as a separate route rather than a shared
+// one because the two records live in different tables and neither id space
+// implies the other.
+app.get("/api/investor-applications/:id/sensitive", requireRole("Super Admin"), piiRevealLimiter, (req, res) => {
+	try {
+		const appId = Number(req.params.id);
+		if (!Number.isFinite(appId) || appId <= 0) return res.status(400).json({ error: "Invalid application id" });
+		const application = db.prepare("SELECT id, legal_name, ein_ssn FROM investor_applications WHERE id = ?").get(appId);
+		if (!application) return res.status(404).json({ error: "Application not found" });
+		const banking = db.prepare("SELECT routing_number, account_number FROM investor_payment_info WHERE application_id = ?").get(appId) || {};
+		logAudit(req, "reveal_investor_pii", "investor_application", appId,
+			`Revealed EIN/SSN + banking for ${application.legal_name || "application " + appId} from ${req.ip || "unknown ip"}`);
+		res.json({
+			id: application.id,
+			ein_ssn: application.ein_ssn || "",
+			routing_number: banking.routing_number || "",
+			account_number: banking.account_number || "",
+		});
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -12083,21 +12440,54 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 	}
 });
 
+// ---------------------------------------------------------------------------
+// The three /api/db/* routes are the widest read surface in the application:
+// between them they hand a caller every row of every table, including the SSNs
+// in job_applications and the routing/account numbers in the two payment_info
+// tables. Until now all three carried `requireRole("Super Admin")` and nothing
+// else — no rate limit, and no audit row, so a bulk read of every SSN in the
+// system left no trace anywhere.
+//
+// That matters here more than the role check suggests, because `super_admin` is
+// a SHARED login: "a Super Admin downloaded the database" is not an answer to
+// "who". The audit row cannot name the person either, but it does record that
+// it happened, from which IP, and when — which is the difference between
+// noticing and not.
+//
+// This is also the shape the removed `demo_viewer` account exploited (see the
+// tombstone above): its only gate was the HTTP method, so every Super-Admin GET
+// — GET /api/db/download included — was reachable by anyone who read the repo.
+// ---------------------------------------------------------------------------
+const dbAdminLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 10,
+	message: { error: "Too many database admin requests. Try again later." },
+	standardHeaders: true,
+});
+
 // Download SQLite database file (Super Admin only)
-app.get("/api/db/download", requireRole("Super Admin"), (req, res) => {
-	// Backup to a temp file to capture WAL contents
-	const tmpPath = path.join(__dirname, "app_backup.db");
+app.get("/api/db/download", requireRole("Super Admin"), dbAdminLimiter, (req, res) => {
+	// The entire database in one response. Logged BEFORE the work starts, so an
+	// export that fails or is aborted mid-stream still leaves the attempt on
+	// record — the intent is what is being audited, not the byte count.
+	logAudit(req, "db_download", "database", "app.db", `Full database export requested from ${req.ip || "unknown ip"}`);
+	// Backup to a temp file to capture WAL contents.
+	// Per-request filename: the path used to be a fixed "app_backup.db", so two
+	// concurrent downloads raced on one file and the first to finish unlinked it
+	// out from under the second.
+	const tmpPath = path.join(__dirname, `app_backup-${Date.now()}-${crypto.randomBytes(4).toString("hex")}.db`);
 	db.backup(tmpPath).then(() => {
 		res.download(tmpPath, "app.db", () => {
 			try { fs.unlinkSync(tmpPath); } catch {}
 		});
 	}).catch((err) => {
+		try { fs.unlinkSync(tmpPath); } catch {}
 		res.status(500).json({ error: err.message });
 	});
 });
 
 // Database diagnosis — list tables and query any table (Super Admin only)
-app.get("/api/db/tables", requireRole("Super Admin"), (req, res) => {
+app.get("/api/db/tables", requireRole("Super Admin"), dbAdminLimiter, (req, res) => {
 	const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
 	const result = {};
 	for (const { name } of tables) {
@@ -12107,7 +12497,7 @@ app.get("/api/db/tables", requireRole("Super Admin"), (req, res) => {
 	res.json({ tables: result });
 });
 
-app.get("/api/db/query/:table", requireRole("Super Admin"), (req, res) => {
+app.get("/api/db/query/:table", requireRole("Super Admin"), dbAdminLimiter, (req, res) => {
 	const table = req.params.table;
 	// Validate table name exists to prevent injection
 	const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
@@ -12116,7 +12506,18 @@ app.get("/api/db/query/:table", requireRole("Super Admin"), (req, res) => {
 	const offset = parseInt(req.query.offset) || 0;
 	const rows = db.prepare(`SELECT * FROM "${table}" LIMIT ? OFFSET ?`).all(limit, offset);
 	const count = db.prepare(`SELECT COUNT(*) as total FROM "${table}"`).get();
-	res.json({ table, total: count.total, limit, offset, rows });
+	// `SELECT *` over an arbitrary table cannot carry a per-table column spec, so
+	// masking is driven by column NAME (piiMask.SENSITIVE_COLUMNS, matched
+	// exactly — never as a substring, or `account_type` would be masked too).
+	// This is a diagnostic browser; it has never needed the full digits, and the
+	// values are still reachable deliberately through the audited reveal route.
+	const masked = maskingEnabled() ? rows.map(piiMask.maskUnknownRow) : rows;
+	if (masked !== rows) {
+		// Only worth an audit row when this table actually held something.
+		const touched = masked.some((r, i) => JSON.stringify(r) !== JSON.stringify(rows[i]));
+		if (touched) logAudit(req, "db_query_sensitive", "database", table, `Read ${masked.length} row(s) from ${table} (sensitive columns masked)`);
+	}
+	res.json({ table, total: count.total, limit, offset, rows: masked });
 });
 
 // Rate a driver (Super Admin only)

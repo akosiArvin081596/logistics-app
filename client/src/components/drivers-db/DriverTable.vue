@@ -77,8 +77,8 @@
             <div v-if="docsData.ssn" class="view-row">
               <span class="view-label">SSN</span>
               <span class="ssn-value">
-                {{ showSsn ? docsData.ssn : maskedSsn }}
-                <button type="button" class="ssn-toggle" @click="showSsn = !showSsn" :title="showSsn ? 'Hide' : 'Show'">
+                {{ ssnDisplay }}<span v-if="ssnRevealError" class="ssn-reveal-error"> — {{ ssnRevealError }}</span>
+                <button type="button" class="ssn-toggle" @click="toggleSsn" :title="showSsn ? 'Hide' : 'Show full SSN (recorded in the audit trail)'">
                   <svg v-if="!showSsn" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                   <svg v-else xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                 </button>
@@ -334,8 +334,20 @@ const emit = defineEmits(['delete', 'update', 'picture-updated'])
 
 const viewDrv = ref(null)
 const docsLoading = ref(false)
-const docsData = reactive({ documents: [], drugTest: null, linked: true, ssn: null })
+// NOTE: `application` is deliberately NOT stored here. The template has an
+// "Application Details" block keyed on `docsData.application`, but nothing has
+// ever assigned it, so that block has always been dead. Populating it now would
+// silently switch on a panel of DOB / licence / felony history — more PII on
+// screen, in a change whose whole purpose is less. Only the id is kept, which
+// is all the reveal call needs.
+const docsData = reactive({ documents: [], drugTest: null, linked: true, ssn: null, applicationId: null })
 const showSsn = ref(false)
+// The API now returns the SSN already masked, so revealing means asking for it
+// explicitly — GET /api/applications/:id/sensitive, which writes an audit row.
+// Held separately from docsData.ssn so the masked value is never overwritten and
+// re-masking stays correct after the reveal is toggled back off.
+const ssnFull = ref('')
+const ssnRevealError = ref('')
 const showConfirm = ref(false)
 const pendingDrv = ref(null)
 const showEdit = ref(false)
@@ -387,11 +399,38 @@ function resizeImageToBase64(file, maxDim) {
   })
 }
 
+// Stays correct whether the server sent a masked value or (with
+// PII_MASK_ENABLED=false) a raw one: it reduces to digits first, so masking an
+// already-masked value is a no-op rather than eating the last four.
 const maskedSsn = computed(() => {
   const s = (docsData.ssn || '').replace(/\D/g, '')
   if (!s) return ''
   return s.length >= 4 ? `***-**-${s.slice(-4)}` : '***-**-****'
 })
+
+// Show the real digits only once they have actually been fetched; otherwise the
+// eye toggle would "reveal" the mask and look broken.
+const ssnDisplay = computed(() => (showSsn.value && ssnFull.value ? ssnFull.value : maskedSsn.value))
+
+async function toggleSsn() {
+  if (showSsn.value) { showSsn.value = false; return }
+  ssnRevealError.value = ''
+  if (!ssnFull.value) {
+    const appId = docsData.applicationId
+    if (!appId) { ssnRevealError.value = 'Unavailable'; return }
+    try {
+      const res = await api.get(`/api/applications/${appId}/sensitive`)
+      ssnFull.value = res.ssn || ''
+      if (!ssnFull.value) { ssnRevealError.value = 'Unavailable'; return }
+    } catch {
+      // 429 from the reveal limiter lands here too — surface something rather
+      // than silently leaving the eye toggled off, which reads as a dead button.
+      ssnRevealError.value = 'Unavailable'
+      return
+    }
+  }
+  showSsn.value = true
+}
 
 // Fetch signed docs + drug test + SSN when the detail modal opens
 watch(viewDrv, async (d) => {
@@ -399,7 +438,10 @@ watch(viewDrv, async (d) => {
   docsData.drugTest = null
   docsData.linked = true
   docsData.ssn = null
+  docsData.applicationId = null
   showSsn.value = false
+  ssnFull.value = ''
+  ssnRevealError.value = ''
   if (!d || !d._rowIndex) return
   docsLoading.value = true
   try {
@@ -408,6 +450,7 @@ watch(viewDrv, async (d) => {
     docsData.drugTest = res.drugTest || null
     docsData.linked = res.linked !== false
     docsData.ssn = res.ssn || null
+    docsData.applicationId = res.application?.id || null
   } catch { /* ignore */ }
   finally { docsLoading.value = false }
 })
@@ -741,6 +784,10 @@ function handleConfirmDelete() {
   transition: background 0.12s, color 0.12s;
 }
 .ssn-toggle:hover { background: #f1f5f9; color: #475569; }
+/* Reveal failure (no linked application, or the 20/15min reveal limiter). Shown
+   BESIDE the mask, never instead of it — the last four digits are the useful
+   part for support and there is no reason to take them away too. */
+.ssn-reveal-error { color: #b45309; font-size: 12px; }
 
 .docs-section { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #e8edf2; }
 .docs-title { font-size: 0.72rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.6rem; }
