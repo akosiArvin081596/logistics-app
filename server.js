@@ -14757,22 +14757,28 @@ function buildSheetDeleteAudit(payload) {
 //     on production 205 of 421 Job Tracking rows hold EXACTLY that in "Assigned
 //     Date", written by the n8n rate-con ingestion, which copies the source
 //     email's own Date: header into the cell.
-//   • ⚠️ `new Date(raw)` — because THE MONEY MATH FALLS BACK TO IT. Both
-//     endpoints read `parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol])`,
-//     and V8's parser is far more lenient than either regex above: it reads
-//     every one of those 205 RFC-2822 cells, so they DO book revenue today.
+//   • ⚠️ `new Date(raw)` — because THE MONEY MATH STILL FALLS BACK TO IT for a
+//     shape none of the three readers above recognizes. Both endpoints now read
+//     `moneySheetDate(r[jtDateCol])`, whose last branch is exactly that, and
+//     V8's parser is far more lenient than any regex here.
 //
-// ⚠️ THE FOURTH READER CLOSES A REAL FAIL-OPEN — do not drop it as redundant.
-// `new Date()` respects the RFC-2822 string's UTC OFFSET and then fmtDate() takes
-// the month in the SERVER's local zone, which is UTC in production. So
-// "Date: Wed, 30 Apr 2025 19:35:06 -0500" is 2025-05-01T00:35Z, and the revenue
-// math books it to MAY while the literal month in the text is APRIL. With May
-// locked and April open, a guard reading only the literal month would clear a
-// delete the money math counts in a closed period — the exact direction that
-// must be impossible. Measured on production 2026-08-08 this divergence hits 0
-// of 421 rows today (no rate-con email happened to land in the last ~5 hours of
-// a month, Houston time), which is precisely why it would have shipped unnoticed
-// and surfaced later as one unexplained restatement.
+// ⚠️ THE FOURTH READER IS NO LONGER WHAT COVERS RFC 2822 — reader three is, and
+// that is a deliberate change, not drift. Until 2026-08-08 the money math read
+// `parseSheetDate(v) || new Date(v)`; `new Date()` respects the RFC-2822 string's
+// UTC OFFSET and fmtDate() then took the month in the SERVER's local zone, which
+// is UTC in production, so "Date: Wed, 30 Apr 2025 19:35:06 -0500" is
+// 2025-05-01T00:35Z and the revenue math booked it to MAY while the literal month
+// in the text was APRIL. With May locked and April open, a guard reading only the
+// literal month would have cleared a delete the money math counted in a closed
+// period — the exact direction that must be impossible. moneySheetDate() now
+// reads that shape LITERALLY, so the money month and the literal month are the
+// same month and reader three covers it exactly.
+//
+// KEEP THE FOURTH READER ANYWAY. It is now strictly wider than the money math
+// rather than equal to it, and wider only ever costs a refusal — but it is not
+// redundant: it is the only reader that mirrors moneySheetDate's own surviving
+// `new Date()` branch, so an exotic cell that only V8 can parse still resolves
+// here to the month the P&L would use.
 //
 // The union of all four is therefore never NARROWER than the money math's own
 // resolution, and usually wider. Wider only ever costs a refusal.
@@ -17382,14 +17388,22 @@ function jobTrackingMonthCols(headers) {
 }
 
 // The load's assigned month, or "" when the cell cannot be read as a date.
-// `|| new Date(v)` is copied from the money math on purpose and is load-bearing:
-// production carries assigned dates like "Date: Tue, 1 Jul 2025 11:33:05 -0500"
-// that the strict parser rejects and the lenient Date constructor accepts. Drop
-// that fallback and this guard calls those rows unresolvable while the P&L
-// happily books them into July.
+//
+// ⚠️ CALLS THE MONEY MATH'S OWN RESOLVER, moneySheetDate(), AND MUST KEEP DOING
+// SO. This guard returns a SINGLE month (loadRowPeriods wraps it as `[assigned]`,
+// not a union), so any disagreement with the P&L is a one-sided hole rather than
+// an extra refusal: resolve MAY here while the revenue books APRIL, with April
+// locked and May open, and the guard clears a delete out of a closed period.
+// It previously inlined `jtParseSheetDate(v) || new Date(v)` — a verbatim copy of
+// what the money math read at the time, and load-bearing for the same reason it
+// is now a shared call: production carries assigned dates like
+// "Date: Tue, 1 Jul 2025 11:33:05 -0500" that the strict parser rejects. When
+// that expression was replaced on 2026-08-08 (see moneySheetDate) this had to
+// move with it, in the same commit. Sharing the function is what makes drifting
+// apart impossible; do not re-inline a copy.
 function loadAssignedMonthKey(row, cols) {
 	if (!cols.dateCol || !row[cols.dateCol]) return "";
-	const d = jtParseSheetDate(row[cols.dateCol]) || new Date(row[cols.dateCol]);
+	const d = moneySheetDate(row[cols.dateCol]);
 	return d && !isNaN(d) ? jtFmtDate(d).slice(0, 7) : "";
 }
 
@@ -17403,7 +17417,9 @@ function loadWindowDays(row, cols) {
 	let pickup = jtParseSheetDate(cols.pickupDateCol ? row[cols.pickupDateCol] : null);
 	const dropoff = jtParseSheetDate(cols.dropoffDateCol ? row[cols.dropoffDateCol] : null);
 	if (!pickup && cols.dateCol && row[cols.dateCol]) {
-		pickup = jtParseSheetDate(row[cols.dateCol]) || new Date(row[cols.dateCol]);
+		// Same shared resolver as the pay loop's own assigned-date fallback, for
+		// the same reason as loadAssignedMonthKey above.
+		pickup = moneySheetDate(row[cols.dateCol]);
 	}
 	if (!pickup || isNaN(pickup)) return [];
 	return jtExpandDateRange(pickup, dropoff || pickup);
@@ -18491,22 +18507,29 @@ const exportLimiter = rateLimit({
 // matter before you trust a reconciliation. Verified under TZ=UTC, which is what
 // the VPS runs:
 //
-//   parseSheetDate (x4)  literal for ISO and US slash. But it returns null on
-//                        RFC 2822, and every call site is
-//                        `parseSheetDate(v) || new Date(v)` — that fallback
-//                        honors the offset and is then read back through
+//   parseSheetDate (x4)  literal for ISO and US slash. It returns null on RFC
+//                        2822, and every call site USED TO BE
+//                        `parseSheetDate(v) || new Date(v)` — a fallback that
+//                        honored the offset and was then read back through
 //                        server-local getters, so "19 Jun 2025 20:16:37 -0500"
-//                        buckets as Jun 20.
+//                        bucketed as Jun 20 here and Jun 19 in this helper.
+//                        FIXED 2026-08-08: those call sites now go through
+//                        moneySheetDate(), which reads RFC 2822 literally, so
+//                        the money day and this helper's day AGREE. Verified
+//                        read-only on production: the resolved month changed on
+//                        zero of 421 rows, so nothing was restated.
 //   parseInvoiceDate     literal for US slash ONLY. It has no ISO branch, so
 //                        both ISO and RFC 2822 fall through to new Date() +
 //                        server-local getters. Same Jun 19 -> Jun 20 shift.
 //   invoice-week filter  not literal at all: new Date(raw).toISOString(), an
 //                        outright conversion to UTC. Same shift.
 //
-// The three agree with this helper only where the string carries no UTC offset.
-// RFC 2822 always carries one — and it is the most common shape on completed
-// rows — so that is where a literal day and a money day can still differ by
-// exactly one, on evening stamps. Not hypothetical; just old.
+// The revenue/driver-pay path now agrees with this helper on every shape. The
+// two INVOICE readers still do not: parseInvoiceDate has no ISO branch and the
+// invoice-week filter converts outright via toISOString(), so both still shift an
+// evening RFC 2822 or ISO stamp by one day. That is a live, unfixed divergence —
+// it moves which WEEK a load is billed in, not which month revenue books to, so
+// it was left out of the 2026-08-08 month fix rather than resolved by it.
 //
 // Cost is limited to history: since 2026-08-03 the server stamps Houston time,
 // so the stored date IS the business day and literal == correct. Only
@@ -18580,6 +18603,72 @@ function sheetDayKey(val) {
 		}
 	}
 	return "";
+}
+
+// THE DATE THE MONEY MATH RESOLVES FOR A JOB TRACKING CELL. One function, used
+// by the revenue/driver-pay math AND by the period guards that have to agree
+// with it. Returns a LOCAL-midnight Date (or null), so fmtDate()/jtFmtDate()
+// read back exactly the calendar day this picked, in any server zone.
+//
+// ⚠️ THIS REPLACES `parseSheetDate(v) || new Date(v)`, WHICH WAS SERVER-ZONE
+// DEPENDENT. parseSheetDate itself was never the problem — its ISO and US-slash
+// branches build `new Date(y, m-1, d)`, a local midnight read back through local
+// getters, so they round-trip identically anywhere. The FALLBACK was:
+// `new Date("Date: Wed, 30 Apr 2025 19:35:06 -0500")` is an INSTANT
+// (2025-05-01T00:35Z), and fmtDate() then took its month in the SERVER's zone —
+// UTC in production. That cell booked revenue to MAY on the VPS and to APRIL on
+// a Houston laptop: same sheet, same code, different money. Nothing warned.
+//
+// The RFC 2822 branch reads the date LITERALLY, exactly as sheetDayKey() above
+// already does. That is deliberate on two counts. It ends a live disagreement
+// this file already documents — see "WHAT THE MONEY PATHS ACTUALLY DO", which
+// records the accounting bucketing "19 Jun 2025 20:16:37 -0500" as Jun 20 while
+// the export calls it Jun 19. And literal is the basis the client's rule names:
+// "if it is already closed and locked by the month then follow that date."
+//
+// WHY LITERAL RATHER THAN AN America/Chicago CONVERSION — on production all 205
+// RFC 2822 cells carry -0500 (192) or -0600 (13), i.e. Houston's own offsets, so
+// the literal day and the Houston day are THE SAME DAY and the two candidate
+// fixes are indistinguishable on real data. Literal wins because it needs no
+// zone lookup, cannot drift when the tz database updates, and matches every
+// other reader of this column.
+//
+// MEASURED READ-ONLY ON PRODUCTION BEFORE SHIPPING (2026-08-08): of 421 Job
+// Tracking rows, 205 take this fallback. Against the previous behaviour this
+// changes the resolved DAY of exactly two rows (#521716147 Jul 15→14, $580;
+// 523642943 Aug 4→3, $500) and the resolved MONTH of NONE. Monthly revenue,
+// per-load assigned month, per-truck first/last load date and every driver's
+// pay-day set all come out byte-identical, so no locked period is restated —
+// which is the only reason this was safe to change at all. Both moved rows take
+// their pay window from a Pickup Appointment, so neither shifts a paid day.
+//
+// The last branch keeps `new Date()` for anything the three readers do not
+// recognize. Production has zero such cells today; it stays so that an unforeseen
+// shape degrades to the OLD behaviour rather than to null, which would silently
+// drop that row's revenue instead of merely dating it awkwardly.
+function moneySheetDate(val) {
+	// The "Date: " prefix is part of the copied email header, same as sheetDayKey.
+	const s = String(val ?? "").replace(/^Date:\s*/i, "").trim();
+	if (!s) return null;
+	// ISO first — the US M/D/Y branch would misread "2026-05-13".
+	let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+	if (m) { const d = new Date(+m[1], +m[2] - 1, +m[3]); return isNaN(d) ? null : d; }
+	m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+	if (m) {
+		let yr = +m[3];
+		if (yr < 100) yr += 2000; // "5/16/25" -> 2025, same rule as parseSheetDate
+		const d = new Date(yr, +m[1] - 1, +m[2]);
+		return isNaN(d) ? null : d;
+	}
+	// RFC 2822, read literally. Same shape sheetDayKey matches, so the two cannot
+	// disagree about which day a rate-con-ingested load belongs to.
+	m = s.match(/\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{4})\b/i);
+	if (m) {
+		const mon = RFC2822_MONTHS.indexOf(m[2].slice(0, 3).toLowerCase());
+		if (mon >= 0) { const d = new Date(+m[3], mon, +m[1]); if (!isNaN(d)) return d; }
+	}
+	const fb = new Date(s);
+	return isNaN(fb) ? null : fb;
 }
 
 // GET /api/loads/completed/export?driver=&from=&to= — every completed load as a
@@ -26254,7 +26343,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		const truckUnit = jtTruckCol ? (r[jtTruckCol] || "").trim().toLowerCase() : "";
 		let assignedMonthKey = null;
 		if (jtDateCol && r[jtDateCol]) {
-			const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+			const d = moneySheetDate(r[jtDateCol]);
 			if (d && !isNaN(d)) assignedMonthKey = fmtDate(d).slice(0, 7);
 		}
 		if (completedStatuses.test(st)) {
@@ -26281,7 +26370,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 		if (completedStatuses.test(st) && driver) {
 			let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
 			const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
-			if (!pickup && jtDateCol && r[jtDateCol]) pickup = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+			if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
 			if (pickup && !isNaN(pickup)) {
 				const windowDays = expandDateRange(pickup, dropoff || pickup);
 				const vid = truckUnit ? unitToVid[truckUnit] : null;
@@ -26302,7 +26391,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			}
 		}
 		if (jtDateCol && r[jtDateCol]) {
-			const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+			const d = moneySheetDate(r[jtDateCol]);
 			if (d && !isNaN(d) && (!earliestDate || d < earliestDate)) earliestDate = d;
 		}
 	});
@@ -27162,7 +27251,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// Resolve the load's assigned-month key once (used by both revenue and driver pay)
 			let assignedMonthKey = null;
 			if (jtDateCol && r[jtDateCol]) {
-				const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				const d = moneySheetDate(r[jtDateCol]);
 				if (d && !isNaN(d)) assignedMonthKey = fmtDate(d).slice(0, 7);
 			}
 
@@ -27183,7 +27272,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 						if (truckUnit) milesByTruck[truckUnit] = (milesByTruck[truckUnit] || 0) + loadMiles;
 					}
 					if (assignedMonthKey) {
-						const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+						const d = moneySheetDate(r[jtDateCol]);
 						if (d >= thirtyDaysAgo) last30DaysRevenue += amt;
 						monthlyRevenue[assignedMonthKey] = (monthlyRevenue[assignedMonthKey] || 0) + amt;
 						if (driver) {
@@ -27214,7 +27303,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
 				// Completed load with a blank pickup → fall back to its assigned date.
-				if (!pickup && jtDateCol && r[jtDateCol]) pickup = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
 				if (pickup && !isNaN(pickup)) {
 					const windowDays = expandDateRange(pickup, dropoff || pickup);
 					const vid = truckUnit ? unitToVid[truckUnit] : null;
@@ -27260,7 +27349,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 
 			// Operating period (track earliest/latest dates)
 			if (jtDateCol && r[jtDateCol]) {
-				const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				const d = moneySheetDate(r[jtDateCol]);
 				if (d && !isNaN(d)) {
 					if (!earliestDate || d < earliestDate) earliestDate = d;
 					if (!latestDate || d > latestDate) latestDate = d;
@@ -29551,7 +29640,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 
 			// Operating period
 			if (jtDateCol && r[jtDateCol]) {
-				const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				const d = moneySheetDate(r[jtDateCol]);
 				if (d && !isNaN(d)) {
 					if (!earliestDate || d < earliestDate) earliestDate = d;
 					if (!latestDate || d > latestDate) latestDate = d;
@@ -29580,7 +29669,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 						// fixed-cost accrual window so a truck idle for half
 						// the year doesn't get charged 12 months of insurance.
 						if (jtDateCol && r[jtDateCol]) {
-							const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+							const d = moneySheetDate(r[jtDateCol]);
 							if (d && !isNaN(d)) {
 								if (!truckLoadDates[truckUnit]) truckLoadDates[truckUnit] = { first: d, last: d };
 								else {
@@ -29621,7 +29710,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					// monthly performance view, plus per-driver for the
 					// percentage-pay branch. Bucketed by the load's assigned month.
 					if (jtDateCol && r[jtDateCol]) {
-						const d = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+						const d = moneySheetDate(r[jtDateCol]);
 						if (d && !isNaN(d)) {
 							const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 							loadEntry.monthKey = mk;
@@ -29644,7 +29733,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			if (completedStatuses.test(st)) {
 				let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = parseSheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
-				if (!pickup && jtDateCol && r[jtDateCol]) pickup = parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol]);
+				if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
 				if (pickup && !isNaN(pickup)) {
 					const windowDays = expandDateRange(pickup, dropoff || pickup);
 					const vid = truckUnit ? unitToVid[truckUnit] : null;
