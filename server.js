@@ -13238,31 +13238,662 @@ app.get("/api/archive/tabs", requireRole("Super Admin"), async (req, res) => {
 	}
 });
 
+// ============================================================
+// RAW SHEET ROW DELETES — audit trail + month-end lock
+// ============================================================
+// Two routes delete rows straight out of the Google Sheet: POST
+// /api/admin/remove-rows (the duplicate scanner's "Remove row" button) and
+// DELETE /api/data/:rowIndex (the Data Manager). Job Tracking is this app's
+// primary database and its rows ARE the revenue — /api/dashboard,
+// /api/financials, /api/investor and POST /api/invoices/generate all read them,
+// so a row removed here is money removed from a month.
+//
+// AND THERE IS NO UNDO. `deleteDimension` shifts every following row up: once
+// the batchUpdate returns, the contents are gone AND the row index that
+// identified it now points at a different load. That is precisely why this file
+// already has a soft delete for loads — DELETE /api/loads/:loadId writes a
+// `deleted_loads` tombstone, leaves the sheet row in place for audit, filters it
+// out of every KPI via excludeDroppedLoads(), and reverses with one
+// `DELETE FROM deleted_loads WHERE load_id = ?`. These two routes bypass all of
+// it, so the refusals below name it as the thing to use instead.
+//
+// MEASURED ON PRODUCTION, 2026-08-08, read-only (15 periods locked, 2025-05
+// through 2026-07; only 2026-08 open), using the revenue math's OWN parser
+// chain. Of 421 Job Tracking rows, 407 — 96.7% — book their revenue in a LOCKED
+// month: $313,923.93 of completed-load revenue, inside months backing two
+// payouts already marked PAID (2026-05 $3,992.00 and 2026-06 $8,703.00). Only
+// 14 rows sit in an open month. `audit_trail` contained zero rows describing a
+// sheet-row delete, because neither route has ever written one.
+//
+// FOUR gaps are closed here, and the first three are not about month-end at all:
+//
+//   1. AN UNRESOLVED TAB NAME SILENTLY DELETED FROM A DIFFERENT TAB.
+//      getSheetId() is an exact-title Map lookup that returns `undefined` for
+//      any name not byte-identical to a tab. `undefined` then JSON-serializes
+//      AWAY, leaving a GridRange with no sheetId — and a GridRange with no
+//      sheetId is gid 0. Verified read-only against the production spreadsheet
+//      with spreadsheets.getByDataFilter (same GridRange type, no write): a
+//      filter carrying `sheetId: undefined` matched "Contract Management",
+//      gid 0. So `?sheet=job%20tracking` (wrong case), or a trailing space,
+//      deleted a row out of Contract Management and answered `{success:true}`.
+//      A non-integer sheetId is now a 400 before anything is sent.
+//
+//   2. ROW 1 IS THE HEADER ROW. Nothing stopped `rowIndex: 1`, and this whole
+//      codebase resolves columns by matching header TEXT (findCol). Deleting
+//      Job Tracking's header row does not lose one load — it silently re-points
+//      every column regex in the app at the wrong data.
+//
+//   3. A DUPLICATE INDEX IN remove-rows DELETED A ROW NOBODY ASKED FOR.
+//      Requests inside one batchUpdate apply IN ORDER, so `[5, 5]` deletes row 5
+//      and then deletes whatever shifted up into position 5 — the original row
+//      6, unnamed in the request and unmentioned in the response. The descending
+//      sort exists to stop indices shifting, and hid this precisely.
+//
+//   4. The month-end lock and the audit line, below.
+
+// Blast-radius cap on one bulk call, in the spirit of the other bulk caps in
+// this file (BULK_STATUS_MAX_IDS 200, ≤25 receipts per scan batch). Splitting a
+// larger cleanup across calls costs nothing; an unbounded rowIndices is a
+// whole-sheet wipe in a single request.
+const SHEET_ROW_DELETE_MAX = 100;
+// Same floor as POST /api/dispatch/cancel's CANCEL_REASON_REQUIRED. An audit
+// line reading "row 214 deleted" is close to useless — the reason is part of
+// what makes the record reconstructable, not decoration.
+const SHEET_ROW_DELETE_REASON_MIN = 3;
+// And a ceiling, because `reason` is free text that lands in the audit payload
+// ahead of nothing — an unbounded one used to be able to push the deleted row's
+// contents out of a size-capped record.
+const SHEET_ROW_REASON_MAX = 500;
+// audit_trail.details is TEXT with no limit, but one runaway cell should not be
+// able to write an unbounded row. A 26-column Job Tracking row serializes to
+// roughly 1-2 KB, so this truncates nothing real.
+const SHEET_ROW_AUDIT_DETAILS_MAX = 8000;
+
+// Tabs whose rows feed an accounting month, and therefore get the period guard.
+//
+// DELIBERATELY NOT "every tab". The rule is to fail closed when a row's month
+// cannot be determined — but that only applies to rows that HAVE a month.
+// Carrier Database, Carrier History and Contract Management carry dates meaning
+// something else entirely; refusing a delete because a driver's hire date falls
+// in a closed month would be GUESSING a period, which is the thing being
+// guarded against. Job Tracking is on this list because its bucketing was read
+// out of the money math itself (see loadRowAccountingMonths), not assumed.
+//
+// Payments Table and Job Details are per-load and written by
+// POST /api/loads/from-ratecon, but no aggregate in this file READS them today —
+// grep either name: every hit is a write. If one ever starts feeding a total,
+// add it here and give loadRowAccountingMonths its column mapping.
+const PERIOD_GUARDED_SHEETS = ["Job Tracking"];
+
+// Does this gid belong to a period-guarded tab? Resolved through the SAME
+// getSheetId() cache the delete uses, so the guard and the delete can never be
+// talking about different tabs — see the ⚠️ on sheetRowDeleteBlocker.
+// Fails CLOSED: if a guarded tab's gid cannot be resolved at all, every sheet is
+// treated as guarded rather than none, because "I could not look up Job
+// Tracking" must not read as "this is not Job Tracking".
+async function isPeriodGuardedGid(sheets, sheetId) {
+	for (const title of PERIOD_GUARDED_SHEETS) {
+		let gid;
+		try { gid = await getSheetId(sheets, title); } catch { return true; }
+		if (!Number.isInteger(gid)) return true;
+		if (gid === sheetId) return true;
+	}
+	return false;
+}
+
+// The audit `details` payload, built so that TRUNCATION CANNOT COST THE ROW
+// CONTENTS — which are the entire point of the record.
+//
+// A naive `JSON.stringify(everything).slice(0, MAX)` fails twice over: the
+// contents serialize last, so an uncapped `reason` or a long `skipped` list
+// (each entry carries the full PERIOD_FINALIZED prose) pushes them off the end;
+// and slicing mid-token yields a string that will not parse. So the row
+// snapshots are serialized FIRST and given their own budget, everything else is
+// capped per field, and the result is parse-checked before it is returned.
+function buildSheetDeleteAudit(payload) {
+	const cap = (v, n) => {
+		const s = String(v == null ? "" : v);
+		return s.length > n ? s.slice(0, n) + "…[truncated]" : s;
+	};
+	const out = {
+		outcome: payload.outcome,
+		sheet: cap(payload.sheet, 200),
+		// Contents first, and budgeted per cell so one runaway cell cannot crowd
+		// out the other columns or the other rows.
+		rows: (payload.rows || []).map((r) => ({
+			rowIndex: r.rowIndex,
+			cells: Object.fromEntries(Object.entries(r.cells || {}).map(([k, v]) => [cap(k, 120), cap(v, 500)])),
+		})),
+		reason: cap(payload.reason, SHEET_ROW_REASON_MAX),
+		requested: payload.requested,
+		deletedRowIndices: payload.deletedRowIndices,
+		skipped: (payload.skipped || []).map((s) => ({ rowIndex: s.rowIndex, code: s.code, periods: s.periods })),
+		...(payload.error ? { error: cap(payload.error, 500) } : {}),
+	};
+	let json = JSON.stringify(out);
+	if (json.length > SHEET_ROW_AUDIT_DETAILS_MAX) {
+		// Still too big (a very wide sheet, or a very large batch). Drop whole
+		// structures rather than cutting a string in half, and SAY that it happened
+		// — a silently shortened record is worse than a short one.
+		out.truncated = `contents omitted for ${out.rows.length} row(s) — payload exceeded ${SHEET_ROW_AUDIT_DETAILS_MAX} bytes`;
+		out.rows = out.rows.map((r) => ({ rowIndex: r.rowIndex }));
+		json = JSON.stringify(out);
+	}
+	try { JSON.parse(json); } catch { return JSON.stringify({ outcome: payload.outcome, sheet: String(payload.sheet), auditSerializationFailed: true }); }
+	return json;
+}
+
+// Every month a single sheet DATE CELL could be booked to.
+//
+// Returns an ARRAY because one cell can legitimately imply two months, and
+// because the union is the only shape that is safe in both directions: the
+// guard must never resolve a month the money math would call LOCKED into one it
+// calls OPEN. Where the two could disagree, this returns both and the caller
+// refuses on either.
+//
+// FOUR readers, and the fourth is the one that makes this correct rather than
+// merely careful:
+//   • ISO `YYYY-M-D` and US `M/D/YY(YY)` — the two forms parseSheetDate()
+//     accepts. It is defined inline inside /api/investor and /api/financials
+//     rather than at module scope, hence a reader here rather than a call.
+//   • the DAY-ROLLOVER month. parseSheetDate builds `new Date(y, m-1, d)`, which
+//     rolls "2/30/2025" forward into March. Reporting only the literal month
+//     could clear a delete as safe while the revenue math had that row in a
+//     different — possibly locked — month, so both are emitted.
+//   • RFC-2822, e.g. "Date: Tue, 13 May 2025 11:56:47 -0500". Not hypothetical:
+//     on production 205 of 421 Job Tracking rows hold EXACTLY that in "Assigned
+//     Date", written by the n8n rate-con ingestion, which copies the source
+//     email's own Date: header into the cell.
+//   • ⚠️ `new Date(raw)` — because THE MONEY MATH FALLS BACK TO IT. Both
+//     endpoints read `parseSheetDate(r[jtDateCol]) || new Date(r[jtDateCol])`,
+//     and V8's parser is far more lenient than either regex above: it reads
+//     every one of those 205 RFC-2822 cells, so they DO book revenue today.
+//
+// ⚠️ THE FOURTH READER CLOSES A REAL FAIL-OPEN — do not drop it as redundant.
+// `new Date()` respects the RFC-2822 string's UTC OFFSET and then fmtDate() takes
+// the month in the SERVER's local zone, which is UTC in production. So
+// "Date: Wed, 30 Apr 2025 19:35:06 -0500" is 2025-05-01T00:35Z, and the revenue
+// math books it to MAY while the literal month in the text is APRIL. With May
+// locked and April open, a guard reading only the literal month would clear a
+// delete the money math counts in a closed period — the exact direction that
+// must be impossible. Measured on production 2026-08-08 this divergence hits 0
+// of 421 rows today (no rate-con email happened to land in the last ~5 hours of
+// a month, Houston time), which is precisely why it would have shipped unnoticed
+// and surfaced later as one unexplained restatement.
+//
+// The union of all four is therefore never NARROWER than the money math's own
+// resolution, and usually wider. Wider only ever costs a refusal.
+// Returns `null` — NOT `[]` — for a cell that holds something but resolves to
+// nothing. `[]` means "this cell is blank", which is a fact; `null` means "this
+// cell has content I could not read", which is an admission, and the caller has
+// to fail closed on it. Collapsing the two is what let a row be judged on
+// whichever OTHER column happened to parse.
+function sheetCellMonths(val) {
+	const s = String(val == null ? "" : val).trim();
+	if (!s) return [];
+	const out = new Set();
+	let unreadable = false;
+	const inRange = (y) => Number.isInteger(y) && y >= 1970 && y <= 2999;
+	const add = (y, mo, day) => {
+		if (!Number.isInteger(y) || !Number.isInteger(mo) || !Number.isInteger(day)) { unreadable = true; return; }
+		// The literal month, but ONLY when it is a month at all.
+		if (inRange(y) && mo >= 1 && mo <= 12) out.add(`${y}-${String(mo).padStart(2, "0")}`);
+		// ⚠️ The month parseSheetDate ACTUALLY lands on — and deliberately NOT
+		// range-checked on `mo`, because parseSheetDate does not range-check it
+		// either. It builds `new Date(y, mo - 1, day)` and lets JS roll over, so
+		// "2026-13-05" and "13/05/2026" are January 2027 to the revenue math. An
+		// earlier version of this guard dropped `mo > 12` on the floor and returned
+		// nothing for both, which is a fail-open whenever another column on the row
+		// happens to resolve. Same rollover covers "2/30/2025" → March.
+		const d = new Date(y, mo - 1, day);
+		if (!isNaN(d) && inRange(d.getFullYear())) out.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+		else unreadable = true;
+	};
+	// ISO first — the US reader below would read "2026-05-13" as month 2026.
+	let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+	if (m) add(+m[1], +m[2], +m[3]);
+	else if ((m = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/.exec(s))) {
+		let yr = +m[3];
+		if (yr < 100) yr += 2000;
+		add(yr, +m[1], +m[2]);
+	}
+	// Unanchored on purpose — the cell holds a whole header line, not just a
+	// date. A separate `if`, not an `else`: a cell carrying both forms yields
+	// both months, which is the safe direction.
+	const RFC_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+	if ((m = /(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{4})/i.exec(s))) {
+		add(+m[3], RFC_MONTHS[m[2].slice(0, 3).toLowerCase()], +m[1]);
+	}
+	// The money math's own fallback, read the money math's own way: getMonth() in
+	// the SERVER's local zone, exactly as fmtDate() does, so an offset-bearing
+	// string lands in the same month here as it does in the revenue total. See
+	// the ⚠️ above — this is the rung that makes the guard sound, not a nicety.
+	// The year bound is what stops V8's leniency inventing a month out of a bare
+	// load id or a stray number.
+	const fallback = new Date(s);
+	if (!isNaN(fallback)) {
+		const fy = fallback.getFullYear();
+		if (inRange(fy)) out.add(`${fy}-${String(fallback.getMonth() + 1).padStart(2, "0")}`);
+		else unreadable = true;
+	}
+	// A non-empty cell that produced no month at all is unreadable by definition,
+	// whether or not a reader flagged it.
+	if (unreadable || !out.size) return null;
+	return [...out];
+}
+
+// Which accounting months does THIS Job Tracking row feed?
+//
+// Read out of the money math, not invented. A completed load's revenue books to
+// the month of its "Assigned Date" — GET /api/investor and GET /api/financials
+// both compute `assignedMonthKey` from `parseSheetDate(r[jtDateCol])` and add
+// the payment there, i.e. the month the load was ASSIGNED, not delivered — and
+// its driver-pay days bucket to `assignedMonthKey || <the day's own month>`,
+// where the days come from the pickup→dropoff window. So the row's true
+// footprint is the assigned month UNION the appointment months.
+//
+// Collecting EVERY date-ish column instead of picking one also sidesteps a real
+// trap in the money math's own column resolution: it does
+// `findCol(a) || findCol(b)`, and findCol returns the header NAME, so a matching
+// header at index 0 is falsy and silently falls through to the fallback. Taking
+// the union cannot pick the wrong column, because it does not pick.
+//
+// ⚠️ RETURNS `null` WHEN ANY DATE CELL ON THE ROW IS UNREADABLE, and the caller
+// must fail closed on that exactly as it does on an empty result. The earlier
+// version simply skipped an unreadable cell, which meant one bad date column was
+// INVISIBLE as long as a different column parsed — so a row whose Assigned Date
+// the guard could not read but whose Pickup Appointment sat in an open month was
+// cleared for deletion on the strength of the pickup alone. Partial resolution
+// is not resolution.
+//
+// An empty array likewise means "no month could be determined". Both answers say
+// "do not delete this row"; only a non-empty array is a positive finding.
+function loadRowAccountingMonths(headers, row) {
+	const hs = Array.isArray(headers) ? headers : [];
+	const vs = Array.isArray(row) ? row : [];
+	const months = new Set();
+	let pickupCell = null;
+	let dropoffCell = null;
+	for (let i = 0; i < hs.length; i++) {
+		const h = String(hs[i] || "");
+		// A superset of every date column the revenue and driver-pay math reads:
+		// Assigned Date, Status Update Date and Completion Date (all /date/i), plus
+		// Pickup Appointment and Drop-off Appointment. `appo` (not `appointment`)
+		// because the money math's own regexes are /pickup.*appo/ and
+		// /drop.?off.*appo/ — a header abbreviated "Pickup Appt"/"Pickup Appoint"
+		// matches theirs, and must therefore match this one too.
+		if (!/date|appo|appt/i.test(h)) continue;
+		const cell = vs[i];
+		const ms = sheetCellMonths(cell);
+		if (ms === null) return null;      // unreadable content — fail closed
+		for (const mk of ms) months.add(mk);
+		if (/pickup.*appo|pickup.*date/i.test(h)) pickupCell = cell;
+		else if (/drop.?off.*appo|drop.?off.*date|delivery.*date/i.test(h)) dropoffCell = cell;
+	}
+
+	// INTERIOR months of the pickup→dropoff window. Driver pay enumerates EVERY
+	// day from pickup to dropoff (expandDateRange, clamped to 31 days) and buckets
+	// each day by `assignedMonthKey || <that day's own month>`. When the assigned
+	// month is absent — normal for a load created before it was assigned — a
+	// window spanning three months pays into all three, including a month that
+	// appears in no cell on the row. Reachable because
+	// POST /api/periods/:period/reopen makes locks non-contiguous: with June
+	// reopened, July locked and August open, a 6/29→8/5 window pays into a locked
+	// July that neither endpoint names.
+	const start = sheetCellDate(pickupCell);
+	const end = sheetCellDate(dropoffCell);
+	if (start && end && end >= start) {
+		const cur = new Date(start.getFullYear(), start.getMonth(), 1);
+		// Same 31-day clamp expandDateRange applies, so the guard walks exactly the
+		// span the pay math can walk and not one month more.
+		const capped = new Date(Math.min(end.getTime(), start.getTime() + 31 * 24 * 3600 * 1000));
+		const last = new Date(capped.getFullYear(), capped.getMonth(), 1);
+		while (cur <= last) {
+			months.add(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}`);
+			cur.setMonth(cur.getMonth() + 1);
+		}
+	}
+	return [...months].sort();
+}
+
+// The single Date the revenue math would resolve for a cell — `parseSheetDate()`
+// then its `new Date()` fallback, in that order. Only used for the window span
+// above, where a month key is not enough because the interior has to be walked.
+function sheetCellDate(val) {
+	const s = String(val == null ? "" : val).trim();
+	if (!s) return null;
+	let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+	if (m) { const d = new Date(+m[1], +m[2] - 1, +m[3]); if (!isNaN(d)) return d; }
+	if ((m = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/.exec(s))) {
+		let yr = +m[3];
+		if (yr < 100) yr += 2000;
+		const d = new Date(yr, +m[1] - 1, +m[2]);
+		if (!isNaN(d)) return d;
+	}
+	const fb = new Date(s);
+	return isNaN(fb) ? null : fb;
+}
+
+// A row with nothing in it. Deleting one destroys no figure: with every cell
+// blank there is no completed status to match `completedStatuses` and no amount
+// to add, so it contributes $0 to revenue, no days to driver pay, and nothing to
+// any other total. (It is NOT that the aggregates filter on a non-empty Load ID —
+// excludeDroppedLoads does not do that, and someone relaxing this helper on that
+// belief would be relying on something untrue.) So the period guard has nothing
+// to protect here and says so, rather than failing closed on a blank.
+//
+// ⚠️ `values.get` omits trailing empty cells and returns NO row at all past the
+// last populated one, so `[]` reaches this function for a row that is genuinely
+// blank AND for a row the read simply did not return. That ambiguity is why both
+// callers must independently refuse a read that came back with no rows or no
+// header at all — see ROW_READ_FAILED. This helper cannot tell the difference.
+function sheetRowIsEmpty(row) {
+	return !Array.isArray(row) || row.every((c) => String(c == null ? "" : c).trim() === "");
+}
+
+// The row's contents, keyed by header, for the audit line. An audit entry naming
+// only "row 214" is unusable: the row index is the one identifier that stops
+// meaning anything the instant the delete lands and every following row shifts
+// up.
+function sheetRowSnapshot(headers, row) {
+	const hs = Array.isArray(headers) ? headers : [];
+	const vs = Array.isArray(row) ? row : [];
+	const cells = {};
+	for (let i = 0; i < Math.max(hs.length, vs.length); i++) {
+		// Job Details' column A header is blank in production AND staging, and
+		// duplicate headers exist in the wild. Neither may silently drop a cell, so
+		// both fall back to a positional key.
+		let key = String(hs[i] == null ? "" : hs[i]).trim() || `col${i + 1}`;
+		if (key in cells) key = `${key} (col${i + 1})`;
+		cells[key] = vs[i] == null ? "" : String(vs[i]);
+	}
+	return cells;
+}
+
+// May this row be deleted? Returns null to allow, else the 409 body.
+//
+// REUSES periodWriteLocked(), NOT expenseRowPeriodLocked(). Reusing the shared
+// predicate is the right instinct, and this is what honouring it looks like
+// here: expenseRowPeriodLocked() answers for an `expenses` ROW SHAPE — it reads
+// posted_period, date and created_at, and a Job Tracking row has none of the
+// three. Handing it a synthetic `{date: <a sheet cell>}` would be a brand-new
+// predicate wearing the shared one's name, and would quietly assert that a load
+// is bucketed by EXPENSE_PERIOD_EXPR's rules, which it is not. What the two
+// guards genuinely share is the rung underneath: periodWriteLocked() — the
+// documented fail-closed WRITE predicate that expenseRowPeriodLocked() itself
+// composes, and that PUT /api/expenses/:id/status calls directly for the same
+// reason.
+//
+// Fails closed on all three rungs, in the order they can go wrong: an unreadable
+// period_locks (isLocked() swallows every error and answers "not locked", so
+// without this the guard is present, silent and open), a row whose month cannot
+// be resolved at all, and finally a month that is genuinely locked.
+//
+// NOT gated on PERIOD_FINALIZE_ENABLED, matching isLocked() and the user-delete
+// guard: a period finalized while the feature was on stays finalized, and on a
+// database that never enabled it period_locks is empty and this is a no-op.
+// ⚠️ TAKES `guarded` AS A BOOLEAN RESOLVED FROM THE GID, not a sheet name. The
+// delete targets a gid, so the guard has to decide on the same identity the
+// delete uses. Deciding on the string meant two separate divergences: a tab
+// RENAMED without a process restart leaves `sheetIdCache` stale, so the cached
+// title→gid mapping and the requested title can disagree; and a title carrying a
+// double space, an NBSP or a zero-width character would miss a
+// `trim().toLowerCase()` comparison entirely and silently turn the guard off in
+// production. Callers resolve `guarded` with `isPeriodGuardedGid()`.
+function sheetRowDeleteBlocker(guarded, headers, row) {
+	if (!guarded) return null;
+	if (sheetRowIsEmpty(row)) return null;
+
+	if (!periodLocksReadable()) {
+		return {
+			code: "PERIOD_LOCK_UNREADABLE",
+			periods: [],
+			error: "The period lock table could not be read, so no month can be confirmed open. Deleting sheet rows is held until that is fixed.",
+		};
+	}
+
+	// `null` (a date cell the server cannot read) and `[]` (no date at all) are
+	// the same answer here: the row cannot be SHOWN to sit outside a closed
+	// period, so it is not deleted. Only a non-empty list is a positive finding.
+	const months = loadRowAccountingMonths(headers, row);
+	if (!months || !months.length) {
+		return {
+			code: "PERIOD_UNRESOLVED",
+			periods: [],
+			error: months === null
+				? "This row carries a date the server cannot resolve to a month, so it cannot be shown to sit outside a closed period. Correct the date, or remove the load reversibly with DELETE /api/loads/:loadId."
+				: "This row carries no date the server can resolve to a month, so it cannot be shown to sit outside a closed period. Add the date, or remove the load reversibly with DELETE /api/loads/:loadId.",
+		};
+	}
+
+	const locked = months.filter((mk) => periodWriteLocked(mk));
+	if (!locked.length) return null;
+	return {
+		code: "PERIOD_FINALIZED",
+		periods: locked,
+		// Two ways forward, in the order they should be considered. The soft delete
+		// leads because it is almost always the right answer: it keeps the row in
+		// the sheet for audit, drops it from every KPI, and reverses.
+		error: `This row's figures belong to ${locked.map(periodLabel).join(", ")}, which ${locked.length === 1 ? "is" : "are"} finalized — deleting the row would restate a closed month and cannot be undone. Remove the load reversibly with DELETE /api/loads/:loadId (soft delete; keeps the row for audit), or reopen the period first with POST /api/periods/:period/reopen, which records a reason.`,
+	};
+}
+
 // Admin: batch delete specific rows from a sheet (for removing stale duplicates)
+//
+// SKIP-AND-REPORT, not refuse-the-whole-batch, and the distinction is deliberate.
+// DELETE /api/users/:id refuses wholesale because a user delete is not
+// decomposable — half of it leaves finance rows keyed to a driver-name string
+// with no account behind them. This route is the opposite: each row is an
+// independent unit of work (its whole purpose is "remove these three stale
+// duplicate rows"), and deleting two of them leaves nothing composite
+// half-built. So it follows the other precedent, PUT /api/expenses/bulk-status:
+// do the open ones, skip the closed ones, and NAME the periods — a silent skip
+// on a bulk delete reads as "all done" when it wasn't.
 app.post("/api/admin/remove-rows", requireRole("Super Admin"), async (req, res) => {
 	try {
-		const { sheet, rowIndices } = req.body;
-		if (!sheet || !rowIndices || !rowIndices.length) {
-			return res.status(400).json({ error: "sheet and rowIndices required" });
+		const { sheet, rowIndices, confirm } = req.body || {};
+		const reason = String((req.body && req.body.reason) || "").trim();
+		if (!sheet || !Array.isArray(rowIndices) || !rowIndices.length) {
+			return res.status(400).json({ error: "sheet and rowIndices required", code: "SELECTION_REQUIRED" });
+		}
+		// Same reasoning as POST /api/admin/fuel-gallons-recovery/apply's 400
+		// SELECTION_REQUIRED and the confirm gate on "Mark Paid": a request that
+		// destroys revenue rows has to SAY it means to, rather than inheriting the
+		// intent from a bare index list. Free for the one real caller, and it stops
+		// a replayed or hand-rolled body from deleting by accident.
+		if (confirm !== true) {
+			return res.status(400).json({
+				error: "Deleting sheet rows is irreversible — send confirm: true to proceed.",
+				code: "CONFIRMATION_REQUIRED",
+			});
+		}
+		if (reason.length < SHEET_ROW_DELETE_REASON_MIN || reason.length > SHEET_ROW_REASON_MAX) {
+			return res.status(400).json({
+				error: `A reason of ${SHEET_ROW_DELETE_REASON_MIN}-${SHEET_ROW_REASON_MAX} characters is required — it is written to the audit trail beside the deleted contents.`,
+				code: "DELETE_REASON_REQUIRED",
+			});
+		}
+		if (rowIndices.length > SHEET_ROW_DELETE_MAX) {
+			return res.status(400).json({
+				error: `Too many rows — max ${SHEET_ROW_DELETE_MAX} per request.`,
+				code: "TOO_MANY_ROWS",
+			});
+		}
+
+		const indices = rowIndices.map((v) => (typeof v === "number" || typeof v === "string" ? Number(v) : NaN));
+		if (!indices.every((n) => Number.isInteger(n) && n >= 2)) {
+			const headerRow = indices.some((n) => n === 1);
+			return res.status(400).json({
+				error: headerRow
+					? "Row 1 is the header row — deleting it re-points every column lookup in the app at the wrong data."
+					: "Every rowIndex must be an integer of 2 or more (row 1 is the header row).",
+				code: headerRow ? "HEADER_ROW_PROTECTED" : "INVALID_ROW_INDEX",
+			});
+		}
+		// ⚠️ Requests inside one batchUpdate apply IN ORDER, so a repeated index
+		// deletes a SECOND row: [5, 5] removes row 5, then removes whatever shifted
+		// up into position 5 — the original row 6, which nobody named and the
+		// response never mentioned. Refuse rather than de-duplicate silently, so a
+		// caller that built its list wrongly finds out.
+		if (new Set(indices).size !== indices.length) {
+			return res.status(400).json({
+				error: "rowIndices names the same row twice — after the first delete the rows shift up, so the repeat would destroy a different row than the one named.",
+				code: "DUPLICATE_ROW_INDEX",
+			});
 		}
 
 		const sheets = await getSheets();
 		const sheetId = await getSheetId(sheets, sheet);
+		// See gap 1 in the block comment above: an unresolved name leaves the
+		// GridRange with no sheetId, which is gid 0 — a different tab entirely.
+		if (!Number.isInteger(sheetId)) {
+			return res.status(400).json({
+				error: `No tab named "${sheet}" exists in this spreadsheet. Tab names are matched exactly, including case and spacing.`,
+				code: "UNKNOWN_SHEET",
+			});
+		}
+
+		const guarded = await isPeriodGuardedGid(sheets, sheetId);
+		const quoted = `'${String(sheet).replace(/'/g, "''")}'`;
+
+		// ONE read of the tab, supplying BOTH the audit snapshot and the month each
+		// row is judged on. Fail closed if it cannot be read: a row whose contents
+		// cannot be captured must not be deleted here, because the audit line is
+		// the only record that will survive the delete.
+		const readTab = async () => {
+			const snap = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: quoted });
+			return snap.data.values || [];
+		};
+		let allRows = [];
+		try {
+			allRows = await readTab();
+		} catch (err) {
+			console.error("remove-rows: could not read rows before deleting:", err.message);
+			return res.status(409).json({
+				error: "The rows could not be read before deleting, so nothing was removed — a delete that cannot be recorded is not performed.",
+				code: "ROW_READ_FAILED",
+			});
+		}
+		// ⚠️ A read that SUCCEEDS but comes back empty is not permission to delete
+		// everything. With no rows, every `allRows[i] || []` looks blank,
+		// sheetRowIsEmpty() waves it through before the lock is even consulted, and
+		// the whole batch is deleted with `cells: {}` recorded. The route failed
+		// closed on a throw but not on this. Same reasoning as the invoice auto-gen
+		// batch, which aborts rather than closing a payroll week on an empty
+		// pre-read: a guarded tab always has a header row, so no rows means the read
+		// is untrustworthy, not that the sheet is empty.
+		const headers = allRows[0] || [];
+		if (!allRows.length || !headers.length) {
+			return res.status(409).json({
+				error: "The sheet read returned no rows, so nothing was removed — the row contents could not be recorded and no month could be checked.",
+				code: "ROW_READ_FAILED",
+			});
+		}
+
+		const deletable = [];
+		const skipped = [];
+		for (const rowIndex of indices) {
+			const row = allRows[rowIndex - 1] || [];
+			const blocker = sheetRowDeleteBlocker(guarded, headers, row);
+			if (blocker) {
+				skipped.push({ rowIndex, code: blocker.code, periods: blocker.periods, reason: blocker.error });
+				continue;
+			}
+			deletable.push({ rowIndex, snapshot: sheetRowSnapshot(headers, row) });
+		}
+
+		if (!deletable.length) {
+			// Everything was withheld. A 200 with `deleted: 0` reads as success on a
+			// route whose entire job is deleting, so this is a 409 naming the cause.
+			const periods = [...new Set(skipped.flatMap((s) => s.periods))].sort();
+			return res.status(409).json({
+				error: skipped[0].reason,
+				code: skipped[0].code,
+				deleted: 0,
+				requested: indices.length,
+				periods,
+				skipped,
+			});
+		}
 
 		// Sort descending so deletions don't shift indices
-		const sorted = [...rowIndices].sort((a, b) => b - a);
+		const sorted = deletable.map((d) => d.rowIndex).sort((a, b) => b - a);
 		const requests = sorted.map((rowIndex) => ({
 			deleteDimension: {
 				range: { sheetId, dimension: "ROWS", startIndex: rowIndex - 1, endIndex: rowIndex },
 			},
 		}));
 
-		await sheets.spreadsheets.batchUpdate({
-			spreadsheetId: SPREADSHEET_ID,
-			requestBody: { requests },
+		const auditDetails = (outcome, extra) => buildSheetDeleteAudit({
+			outcome,
+			sheet,
+			reason,
+			requested: indices,
+			deletedRowIndices: sorted,
+			skipped,
+			rows: deletable.map((d) => ({ rowIndex: d.rowIndex, cells: d.snapshot })),
+			...extra,
 		});
 
-		res.json({ deleted: sorted.length });
+		// ⚠️ RE-READ IMMEDIATELY BEFORE DELETING. Row indices are positional, so any
+		// delete that lands between the snapshot above and the batchUpdate below
+		// shifts every following row up and this request then destroys rows it never
+		// judged and never recorded. That is not hypothetical here: `super_admin` is
+		// a SHARED login, and two people in the duplicate scanner at once is an
+		// ordinary afternoon. Sheets offers no if-match, so this compares the target
+		// rows to what was snapshotted and refuses on any drift — it narrows the
+		// window to the batchUpdate itself instead of the whole handler.
+		try {
+			const fresh = await readTab();
+			const drifted = deletable.filter((d) =>
+				JSON.stringify(fresh[d.rowIndex - 1] || []) !== JSON.stringify(allRows[d.rowIndex - 1] || []));
+			if (drifted.length) {
+				return res.status(409).json({
+					error: `The sheet changed while this request was being checked — row${drifted.length === 1 ? "" : "s"} ${drifted.map((d) => d.rowIndex).join(", ")} no longer hold the contents that were verified. Nothing was deleted; re-run the scan and try again.`,
+					code: "SHEET_CHANGED",
+					rowIndices: drifted.map((d) => d.rowIndex),
+				});
+			}
+		} catch (err) {
+			console.error("remove-rows: re-read before delete failed:", err.message);
+			return res.status(409).json({
+				error: "The rows could not be re-checked immediately before deleting, so nothing was removed.",
+				code: "ROW_READ_FAILED",
+			});
+		}
+
+		try {
+			await sheets.spreadsheets.batchUpdate({
+				spreadsheetId: SPREADSHEET_ID,
+				requestBody: { requests },
+			});
+		} catch (err) {
+			// ⚠️ AUDIT THE FAILED ATTEMPT TOO, with the same contents. Sheets writes
+			// are POSTs, which GOOGLE_API_TIMEOUT_MS deliberately does NOT retry
+			// because a retry could duplicate the call — so a timeout here is
+			// genuinely ambiguous about whether the rows are gone. Dropping the
+			// snapshot on that path loses it exactly when it is needed most.
+			logAudit(req, "delete_sheet_rows_failed", "sheet_row", String(sheet), auditDetails("failed", { error: err.message }));
+			throw err;
+		}
+
+		logAudit(req, "delete_sheet_rows", "sheet_row", String(sheet), auditDetails("deleted"));
+		// The 60s Job Tracking cache would otherwise keep serving the deleted rows.
+		if (guarded) jtCacheInvalidate();
+
+		const lockedPeriods = [...new Set(skipped.flatMap((s) => s.periods))].sort();
+		res.json({
+			deleted: sorted.length,
+			requested: indices.length,
+			...(skipped.length ? {
+				skipped,
+				skippedFinalized: skipped.length,
+				finalizedPeriods: lockedPeriods,
+				message: `${sorted.length} deleted. ${skipped.length} skipped — ${lockedPeriods.length
+					? `${lockedPeriods.map(periodLabel).join(", ")} ${lockedPeriods.length === 1 ? "is" : "are"} finalized.`
+					: "their month could not be confirmed open."}`,
+			} : {}),
+		});
 	} catch (error) {
 		console.error("Error removing rows:", error.message);
 		res.status(500).json({ error: error.message });
@@ -14518,32 +15149,128 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 });
 
 // DELETE — Clear a row (shifts content up by deleting the row) — Admin only
+//
+// Guarded and audited by the shared helpers beside POST /api/admin/remove-rows —
+// read the block comment there for what a deleted Job Tracking row actually
+// costs and why each check exists. This is the single-row twin of that route and
+// applies the identical rules; the only difference is that with one row there is
+// nothing to skip, so a blocked row is a 409 rather than a skip-and-report.
+//
+// `reason` is accepted from the JSON body or from `?reason=`. A DELETE body is
+// legal and express.json() parses it, but it is easy to lose through a proxy or
+// a client that strips it, so the query form is there as well.
 app.delete("/api/data/:rowIndex", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const sheetName = getSheetName(req);
-		const rowIndex = parseInt(req.params.rowIndex);
+		// Number(), not parseInt(): parseInt("2abc") is 2 and parseInt("2.9") is 2,
+		// so a malformed index would silently delete a real row.
+		const rowIndex = Number(String(req.params.rowIndex).trim());
+		const reason = String((req.body && req.body.reason) || req.query.reason || "").trim();
+
+		if (!Number.isInteger(rowIndex) || rowIndex < 2) {
+			return res.status(400).json({
+				error: rowIndex === 1
+					? "Row 1 is the header row — deleting it re-points every column lookup in the app at the wrong data."
+					: "rowIndex must be an integer of 2 or more (row 1 is the header row).",
+				code: rowIndex === 1 ? "HEADER_ROW_PROTECTED" : "INVALID_ROW_INDEX",
+			});
+		}
+		if (reason.length < SHEET_ROW_DELETE_REASON_MIN || reason.length > SHEET_ROW_REASON_MAX) {
+			return res.status(400).json({
+				error: `A reason of ${SHEET_ROW_DELETE_REASON_MIN}-${SHEET_ROW_REASON_MAX} characters is required — it is written to the audit trail beside the deleted contents.`,
+				code: "DELETE_REASON_REQUIRED",
+			});
+		}
 
 		const sheets = await getSheets();
 		const sheetId = await getSheetId(sheets, sheetName);
+		// An unresolved tab name leaves the GridRange with no sheetId, which is
+		// gid 0 — a different tab entirely. See gap 1 beside remove-rows.
+		if (!Number.isInteger(sheetId)) {
+			return res.status(400).json({
+				error: `No tab named "${sheetName}" exists in this spreadsheet. Tab names are matched exactly, including case and spacing.`,
+				code: "UNKNOWN_SHEET",
+			});
+		}
 
-		// Delete the entire row so remaining rows shift up
-		await sheets.spreadsheets.batchUpdate({
-			spreadsheetId: SPREADSHEET_ID,
-			requestBody: {
-				requests: [
-					{
-						deleteDimension: {
-							range: {
-								sheetId: sheetId,
-								dimension: "ROWS",
-								startIndex: rowIndex - 1, // 0-indexed
-								endIndex: rowIndex,
+		// Read the row BEFORE deleting it — this is both the audit snapshot and the
+		// basis for the month check. Fail closed if it cannot be read: the audit
+		// line is the only record that survives the delete.
+		const quoted = `'${String(sheetName).replace(/'/g, "''")}'`;
+		let headers = [];
+		let row = [];
+		try {
+			const snap = await sheets.spreadsheets.values.batchGet({
+				spreadsheetId: SPREADSHEET_ID,
+				ranges: [`${quoted}!1:1`, `${quoted}!${rowIndex}:${rowIndex}`],
+			});
+			const ranges = snap.data.valueRanges || [];
+			headers = (ranges[0] && ranges[0].values && ranges[0].values[0]) || [];
+			row = (ranges[1] && ranges[1].values && ranges[1].values[0]) || [];
+		} catch (err) {
+			console.error("Delete row: could not read the row before deleting:", err.message);
+			return res.status(409).json({
+				error: "The row could not be read before deleting, so nothing was removed — a delete that cannot be recorded is not performed.",
+				code: "ROW_READ_FAILED",
+			});
+		}
+		// A read that returns no HEADER row is a degraded read, not an empty sheet —
+		// and without headers no column can be identified, so no month can be
+		// resolved and sheetRowIsEmpty() would wave every row through. See the ⚠️ on
+		// sheetRowIsEmpty.
+		if (!headers.length) {
+			return res.status(409).json({
+				error: "The sheet read returned no header row, so nothing was removed — the row contents could not be recorded and no month could be checked.",
+				code: "ROW_READ_FAILED",
+			});
+		}
+
+		const guarded = await isPeriodGuardedGid(sheets, sheetId);
+		const blocker = sheetRowDeleteBlocker(guarded, headers, row);
+		if (blocker) {
+			return res.status(409).json({ error: blocker.error, code: blocker.code, periods: blocker.periods });
+		}
+
+		const auditDetails = (outcome, extra) => buildSheetDeleteAudit({
+			outcome,
+			sheet: sheetName,
+			reason,
+			requested: [rowIndex],
+			deletedRowIndices: [rowIndex],
+			rows: [{ rowIndex, cells: sheetRowSnapshot(headers, row) }],
+			...extra,
+		});
+
+		try {
+			// Delete the entire row so remaining rows shift up
+			await sheets.spreadsheets.batchUpdate({
+				spreadsheetId: SPREADSHEET_ID,
+				requestBody: {
+					requests: [
+						{
+							deleteDimension: {
+								range: {
+									sheetId: sheetId,
+									dimension: "ROWS",
+									startIndex: rowIndex - 1, // 0-indexed
+									endIndex: rowIndex,
+								},
 							},
 						},
-					},
-				],
-			},
-		});
+					],
+				},
+			});
+		} catch (err) {
+			// ⚠️ Audit the failed attempt too — a Sheets write is a POST and is
+			// deliberately not retried on timeout, so a timeout leaves it genuinely
+			// unknown whether the row is gone. See the same note in remove-rows.
+			logAudit(req, "delete_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+			throw err;
+		}
+
+		logAudit(req, "delete_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("deleted"));
+		// The 60s Job Tracking cache would otherwise keep serving the deleted row.
+		if (guarded) jtCacheInvalidate();
 
 		res.json({ success: true });
 	} catch (error) {

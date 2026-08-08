@@ -43,8 +43,18 @@ export const useAdminToolsStore = defineStore('adminTools', {
       }
     },
 
-    async removeRows(sheet, rowIndices) {
-      return await api.post('/api/admin/remove-rows', { sheet, rowIndices })
+    // `confirm` and `reason` are both required by the server (400
+    // CONFIRMATION_REQUIRED / DELETE_REASON_REQUIRED). Deleting sheet rows is
+    // irreversible and rows in a finalized month are refused outright, so the
+    // caller must state intent and the reason is written to audit_trail with the
+    // deleted contents.
+    async removeRows(sheet, rowIndices, reason) {
+      return await api.post('/api/admin/remove-rows', {
+        sheet,
+        rowIndices,
+        confirm: true,
+        reason,
+      })
     },
 
     // dryRun is a QUERY parameter, never a body field — the server treats a

@@ -84,16 +84,29 @@
       @close="showModal = false"
     />
 
-    <!-- Delete Confirmation -->
+    <!-- Delete Confirmation. The reason is REQUIRED by the server and is stored
+         in the audit trail with the row's contents — this delete removes the row
+         from the sheet permanently and shifts every row below it up. -->
     <ConfirmModal
       :open="deleteTarget !== null"
       title="Delete Row"
-      message="Are you sure you want to delete this row? This action cannot be undone."
+      :message="`Row ${deleteTarget} of &quot;${store.currentSheet}&quot; will be permanently removed from the sheet and every row below it shifts up. This cannot be undone.`"
       confirm-text="Delete"
       :danger="true"
+      :confirm-disabled="deleteReason.trim().length < 3 || deleting"
       @confirm="confirmDelete"
-      @cancel="deleteTarget = null"
-    />
+      @cancel="cancelDelete"
+    >
+      <label class="reason-label" for="delete-reason">Reason (recorded in the audit trail)</label>
+      <textarea
+        id="delete-reason"
+        v-model="deleteReason"
+        class="reason-input"
+        rows="2"
+        placeholder="e.g. duplicate of row 118 created by a re-sent rate con"
+      />
+      <p v-if="deleteError" class="reason-error">{{ deleteError }}</p>
+    </ConfirmModal>
   </div>
 </template>
 
@@ -116,6 +129,9 @@ const socket = useSocket()
 
 const showModal = ref(false)
 const deleteTarget = ref(null)
+const deleteReason = ref('')
+const deleteError = ref('')
+const deleting = ref(false)
 let searchTimer = null
 
 // Sort duplicates by Load ID so matching rows are grouped together
@@ -206,16 +222,34 @@ async function handleAdd(values) {
 
 function handleDelete(rowIndex) {
   deleteTarget.value = rowIndex
+  deleteReason.value = ''
+  deleteError.value = ''
+}
+
+function cancelDelete() {
+  deleteTarget.value = null
+  deleteReason.value = ''
+  deleteError.value = ''
 }
 
 async function confirmDelete() {
   const rowIndex = deleteTarget.value
-  deleteTarget.value = null
+  const reason = deleteReason.value.trim()
+  if (rowIndex === null || reason.length < 3 || deleting.value) return
+  deleting.value = true
+  deleteError.value = ''
   try {
-    await store.deleteRow(rowIndex)
+    await store.deleteRow(rowIndex, reason)
+    cancelDelete()
     toast('Row deleted', 'success')
-  } catch {
-    toast('Failed to delete row', 'error')
+  } catch (err) {
+    // Keep the modal open and show what the server actually said. A row in a
+    // finalized month comes back as 409 PERIOD_FINALIZED naming the month and
+    // pointing at the reversible soft delete; collapsing that to "Failed to
+    // delete row" throws away the only actionable part of the response.
+    deleteError.value = (err && err.message) || 'Failed to delete row.'
+  } finally {
+    deleting.value = false
   }
 }
 </script>
@@ -286,5 +320,36 @@ async function confirmDelete() {
   max-height: 500px;
   overflow-y: auto;
   background: var(--surface);
+}
+
+/* Delete-confirm reason field. Matches the cancel-load reason in ActiveLoadsTab:
+   deliberately plain so it inherits the confirm dialog's surface rather than the
+   data table's dense styling. */
+.reason-label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.reason-input {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--bg, #fff);
+  color: inherit;
+}
+.reason-input:focus {
+  outline: none;
+  border-color: #94a3b8;
+}
+.reason-error {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+  color: var(--red, #dc2626);
 }
 </style>
