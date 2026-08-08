@@ -119,7 +119,13 @@ function req(method, path, body, cookies, port) {
 }
 
 const results = [];
-function test(name, pass) { results.push({ name, pass }); }
+// `detail` is optional and is printed ONLY when the assertion fails. A boolean
+// is enough to know something broke and never enough to know what; for the
+// arithmetic identities in particular ("the ledger does not reconcile") the
+// gap, and which month opened it, is the whole diagnosis. Tests that report
+// nothing are the ones people learn to skip. Build it lazily where it costs
+// anything — pass a function and it is only called on failure.
+function test(name, pass, detail) { results.push({ name, pass, detail }); }
 // Some payout guards need a specific row shape (a $0 period, a payable period)
 // that seeded data may not contain. Mark those SKIP rather than passing them
 // vacuously — a green run that silently never exercised the guard is how the
@@ -478,18 +484,115 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     rows.every(r => !(Number(r.lossDeferred) > 0) || Number(r.amount) === 0));
 
   // 53. THE reconciliation identity. Every dollar earned sits in exactly one
-  //     bucket, and the two quantities that live between earnings and payable
-  //     (manual adjustments, still-unabsorbed carried loss) are accounted for:
+  //     bucket, and the quantities that live between earnings and payable
+  //     (manual adjustments, still-unabsorbed carried loss, and the frozen
+  //     settlements' drift) are accounted for:
   //
-  //       paid + processing + owed + accruing == earned + adjustments + carriedLoss
+  //       paid + processing + owed + accruing
+  //         === earned + adjustments + carriedLoss − frozenDrift
   //
   //     Breaking this is precisely what the client reported, twice.
+  //
+  //     WHY frozenDrift IS LEGITIMATE AND NOT A FUDGE TO GET GREEN.
+  //     The two sides of this identity are not the same kind of quantity.
+  //     `earned` (investorNetToDate) is a LIVE recompute of every month from
+  //     current loads and expenses. The three status totals sum each row's
+  //     STORED `amount`, which reconcileInvestorPayouts deliberately STOPS
+  //     refreshing once a month is frozen (its guard is `status='owed' &&
+  //     !finalized_at && !periodWriteLocked(period)`). That freeze is the
+  //     feature, not a bug to route around: a correction landing after a month
+  //     was settled must not restate a statement already published to the
+  //     investor. So a bare equality between a live figure and a frozen one is
+  //     guaranteed to fail the first time any calculation is corrected — and it
+  //     did, on our OWN correction. The trucks.in_service_date fix lowered a
+  //     settled June's fixed costs by ~$174, and at the 50% split the ledger
+  //     read exactly $87 out, with the row itself perfectly correct.
+  //     The API already publishes both numbers side by side on every row —
+  //     `amount` (frozen, what was settled) and `recomputedAmount` (live) —
+  //     precisely so the gap is DISCLOSED rather than absorbed. Summing that
+  //     same disclosed gap here is what lets the identity hold against live
+  //     data without weakening what it asserts.
+  //
+  //     WHAT IT STILL CATCHES, measured by mutating a live response: a
+  //     duplicated payout row (+$7,104), a missing one (−$7,238), a corrupted
+  //     adjustment or carried-loss total, and the open month vanishing from
+  //     currentMonth. A month's recompute moving in EITHER direction on a
+  //     frozen row nets to zero, which is the whole point.
+  //
+  //     WHAT IT NO LONGER CATCHES — the honest price, verified the same way:
+  //       (a) somebody hand-editing a frozen row's stored `amount` (+$2,000 in
+  //           the mutation) moves the LHS and the drift term by the same
+  //           amount, so it cancels and passes;
+  //       (b) the refresh guard breaking so an OPEN month's `amount` stops
+  //           tracking its recompute — also absorbed.
+  //     Both are the same concession: the identity no longer asserts
+  //     `amount === recomputedAmount` for any row. That is unavoidable, and
+  //     costs less than it looks, because the old form asserted it for EVERY
+  //     row and therefore went red on the ordinary, correct state of a ledger
+  //     with any settled month in it — a test that is already failing detects
+  //     nothing either. Not re-added as a separate assertion because every row
+  //     in the current fixture is frozen, so it would be vacuous here, and
+  //     because `periodWriteLocked` fails CLOSED on an unreadable table, which
+  //     would make a genuinely-frozen row look open and fail spuriously.
+  //     Instead the failure detail prints each drifted row's status/phase: a
+  //     drifted row reading `owed`/`pending` is a broken refresh guard and not
+  //     a legitimate freeze, and that is visible at a glance when this breaks.
+  //     Pre-existing blind spot, unchanged by this: a spurious or missing row
+  //     for a $0 month contributes 0 to both sides either way.
+  //
+  //     THE DRIFT SET IS "the recompute moved", NOT "the status is settled".
+  //     Keying on paid/processing looks equivalent and is not: the refresh
+  //     guard also freezes a row that is still `owed` — a finalized-but-unpaid
+  //     month, or one reopened to `owed` inside a locked period (the payout
+  //     reopen does not clear finalized_at; only reopening the PERIOD does).
+  //     On this fixture 17 of the 19 rows across the three investors are
+  //     exactly that shape (owed + finalized) and only 2 are paid, so a
+  //     status-based term would miss almost every frozen row the moment one of
+  //     them drifts — it happens to balance today only because those 17 have
+  //     not moved yet.
+  //     Keying on the published gap covers both AND avoids re-implementing the
+  //     server's lock rules in the test: a row the reconcile just refreshed has
+  //     amount === recomputedAmount in this very response, so its term is
+  //     identically zero and it can be summed unconditionally.
   const earned53 = Number(prod47.investorNetToDate || 0);
   const accruing53 = Number(P.currentMonth?.amountInProgress || 0);
+  // A row whose period has aged out of the live earnings window publishes
+  // recomputedAmount: null (e.g. the earliest load was cancelled, so the window
+  // now starts later than the row). Its dollars are in the LHS but not in
+  // `earned`, and with no live figure the drift term CANNOT absorb it. Reading
+  // null as 0 would quietly turn that into an unexplained imbalance, so count
+  // these separately and fail on them by name.
+  const orphans53 = rows.filter(r => r.recomputedAmount == null);
+  const drifted53 = rows
+    .filter(r => r.recomputedAmount != null && r.recomputedAmount !== r.amount)
+    .map(r => ({
+      period: r.period, status: r.status, phase: r.phase,
+      amount: Number(r.amount || 0), recomputed: Number(r.recomputedAmount),
+      delta: Number(r.recomputedAmount) - Number(r.amount || 0),
+    }));
+  const frozenDrift53 = drifted53.reduce((s, d) => s + d.delta, 0);
   const lhs53 = Number(T.totalPaid || 0) + Number(T.totalProcessing || 0) + Number(T.totalOwed || 0) + accruing53;
-  const rhs53 = earned53 + Number(T.totalAdjustments || 0) + Number(T.carriedLossOutstanding || 0);
-  test("53. Ledger reconciles: paid+processing+owed+accruing === earned+adjustments+carriedLoss",
-    invSelf.status === 200 && pay.status === 200 && lhs53 === rhs53);
+  const rhs53 = earned53 + Number(T.totalAdjustments || 0) + Number(T.carriedLossOutstanding || 0) - frozenDrift53;
+  test("53. Ledger reconciles: paid+processing+owed+accruing === earned+adjustments+carriedLoss−frozenDrift",
+    invSelf.status === 200 && pay.status === 200 && lhs53 === rhs53 && orphans53.length === 0,
+    () => {
+      const L = [];
+      if (invSelf.status !== 200 || pay.status !== 200)
+        L.push(`GET /api/investor ${invSelf.status}, GET /api/investor/payouts ${pay.status}`);
+      L.push(`LHS ${lhs53} = paid ${T.totalPaid} + processing ${T.totalProcessing} + owed ${T.totalOwed} + accruing ${accruing53}`);
+      L.push(`RHS ${rhs53} = earned ${earned53} + adjustments ${T.totalAdjustments} + carriedLoss ${T.carriedLossOutstanding} − frozenDrift ${frozenDrift53}`);
+      L.push(`OUT BY ${lhs53 - rhs53}`);
+      if (drifted53.length) {
+        L.push(`frozen rows whose recompute has moved (${drifted53.length}) — these ARE accounted for above:`);
+        drifted53.forEach(d => L.push(
+          `  ${d.period}  ${d.status}/${d.phase}  settled ${d.amount} vs recomputed ${d.recomputed}  (${d.delta >= 0 ? "+" : ""}${d.delta})`));
+      } else {
+        L.push("no frozen row has drifted, so the gap is NOT the settled-figure freeze — look at row/period coverage.");
+      }
+      if (orphans53.length)
+        L.push(`rows with NO live recompute (period outside the earnings window) — unreconcilable, not absorbed: ${orphans53.map(r => r.period).join(", ")}`);
+      return L.join("\n");
+    });
 
   // 54. The still-open month is never a settleable row — it is reported only as
   //     currentMonth.amountInProgress. This is the root cause of the original
@@ -543,13 +646,43 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
     skip("58. Load report splits completed vs in-transit and grosses only completed",
       "investor has no load periods");
   } else {
+    // The gross check is TOLERANCED, and the tolerance is arithmetic, not slack.
+    // The endpoint accumulates unrounded rates and rounds ONCE at the end
+    // (`grossRevenue`), while each load publishes an already-rounded `rate`.
+    // Summing the published rates is therefore round-then-sum against the
+    // server's sum-then-round, and the two legitimately differ: on this fixture
+    // 2026-07 reads 30,997 against 30,998 across 15 completed loads, of which
+    // exactly two carry cents (published as 1,015 and 1,013) and both round up.
+    // The server's figure is the MORE accurate of the two
+    // — one rounding, not fifteen — so this is a defect in the old expectation,
+    // not in the money. Each of the n published rates is off by at most $0.50
+    // and the single final rounding by at most $0.50, so the gap is provably
+    // bounded by (n + 1) / 2 dollars. Anything past that is a real leak.
+    const bound58 = (p) => (Number(p.completedCount || 0) + 1) / 2;
+    const doneSum58 = (p) => (p.loads || []).filter(l => l.completed).reduce((s, l) => s + (l.rate || 0), 0);
+    const allSum58 = (p) => (p.loads || []).reduce((s, l) => s + (l.rate || 0), 0);
+    // The bound alone would let an in-transit load smaller than the rounding
+    // noise hide inside grossRevenue, so keep one EXACT, rounding-immune
+    // assertion of the original defect ("12 loads / $20,623" with 3 still in
+    // transit): if in-transit money exists at all, gross must be strictly under
+    // the all-loads total.
+    const excludesInTransit58 = (p) => allSum58(p) <= doneSum58(p) || p.grossRevenue < allSum58(p);
+    const ok58 = (p) =>
+      typeof p.completedCount === "number" && typeof p.inTransitCount === "number" &&
+      p.completedCount + p.inTransitCount === p.loadCount &&
+      p.completedCount === (p.loads || []).filter(l => l.completed).length &&
+      Math.abs(Number(p.grossRevenue || 0) - doneSum58(p)) <= bound58(p) &&
+      excludesInTransit58(p);
     test("58. Load report splits completed vs in-transit and grosses only completed",
-      lr.status === 200 && periods.every(p =>
-        typeof p.completedCount === "number" && typeof p.inTransitCount === "number" &&
-        p.completedCount + p.inTransitCount === p.loadCount &&
-        p.completedCount === (p.loads || []).filter(l => l.completed).length &&
-        Math.round(p.grossRevenue) === Math.round((p.loads || []).filter(l => l.completed)
-          .reduce((s, l) => s + (l.rate || 0), 0))));
+      lr.status === 200 && periods.every(ok58),
+      () => {
+        if (lr.status !== 200) return `GET /api/investor/load-report -> ${lr.status}`;
+        return periods.filter(p => !ok58(p)).map(p =>
+          `${p.key}: loadCount ${p.loadCount} = completed ${p.completedCount} + inTransit ${p.inTransitCount}` +
+          ` | gross ${p.grossRevenue} vs completed-rate sum ${doneSum58(p)}` +
+          ` (off by ${Number(p.grossRevenue || 0) - doneSum58(p)}, rounding bound ±${bound58(p)})` +
+          ` | all-loads sum ${allSum58(p)}`).join("\n");
+      });
   }
 
   // ==========================================================================
@@ -2134,7 +2267,16 @@ function skip(name, why) { results.push({ name, pass: true, skipped: why }); }
   results.forEach(r => {
     if (r.skipped) { console.log("  [SKIP] " + r.name + " — " + r.skipped); s++; return; }
     console.log((r.pass ? "  [PASS]" : "  [FAIL]") + " " + r.name);
-    if (r.pass) p++; else f++;
+    if (r.pass) p++;
+    else {
+      f++;
+      if (r.detail) {
+        let d;
+        try { d = typeof r.detail === "function" ? r.detail() : r.detail; }
+        catch (e) { d = "(detail unavailable: " + e.message + ")"; }
+        if (d) String(d).split("\n").forEach(line => console.log("         " + line));
+      }
+    }
   });
   console.log("\n" + p + " passed, " + f + " failed, " + s + " skipped"
     + "  (" + results.length + " tests total; skipped are NOT counted as passed)");
