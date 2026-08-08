@@ -7887,6 +7887,12 @@ db.exec(`
 		resolved_at DATETIME
 	)
 `);
+// Why a row closed, not merely that it did. 'appeared' = the load reached the
+// sheet after all; 'self_sent' = it was never a load, the number came off mail
+// we sent ourselves (see the sender filter below). Recording both as a bare
+// resolved_at would file a false positive as a recovery — the kind of quiet
+// untruth that costs an alert channel its credibility.
+try { db.exec("ALTER TABLE ratecon_reconcile_alerts ADD COLUMN resolution TEXT DEFAULT ''"); } catch {}
 
 // DEFAULT OFF, like every other side-effectful integration here
 // (ROUTEMATE_ENABLED / SCANKIT_ENABLED / INVOICE_AUTOGEN_ENABLED). It only reads
@@ -7896,20 +7902,29 @@ const RATECON_RECONCILE_DAYS = Math.max(1, Math.min(60, parseInt(process.env.RAT
 const RATECON_RECONCILE_MAILBOX = String(process.env.RATECON_RECONCILE_MAILBOX ?? "RATECONs").trim() || "RATECONs";
 const RATECON_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;   // 4×/day
 let rateconReconcileRunning = false;
-const rateconReconcileHealth = { lastRun: null, lastError: null, lastGapCount: 0, lastScanned: 0 };
+const rateconReconcileHealth = { lastRun: null, lastError: null, lastGapCount: 0, lastScanned: 0, lastSelfSentSkipped: 0 };
 
-// Returns { scanned, missing[], newlyAlerted[] }. Read-only against the mailbox
+// Returns { scanned, missing[], newlyAlerted[], selfSentSkipped, retired[] };
+// `scanned` counts INBOUND mail only. Read-only against the mailbox
 // (EXAMINE + BODY.PEEK) — it must never set \Seen or touch \Flagged, because
 // n8n's Gmail Trigger selects on unread+starred and a sweep that marked mail
 // read would silently stop ingestion, i.e. cause the very outage it detects.
 async function reconcileRateCons({ alert = true } = {}) {
-	const { fetchRateConSubjects, findMissingLoads } = require("./lib/ratecon-reconcile.js");
-	const emails = await fetchRateConSubjects({
+	const { fetchRateConSubjects, findMissingLoads, splitSelfSent, extractLoadNumbers } = require("./lib/ratecon-reconcile.js");
+	const fetched = await fetchRateConSubjects({
 		user: process.env.GMAIL_USER,
 		pass: process.env.GMAIL_APP_PASSWORD,
 		mailbox: RATECON_RECONCILE_MAILBOX,
 		sinceDays: RATECON_RECONCILE_DAYS,
 	});
+
+	// Only mail that ARRIVED is an ingestion signal. The label also catches our
+	// own outbound invoices, whose PO numbers look exactly like load ids — that
+	// is what alerted "2787514" on 2026-08-07 for a load that never existed.
+	// Filtered on the parsed From address, and only when it positively matches
+	// GMAIL_USER: an unset address or an unreadable header keeps the mail, since
+	// a detector that discards what it cannot parse stops detecting.
+	const { inbound: emails, selfSent } = splitSelfSent(fetched, process.env.GMAIL_USER);
 
 	const jt = await getJobTrackingCached();
 	const loadIdCol = (jt.headers || []).find((h) => /load.?id|job.?id/i.test(h));
@@ -7921,16 +7936,35 @@ async function reconcileRateCons({ alert = true } = {}) {
 
 	const missing = findMissingLoads(emails, sheetIds);
 	rateconReconcileHealth.lastScanned = emails.length;
+	rateconReconcileHealth.lastSelfSentSkipped = selfSent.length;
 	rateconReconcileHealth.lastGapCount = missing.length;
 
-	// Anything previously flagged that has since appeared: mark resolved so a
-	// recovered load stops counting against us.
+	// Numbers only our own outbound mail ever produced. These are the rows the
+	// sender filter retires: no load will ever "appear" to resolve them, so left
+	// alone they sit open forever and every reader of this table has to remember
+	// which entries were real.
+	const inboundNums = new Set();
+	for (const em of emails) for (const n of extractLoadNumbers(em.subject)) inboundNums.add(n);
+	const selfOnlyNums = new Set();
+	for (const em of selfSent) for (const n of extractLoadNumbers(em.subject)) if (!inboundNums.has(n)) selfOnlyNums.add(n);
+
+	// Close out rows the mailbox has since settled, either way. Both closures are
+	// bookkeeping rather than alerting, so — like the resolve path that shipped
+	// first — they run regardless of `alert`; splitting them would make the table
+	// mean different things depending on which caller ran last. Idempotent: the
+	// UPDATE is scoped to still-open rows, and a retired id can never come back
+	// because the outbound mail no longer reaches findMissingLoads.
+	const retired = [];
 	const sheetSet = new Set(sheetIds.map((v) => String(v).trim().toLowerCase().replace(/^#/, "")));
 	for (const row of db.prepare("SELECT load_id FROM ratecon_reconcile_alerts WHERE resolved_at IS NULL").all()) {
 		if (sheetSet.has(String(row.load_id).toLowerCase())) {
-			db.prepare("UPDATE ratecon_reconcile_alerts SET resolved_at = CURRENT_TIMESTAMP WHERE load_id = ?").run(row.load_id);
+			db.prepare("UPDATE ratecon_reconcile_alerts SET resolved_at = CURRENT_TIMESTAMP, resolution = 'appeared' WHERE load_id = ? AND resolved_at IS NULL").run(row.load_id);
+		} else if (selfOnlyNums.has(String(row.load_id))) {
+			db.prepare("UPDATE ratecon_reconcile_alerts SET resolved_at = CURRENT_TIMESTAMP, resolution = 'self_sent' WHERE load_id = ? AND resolved_at IS NULL").run(row.load_id);
+			retired.push(row.load_id);
 		}
 	}
+	if (retired.length) console.log(`[ratecon-reconcile] retired ${retired.length} false positive(s) (our own outbound mail): ${retired.join(", ")}`);
 
 	const newly = [];
 	for (const m of missing) {
@@ -7955,7 +7989,8 @@ async function reconcileRateCons({ alert = true } = {}) {
 			`<tr><th style="padding:6px 10px;border:1px solid #ddd;">Load</th><th style="padding:6px 10px;border:1px solid #ddd;">Subject</th><th style="padding:6px 10px;border:1px solid #ddd;">Received</th></tr>` +
 			rowsHtml + `</table>` +
 			`<p style="margin-top:14px;">To recover: open the rate con and drag the PDF onto the Job Board, which runs the same ingestion by hand.</p>` +
-			`<p style="color:#888;font-size:12px;">Each load is reported once. Scanned ${emails.length} rate-con email(s) from the last ${RATECON_RECONCILE_DAYS} days.</p>`;
+			`<p style="color:#888;font-size:12px;">Each load is reported once. Scanned ${emails.length} inbound rate-con email(s) from the last ${RATECON_RECONCILE_DAYS} days` +
+			(selfSent.length ? `, skipping ${selfSent.length} sent by us` : "") + `.</p>`;
 		try {
 			await sendEmail(process.env.GMAIL_USER, `⚠️ ${newly.length} rate-con(s) missing from Job Tracking`, html);
 		} catch (e) { console.error("[ratecon-reconcile] alert email failed:", e.message); }
@@ -7975,7 +8010,7 @@ async function reconcileRateCons({ alert = true } = {}) {
 		console.log(`[ratecon-reconcile] ALERT — missing loads: ${newly.map((m) => m.loadNumber).join(", ")}`);
 	}
 
-	return { scanned: emails.length, missing, newlyAlerted: newly };
+	return { scanned: emails.length, missing, newlyAlerted: newly, selfSentSkipped: selfSent.length, retired };
 }
 
 async function maybeReconcileRateCons() {
@@ -7985,7 +8020,7 @@ async function maybeReconcileRateCons() {
 		const r = await reconcileRateCons({ alert: true });
 		rateconReconcileHealth.lastRun = new Date().toISOString();
 		rateconReconcileHealth.lastError = null;
-		console.log(`[ratecon-reconcile] scanned ${r.scanned} email(s), ${r.missing.length} gap(s), ${r.newlyAlerted.length} newly alerted`);
+		console.log(`[ratecon-reconcile] scanned ${r.scanned} inbound email(s) (${r.selfSentSkipped} of ours skipped), ${r.missing.length} gap(s), ${r.newlyAlerted.length} newly alerted`);
 	} catch (e) {
 		rateconReconcileHealth.lastError = e.message;
 		console.error("[ratecon-reconcile] failed:", e.message);
@@ -8015,9 +8050,11 @@ app.get("/api/admin/ratecon-reconcile", requireRole("Super Admin"), async (req, 
 			dryRun,
 			windowDays: RATECON_RECONCILE_DAYS,
 			mailbox: RATECON_RECONCILE_MAILBOX,
-			scanned: r.scanned,
+			scanned: r.scanned,                     // inbound only
+			selfSentSkipped: r.selfSentSkipped,     // our own outbound mail under the same label
 			missing: r.missing,
 			newlyAlerted: r.newlyAlerted.map((m) => m.loadNumber),
+			retired: r.retired,
 			health: rateconReconcileHealth,
 		});
 	} catch (error) {
