@@ -11261,7 +11261,18 @@ function userDeleteLockBlockers(user, cascadeName) {
 	// Three independent reasons a row counts as frozen: `paid_at` (money moved),
 	// `finalized_at` (a statement was published against it), and isLocked() (the
 	// month is shut regardless of how far this investor's own row got).
-	if (user.role === "Investor") {
+	//
+	// ⚠️ KEYED ON user.id, NOT ON user.role — and that is the whole point.
+	// `investor_payouts.owner_id` and `trucks.owner_id` reference users.id; nothing
+	// in either table records a role. `PUT /api/users/:id` lets a Super Admin set
+	// `role` to any of the four values with no lock check and no cleanup of these
+	// tables, so gating the check on `role === "Investor"` makes the sequence
+	//   PUT /api/users/42 {"role":"Driver"}  →  DELETE /api/users/42
+	// skip BOTH blockers and orphan the paid payouts anyway. That is not an
+	// adversarial path; "this investor drives for us now, change their role" is a
+	// plausible afternoon. A genuine non-investor matches zero rows here, so the
+	// unconditional query costs one indexed no-op and closes the hole.
+	{
 		const rows = db.prepare(
 			"SELECT period, status, COALESCE(paid_at, '') AS paid_at, COALESCE(finalized_at, '') AS finalized_at FROM investor_payouts WHERE owner_id = ?"
 		).all(user.id);
@@ -11276,31 +11287,41 @@ function userDeleteLockBlockers(user, cascadeName) {
 		});
 	}
 
-	// (3) trucks — `UPDATE trucks SET owner_id = 0` re-parents the investor's
-	// whole fleet. A truck row carries no period, so it is not a locked ROW; it
-	// is an INPUT to every locked month, and moving it restates each one's fixed
-	// costs (insurance / ELD / truck payment / HVUT / IRP) on every surface that
-	// recomputes. Scoped to trucks that could actually have been charged inside a
-	// locked month via truckChargeFromMonth() — the same start-of-billing rule
-	// the earnings math uses — so a truck added this month never blocks a delete.
-	if (user.role === "Investor") {
+	// (3) trucks — for an Investor the cascade runs `UPDATE trucks SET owner_id = 0`;
+	// for anyone else the `users` row simply vanishes and the trucks keep a dangling
+	// owner_id. Both outcomes are the same accounting event: the truck loses a valid
+	// owner, and every locked month it was in service for is restated (insurance /
+	// ELD / truck payment / HVUT / IRP). A truck row carries no period — it is not a
+	// locked ROW, it is an INPUT to every locked month. Role-independent for the same
+	// reason as (2) above.
+	{
 		const lockedPeriods = db.prepare(
 			"SELECT period FROM period_locks WHERE period_locks.status = 'locked' ORDER BY period DESC"
 		).all().map((r) => r.period);
 		const newestLock = lockedPeriods[0] || "";
 		if (newestLock) {
+			// ⚠️ `!from ||` is load-bearing, not defensive noise. truckChargeFromMonth()
+			// returns "" when in_service_date is not a bare YYYY-MM-DD AND created_at is
+			// falsy, and the fixed-cost math reads that empty value as "charge this truck
+			// in EVERY month" (`if (truckKey && monthKey < truckKey) continue;` — the
+			// short-circuit means the skip never fires). Written as `from && from <= …`
+			// this guard read the identical value as "never charged" and waved the truck
+			// through — a guard disagreeing with the money math it is protecting, which is
+			// exactly what the note above blockedExpensePeriods() forbids. Unknown
+			// in-service date now blocks, matching how it is billed.
+			const chargedFrom = (t) => truckChargeFromMonth(t) || "";
 			const charged = db.prepare(
 				"SELECT id, unit_number, in_service_date, created_at FROM trucks WHERE owner_id = ?"
 			).all(user.id).filter((t) => {
-				const from = truckChargeFromMonth(t);
-				return from && from <= newestLock;
+				const from = chargedFrom(t);
+				return !from || from <= newestLock;
 			});
 			if (charged.length) blockers.push({
 				table: "trucks",
 				rows: charged.length,
 				units: charged.map((t) => t.unit_number).filter(Boolean),
-				periods: lockedPeriods.filter((p) => charged.some((t) => truckChargeFromMonth(t) <= p)).sort(),
-				detail: `${charged.length} truck${charged.length === 1 ? "" : "s"} (${charged.map((t) => t.unit_number || `#${t.id}`).join(", ")}) would be re-parented to no owner, restating the fixed costs inside finalized months`,
+				periods: lockedPeriods.filter((p) => charged.some((t) => { const k = chargedFrom(t); return !k || k <= p; })).sort(),
+				detail: `${charged.length} truck${charged.length === 1 ? "" : "s"} (${charged.map((t) => t.unit_number || `#${t.id}`).join(", ")}) would be left without a valid owner, restating the fixed costs inside finalized months`,
 			});
 		}
 	}
