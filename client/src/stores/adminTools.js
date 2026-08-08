@@ -47,8 +47,14 @@ export const useAdminToolsStore = defineStore('adminTools', {
       return await api.post('/api/admin/remove-rows', { sheet, rowIndices })
     },
 
-    async fixDriverName(oldName, newName) {
-      return await api.put('/api/admin/fix-driver-name', { oldName, newName })
+    // dryRun is a QUERY parameter, never a body field — the server treats a
+    // body-only flag as a real rename. See the note on the route.
+    async fixDriverName(oldName, newName, opts = {}) {
+      const { dryRun = false, reason = '', acknowledgeLockedPeriods = false } = opts
+      const qs = dryRun ? '?dryRun=true' : ''
+      return await api.put(`/api/admin/fix-driver-name${qs}`, {
+        oldName, newName, reason, acknowledgeLockedPeriods,
+      })
     },
 
     async scanStaleLocations() {
