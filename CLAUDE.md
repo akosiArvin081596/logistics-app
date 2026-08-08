@@ -429,7 +429,11 @@ Key directories:
 
 **Composable singletons**: `useApi()`, `useSocket()`, `useToast()` are module-level singletons (not per-component). Each Pinia store does `const api = useApi()` at module scope; `useSocket` keeps one global socket connection.
 
-**Phone GPS retired**: As of 2026-05-13, Routemate ELD is the sole location source. `useGeolocation` was deleted; the driver app no longer requests location permission or reports pings, and the "Location Access Required" gate was removed from `DriverView`. `POST /api/location` is a 410 Gone stub so cached old clients get a clear error, not a 404. See `routemateSyncTelemetry()` for the live-position pipeline.
+**Phone GPS retired**: As of 2026-05-13, Routemate ELD is the sole location source. `useGeolocation` was deleted; the driver app no longer requests location permission or reports pings on a real load, and the "Location Access Required" gate was removed from `DriverView`. `POST /api/location` is a 410 Gone stub so cached old clients get a clear error, not a 404. See `routemateSyncTelemetry()` for the live-position pipeline.
+
+⚠️ **"Retired" does NOT mean `navigator.geolocation` is gone — it is still called in four places, and a `Permissions-Policy: geolocation=()` header would break all of them.** Verified 2026-08-08 while scoping a CSP; the plain-English summary above reads as if the API were unused, and acting on that reading breaks the driver app.
+- `DriverView.vue` (`enablePhoneGps` / `phoneGpsWatcherId`) — a **test-only** `watchPosition` hook, gated to `PHONE_GPS_TEST_LOAD_IDS = {'LD-MP4W4LP1'}` and tagged `source:'phone-test'`. It is why the retirement is true for production loads and false for the API surface.
+- `StepPersonalInfo.vue`, `LocationPickerModal.vue`, `InvestorApplyView.vue` — one-shot `getCurrentPosition` for **address autofill**, unrelated to load tracking and never retired.
 
 **useGoogleMaps**: Loads the Google Maps JS API via `@googlemaps/js-api-loader`, fetches the API key from `GET /api/config/maps-key`.
 
