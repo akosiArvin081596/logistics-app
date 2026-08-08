@@ -86,7 +86,11 @@ Default values in `server.js` (override via env):
 - Session secret: Set via `SESSION_SECRET` env var (required for production; falls back to default for dev)
 
 Helper scripts in `scripts/`:
-- `reset-super-admin-password.js` — reset the Super Admin password against the local SQLite DB.
+- ~~`reset-super-admin-password.js` — reset the Super Admin password against the local SQLite DB.~~
+  **⚠️ This file does not exist.** Verified 2026-08-08 against the repo and the VPS checkout. It is the
+  documented answer to "I am locked out", so its absence is load-bearing: there is no scripted recovery
+  from a lost or demoted Super Admin, which is why `DELETE`/`PUT /api/users/:id` refuse to remove the
+  last one and why `SETUP_RECOVERY_TOKEN` exists. Write it, or keep the guards.
 - `prepare-test-fixtures.js` — makes a LOCAL app.db runnable by `test-suite.js` by setting known
   passwords on the accounts that already own the test data. Refuses to touch a deployed path or
   `NODE_ENV=production`, and requires `--yes-local-db`. Deliberately does NOT wipe/reseed: loads live
@@ -367,6 +371,24 @@ Client ask (2026-08-07), verbatim: *"the 449 miles to empty — we need to write
 - `/api/load-ratings/*` — per-load driver ratings
 - `GET /api/users/investors` — list users with Investor role
 
+### The user routes are finance routes — guards on `PUT`/`DELETE /api/users/:id`
+Both cascade into `expenses` and both can restate a **finalized** month. `DELETE` got its guard in PR #205; `PUT` is the same cascade by UPDATE and got the matching one (with the identical `expenseRowPeriodLocked()` / `blockedExpensePeriods()` / fail-closed / guard-before-first-write shape, and **not** gated on `PERIOD_FINALIZE_ENABLED`).
+- **⚠️ `driverName: ""` on `PUT` DEFEATED the `DELETE` guard, and that is why the two must stay paired.** `PUT`'s cascade only fires `if (oldName && newName)`, so a blank cleared `users.driver_name` and touched nothing else. `DELETE` then resolves its cascade name as `driver_name || username`, falls back to the **username**, matches zero expense rows, finds no blocker and succeeds — leaving the receipts filed under a name with no account behind them, and silently re-adopted by the next user created with that name. Measured on production 2026-08-08: 165 rows / **$38,476.33** in finalized months were reachable this way (Howard Reddie 75 / $18,381.23; Shorn King 90 / $20,095.10).
+- **409 codes:** `PERIOD_FINALIZED` (rename or blank touching a locked month; role change de-listing a settled payout), `DRIVER_NAME_IN_USE` (blanking a name that still has receipts, *even in an open month* — the stranding), `DRIVER_NAME_TAKEN` (renaming onto another account's driver name irreversibly merges two people's finance rows), `LAST_SUPER_ADMIN`, `CANNOT_DELETE_SELF`, `PERIOD_LOCK_UNREADABLE`. `PUT` now also 400s `INVALID_ROLE` instead of silently ignoring an unrecognised role.
+- **A role change is a settlement event.** `listSettlableInvestors()` drives `GET /api/payouts` off `users WHERE role = 'Investor'`, so demoting an Investor drops their settled months out of every payouts surface while the rows sit in `investor_payouts`, and `grandTotals.totalPaid` quietly falls. Keyed on **`user.id`, never the role column** (#205's lesson: those tables record no role). Production carries 19 finalized payout rows across 3 investors, 2 already PAID.
+- **⚠️ `PUT /api/users/:id` renames only 8 tables; `PUT /api/admin/fix-driver-name` renames 16.** A rename through the users route leaves `invoices`, `truck_assignments`, `driver_onboarding`, `load_ratings`, `carrier_driver_history`, `drivers_directory`, `routemate_dvir`, `routemate_hos_daily` pointing at the old name — on production today that is **31 invoice rows / $20,220, 15 of them already PAID**. Not fixed here; use `fix-driver-name` for a real rename. (`invoices.driver` already holds both `shorn king` and `Shorn King`, so the split is not hypothetical.)
+- Both routes now write an `audit_trail` row with per-table cascade counts. `PUT` previously logged **nothing at all**; a password change is recorded as `password reset`, never a value.
+- **Availability guards, checked before the period guard** because they have no remedy: a Super Admin cannot delete their own account (`CANNOT_DELETE_SELF`, matched on session id **or** username so a session predating `user.id` cannot fail open), cannot delete the last Super Admin, and cannot **demote** the last Super Admin. All three are required — without the demotion twin, `PUT {"role":"Driver"}` then `DELETE` walks around the pair.
+
+### `POST /api/auth/setup` — the unauthenticated admin minter
+Creates the first Super Admin with no session and no role check. Its only gate was `SELECT COUNT(*) FROM users == 0`, i.e. the contents of one table — so anything emptying `users` republished an open admin minter. There is **no** `scripts/reset-super-admin-password.js` in this repo despite the reference above, so a zero-Super-Admin state means hand-editing `app.db` on the VPS.
+- Now `setupLimiter` (5/15 min), audit-logged (`setup_super_admin`), and the count-check + INSERT run in **one synchronous transaction** — `await bcrypt.hash` sits between them and yields, so two concurrent requests could both pass the check and both insert.
+- **The latch:** `usersEverExisted()` refuses setup when `users` is empty but the DB still carries a live system's data — a row in any of `LIVE_SYSTEM_EVIDENCE_TABLES` (`audit_trail`, `expenses`, `trucks`, `investor_payouts`, `documents`), all of which need an authenticated writer. Fails **closed** on an unreadable `users` table. A genuinely fresh install has none of them and setup works unchanged.
+- **⚠️ NEVER latch on `sqlite_sequence`.** `users.id` is AUTOINCREMENT so its high-water mark looks like the perfect durable signal (413 vs 12 live rows in production) — but the CHECK-constraint probe at the top of `server.js` inserts and deletes a `__test_sa__` row on **every boot**, so the sequence climbs once per restart on an empty database. The first draft of this feature used it and refused first-time setup on a fresh install. `invoices` and `investor_applications` carry the same kind of probe.
+- **What it deliberately does not cover:** a *missing* `app.db`. No content test can — the file is new and empty, which is indistinguishable from a fresh install because it is one. Mitigated by the limiter, the audit row, and backups; the structural fix is that the API can no longer reach a zero-admin state.
+- **`SETUP_RECOVERY_TOKEN`** is the owner's way back: with the latch armed, setup proceeds only for a caller presenting it (via `X-Setup-Token`, `Authorization: Bearer`, or `setupToken` in the body). Unset — the normal state — the latch is simply closed. An unset token plus an empty presented token is refused *explicitly*, because `safeEqual("", "")` is true.
+- `GET /api/auth/setup-check` now returns `{needsSetup, locked}` where `needsSetup` means "setup would actually succeed", so a latched system does not render a form that can only 403.
+
 **Debug** (no auth — dev only). `GET /api/debug/` paths: `driver-view/:driverName`, `driver-empty/:driverName`, `sample-row`, `driver-loads/:driverName`, `user/:username`.
 
 **Socket.IO events** (server emits):
@@ -386,7 +408,7 @@ Clients emit `register` with their name to join a socket room.
 
 **Status progression & guards**: `PUT /api/driver/status` enforces one active job — a driver can't transition to "At Shipper" with another load already active (`at shipper|loading|in transit|at receiver`) → 409 Conflict. Every change is logged to the "Status Logs" sheet (`LOG-{timestamp}`, old→new status, reason). Uses `batchUpdate` to atomically set both the status and date columns.
 
-Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth middleware: `requireAuth` (401), `requireRole(...roles)` (403). First-time setup creates the initial Super Admin via `POST /api/auth/setup`.
+Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth middleware: `requireAuth` (401), `requireRole(...roles)` (403). First-time setup creates the initial Super Admin via `POST /api/auth/setup` — see "the unauthenticated admin minter" above before touching that route, and note the app deliberately refuses to be left with **zero** Super Admins.
 
 **Role-based data sanitization**: `PUT /api/data/:rowIndex` preserves broker and phone contact columns for non-Super Admin users (values are read from the sheet and spliced back in before writing). `GET /api/data` strips financial columns for Driver role.
 
@@ -397,6 +419,7 @@ Session-based auth with 4 roles: Super Admin, Dispatcher, Driver, Investor. Auth
 |---------|--------|-----|-------|
 | `publicFormLimiter` | 15 min | 10 | `POST /api/public/apply`, `POST /api/public/investor-apply` |
 | `loginLimiter` | 15 min | 20 | `POST /api/auth/login` |
+| `setupLimiter` | 15 min | 5 | `POST /api/auth/setup` — the only route that mints a Super Admin with no session. Tighter than `loginLimiter` because a legitimate caller uses it **once, ever**, so anything past a typo retry is abuse. Caps the burst on the one window the latch cannot close (a lost `app.db`). |
 | `changePasswordLimiter` | 15 min | 5 | password change |
 | `driverFilesLimiter` | 15 min | 30 | `GET /api/trucks/:id/driver-files` |
 | `truckDocViewLimiter` | 15 min | 30 | `GET /api/driver/truck-documents/:id/view` |
