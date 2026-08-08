@@ -36,6 +36,7 @@ const expenseAi = require("./lib/expense-ai");
 const fuelModel = require("./lib/fuel-model");
 const poiFuelStops = require("./lib/poi-fuel-stops");
 const rateconNormalize = require("./lib/ratecon-normalize");
+const { geminiFailure } = require("./lib/gemini-errors");
 const { csvRows } = require("./lib/csv");
 
 // Convert 0-based column index to spreadsheet letter (0=A, 25=Z, 26=AA, etc.)
@@ -3156,6 +3157,14 @@ async function runRateConGemini(base64) {
 
 	// 2-retry / 30s timeout — PDFs take longer than receipt JPEGs so we widen
 	// the timeout vs the expense OCR endpoint.
+	//
+	// ⚠️ This function is the LOAD-INGESTION path (POST /api/loads/ratecon/extract
+	// and the n8n Extract via LogisX node), so its failure shape is load-bearing:
+	// the n8n HTTP node runs onError:continueErrorOutput → LlamaParse Upload, and
+	// that fallback is what stops a Gemini outage losing a load. It still THROWS on
+	// failure, with the same `Gemini <status>: <body>` message; the error merely
+	// carries .status/.kind/.reason now, and arrives sooner. Do not make this
+	// resolve instead of throw — that silently disconnects the n8n error branch.
 	let lastErr = null;
 	for (let attempt = 0; attempt <= 2; attempt++) {
 		const controller = new AbortController();
@@ -3168,8 +3177,9 @@ async function runRateConGemini(base64) {
 				signal: controller.signal,
 			});
 			if (!resp.ok) {
-				const errText = await resp.text().catch(() => "");
-				throw new Error(`Gemini ${resp.status}: ${errText.slice(0, 200)}`);
+				// Same message as before; now carries .status/.kind/.reason so the
+				// loop below and every caller can branch without re-parsing.
+				throw geminiFailure(resp.status, await resp.text().catch(() => ""));
 			}
 			const data = await resp.json();
 			const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
@@ -3185,6 +3195,18 @@ async function runRateConGemini(base64) {
 			return out;
 		} catch (err) {
 			lastErr = err;
+			// Stop on anything a second attempt cannot change: a rejected key or an
+			// exhausted quota ('unavailable') and a request we built badly
+			// ('defect') both fail identically every time. This loop had NO
+			// fast-fail, which made it the app's worst amplifier — three 30s-budget
+			// calls plus 3s of backoff per pass, and the extract route runs a second
+			// pass, so one dropped rate-con could cost six calls against a key that
+			// was never going to answer. On a 429 that actively deepens the hole.
+			// It also crowded the n8n node's own 120s timeout, which would have
+			// turned a clean error-branch fallback into a node timeout.
+			// Errors with no .kind (empty body, unparseable JSON, an aborted fetch)
+			// still retry exactly as they did.
+			if (err && err.kind && err.kind !== "transient") break;
 			if (attempt < 2) {
 				await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
 			}
@@ -3240,6 +3262,20 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 			// without any rewiring of its expressions.
 			return res.json({ output: out });
 		} catch (err) {
+			// n8n's "Extract via LogisX" node is onError:continueErrorOutput →
+			// LlamaParse Upload, and its error branch fires on ANY non-2xx (verified
+			// on the live workflow: no neverError, no ignoreResponseCode, no
+			// retryOnFail), so the fallback routes identically on 503 and on 502.
+			// 503 + pdf_extract_unavailable is also NOT a new shape for the
+			// workflow — it is exactly what this route already returns when
+			// GEMINI_API_KEY is unset, twelve lines above. The real win here is the
+			// fast-fail in runRateConGemini: three 30s-budget attempts plus backoff
+			// crowded the node's own 120s timeout, and a node timeout is a slower,
+			// noisier fallback than a clean error branch.
+			if (err && err.kind === "unavailable") {
+				console.error(`PDF Gemini extract unavailable (Gemini ${err.status}${err.reason ? " " + err.reason : ""}):`, err.message);
+				return res.status(503).json({ error: "pdf_extract_unavailable" });
+			}
 			console.error("PDF Gemini extract failed after retries:", err && err.message);
 			return res.status(502).json({ error: "pdf_extract_failed" });
 		}
@@ -9587,6 +9623,12 @@ async function runGallonsRecovery({ apply = false, ids = null, limit, req } = {}
 	const started = Date.now();
 	const results = new Array(batch.length);
 	let deadlineHit = false;
+	// Set by the first 'unavailable' verdict (rejected key / exhausted quota). Every
+	// remaining receipt would fail identically, so the batch stops reading rather
+	// than sending 24 more requests to a scanner that is answering the same refusal
+	// to all of them — and, more to the point, rather than filing 24 rows of "the
+	// scanner could not make sense of this file" against perfectly good receipts.
+	let scannerDown = null;
 
 	// Judge locks and missing files FIRST, with no network call. A closed month is
 	// refused before a single cent of Gemini is spent — a guard that bills before
@@ -9607,12 +9649,55 @@ async function runGallonsRecovery({ apply = false, ids = null, limit, req } = {}
 		toRead.push({ i, r, uri: du.uri });
 	});
 
+	// One producer for the admin-facing sentence, so the receipt that actually hit
+	// the failure and the receipts skipped because of it cannot describe it
+	// differently. CLASSIFIED, not interpolated: runReceiptOcr's message is
+	// `Gemini <status>: <first 200 chars of Google's body>`, which on a 429 carries
+	// quota metric names and the GCP project number — and this string lands in a UI.
+	// Mapping to a fixed set loses nothing the admin can act on (each branch names
+	// its own remedy) and keeps the upstream body in console.error where diagnosis
+	// belongs.
+	const ocrFailureReason = (err) => {
+		if (err && err.code === "OCR_NO_KEY") return "Receipt scanning is not configured on this server.";
+		// Quota vs credential, both 'unavailable'. Split because the remedies differ
+		// (wait it out vs go fix the key) and 429 is not the only way to be out of
+		// quota — RESOURCE_EXHAUSTED arrives on other statuses too.
+		if (err && err.kind === "unavailable") {
+			const quota = err.status === 429 || /RATE_LIMIT_EXCEEDED|RESOURCE_EXHAUSTED/.test(err.reason || "");
+			return quota
+				? "Receipt scanning is rate-limited or out of quota right now. Try again later."
+				: "Receipt scanning rejected our credentials. The API key needs attention.";
+		}
+		if (err && err.status === 413) return "The receipt file is too large for the scanner.";
+		// ⚠️ 'defect' ONLY — never a bare `status === 400`. A revoked or out-of-credit
+		// key answers HTTP 400 INVALID_ARGUMENT with reason API_KEY_INVALID, so the
+		// old status test told an admin their receipt was unreadable when the truth
+		// was that the key was dead, and sent them to re-photograph paper instead of
+		// to the API console. Only lib/gemini-errors.js, which reads Google's body,
+		// can tell those two 400s apart — and the distinction has to survive, because
+		// a request WE built badly really does belong on this line.
+		if (err && err.kind === "defect") return "The scanner could not make sense of this file.";
+		return "The receipt could not be read. See the server log for the upstream error.";
+	};
+
 	let cursor = 0;
 	const worker = async () => {
 		for (;;) {
 			const k = cursor++;
 			if (k >= toRead.length) return;
 			const { i, r, uri } = toRead[k];
+			// Reuses the deadline path's 'not_attempted' verdict deliberately: it
+			// already means "nobody read this one, come back for it", it is already
+			// excluded from summarizeRecovery's `attempted` (so an outage cannot move
+			// the reader's hit rate), and it is already counted in `remaining`.
+			if (scannerDown) {
+				results[i] = {
+					...r, verdict: "not_attempted", gallons: null, cpg: null,
+					amountDelta: null, dateMatches: null,
+					reason: ocrFailureReason(scannerDown),
+				};
+				continue;
+			}
 			if (Date.now() - started > FUEL_GALLONS_DEADLINE_MS) {
 				deadlineHit = true;
 				results[i] = {
@@ -9625,26 +9710,19 @@ async function runGallonsRecovery({ apply = false, ids = null, limit, req } = {}
 			let ocr = null;
 			try { ocr = await runReceiptOcr(uri); }
 			catch (err) {
-				// CLASSIFIED, not interpolated. runReceiptOcr's message is
-				// `Gemini <status>: <first 200 chars of Google's body>`, which on a 429
-				// carries quota metric names and the GCP project number — and the
-				// string would land in a UI. Mapping to a fixed set loses nothing the
-				// admin can act on (each branch already names the remedy) and keeps the
-				// upstream body in console.error where diagnosis belongs.
 				console.error("[fuel-gallons] OCR failed for expense", r.id, err && err.message);
-				const s = err && err.status;
+				// Latch the outage for the rest of the batch. Set BEFORE this row is
+				// filed so the two in-flight siblings (concurrency 3) are the only
+				// further calls; a missing key is deliberately latched too, since it
+				// cannot be configured mid-batch either.
+				if (err && (err.kind === "unavailable" || err.code === "OCR_NO_KEY")) scannerDown = err;
 				// The VERDICT comes from the judge (one producer, so the ladder cannot
 				// grow a second definition of ocr_failed); only the REASON is replaced,
 				// because the judge cannot see which upstream failure occurred.
 				results[i] = {
 					...r,
 					...gallonsRecovery.judgeGallonsRecovery({ ocr: null }),
-					reason: err && err.code === "OCR_NO_KEY" ? "Receipt scanning is not configured on this server."
-						: s === 429 ? "Receipt scanning is rate-limited or out of quota right now. Try again later."
-						: (s === 401 || s === 403) ? "Receipt scanning rejected our credentials. The API key needs attention."
-						: s === 413 ? "The receipt file is too large for the scanner."
-						: s === 400 ? "The scanner could not make sense of this file."
-						: "The receipt could not be read. See the server log for the upstream error.",
+					reason: ocrFailureReason(err),
 				};
 				continue;
 			}
@@ -9742,6 +9820,11 @@ async function runGallonsRecovery({ apply = false, ids = null, limit, req } = {}
 		// on, so it is the one that must not be optimistic.
 		remaining: remaining + results.filter((r) => r && r.verdict === "not_attempted").length,
 		deadlineHit,
+		// Reported beside deadlineHit for the same reason it exists: a run that
+		// stopped early must say WHY, or "3 of 25 read" reads as a backlog that
+		// shrank rather than a scanner that quit. Never the upstream message —
+		// that is the 429-body/project-number leak ocrFailureReason() avoids.
+		scannerUnavailable: scannerDown ? ocrFailureReason(scannerDown) : null,
 		written,
 		cpgBand: band,
 		periodLocksReadable: !lockUnreadable,
@@ -16682,8 +16765,15 @@ app.post("/api/expenses/ocr", requireAuth, expenseOcrLimiter, async (req, res) =
 			// "couldn't read this receipt" sends the user off re-photographing
 			// perfectly good paper; 503 makes the UI say scanning is unavailable and
 			// to enter it manually, which is the truth and the useful instruction.
-			if (err && (err.status === 401 || err.status === 403 || err.status === 429)) {
-				console.error("Expense OCR unavailable (Gemini key rejected/limited):", err.message);
+			//
+			// Was a raw 401/403/429 test, which MISSED the most likely case in
+			// production: a revoked or out-of-credit key answers HTTP 400
+			// INVALID_ARGUMENT with reason API_KEY_INVALID, so it fell through to the
+			// 502 below and told the driver their receipt was unreadable. The verdict
+			// from lib/gemini-errors.js reads Google's body, which is the only place
+			// that distinction exists. A request WE malformed is still a loud 502.
+			if (err && err.kind === "unavailable") {
+				console.error(`Expense OCR unavailable (Gemini ${err.status}${err.reason ? " " + err.reason : ""}):`, err.message);
 				return res.status(503).json({ error: "ocr_unavailable" });
 			}
 			console.error("Expense OCR failed after retries:", err && err.message);
@@ -16740,6 +16830,15 @@ app.post("/api/expenses/:id/extract-details", requireRole("Super Admin", "Dispat
 			ocr = await runReceiptOcr(dataUri);
 		} catch (err) {
 			if (err && err.code === "OCR_NO_KEY") return res.status(503).json({ error: "ocr_unavailable" });
+			// Same branch and the same reasoning as POST /api/expenses/ocr above: a
+			// rejected key or an exhausted quota is the state this route already
+			// answers 503 for when GEMINI_API_KEY is unset, so it degrades the same
+			// way rather than telling the admin their stored receipt is unreadable.
+			// `kind` is set by lib/gemini-errors.js; a defect stays a loud 502.
+			if (err && err.kind === "unavailable") {
+				console.error(`extract-details unavailable (Gemini ${err.status}${err.reason ? " " + err.reason : ""}):`, err.message);
+				return res.status(503).json({ error: "ocr_unavailable" });
+			}
 			console.error("extract-details OCR failed:", err && err.message);
 			return res.status(502).json({ error: "ocr_failed" });
 		}
@@ -17052,6 +17151,18 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 			}
 			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields) });
 		} catch (err) {
+			// A rejected key or an exhausted quota is the same state as having no key
+			// at all, which this route already answers 503 for six lines above — so
+			// say 503 and reuse that error code, and the dispatcher is told the
+			// scanner is unavailable (fill the load in by hand) instead of being sent
+			// to re-scan a PDF that was never the problem. This is the path that lost
+			// a $1,300 load: the rate-con arrived while credits were depleted and the
+			// 502 read as "bad PDF". `kind` is set by lib/gemini-errors.js; a request
+			// WE malformed stays a loud 502 below.
+			if (err && err.kind === "unavailable") {
+				console.error(`Rate-con extract unavailable (Gemini ${err.status}${err.reason ? " " + err.reason : ""}):`, err.message);
+				return res.status(503).json({ error: "ratecon_extract_unavailable" });
+			}
 			console.error("Rate-con extract failed after retries:", err && err.message);
 			return res.status(502).json({ error: "ratecon_extract_failed" });
 		}
@@ -17882,7 +17993,24 @@ app.post(
 						return runRateConGemini(b64);
 				  }
 				: null;
-			const onGeminiError = (e) => console.error("Draft invoice: Gemini fallback failed:", e.message);
+			// This route already degrades correctly on a Gemini failure —
+			// extractRateConFields returns empty fields, the total falls back to the
+			// sheet's Payment column and the order number to the load ID — so there is
+			// no status to change here. Two things are free, and only those:
+			// (a) NAME the failure in the log. "Gemini fallback failed" on a dead key
+			//     reads as a parsing problem, which is what sent 2026-08-05's outage to
+			//     the wrong diagnosis for a day.
+			// (b) latch it, so the alternate-rate-con loop below stops re-calling a
+			//     scanner that is refusing everything.
+			let geminiUnavailable = null;
+			const onGeminiError = (e) => {
+				if (e && e.kind === "unavailable") {
+					geminiUnavailable = e;
+					console.error(`Draft invoice: Gemini fallback unavailable (Gemini ${e.status}${e.reason ? " " + e.reason : ""}):`, e.message);
+					return;
+				}
+				console.error("Draft invoice: Gemini fallback failed:", e.message);
+			};
 			const rcFields = await brokerInvoice.extractRateConFields(rateconBuffer, {
 				brokerEmail, // exclude the booking agent's own email from documents-email detection
 				geminiExtract,
@@ -17900,7 +18028,12 @@ app.post(
 				for (const cand of rateconCandidates) {
 					if (!cand || !cand.buffer || cand.buffer === rateconBuffer) continue;
 					try {
-						const alt = await brokerInvoice.extractRateConFields(cand.buffer, { brokerEmail, geminiExtract, onGeminiError });
+						// Drop only the GEMINI half when the key is refusing — the
+						// documents email this loop is hunting for comes from the
+						// deterministic text scan, so skipping the whole loop would
+						// throw away a recovery that never needed Gemini. Passing null
+						// keeps the free scan and spends nothing.
+						const alt = await brokerInvoice.extractRateConFields(cand.buffer, { brokerEmail, geminiExtract: geminiUnavailable ? null : geminiExtract, onGeminiError });
 						if (alt.documentsEmail) {
 							rcFields.documentsEmail = alt.documentsEmail;
 							console.log(`Draft invoice ${loadId}: documents email recovered from an alternate rate-con file (of ${rateconCandidates.length} candidates).`);
