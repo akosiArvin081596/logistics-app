@@ -907,6 +907,29 @@
           </div>
         </div>
 
+        <!-- GALLONS RECOVERY — the queue above, with the reason attached.
+             Placed here rather than on a route of its own because these are the
+             SAME receipts: server-side the queue and
+             GET /api/admin/fuel-gallons-recovery both select through the one
+             volumelessFuelReceiptRows() query, so they cannot disagree about
+             what a candidate is. Two screens is the one way to reintroduce a
+             disagreement the backend went to the trouble of preventing — and
+             the context that makes a verdict legible (why gallons matter, the
+             "at most" hedge on $/Gal below) is already on this screen.
+
+             ⚠️ Its own card, and deliberately NOT `v-if="volumelessRows.length"`.
+             The queue above is omitted wholesale until the fuel-events sweep has
+             populated its table, whereas the recovery endpoint is a pure read
+             over `expenses` and works regardless. Gating this on the queue made
+             an independent feature inherit an unrelated flag's dormancy — on a
+             server with FUEL_EVENTS_ENABLED unset the panel vanished while the
+             endpoint behind it answered perfectly. It follows the review focus
+             like everything else on this tab, and Super Admin gating lives
+             inside the component (this route is a Dispatcher's too). -->
+        <div v-if="!reviewFocus || reviewFocus === 'volumeless'" class="section-card review-card">
+          <GallonsRecoveryPanel />
+        </div>
+
         <!-- REVIEW QUEUE 4 — the typed odometer and the machine disagree.
              The only queue here that isn't about a missing document: the paper
              exists and one number on it is wrong. -->
@@ -1393,6 +1416,7 @@ import { useSocketRefresh } from '../../composables/useSocketRefresh'
 import ZoomableImage from '../shared/ZoomableImage.vue'
 import ExpenseAnalyticsPanel from './expenses/ExpenseAnalyticsPanel.vue'
 import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
+import GallonsRecoveryPanel from './expenses/GallonsRecoveryPanel.vue'
 import { US_STATES } from '../../utils/usStates'
 import { compressImage } from '../../lib/imageUtils'
 import { fmtTimestamp, fmtYmd, houstonToday, parseYmdLocal } from '../../utils/datetime'
