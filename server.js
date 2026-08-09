@@ -903,6 +903,119 @@ try { db.exec("ALTER TABLE investors ADD COLUMN profile_picture_url TEXT DEFAULT
 try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_type TEXT DEFAULT 'fixed'"); } catch {}
 try { db.exec("ALTER TABLE drivers_directory ADD COLUMN pay_percentage REAL DEFAULT 0"); } catch {}
 
+// ============================================================
+// Migration: drivers_directory.driver_name UNIQUE -> UNIQUE COLLATE NOCASE
+// ============================================================
+// ⚠️ THIS COLUMN IS A MONEY JOIN KEY WITH A CASE-BLIND READER AND A
+// CASE-SENSITIVE CONSTRAINT, WHICH IS THE WORST OF BOTH.
+// getDriverPayStructures() indexes on LOWER(driver_name) and builds a plain
+// object, so two spellings collapse to ONE key — while `TEXT NOT NULL UNIQUE`
+// carries SQLite's default BINARY collation, so nothing stops the second
+// spelling being created. Insert "SHORN KING" beside "Shorn King" and you get a
+// second row whose pay_daily is the column DEFAULT of 0; it wins the key, and
+// resolveDailyRate() silently falls back to the truck's rate. The original row
+// still reads 300 in the UI. Nothing errors, nothing is logged, and the driver
+// is paid $250/day instead of $300 for every month the shadow row survives.
+//
+// ⚠️ THE UPPERCASING IS NOT HYPOTHETICAL — IT IS THE ONLY CLIENT'S DEFAULT.
+// AddDriverForm.vue emits `form.driver.trim().toUpperCase()`, so re-adding an
+// existing driver through the Add Driver screen sends exactly the case variant
+// that mints the shadow. And POST /api/users reaches the same INSERT through
+// syncDriverToCarrierSheet(action:"add") — an `INSERT OR IGNORE` that ignores
+// nothing when the case differs — with no period guard anywhere on that path.
+//
+// Fixing it in the queries instead was considered and rejected: every reader
+// ALREADY folds case (that is the bug), so there is no query to fix. The
+// constraint is the thing that disagrees with them, so the constraint is what
+// moves. COLLATE NOCASE is ASCII-only, which matches SQLite's LOWER() exactly,
+// so the constraint and getDriverPayStructures() now agree by construction.
+//
+// SQLite cannot ALTER a collation, so this is the repo's rename-recreate
+// pattern. Two deliberate departures from the two existing examples:
+//
+//   1. THE NEW TABLE'S DDL IS BUILT FROM PRAGMA table_info AT RUNTIME, never
+//      hardcoded. Column ORDER differs between a fresh install and a migrated
+//      one — `pay_daily` sits inline in the CREATE above but arrives by ALTER on
+//      an existing database, so production's order ends `... pay_type,
+//      pay_percentage, pay_daily` where a fresh install's ends `... pay_daily,
+//      created_at, status, ...`. A hardcoded CREATE plus `INSERT ... SELECT *`
+//      would silently transpose columns on one of the two shapes: pay_daily 300
+//      written into pay_percentage is a 300% revenue share. Reading the live
+//      shape also means the next ALTER added above this block needs no edit here.
+//   2. SESSIONS ARE NOT CLEARED. The two precedents (`users`,
+//      `investor_applications`) clear them because a rebuilt `users` table can
+//      change a role a live session already carries. Nothing in a session derives
+//      from drivers_directory, so forcing every driver to re-login would be cost
+//      with no benefit.
+//
+// ⚠️ IF CASE-DUPLICATES ALREADY EXIST THIS SKIPS AND SHOUTS — it must never
+// "resolve" them. The UNIQUE would reject the second row, so an unguarded
+// INSERT ... SELECT throws; caught, that reads as "migration failed, carry on"
+// and the collation quietly never lands, and an `INSERT OR IGNORE` would DROP a
+// row instead. Which of two spellings is the real driver is a business question
+// (see the Deshorn/Shorn trap beside PUT /api/admin/fix-driver-name — two
+// people, one a substring of the other), so it is left to a human. Production
+// carried zero duplicates when this was written, verified read-only.
+try {
+	const ddSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='drivers_directory'").get() || {}).sql || "";
+	// Idempotency: keyed on the constraint actually present, not on a version
+	// marker that can disagree with the schema. Re-running is a no-op.
+	const alreadyNoCase = /driver_name[^,]*COLLATE\s+NOCASE/i.test(ddSql);
+	if (ddSql && !alreadyNoCase) {
+		const dupes = db.prepare(
+			"SELECT GROUP_CONCAT(driver_name, ' | ') AS spellings, COUNT(*) AS n FROM drivers_directory GROUP BY LOWER(TRIM(driver_name)) HAVING n > 1"
+		).all();
+		if (dupes.length) {
+			console.error(
+				`⚠️  drivers_directory: NOT applying the COLLATE NOCASE migration — ${dupes.length} name(s) already exist in more than one spelling: ` +
+				dupes.map((d) => `[${d.spellings}]`).join(", ") +
+				". Merge or delete the duplicates by hand first; until then getDriverPayStructures() resolves each to its LOWEST-id row (see the note there).",
+			);
+		} else {
+			const cols = db.prepare("PRAGMA table_info(drivers_directory)").all();
+			// Reproduce each column exactly as stored — type, NOT NULL, DEFAULT and
+			// PRIMARY KEY — and add the collation to driver_name only. `pk` is
+			// re-emitted as INTEGER PRIMARY KEY AUTOINCREMENT because that is what
+			// the original declares and dropping AUTOINCREMENT would let a deleted
+			// id be reused by a later row (legal_documents.driver_id points at it).
+			const defs = cols.map((c) => {
+				if (c.pk) return `"${c.name}" ${c.type} PRIMARY KEY AUTOINCREMENT`;
+				let d = `"${c.name}" ${c.type}`;
+				if (c.name === "driver_name") d += " COLLATE NOCASE";
+				if (c.notnull) d += " NOT NULL";
+				if (c.dflt_value !== null && c.dflt_value !== undefined) d += ` DEFAULT ${c.dflt_value}`;
+				if (c.name === "driver_name") d += " UNIQUE";
+				return d;
+			});
+			const colList = cols.map((c) => `"${c.name}"`).join(", ");
+			// Non-auto indexes are dropped with the table and must be recreated.
+			const idx = db.prepare(
+				"SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='drivers_directory' AND sql IS NOT NULL"
+			).all().map((r) => r.sql).filter(Boolean);
+			db.pragma("foreign_keys = OFF");
+			try {
+				db.transaction(() => {
+					db.exec("ALTER TABLE drivers_directory RENAME TO drivers_directory_old");
+					db.exec(`CREATE TABLE drivers_directory (\n\t${defs.join(",\n\t")}\n)`);
+					db.exec(`INSERT INTO drivers_directory (${colList}) SELECT ${colList} FROM drivers_directory_old`);
+					db.exec("DROP TABLE drivers_directory_old");
+					for (const s of idx) { try { db.exec(s); } catch {} }
+				})();
+				const fkBroken = db.pragma("foreign_key_check");
+				if (fkBroken && fkBroken.length) console.error("⚠️  drivers_directory migration left foreign key violations:", fkBroken);
+				console.log("drivers_directory.driver_name migrated to UNIQUE COLLATE NOCASE");
+			} finally {
+				db.pragma("foreign_keys = ON");
+			}
+		}
+	}
+} catch (err) {
+	// The transaction rolled the rename back, so the original table is intact and
+	// the app boots on the old constraint. Loud, because the guard it carries is
+	// then not in force.
+	console.error("⚠️  drivers_directory COLLATE NOCASE migration failed (table left unchanged):", err.message);
+}
+
 // One-time seed: import Carrier Database from Google Sheet into SQLite on first boot
 const driverCount = db.prepare("SELECT COUNT(*) AS cnt FROM drivers_directory").get().cnt;
 if (driverCount === 0) {
@@ -3841,61 +3954,66 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (re
 		const insPayPct = Math.max(0, Math.min(100, parseFloat(obj.PayPercentage) || 0));
 		const insPayDaily = Math.max(0, parseFloat(obj.PayDaily) || 0);
 
-		// ⚠️ THIS IS AN UPDATE VERB IN DISGUISE, and it was the way around the
-		// guard on the PUT. `driver_name` is UNIQUE, so INSERT OR REPLACE on an
-		// existing name is a DELETE followed by an INSERT: every column the body
-		// omits reverts to this handler's default rather than being preserved.
+		// ⚠️ THIS WAS AN UPDATE VERB IN DISGUISE — `INSERT OR REPLACE` on a UNIQUE
+		// column is a DELETE followed by an INSERT, so every column the body
+		// omitted reverted to this handler's default instead of being preserved.
 		// One call —
 		//     POST /api/drivers-directory {"headers":["Driver"],"values":["Shorn King"]}
-		// — therefore rewrites pay_daily 300 → 0, which resolveDailyRate turns
-		// into the truck's 250, restating 50 invoiced active days across four
-		// finalized months. Same money, same table, same roles as the PUT; only
-		// the verb differs. So the replace path runs the SAME predicate, with the
-		// new values as the change set.
+		// — rewrote pay_daily 300 → 0, which resolveDailyRate turns into the
+		// truck's 250, restating 50 invoiced active days. PR #216 put the PUT's
+		// month-end predicate on that path, which stopped the restatement of a
+		// CLOSED month and deliberately left three things open, all of them here:
+		//   • an OPEN month was still blanked outright — an unguarded $300 → $250
+		//     going forward for any driver whose exposure is all in open periods;
+		//   • the replace CHANGED THE ROW ID, orphaning legal_documents.driver_id
+		//     and the profile picture on disk (#216 names this and declines it);
+		//   • the columns the money guard correctly ignores — address, phone,
+		//     email, DOT, MC, status — were blanked with no refusal at all.
 		//
-		// ⚠️ MATCHED CASE-INSENSITIVELY, WHICH IS WIDER THAN THE CONSTRAINT — on
-		// purpose. `driver_name TEXT NOT NULL UNIQUE` carries no COLLATE NOCASE,
-		// so the UNIQUE is BINARY: posting "SHORN KING" over "Shorn King" does
-		// NOT replace, it inserts a SECOND row. That is the more dangerous half,
-		// because getDriverPayStructures() keys on LOWER(driver_name) and builds
-		// a plain object — so the duplicate silently WINS the key and its
-		// pay_daily 0 overrides the real row's 300 across every closed month,
-		// with the original row still sitting there looking correct. Matching on
-		// LOWER(TRIM(...)) catches both the true replace and that shadowing
-		// insert; over-reporting is the only safe direction for a guard.
+		// A create verb that silently overwrites is the whole defect, so the fix
+		// is to stop it being one. An existing name is now a 409 pointing at the
+		// PUT, which is the route that HAS the period guard, preserves omitted
+		// columns and keeps the id. That is strictly stronger than the guard it
+		// replaces: it refuses in open months too, and it needs no period data to
+		// be right. The only client is AddDriverForm.vue via driversDb.add() — an
+		// Add form — so nothing legitimate was using the replace.
 		//
-		// Left deliberately unfixed and stated instead: the replace also CHANGES
-		// THE ROW ID, orphaning legal_documents.driver_id and the profile picture
-		// on disk. That is a real defect, but converting this to a genuine UPSERT
-		// is a behaviour change beyond a period guard, and every path that would
-		// move money through it is now refused.
-		const dirExisting = db.prepare("SELECT * FROM drivers_directory WHERE LOWER(TRIM(driver_name)) = LOWER(TRIM(?))").get(obj.Driver || "");
+		// Matched LOWER(TRIM(...)), wider than the constraint even now that it is
+		// COLLATE NOCASE, because NOCASE folds case but not surrounding
+		// whitespace: " Shorn King" would otherwise insert alongside "Shorn King"
+		// and shadow it in getDriverPayStructures(). Names are stored trimmed for
+		// the same reason.
+		const insName = String(obj.Driver == null ? "" : obj.Driver).trim();
+		if (!insName) {
+			// The old handler inserted `""` into a NOT NULL UNIQUE column quite
+			// happily — a nameless directory row that keys as "" in the pay map,
+			// and whose second occurrence 500s on the constraint.
+			return res.status(400).json({ error: "Driver name is required.", code: "DRIVER_NAME_REQUIRED" });
+		}
+		const dirExisting = db.prepare("SELECT id, driver_name FROM drivers_directory WHERE LOWER(TRIM(driver_name)) = LOWER(TRIM(?))").get(insName);
 		if (dirExisting) {
-			const replaceRow = {
-				driver_name: obj.Driver || "", carrier_name: obj["Carrier Name"] || "",
-				pay_type: insPayType, pay_percentage: insPayPct, pay_daily: insPayDaily,
-			};
-			const dirChanged = directoryChangedColumns(dirExisting, replaceRow);
-			if (Object.keys(dirChanged).length) {
-				const lock = directoryEditLockBlockers(dirExisting, dirChanged);
-				if (lock.unreadable) return periodLockUnreadableResponse(res, "Replacing a driver's record");
-				if (lock.blockers.length) {
-					return periodBlockedResponse(res,
-						`Cannot replace the existing record for ${dirExisting.driver_name}`,
-						lock.blockers, DIRECTORY_LOCK_REMEDY);
-				}
-			}
+			return res.status(409).json({
+				error: `"${dirExisting.driver_name}" is already in the drivers directory (row ${dirExisting.id}). ` +
+					`Creating it again would replace that record — blanking the pay structure, address and contact columns this request does not carry, and changing the row id that documents and the profile picture hang off. ` +
+					`Edit row ${dirExisting.id} instead.`,
+				code: "DRIVER_EXISTS",
+				id: dirExisting.id,
+				driverName: dirExisting.driver_name,
+				route: `PUT /api/drivers-directory/${dirExisting.id}`,
+			});
 		}
 
-		db.prepare(`INSERT OR REPLACE INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating, status, pay_type, pay_percentage, pay_daily)
+		db.prepare(`INSERT INTO drivers_directory (driver_name, carrier_name, state, city, zip, address, phone, cell, email, dot, mc, trucks, hazmat, rating, status, pay_type, pay_percentage, pay_daily)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-			.run(obj.Driver || "", obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
+			.run(insName, obj["Carrier Name"] || "", obj.State || "", obj.City || "", obj.ZIP || "",
 				obj.Address || "", obj.PhoneNumber || "", obj.CellNumber || "", obj.Email || "",
 				obj.DOT || "", obj.MC || "", obj.Trucks || "", obj.Hazmat || "", obj.Rating || "",
 				obj.Status || "active", insPayType, insPayPct, insPayDaily);
-		// Sync carrier-driver history on write (not on read)
-		if (obj.Driver && obj["Carrier Name"]) {
-			syncCarrierDriverHistory([obj], "Driver", "Carrier Name");
+		// Sync carrier-driver history on write (not on read). Fed the TRIMMED name,
+		// so the history row (getInvestorDriverSet leg 3) carries the same string
+		// the directory row does rather than the raw body value.
+		if (obj["Carrier Name"]) {
+			syncCarrierDriverHistory([{ ...obj, Driver: insName }], "Driver", "Carrier Name");
 		}
 		notifyChange("drivers");
 		res.json({ success: true });
@@ -7455,17 +7573,48 @@ function generateInvoiceNumber(driverName, weekStart) {
 // activeDays × $250 estimate that overstated/understated their pay in the P&L.
 
 // Returns { [driver_name_lc]: { payType, payPercentage } } for branch decisions.
+//
+// ⚠️ TWO ROWS CAN STILL COLLIDE ON ONE KEY, AND WHICH ONE WINS IS MONEY.
+// drivers_directory.driver_name is now UNIQUE COLLATE NOCASE (see the migration
+// beside that table), so on any database that took it a collision is impossible.
+// It is NOT impossible on one where the migration had to skip because duplicates
+// were already present — the one database where this function is the last line
+// of defence. It used to be a bare `out[key] = …` over an unordered SELECT, i.e.
+// last row wins, which resolves to the LATER row: precisely the shadow that a
+// case-variant insert mints with the column defaults (pay_daily 0). So the
+// default silently beat the real structure.
+//
+// Ordering by id and keeping the FIRST occurrence inverts that: the established
+// row wins and the shadow is ignored. Byte-identical wherever no duplicate
+// exists — which is every migrated database — and it makes the mis-pay inert
+// rather than merely unlikely on the ones where it isn't.
+//
+// TRIM is in the key because every caller looks up with normalizeDriverName(),
+// which trims; a row stored as " Shorn King" would otherwise key as
+// " shorn king" and its pay structure would be invisible to all four readers —
+// failing to the same $250 default by a different route. Strictly widening.
+let lastPayStructShadowWarnMs = 0;
 function getDriverPayStructures() {
 	const rows = db.prepare(
-		"SELECT LOWER(driver_name) AS name_lc, pay_type, pay_percentage, pay_daily FROM drivers_directory"
+		"SELECT id, LOWER(TRIM(driver_name)) AS name_lc, driver_name, pay_type, pay_percentage, pay_daily FROM drivers_directory ORDER BY id ASC"
 	).all();
 	const out = {};
+	const shadowed = [];
 	for (const r of rows) {
+		if (Object.prototype.hasOwnProperty.call(out, r.name_lc)) { shadowed.push(`${r.driver_name} (id ${r.id})`); continue; }
 		out[r.name_lc] = {
 			payType: (r.pay_type || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed",
 			payPercentage: Math.max(0, Math.min(100, Number(r.pay_percentage) || 0)),
 			payDaily: Math.max(0, Number(r.pay_daily) || 0),
 		};
+	}
+	// Called on every financials/investor/invoice read, so this is throttled to
+	// once a minute rather than once a call — but it must not be silent. A
+	// shadowed row means somebody's pay structure is being ignored, and the row
+	// looks perfectly correct in the Drivers Directory UI.
+	if (shadowed.length && Date.now() - lastPayStructShadowWarnMs > 60000) {
+		lastPayStructShadowWarnMs = Date.now();
+		console.error(`⚠️  drivers_directory: ${shadowed.length} row(s) shadowed by an earlier row with the same name — IGNORED for pay: ${shadowed.join(", ")}`);
 	}
 	return out;
 }
@@ -12178,24 +12327,90 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 			return res.status(400).json({ error: "Invalid role" });
 		}
 
+		// Coerced, not trusted. PUT /api/users/:id learned this the hard way in
+		// #212: `driverName: 123` reached `.trim()` and threw AFTER the row was
+		// written. Here the throw is swallowed inside syncDriverToCarrierSheet, so
+		// the failure mode is quieter and worse — an account whose driver_name is
+		// the integer 123, matching no finance row and no directory entry.
+		if (driverName !== undefined && driverName !== null && typeof driverName !== "string") {
+			return res.status(400).json({ error: "driverName must be a string.", code: "INVALID_DRIVER_NAME" });
+		}
+		const newDriverName = String(driverName == null ? "" : driverName).trim();
+
+		// ⚠️ COMPARE AND STORE THE SAME STRING. `users.username` is `TEXT NOT NULL
+		// UNIQUE` with SQLite's default BINARY collation, while the login lookup
+		// (`LOWER(username) = LOWER(?)`) and DELETE's self-delete guard both fold
+		// case. This check folded case too — but tested the TRIMMED needle against
+		// the UNTRIMMED stored value and then inserted the raw body string, so
+		// `" Bob "` and `"Bob"` coexisted happily. Two accounts one of which the
+		// self-delete guard matches for both is the undeletable-account state: it
+		// fails closed, so it costs an admin a locked record rather than money,
+		// but it is unrecoverable through the API. Trimming on both sides and on
+		// the INSERT closes it without a collation migration — every reader of
+		// this column already folds case, so there is nothing left that disagrees.
+		const newUsername = String(username).trim();
+		if (!newUsername) {
+			return res.status(400).json({ error: "Username required", code: "USERNAME_REQUIRED" });
+		}
+
+		// ⚠️ HASHED ABOVE THE COLLISION CHECKS, AND IT MUST STAY THERE. This
+		// handler is async and `await bcrypt.hash` is its only yield point — ~100 ms
+		// of held event loop. Sitting between the checks and the INSERT it made
+		// this a check-then-act: two concurrent creates for the same driver name
+		// both pass, both insert, and the merge the guard exists to prevent
+		// happens anyway. `users.username` has a UNIQUE index to fall back on;
+		// `users.driver_name` has NOTHING, so that half of the race is silent.
+		// Same defect and same remedy as PUT /api/users/:id (#212 security round).
+		const hash = await bcrypt.hash(password, 10);
+
 		const existing = db
-			.prepare("SELECT id FROM users WHERE LOWER(username) = LOWER(?)")
-			.get(username.trim());
+			.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)")
+			.get(newUsername.toLowerCase());
 		if (existing) {
 			return res.status(400).json({ error: "Username already exists" });
 		}
 
-		const hash = await bcrypt.hash(password, 10);
-		db.prepare(
-			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		).run(username, hash, role, driverName || "", email || "", fullName || "", companyName || "");
-
-		// Auto-sync driver to Carrier Database sheet
-		if (role === "Driver" && driverName) {
-			syncDriverToCarrierSheet(driverName, { email, companyName, action: "add" });
+		// ⚠️ THE DRIVER-NAME COLLISION CHECK PUT HAS AND POST DID NOT.
+		// `PUT /api/users/:id` refuses `DRIVER_NAME_TAKEN` because two accounts
+		// sharing a driver name merge two people's expenses, invoices and
+		// documents into one bucket — every settlement join is `LOWER(driver) = ?`
+		// and resolves to both. Creating the second account did the same thing
+		// with no check at all, so the guard was one route wide.
+		//
+		// It is also the front door on the pay-structure hijack. `driverName:
+		// "SHORN KING"` next to an existing "Shorn King" used to reach
+		// syncDriverToCarrierSheet(action:"add") — an `INSERT OR IGNORE` that
+		// ignored nothing, because the directory's UNIQUE was BINARY — minting a
+		// second drivers_directory row with pay_daily 0 that then WON
+		// getDriverPayStructures()'s key. The COLLATE NOCASE migration makes that
+		// INSERT a genuine no-op; this makes the account that triggers it
+		// impossible in the first place. Neither one is redundant: the migration
+		// protects every other writer, this protects the users table's own
+		// invariant, and only this one names the person whose rows would merge.
+		if (newDriverName) {
+			const clash = db.prepare(
+				"SELECT id, username FROM users WHERE TRIM(LOWER(driver_name)) = ?"
+			).get(newDriverName.toLowerCase());
+			if (clash) {
+				return res.status(409).json({
+					error: `Cannot create an account with the driver name "${newDriverName}": it already belongs to ${clash.username} (user ${clash.id}). Two accounts sharing a driver name merge their expenses, invoices and documents irreversibly — every settlement join matches the name case-insensitively and would resolve to both.`,
+					code: "DRIVER_NAME_TAKEN",
+					conflictUserId: clash.id,
+					conflictUsername: clash.username,
+				});
+			}
 		}
 
-		logAudit(req, 'create_user', 'user', username, `Created user "${username}" with role ${role}`);
+		db.prepare(
+			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		).run(newUsername, hash, role, newDriverName, email || "", fullName || "", companyName || "");
+
+		// Auto-sync driver to Carrier Database sheet
+		if (role === "Driver" && newDriverName) {
+			syncDriverToCarrierSheet(newDriverName, { email, companyName, action: "add" });
+		}
+
+		logAudit(req, 'create_user', 'user', newUsername, `Created user "${newUsername}" with role ${role}${newDriverName ? ` (driver name "${newDriverName}")` : ""}`);
 		notifyChange("users");
 		res.json({ success: true });
 	} catch (error) {
@@ -14480,9 +14695,11 @@ function directoryPayStruct(row) {
 const DIRECTORY_DEFAULT_STRUCT = { payType: "fixed", payPercentage: 0, payDaily: 0 };
 
 // The five drivers_directory columns any settlement figure reads. Declared once
-// so the PUT, the POST's replace path and the DELETE cannot drift about which
-// columns the lock reasons over — the same drift that let the old rename
-// handler write this table while reporting nothing about it.
+// so the PUT and the DELETE cannot drift about which columns the lock reasons
+// over — the same drift that let the old rename handler write this table while
+// reporting nothing about it. (The POST's replace path was the third consumer
+// until it stopped being a replace: it now refuses an existing name outright,
+// which needs no column analysis at all.)
 const DIRECTORY_PERIOD_COLUMNS = ["driver_name", "carrier_name", "pay_type", "pay_percentage", "pay_daily"];
 
 // `changed` for directoryEditLockBlockers: ONLY the money-visible columns whose
@@ -15557,7 +15774,14 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 // interpolating them into SQL is safe; every VALUE is bound.
 const DRIVER_RENAME_TARGETS = [
 	// --- MONEY-BEARING: the settlement math joins on these ---
-	{ key: "drivers_directory", table: "drivers_directory", column: "driver_name", match: "ci", writes: "trimmed", money: true, period: "none",
+	// ⚠️ `uniqueName` marks a column carrying a UNIQUE constraint that this
+	// cascade can violate, because every matched row is written the SAME value.
+	// `invoices` gets a bespoke probe (its index is on a PAIR, (driver,
+	// week_start), so the collision is per billing week); this one is on the
+	// column alone, so any two rows folding onto the new name collide. Declared
+	// on the target rather than hardcoded in the planner so the next target that
+	// gains a UNIQUE is one flag, not a second forgotten pre-flight.
+	{ key: "drivers_directory", table: "drivers_directory", column: "driver_name", match: "ci", writes: "trimmed", money: true, period: "none", uniqueName: true,
 		why: "pay structure — getDriverPayStructures() decides fixed vs percentage and pay_daily" },
 	{ key: "trucks_assigned_driver", table: "trucks", column: "assigned_driver", match: "ci", writes: "trimmed", money: true, period: "none",
 		why: "daily rate (trucks.driver_pay_daily) + getInvestorDriverSet leg 1" },
@@ -15684,7 +15908,7 @@ const DRIVER_RENAME_ID_CAP = 500;
 // acknowledgeLockedPeriods, and not via the caseOnly money-neutral carve-out.
 // A locked period is a business decision someone can own; these two are not.
 // See the note beside `hardBlockers` in the fix-driver-name handler.
-const DRIVER_RENAME_HARD_BLOCK_CODES = new Set(["INVOICE_WEEK_COLLISION", "TARGET_UNREADABLE"]);
+const DRIVER_RENAME_HARD_BLOCK_CODES = new Set(["INVOICE_WEEK_COLLISION", "TARGET_UNREADABLE", "DIRECTORY_NAME_COLLISION"]);
 
 // Count every target and judge the month-end lock on the two that carry a
 // period. Read-only — no writes, no side effects — so it is safe to call from a
@@ -15802,6 +16026,48 @@ function planDriverRenameSqlite(oldLower, opts = {}) {
 				}
 			} catch { /* index or columns absent on this database — nothing to collide */ }
 		}
+
+		// ⚠️ SINGLE-COLUMN UNIQUE PRE-FLIGHT — the sibling of INVOICE_WEEK_COLLISION
+		// above, and missing until now. `drivers_directory.driver_name` is
+		// `NOT NULL UNIQUE`, and the executor writes EVERY matched row the same
+		// value, so two rows that fold onto the new name violate it and the UPDATE
+		// throws mid-transaction. Caught here for the same reason as the invoice
+		// probe and no other: fix-driver-name writes the SHEET FIRST, so an
+		// unprobed collision does not surface as a clean 500 — it surfaces as
+		// PARTIAL_RENAME, the one outcome that route exists to prevent, with Job
+		// Tracking renamed and the pay structure left on the old name. That is
+		// exactly the detached-structure case the directory guard calls "a
+		// percentage driver silently becomes a $250/day fixed driver".
+		//
+		// ⚠️ old ∪ new, NOT just old — same argument as the invoice probe, and here
+		// the merge half is the ONLY half that survives the COLLATE NOCASE
+		// migration:
+		//   • old-vs-old — two case-variant rows folding together. Impossible once
+		//     the migration lands, and the reason it is still probed is that the
+		//     migration SKIPS a database that already has duplicates, which is
+		//     precisely the database where this would throw.
+		//   • old-vs-NEW — a row already under the target name. fix-driver-name
+		//     PERMITS merges (isMerge only warns), so this is reachable on every
+		//     database, migrated or not. "Deshorn King" → "Shorn King" is exactly
+		//     this shape: two real, different people, both holding a directory row.
+		// Bound as two parameters that may be equal — a case-only rename folds them
+		// to one predicate and correctly reports no collision, because the row it
+		// matches is the row being renamed.
+		if (t.uniqueName && total) {
+			try {
+				const dupSql = `SELECT id, "${t.column}" AS name FROM "${t.table}" WHERE LOWER(TRIM("${t.column}")) = ? OR LOWER(TRIM("${t.column}")) = ?`;
+				const rowsHit = db.prepare(dupSql).all(oldLower, opts.newLower || oldLower);
+				if (rowsHit.length > 1) {
+					entry.nameCollisions = rowsHit.map((r) => `${r.name} (id ${r.id})`);
+					blockers.push({
+						target: `${t.table}.${t.column}`, table: t.table, code: "DIRECTORY_NAME_COLLISION",
+						rows: rowsHit.length, periods: [], names: entry.nameCollisions,
+						detail: `${rowsHit.length} ${t.table} rows (${entry.nameCollisions.join(", ")}) would all be written the same name, violating the UNIQUE constraint on ${t.column}. Because the Job Tracking sheet is written first, this surfaces as a PARTIAL rename: the loads move and the pay structure does not. Merge or delete the redundant row first.`,
+					});
+				}
+			} catch { /* table or column absent on this database — nothing to collide */ }
+		}
+
 		targets[t.key] = entry;
 	}
 	return { targets, blockers };
