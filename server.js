@@ -5880,7 +5880,13 @@ function refreshInvestorOnboardingStatus(appId) {
 	if (signedCount !== INVESTOR_ONBOARDING_DOCS.length) return null;
 	const hasBanking = db.prepare("SELECT 1 FROM investor_payment_info WHERE application_id=?").get(appId);
 	if (hasBanking) {
-		db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=COALESCE(NULLIF(onboarded_at,''), ?) WHERE application_id=?")
+		// onboarded_at is OVERWRITTEN with the completion time, not preserved.
+		// The row is INSERTed with onboarded_at = now at application time (status
+		// 'documents_pending'), so the column is never empty and a
+		// COALESCE(NULLIF(...)) "keep the first value" would pin it to the moment
+		// the applicant submitted — i.e. it would never record when onboarding
+		// actually completed. This mirrors the original signing route exactly.
+		db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=? WHERE application_id=?")
 			.run(new Date().toISOString(), appId);
 		return "fully_onboarded";
 	}
@@ -7554,7 +7560,11 @@ app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async 
 });
 
 // GET /api/onboarding/documents/:docKey/pdf — serve onboarding PDF (HTML template rendered via Puppeteer)
-app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) => {
+// The fourth render route, and the driver-side twin of the token-gated investor
+// preview above: requireAuth only, one Puppeteer render per request, no cap.
+// Same limiter and the same reasoning — previewing is a read, so it gets the
+// looser 30, and the guard stays mounted before the limiter.
+app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, onboardingPreviewLimiter, async (req, res) => {
 	try {
 		const { docKey } = req.params;
 		const docDef = ONBOARDING_DOCS.find(d => d.key === docKey);
