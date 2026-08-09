@@ -6591,7 +6591,17 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			const validTruckStatus = ["Active", "Inactive", "Maintenance", "OOS"];
 			for (let i = 0; i < vehicles.length; i++) {
 				const v = vehicles[i];
-				const unitNum = `INV-${appId}-${String.fromCharCode(65 + i)}`;
+				// NOT the same bug as the sheet-column sites: `i` indexes an
+				// application's vehicles, never a spreadsheet column, so it can never
+				// produce an invalid A1 range — the 27th vehicle would just be named
+				// "INV-42-[", which is ugly but unique, and nothing builds a regex or a
+				// path from unit_number. Converted anyway because colLetter(i) is
+				// byte-identical for i < 26 (every application that has ever existed),
+				// strictly more readable above it, and leaving one benign
+				// String.fromCharCode(65 + …) in the tree means the next person to grep
+				// for the anti-pattern has to re-derive that this one is harmless —
+				// which is exactly how the accept-branch site survived.
+				const unitNum = `INV-${appId}-${colLetter(i)}`;
 				const truckStatus = validTruckStatus.includes(v.status) ? v.status : "Active";
 				try {
 					db.prepare(`INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, owner_id, purchase_price, title_status, title_state, notes)
@@ -17095,6 +17105,15 @@ function buildSheetUpdateAudit(payload) {
 		})),
 		guardedChangeCount: (payload.guardedChanged || []).length,
 		guardedColumns: (payload.guardedChanged || []).slice(0, SHEET_ROW_AUDIT_MAX_CHANGES).map((c) => cap(c.column, 120)),
+		// Optional provenance. More than one route rewrites a Job Tracking row and
+		// they all log the same `update_sheet_row` action on purpose — one query
+		// finds every rewrite regardless of which door it came through — so the
+		// record has to say which door that was. `loadId` is the address
+		// PUT /api/load/:loadId was actually given; `rowIndex` beside it is the row
+		// that id resolved to, and the pair is what makes a resolution mistake
+		// visible afterwards.
+		...(payload.loadId ? { loadId: cap(payload.loadId, 120) } : {}),
+		...(payload.via ? { via: cap(payload.via, 60) } : {}),
 		...(droppedForCount > 0 ? { changesOmitted: droppedForCount } : {}),
 		...(payload.periods && payload.periods.length ? { periods: payload.periods } : {}),
 		...(payload.code ? { code: payload.code } : {}),
@@ -19177,9 +19196,15 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 			const headers2 = (headerResp2.data.values || [[]])[0];
 			const statusColIdx2 = headers2.findIndex((h) => /status/i.test(h));
 			if (statusColIdx2 !== -1) {
+				// colLetter(), not String.fromCharCode(65 + idx) — the latter emits "["
+				// at index 26 and silently writes to a garbage range on any sheet wider
+				// than Z. Job Tracking is 26 columns today, i.e. exactly one column
+				// away. The DECLINE branch of this same handler (below) was already
+				// converted; this accept branch was missed, so one if/else disagreed
+				// with itself.
 				await sheets.spreadsheets.values.update({
 					spreadsheetId: SPREADSHEET_ID,
-					range: `Job Tracking!${String.fromCharCode(65 + statusColIdx2)}${rowIndex}`,
+					range: `Job Tracking!${colLetter(statusColIdx2)}${rowIndex}`,
 					valueInputOption: "USER_ENTERED",
 					requestBody: { values: [["Assigned"]] },
 				});
@@ -27025,69 +27050,297 @@ app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 	}
 });
 
-// PUT /api/load/:loadId — Update specific fields of a load by load ID
+// PUT /api/load/:loadId — Update specific fields of a load by load ID.
+//
+// The sibling of PUT /api/data/:rowIndex, addressed by LOAD ID rather than by row
+// number, and it carried none of that route's guards: no period check, no audit
+// line, no Owner ID validation — plus a door into the header row that route does
+// not have (see UNKNOWN_COLUMN below).
+//
+// Because it resolves its own row, #222's caller-supplied-rowIndex class is
+// structurally absent here. Everything it does after that is the same accounting
+// event, so it runs the SAME sheetRowUpdateBlocker() over the same before ∪ after
+// union and writes the same `update_sheet_row` audit action — one query finds
+// every rewrite of a Job Tracking row whichever door it came through, with `via`
+// naming the door.
 app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const { loadId } = req.params;
 		const updates = req.body; // { "Column Name": "value", ... }
-		if (!updates || Object.keys(updates).length === 0) {
+		// Arrays and null are both typeof "object". An array body would turn every
+		// key into a numeric index that matches no header, which is worth refusing
+		// honestly rather than as a confusing UNKNOWN_COLUMN list.
+		if (!updates || typeof updates !== "object" || Array.isArray(updates) || Object.keys(updates).length === 0) {
 			return res.status(400).json({ error: "Request body with column updates required" });
+		}
+		const updateKeys = Object.keys(updates);
+		// Same reasoning as PUT /api/data's ROW_TOO_WIDE: the body limit is 50mb, and
+		// the diff and audit builder both walk this set. Sheets itself stops at
+		// 18,278 columns, so nothing real is refused.
+		if (updateKeys.length > SHEET_ROW_MAX_CELLS) {
+			return res.status(400).json({
+				error: `A row cannot have more than ${SHEET_ROW_MAX_CELLS} columns (received ${updateKeys.length}).`,
+				code: "ROW_TOO_WIDE",
+			});
 		}
 
 		const sheets = await getSheets();
-		const headerResp = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking!1:1",
-		});
-		const headers = (headerResp.data.values || [[]])[0];
+		// This route addresses Job Tracking and nothing else — the tab is a hardcoded
+		// literal in every range below and there is no ?sheet= parameter, so it has
+		// none of the caller-controlled-tab surface resolveSheetTargetForWrite()
+		// exists to close on PUT /api/data. The tab is period-guarded by definition.
+		const sheetName = "Job Tracking";
+		const guarded = PERIOD_GUARDED_SHEETS.includes(sheetName);
+		const a1 = a1SheetPrefix(sheetName);
+
+		// One read: headers and every row, which is what the load-id lookup needs
+		// anyway. Replaces the two separate gets this route used to make.
 		const dataResp = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking",
+			range: a1,
 		});
 		const rows = dataResp.data.values || [];
+		const headers = rows[0] || [];
+		// ⚠️ An empty-but-successful read must not unlock the write — the same
+		// fail-open #209's review caught on the delete batch. Job Tracking always has
+		// a header row, so no header means the read failed; and with no `before` the
+		// guard can know neither which cells changed nor which month the row books
+		// to, which is exactly what it needs.
+		if (!headers.length) {
+			return res.status(409).json({
+				error: "Job Tracking could not be read, so this edit cannot be shown to leave closed months alone and cannot be recorded reversibly. Try again.",
+				code: "ROW_READ_FAILED",
+			});
+		}
 		const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h));
 		if (!loadIdCol) {
 			return res.status(404).json({ error: "No load ID column found in sheet" });
 		}
+		const loadIdIdx = headers.indexOf(loadIdCol);
 
-		// Check for new columns that don't exist yet
-		const newCols = Object.keys(updates).filter((k) => !headers.includes(k));
-		if (newCols.length > 0) {
-			headers.push(...newCols);
-			await sheets.spreadsheets.values.update({
-				spreadsheetId: SPREADSHEET_ID,
-				range: `Job Tracking!A1`,
-				valueInputOption: "USER_ENTERED",
-				requestBody: { values: [headers] },
+		// ⚠️ AN UNKNOWN BODY KEY USED TO CREATE A COLUMN BY REWRITING ROW 1.
+		//
+		// The old branch pushed any unrecognised key onto `headers` and wrote the
+		// whole array back to `Job Tracking!A1`. That is the header row, and this app
+		// resolves EVERY column by matching header text (findCol, the /driver/i and
+		// /status/i findIndex calls, the money pattern), so one request re-pointed
+		// the dashboard, the driver app, /api/financials, /api/investor and the
+		// invoice batch at once — with no data row touched and no period guard fired,
+		// because no data row WAS touched. It ran before the load was even located,
+		// so a request for a load id that does not exist still rewrote row 1 and then
+		// answered 404.
+		//
+		// This is not hypothetical: the route's one caller in this repo,
+		// scripts/geocode-loads.js, sends ONLY unknown keys — "Origin Lat",
+		// "Origin Lng", "Dest Lat", "Dest Lng" — none of which exist on Job Tracking
+		// (26 columns, no coordinates; the real ones live in `load_coordinates`).
+		// Running it would have taken the sheet to 30 columns, and the four new
+		// headers match resolveGeofencePoints()'s /origin.*lat/i and /dest.*lat/i,
+		// which PREFER sheet columns over `load_coordinates` — so it would also have
+		// silently repointed geofencing at a second, unmaintained copy of the
+		// coordinates. It is also what would have detonated the column-letter bug
+		// fixed in this same change: at 30 columns, index 26 is where
+		// String.fromCharCode(65 + i) starts emitting "[".
+		//
+		// Refusing is the right rule rather than "create the column safely": the
+		// header row is this app's schema, a REST update route is not a migration
+		// tool, and a new column is free to capture an existing regex (a "Driver
+		// Phone" column would be matched by the loose /driver/i fallback). Adding a
+		// column is a deliberate act — do it in the Sheets UI.
+		const unknownCols = updateKeys.filter((k) => !headers.includes(k));
+		if (unknownCols.length > 0) {
+			return res.status(400).json({
+				error: `Unknown column(s) ${unknownCols.map((c) => JSON.stringify(c)).join(", ")}. This route updates existing columns only — it used to create a missing one by rewriting the header row, which re-points every column this app resolves by header text. Add the column in the sheet first, or correct the name (header names are matched exactly, and some carry real leading/trailing spaces).`,
+				code: "UNKNOWN_COLUMN",
+				unknownColumns: unknownCols,
+				knownColumns: headers,
 			});
 		}
 
+		// Which rows this load id resolves to. Selection keeps the route's original
+		// EXACT match, so no row that resolved before resolves differently now.
+		// Ambiguity, though, is judged on the NORMALISED id, because that is the rule
+		// deduplicateLoads() applies inside getJobTrackingCached(): every aggregate in
+		// the app collapses "#123", "123 " and "123" to one load and keeps the LAST
+		// row. An exact-only test would miss the "#123" vs "123" pair entirely.
+		const normLid = (v) => String(v == null ? "" : v).trim().toLowerCase().replace(/^#/, "");
+		const wantedLid = normLid(loadId);
+		const exactRows = [];
+		const normRows = [];
 		for (let i = 1; i < rows.length; i++) {
-			const obj = {};
-			headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
-			if (obj[loadIdCol] === loadId) {
-				// Apply updates to the row
-				const updatedRow = headers.map((h, idx) => {
-					if (updates.hasOwnProperty(h)) return updates[h];
-					return rows[i][idx] || "";
-				});
+			const cell = (rows[i] || [])[loadIdIdx];
+			if (String(cell == null ? "" : cell) === loadId) exactRows.push(i);
+			if (wantedLid && normLid(cell) === wantedLid) normRows.push(i);
+		}
+		if (!exactRows.length) {
+			return res.status(404).json({ error: `Load ${loadId} not found` });
+		}
+		// ⚠️ AMBIGUITY REFUSES, IT DOES NOT GUESS — the same rule, code and reasoning
+		// PUT /api/loads/:loadId/status-override adopted in #223, on the same sheet.
+		// The request carries a load id and nothing else, so there is no basis for
+		// choosing. First-match (what this route did) is the worst of the available
+		// guesses: the aggregates keep the LAST row, so editing the payment of an
+		// earlier duplicate is written to the sheet, answered {success:true}, and then
+		// discarded by every total that reads it — while the period guard reasoned
+		// about the months of a row that contributes nothing. #223 measured 87 load
+		// ids sitting on 2+ rows inside locked months.
+		const candidateRows = [...new Set([...exactRows, ...normRows])].sort((a, b) => a - b);
+		if (candidateRows.length > 1) {
+			const shown = candidateRows.map((i) => i + 1);
+			return res.status(409).json({
+				error: `Load '${loadId}' matches ${candidateRows.length} rows in Job Tracking (rows ${shown.join(", ")}). Every total in this app collapses duplicate load ids to the last row, so writing one of them cannot be shown to change what the app reads. Edit the row directly with PUT /api/data/<rowIndex>, or make the load ids unique.`,
+				code: "AMBIGUOUS_LOAD",
+				rowIndexes: shown,
+			});
+		}
 
-				await sheets.spreadsheets.values.update({
-					spreadsheetId: SPREADSHEET_ID,
-					range: `Job Tracking!A${i + 1}`,
-					valueInputOption: "USER_ENTERED",
-					requestBody: { values: [updatedRow] },
-				});
+		const matchIdx = candidateRows[0];
+		const rowIndex = matchIdx + 1;
+		const before = rows[matchIdx] || [];
 
-				// Return updated load
-				const result = {};
-				headers.forEach((h, idx) => { result[h] = updatedRow[idx]; });
-				result._rowIndex = i + 1;
-				return res.json({ success: true, load: result });
+		// The row as it will be written. Object.prototype.hasOwnProperty.call, not
+		// updates.hasOwnProperty — a body carrying its own "hasOwnProperty" key
+		// shadows the method and turns this into a TypeError 500.
+		const updatedRow = headers.map((h, idx) => {
+			if (Object.prototype.hasOwnProperty.call(updates, h)) return updates[h];
+			return before[idx] || "";
+		});
+		const after = sheetRowAfterUpdate(before, updatedRow);
+		const changes = changedGuardedCells(headers, before, after);
+
+		// Reject investors.id typos before anything is written, exactly as
+		// PUT /api/data does. A no-op on any layout without an "Owner ID" header.
+		if (guarded) {
+			const ownerErr = validateOwnerIdCell(sheetName, headers, updatedRow);
+			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
+		}
+
+		const auditDetails = (outcome, extra) => buildSheetUpdateAudit({
+			outcome,
+			sheet: sheetName,
+			rowIndex,
+			loadId,
+			via: "PUT /api/load/:loadId",
+			// Every changed cell, guarded or not — the audit's job is to make the
+			// write reversible by hand, and a corrected address is as much a change as
+			// a corrected payment.
+			changed: (() => {
+				const out = [];
+				for (let i = 0; i < Math.max(headers.length, before.length, after.length); i++) {
+					const from = before[i] == null ? "" : String(before[i]);
+					const to = after[i] == null ? "" : String(after[i]);
+					if (from === to) continue;
+					out.push({ column: String(headers[i] == null ? "" : headers[i]).trim() || "(unnamed)", index: i, from, to, why: guardedColumnReason(headers[i]) || "" });
+				}
+				return out;
+			})(),
+			guardedChanged: changes,
+			...extra,
+		});
+
+		// ⚠️ A LOAD ID CHANGE REACHES A ROW THIS GUARD NEVER LOOKED AT — the hole #218
+		// closed on PUT /api/data/:rowIndex, and free here because the whole sheet is
+		// already in memory. deduplicateLoads() keeps the LAST row for a colliding id,
+		// so retyping this row's Load ID onto a completed load sitting in a finalized
+		// month shadows that load out of every total: both sides of the EDITED row are
+		// open, so the period guard sees nothing to refuse.
+		if (guarded) {
+			const lidChange = changes.find((c) => /load.?id|job.?id/i.test(c.column));
+			if (lidChange) {
+				const target = normLid(lidChange.to);
+				let collision = null;
+				if (target) {
+					for (let i = 1; i < rows.length; i++) {
+						if (i === matchIdx) continue;
+						if (normLid((rows[i] || [])[loadIdIdx]) === target) { collision = i + 1; break; }
+					}
+				}
+				if (collision) {
+					logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "DUPLICATE_LOAD" }));
+					return res.status(409).json({
+						error: `Load ID '${lidChange.to}' already exists on row ${collision}. Two rows sharing a load id are collapsed to one everywhere the app totals revenue, so this would silently drop that row's figures — including out of a finalized month. Use a unique load id.`,
+						code: "DUPLICATE_LOAD",
+						conflictRowIndex: collision,
+					});
+				}
 			}
 		}
 
-		res.status(404).json({ error: `Load ${loadId} not found` });
+		const blocker = sheetRowUpdateBlocker(guarded, headers, before, after, changes);
+		if (blocker) {
+			// Record the attempt. `super_admin` is a shared login, so a refusal that
+			// left no trace would make a repeated attempt to rewrite a closed month
+			// invisible in the one place anyone looks afterwards.
+			logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: blocker.code, periods: blocker.periods }));
+			return res.status(409).json({
+				error: blocker.error,
+				code: blocker.code,
+				periods: blocker.periods,
+				...(blocker.changed ? { changed: blocker.changed } : {}),
+				...(blocker.unreadable ? { unreadable: blocker.unreadable } : {}),
+			});
+		}
+
+		// ⚠️ RE-READ IMMEDIATELY BEFORE WRITING, for the same reason PUT /api/data and
+		// POST /api/admin/remove-rows do. The whole sheet was read at the top of this
+		// handler; a delete landing since then shifts every following row up, so the
+		// index this load id resolved to now points at a different load, and the write
+		// would overwrite a row the guard never evaluated while the audit records a
+		// `before` describing another load. `values.update` leaves a plausible-looking
+		// row where a delete at least leaves a hole.
+		if (guarded) {
+			let fresh = null;
+			try {
+				const re = await sheets.spreadsheets.values.get({
+					spreadsheetId: SPREADSHEET_ID,
+					range: `${a1}!${rowIndex}:${rowIndex}`,
+				});
+				fresh = ((re.data.values || [[]])[0]) || [];
+			} catch (err) {
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "ROW_READ_FAILED", error: err.message }));
+				return res.status(409).json({
+					error: "The row could not be re-read immediately before writing, so it cannot be confirmed to be the row that was checked. Try again.",
+					code: "ROW_READ_FAILED",
+				});
+			}
+			const same = (a, b) => {
+				const n = Math.max(a.length, b.length);
+				for (let i = 0; i < n; i++) if (String(a[i] == null ? "" : a[i]) !== String(b[i] == null ? "" : b[i])) return false;
+				return true;
+			};
+			if (!same(fresh, before)) {
+				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("blocked", { code: "SHEET_CHANGED" }));
+				return res.status(409).json({
+					error: `Row ${rowIndex} changed while this edit was being checked — another write, or a deleted row shifting the sheet up, means load '${loadId}' no longer resolves to the row that was validated. Re-read the load and try again.`,
+					code: "SHEET_CHANGED",
+				});
+			}
+		}
+
+		try {
+			await sheets.spreadsheets.values.update({
+				spreadsheetId: SPREADSHEET_ID,
+				range: `${a1}!A${rowIndex}`,
+				valueInputOption: "USER_ENTERED",
+				requestBody: { values: [updatedRow] },
+			});
+		} catch (err) {
+			// Audit the failed attempt too. A timed-out Sheets write leaves it
+			// genuinely unknown whether the row changed, and that is precisely when the
+			// before/after values are worth having.
+			logAudit(req, "update_sheet_row_failed", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("failed", { error: err.message }));
+			throw err;
+		}
+
+		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
+		// The 60s Job Tracking cache would otherwise keep serving the old figures.
+		if (guarded) jtCacheInvalidate();
+
+		// Return updated load — unchanged response shape.
+		const result = {};
+		headers.forEach((h, idx) => { result[h] = updatedRow[idx]; });
+		result._rowIndex = rowIndex;
+		res.json({ success: true, load: result });
 	} catch (error) {
 		console.error("Error updating load:", error.message);
 		res.status(500).json({ error: error.message });
