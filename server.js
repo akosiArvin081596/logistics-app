@@ -3257,6 +3257,33 @@ const sessionMiddleware = session({
 		// from the driver-mobile-view (requires secure=true, which is set above
 		// when NODE_ENV=production). "lax" in dev because secure=false would
 		// reject "none" cookies.
+		//
+		// ⚠️ THIS LINE IS WHAT MAKES CSRF POSSIBLE AT ALL, AND THE CLIENT IT WAS
+		// ADDED FOR MAY NO LONGER EXIST. SameSite=None is why a browser attaches
+		// this cookie to a POST from any site on the internet; there is no CSRF
+		// token anywhere in this app, so it is the only thing between an
+		// auto-submitting form and a settlement close (see crossSiteGuard).
+		//
+		// Investigated 2026-08-09, NOT changed here because it is a one-line
+		// change with a fleet-wide blast radius and belongs in its own deploy:
+		//   - It was added 2026-05-17 (commit 4f19807) for a driver-mobile-view
+		//     Next.js prototype whose ONLY allowed origins are the defaults
+		//     https://localhost:3002 and the LAN address https://192.168.8.106:3002.
+		//   - DRIVER_MOBILE_ORIGINS is not in .env.example, not in the developer
+		//     .env, and — checked read-only on the VPS — NOT SET IN PRODUCTION. So
+		//     production CORS allowlists two dev addresses no production browser
+		//     is ever on, i.e. there is no cross-origin browser client today.
+		//   - drivers.logisx.com / investors.logisx.com are static marketing sites
+		//     that LINK to app.logisx.com. Those are top-level GET navigations,
+		//     which "lax" still carries — and they are same-site anyway.
+		// RECOMMENDATION: tighten to "lax" (a strictly stronger fix than any
+		// per-route guard, because it removes the cookie rather than filtering the
+		// request), and delete the CORS allowlist with it. ⚠️ Verify FIRST that no
+		// live client is genuinely cross-origin — resurrecting the driver-mobile
+		// app on its own hostname would need this back, and it fails as a silent
+		// "logged out on every request" rather than an error. Note "lax" would
+		// still not stop a same-SITE attacker (an XSS on a sibling subdomain), so
+		// it replaces neither the guards above nor a real token.
 		sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
 	},
 });
@@ -11698,7 +11725,7 @@ const FUEL_GALLONS_RECOVERY_ENABLED = String(process.env.FUEL_GALLONS_RECOVERY_E
 // A GET that SPENDS is not the same animal as a GET that reads, and the usual
 // "a read verb needs no CSRF defence" reasoning does not cover it.
 //
-// Session cookies here are sameSite:'none' + secure, there is no CSRF token in
+// Session cookies here are SameSite=None + Secure, there is no CSRF token in
 // this app, and GET /api/admin/fuel-gallons-recovery is a *simple* request — so
 // `<img src="…/fuel-gallons-recovery?limit=40">` on any page a logged-in Super
 // Admin happens to open fires up to 40 billed Gemini vision calls with their
@@ -11711,20 +11738,116 @@ const FUEL_GALLONS_RECOVERY_ENABLED = String(process.env.FUEL_GALLONS_RECOVERY_E
 // is ~140 ms of local CPU, so "a GET that cannot write is harmless" is true
 // there. It is the cost, not the verb, that makes the difference.
 //
-// `Sec-Fetch-Site` is sent by every current browser; non-browser clients (curl,
-// test-suite.js) omit it entirely. So the rule is "refuse a header that is
-// PRESENT AND CROSS-SITE", never "require the header" — which would break every
-// scripted caller to stop an attack scripted callers cannot mount anyway.
+// ── 2026-08-09: the same machinery now also carries a MONEY case. ────────────
+// POST /api/periods/:period/finalize reads NO request body, so an
+// auto-submitting cross-site form on any page a Super Admin opens closed a
+// settlement month FLEET-WIDE. Reproduced end to end against unpatched code:
+// 200, a period_locks row created, finalized_by set to the victim admin, and
+// GET /api/periods then reporting the month as finalized. That is a strictly
+// worse outcome than a billed API call, which is why the money routes get the
+// tighter of the two variants below.
 //
-// ⚠️ Not a general CSRF defence and must not be mistaken for one. It is a
-// cost guard for the handful of routes where a read verb bills a third party.
-function refuseCrossSite(req, res, next) {
-	const site = req.get("Sec-Fetch-Site");
-	if (site && site !== "same-origin" && site !== "same-site" && site !== "none") {
-		return res.status(403).json({ error: "Cross-site request refused", code: "CROSS_SITE_REFUSED" });
-	}
-	next();
+// ⚠️ THE SIBLING ROUTES ARE SAFE BY ACCIDENT, NOT BY DESIGN. POST …/reopen,
+// POST /api/investor/payouts/:id/status and PUT …/adjust all demand a body
+// field, and a cross-site form CAN post fields — what actually stops them is
+// that express.json() is the ONLY body parser mounted, so a form-encoded or
+// text/plain body leaves req.body empty, and the application/json content type
+// that would parse cannot be set cross-site without a preflight the CORS
+// allowlist refuses. Measured: the identical cross-site request with
+// Content-Type: application/json reopened a finalized month. So the protection
+// is an invariant two unrelated lines away — mounting express.urlencoded()
+// (already warned about beside the fuel-gallons apply route) or adding one
+// production origin to DRIVER_MOBILE_ORIGINS republishes all three. They are
+// guarded here so the invariant stops being load-bearing.
+//
+// TWO HEADERS, TWO ERAS, AND BOTH FAIL OPEN WHEN ABSENT:
+//
+//   1. Sec-Fetch-Site is authoritative and needs no knowledge of our own origin
+//      — the browser already computed the relationship and a page cannot forge
+//      it. Chrome/Edge 76+, Firefox 90+, Safari 16.4+.
+//   2. Origin is the FALLBACK for browsers that predate (1) — which is exactly
+//      Safari before 16.4 (March 2023), still the residual gap on old iPads
+//      that cannot update. Origin has been sent on every cross-origin
+//      POST/PUT/DELETE since ~2016, so it covers precisely what (1) misses. It
+//      also catches Origin: null — a sandboxed iframe or a data: URL — which is
+//      not our origin and must not be treated as one.
+//
+// Absence of BOTH means the caller is not a browser: curl, test-suite.js, the
+// n8n webhooks, the Linxup push receiver. Allowed, deliberately — requiring a
+// header would break every scripted caller to stop an attack a scripted caller
+// cannot mount, since the entire attack is "a browser attaches the victim cookie
+// for you".
+//
+// ⚠️ WHAT THIS IS AND IS NOT. It is an Origin/Sec-Fetch check, not a CSRF
+// token, and it must not be written up as one. It does NOT stop:
+//   (a) a same-SITE attacker. refuseCrossSite tolerates Sec-Fetch-Site:
+//       same-site, so an XSS or takeover on a sibling logisx.com subdomain still
+//       reaches the cost routes. That is why the money routes use
+//       refuseCrossOrigin instead — and why even that is not a complete answer,
+//       because SameSite=Lax would not stop a same-site attacker either. Only a
+//       per-session token does.
+//   (b) a browser that sends neither header. There are none current, and an
+//       attacker cannot choose the victim browser — residual risk, not a bypass.
+//   (c) anything holding a genuinely stolen session. No CSRF control ever does.
+//
+// The structural fix is the COOKIE, not the route: SameSite=None is what makes
+// every one of these reachable at all. See the note beside sessionMiddleware.
+
+// Origin equality is judged on HOST, never on scheme. Behind nginx the scheme
+// the browser used and the scheme Express reconstructs come from proxy headers,
+// and a mismatch there would refuse every same-origin write — an outage far
+// worse than the scheme-downgrade CSRF a strict compare would catch. req.hostname
+// is consulted alongside the raw Host header for the same reason: a proxy that
+// rewrites the port must not turn this into a 403 storm. Neither header is
+// settable by a cross-site page (X-Forwarded-Host is not a CORS-simple header,
+// so setting it costs a preflight the allowlist refuses).
+function originIsSelf(req, origin) {
+	let u;
+	try { u = new URL(origin); } catch { return false; }  // "null" lands here
+	const host = String(req.get("Host") || "").toLowerCase();
+	if (host && u.host.toLowerCase() === host) return true;
+	const name = String(req.hostname || "").toLowerCase();
+	return Boolean(name) && u.hostname.toLowerCase() === name;
 }
+
+// `tolerate` is the LOOSEST Sec-Fetch-Site value still accepted:
+//   "same-site"   — cost guard. A sibling subdomain is allowed through.
+//   "same-origin" — money guard. Only this exact origin is allowed.
+// The Origin fallback is same-ORIGIN in both modes, deliberately: judging
+// "same site" from an Origin header needs a public-suffix list, and the fallback
+// only fires for pre-16.4 Safari, where being stricter is the safe direction.
+function crossSiteGuard(tolerate) {
+	const allowed = tolerate === "same-site"
+		? new Set(["same-origin", "same-site", "none"])
+		: new Set(["same-origin", "none"]);
+	const refuse = (res) =>
+		res.status(403).json({ error: "Cross-site request refused", code: "CROSS_SITE_REFUSED" });
+	return function crossSiteGuardMiddleware(req, res, next) {
+		const origin = req.get("Origin");
+		// The CORS allowlist wins FIRST, and it has to: the driver-mobile-view is
+		// genuinely cross-site, so the Sec-Fetch-Site leg — which it cannot
+		// influence — would refuse the one cross-origin browser client this server
+		// actually has. A browser cannot forge Origin, and a non-browser is allowed
+		// anyway by the fall-through below, so trusting the allowlist here is
+		// exactly as safe as the CORS middleware that already trusts it.
+		if (origin && DRIVER_MOBILE_ORIGINS.includes(origin)) return next();
+		const site = req.get("Sec-Fetch-Site");
+		if (site) return allowed.has(site) ? next() : refuse(res);
+		// No Sec-Fetch-Site. An Origin still means a browser (or something claiming
+		// to be one), and it has to be ours. Origin: null fails this by construction.
+		if (origin && !originIsSelf(req, origin)) return refuse(res);
+		next();
+	};
+}
+
+// Cost guard — the original tolerance, plus the Origin fallback. Two call sites:
+// the fuel-gallons GET and apply.
+const refuseCrossSite = crossSiteGuard("same-site");
+// Money guard — same machinery, one notch tighter. Mounted on the four routes
+// that close a settlement month or move a payout. Their only legitimate browser
+// caller is the SPA this server itself serves, so demanding same-origin costs
+// nothing and removes the sibling-subdomain case above.
+const refuseCrossOrigin = crossSiteGuard("same-origin");
 
 // The plausibility band, rebuilt per run from the fleet's own priced receipts so
 // it tracks the diesel market with nobody maintaining a constant. Uses `date`,
@@ -34361,7 +34484,7 @@ app.get("/api/payouts", requireRole("Super Admin"), async (req, res) => {
 // figure frozen; reopening all the way to 'owed' re-links the row to live
 // earnings, so its amount will track recomputes again on the next read.
 const PAYOUT_STATUS_RANK = { owed: 0, processing: 1, paid: 2 };
-app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, res) => {
+app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
 	try {
 		const id = parseInt(req.params.id, 10);
 		if (!Number.isFinite(id) || id <= 0) {
@@ -34539,7 +34662,7 @@ app.post("/api/investor/payouts/:id/status", requireRole("Super Admin"), (req, r
 // positive adjustment credits the investor. Effective payout = amount +
 // adjustment. The reconcile only ever writes `amount`, so this manual delta
 // persists across live recomputes. Mirrors PUT /api/invoices/:id/adjust.
-app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), (req, res) => {
+app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
 	try {
 		const id = parseInt(req.params.id, 10);
 		if (!Number.isFinite(id) || id <= 0) {
@@ -34738,7 +34861,7 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 // POST /api/periods/:period/finalize — close a month early. The sweep will close
 // it on its own once the grace window elapses; this is for "every receipt is in,
 // don't make me wait until the 8th".
-app.post("/api/periods/:period/finalize", requireRole("Super Admin"), async (req, res) => {
+app.post("/api/periods/:period/finalize", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {
 	try {
 		const period = String(req.params.period || "");
 		// Validate at the SOURCE. This route is the only door through which a human
@@ -34783,7 +34906,7 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), async (req
 // POST /api/periods/:period/reopen — walk a finalized month back open. Requires a
 // reason, exactly like reopening a settled payout: this un-freezes figures that
 // may already be on a delivered statement.
-app.post("/api/periods/:period/reopen", requireRole("Super Admin"), (req, res) => {
+app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
 	try {
 		const period = String(req.params.period || "");
 		if (!LOCKABLE_MONTH_KEY.test(period)) {
