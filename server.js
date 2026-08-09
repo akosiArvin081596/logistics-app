@@ -3458,6 +3458,224 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 	}
 });
 
+// POST /api/n8n/load-distance — Called by the n8n Dispatch workflow to MEASURE
+// a load's driving distance and rate-per-mile, replacing the `AI Agent` node
+// that was prompted to "calculate the driving distance" with no tool attached
+// and therefore answered from model memory.
+//
+// WHY THIS EXISTS (measured, PR #226, all 62 distinct production lanes):
+//   median error 20.5 mi (7.5%) · p90 16.9% · max 224 mi · 32% of lanes >10% off
+//   median rate-per-mile error $0.24/mi (worst $1.41)
+// It was NOISE, not bias — 23 of 28 repeated lanes returned a different answer
+// each time, and one lane asked 29 times spanned 680–840 mi. A bias can be
+// calibrated out with a constant; noise cannot. 74% of the model's answers were
+// multiples of ten against 19% of Google's on the same lanes.
+//
+// The guessed numbers happened to reach no Distance / Rate Per Mile column
+// (Job Details' column A header is blank, so n8n's autoMapInputData wrote the
+// whole JSON blob to a column literally named `output` — 151 rows). So the
+// dollar impact was zero BY ACCIDENT, and it read exactly like a one-line
+// mapping bug. Fixing that mapping while the LLM was still the source would
+// have connected 151 guessed distances to the live figure. The source is
+// removed instead.
+//
+// This is the SAME calculateRatePerMile() the drag-and-drop path uses at
+// POST /api/loads/from-ratecon, against the SAME Distance Matrix response, so
+// there is now exactly one implementation and the two ingestion paths agree —
+// which is what CLAUDE.md's "a load that arrived one way has to be
+// indistinguishable from one that arrived the other" requires.
+//
+// SECURITY / COST:
+// - Same dual-secret gate as /api/n8n/extract-pdf-via-gemini. N8N_EXTRACT_SECRET
+//   is the one to use: N8N_WEBHOOK_SECRET also gates POST /api/webhook/new-load,
+//   which CREATES LOADS, and n8n node parameters are plaintext in the workflow
+//   JSON. A leak of the extract secret costs Distance Matrix elements against a
+//   rate-limited endpoint that writes nothing.
+// - Writes NOTHING — no sheet, no SQLite, no Drive. Pure read + arithmetic, so
+//   it cannot restate a locked period or touch a finance row.
+// - Rate-limited: every call is a billed Distance Matrix element.
+// - Keeps Maps server-side. n8n no longer holds a Google Maps key at all (the
+//   plaintext one in the deleted `Get Distance Matrix` node was the last), so
+//   GOOGLE_MAPS_API_KEY can stay IP-restricted to the VPS.
+// Shared by the limiter's keyGenerator and the handler, so the two can never
+// disagree about who is authorized.
+//
+// The `secret &&` guards are load-bearing, not defensive noise: safeEqual("", "")
+// and safeEqual(undefined, undefined) both return TRUE, so with the env var unset
+// an empty header would authorize. A falsy env var short-circuits first.
+function n8nDistanceAuthorized(req) {
+	const presented = req.headers["x-webhook-secret"];
+	const sharedSecret = process.env.N8N_WEBHOOK_SECRET;
+	const extractSecret = process.env.N8N_EXTRACT_SECRET;
+	return Boolean(
+		(sharedSecret && safeEqual(presented, sharedSecret)) ||
+		(extractSecret && safeEqual(presented, extractSecret))
+	);
+}
+const n8nDistanceLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	// ⚠️ Keyed on a VALID secret — NOT per-IP, and NOT on whatever was presented.
+	//
+	// Not per-IP: this endpoint has exactly one legitimate caller, n8n Cloud, whose
+	// egress IPs are shared across tenants and rotate. A per-IP cap therefore both
+	// leaks budget to whoever shares that egress and resets for free when the IP
+	// changes — i.e. it fails to bind the single caller it exists to bind.
+	//
+	// Not on the presented value: that would hand an attacker a fresh 60-call
+	// bucket for every string they invent, plus an unbounded number of live entries
+	// in the in-memory store. Authorizing FIRST means every real caller shares one
+	// bucket and every bad one is keyed by IP, so a 401 flood can never consume
+	// n8n's allowance and cannot escape its own bucket by rotating the header.
+	//
+	// The hash is so the bucket name can never become the secret in a heap dump or
+	// an error string.
+	keyGenerator: (req) => {
+		if (n8nDistanceAuthorized(req)) {
+			const presented = String(req.headers["x-webhook-secret"]);
+			return "n8n:" + crypto.createHash("sha256").update(presented).digest("hex").slice(0, 16);
+		}
+		return `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many distance requests. Try again later." },
+	standardHeaders: true,
+});
+// Unauthorized attempts are otherwise completely invisible — a leaked secret being
+// abused would show up only as a line on the Google Maps bill, and a distributed
+// guessing campaign would leave no trace at all. Counted and logged at a throttle
+// so the log cannot itself be flooded. The presented value is NEVER logged.
+let n8nDistanceUnauthorized = 0;
+let n8nDistanceUnauthorizedLoggedAt = 0;
+app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
+	if (!n8nDistanceAuthorized(req)) {
+		n8nDistanceUnauthorized++;
+		const now = Date.now();
+		if (now - n8nDistanceUnauthorizedLoggedAt > 60_000) {
+			n8nDistanceUnauthorizedLoggedAt = now;
+			console.warn(`n8n load-distance: ${n8nDistanceUnauthorized} unauthorized attempt(s), most recent from ${req.ip || "unknown ip"}`);
+		}
+		return res.status(401).json({ error: "Unauthorized" });
+	}
+	try {
+		const body = req.body || {};
+		// Addresses are capped rather than rejected on length: they are
+		// broker-authored free text and an over-long one should still be
+		// measured, not 400'd into the failure-alert cascade.
+		//
+		// ⚠️ THE 500 IS A SECURITY CONTROL, not a UX choice — do not raise it
+		// without re-measuring. cityStateZip()'s regex is super-linear in the input
+		// length (see the note beside it); at 500 chars the worst adversarial shape
+		// costs ~0.26 ms, at 5,000 it is ~19 ms, and before that regex was made
+		// unambiguous 5,000 chars cost 9.4 SECONDS of blocked event loop.
+		const pickupAddress = String(body.pickup_address ?? "").trim().slice(0, 500);
+		const dropoffAddress = String(body.dropoff_address ?? "").trim().slice(0, 500);
+		const loadId = String(body.load_id ?? "").trim().slice(0, 64);
+		const rate = body.rate == null ? "" : String(body.rate).slice(0, 64);
+
+		if (!pickupAddress || !dropoffAddress) {
+			return res.status(400).json({
+				error: "pickup_address and dropoff_address required",
+				code: "ADDRESSES_REQUIRED",
+			});
+		}
+
+		// Identical call to the one in POST /api/loads/from-ratecon. Never fatal:
+		// a missing key, a quota error, a timeout or ZERO_RESULTS all arrive at
+		// calculateRatePerMile() as a non-OK element and take its zeros /
+		// "Distance unavailable" branch. A Maps outage must not stop a rate-con
+		// email from becoming a load — the Job Tracking row already exists by the
+		// time n8n calls this.
+		let distanceMatrix = null;
+		let lookupError = "";
+		if (GOOGLE_MAPS_API_KEY) {
+			try {
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), 8000);
+				const dmUrl =
+					"https://maps.googleapis.com/maps/api/distancematrix/json" +
+					`?origins=${encodeURIComponent(pickupAddress)}` +
+					`&destinations=${encodeURIComponent(dropoffAddress)}` +
+					`&units=imperial&key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}`;
+				const dmResp = await fetch(dmUrl, { signal: controller.signal });
+				// ⚠️ clearTimeout AFTER the body read, not between. The signal
+				// otherwise stops applying the moment response headers arrive, so a
+				// slow-drip body has no ceiling at all and parks the handler — the
+				// exact shape of the 2026-08-06 Sheets outage that GOOGLE_API_TIMEOUT_MS
+				// exists to prevent (it is applied twice, independently, for this
+				// reason). n8n's own 30 s node timeout frees the CLIENT, not us.
+				try {
+					distanceMatrix = await dmResp.json();
+				} finally {
+					clearTimeout(timer);
+				}
+			} catch (e) {
+				lookupError = e.message || "distance_matrix_failed";
+				console.error(`n8n load-distance: Distance Matrix failed${loadId ? ` (load ${loadId})` : ""}:`, lookupError);
+			}
+		} else {
+			lookupError = "GOOGLE_MAPS_API_KEY unset";
+		}
+
+		const rpm = rateconLoad.calculateRatePerMile(distanceMatrix, {
+			"Pickup Address": pickupAddress,
+			"Drop-off Address": dropoffAddress,
+			Rate: rate,
+		});
+		const measured = rpm.distance_miles > 0;
+		if (!measured) {
+			console.warn(`n8n load-distance: no distance for ${loadId || "(no load id)"} — "${pickupAddress}" → "${dropoffAddress}"${lookupError ? ` (${lookupError})` : ""}`);
+		}
+
+		// ⚠️ THE RESPONSE SHAPE IS THE FIX. Read this before changing a key.
+		//
+		// The consuming node `Update Job Details (Distance)` is
+		// mappingMode: autoMapInputData — it maps each TOP-LEVEL key of the
+		// incoming item onto the sheet column of the same name and silently drops
+		// the rest. Its sibling /api/n8n/extract-pdf-via-gemini answers
+		// { output: {...} } because the Information-Extractor node it replaced did;
+		// returning that envelope HERE is exactly the bug being fixed. The item
+		// then has one top-level key, `output`, Job Details happens to carry a
+		// column literally named `output`, and the whole JSON blob lands there as
+		// a string — 151 rows of it — while Distance and Rate Per Mile stay empty.
+		//
+		// So the top level is deliberately FLAT and its keys are exactly the Job
+		// Details column names, matching the map POST /api/loads/from-ratecon
+		// hands to upsertByKey(). Everything else is namespaced under `_meta`,
+		// which matches no column and is therefore ignored by the sheet node.
+		// NEVER add a top-level key that is not a Job Details column — and never
+		// re-introduce a top-level `output`.
+		//
+		// Formatting the cells here rather than in an n8n expression is what makes
+		// the two ingestion paths write byte-identical rows: from-ratecon writes
+		// `${miles} Miles` and `$${rate_per_mile}`, whereas the n8n node's own
+		// (never-reached) mapping would have written `486Miles`, no space. One
+		// formatter cannot drift from itself.
+		//
+		// `Load ID` is included for parity with from-ratecon even though Job
+		// Details has no such column today and both writers silently drop it — so
+		// that if the column is ever added, both paths fill it rather than one.
+		return res.json({
+			"Load ID": loadId,
+			Distance: `${rpm.distance_miles} Miles`,
+			"Rate Per Mile": `$${rpm.rate_per_mile}`,
+			Details: rpm.details,
+			Payment: rpm.payment,
+			_meta: {
+				distance_miles: rpm.distance_miles,
+				distance_text: rpm.distance_text,
+				rate_per_mile: rpm.rate_per_mile,
+				details: rpm.details,
+				payment: rpm.payment,
+				measured,
+				source: measured ? "google_distance_matrix" : "unavailable",
+			},
+		});
+	} catch (err) {
+		console.error("n8n load-distance error:", err.message);
+		res.status(500).json({ error: "load_distance_failed" });
+	}
+});
+
 // Shared email helper
 async function sendEmail(to, subject, htmlBody, attachments = []) {
 	const gmailUser = process.env.GMAIL_USER;
