@@ -531,9 +531,24 @@
   </div>
 
   <p><strong>IV. ACCEPTANCE</strong> The Lessee hereby accepts the Vehicle in the condition noted above. The <strong>Initial Term</strong> and <strong>Insurance Coverage</strong> begin as of the date and time of this signature.</p>
+  <!-- ⚠️ The two sides of this receipt are deliberately NOT symmetrical.
+       LESSEE is `Lessee signature`, the same label as the lease execution page, so
+       it fills: the lessee genuinely executes this page at signing time, and the
+       field map says so — it stamps the delivery location and date/time above and
+       defaults all 10 condition checkboxes to checked, commented "Lessee is
+       attesting the unit is in inspection-pass condition when signing".
+       LESSOR is `Lessor delivery signature`, a label NOTHING maps, so it renders
+       BLANK ON PURPOSE — this is not the querySelector bug, and do not "fix" it by
+       pointing it back at `Lessor signature`. There is no counterpart intent for
+       the lessor: `Lessor signature` is mapped for the SIGNATURE EXECUTION party
+       block, and reusing that label here would have LogisX countersigning, by
+       server constant at online-application time, that it physically delivered a
+       vehicle it has not delivered — on the very clause that starts the Initial
+       Term and Insurance Coverage. The blank is the countersignature slot for
+       whoever hands the truck over. -->
   <div class="sig-row" style="margin-top:14px;">
     <div class="sig-group grow"><span class="label">LESSEE Signature:</span><input type="text" class="blank" aria-label="Lessee signature"></div>
-    <div class="sig-group grow"><span class="label">LESSOR Signature:</span><input type="text" class="blank" aria-label="Lessor signature"></div>
+    <div class="sig-group grow"><span class="label">LESSOR Signature:</span><input type="text" class="blank" aria-label="Lessor delivery signature"></div>
   </div>
 
   <!-- Welcome/Onboarding content and Investor Checklist moved to investor-guide.html -->
