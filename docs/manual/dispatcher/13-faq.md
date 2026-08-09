@@ -181,7 +181,7 @@ The system reads from Google Sheets. Sheets has a rate limit; we cache aggressiv
 No. The app needs a live connection for almost everything.
 
 **Q. Are sessions secure?**
-Sessions use HTTPS, cookie flags (httpOnly, secure, sameSite=strict), and database storage. Standard web-security practices.
+Sessions use HTTPS, cookie flags (httpOnly, secure, sameSite=lax), and database storage. Standard web-security practices.
 
 ## Career
 

@@ -118,7 +118,7 @@ Nothing else. The repo is the source of truth for code; the VPS holds runtime st
 Several defaults that protect the production environment:
 
 - **`SESSION_SECRET`** is enforced — the server warns at boot if it falls back to the dev default. In production, the warning becomes a real risk.
-- **Cookie flags** — `httpOnly`, `secure: true` when `NODE_ENV=production`, `sameSite: 'strict'`.
+- **Cookie flags** — `httpOnly`, `secure: true` when `NODE_ENV=production`, `sameSite: 'lax'` (tightened from `'none'` 2026-08-09; override via `SESSION_COOKIE_SAMESITE`, which defaults to `lax`).
 - **`compression`** middleware gzips all responses.
 - **`express-rate-limit`** caps the abusable endpoints (see backend chapter).
 - **Demo viewer write lockdown** — a global middleware blocks all mutating verbs (POST/PUT/PATCH/DELETE) for a special demo role with a small whitelist for harmless idempotent operations.

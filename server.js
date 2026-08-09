@@ -157,8 +157,28 @@ function verifyInlineServedBytes(buf, ext) {
 // app at a different origin). Only the env-allowlisted origins get permissive
 // CORS headers; everything else falls through with no Access-Control-* headers
 // and the browser blocks the response — same as before this middleware existed.
-const DRIVER_MOBILE_ORIGINS = (process.env.DRIVER_MOBILE_ORIGINS ||
-	"https://localhost:3002,https://192.168.8.106:3002")
+//
+// ⚠️ THE DEFAULT IS NOW EMPTY, i.e. no cross-origin browser client unless one is
+// configured. It used to default to "https://localhost:3002,https://192.168.8.106:3002",
+// which shipped to PRODUCTION because DRIVER_MOBILE_ORIGINS is set nowhere —
+// re-verified 2026-08-09 read-only on the VPS against the running process
+// environment of both pm2 apps and every other process on the box, not just the
+// .env files. That default was worse than dead weight for two reasons:
+//   1. Production advertised `Access-Control-Allow-Credentials: true` to
+//      https://localhost:3002 — an origin ANY developer's own machine can serve,
+//      on a box no developer's machine is otherwise related to.
+//   2. This list is also the FIRST leg of crossSiteGuard: an allowlisted Origin
+//      is waved straight past refuseCrossOrigin, so those two dev addresses were
+//      a standing bypass of the guards PR #253 put on the four money routes.
+// Emptying the default closes both. The client it existed for has never been in
+// this repo (git log --all --diff-filter=A finds no such file; commit 4f19807
+// touched server.js only), and the sibling marketing site drivers.logisx.com
+// makes zero API calls — it only links here.
+//
+// To resurrect a genuine cross-origin client: set DRIVER_MOBILE_ORIGINS *and*
+// SESSION_COOKIE_SAMESITE=none. Both are needed and neither alone is enough,
+// which is deliberate — see the sessionMiddleware note.
+const DRIVER_MOBILE_ORIGINS = (process.env.DRIVER_MOBILE_ORIGINS || "")
 	.split(",")
 	.map((s) => s.trim())
 	.filter(Boolean);
@@ -3240,6 +3260,50 @@ if (!process.env.SESSION_SECRET) {
 	console.warn("WARNING: SESSION_SECRET not set in environment — using dev fallback. Set it in .env for production.");
 }
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev-only-fallback-do-not-use-in-production";
+
+// The session cookie is Secure in production only, because dev runs on plain
+// http://localhost and a Secure cookie would never be stored there.
+//
+// ⚠️ In production this is also the ONLY thing standing in front of the node
+// port. server.js binds *:3000 (all interfaces, not loopback) while nginx
+// proxies app.logisx.com to 127.0.0.1:3000 — so the app answers on BOTH
+// https://app.logisx.com and plain http://<vps-ip>:3000, and the second one is
+// reachable from the internet (verified 2026-08-09: 200). A browser will
+// neither store nor send a Secure cookie over that plain-HTTP path, so no
+// session can ride it — which is why tightening SameSite below changes nothing
+// there. What it does NOT cover: `app.set("trust proxy", 1)` believes the
+// X-Forwarded-Proto of whatever connects, and on the direct path that is the
+// caller, so a scripted client can present `X-Forwarded-Proto: https` and be
+// treated as secure. Harmless for CSRF (a script has no victim cookie to
+// borrow), but the reason trust-proxy is only sound if nothing but nginx can
+// reach :3000. Binding to 127.0.0.1 is an infrastructure fix, not a code one.
+const SESSION_COOKIE_SECURE = process.env.NODE_ENV === "production";
+
+// Resolve the SameSite attribute. Defaults SAFE — unset means "lax".
+function resolveSessionSameSite(raw, secure) {
+	const want = String(raw ?? "").trim().toLowerCase();
+	if (!want) return "lax";
+	if (!["lax", "strict", "none"].includes(want)) {
+		console.warn(`[session] SESSION_COOKIE_SAMESITE="${raw}" is not one of lax|strict|none — using "lax".`);
+		return "lax";
+	}
+	if (want === "none" && !secure) {
+		// Browsers REJECT SameSite=None without Secure, so honoring this would
+		// drop the cookie outright — i.e. logged out on every request, which is
+		// the exact outage this knob exists to let someone back out of.
+		console.warn('[session] SESSION_COOKIE_SAMESITE="none" needs a Secure cookie (NODE_ENV=production); browsers reject None without Secure — using "lax".');
+		return "lax";
+	}
+	if (want === "none") {
+		console.warn('[session] ⚠️  SameSite=None — the session cookie is attached to cross-site POSTs from ANY origin. There is no CSRF token in this app; only the crossSiteGuard mounts stand in the way. Set this back to "lax" once the cross-origin client that needs it is gone.');
+	}
+	if (want === "strict") {
+		console.warn('[session] SameSite=Strict — anyone following a link from an email or an external site lands LOGGED OUT, because the cookie is withheld even on a top-level GET navigation.');
+	}
+	return want;
+}
+const SESSION_COOKIE_SAMESITE = resolveSessionSameSite(process.env.SESSION_COOKIE_SAMESITE, SESSION_COOKIE_SECURE);
+
 // Shared between Express and Socket.IO so connection upgrades inherit the
 // session object. socket.io v4's engine.use() runs middleware on the
 // underlying HTTP request before the WebSocket upgrade completes — that
@@ -3252,39 +3316,58 @@ const sessionMiddleware = session({
 	cookie: {
 		maxAge: 24 * 60 * 60 * 1000,
 		httpOnly: true,
-		secure: process.env.NODE_ENV === "production",
-		// "none" in production so the cookie survives the cross-origin login
-		// from the driver-mobile-view (requires secure=true, which is set above
-		// when NODE_ENV=production). "lax" in dev because secure=false would
-		// reject "none" cookies.
+		secure: SESSION_COOKIE_SECURE,
+		// SameSite decides whether a browser attaches this cookie to a request
+		// some OTHER site made. It is therefore the whole CSRF question, and it
+		// closes the class at the cookie instead of route by route.
 		//
-		// ⚠️ THIS LINE IS WHAT MAKES CSRF POSSIBLE AT ALL, AND THE CLIENT IT WAS
-		// ADDED FOR MAY NO LONGER EXIST. SameSite=None is why a browser attaches
-		// this cookie to a POST from any site on the internet; there is no CSRF
-		// token anywhere in this app, so it is the only thing between an
-		// auto-submitting form and a settlement close (see crossSiteGuard).
-		//
-		// Investigated 2026-08-09, NOT changed here because it is a one-line
-		// change with a fleet-wide blast radius and belongs in its own deploy:
-		//   - It was added 2026-05-17 (commit 4f19807) for a driver-mobile-view
-		//     Next.js prototype whose ONLY allowed origins are the defaults
-		//     https://localhost:3002 and the LAN address https://192.168.8.106:3002.
+		// Production ran "none" from 2026-05-17 (commit 4f19807), which is what
+		// made every finding in PR #253 reachable: None tells the browser to
+		// attach connect.sid to a POST from any site on the internet, and there
+		// is no CSRF token anywhere in this app. Tightened to "lax" 2026-08-09
+		// after re-verifying the premise three independent ways:
 		//   - DRIVER_MOBILE_ORIGINS is not in .env.example, not in the developer
-		//     .env, and — checked read-only on the VPS — NOT SET IN PRODUCTION. So
-		//     production CORS allowlists two dev addresses no production browser
-		//     is ever on, i.e. there is no cross-origin browser client today.
-		//   - drivers.logisx.com / investors.logisx.com are static marketing sites
-		//     that LINK to app.logisx.com. Those are top-level GET navigations,
-		//     which "lax" still carries — and they are same-site anyway.
-		// RECOMMENDATION: tighten to "lax" (a strictly stronger fix than any
-		// per-route guard, because it removes the cookie rather than filtering the
-		// request), and delete the CORS allowlist with it. ⚠️ Verify FIRST that no
-		// live client is genuinely cross-origin — resurrecting the driver-mobile
-		// app on its own hostname would need this back, and it fails as a silent
-		// "logged out on every request" rather than an error. Note "lax" would
-		// still not stop a same-SITE attacker (an XSS on a sibling subdomain), so
-		// it replaces neither the guards above nor a real token.
-		sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+		//     .env, and NOT SET IN PRODUCTION — checked read-only on the VPS
+		//     against the RUNNING PROCESS environment (/proc/<pid>/environ) of
+		//     both the logistics-app and logisx-staging pm2 processes, and
+		//     against every other process on the box. Nothing on the machine
+		//     sets it. (Checking the .env file alone would have missed a pm2
+		//     ecosystem injection, which is why the process was checked too.)
+		//   - The driver-mobile-view Next.js prototype it was added for does not
+		//     exist in this repo, so its two default origins — https://localhost:3002
+		//     and the LAN address https://192.168.8.106:3002 — are addresses no
+		//     production browser is ever on.
+		//   - The SPA, the driver app and all three public surfaces (/apply,
+		//     /invest, /track/:loadId) are served BY THIS SERVER AT THIS ORIGIN
+		//     and call relative /api/... URLs, so none of them is a cross-site
+		//     request and none needs credentials:"include".
+		//
+		// WHY "lax" AND NOT "strict": lax still carries the cookie on a
+		// top-level cross-site GET navigation, and that case must keep working —
+		// a link in an onboarding or outreach email, a bookmark, a QR code, or a
+		// redirect landing on /track/:loadId has to arrive logged in. Strict
+		// withholds the cookie there and would strand all of them at the login
+		// page. What lax drops is exactly the attack surface: cross-site POST,
+		// cross-origin fetch/XHR, and every subresource load (<img src>,
+		// <iframe>).
+		//
+		// ⚠️ TWO THINGS "lax" STILL DOES NOT STOP, both load-bearing:
+		//   (a) a same-SITE attacker — an XSS or takeover on a sibling
+		//       logisx.com subdomain is same-site, so the cookie still rides.
+		//   (b) a top-level GET navigation to a route that WRITES. Lax carries
+		//       the cookie there by design. That is why GET /api/admin/ratecon-
+		//       reconcile no longer alerts or sends mail on a GET (see it), and
+		//       why the crossSiteGuard mounts stay. Only a per-session token
+		//       closes (a).
+		//
+		// The override defaults SAFE (unset = "lax"). It exists because getting
+		// this wrong fails as "logged out on every request" — a total outage,
+		// not a degradation — and it is the one-line, no-deploy way back (set
+		// it, pm2 restart) as well as the documented path if the driver-mobile
+		// client is ever resurrected on its own hostname. "none" must be asked
+		// for explicitly, is refused unless the cookie is also Secure, and warns
+		// loudly at boot. See resolveSessionSameSite() above.
+		sameSite: SESSION_COOKIE_SAMESITE,
 	},
 });
 app.use(sessionMiddleware);
@@ -4841,6 +4924,164 @@ function requireRole(...roles) {
 		next();
 	};
 }
+
+// ⚠️ THESE ARE `const`, SO THEY MUST BE DEFINED ABOVE EVERY ROUTE THAT MOUNTS
+// THEM. They sit here, immediately after requireRole, for that reason and not
+// for tidiness: they used to live ~6,000 lines further down, beside the
+// fuel-gallons routes, which made them reachable only by routes declared after
+// that point. requireRole is a hoisted function declaration and works anywhere;
+// these are not, so mounting one on an earlier route threw
+// "Cannot access 'refuseCrossOrigin' before initialization" AT BOOT — the whole
+// app down, not one route. Hit while adding the guard to
+// GET /api/admin/ratecon-reconcile (~line 8900). Defining them beside
+// requireRole makes "you may mount this wherever you may mount requireRole"
+// true by construction. scripts/test-csrf-guard.js lifts this block by the
+// `function originIsSelf(` / `const refuseCrossOrigin =` markers, so it follows
+// the block wherever it lives — but keep those two lines intact.
+//
+// A GET that SPENDS is not the same animal as a GET that reads, and the usual
+// "a read verb needs no CSRF defence" reasoning does not cover it.
+//
+// Session cookies are SameSite=Lax as of 2026-08-09 (they were None+Secure when
+// this guard was written), there is no CSRF token in this app, and
+// GET /api/admin/fuel-gallons-recovery is a *simple* request. Lax now kills the
+// `<img src="…/fuel-gallons-recovery?limit=40">` shape this paragraph was
+// written about — a subresource load is not a top-level navigation, so the
+// cookie no longer rides it. The guard is kept, and is still doing work: Lax
+// does NOT withhold the cookie on a top-level cross-site GET *navigation*, so
+// one link or redirect a logged-in Super Admin follows still fires up to 40
+// billed Gemini vision calls with their cookie attached. CORS hides the
+// response, not the effect. That matters more
+// than the cash: GEMINI_API_KEY is shared across Alchemy projects and rotated in
+// one place, and an exhausted key has already taken rate-con ingestion down once
+// (2026-08-05). A cross-site spend endpoint on that key is an outage lever.
+//
+// The adjacent fuel-events GET is deliberately NOT given this guard: its dry run
+// is ~140 ms of local CPU, so "a GET that cannot write is harmless" is true
+// there. It is the cost, not the verb, that makes the difference.
+//
+// ── 2026-08-09: the same machinery now also carries a MONEY case. ────────────
+// POST /api/periods/:period/finalize reads NO request body, so an
+// auto-submitting cross-site form on any page a Super Admin opens closed a
+// settlement month FLEET-WIDE. Reproduced end to end against unpatched code:
+// 200, a period_locks row created, finalized_by set to the victim admin, and
+// GET /api/periods then reporting the month as finalized. That is a strictly
+// worse outcome than a billed API call, which is why the money routes get the
+// tighter of the two variants below.
+//
+// ⚠️ THE SIBLING ROUTES ARE SAFE BY ACCIDENT, NOT BY DESIGN. POST …/reopen,
+// POST /api/investor/payouts/:id/status and PUT …/adjust all demand a body
+// field, and a cross-site form CAN post fields — what actually stops them is
+// that express.json() is the ONLY body parser mounted, so a form-encoded or
+// text/plain body leaves req.body empty, and the application/json content type
+// that would parse cannot be set cross-site without a preflight the CORS
+// allowlist refuses. Measured: the identical cross-site request with
+// Content-Type: application/json reopened a finalized month. So the protection
+// is an invariant two unrelated lines away — mounting express.urlencoded()
+// (already warned about beside the fuel-gallons apply route) or adding one
+// production origin to DRIVER_MOBILE_ORIGINS republishes all three. They are
+// guarded here so the invariant stops being load-bearing.
+//
+// TWO HEADERS, TWO ERAS, AND BOTH FAIL OPEN WHEN ABSENT:
+//
+//   1. Sec-Fetch-Site is authoritative and needs no knowledge of our own origin
+//      — the browser already computed the relationship and a page cannot forge
+//      it. Chrome/Edge 76+, Firefox 90+, Safari 16.4+.
+//   2. Origin is the FALLBACK for browsers that predate (1) — which is exactly
+//      Safari before 16.4 (March 2023), still the residual gap on old iPads
+//      that cannot update. Origin has been sent on every cross-origin
+//      POST/PUT/DELETE since ~2016, so it covers precisely what (1) misses. It
+//      also catches Origin: null — a sandboxed iframe or a data: URL — which is
+//      not our origin and must not be treated as one.
+//
+// Absence of BOTH means the caller is not a browser: curl, test-suite.js, the
+// n8n webhooks, the Linxup push receiver. Allowed, deliberately — requiring a
+// header would break every scripted caller to stop an attack a scripted caller
+// cannot mount, since the entire attack is "a browser attaches the victim cookie
+// for you".
+//
+// ⚠️ WHAT THIS IS AND IS NOT. It is an Origin/Sec-Fetch check, not a CSRF
+// token, and it must not be written up as one. It does NOT stop:
+//   (a) a same-SITE attacker. refuseCrossSite tolerates Sec-Fetch-Site:
+//       same-site, so an XSS or takeover on a sibling logisx.com subdomain still
+//       reaches the cost routes. That is why the money routes use
+//       refuseCrossOrigin instead — and why even that is not a complete answer,
+//       because SameSite=Lax would not stop a same-site attacker either. Only a
+//       per-session token does.
+//   (b) a browser that sends neither header. There are none current, and an
+//       attacker cannot choose the victim browser — residual risk, not a bypass.
+//   (c) anything holding a genuinely stolen session. No CSRF control ever does.
+//
+// The structural fix is the COOKIE, not the route, and it has since been made:
+// the session cookie went SameSite=None -> Lax on 2026-08-09, which is what
+// actually closes the class (it removes the cookie instead of filtering the
+// request). See the note beside sessionMiddleware.
+//
+// These guards are NOT redundant after that change, for three reasons:
+//   1. Lax still carries the cookie on a top-level cross-site GET NAVIGATION.
+//      Every mount below that is a GET — the fuel-gallons pair — is defending
+//      exactly that, and it is the only thing defending it.
+//   2. Lax does not stop a same-SITE attacker, per (a) above.
+//   3. SESSION_COOKIE_SAMESITE can be set back to "none" in one env var, and
+//      the route guards are what keep the blast radius bounded if it ever is
+//      (e.g. to resurrect a cross-origin client). Defence that survives its own
+//      rollback is the point.
+
+// Origin equality is judged on HOST, never on scheme. Behind nginx the scheme
+// the browser used and the scheme Express reconstructs come from proxy headers,
+// and a mismatch there would refuse every same-origin write — an outage far
+// worse than the scheme-downgrade CSRF a strict compare would catch. req.hostname
+// is consulted alongside the raw Host header for the same reason: a proxy that
+// rewrites the port must not turn this into a 403 storm. Neither header is
+// settable by a cross-site page (X-Forwarded-Host is not a CORS-simple header,
+// so setting it costs a preflight the allowlist refuses).
+function originIsSelf(req, origin) {
+	let u;
+	try { u = new URL(origin); } catch { return false; }  // "null" lands here
+	const host = String(req.get("Host") || "").toLowerCase();
+	if (host && u.host.toLowerCase() === host) return true;
+	const name = String(req.hostname || "").toLowerCase();
+	return Boolean(name) && u.hostname.toLowerCase() === name;
+}
+
+// `tolerate` is the LOOSEST Sec-Fetch-Site value still accepted:
+//   "same-site"   — cost guard. A sibling subdomain is allowed through.
+//   "same-origin" — money guard. Only this exact origin is allowed.
+// The Origin fallback is same-ORIGIN in both modes, deliberately: judging
+// "same site" from an Origin header needs a public-suffix list, and the fallback
+// only fires for pre-16.4 Safari, where being stricter is the safe direction.
+function crossSiteGuard(tolerate) {
+	const allowed = tolerate === "same-site"
+		? new Set(["same-origin", "same-site", "none"])
+		: new Set(["same-origin", "none"]);
+	const refuse = (res) =>
+		res.status(403).json({ error: "Cross-site request refused", code: "CROSS_SITE_REFUSED" });
+	return function crossSiteGuardMiddleware(req, res, next) {
+		const origin = req.get("Origin");
+		// The CORS allowlist wins FIRST, and it has to: the driver-mobile-view is
+		// genuinely cross-site, so the Sec-Fetch-Site leg — which it cannot
+		// influence — would refuse the one cross-origin browser client this server
+		// actually has. A browser cannot forge Origin, and a non-browser is allowed
+		// anyway by the fall-through below, so trusting the allowlist here is
+		// exactly as safe as the CORS middleware that already trusts it.
+		if (origin && DRIVER_MOBILE_ORIGINS.includes(origin)) return next();
+		const site = req.get("Sec-Fetch-Site");
+		if (site) return allowed.has(site) ? next() : refuse(res);
+		// No Sec-Fetch-Site. An Origin still means a browser (or something claiming
+		// to be one), and it has to be ours. Origin: null fails this by construction.
+		if (origin && !originIsSelf(req, origin)) return refuse(res);
+		next();
+	};
+}
+
+// Cost guard — the original tolerance, plus the Origin fallback. Two call sites:
+// the fuel-gallons GET and apply.
+const refuseCrossSite = crossSiteGuard("same-site");
+// Money guard — same machinery, one notch tighter. Mounted on the four routes
+// that close a settlement month or move a payout. Their only legitimate browser
+// caller is the SPA this server itself serves, so demanding same-origin costs
+// nothing and removes the sibling-subdomain case above.
+const refuseCrossOrigin = crossSiteGuard("same-origin");
 
 // Rate cons state the BROKER RATE, so they are dispatch/ownership material, not
 // driver material — this app strips financial columns from the Driver role
@@ -10219,19 +10460,59 @@ if (RATECON_RECONCILE_ENABLED) {
 	console.log(`[ratecon-reconcile] enabled — every 6h over the last ${RATECON_RECONCILE_DAYS} days of "${RATECON_RECONCILE_MAILBOX}"`);
 }
 
-// GET /api/admin/ratecon-reconcile — run the sweep on demand. Super Admin only.
-// ?dryRun=true reports gaps WITHOUT sending mail or recording an alert, so the
-// check can be run freely without burning the once-per-load alert.
-app.get("/api/admin/ratecon-reconcile", requireRole("Super Admin"), async (req, res) => {
+// Run the sweep on demand. Super Admin only.
+//   GET  /api/admin/ratecon-reconcile      REPORT gaps. Structurally read-only.
+//   POST /api/admin/ratecon-reconcile/run  Report AND alert (DB row + email).
+//
+// Split 2026-08-09. This was ONE GET whose `?dryRun` chose between "report" and
+// "insert an alert row and send mail" — the side effect selected by a query
+// parameter on a safe verb, and the DEFAULT was the writing one.
+//
+// Tightening the session cookie to SameSite=Lax does not reach this. Lax
+// deliberately still attaches the cookie to a top-level cross-site GET
+// NAVIGATION, so a single link a Super Admin follows — or a redirect they land
+// on — ran the IMAP sweep, wrote ratecon_reconcile_alerts rows and mailed out,
+// under their session. (The `<img src>` shape IS dead under Lax; the navigation
+// one is not.) It is the one route in #253's table the cookie fix cannot cover.
+//
+// ⚠️ THE HARM IS NOT NOISE, IT IS THE OPPOSITE. Alerts are once-per-load-id by
+// design — repeating a gap daily is how the previous "needs a manual check"
+// mails came to be ignored — so firing one early CONSUMES it, and the next
+// genuine ingestion gap for that load is then SILENT. This module exists
+// precisely to catch the failure modes that produce no other signal, so an
+// attacker-triggered run degrades the detector rather than merely spamming it.
+//
+// Shaped after the two pairs already in this file rather than inventing a third
+// convention: GET /api/admin/fuel-events + POST …/run (whose comment records
+// this same reasoning), and GET /api/admin/fuel-gallons-recovery + POST …/apply.
+// The GET is read-only STRUCTURALLY — `alert` is hardcoded false and no query
+// parameter reaches it — which is the gallons-recovery discipline and is
+// stronger than trusting a `?dryRun` default. It also sidesteps the qs-parser
+// trap the fuel-events comment names: a duplicated `?dryRun=true&dryRun=true`
+// parses to the array-ish "true,true", which failed OPEN into the live write.
+// `?dryRun=true` is still accepted, as a no-op, so existing runbooks and
+// bookmarks keep working and keep meaning exactly what they said.
+//
+// Both carry refuseCrossOrigin, the tighter tier, because it is free here: this
+// pair has NO browser caller at all (there is no admin screen — it is run with
+// curl, confirmed by grepping client/, scripts/ and test-suite.js), so demanding
+// same-origin costs nothing and drops the sibling-subdomain case. A Super Admin
+// pasting the URL into the address bar or using a bookmark sends
+// `Sec-Fetch-Site: none`, which both tiers allow, so that is unaffected. And the
+// GET is not merely "a GET that cannot write": it still runs a full IMAP sweep
+// of the production mailbox, so it sits in the cost class that earned
+// fuel-gallons its guard, not the ~140 ms local-CPU class that let fuel-events
+// go without one.
+async function rateConReconcileHttp(req, res, alert) {
 	try {
 		if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
 			return res.status(503).json({ error: "GMAIL_USER / GMAIL_APP_PASSWORD not configured" });
 		}
-		const dryRun = /^(true|1|yes|on)$/i.test(String(req.query.dryRun ?? "").trim());
-		const r = await reconcileRateCons({ alert: !dryRun });
+		const r = await reconcileRateCons({ alert });
 		res.json({
 			enabled: RATECON_RECONCILE_ENABLED,
-			dryRun,
+			alerted: alert,                         // what this call actually did
+			dryRun: !alert,                         // kept so old callers read the same shape
 			windowDays: RATECON_RECONCILE_DAYS,
 			mailbox: RATECON_RECONCILE_MAILBOX,
 			scanned: r.scanned,                     // inbound only
@@ -10245,7 +10526,11 @@ app.get("/api/admin/ratecon-reconcile", requireRole("Super Admin"), async (req, 
 		console.error("ratecon-reconcile error:", error.message);
 		res.status(500).json({ error: error.message });
 	}
-});
+}
+app.get("/api/admin/ratecon-reconcile", requireRole("Super Admin"), refuseCrossOrigin, (req, res) =>
+	rateConReconcileHttp(req, res, false));
+app.post("/api/admin/ratecon-reconcile/run", requireRole("Super Admin"), refuseCrossOrigin, (req, res) =>
+	rateConReconcileHttp(req, res, true));
 
 // ============================================================
 // Fuel events — detect refuels, then match them to receipts
@@ -11528,10 +11813,12 @@ const fuelEventsLimiter = rateLimit({
 // The split is a safety property, not REST tidiness. Three things converge on
 // the old single GET: `writeReceipts` defaulted to true, so a Super Admin merely
 // opening the URL with no query string ran a full backfill against `expenses` on
-// a box where the feature was supposed to be dormant; the session cookie is
+// a box where the feature was supposed to be dormant; the session cookie was
 // SameSite=None in production with no CSRF token, so any page an admin visits
 // could fire that GET via an <img> tag and land the write (CORS hides the
-// response, not the effect); and `?dryRun=true` was decided by
+// response, not the effect) — that specific shape died when the cookie went Lax
+// on 2026-08-09, but a top-level cross-site GET navigation still carries the
+// cookie, so the verb split is still what makes it safe; and `?dryRun=true` was decided by
 // `String(req.query.dryRun)`, which the qs parser turns into "true,true" for a
 // duplicated param — failing OPEN into the live write.
 //
@@ -11721,133 +12008,6 @@ let fuelGallonsRunning = false;
 // that guards are what you discover are wrong after deploy, and this one writes to
 // the table investor settlements are computed from.
 const FUEL_GALLONS_RECOVERY_ENABLED = String(process.env.FUEL_GALLONS_RECOVERY_ENABLED || "").toLowerCase() === "true";
-
-// A GET that SPENDS is not the same animal as a GET that reads, and the usual
-// "a read verb needs no CSRF defence" reasoning does not cover it.
-//
-// Session cookies here are SameSite=None + Secure, there is no CSRF token in
-// this app, and GET /api/admin/fuel-gallons-recovery is a *simple* request — so
-// `<img src="…/fuel-gallons-recovery?limit=40">` on any page a logged-in Super
-// Admin happens to open fires up to 40 billed Gemini vision calls with their
-// cookie attached. CORS hides the response, not the effect. That matters more
-// than the cash: GEMINI_API_KEY is shared across Alchemy projects and rotated in
-// one place, and an exhausted key has already taken rate-con ingestion down once
-// (2026-08-05). A cross-site spend endpoint on that key is an outage lever.
-//
-// The adjacent fuel-events GET is deliberately NOT given this guard: its dry run
-// is ~140 ms of local CPU, so "a GET that cannot write is harmless" is true
-// there. It is the cost, not the verb, that makes the difference.
-//
-// ── 2026-08-09: the same machinery now also carries a MONEY case. ────────────
-// POST /api/periods/:period/finalize reads NO request body, so an
-// auto-submitting cross-site form on any page a Super Admin opens closed a
-// settlement month FLEET-WIDE. Reproduced end to end against unpatched code:
-// 200, a period_locks row created, finalized_by set to the victim admin, and
-// GET /api/periods then reporting the month as finalized. That is a strictly
-// worse outcome than a billed API call, which is why the money routes get the
-// tighter of the two variants below.
-//
-// ⚠️ THE SIBLING ROUTES ARE SAFE BY ACCIDENT, NOT BY DESIGN. POST …/reopen,
-// POST /api/investor/payouts/:id/status and PUT …/adjust all demand a body
-// field, and a cross-site form CAN post fields — what actually stops them is
-// that express.json() is the ONLY body parser mounted, so a form-encoded or
-// text/plain body leaves req.body empty, and the application/json content type
-// that would parse cannot be set cross-site without a preflight the CORS
-// allowlist refuses. Measured: the identical cross-site request with
-// Content-Type: application/json reopened a finalized month. So the protection
-// is an invariant two unrelated lines away — mounting express.urlencoded()
-// (already warned about beside the fuel-gallons apply route) or adding one
-// production origin to DRIVER_MOBILE_ORIGINS republishes all three. They are
-// guarded here so the invariant stops being load-bearing.
-//
-// TWO HEADERS, TWO ERAS, AND BOTH FAIL OPEN WHEN ABSENT:
-//
-//   1. Sec-Fetch-Site is authoritative and needs no knowledge of our own origin
-//      — the browser already computed the relationship and a page cannot forge
-//      it. Chrome/Edge 76+, Firefox 90+, Safari 16.4+.
-//   2. Origin is the FALLBACK for browsers that predate (1) — which is exactly
-//      Safari before 16.4 (March 2023), still the residual gap on old iPads
-//      that cannot update. Origin has been sent on every cross-origin
-//      POST/PUT/DELETE since ~2016, so it covers precisely what (1) misses. It
-//      also catches Origin: null — a sandboxed iframe or a data: URL — which is
-//      not our origin and must not be treated as one.
-//
-// Absence of BOTH means the caller is not a browser: curl, test-suite.js, the
-// n8n webhooks, the Linxup push receiver. Allowed, deliberately — requiring a
-// header would break every scripted caller to stop an attack a scripted caller
-// cannot mount, since the entire attack is "a browser attaches the victim cookie
-// for you".
-//
-// ⚠️ WHAT THIS IS AND IS NOT. It is an Origin/Sec-Fetch check, not a CSRF
-// token, and it must not be written up as one. It does NOT stop:
-//   (a) a same-SITE attacker. refuseCrossSite tolerates Sec-Fetch-Site:
-//       same-site, so an XSS or takeover on a sibling logisx.com subdomain still
-//       reaches the cost routes. That is why the money routes use
-//       refuseCrossOrigin instead — and why even that is not a complete answer,
-//       because SameSite=Lax would not stop a same-site attacker either. Only a
-//       per-session token does.
-//   (b) a browser that sends neither header. There are none current, and an
-//       attacker cannot choose the victim browser — residual risk, not a bypass.
-//   (c) anything holding a genuinely stolen session. No CSRF control ever does.
-//
-// The structural fix is the COOKIE, not the route: SameSite=None is what makes
-// every one of these reachable at all. See the note beside sessionMiddleware.
-
-// Origin equality is judged on HOST, never on scheme. Behind nginx the scheme
-// the browser used and the scheme Express reconstructs come from proxy headers,
-// and a mismatch there would refuse every same-origin write — an outage far
-// worse than the scheme-downgrade CSRF a strict compare would catch. req.hostname
-// is consulted alongside the raw Host header for the same reason: a proxy that
-// rewrites the port must not turn this into a 403 storm. Neither header is
-// settable by a cross-site page (X-Forwarded-Host is not a CORS-simple header,
-// so setting it costs a preflight the allowlist refuses).
-function originIsSelf(req, origin) {
-	let u;
-	try { u = new URL(origin); } catch { return false; }  // "null" lands here
-	const host = String(req.get("Host") || "").toLowerCase();
-	if (host && u.host.toLowerCase() === host) return true;
-	const name = String(req.hostname || "").toLowerCase();
-	return Boolean(name) && u.hostname.toLowerCase() === name;
-}
-
-// `tolerate` is the LOOSEST Sec-Fetch-Site value still accepted:
-//   "same-site"   — cost guard. A sibling subdomain is allowed through.
-//   "same-origin" — money guard. Only this exact origin is allowed.
-// The Origin fallback is same-ORIGIN in both modes, deliberately: judging
-// "same site" from an Origin header needs a public-suffix list, and the fallback
-// only fires for pre-16.4 Safari, where being stricter is the safe direction.
-function crossSiteGuard(tolerate) {
-	const allowed = tolerate === "same-site"
-		? new Set(["same-origin", "same-site", "none"])
-		: new Set(["same-origin", "none"]);
-	const refuse = (res) =>
-		res.status(403).json({ error: "Cross-site request refused", code: "CROSS_SITE_REFUSED" });
-	return function crossSiteGuardMiddleware(req, res, next) {
-		const origin = req.get("Origin");
-		// The CORS allowlist wins FIRST, and it has to: the driver-mobile-view is
-		// genuinely cross-site, so the Sec-Fetch-Site leg — which it cannot
-		// influence — would refuse the one cross-origin browser client this server
-		// actually has. A browser cannot forge Origin, and a non-browser is allowed
-		// anyway by the fall-through below, so trusting the allowlist here is
-		// exactly as safe as the CORS middleware that already trusts it.
-		if (origin && DRIVER_MOBILE_ORIGINS.includes(origin)) return next();
-		const site = req.get("Sec-Fetch-Site");
-		if (site) return allowed.has(site) ? next() : refuse(res);
-		// No Sec-Fetch-Site. An Origin still means a browser (or something claiming
-		// to be one), and it has to be ours. Origin: null fails this by construction.
-		if (origin && !originIsSelf(req, origin)) return refuse(res);
-		next();
-	};
-}
-
-// Cost guard — the original tolerance, plus the Origin fallback. Two call sites:
-// the fuel-gallons GET and apply.
-const refuseCrossSite = crossSiteGuard("same-site");
-// Money guard — same machinery, one notch tighter. Mounted on the four routes
-// that close a settlement month or move a payout. Their only legitimate browser
-// caller is the SPA this server itself serves, so demanding same-origin costs
-// nothing and removes the sibling-subdomain case above.
-const refuseCrossOrigin = crossSiteGuard("same-origin");
 
 // The plausibility band, rebuilt per run from the fleet's own priced receipts so
 // it tracks the diesel market with nobody maintaining a constant. Uses `date`,
@@ -24328,10 +24488,13 @@ app.get("/api/loads/completed/export", requireRole("Super Admin"), exportLimiter
 		res.setHeader("Content-Type", "text/csv");
 		res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 		// Matches the other file-serving routes (truck docs, shared driver files).
-		// no-store matters here specifically because the session cookie is
-		// sameSite:"none" in production, so this URL is reachable on a cross-site
-		// navigation — a whole-fleet revenue CSV should never sit in a shared or
-		// browser cache afterwards.
+		// no-store matters here specifically because this URL is reachable on a
+		// cross-site NAVIGATION — a whole-fleet revenue CSV should never sit in a
+		// shared or browser cache afterwards. That was written when the session
+		// cookie was sameSite:"none"; it went "lax" on 2026-08-09 and the reason
+		// SURVIVES unchanged, because lax withholds the cookie from cross-site
+		// POSTs and subresources but still sends it on a top-level GET
+		// navigation, which is exactly the shape that reaches this route.
 		res.setHeader("X-Content-Type-Options", "nosniff");
 		res.setHeader("Cache-Control", "no-store");
 		res.send(csvRows(out));
