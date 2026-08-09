@@ -23233,9 +23233,12 @@ async function extractReceiptText(imageBuffer) {
 // Rate-con drag-and-drop → load creation
 // ============================================================
 // Server-side replica of the n8n "Dispatch v2 (Fixed)" ingestion path (see
-// Dispatch-v2-fixed.json — Validate Load ID · Check Existing Load · RATE
-// UPDATE · JOB DETAILS ENTRY · Google Maps Distance · Calculate Rate Per Mile
-// · Google Sheets2). Today a load can enter LogisX ONLY via a rate-con email
+// Dispatch-v2-fixed.json — Validate Load ID · Critical Fields Complete? ·
+// Lookup Existing Row · Row Already Has Payment? · JOB DETAILS ENTRY).
+// ⚠️ Node names drift; the live workflow over the API is the source of truth.
+// This list previously named "Check Existing Load", "RATE UPDATE", "Google
+// Maps Distance", "Calculate Rate Per Mile" and "Google Sheets2" — no nodes by
+// those names exist. Today a load can enter LogisX ONLY via a rate-con email
 // landing in info@logisx.com; when a broker sends the details over WhatsApp
 // instead there is zero signal and the dispatcher retypes the whole load.
 // Dropping the PDF here produces the same rows the email pipeline writes.
@@ -23422,11 +23425,13 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			});
 		}
 
-		// ---- 3) Distance Matrix → rate per mile (n8n "Google Maps Distance"
-		// → "Calculate Rate Per Mile"). Never fatal: a missing key, a quota
-		// error, a timeout or ZERO_RESULTS all arrive at calculateRatePerMile()
-		// as a non-OK element and take the node's own zeros / "N/A" branch. A
-		// Maps outage must not stop a dispatcher from booking a load. ----
+		// ---- 3) Distance Matrix → rate per mile (ported from the n8n nodes
+		// "Get Distance Matrix" → "Calculate RPM + Details", both since deleted
+		// as unreachable, so this is the only Distance Matrix caller left).
+		// Never fatal: a missing key, a quota error, a timeout or ZERO_RESULTS
+		// all arrive at calculateRatePerMile() as a non-OK element and take the
+		// node's own zeros / "N/A" branch. A Maps outage must not stop a
+		// dispatcher from booking a load. ----
 		const pickupAddress = String(fields["Pickup Address"] || "").trim();
 		const dropoffAddress = String(fields["Drop-off Address"] || "").trim();
 		let distanceMatrix = null;
