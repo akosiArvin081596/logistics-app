@@ -22319,6 +22319,66 @@ function lockedAmong(periods) {
 	return [...new Set((periods || []).filter((p) => LOCKABLE_MONTH_KEY.test(p) && isLocked(p)))].sort();
 }
 
+// ── Which months may be WRITTEN into period_locks ────────────────────────────
+// LOCKABLE_MONTH_KEY above answers "can isLocked() be asked about this key?".
+// This answers the different question "may this key be CREATED as a lock?", and
+// it is deliberately NARROWER: `1900-05`, `0999-13` and `9999-99` all satisfy
+// /^\d{4}-\d{2}$/, so before this the finalize route admitted every one of them
+// and period_locks — which has no CHECK on `period` — kept the junk row that
+// every guard in this file then consults.
+//
+// ⚠️ THE DIRECTION IS THE WHOLE POINT, AND IT IS THE OPPOSITE OF PR #249's.
+// #249 tried tightening the CONSUMER (a 1970–2999 bound inside the month-key
+// producers, which lockedAmong then had to match) and that was a FAIL-OPEN:
+// when the reader admits less than the lock table can hold, a genuinely locked
+// month is silently discarded, `locked.length` is 0, and a refusal becomes a
+// permit — measured at 128 REFUSE→permit flips. Tightening the WRITER cannot do
+// that: it can only ever REMOVE rows from period_locks, never HIDE one that
+// exists, and a hidden lock is what turns a refusal into a permit.
+//
+// ⚠️ Note precisely what that does and does not claim. A lock row that is never
+// created IS a refusal that never happens, so this is not free — it is safe only
+// because the months it removes are not settlement months at all. The invariant
+// below is what keeps the *reader* whole:
+//
+//         isPlausibleLockPeriod(p)  ⟹  LOCKABLE_MONTH_KEY.test(p)
+//
+// i.e. the writer's set is a strict SUBSET of the reader's. That is enforced
+// STRUCTURALLY by the first line of the function — it delegates to the very
+// same regex object rather than restating the shape — so the two cannot drift
+// apart even if the bounds below are edited. Do NOT reimplement the shape here,
+// and do NOT copy this bound back into lockedAmong() or the month-key producers;
+// that is exactly the fail-open #249 reverted.
+//
+// The bound is a typo/garbage filter, not a business rule, so it is deliberately
+// enormous: production's oldest lock is 2025-05 and the carrier did not exist in
+// 1999. Fixed rather than clock- or data-derived on purpose — a window learned
+// from the rows present goes blind exactly when the data is wrong, which is the
+// case this exists for (same reasoning as the LOAD_NUM_RE note in
+// lib/ratecon-reconcile.js). Widen it before 2100 and nothing else changes.
+//
+// ⚠️ WIDENING IS SAFE. NARROWING IS NOT — DO NOT EVER NARROW THIS.
+// Not to a "business" range (2020-2030), not to trim the tails. Two reasons, and
+// the second has no recovery:
+//   1. A month that becomes implausible stops being lockable, so any guard whose
+//      only candidate is that month flips refuse → permit. That is #249's bug
+//      arriving through the back door.
+//   2. It is a ONE-WAY DOOR. Reopen deliberately skips this bound when a lock row
+//      already exists (see the route), but finalize does not — so narrowing past a
+//      month that is already locked leaves it reopenable and never re-lockable,
+//      with no API able to close it again.
+// The tails cost nothing: nobody types 2001-03 by accident, and the bound exists
+// to catch 1900-05 and 0999-13, both of which are far outside any range worth
+// arguing about.
+const LOCK_PERIOD_MIN_YEAR = 2000;
+const LOCK_PERIOD_MAX_YEAR = 2100;
+function isPlausibleLockPeriod(period) {
+	const p = String(period == null ? "" : period);
+	if (!LOCKABLE_MONTH_KEY.test(p)) return false;   // ⚠️ subset, structurally — see above
+	const y = Number(p.slice(0, 4)), m = Number(p.slice(5, 7));
+	return m >= 1 && m <= 12 && y >= LOCK_PERIOD_MIN_YEAR && y <= LOCK_PERIOD_MAX_YEAR;
+}
+
 // Compute per-driver FIFO queues from Job Tracking + load_responses.
 // Returns { [driverNameNorm]: [{ load_id, queue_position, accepted_at }, ...] }.
 // A "queued" load is one the driver has accepted (Sheet status === "Assigned")
@@ -34681,7 +34741,20 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 app.post("/api/periods/:period/finalize", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const period = String(req.params.period || "");
-		if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: "period must be YYYY-MM" });
+		// Validate at the SOURCE. This route is the only door through which a human
+		// creates a lock row, and period_locks has no CHECK on `period`, so anything
+		// admitted here becomes a permanent fact that every period guard consults.
+		// Two rungs, because they are different failures and deserve different words:
+		// a malformed key is a client bug, an out-of-range month is a typo.
+		if (!LOCKABLE_MONTH_KEY.test(period)) {
+			return res.status(400).json({ error: "period must be YYYY-MM", code: "PERIOD_KEY_INVALID" });
+		}
+		if (!isPlausibleLockPeriod(period)) {
+			return res.status(400).json({
+				error: `"${period}" is not a settlement month — months run 01-12 and years ${LOCK_PERIOD_MIN_YEAR}-${LOCK_PERIOD_MAX_YEAR}.`,
+				code: "PERIOD_OUT_OF_RANGE",
+			});
+		}
 		if (!PERIOD_FINALIZE_ENABLED) {
 			return res.status(503).json({ error: "Period close is not enabled on this server.", code: "FEATURE_DISABLED" });
 		}
@@ -34713,9 +34786,27 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), async (req
 app.post("/api/periods/:period/reopen", requireRole("Super Admin"), (req, res) => {
 	try {
 		const period = String(req.params.period || "");
-		if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: "period must be YYYY-MM" });
+		if (!LOCKABLE_MONTH_KEY.test(period)) {
+			return res.status(400).json({ error: "period must be YYYY-MM", code: "PERIOD_KEY_INVALID" });
+		}
 
 		const lock = db.prepare("SELECT * FROM period_locks WHERE period = ?").get(period);
+		// ⚠️ THE RANGE BOUND IS NOT APPLIED WHEN A LOCK ROW EXISTS, DELIBERATELY.
+		// Reopen is the REMEDY, and the finalize route was unbounded until this
+		// commit — so a database may already hold a `1900-05` row. Refusing to
+		// reopen it would strand the junk lock permanently: there is no other API
+		// that clears one, and the VPS has no sqlite3 binary, so the only way back
+		// would be hand-editing app.db. Validating a key we are about to DELETE the
+		// authority of is backwards; the bound belongs on creation, which is where
+		// it now is. Ordering matters — the lookup happens first, and the bound is
+		// only consulted when there is nothing to remedy. (Parameterized query, so
+		// an unvalidated string is safe to look up.)
+		if (!lock && !isPlausibleLockPeriod(period)) {
+			return res.status(400).json({
+				error: `"${period}" is not a settlement month — months run 01-12 and years ${LOCK_PERIOD_MIN_YEAR}-${LOCK_PERIOD_MAX_YEAR}.`,
+				code: "PERIOD_OUT_OF_RANGE",
+			});
+		}
 		if (!lock || lock.status !== "locked") {
 			return res.status(404).json({ error: `${periodLabel(period)} is not finalized.`, code: "NOT_FINALIZED" });
 		}
@@ -34793,7 +34884,21 @@ app.post("/api/periods/:period/reopen", requireRole("Super Admin"), (req, res) =
 // documented". Idempotent — re-running only touches rows with no stamp yet.
 async function finalizePeriods(periods, actor) {
 	const nowIso = new Date().toISOString();
-	const list = [...new Set(periods)].filter(Boolean);
+	// EVERY lock write that is not the baseline seed funnels through here — the
+	// finalize route AND the per-minute sweep — so this is the one place that can
+	// state "nothing implausible reaches period_locks" without depending on which
+	// caller it was. The route validates too and returns a proper 400; this is the
+	// backstop for the callers that have no response to fail, and for the next one.
+	//
+	// The sweep's own candidates are already filtered (periodsDueForClose), so in
+	// practice this fires only for a period reached some other way — which is
+	// abnormal enough to say out loud rather than drop silently.
+	const proposed = [...new Set(periods)].filter(Boolean);
+	const list = proposed.filter(isPlausibleLockPeriod);
+	const refused = proposed.filter((p) => !isPlausibleLockPeriod(p));
+	if (refused.length) {
+		console.warn(`[period-close] REFUSED to lock ${refused.length} implausible period key(s): ${refused.join(", ")} — not a settlement month, nothing written to period_locks`);
+	}
 	if (!list.length) return { stamped: 0, investors: 0, periods: [] };
 
 	const takeLock = db.prepare(
@@ -34921,7 +35026,17 @@ function periodsDueForClose() {
 		"SELECT DISTINCT period FROM investor_payouts WHERE period NOT IN (SELECT period FROM period_locks) ORDER BY period ASC"
 	).all()
 		.map((r) => r.period)
-		.filter((p) => p < cur && isPastGrace(p, graceDays));
+		// isPlausibleLockPeriod is the same predicate the finalize route enforces.
+		// Applied HERE as well as inside finalizePeriods so this leg of the sweep
+		// never proposes a junk key — otherwise a single unlockable row in
+		// investor_payouts stays "due" forever and warns once a minute, for good.
+		// ⚠️ This covers the `due` leg ONLY. The sweep's other input — the
+		// `unstamped` retry, which reads period_locks directly — carries its own
+		// copy of this filter for the same reason; see maybeCloseFinishedPeriods().
+		// investor_payouts.period is NOT independently validated: it is built from a
+		// Date cursor whose start comes from moneySheetDate() over the sheet, so one
+		// mistyped year in `Assigned Date` seeds real-shaped but absurd months.
+		.filter((p) => p < cur && isPastGrace(p, graceDays) && isPlausibleLockPeriod(p));
 }
 
 async function maybeCloseFinishedPeriods() {
@@ -34953,11 +35068,22 @@ async function maybeCloseFinishedPeriods() {
 		due = periodsDueForClose();
 		// Also retry the stamp for periods locked earlier whose snapshot never landed
 		// (step 2 failed on a previous pass — see finalizePeriod).
+		//
+		// ⚠️ FILTERED TOO, and this leg is the one that actually needs it. Unlike
+		// `due` (which reads investor_payouts), this reads period_locks itself — so
+		// it surfaces a junk row that a PRE-VALIDATION build already wrote, which is
+		// exactly the database state the reopen carve-out exists for. Unfiltered, such
+		// a row makes `work` permanently non-empty, finalizePeriods refuses it and
+		// stamps nothing, nothing changes, and the same row comes back on the next
+		// tick — a per-minute WARN loop, forever, burying every real close failure.
+		// The operator's remedy is POST /api/periods/:period/reopen, which flips the
+		// status and drops the row out of both this JOIN and periodsDueForClose's
+		// NOT IN.
 		const unstamped = db.prepare(
 			`SELECT DISTINCT p.period FROM investor_payouts p
 			   JOIN period_locks l ON l.period = p.period AND l.status = 'locked'
 			  WHERE COALESCE(p.finalized_at,'') = '' ORDER BY p.period ASC`
-		).all().map((r) => r.period);
+		).all().map((r) => r.period).filter(isPlausibleLockPeriod);
 
 		const work = [...new Set([...due, ...unstamped])];
 		if (!work.length) { periodCloseFailStreak = 0; return; }
@@ -34966,7 +35092,11 @@ async function maybeCloseFinishedPeriods() {
 		// One batched pass: locks are taken for every due period up front, then
 		// each investor is reconciled ONCE and stamped across all of them.
 		const result = await finalizePeriods(work, "system");
-		console.log(`[period-close] finalized ${work.join(", ")} — ${result.stamped} payout row(s) frozen across ${result.investors} investor(s)`);
+		// ⚠️ Report what was CLOSED (result.periods), not what was PROPOSED (work).
+		// finalizePeriods refuses implausible keys, so logging `work` would announce a
+		// close that never happened — the log line is the only place anyone looks when
+		// asking "did the month close?", and it must not be able to lie.
+		console.log(`[period-close] finalized ${result.periods.join(", ") || "(nothing)"} — ${result.stamped} payout row(s) frozen across ${result.investors} investor(s)`);
 
 		// Notify only for periods that actually crossed their window on this pass;
 		// `unstamped` retries of an already-announced month must not re-announce it.
@@ -35028,7 +35158,13 @@ if (PERIOD_FINALIZE_ENABLED) {
 			const cur = currentMonthKeyCT();
 			const historical = db.prepare("SELECT DISTINCT period FROM investor_payouts ORDER BY period ASC").all()
 				.map((r) => r.period)
-				.filter((p) => p < cur && isPastGrace(p, graceDays));
+				// The seed is the SECOND writer of period_locks (it INSERTs directly
+				// rather than going through finalizePeriods), so it needs the predicate
+				// in its own right. It is also the riskiest one: it takes whatever
+				// distinct periods investor_payouts happens to hold and locks the lot in
+				// a single pass, so one absurd month key there becomes a permanent lock
+				// row on the day the feature is first enabled.
+				.filter((p) => p < cur && isPastGrace(p, graceDays) && isPlausibleLockPeriod(p));
 			const ins = db.prepare("INSERT OR IGNORE INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', ?, 'baseline')");
 			const nowIso = new Date().toISOString();
 			db.transaction(() => { for (const p of historical) ins.run(p, nowIso); })();
