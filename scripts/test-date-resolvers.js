@@ -333,14 +333,22 @@ ok(/let pickup = moneySheetDate\(/.test(PICKUP_STMT), "all 3 money sites read th
 ok(!/let pickup = parseSheetDate\(/.test(SRC), "no money site still reads the pickup with the local strict parser");
 ok(!/const parseSheetDate = \(val\) => \{/.test(SRC),
 	"computeInvestorMonthlyEarnings' local parseSheetDate copy is DELETED, not merely unused");
-// One local copy survives, deliberately and out of scope: GET /api/investor/load-report
-// buckets by the ASSIGNED date with it, which is a separate defect of the same class
-// (it drops RFC 2822 rows). Pinning the count here is what stops it silently becoming
-// two again.
+// ⚠️ This pin was `1` until 2026-08-09 and now reads ZERO. One local copy used to
+// survive, deliberately out of scope: GET /api/investor/load-report bucketed by the
+// ASSIGNED date with it — a separate defect of the same class (it dropped RFC 2822
+// rows, hiding 105 production loads). PR #227 resolved that route through the shared
+// moneySheetDate() too, so the last copy is gone.
+//
+// Moving the pin DOWN is strictly stronger, and pinning it is still the point: any
+// reintroduced local copy — in load-report or anywhere else — now fails here rather
+// than becoming "two again" unnoticed. The companion assertion moved with it: instead
+// of proving the survivor was confined to load-report, it proves load-report resolves
+// through the shared resolver, so a revert of #227 fails this section rather than
+// silently satisfying a count of 1.
 const localParsers = (SRC.match(/\n\t*function parseSheetDate\(val\) \{/g) || []).length;
-eq(localParsers, 1, "exactly 1 local parseSheetDate survives (GET /api/investor/load-report, reported not fixed)");
-ok(/app\.get\("\/api\/investor\/load-report"[\s\S]{0,4000}?function parseSheetDate\(val\) \{/.test(SRC),
-	"…and the survivor is inside /api/investor/load-report, not a money site");
+eq(localParsers, 0, "0 local parseSheetDate copies survive (load-report was the last; PR #227 resolved it)");
+ok(/app\.get\("\/api\/investor\/load-report"[\s\S]{0,6000}?const dt = dateCol \? moneySheetDate\(r\[dateCol\]\) : null;/.test(SRC),
+	"…and /api/investor/load-report buckets the ASSIGNED date via the shared moneySheetDate()");
 
 // The guard keeps its narrow read AND gains the wide one — union, not substitution.
 ok(/let pickup = jtParseSheetDate\(cols\.pickupDateCol \? row\[cols\.pickupDateCol\] : null\);/.test(WINDOW_SRC),
