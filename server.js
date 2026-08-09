@@ -3390,6 +3390,39 @@ async function runRateConGemini(base64) {
 	throw lastErr || new Error("pdf_extract_failed");
 }
 
+// Spend + memory ceiling on the SECOND Gemini pass in the route below. Separate
+// from pdfOcrLimiter on purpose: that limiter caps REQUESTS per IP, and neither
+// half of what needs capping here is per-IP. The retry is triggered by the
+// content of the caller's PDF, so it is not a rare path an attacker has to get
+// lucky to hit — it is one they choose.
+//   * window count — bounds the extra billed Gemini calls globally, across every
+//     caller, because the key is shared across Alchemy projects.
+//   * in-flight    — bounds peak memory: a retry means two ~14 MB base64 bodies
+//     plus their JSON copies alive at once, for up to ~93 s.
+// Both are advisory: exceeding either skips the upgrade attempt and ships the
+// first-pass fields, which is the pre-2026-08-09 behaviour. Never an error.
+const RATECON_RETRY_WINDOW_MS = 15 * 60 * 1000;
+const RATECON_RETRY_MAX_PER_WINDOW = Math.max(0, parseInt(process.env.RATECON_RETRY_MAX_PER_WINDOW ?? "20", 10) || 0);
+const RATECON_RETRY_MAX_IN_FLIGHT = 2;
+let rateconRetryWindowStart = 0;
+let rateconRetryWindowCount = 0;
+let rateconRetryInFlight = 0;
+function rateconRetryBudgetTake() {
+	const now = Date.now();
+	if (now - rateconRetryWindowStart >= RATECON_RETRY_WINDOW_MS) {
+		rateconRetryWindowStart = now;
+		rateconRetryWindowCount = 0;
+	}
+	if (rateconRetryWindowCount >= RATECON_RETRY_MAX_PER_WINDOW) return false;
+	if (rateconRetryInFlight >= RATECON_RETRY_MAX_IN_FLIGHT) return false;
+	rateconRetryWindowCount++;
+	rateconRetryInFlight++;
+	return true;
+}
+function rateconRetryBudgetRelease() {
+	if (rateconRetryInFlight > 0) rateconRetryInFlight--;
+}
+
 app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 	// Accepts EITHER the shared n8n secret OR an extract-only secret.
 	//
@@ -3429,11 +3462,93 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 		if (!GEMINI_API_KEY) return res.status(503).json({ error: "pdf_extract_unavailable" });
 
 		try {
-			const out = await runRateConGemini(base64);
+			const startedAt = Date.now();
+			// LOCKSTEP WITH THE DRAG-AND-DROP ROUTE. This endpoint used to return
+			// runRateConGemini's raw first pass while POST /api/loads/ratecon/extract
+			// normalized it AND re-ran it once when a critical field came back blank.
+			// The two ingestion paths are supposed to be indistinguishable, and that
+			// divergence is measurable in production: 37 Job Tracking `Pickup Address`
+			// cells and 34 `Drop-off Address` cells still carry the broker's raw line
+			// breaks, because only the drag-and-drop half ever ran collapseAddress().
+			//
+			// The second pass is the part that matters here. It is the one mechanism
+			// that recovers a drop-off address the first pass missed — the exact
+			// failure behind load 550303758 — and the unattended path, which has no
+			// dispatcher looking at a review modal, was the half that did not have it.
+			let fields = rateconNormalize.normalizeRateConFields(await runRateConGemini(base64));
+
+			// ⚠️ BUDGETED, unlike the drag-and-drop route's identical retry. The
+			// caller is n8n's `Extract via LogisX` node with a hard 120 s timeout, and
+			// runRateConGemini's own worst case is ~93 s (3 attempts x 30 s + backoff),
+			// so an unbudgeted second pass could push a THIN-BUT-USABLE extraction past
+			// the node timeout and turn it into no load at all. That trade is backwards:
+			// a load with one bad field beats no load. The race caps the retry at the
+			// remaining budget; the losing promise is left to settle and be ignored
+			// (its own AbortController still closes the socket).
+			//
+			// ⚠️ THE CLOCK IS NOT A SPEND CAP, and on its own it never denies a retry.
+			// "A critical field is blank" is decided by the CALLER'S PDF, so a caller
+			// can make the second pass fire on every single request just by sending a
+			// rate con with no rate — turning this route into a deterministic 2x
+			// amplifier on a GEMINI_API_KEY that is shared across Alchemy projects and
+			// has already been exhausted once (2026-08-05), taking ingestion down. The
+			// window budget below is what bounds that; the in-flight cap bounds the
+			// matching memory doubling (two ~14 MB base64 payloads live at once, and
+			// pdfOcrLimiter counts requests per window, not concurrent ones).
+			// Exceeding either is NOT an error — the first-pass fields still ship.
+			const RATECON_N8N_DEADLINE_MS = 105000;   // 15 s under the node's 120 s
+			const RATECON_N8N_MIN_RETRY_MS = 20000;   // below this a pass cannot finish anyway
+			const missing = rateconNormalize.missingCriticalFields(fields);
+			const remainingMs = RATECON_N8N_DEADLINE_MS - (Date.now() - startedAt);
+			// Take the budget ONLY once the free conditions have already said yes —
+			// a take that is never followed by a retry would leak an in-flight slot.
+			const wantRetry = missing.length > 0 && remainingMs > RATECON_N8N_MIN_RETRY_MS;
+			const budgetOk = wantRetry ? rateconRetryBudgetTake() : false;
+			if (wantRetry && budgetOk) {
+				let budgetTimer = null;
+				try {
+					const retry = await Promise.race([
+						runRateConGemini(base64).then(rateconNormalize.normalizeRateConFields),
+						new Promise((_r, reject) => {
+							budgetTimer = setTimeout(() => reject(new Error("retry_budget_exhausted")), remainingMs);
+						}),
+					]);
+					fields = rateconNormalize.mergeExtractions(fields, retry);
+				} catch (e) {
+					// Keep the first-pass fields. A failed or over-budget retry must be
+					// invisible to the caller — it was only ever an upgrade attempt.
+					console.warn(`PDF Gemini extract: second pass skipped (${e && e.message}); using first pass`);
+				} finally {
+					if (budgetTimer) clearTimeout(budgetTimer);
+					rateconRetryBudgetRelease();
+				}
+			} else if (wantRetry && !budgetOk) {
+				console.warn("PDF Gemini extract: second pass declined (retry budget exhausted); using first pass");
+			}
+
+			// A load whose address cannot be placed must not pass silently. It still
+			// ships — refusing here would send n8n down its error branch and lose the
+			// load outright, which is the worse failure — but it now raises its voice
+			// exactly once. See alertUnusableRateConExtraction for why the check lives
+			// on this side of the wire rather than in the workflow.
+			const unusable = rateconNormalize.unusableCriticalFields(fields);
+			if (unusable.length) {
+				alertUnusableRateConExtraction({
+					loadId: fields["Load Number"], unusable, fields,
+				}).catch(() => {});
+			}
+
 			// Mirror the Information Extractor output shape so the n8n
 			// Normalize Load Fields node (which reads $json.output.X) works
-			// without any rewiring of its expressions.
-			return res.json({ output: out });
+			// without any rewiring of its expressions. `warnings` / `unusableFields`
+			// are SIBLINGS of `output`, never inside it, so no existing expression
+			// changes; they exist for a human reading an execution.
+			return res.json({
+				output: fields,
+				unusableFields: unusable,
+				warnings: unusable.map((k) =>
+					`${k} is missing or not specific enough to place — this load will have no distance and $0.00/mi.`),
+			});
 		} catch (err) {
 			// n8n's "Extract via LogisX" node is onError:continueErrorOutput →
 			// LlamaParse Upload, and its error branch fires on ANY non-2xx (verified
@@ -3677,15 +3792,22 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 });
 
 // Shared email helper
+// Returns TRUE only when the message was actually handed to Gmail. Callers that
+// ignore the return value behave exactly as before (it used to return undefined
+// on every path) — but a caller that RECORDS "we told them" must be able to tell
+// a real send from a swallowed failure or an unconfigured mailbox, otherwise it
+// files a silence as a notification. See alertUnusableRateConExtraction.
 async function sendEmail(to, subject, htmlBody, attachments = []) {
 	const gmailUser = process.env.GMAIL_USER;
 	const gmailPass = process.env.GMAIL_APP_PASSWORD;
-	if (!gmailUser || !gmailPass) return;
+	if (!gmailUser || !gmailPass) return false;
 	try {
 		const transporter = nodemailer.createTransport({ service: "gmail", auth: { user: gmailUser, pass: gmailPass } });
 		await transporter.sendMail({ from: `"LogisX Inc." <${gmailUser}>`, to, subject, html: htmlBody, attachments });
+		return true;
 	} catch (err) {
 		console.error("Email send failed:", err.message);
+		return false;
 	}
 }
 
@@ -9223,6 +9345,173 @@ db.exec(`
 // resolved_at would file a false positive as a recovery — the kind of quiet
 // untruth that costs an alert channel its credibility.
 try { db.exec("ALTER TABLE ratecon_reconcile_alerts ADD COLUMN resolution TEXT DEFAULT ''"); } catch {}
+
+// ============================================================
+// Unusable-address alerting — the OTHER silent ingestion loss
+// ============================================================
+// reconcileRateCons answers "did every rate-con email become a load?". It cannot
+// answer "is the load it became actually usable?", and on 2026-08-09 six
+// email-ingested loads were found that had passed every gate with an address the
+// pipeline could not place — carrying $0.00/mi as a result. Two are named in the
+// PR; the load-bearing one is 550303758 ($740, delivered), whose Job Tracking
+// `Drop-off Address` cell is EMPTY to this day while `Drop-off Info` reads
+// "SAMS CLUB 8244".
+//
+// WHY THE WORKFLOW COULD NOT CATCH IT. n8n's order is
+//   Validate Load ID -> JOB DETAILS ENTRY (writes the Job Tracking row)
+//                    -> Addresses Ready?  -> AI Agent -> ...
+// so the row is CREATED BEFORE any address is looked at. `Validate Load ID`
+// checks the load number and `Critical Fields Complete?` checks the Rate;
+// nothing between them checks the two addresses. `Addresses Ready?` gates only
+// the distance branch, so its verdict decides whether a load gets a mileage —
+// never whether it gets created. A guard downstream of the write cannot stop a
+// bad write.
+//
+// So the check belongs where the app already owns the decision: the extraction
+// endpoint the workflow calls. It is the one place that sees the fields before
+// any sheet does, and it is ours.
+//
+// Alerts ONCE per load id, same reasoning (and same shape) as
+// ratecon_reconcile_alerts: a gap repeated daily is a gap nobody reads.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS ratecon_extract_alerts (
+		load_id TEXT PRIMARY KEY,
+		unusable TEXT DEFAULT '',
+		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+		alerted_at DATETIME
+	)
+`);
+
+// DEFAULTS ON, deliberately breaking the ships-dormant convention — same call as
+// PII_MASK_ENABLED, and for the same reason: this is a kill switch, not an
+// enable switch. A defect detector that ships off is a defect detector that
+// stays off, and the failure it exists to break is silence. It sends one email
+// and writes one dispatch notification per NEW bad load; with no mail configured
+// it degrades to the notification and a console line.
+const RATECON_EXTRACT_ALERT_ENABLED =
+	!/^(false|0|no|off)$/i.test(String(process.env.RATECON_EXTRACT_ALERT_ENABLED ?? "").trim());
+// Ceiling on alerts per rolling 24 h, keyed on nothing the caller controls. The
+// once-per-load dedupe is the primary control, but its key is Gemini's reading
+// of the caller's PDF — so this is the one that still holds if that key is ever
+// wrong. 25/day is far above any real defect rate (production produced 6 bad
+// loads in 151) and far below Gmail's send quota.
+const RATECON_EXTRACT_ALERT_MAX_PER_DAY =
+	Math.max(1, parseInt(process.env.RATECON_EXTRACT_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
+
+// Fire-and-forget. NEVER throws and never rejects: it is called from the
+// extraction route, whose response must not depend on an alert succeeding —
+// losing the extraction because the alert failed would trade a $0.00/mi load for
+// no load at all, which is strictly worse.
+async function alertUnusableRateConExtraction({ loadId, unusable, fields }) {
+	if (!RATECON_EXTRACT_ALERT_ENABLED) return { alerted: false, reason: "disabled" };
+	try {
+		const raw = String(loadId == null ? "" : loadId).trim();
+		// ⚠️ THE DEDUPE KEY MUST BE VALIDATED, NOT MERELY TRIMMED. It is Gemini's
+		// reading of the CALLER'S PDF, so an unvalidated key is chosen by whoever
+		// sends the PDF: increment a digit, get a fresh key, get a fresh email —
+		// and "once per load" silently becomes "once per request". Same whitelist
+		// the public tracker and POST /api/loads/from-ratecon already impose on a
+		// load id, so anything that could not become a load cannot mint a key
+		// either; it collapses into the shared `unidentified:` bucket below.
+		const id = /^[A-Za-z0-9\-_.#]{1,40}$/.test(raw) ? raw : "";
+		// With no usable load number there is nothing stable to deduplicate on, and
+		// n8n's own `Validate Load ID` already rejects+alerts that case. A per-UTC-day
+		// key keeps the channel from either spamming or going silent: at most one
+		// "we extracted nothing identifiable today" line.
+		const key = id || `unidentified:${new Date().toISOString().slice(0, 10)}`;
+		const seen = db.prepare("SELECT load_id, alerted_at FROM ratecon_extract_alerts WHERE load_id = ?").get(key);
+		if (seen && seen.alerted_at) return { alerted: false, reason: "already_alerted", key };
+
+		// Second ceiling, independent of the key, because the key is only as
+		// trustworthy as the validation above: a global cap means even a key space
+		// we failed to anticipate cannot turn this into a mail flood. sendEmail is
+		// SHARED with onboarding, investor outreach and the invoice batch, so
+		// exhausting Gmail's daily quota here would take all outbound app mail down
+		// — i.e. the abuse would silence exactly the channels this feature needs.
+		const alertedToday = db.prepare(
+			"SELECT COUNT(*) AS c FROM ratecon_extract_alerts WHERE alerted_at > datetime('now', '-1 day')",
+		).get().c;
+		if (alertedToday >= RATECON_EXTRACT_ALERT_MAX_PER_DAY) {
+			console.warn(`[ratecon-extract] daily alert cap (${RATECON_EXTRACT_ALERT_MAX_PER_DAY}) reached — load ${key} logged, not mailed: ${unusable.join(", ")}`);
+			return { alerted: false, reason: "daily_cap", key };
+		}
+
+		// Record the sighting NOW but leave alerted_at NULL — see the stamp below.
+		db.prepare(
+			"INSERT OR IGNORE INTO ratecon_extract_alerts (load_id, unusable, first_seen, alerted_at) VALUES (?, ?, CURRENT_TIMESTAMP, NULL)",
+		).run(key, unusable.join(", "));
+
+		// One-line sanitize, used for BOTH the subject and the console line: the
+		// load number survives runRateConGemini with internal \r\n intact (it is
+		// not an address/phone/rate field, so cleanKnownField passes it verbatim),
+		// which is enough to forge pm2 log lines. nodemailer does strip CR/LF from
+		// a Subject, but relying on a dependency for that is not a control we own.
+		const label = (id ? id.replace(/[\r\n]+/g, " ") : "(no load number extracted)").slice(0, 60);
+		const shown = ["Pickup Address", "Drop-off Address", "Rate", "Load Number"]
+			.filter((k) => fields && k in fields)
+			.map((k) => `<tr><td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(k)}</td>` +
+				`<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(fields[k] == null ? "(blank)" : String(fields[k]))}</td>` +
+				`<td style="padding:6px 10px;border:1px solid #ddd;">${unusable.includes(k) ? "⚠️ unusable" : "ok"}</td></tr>`)
+			.join("");
+		const html =
+			`<p><b>Load ${escHtml(label)} was ingested with an address the system cannot place.</b></p>` +
+			`<p>The rate con parsed, so the load will still reach Job Tracking — but ` +
+			`${unusable.map((u) => `<code>${escHtml(u)}</code>`).join(" and ")} ` +
+			`cannot be geocoded, so this load has <b>no distance and $0.00/mi</b>, no map pin and no ETA.</p>` +
+			`<table style="border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;">` +
+			`<tr><th style="padding:6px 10px;border:1px solid #ddd;">Field</th>` +
+			`<th style="padding:6px 10px;border:1px solid #ddd;">Extracted</th>` +
+			`<th style="padding:6px 10px;border:1px solid #ddd;">Verdict</th></tr>` +
+			shown + `</table>` +
+			`<p style="margin-top:14px;">To fix: open the load in the dashboard and paste the real address from the rate con. ` +
+			`Distance and rate-per-mile are display figures — the load's <b>Payment</b> is unaffected, so nothing needs re-settling.</p>` +
+			`<p style="color:#888;font-size:12px;">Reported once per load.</p>`;
+		let emailed = false;
+		try {
+			emailed = (await sendEmail(process.env.GMAIL_USER, `⚠️ Load ${label} ingested with an unusable address`, html)) === true;
+		} catch (e) { console.error("[ratecon-extract] alert email failed:", e.message); }
+		let notified = false;
+		try {
+			insertDispatchNotification.run(
+				"ratecon-unusable-address",
+				`Load ${label} ingested with an unusable address`,
+				unusable.join(", "),
+				JSON.stringify({ loadId: id, unusable }),
+			);
+			io.to("dispatch").emit("dispatch-notification", {
+				type: "ratecon-unusable-address",
+				title: `Load ${label} ingested with an unusable address`,
+				body: unusable.join(", "),
+				metadata: { loadId: id, unusable },
+			});
+			notified = true;
+		} catch (e) { console.error("[ratecon-extract] notification failed:", e.message); }
+
+		// ⚠️ STAMP ONLY ON CONFIRMED DELIVERY. Stamping before the send — the
+		// obvious shape — makes the once-per-load guard suppress the load forever
+		// on a transient Gmail 4xx or an unconfigured mailbox, because sendEmail
+		// swallows both. The alert that never went out then looks, in this table,
+		// exactly like one that did. Leaving alerted_at NULL costs a duplicate
+		// notification on the next sighting and buys a retry; the row is already
+		// recorded above either way, so first_seen is never lost.
+		// The in-app dispatch notification counts as delivery in its own right —
+		// it is the channel that still works with no GMAIL_* configured at all.
+		const delivered = emailed || notified;
+		if (delivered) {
+			db.prepare("UPDATE ratecon_extract_alerts SET alerted_at = ? WHERE load_id = ? AND alerted_at IS NULL")
+				.run(new Date().toISOString(), key);
+		}
+		console.log(
+			"[ratecon-extract] %s — load %s: unusable %s",
+			delivered ? "ALERT" : "ALERT UNDELIVERED (will retry next sighting)",
+			label, unusable.join(", "),
+		);
+		return { alerted: delivered, emailed, notified, key };
+	} catch (e) {
+		console.error("[ratecon-extract] alert failed:", e && e.message);
+		return { alerted: false, reason: "error" };
+	}
+}
 
 // DEFAULT OFF, like every other side-effectful integration here
 // (ROUTEMATE_ENABLED / SCANKIT_ENABLED / INVOICE_AUTOGEN_ENABLED). It only reads
