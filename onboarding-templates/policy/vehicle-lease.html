@@ -90,6 +90,20 @@
     .blank-sm  { width: 160px; }
     .blank-md  { width: 240px; }
     .blank-lg  { width: 340px; }
+    /* ⚠️ .blank-xl was USED by four INVESTOR/PARTICIPANT APPLICATION inputs (Legal
+       name, DBA, Principal address, EIN SSN) but never DEFINED here, so all four
+       silently fell back to Chromium's default 154px input and clipped their value.
+       It stayed invisible only because the two longest of them — Legal name and
+       Principal address — are duplicated labels that never got filled at all until
+       the querySelectorAll fix. Value copied from master-agreement.html, which
+       defines the same scale. */
+    .blank-xl  { width: 420px; }
+    /* Signatory title — see the matching note in master-agreement.html. A bare
+       .blank here is Chromium's default 154px input (146px content) against the
+       158.7px "CEO / Managing Member" needs, so every executed lease reads
+       "CEO / Managing Memb". Widened rather than shortening the constant: the
+       title states authority to bind the company, which is contract content. */
+    .blank-title { width: 200px; }
 
     /* Signature rows */
     .sig-row {
@@ -374,7 +388,7 @@
         <div class="sig-group grow"><span class="label">By:</span><input type="text" class="blank" aria-label="Lessor signature"></div>
       </div>
       <div class="name-title-row">
-        Name: <input type="text" class="blank" aria-label="Lessor printed name"> &nbsp;&nbsp; Title: <input type="text" class="blank" aria-label="Lessor title">
+        Name: <input type="text" class="blank" aria-label="Lessor printed name"> &nbsp;&nbsp; Title: <input type="text" class="blank blank-title" aria-label="Lessor title">
       </div>
     </div>
 

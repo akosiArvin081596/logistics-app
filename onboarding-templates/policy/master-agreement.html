@@ -102,6 +102,16 @@
     .blank-md  { width: 240px; }
     .blank-lg  { width: 340px; }
     .blank-xl  { width: 420px; }
+    /* Signatory title. An <input> CLIPS its own value and Chromium's print path
+       paints only the visible glyphs, so an overflowing title is truncated in the
+       PDF's text layer too: "CEO / Managing Member" needs 164.4px but blank-sm
+       leaves 152px of content box, and every executed copy reads "CEO / Managing
+       Memb". Widened rather than shortening the constant because the title states
+       the signatory's authority to bind the company, which is contract content and
+       not formatting. 200px is deliberate headroom over the 164.4px measured here —
+       the shortfall was only 12.4px, so a snug fit would re-truncate on any host
+       whose font stack metrics differ from the render box. */
+    .blank-title { width: 200px; }
 
     /* Signature execution box */
     .sig-box {
@@ -408,7 +418,7 @@
       </div>
       <div class="sig-row">
         <div class="sig-group grow"><span class="label">Name:</span><input type="text" class="blank" aria-label="Manager name"></div>
-        <div class="sig-group fixed"><span class="label">Title:</span><input type="text" class="blank blank-sm" aria-label="Manager title"></div>
+        <div class="sig-group fixed"><span class="label">Title:</span><input type="text" class="blank blank-title" aria-label="Manager title"></div>
       </div>
     </div>
     <div class="sig-party">
@@ -419,7 +429,7 @@
       </div>
       <div class="sig-row">
         <div class="sig-group grow"><span class="label">Name:</span><input type="text" class="blank" aria-label="Participant name"></div>
-        <div class="sig-group fixed"><span class="label">Title:</span><input type="text" class="blank blank-sm" aria-label="Participant title"></div>
+        <div class="sig-group fixed"><span class="label">Title:</span><input type="text" class="blank blank-title" aria-label="Participant title"></div>
       </div>
       <div class="sig-row">
         <div class="sig-group grow"><span class="label">Address:</span><input type="text" class="blank" aria-label="Participant address"></div>
