@@ -20,7 +20,7 @@
       <component
         :is="pdfComp"
         v-if="pdfComp && src && !failed"
-        :source="src"
+        :source="pdfSource"
         :scale="RENDER_SCALE"
         @rendered="onRendered"
         @loading-failed="onFail"
@@ -68,6 +68,21 @@ const props = defineProps({
   // rides along automatically — no auth wiring needed here.
   src: { type: String, default: '' },
 })
+
+// pdf.js 6 DROPPED getDocument()'s string coercion. 5.x opened with
+//   if (typeof src === "string" || src instanceof URL) src = { url: src }
+// and 6.x has no such branch, so a bare string reaches the argument check and
+// throws "getDocument - expected either `data`, `range`, or `url` parameter" —
+// which this component catches into its "Couldn't render the PDF preview"
+// fallback, i.e. it fails SILENTLY, with a rendering error and no console trace.
+// vue-pdf-embed's essential entry passes `source` through untouched, so nothing
+// between here and pdf.js normalizes it; the default entry only ever hid this by
+// bundling its own pdf.js 5. `{ url }` is the normalized form 5.x produced, so
+// it is correct on both majors.
+//
+// The `src` PROP deliberately stays a plain string: two of the three call sites
+// pass a `blob:` object URL, and the failure fallback renders it as <a :href>.
+const pdfSource = computed(() => ({ url: props.src }))
 
 // Target a consistent ~2x effective backing resolution so text stays crisp when
 // zoomed. vue-pdf-embed already renders at paneWidth × devicePixelRatio, so we
@@ -277,9 +292,35 @@ function onFail() {
   loading.value = false
 }
 
+// vue-pdf-embed ships TWO entries and the choice is a security decision, not a
+// size one. The default entry ('vue-pdf-embed') INLINES the whole of pdf.js —
+// including the worker, as a ~1.7M-character base64 `data:text/javascript` URL —
+// so `pdfjs-dist` is never resolved at runtime and a version bump or an npm
+// `overrides` entry patches a directory nothing loads: audit goes green, the
+// byte-identical vulnerable code still ships. That matters here because this
+// viewer renders broker-emailed rate-cons, and CVE-2026-16633 (CVSS 8.1) is
+// arbitrary JS execution from a malicious PDF.
+//
+// 'vue-pdf-embed/dist/index.essential.mjs' is the same component, but it imports
+// pdf.js as a real dependency — which is what makes the pinned version the
+// version that actually ships. Side benefit: 2.7 MB -> 18 KB on this import.
+// Its one cost is that the worker is no longer bundled, hence the wiring below.
 async function loadPdfComp() {
   try {
-    const mod = await import('vue-pdf-embed')
+    const [mod, worker] = await Promise.all([
+      import('vue-pdf-embed/dist/index.essential.mjs'),
+      // `?url` emits the worker as its own hashed asset and returns the URL.
+      // pdf.js loads it with `new Worker(src, { type: 'module' })` and the file
+      // has no imports of its own, so it needs no bundling. It MUST be the
+      // `legacy/` build — that is the one index.essential.mjs itself imports,
+      // and mixing the two ships pdf.js twice.
+      import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'),
+    ])
+    // Load-bearing: unset, pdf.js defaults workerSrc to a relative
+    // './pdf.worker.mjs' that 404s here, and on the resulting worker `error`
+    // event it silently falls back to running the parser on the main thread —
+    // so this failing looks like "PDFs are just slow now", not like an error.
+    mod.GlobalWorkerOptions.workerSrc = worker.default
     pdfComp.value = mod.default
   } catch {
     // Chunk failed to load (offline / network) — surface the direct-link fallback.

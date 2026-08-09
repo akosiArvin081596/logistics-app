@@ -14,6 +14,7 @@
     "clsx": "^2.1.1",
     "heic2any": "^0.0.4",
     "lucide-vue-next": "^1.0.0",
+    "pdfjs-dist": "^6.2.108",
     "pinia": "^3.0.2",
     "radix-vue": "^1.9.17",
     "reka-ui": "^2.9.3",
@@ -23,6 +24,10 @@
     "vue": "^3.5.13",
     "vue-pdf-embed": "^2.1.5",
     "vue-router": "^4.5.0"
+  },
+  "//overrides": "vue-pdf-embed@2.1.5 pins pdfjs-dist ^5.7.284, which is inside the CVE-2026-16633 range (>=5.6.83 <6.2.108, arbitrary JS execution from a malicious PDF). 2.1.5 is the latest release and no 5.x backport exists, so the only forward fix is to force 6.2.108 past that range. $pdfjs-dist references the dependency spec above so the two can never drift. NOTE: this override is only load-bearing because PdfZoomViewer.vue imports vue-pdf-embed/dist/index.essential.mjs — the package's DEFAULT entry inlines pdf.js and would ignore it entirely. See the comment in that file before changing either half.",
+  "overrides": {
+    "pdfjs-dist": "$pdfjs-dist"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.2",
