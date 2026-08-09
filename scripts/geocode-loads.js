@@ -1,49 +1,51 @@
 #!/usr/bin/env node
 /**
- * Batch geocode load addresses and update Origin/Dest Lat/Lng columns.
- * Usage: GOOGLE_MAPS_API_KEY=<key> node scripts/geocode-loads.js <session-cookie>
+ * Backfill origin/destination coordinates for rows in "Job Tracking".
  *
- * Uses Google Geocoding API.
+ * Usage: node scripts/geocode-loads.js <connect.sid cookie value>
+ *        LOGISX_BASE_URL=http://localhost:3000 node scripts/geocode-loads.js <cookie>
+ *
+ * ⚠️ THIS SCRIPT NO LONGER WRITES TO THE SHEET, AND MUST NOT GO BACK TO DOING SO.
+ *
+ * It used to PUT "Origin Lat" / "Origin Lng" / "Dest Lat" / "Dest Lng" to
+ * `PUT /api/load/:loadId`. Job Tracking has 26 columns and none of them are
+ * coordinates, so all four were UNKNOWN keys — and that route's old new-column
+ * branch turned an unknown key into a column by rewriting `Job Tracking!A1`, the
+ * header row. Every column in this app is resolved by matching header text, so a
+ * single run would have:
+ *
+ *   1. re-pointed the dashboard, driver app, /api/financials, /api/investor and
+ *      the invoice batch at a rewritten header array;
+ *   2. taken the sheet from 26 to 30 columns, which is where the app's
+ *      `String.fromCharCode(65 + colIdx)` A1 helpers started emitting "[" and
+ *      writing to garbage ranges;
+ *   3. made resolveGeofencePoints() PREFER these new sheet columns over the
+ *      `load_coordinates` table (it matches /origin.*lat/i and /dest.*lat/i
+ *      first), silently moving geofencing onto a second, unmaintained copy of
+ *      the coordinates.
+ *
+ * `PUT /api/load/:loadId` now refuses unknown columns outright (400
+ * UNKNOWN_COLUMN), so the old script would simply fail — but the fix is not to
+ * find another way to add the columns. Coordinates live in the `load_coordinates`
+ * SQLite table, which is what geofencing, the tracking map and the public tracker
+ * actually read.
+ *
+ * `GET /api/geocode/load/:loadId` is the supported way in: on a miss it reads the
+ * addresses off the sheet, geocodes them with the SERVER's Maps key, caches the
+ * result in `load_coordinates`, and returns it. So this script is now a loop over
+ * that endpoint — it needs no Maps key of its own, and it writes nothing to the
+ * spreadsheet.
  */
 
-const BASE = "https://logistics-app.abedubas.dev";
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
+const BASE = process.env.LOGISX_BASE_URL || "https://logistics-app.abedubas.dev";
 const COOKIE = process.argv[2];
 if (!COOKIE) {
-  console.error("Usage: GOOGLE_MAPS_API_KEY=<key> node scripts/geocode-loads.js <connect.sid cookie value>");
-  process.exit(1);
-}
-if (!GOOGLE_MAPS_API_KEY) {
-  console.error("Error: GOOGLE_MAPS_API_KEY environment variable is required");
+  console.error("Usage: node scripts/geocode-loads.js <connect.sid cookie value>");
+  console.error("       LOGISX_BASE_URL=<url> to target staging/local instead of production.");
   process.exit(1);
 }
 
 const headers = { Cookie: `connect.sid=${COOKIE}`, "Content-Type": "application/json" };
-
-// Cache to avoid re-geocoding the same address
-const geocodeCache = new Map();
-
-async function geocode(address) {
-  if (!address || address.trim().length < 5) return null;
-  const key = address.trim().toLowerCase();
-  if (geocodeCache.has(key)) return geocodeCache.get(key);
-
-  try {
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_API_KEY}`;
-    const resp = await fetch(url);
-    const data = await resp.json();
-    if (data.status === "OK" && data.results && data.results.length > 0) {
-      const loc = data.results[0].geometry.location;
-      const result = { lat: loc.lat, lng: loc.lng };
-      geocodeCache.set(key, result);
-      return result;
-    }
-  } catch (err) {
-    console.error(`  Geocode error for "${address}":`, err.message);
-  }
-  geocodeCache.set(key, null);
-  return null;
-}
 
 async function fetchAllLoads() {
   const loads = [];
@@ -60,81 +62,56 @@ async function fetchAllLoads() {
   return loads;
 }
 
-async function updateLoad(loadId, updates) {
-  const resp = await fetch(`${BASE}/api/load/${encodeURIComponent(loadId)}`, {
-    method: "PUT",
-    headers,
-    body: JSON.stringify(updates),
-  });
-  return resp.json();
+// Ask the server to resolve (and cache) this load's coordinates. Returns the
+// coordinate payload, or null when the server could not geocode it.
+async function ensureCoords(loadId) {
+  const resp = await fetch(`${BASE}/api/geocode/load/${encodeURIComponent(loadId)}`, { headers });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  return data && data.originLat != null && data.destLat != null ? data : null;
 }
 
 async function main() {
+  console.log(`Target: ${BASE}`);
   console.log("Fetching all loads...");
   const loads = await fetchAllLoads();
   console.log(`Found ${loads.length} loads`);
 
-  // Find loads needing geocoding
-  const needsUpdate = loads.filter(l => {
+  // Only rows that actually carry an address are worth asking about — the
+  // endpoint reads the same two columns to geocode from.
+  const candidates = loads.filter((l) => {
     const loadId = l["Load ID"] || "";
-    const hasOrigin = l["Origin Lat"] && l["Origin Lat"].trim();
-    const hasDest = l["Dest Lat"] && l["Dest Lat"].trim();
-    const hasPickupAddr = l["Pickup Address"] && l["Pickup Address"].trim();
-    const hasDropoffAddr = l["Drop-off Address"] && l["Drop-off Address"].trim();
-    return loadId && (!hasOrigin || !hasDest) && (hasPickupAddr || hasDropoffAddr);
+    const hasPickupAddr = (l["Pickup Address"] || "").trim();
+    const hasDropoffAddr = (l["Drop-off Address"] || "").trim();
+    return loadId && (hasPickupAddr || hasDropoffAddr);
   });
 
-  console.log(`${needsUpdate.length} loads need geocoding\n`);
+  console.log(`${candidates.length} loads have an address to geocode\n`);
 
-  let updated = 0;
+  let resolved = 0;
+  let incomplete = 0;
   let failed = 0;
 
-  for (let i = 0; i < needsUpdate.length; i++) {
-    const load = needsUpdate[i];
-    const loadId = load["Load ID"];
-    const pickupAddr = (load["Pickup Address"] || "").trim();
-    const dropoffAddr = (load["Drop-off Address"] || "").trim();
-    const hasOrigin = load["Origin Lat"] && load["Origin Lat"].trim();
-    const hasDest = load["Dest Lat"] && load["Dest Lat"].trim();
-
-    console.log(`[${i + 1}/${needsUpdate.length}] Load ${loadId}`);
-
-    const updates = {};
-
-    if (!hasOrigin && pickupAddr) {
-      const origin = await geocode(pickupAddr);
-      if (origin) {
-        updates["Origin Lat"] = String(origin.lat);
-        updates["Origin Lng"] = String(origin.lng);
-        console.log(`  Origin: ${pickupAddr} → ${origin.lat}, ${origin.lng}`);
+  for (let i = 0; i < candidates.length; i++) {
+    const loadId = candidates[i]["Load ID"];
+    process.stdout.write(`[${i + 1}/${candidates.length}] Load ${loadId} ... `);
+    try {
+      const coords = await ensureCoords(loadId);
+      if (coords) {
+        console.log(`ok (${coords.originLat}, ${coords.originLng}) → (${coords.destLat}, ${coords.destLng})`);
+        resolved++;
       } else {
-        console.log(`  Origin: Could not geocode "${pickupAddr}"`);
+        console.log("no coordinates resolved (address missing or not geocodable)");
+        incomplete++;
       }
-    }
-
-    if (!hasDest && dropoffAddr) {
-      const dest = await geocode(dropoffAddr);
-      if (dest) {
-        updates["Dest Lat"] = String(dest.lat);
-        updates["Dest Lng"] = String(dest.lng);
-        console.log(`  Dest: ${dropoffAddr} → ${dest.lat}, ${dest.lng}`);
-      } else {
-        console.log(`  Dest: Could not geocode "${dropoffAddr}"`);
-      }
-    }
-
-    if (Object.keys(updates).length > 0) {
-      try {
-        await updateLoad(loadId, updates);
-        updated++;
-      } catch (err) {
-        console.error(`  Update failed: ${err.message}`);
-        failed++;
-      }
+    } catch (err) {
+      console.log(`failed: ${err.message}`);
+      failed++;
     }
   }
 
-  console.log(`\nDone! Updated: ${updated}, Failed: ${failed}, Cache hits: ${geocodeCache.size} addresses`);
+  console.log(`\nDone! Resolved: ${resolved}, Incomplete: ${incomplete}, Failed: ${failed}`);
+  console.log("Coordinates are cached in the load_coordinates table; the sheet was not modified.");
 }
 
 main().catch(console.error);
