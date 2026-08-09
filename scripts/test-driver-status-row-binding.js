@@ -223,6 +223,31 @@ const at = (s) => ROUTE.indexOf(s);
 // Strip comments so prose about the old code cannot satisfy a code assertion.
 const ROUTE_CODE = ROUTE.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 
+// ⚠️ H1 — THE ROUTE MUST BE ROLE-GATED. `requireAuth` only asserts a session
+// exists, and the ownership check is gated on `role === "Driver"`, so under
+// requireAuth an INVESTOR reached this route with no ownership check at all —
+// and the binding's ROW_LOAD_MISMATCH names the row a load is on, turning that
+// into a precise row-location oracle for any load id their own portal shows.
+check("the route is requireRole-gated, NOT bare requireAuth",
+	/app\.put\("\/api\/driver\/status", requireRole\("Super Admin", "Dispatcher", "Driver"\), driverWriteLimiter/.test(SRC), true);
+check("...so an Investor cannot reach it", /app\.put\("\/api\/driver\/status", requireAuth/.test(SRC), false);
+// The mount regex above already fixes the order (requireRole then the limiter);
+// this states the property being protected rather than re-matching the string.
+check("...and the role gate precedes the rate limiter (no budget spent on 403s)",
+	/app\.put\("\/api\/driver\/status", requireRole\([^)]*\), driverWriteLimiter/.test(SRC), true);
+
+// ⚠️ M2 — the relaxation is only safe while ownership is judged on the
+// DEDUPLICATED view (last row per id wins). If loadBelongsToDriver() is ever
+// changed to scan raw rows, a Driver owning any copy of a duplicated id could
+// stamp a status onto another driver's copy. Pin the dependency both ways.
+check("loadBelongsToDriver still judges ownership on the deduplicated cache",
+	/function loadBelongsToDriver[\s\S]{0,900}getJobTrackingCached\(/.test(SRC), true);
+check("...and the binding still reads the RAW snapshot, not that cache",
+	ROUTE_CODE.includes("readJobTrackingSnapshot(sheets, rowIndex)")
+	&& !/resolveLoadBinding\([\s\S]{0,120}getJobTrackingCached/.test(ROUTE_CODE), true);
+check("...and the dependency is recorded where someone would break it",
+	/loadBelongsToDriver\(\) is ever[\s\S]{0,200}raw scan|do not change that helper/i.test(SRC), true);
+
 check("the route binds its row to the load", ROUTE_CODE.includes("resolveLoadBinding("), true);
 check("...and opts into the measured relaxation", ROUTE_CODE.includes("callerRowWinsAmongDuplicates: true"), true);
 check("...refusing through the shared helper, not a private 404",
@@ -312,8 +337,17 @@ section("5. audit_trail — coalescing and bounded retention");
 function makeCoalescer() {
 	const written = [];
 	const C = {};
+	// ⚠️ UNCOALESCED_REFUSAL_CODES must be extracted too. Leaving it out made the
+	// helper throw ReferenceError INSIDE its own try/catch, which swallows the
+	// error and writes nothing — so every coalescing assertion silently "passed"
+	// against a function that did nothing. Caught by the first-refusal assertion.
+	const uncoalesced = SRC.slice(
+		SRC.indexOf("const UNCOALESCED_REFUSAL_CODES = new Set(["),
+		SRC.indexOf("]);", SRC.indexOf("const UNCOALESCED_REFUSAL_CODES = new Set([")) + 3
+	);
+	if (!uncoalesced.includes("PERIOD_FINALIZED")) throw new Error("could not extract UNCOALESCED_REFUSAL_CODES");
 	new Function("C", "logAudit", "Date",
-		[extractConst("REFUSAL_AUDIT_WINDOW_MS"), extractConst("refusalAuditWindows"), extract("logAuditRefusal")].join("\n") +
+		[extractConst("REFUSAL_AUDIT_WINDOW_MS"), extractConst("refusalAuditWindows"), uncoalesced, extract("logAuditRefusal")].join("\n") +
 		"\nC.logAuditRefusal = logAuditRefusal; C.windows = refusalAuditWindows;"
 	)(C, (_req, action, entity, entityId, details) => written.push({ action, entityId, details }),
 		{ now: () => makeCoalescer.clock });
@@ -342,6 +376,28 @@ co.fire("status_update_blocked", "load", "L1", "Blocked A", "ROW_LOAD_MISMATCH")
 check("after the window the next refusal is written", co.written.length, 4);
 check("...and the burst is COUNTED, not silently discarded",
 	/\+500 more identical refusal\(s\) suppressed/.test(co.written[3].details), true);
+// ⚠️ M3 — PERIOD refusals are NEVER coalesced. They need a locked month AND a
+// material write on an admin-only route, so they are not floodable; collapsing
+// them would cost the per-attempt load id and period list, and on the SHARED
+// `super_admin` login would merge two different operators' attempts on two
+// different months into one row.
+{
+	const co3 = makeCoalescer();
+	for (let i = 0; i < 10; i++) co3.fire("status_update_blocked", "load", `L${i}`, "Blocked", "PERIOD_FINALIZED");
+	check("10 period refusals write 10 rows — never collapsed", co3.written.length, 10);
+	check("...each keeping its own load id", co3.written.map((w) => w.entityId), ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"]);
+	for (const c of ["PERIOD_LOCK_UNREADABLE", "PERIOD_UNRESOLVED"]) {
+		const co4 = makeCoalescer();
+		co4.fire("cancel_blocked", "load", "A", "x", c);
+		co4.fire("cancel_blocked", "load", "B", "x", c);
+		check(`${c} is exempt too`, co4.written.length, 2);
+	}
+	// ...but a binding refusal in the same action still coalesces.
+	const co5 = makeCoalescer();
+	for (let i = 0; i < 10; i++) co5.fire("status_update_blocked", "load", `L${i}`, "Blocked", "ROW_LOAD_MISMATCH");
+	check("a binding refusal on the SAME action still collapses", co5.written.length, 1);
+}
+
 // A different user must never be suppressed by someone else's burst.
 const co2 = makeCoalescer();
 co2.fire("status_update_blocked", "load", "L1", "x", "ROW_LOAD_MISMATCH");
@@ -356,11 +412,35 @@ new Function("P", extractArrayConst("PURGEABLE_REFUSAL_ACTIONS") + "\nP.list = P
 const PURGE = P.list;
 const PURGE_FN = extract("purgeOldAuditRefusals");
 
-// ⚠️ EVERY `*_blocked` ACTION IN server.js MUST BE ON THE LIST, AND NOTHING ELSE
-// MAY BE. An equality pin, so a new refusal action is a conscious decision.
+// ⚠️ A SUBSET PIN, NOT AN EQUALITY, AND THE DIRECTION IS THE WHOLE ARGUMENT.
+// The dangerous direction is a WRITE action appearing on the list (evidence
+// destroyed) — asserted exhaustively below. The other direction, a `*_blocked`
+// action NOT on the list, means that action is simply KEPT FOREVER, which is the
+// safe default. An equality pin (my first draft) inverts the pressure: any new
+// `*_blocked` action fails CI until someone adds it, and the path of least
+// resistance is to add it un-reviewed — a test that manufactures the exact
+// unsafe edit it exists to prevent. So: every entry must be a real `*_blocked`
+// action, and nothing is forced onto the list.
 const blockedInSrc = [...new Set((SRC.match(/"[a-z_]+_blocked"/g) || []).map((s) => s.slice(1, -1)))].sort();
-check("the purge list is exactly the set of *_blocked actions in server.js",
-	[...PURGE].sort(), blockedInSrc);
+check("every purgeable action is a real *_blocked action in server.js",
+	PURGE.every((a) => blockedInSrc.includes(a)), true);
+check("...and there is no dead entry on the list", PURGE.filter((a) => !blockedInSrc.includes(a)), []);
+// ⚠️ THE REVIEWED LIST, pinned as a SUPERSET requirement. This is the half of the
+// old equality pin that is worth keeping: each of these eight was checked call
+// site by call site and confirmed to return before any sheet or database write,
+// so silently DROPPING one is a regression worth failing on. What is deliberately
+// not asserted is the other direction — a NEW `*_blocked` action is not forced
+// onto the list, because forcing it is what produces an un-reviewed addition.
+const REVIEWED_PURGEABLE = ["dispatch_blocked", "reassign_blocked", "cancel_blocked",
+	"driver_respond_blocked", "status_update_blocked", "status_override_blocked",
+	"create_sheet_row_blocked", "update_sheet_row_blocked"].sort();
+check("the reviewed refusal actions are all still purgeable",
+	REVIEWED_PURGEABLE.filter((a) => !PURGE.includes(a)), []);
+// Informational, and deliberately NOT a failure: an unlisted refusal is retained.
+{
+	const unlisted = blockedInSrc.filter((a) => !PURGE.includes(a));
+	console.log(`       (note: ${unlisted.length} *_blocked action(s) not on the purge list — retained forever, the safe default${unlisted.length ? ": " + unlisted.join(", ") : ""})`);
+}
 check("every purgeable action really exists in server.js",
 	PURGE.every((a) => SRC.includes(`"${a}"`)), true);
 check("every purgeable action is named *_blocked", PURGE.every((a) => a.endsWith("_blocked")), true);
@@ -385,8 +465,38 @@ check("...and is NOT purgeable (unauthenticated route, slow-guess evidence)",
 // The DELETE itself.
 check("the purge scopes by an explicit action list, never a LIKE pattern",
 	/action IN \(\$\{placeholders\}\)/.test(PURGE_FN), true);
-check("...and carries no LIKE at all", /LIKE/.test(PURGE_FN), false);
+// ⚠️ The property is "no pattern match on the ACTION column" — that is what
+// would silently adopt a future `*_blocked` action, including one recording a
+// write. The `details NOT LIKE '%[PERIOD_%'` clause added for L5 is the opposite
+// kind of thing: it only ever REMOVES rows from the delete set, so it can retain
+// too much but never destroy too much.
+check("the action column is never pattern-matched", /action LIKE/.test(PURGE_FN), false);
+check("...and the only LIKE narrows the delete set (NOT LIKE on details)",
+	(PURGE_FN.match(/LIKE/g) || []).length, 1);
 check("...and is also bounded by timestamp", /AND timestamp < \?/.test(PURGE_FN), true);
+// ⚠️ L5 — the ACTION is not fine-grained enough: status_update_blocked carries
+// both cheap ROW_LOAD_MISMATCH noise and PERIOD_FINALIZED settlement disputes,
+// which surface on a cadence longer than the retention window.
+check("period refusals are excluded from the purge by detail, not just by action",
+	/details NOT LIKE '%\[PERIOD/.test(PURGE_FN), true);
+check("...with a LIKE escape, so the underscore is a literal not a wildcard",
+	/ESCAPE '\\\\'/.test(PURGE_FN), true);
+check("the never-coalesced and never-purged sets are the same family",
+	/UNCOALESCED_REFUSAL_CODES = new Set\(\[\s*\n?\s*"PERIOD_FINALIZED", "PERIOD_LOCK_UNREADABLE", "PERIOD_UNRESOLVED",/.test(SRC), true);
+
+// ⚠️ I10 — an own-property test, so a polluted Object.prototype cannot switch
+// the relaxation on for a caller that passed a bare {}.
+check("the relaxation reads an OWN property, not an inherited one",
+	/Object\.hasOwn\(opts, "callerRowWinsAmongDuplicates"\)/.test(SRC), true);
+{
+	const poisoned = {};
+	Object.defineProperty(Object.prototype, "callerRowWinsAmongDuplicates", { value: true, configurable: true });
+	const viaEmpty = code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "7052901", poisoned));
+	const viaAbsent = code(G.resolveLoadBinding(PROD_HEADERS, REDDIE, 2, "7052901"));
+	delete Object.prototype.callerRowWinsAmongDuplicates;
+	check("a polluted prototype cannot enable it via {}", viaEmpty, "AMBIGUOUS_LOAD");
+	check("...nor via an omitted opts", viaAbsent, "AMBIGUOUS_LOAD");
+}
 // ⚠️ ISO-to-ISO. logAudit() always stores toISOString(); SQLite's datetime()
 // renders `YYYY-MM-DD HH:MM:SS`, and comparing that to `…THH:MM:SS.sssZ` is a
 // string comparison in which 'T' sorts above the space.

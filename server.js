@@ -689,9 +689,23 @@ const REFUSAL_AUDIT_WINDOW_MS = 60 * 1000;
 // still carries its own entity_id, so the specific load is never lost.
 const refusalAuditWindows = new Map();
 
+// ⚠️ NEVER COALESCED, however cheap it looks to fold them in. A period refusal
+// needs a locked month AND a material write, on routes that are Super Admin /
+// Dispatcher only — it is not floodable, so coalescing buys nothing and costs the
+// per-attempt load id and period list, which are the highest-value rows in this
+// table. It is made worse by the shared login: `super_admin` is one account for
+// several people, and the coalesce key is the ACCOUNT, so two operators refused
+// on different loads in different months within the window would collapse into
+// one row naming one of them. "Someone repeatedly tried to restate a settled
+// month" is exactly the signal the refusal audit exists to keep.
+const UNCOALESCED_REFUSAL_CODES = new Set([
+	"PERIOD_FINALIZED", "PERIOD_LOCK_UNREADABLE", "PERIOD_UNRESOLVED",
+]);
+
 function logAuditRefusal(req, action, entity, entityId, details, code) {
 	try {
 		const user = req.session?.user || {};
+		if (UNCOALESCED_REFUSAL_CODES.has(code)) return logAudit(req, action, entity, entityId, details);
 		const key = `${user.id || 0}|${action}|${code || ""}`;
 		const now = Date.now();
 		const prev = refusalAuditWindows.get(key);
@@ -764,8 +778,19 @@ function purgeOldAuditRefusals() {
 	try {
 		const cutoff = new Date(Date.now() - REFUSAL_AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
 		const placeholders = PURGEABLE_REFUSAL_ACTIONS.map(() => "?").join(",");
+		// ⚠️ THE ACTION IS NOT FINE-GRAINED ENOUGH ON ITS OWN. `status_update_blocked`
+		// covers both ROW_LOAD_MISMATCH (cheap, floodable noise — the reason this
+		// purge exists) and PERIOD_FINALIZED (someone repeatedly trying to restate a
+		// settled month). Those are opposite in value, and settlement disputes surface
+		// on a quarterly or annual cadence, i.e. reliably AFTER 90 days — so purging
+		// them by action would delete the evidence exactly when it is first wanted,
+		// while the corresponding successful writes are kept forever. Every refusal
+		// detail is written as `… [CODE]…` by the two helpers, so excluding `[PERIOD_`
+		// keeps the whole period family (FINALIZED / LOCK_UNREADABLE / UNRESOLVED)
+		// indefinitely. Pairs with UNCOALESCED_REFUSAL_CODES above: the same rows that
+		// are never collapsed are also never purged.
 		const result = db
-			.prepare(`DELETE FROM audit_trail WHERE action IN (${placeholders}) AND timestamp < ?`)
+			.prepare(`DELETE FROM audit_trail WHERE action IN (${placeholders}) AND timestamp < ? AND details NOT LIKE '%[PERIOD\\_%' ESCAPE '\\'`)
 			.run(...PURGEABLE_REFUSAL_ACTIONS, cutoff);
 		if (result.changes > 0) console.log(`[cleanup] Purged ${result.changes} audit_trail refusal rows older than ${REFUSAL_AUDIT_RETENTION_DAYS} days`);
 	} catch (err) {
@@ -20133,6 +20158,23 @@ async function readJobTrackingSnapshot(sheets, rowIndex) {
 //      board). Ambiguity is still refused when the caller's row is NOT one of
 //      the copies, because then the server would have to guess which copy — and
 //      guessing is precisely what produced the 2026-08-05 incident.
+//
+//      ⚠️⚠️ WHAT THE RELAXATION LEANS ON, AND IT IS NOT LOCAL TO THIS FUNCTION.
+//      "Choice of which copy of their OWN load" is only a safe thing to grant
+//      while ownership is judged on the DEDUPLICATED view. loadBelongsToDriver()
+//      iterates getJobTrackingCached(), which returns deduplicateLoads() output
+//      — LAST row per load id wins — so to own a duplicated load a Driver must
+//      own its LAST row, which is also the row every dashboard, KPI and payout
+//      surface treats as the load. This guard, by contrast, deliberately reads
+//      the RAW snapshot (it has to; the deduped view hides the duplicates it
+//      counts). Those two views disagreeing is exactly what keeps the pair safe:
+//      the attacker-controlled row is the representative one, so writing to an
+//      earlier copy moves nothing anyone reads. If loadBelongsToDriver() is ever
+//      "fixed" to scan raw rows, a Driver owning ANY copy could stamp a status
+//      onto a DIFFERENT driver's copy of the same id. Do not change that helper
+//      to a raw scan without narrowing this relaxation in the same commit —
+//      e.g. to additionally require the target row's Driver cell to match the
+//      actor. Pinned by scripts/test-driver-status-row-binding.js.
 //   5. THE ID IS ON EXACTLY ONE ROW, AND IT IS NOT THE CALLER'S → refuse, and
 //      name the row it IS on so the caller can refresh rather than guess.
 //
@@ -20226,7 +20268,13 @@ function resolveLoadBinding(headers, rows, rowIndex, loadId, opts) {
 		// demonstrably holds the named load, which is the only question this guard
 		// asks. See the ⚠️ on rung 4 above for the measurement that forced this and
 		// for why it cannot reach another load's row.
-		if (opts && opts.callerRowWinsAmongDuplicates && carrying.includes(rowIndex)) return null;
+		// ⚠️ `Object.hasOwn`, not a truthiness read. `opts.callerRowWinsAmongDuplicates`
+		// on a bare `{}` would inherit from a polluted Object.prototype and switch the
+		// relaxation on for a caller that never asked. No caller passes `{}` today and
+		// there is no known pollution primitive here (no express.urlencoded, so no `qs`
+		// vector), but an own-property test removes the class for one word.
+		if (opts && Object.hasOwn(opts, "callerRowWinsAmongDuplicates")
+			&& opts.callerRowWinsAmongDuplicates && carrying.includes(rowIndex)) return null;
 		return {
 			http: 409,
 			code: "AMBIGUOUS_LOAD",
@@ -22999,7 +23047,29 @@ app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter
 const STATUS_OVERRIDE_ALLOWED = ["Dispatched", "Heading to Shipper", "At Shipper", "Loading", "In Transit", "At Receiver", "Delivered"];
 
 // PUT /api/driver/status — Update load status
-app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) => {
+//
+// ⚠️ `requireRole`, NOT `requireAuth` — an INVESTOR could reach this route.
+// `requireAuth` only asserts that a session exists, and the ownership check
+// below is gated on `role === "Driver"`, so every other role skipped it: Super
+// Admin and Dispatcher legitimately, and **Investor** by omission. There are 3
+// Investor accounts on production. Every other Job Tracking surface is properly
+// scoped (`GET /api/data`, `/api/dashboard`, `/api/load/:loadId` are all
+// requireRole("Super Admin","Dispatcher")); this route was the hole.
+//
+// It mattered before this PR because an Investor could WRITE a status to an
+// arbitrary row. It matters differently now: the load binding below answers
+// "which row is load X on?" precisely (`ROW_LOAD_MISMATCH` names the row), so
+// leaving the route open would have converted a blind write into an accurate
+// row-location oracle for any load id an investor can already see on their own
+// portal. Narrowing the write while widening the read is the wrong trade — so
+// the role gate closes both at once.
+//
+// No client changes: all three callers are Driver or admin surfaces
+// (client/src/stores/driver.js, client/src/stores/dashboard.js,
+// public/driver.html). Mounted BEFORE driverWriteLimiter, matching the
+// convention on the fuel-events/fuel-gallons routes, so an unauthorized caller
+// cannot spend the rate-limit budget on 403s.
+app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {
 	try {
 		// `rowData` is deliberately NOT destructured any more — see the load-binding
 		// block below. Clients still send it and it is simply ignored, so no client
