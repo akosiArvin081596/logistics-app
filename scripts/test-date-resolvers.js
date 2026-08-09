@@ -790,9 +790,372 @@ for (const date of ["2026-08-01", "2026-07-15", "1969-12-05", "1900-05-05"]) {
 eq(advPermits, 0, `⚠️ 0 of ${advCombos} combinations go REFUSE→permit even with out-of-range periods locked`);
 ok(advRefusals > 0, `…while the union still converts fail-opens into refusals (${advRefusals} newly refused)`);
 
-// ------------------------------------------------------- 12. timezone invariance
+// ============================================================================
+// 12. THE PRODUCER END — which months may be WRITTEN into period_locks
+// ============================================================================
+// Section 11 pins the READER: lockedAmong() must stay as wide as the lock table
+// can be, because a reader narrower than the table turns a refusal into a permit.
+// That left the complementary hole open and named it — the finalize route admitted
+// anything matching /^\d{4}-\d{2}$/ and period_locks has no CHECK, so `1900-05`,
+// `0999-13` and `9999-99` were all lockable and every guard in server.js then
+// consulted the junk row.
+//
+// The fix bounds the WRITER, which is the only end that can be tightened safely.
+// The invariant that makes it safe is a subset relation, and it is asserted here
+// rather than described:
+//
+//        isPlausibleLockPeriod(p)  ⟹  LOCKABLE_MONTH_KEY.test(p)
+//
+console.log("\n12. isPlausibleLockPeriod — the WRITER's bound, and why it is not the reader's");
+
+const PLAUSIBLE_SRC = extractFn("isPlausibleLockPeriod");
+const MIN_YEAR_CONST = extractConst("LOCK_PERIOD_MIN_YEAR");
+const MAX_YEAR_CONST = extractConst("LOCK_PERIOD_MAX_YEAR");
+const PLAUSIBLE = new Function(`
+	${MONTH_KEY_CONST}
+	${MIN_YEAR_CONST}
+	${MAX_YEAR_CONST}
+	${PLAUSIBLE_SRC}
+	return { isPlausibleLockPeriod, LOCKABLE_MONTH_KEY, LOCK_PERIOD_MIN_YEAR, LOCK_PERIOD_MAX_YEAR };
+`)();
+
+// ⚠️ STRUCTURAL: the predicate must DELEGATE to the shared regex, not restate the
+// shape. A hand-rolled copy (/^[0-9]{4}-[0-9]{2}$/, or a substr length test) would
+// pass every functional assertion below and still be free to drift away from
+// lockedAmong() later — which is the exact failure mode PR #249 reverted.
+ok(/LOCKABLE_MONTH_KEY\.test\(p\)/.test(PLAUSIBLE_SRC),
+	"⚠️ isPlausibleLockPeriod delegates to the SHARED LOCKABLE_MONTH_KEY — subset by construction, not by coincidence");
+ok(!/\^\\d\{4\}|\^\[0-9\]/.test(PLAUSIBLE_SRC), "…and keeps no private copy of the shape regex");
+
+// Production's 15 rows, read off the VPS read-only on 2026-08-09 (better-sqlite3
+// {readonly:true}); every one is status='locked'. If a tightening cannot clear
+// this list it would orphan a live lock, so this is the gate on the whole change.
+const PROD_LOCK_ROWS = ["2025-05", "2025-06", "2025-07", "2025-08", "2025-09", "2025-10", "2025-11",
+	"2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07"];
+eq(PROD_LOCK_ROWS.length, 15, "the production lock table had exactly 15 rows");
+eq(PROD_LOCK_ROWS.filter((p) => !PLAUSIBLE.isPlausibleLockPeriod(p)), [],
+	"⚠️ all 15 EXISTING production periods still validate — the bound orphans nothing");
+eq(LOCKED_PERIODS.filter((p) => !PLAUSIBLE.isPlausibleLockPeriod(p)), [],
+	"…and so does every period section 10/11 treat as locked");
+
+console.log("\n   the junk the finalize route used to admit");
+for (const bad of ["1900-05", "1969-12", "0999-13", "9999-99", "3000-01", "1000-01", "2026-00", "2026-13"]) {
+	ok(PLAUSIBLE.isPlausibleLockPeriod(bad) === false, `"${bad}" is refused as a lock key`);
+}
+console.log("\n   …and the real months it must never touch");
+for (const good of ["2000-01", "2100-12", "2025-05", "2026-07", "2026-08", "2099-12"]) {
+	ok(PLAUSIBLE.isPlausibleLockPeriod(good) === true, `"${good}" is accepted`);
+}
+
+console.log("\n   ⚠️ SUBSET — the writer's set is strictly inside the reader's");
+// A corpus mixing production, the junk above, malformed shapes, the L-2 truncated
+// keys from section 11, and non-strings. The subset property must hold over ALL of
+// it: anything the writer admits, lockedAmong must be able to match.
+const PERIOD_CORPUS = [...PROD_LOCK_ROWS, "1900-05", "1969-12", "0999-13", "9999-99", "3000-01",
+	"1000-01", "2000-01", "2100-12", "2101-01", "1999-12", "2026-00", "2026-13", "2026-1", "202-05",
+	"20260-05", "10000-01", "999-01-", "275760-", "2026-07 ", " 2026-07", "2026/07", "2026_07", "",
+	"abc", "0000-00", null, undefined, 0, 20260, {}, [], "2026-07\n"];
+let subsetHolds = true, narrowedBy = 0;
+for (const p of PERIOD_CORPUS) {
+	const writer = PLAUSIBLE.isPlausibleLockPeriod(p);
+	const reader = PLAUSIBLE.LOCKABLE_MONTH_KEY.test(String(p == null ? "" : p));
+	if (writer && !reader) { subsetHolds = false; console.log(`    !! ${JSON.stringify(p)} admitted by WRITER but unmatchable by READER`); }
+	if (reader && !writer) narrowedBy++;
+}
+ok(subsetHolds, `⚠️ every key the writer admits is matchable by lockedAmong (${PERIOD_CORPUS.length} candidates) — tightening cannot hide a lock`);
+ok(narrowedBy > 0, `…and the bound is genuinely narrower, not a no-op (${narrowedBy} well-formed keys refused)`);
+
+console.log("\n   ⚠️ ANTI-NARROWING — every month the business could plausibly settle must stay lockable");
+// Widening this bound is safe; NARROWING it is a one-way door. Reopen skips the
+// bound when a lock row exists but finalize does not, so a month narrowed out
+// while already locked becomes reopenable and never re-lockable — no API can
+// close it again. Raised by security review (L-1). This sweeps the whole span the
+// business could ever settle, so a future "tidy" to a business range fails here
+// rather than in production years later.
+const EARLIEST_PROD_YEAR = Number(PROD_LOCK_ROWS[0].slice(0, 4));   // 2025
+const HORIZON_YEAR = new Date().getUTCFullYear() + 10;
+let settleableRefused = [];
+for (let y = EARLIEST_PROD_YEAR - 5; y <= HORIZON_YEAR; y++) {
+	for (let m = 1; m <= 12; m++) {
+		const key = `${y}-${String(m).padStart(2, "0")}`;
+		if (!PLAUSIBLE.isPlausibleLockPeriod(key)) settleableRefused.push(key);
+	}
+}
+eq(settleableRefused, [], `⚠️ every month from ${EARLIEST_PROD_YEAR - 5}-01 to ${HORIZON_YEAR}-12 is lockable — the bound can never strand a real settlement month`);
+// And all 12 month numbers are accepted in a real year — a bound that silently
+// refused month 12 would only surface each December.
+eq([...Array(12)].map((_, i) => `2026-${String(i + 1).padStart(2, "0")}`).filter((p) => !PLAUSIBLE.isPlausibleLockPeriod(p)),
+	[], "all twelve months of a real year are lockable (December is not special-cased away)");
+
+console.log("\n   ⚠️ …and applying this SAME bound at the READER would fail open — measured");
+// The counterfactual, as a number. This is the one-line answer to "why not just
+// put the range check in lockedAmong too?": with a junk period genuinely locked, a
+// reader that discards it reports nothing locked, and the guard permits the write.
+// Same adversarial lock table as section 11.
+const GATE_READER_BOUNDED = new Function("RFC2822_MONTHS", "LOCKED", `
+	${DEPS}
+	${GATE_DEPS}
+	${WINDOW_SRC}
+	${PERIOD_FNS}
+	${EDP_SRC}
+	${MIN_YEAR_CONST}
+	${MAX_YEAR_CONST}
+	${PLAUSIBLE_SRC}
+	const isLocked = (p) => LOCKED.has(p);
+	// lockedAmong with the WRITER's bound wrongly applied to the READER.
+	function lockedAmong(periods) {
+		return [...new Set((periods || []).filter((p) => isPlausibleLockPeriod(p) && isLocked(p)))].sort();
+	}
+	return { verdict: (a) => (lockedAmong(excludedDayPeriods(a)).length ? "finalized" : null) };
+`)(RFC2822_MONTHS, new Set(ADVERSARIAL_LOCKS));
+
+let readerBoundFlips = 0, shippedFlips = 0, combos = 0;
+for (const date of ["2026-08-01", "2026-07-15", "1969-12-05", "1900-05-05"]) {
+	for (const a1 of ["2026-08-03", "2026-07-03", "1900-05-05", "1969-12-05", "3000-01-05", "1 Jan 0999", "TBD"]) {
+		for (const a2 of ["2026-08-03", "1900-05-05", "1 Jan 0999", "TBD"]) {
+			const jobTracking = jt(jtRow(DRV, a1, date, date), jtRow(DRV, a2, date, date));
+			const arg = { driver: DRV, date, action: "remove", jobTracking };
+			combos++;
+			// Baseline is the SHIPPED reader (section 11's SHIPPED_ADV).
+			const base = SHIPPED_ADV.verdict(arg);
+			if (base === "finalized" && GATE_READER_BOUNDED.verdict(arg) === null) readerBoundFlips++;
+			if (base === "finalized" && SHIPPED_ADV.verdict(arg) === null) shippedFlips++;
+		}
+	}
+}
+// Printed, not merely asserted — these two numbers ARE the argument for putting
+// the bound on the writer, and an assertion label is invisible while it passes.
+console.log(`    bound at the READER (the wrong end): ${readerBoundFlips} of ${combos} REFUSE→permit flips`);
+console.log(`    bound at the WRITER  (as shipped)  : ${shippedFlips} of ${combos} REFUSE→permit flips`);
+ok(readerBoundFlips > 0,
+	`⚠️ bounding the READER costs ${readerBoundFlips} of ${combos} REFUSE→permit flips — this is why the bound is on the writer only`);
+eq(shippedFlips, 0, `⚠️ the SHIPPED arrangement flips 0 of ${combos} — no refusal becomes a permit`);
+// The reader is untouched by this change, so section 11's own 0-flips result must
+// still stand. Re-asserted here so a future edit to isPlausibleLockPeriod that
+// leaked into lockedAmong is caught by THIS section too, not only by that one.
+eq(advPermits, 0, "…and section 11's adversarial comparison is still 0 flips after this change");
+
+// ---------------------------------------------------------- the routes themselves
+console.log("\n   the two ROUTES — the real handler bodies, run against stubs");
+// Extracted verbatim, same philosophy as the money statements: these are inline
+// arrow handlers inside 35k lines, so lifting the body is the only way to exercise
+// the code that ships rather than a paraphrase of it.
+function extractRouteBody(pathLiteral) {
+	const needle = `app.post("${pathLiteral}"`;
+	const hits = SRC.split(needle).length - 1;
+	if (hits !== 1) throw new Error(`expected exactly 1 route ${pathLiteral}, found ${hits}`);
+	const at = SRC.indexOf(needle);
+	const arrow = SRC.indexOf("=> {", at);
+	if (arrow < 0) throw new Error(`no handler body for ${pathLiteral}`);
+	const brace = SRC.indexOf("{", arrow);
+	return braceMatch(brace, brace);
+}
+const FINALIZE_BODY = extractRouteBody("/api/periods/:period/finalize");
+const REOPEN_BODY = extractRouteBody("/api/periods/:period/reopen");
+
+// Stubs for everything the handlers touch besides the validation under test.
+// db is dispatched on SQL text so the reopen handler's three statements can be
+// told apart; `lockRow` is what SELECT … FROM period_locks returns.
+function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
+	const calls = { finalized: [], audited: [], reopened: [] };
+	const res = {
+		_status: 200, _json: null,
+		status(c) { this._status = c; return this; },
+		json(o) { this._json = o; return this; },
+	};
+	const db = {
+		prepare(sql) {
+			return {
+				get: () => (/FROM period_locks/.test(sql) ? lockRow
+					: /COUNT\(\*\)/.test(sql) ? { c: 0, t: 0 } : undefined),
+				run: (...a) => { if (/UPDATE period_locks/.test(sql)) calls.reopened.push(a); return { changes: 1 }; },
+			};
+		},
+		transaction: (fn) => (...a) => fn(...a),
+	};
+	const fn = new Function("ctx", `
+		const { req, res, db, calls, PERIOD_FINALIZE_ENABLED,
+			LOCKABLE_MONTH_KEY, isPlausibleLockPeriod, LOCK_PERIOD_MIN_YEAR, LOCK_PERIOD_MAX_YEAR,
+			currentMonthKeyCT, periodLabel, periodLockStmt, finalizePeriod, logAudit } = ctx;
+		return (async () => ${bodySrc})();
+	`);
+	return fn({
+		req: { params: { period }, body: { reason: "late receipt correction" }, session: { user: { username: "qa" } } },
+		res, db, calls,
+		PERIOD_FINALIZE_ENABLED: enabled,
+		LOCKABLE_MONTH_KEY: PLAUSIBLE.LOCKABLE_MONTH_KEY,
+		isPlausibleLockPeriod: PLAUSIBLE.isPlausibleLockPeriod,
+		LOCK_PERIOD_MIN_YEAR: PLAUSIBLE.LOCK_PERIOD_MIN_YEAR,
+		LOCK_PERIOD_MAX_YEAR: PLAUSIBLE.LOCK_PERIOD_MAX_YEAR,
+		currentMonthKeyCT: () => "2026-08",
+		periodLabel: (p) => `label(${p})`,
+		periodLockStmt: () => ({ get: () => undefined }),
+		finalizePeriod: async (p, a) => { calls.finalized.push([p, a]); return { stamped: 3, investors: 1, periods: [p] }; },
+		logAudit: (...a) => { calls.audited.push(a); },
+	}).then(() => ({ status: res._status, body: res._json, calls }));
+}
+
+const routeChecks = [];
+// ⚠️ ASYNC — every route assertion is queued and awaited at the end of the file,
+// because the finalize handler is async and a fire-and-forget promise would let a
+// failure land AFTER the pass/fail summary had already printed a green total.
+async function routeCase(label, run, check) {
+	routeChecks.push(run().then((r) => check(r, label)));
+}
+
+for (const bad of ["1900-05", "0999-13", "9999-99", "2026-13", "1969-12"]) {
+	routeCase(`finalize refuses "${bad}"`,
+		() => runRoute(FINALIZE_BODY, { period: bad }),
+		(r, label) => {
+			ok(r.status === 400, `${label} — 400 (got ${r.status})`);
+			ok(r.body && r.body.code === "PERIOD_OUT_OF_RANGE", `${label} — code PERIOD_OUT_OF_RANGE (got ${r.body && r.body.code})`);
+			eq(r.calls.finalized, [], `${label} — and finalizePeriod() is never reached`);
+		});
+}
+for (const malformed of ["2026-7", "202605", "abc", "20260-05"]) {
+	routeCase(`finalize rejects malformed "${malformed}"`,
+		() => runRoute(FINALIZE_BODY, { period: malformed }),
+		(r, label) => {
+			ok(r.status === 400, `${label} — 400 (got ${r.status})`);
+			ok(r.body && r.body.code === "PERIOD_KEY_INVALID", `${label} — code PERIOD_KEY_INVALID (got ${r.body && r.body.code})`);
+		});
+}
+// THE CONTROL THAT MATTERS: a legitimate close still closes. Without this the
+// section could be satisfied by a route that refuses everything.
+routeCase("finalize STILL SUCCEEDS on a legitimate past month",
+	() => runRoute(FINALIZE_BODY, { period: "2026-07" }),
+	(r, label) => {
+		ok(r.status === 200, `${label} — 200 (got ${r.status})`);
+		ok(r.body && r.body.success === true && r.body.period === "2026-07", `${label} — success body`);
+		eq(r.calls.finalized, [["2026-07", "qa"]], `${label} — finalizePeriod() actually ran`);
+		ok(r.calls.audited.length === 1, `${label} — and the close was audit-logged`);
+	});
+routeCase("finalize still 409s an accruing month (existing guard intact)",
+	() => runRoute(FINALIZE_BODY, { period: "2026-08" }),
+	(r, label) => ok(r.status === 409 && r.body.code === "PERIOD_ACCRUING", `${label} — 409 PERIOD_ACCRUING (got ${r.status}/${r.body && r.body.code})`));
+
+routeCase("reopen refuses an implausible period that has NO lock row",
+	() => runRoute(REOPEN_BODY, { period: "1900-05", lockRow: undefined }),
+	(r, label) => {
+		ok(r.status === 400, `${label} — 400 (got ${r.status})`);
+		ok(r.body && r.body.code === "PERIOD_OUT_OF_RANGE", `${label} — code PERIOD_OUT_OF_RANGE`);
+	});
+// ⚠️ THE REMEDY CARVE-OUT. finalize was unbounded until this commit, so a database
+// may already hold a `1900-05` row. Reopen is the only API that clears one, and the
+// VPS has no sqlite3 binary — so bounding reopen unconditionally would strand the
+// junk lock permanently. An EXISTING row must stay reopenable.
+routeCase("⚠️ reopen STILL WORKS on an implausible period that IS locked (the remedy is not blocked)",
+	() => runRoute(REOPEN_BODY, { period: "1900-05", lockRow: { period: "1900-05", status: "locked" } }),
+	(r, label) => {
+		ok(r.status === 200, `${label} — 200 (got ${r.status}/${JSON.stringify(r.body)})`);
+		ok(r.calls.reopened.length === 1, `${label} — the UPDATE to period_locks actually ran`);
+	});
+routeCase("reopen still 404s a plausible month that was never finalized",
+	() => runRoute(REOPEN_BODY, { period: "2026-06", lockRow: undefined }),
+	(r, label) => ok(r.status === 404 && r.body.code === "NOT_FINALIZED", `${label} — 404 NOT_FINALIZED (got ${r.status})`));
+routeCase("reopen still succeeds normally on a real locked month",
+	() => runRoute(REOPEN_BODY, { period: "2026-07", lockRow: { period: "2026-07", status: "locked" } }),
+	(r, label) => ok(r.status === 200 && r.body.success === true, `${label} — 200 success (got ${r.status})`));
+
+// ------------------------------------------ the pre-fix routes must FAIL these
+// Self-discrimination, same discipline as section 5: reconstruct the route bodies
+// as they were before this commit and require them to admit what the shipped ones
+// refuse. A test that passes against both proves nothing.
+console.log("\n   ⚠️ discrimination — the PRE-FIX routes admitted the junk");
+const FINALIZE_PRE = FINALIZE_BODY.replace(/\n\t\tif \(!isPlausibleLockPeriod\(period\)\) \{[\s\S]*?\n\t\t\}/, "");
+const REOPEN_PRE = REOPEN_BODY.replace(/\n\t\tif \(!lock && !isPlausibleLockPeriod\(period\)\) \{[\s\S]*?\n\t\t\}/, "");
+ok(FINALIZE_PRE !== FINALIZE_BODY && !/isPlausibleLockPeriod/.test(FINALIZE_PRE),
+	"the pre-fix finalize handler could be reconstructed");
+ok(REOPEN_PRE !== REOPEN_BODY && !/isPlausibleLockPeriod/.test(REOPEN_PRE),
+	"the pre-fix reopen handler could be reconstructed");
+routeCase("⚠️ PRE-FIX finalize LOCKED \"1900-05\" — the gap, reproduced",
+	() => runRoute(FINALIZE_PRE, { period: "1900-05" }),
+	(r, label) => {
+		ok(r.status === 200, `${label} — it returned 200 (got ${r.status})`);
+		eq(r.calls.finalized, [["1900-05", "qa"]], `${label} — and finalizePeriods() wrote the junk lock`);
+	});
+routeCase("⚠️ PRE-FIX finalize also locked \"0999-13\" (month 13)",
+	() => runRoute(FINALIZE_PRE, { period: "0999-13" }),
+	(r, label) => ok(r.status === 200 && r.calls.finalized.length === 1, `${label} — locked a 13th month (got ${r.status})`));
+routeCase("PRE-FIX reopen 404'd rather than 400'd an implausible key",
+	() => runRoute(REOPEN_PRE, { period: "1900-05", lockRow: undefined }),
+	(r, label) => ok(r.status === 404, `${label} — 404, i.e. treated as a real month (got ${r.status})`));
+// …while the control still passes on BOTH, so the discriminator is the bound and
+// not some incidental breakage in the reconstruction.
+routeCase("control — the pre-fix finalize also succeeded on a legitimate month",
+	() => runRoute(FINALIZE_PRE, { period: "2026-07" }),
+	(r, label) => ok(r.status === 200, `${label} — 200 (got ${r.status})`));
+
+// ---------------------------------------------- the non-route doors into the table
+console.log("\n   the other writers — route validation only helps if the routes are the only door");
+// period_locks has exactly three write sites. Pinned structurally, because a fourth
+// one added later is precisely how this class of gap comes back.
+eq((SRC.match(/INTO period_locks/g) || []).length, 2, "period_locks still has exactly 2 INSERT sites");
+eq((SRC.match(/UPDATE period_locks/g) || []).length, 1, "…and exactly 1 UPDATE site (the reopen)");
+// extractFn() only knows plain declarations; finalizePeriods is `async function`.
+function extractFnAny(name) {
+	for (const kw of ["function", "async function"]) {
+		const needle = `\n${kw} ${name}(`;
+		if (SRC.split(needle).length - 1 === 1) {
+			const start = SRC.indexOf(needle) + 1;
+			return braceMatch(start, bodyStart(start + `${kw} ${name}`.length));
+		}
+	}
+	throw new Error(`expected exactly 1 definition of ${name}(), found none`);
+}
+ok(/const list = proposed\.filter\(isPlausibleLockPeriod\);/.test(extractFnAny("finalizePeriods")),
+	"⚠️ finalizePeriods() filters — the choke point the finalize ROUTE and the SWEEP both pass through");
+ok(/isPlausibleLockPeriod/.test(extractFnAny("periodsDueForClose")),
+	"periodsDueForClose() filters, so the sweep's `due` leg never proposes a junk key");
+// ⚠️ THE SWEEP HAS TWO INPUTS AND THE SECOND IS THE DANGEROUS ONE. `unstamped`
+// reads period_locks DIRECTLY, so it surfaces a junk row a pre-validation build
+// already wrote — the exact state the reopen carve-out exists for. Unfiltered,
+// finalizePeriods refuses it, stamps nothing, nothing changes, and the identical
+// row returns next tick: a per-minute warn loop forever, burying real failures.
+// Found by security review (M-1); the filter is invisible in any single-tick test,
+// so it is pinned structurally.
+const SWEEP_SRC = extractFnAny("maybeCloseFinishedPeriods");
+ok(/\.all\(\)\.map\(\(r\) => r\.period\)\.filter\(isPlausibleLockPeriod\)/.test(SWEEP_SRC),
+	"⚠️ the sweep's `unstamped` retry leg is filtered too — not just `due`");
+// …and the close log must report what CLOSED, not what was PROPOSED. Logging
+// `work` announces a close that finalizePeriods refused.
+ok(/finalized \$\{result\.periods\.join/.test(SWEEP_SRC),
+	"⚠️ the close log reports result.periods, not the proposed `work` (it cannot announce a refused close)");
+ok(!/finalized \$\{work\.join/.test(SWEEP_SRC), "…and no longer logs `work`");
+// The baseline seed is the second INSERT and does NOT go through finalizePeriods.
+// It locks every distinct investor_payouts.period in one pass on first enable, so
+// it is the highest-volume way junk could land.
+const SEED_AT = SRC.indexOf("INSERT OR IGNORE INTO period_locks");
+ok(SRC.slice(SEED_AT - 900, SEED_AT).includes("isPlausibleLockPeriod"),
+	"⚠️ the baseline seed filters too — it INSERTs directly, bypassing finalizePeriods()");
+
+// ⚠️ THE BOUND MUST NEVER REACH A READ PATH. isLocked() reports a FACT about the
+// table and periodLocksReadable() is the positive control for the entire lock
+// system — and it deliberately probes with "1970-01", a period this writer bound
+// REFUSES. Teaching either of them the bound would break the health probe and,
+// worse, reproduce #249's fail-open: a reader that discards a key the table holds
+// reports "nothing locked" and permits the write. Pinned structurally, because it
+// is the single most tempting follow-up edit.
+ok(!/isPlausibleLockPeriod/.test(extractFn("isLocked")), "⚠️ isLocked() does NOT consult the writer bound — it reports what the table says");
+ok(!/isPlausibleLockPeriod/.test(extractFn("periodLocksReadable")), "⚠️ …nor does periodLocksReadable(), whose probe key '1970-01' the bound refuses");
+ok(!/isPlausibleLockPeriod/.test(extractFn("lockedAmong")), "⚠️ …nor lockedAmong(), the reader #249 proved must stay wide");
+ok(PLAUSIBLE.isPlausibleLockPeriod("1970-01") === false && /1970-01/.test(extractFn("periodLocksReadable")),
+	"…and that probe key really is one the writer would refuse — so the split is load-bearing, not cosmetic");
+
+// ⚠️ WHY THE UPSTREAM NEEDS THIS AT ALL: investor_payouts.period is not validated
+// anywhere. It is built from a Date cursor whose start is moneySheetDate() over the
+// sheet's Assigned Date column, and the year is interpolated with getFullYear() —
+// unpadded, exactly like jtFmtDate(). One mistyped year seeds real-SHAPED but absurd
+// months, which the seed would then lock in bulk. Reproduced here from the shipped
+// month-key expression rather than asserted from memory.
+const mk = (y, m) => `${new Date(y, m - 1, 1).getFullYear()}-${String(new Date(y, m - 1, 1).getMonth() + 1).padStart(2, "0")}`;
+eq(mk(1000, 1), "1000-01", "a year-1000 cursor yields a well-SHAPED month key, so the shape test alone would pass it");
+ok(PLAUSIBLE.LOCKABLE_MONTH_KEY.test(mk(1000, 1)) && !PLAUSIBLE.isPlausibleLockPeriod(mk(1000, 1)),
+	"⚠️ …and only the range bound refuses it — this is the case route validation alone would have missed");
+
+// ------------------------------------------------------- 13. timezone invariance
 if (!process.env.TZ_CHILD) {
-	console.log("\n12. timezone invariance — same verdicts under UTC / Chicago / Kolkata");
+	console.log("\n13. timezone invariance — same verdicts under UTC / Chicago / Kolkata");
 	const probe = [
 		"2025-09-24", "Date: Tue, 13 May 2025 11:56:47 -0500",
 		"Date: Wed, 31 Dec 2025 20:00:00 -0600", "9/24/2025", "2025/09/24 23:59", "9:00",
@@ -833,7 +1196,15 @@ module.exports.probe = (v) => [
 	GATE.loadRowPeriods(jtRow(DRV, v, "", ""), COLS),
 ];
 
-if (!process.env.TZ_CHILD) {
-	console.log(`\n${pass} passed, ${fail} failed`);
-	if (fail) { failures.forEach((f) => console.log("  - " + f)); process.exit(1); }
-}
+// ⚠️ The section-12 route assertions are ASYNC (the finalize handler is an async
+// arrow, so its body can only be exercised through a promise). They must be
+// settled before the totals print — otherwise a failing route check resolves
+// after "N passed, 0 failed" has already been written and the run exits green.
+Promise.all(routeChecks).catch((e) => {
+	fail++; failures.push("route harness threw: " + e.message);
+}).then(() => {
+	if (!process.env.TZ_CHILD) {
+		console.log(`\n${pass} passed, ${fail} failed`);
+		if (fail) { failures.forEach((f) => console.log("  - " + f)); process.exit(1); }
+	}
+});
