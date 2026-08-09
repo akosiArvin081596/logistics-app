@@ -238,7 +238,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { Collapse as VanCollapse, CollapseItem as VanCollapseItem, Cell as VanCell, Button as VanButton, Empty as VanEmpty } from 'vant'
-import { splitAddress } from '../../lib/address.js'
+import { splitAddress, formatLoadRoute } from '../../lib/address.js'
 import StatusBadge from '../shared/StatusBadge.vue'
 import StatusTimeline from '../shared/StatusTimeline.vue'
 import StatusStepper from './StatusStepper.vue'
@@ -397,9 +397,6 @@ function findCol(headers, regex) {
 
 const statusCol = computed(() => findCol(props.headers, /status/i))
 const loadIdCol = computed(() => findCol(props.headers, /load.?id|job.?id/i))
-const detailsCol = computed(() => findCol(props.headers, /details/i))
-const originCol = computed(() => (props.headers || []).find(h => /origin|pickup.*(city|info|address)|shipper.*(city|info)/i.test(h) && !/lat|lng|lon/i.test(h)) || null)
-const destCol = computed(() => (props.headers || []).find(h => /dest|drop.*(city|info|address)|receiver.*(city|info)|delivery.*(city|info)|consignee.*(city|info)/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null)
 
 const status = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim() : '')
 const loadId = computed(() => loadIdCol.value ? props.load[loadIdCol.value] : '')
@@ -416,16 +413,9 @@ const isActiveLoad = computed(() => /^(assigned|dispatched|heading to shipper|at
 // to make it. Same status set the driver store splits Active from Historical on.
 const loadStillToDrive = computed(() => !/^(delivered|completed|pod received)$/i.test(status.value))
 
-const route = computed(() => {
-  if (detailsCol.value) {
-    const details = (props.load[detailsCol.value] || '').trim()
-    if (details) return details.replace(/\s*-\s*/, ' \u2192 ')
-  }
-  const o = originCol.value ? props.load[originCol.value] : ''
-  const d = destCol.value ? props.load[destCol.value] : ''
-  if (o || d) return `${o || '\u2014'} \u2192 ${d || '\u2014'}`
-  return ''
-})
+// See LoadCard.vue \u2014 identical reasoning. `Details` is the commodity column and
+// is only consulted for a route when it is genuinely route-shaped.
+const route = computed(() => formatLoadRoute(props.load, props.headers))
 
 const pickupFields = computed(() => {
   const exclude = /lat|lng|lon/i
