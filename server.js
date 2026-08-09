@@ -4933,9 +4933,17 @@ function requireRole(...roles) {
 // these are not, so mounting one on an earlier route threw
 // "Cannot access 'refuseCrossOrigin' before initialization" AT BOOT — the whole
 // app down, not one route. Hit while adding the guard to
-// GET /api/admin/ratecon-reconcile (~line 8900). Defining them beside
-// requireRole makes "you may mount this wherever you may mount requireRole"
-// true by construction. scripts/test-csrf-guard.js lifts this block by the
+// GET /api/admin/ratecon-reconcile (~line 8900).
+//
+// ⚠️ This position is a much better one, NOT a general fix. About nine routes
+// are still registered above these definitions — the drivers-directory writes
+// and two profile-picture uploads among them — and none of them can mount a
+// guard. None NEEDS one today, because SameSite=Lax withholds the cookie from
+// the cross-site POST that would reach them. If that ever changes, move these
+// definitions higher again or convert them to function declarations. Do not
+// read "beside requireRole" as "available everywhere": requireRole hoists and
+// these do not, which is the whole asymmetry that caused the crash.
+// scripts/test-csrf-guard.js lifts this block by the
 // `function originIsSelf(` / `const refuseCrossOrigin =` markers, so it follows
 // the block wherever it lives — but keep those two lines intact.
 //
@@ -10461,8 +10469,9 @@ if (RATECON_RECONCILE_ENABLED) {
 }
 
 // Run the sweep on demand. Super Admin only.
-//   GET  /api/admin/ratecon-reconcile      REPORT gaps. Structurally read-only.
-//   POST /api/admin/ratecon-reconcile/run  Report AND alert (DB row + email).
+//   GET  /api/admin/ratecon-reconcile      Report gaps. Does not alert, sends no
+//                                          mail, and never consumes an alert.
+//   POST /api/admin/ratecon-reconcile/run  Report AND alert (stamp + email).
 //
 // Split 2026-08-09. This was ONE GET whose `?dryRun` chose between "report" and
 // "insert an alert row and send mail" — the side effect selected by a query
@@ -10485,13 +10494,27 @@ if (RATECON_RECONCILE_ENABLED) {
 // Shaped after the two pairs already in this file rather than inventing a third
 // convention: GET /api/admin/fuel-events + POST …/run (whose comment records
 // this same reasoning), and GET /api/admin/fuel-gallons-recovery + POST …/apply.
-// The GET is read-only STRUCTURALLY — `alert` is hardcoded false and no query
-// parameter reaches it — which is the gallons-recovery discipline and is
-// stronger than trusting a `?dryRun` default. It also sidesteps the qs-parser
-// trap the fuel-events comment names: a duplicated `?dryRun=true&dryRun=true`
-// parses to the array-ish "true,true", which failed OPEN into the live write.
-// `?dryRun=true` is still accepted, as a no-op, so existing runbooks and
-// bookmarks keep working and keep meaning exactly what they said.
+// `alert` is passed positionally from the mount and hardcoded false on the GET;
+// rateConReconcileHttp never reads req.query at all, so no query parameter can
+// reach the decision. That also sidesteps the qs-parser trap the fuel-events
+// comment names: a duplicated `?dryRun=true&dryRun=true` parses to the
+// array-ish "true,true", which failed OPEN into the live write. `?dryRun=true`
+// is still accepted, as an inert no-op, so existing runbooks and bookmarks keep
+// working and keep meaning exactly what they said.
+//
+// ⚠️ THE GET IS NOT LITERALLY READ-ONLY, AND MUST NOT BE DESCRIBED AS SUCH.
+// Unlike GET /api/admin/fuel-gallons-recovery — which really does write nothing
+// — reconcileRateCons() always does its resolve/retire bookkeeping against
+// ratecon_reconcile_alerts (the two UPDATEs that close an 'appeared' or
+// 'self_sent' row, and the INSERT OR REPLACE that records a gap). `alert` gates
+// only `alerted_at` and the mail/notification block. What the GET therefore
+// CANNOT do is the thing that matters: a row it inserts carries
+// `alerted_at = NULL`, so the next alerting run does not skip it at the
+// `if (seen && seen.alerted_at) continue` test — the once-per-load alert is
+// preserved, not consumed. Do not "simplify" this to a read-only claim and then
+// drop refuseCrossOrigin off the GET on the strength of it: that guard is the
+// only thing between a top-level cross-site navigation, which Lax still carries
+// the cookie on, and an IMAP sweep plus these writes.
 //
 // Both carry refuseCrossOrigin, the tighter tier, because it is free here: this
 // pair has NO browser caller at all (there is no admin screen — it is run with
