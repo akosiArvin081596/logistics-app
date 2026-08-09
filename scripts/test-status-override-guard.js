@@ -76,9 +76,9 @@ function extractAllowList() {
 }
 
 // A module-scope `const NAME = …;` one-liner, lifted verbatim. loadRowPeriods()
-// and loadAssignedMonthKey() reference LOCKABLE_MONTH_KEY (the 1970-2999 bound
-// that stops a non-month key like "999-01-" being silently dropped by
-// lockedAmong() and read as "nothing locked"), so extracting the functions
+// and loadAssignedMonthKey() reference LOCKABLE_MONTH_KEY — lockedAmong()'s OWN
+// shape test, shared with it, which stops a non-month key like "999-01-" being
+// silently dropped there and read as "nothing locked". Extracting the functions
 // without it throws a ReferenceError the moment the guard evaluates a row.
 function extractConst(name) {
 	const hits = SRC.match(new RegExp(`\\nconst ${name} = [^\\n]*;`, "g")) || [];

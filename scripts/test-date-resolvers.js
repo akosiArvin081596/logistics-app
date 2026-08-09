@@ -540,8 +540,16 @@ eq(PERIODS.loadRowPeriods(UNRESOLVABLE, COLS).resolved, false,
 // PERMIT, while `resolved` still said true so the refusal rung never fired.
 //
 // Both are fail-OPENs, and both are fixed in the fail-CLOSED direction: M-1 by
-// unioning, L-2 by bounding the year to 1970-2999 (the bound sheetCellMonths()
-// already applies) and letting an out-of-range key become NO key.
+// unioning, L-2 by testing every emitted key against lockedAmong()'s OWN regex —
+// shared with it, so the two cannot drift — and letting an unmatchable key
+// become NO key.
+//
+// ⚠️ NOT sheetCellMonths' tighter 1970-2999 bound, which #245's L-2 suggested.
+// That is itself a fail-open here: period_locks has no CHECK and the finalize
+// route admits any /^\d{4}-\d{2}$/, so "1900-05" is lockable, and a stricter
+// test would DISCARD it and permit the write. Measured under such a lock: 128
+// REFUSE→permit flips versus 0 with the shared predicate. Section 11 pins both
+// halves — the implausible-but-lockable months are asserted KEPT.
 
 // The gate's real decision, minus the two DB reads excludedDayGate() makes
 // first. isLocked() is the ONLY stub — lockedAmong()'s /^\d{4}-\d{2}$/ filter is
