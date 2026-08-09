@@ -7333,7 +7333,21 @@ function getWeekRange(referenceDate) {
 	const weekEnd = new Date(weekStart);
 	weekEnd.setDate(weekStart.getDate() + 6);
 	weekEnd.setHours(23, 59, 59, 999);
-	const fmt = (dt) => dt.toISOString().split("T")[0];
+	// LOCAL getters, NOT toISOString(). weekStart/weekEnd are server-LOCAL Dates
+	// (built by setHours(0,0,0,0) / (23,59,59,999) above), so serializing them
+	// through UTC asks a different question than the one that was computed. A
+	// local midnight lands on the PREVIOUS UTC day for any zone east of UTC, so
+	// this returned a Fri–Thu window there instead of Sat–Fri — the whole billing
+	// week off by one, silently. Benign on the UTC VPS and in the Americas (a
+	// negative offset keeps local midnight on the same UTC day), which is exactly
+	// why it survived: it is correct in both places anyone has ever run it.
+	//
+	// These strings are the week identity end to end — they are compared against
+	// sheetDayKey() day-keys to decide week membership, clip the active-day window,
+	// bound the expense query, and are stored in invoices.week_start/week_end. So
+	// they must mean a wall-clock calendar day, which is what the local getters read.
+	const p2 = (n) => String(n).padStart(2, "0");
+	const fmt = (dt) => dt.getFullYear() + "-" + p2(dt.getMonth() + 1) + "-" + p2(dt.getDate());
 	return { weekStart: fmt(weekStart), weekEnd: fmt(weekEnd) };
 }
 
@@ -8119,19 +8133,52 @@ async function generateInvoiceHandler(req, res) {
 
 		// --- Active-day algorithm for driver pay ---
 		// Parse date from messy sheet values like "5/16/25 9:00" or "5/16/25 06:00-18:00 Appt."
+		//
+		// ROUTES THROUGH sheetDayKey() — THE WEEK BASIS — AND MUST KEEP DOING SO.
+		// This used to hold its own parser: a literal M/D/Y branch, then a bare
+		// `new Date(cleaned)` for everything else. That fallback made the resolved
+		// calendar day depend on the server's timezone, because `new Date()` on an
+		// ISO or RFC 2822 string yields an INSTANT which fmtLocalDate() below then
+		// reads back through server-local getters. "2026-04-27" is UTC midnight, so
+		// it resolved to Apr 27 on the UTC VPS and Apr 26 on a Houston laptop —
+		// same sheet, same code, a different paid day.
+		//
+		// WHY sheetDayKey AND NOT moneySheetDate. They are both shared resolvers and
+		// they agree on every shape except one: an ISO stamp with a trailing offset
+		// ("…T19:16:37Z"), which sheetDayKey converts to the Houston business day and
+		// moneySheetDate reads literally. sheetDayKey is the right one HERE because
+		// this handler's other two date readers already use it — the week filter
+		// above and driversWithCompletedLoadsInWeek() — and `completionCol` resolves
+		// to "Status Update Date", THE SAME CELL the week filter reads. Resolving
+		// that one cell two ways would admit a load to week N and then place its
+		// active day in week N±1: the exact divergence this is closing, recreated
+		// one function over. moneySheetDate is the MONTH/settlement basis, and it
+		// reads RFC 2822 literally for a settlement-history reason ("already closed
+		// and locked, follow that date") that has no force over a billing week.
+		//
+		// MEASURED READ-ONLY ON PRODUCTION BEFORE SHIPPING: over all 389 completed
+		// Job Tracking rows this changes the resolved day of ZERO rows under TZ=UTC,
+		// which is what the VPS runs — no invoice would have contained a different
+		// set of loads, and nothing is restated. Under TZ=America/Chicago two rows
+		// move by one day and neither crosses a Sat–Fri boundary. It is fixed anyway
+		// because the failure is silent, in money, and goes live the moment a `Z` or
+		// RFC 2822 value reaches an appointment column — the same reasoning
+		// sheetDayKey's own header records for its `Z` branch.
 		function parseInvoiceDate(val) {
-			if (!val) return null;
-			const cleaned = String(val).replace(/^date:\s*/i, "").trim();
-			// Try M/D/YY or M/D/YYYY format first
-			const m = cleaned.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-			if (m) {
-				let yr = parseInt(m[3]); if (yr < 100) yr += 2000;
-				const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
-				return isNaN(d) ? null : d;
+			const key = sheetDayKey(val);
+			if (key) {
+				const [y, mo, d] = key.split("-").map(Number);
+				// LOCAL midnight, so fmtLocalDate() reads back exactly this day in
+				// any server zone — the same round-trip contract moneySheetDate has.
+				const dt = new Date(y, mo - 1, d);
+				if (!isNaN(dt)) return dt;
 			}
-			// Fallback: try native Date parse
-			const d = new Date(cleaned);
-			return isNaN(d) ? null : d;
+			// Anything the three shared branches do not recognize degrades to the OLD
+			// behaviour rather than to null: dropping the day would silently zero a
+			// load's active days, which is worse than dating it awkwardly. Production
+			// has 3 such cells today ("07:00 Appt."), and they are unparseable both ways.
+			const fb = new Date(String(val ?? "").replace(/^date:\s*/i, "").trim());
+			return isNaN(fb) ? null : fb;
 		}
 		function fmtLocalDate(d) {
 			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -21282,18 +21329,27 @@ const exportLimiter = rateLimit({
 //                        the money day and this helper's day AGREE. Verified
 //                        read-only on production: the resolved month changed on
 //                        zero of 421 rows, so nothing was restated.
-//   parseInvoiceDate     literal for US slash ONLY. It has no ISO branch, so
-//                        both ISO and RFC 2822 fall through to new Date() +
-//                        server-local getters. Same Jun 19 -> Jun 20 shift.
-//   invoice-week filter  not literal at all: new Date(raw).toISOString(), an
-//                        outright conversion to UTC. Same shift.
+//   parseInvoiceDate     had NO ISO branch, so both ISO and RFC 2822 fell
+//                        through to new Date() + server-local getters — the same
+//                        Jun 19 -> Jun 20 shift. FIXED 2026-08-09: it now calls
+//                        THIS helper and builds a local-midnight Date from the
+//                        key, so the days it pays and the week it is paid in are
+//                        decided by one function.
+//   invoice-week filter  FIXED EARLIER, in #184: it was
+//                        new Date(raw).toISOString(), an outright conversion to
+//                        UTC, and is now sheetDayKey(). The paragraph that used
+//                        to sit here still described the toISOString version and
+//                        was read in good faith as a live bug months after it was
+//                        gone. A comment asserting a defect is a claim with a
+//                        shelf life — re-read the code before trusting one.
 //
-// The revenue/driver-pay path now agrees with this helper on every shape. The
-// two INVOICE readers still do not: parseInvoiceDate has no ISO branch and the
-// invoice-week filter converts outright via toISOString(), so both still shift an
-// evening RFC 2822 or ISO stamp by one day. That is a live, unfixed divergence —
-// it moves which WEEK a load is billed in, not which month revenue books to, so
-// it was left out of the 2026-08-08 month fix rather than resolved by it.
+// EVERY reader of this column now agrees with this helper. The week path
+// (the filter, driversWithCompletedLoadsInWeek and parseInvoiceDate) resolves
+// through sheetDayKey; the month path resolves through moneySheetDate. Those two
+// differ on exactly one shape — an ISO stamp with a trailing offset, which this
+// helper converts to the Houston day and moneySheetDate reads literally — and
+// that split is deliberate: see the `Z` note above for why the week converts, and
+// moneySheetDate's header for why settled months do not.
 //
 // Cost is limited to history: since 2026-08-03 the server stamps Houston time,
 // so the stored date IS the business day and literal == correct. Only
