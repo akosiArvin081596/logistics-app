@@ -18414,7 +18414,184 @@ function resolveSheetDataRow(res, value) {
 	return rowIndex;
 }
 
+// Raw Job Tracking row (array) → the header-keyed shape the month resolvers read.
+// Blank header cells are skipped: an "" key would collide across every unnamed
+// column, and Job Tracking's last column is literally named "output".
+function sheetRowToObject(headers, row) {
+	const out = {};
+	(headers || []).forEach((h, c) => { if (h) out[h] = (row || [])[c]; });
+	return out;
+}
+
+// The Job Tracking status column, BY NAME, resolved with the same first-match
+// /status/i the four dispatch routes use to pick the cell they write — so the
+// guard and the write can never end up reading different columns.
+//
+// Returns null when the match is a date column, and every caller treats null as
+// "assume this write is material". /status/i also matches "Status Update Date";
+// on production "Job Status" (index 11) sorts ahead of it (21), but that is
+// header ORDER, not a guarantee. On a sheet with no plain status column this
+// would resolve a DATE, no value would ever look completed, and the guard would
+// fail OPEN on every row — the one failure mode that must not be silent.
+function jobStatusColumnName(headers) {
+	const name = findCol(headers || [], /status/i);
+	if (!name || /date/i.test(name)) return null;
+	return name;
+}
+
+const DISPATCH_COMPLETED_RE = /^(delivered|completed|pod received)$/i;
+
+// May this dispatch / driver-status write land on this row? null to allow, else
+// the 409 body. Shared by POST /api/dispatch, POST /api/dispatch/reassign,
+// POST /api/driver/respond and PUT /api/driver/status — the four routes that
+// write Driver / Job Status / Truck / Owner ID, i.e. four of the eleven cells
+// sheetRowUpdateBlocker() exists to protect, while bypassing it completely.
+//
+// Measured during PR #222: PUT /api/data/:rowIndex REFUSED to restore row 306
+// with 409 PERIOD_FINALIZED while POST /api/dispatch had just written all four
+// of those cells to that same finalized row with no complaint.
+//
+// ⚠️ THIS IS DELIBERATELY NOT A BLANKET REFUSAL, and the reason is not
+// convenience. A dispatcher assigning a driver to an older load is ordinary
+// work; a guard that refuses ordinary work gets switched off, and then it
+// protects nothing. POST /api/dispatch/cancel was left unguarded in PR #211 on
+// exactly this reasoning ("a broker calling off a July load in August is
+// normal"). So the line is drawn where the MONEY is, not where the paperwork is:
+//
+//   A load contributes to a month ONLY when its status is completed. Revenue
+//   (`if (completedStatuses.test(st))`, /api/investor ~29118 and /api/financials
+//   ~32420) and driver pay (`completedStatuses.test(st) && driver`, ~29139) are
+//   both gated on it, and nothing else on this row reaches a settled figure.
+//   So on a load that is NOT completed, Driver, Job Status, Truck and Owner ID
+//   all carry $0 into whatever month it books in — closed or open. Assignment,
+//   reassignment, acceptance and every mid-trip status stay unblocked.
+//
+//   The moment either side of the write is completed, those same four cells ARE
+//   the month's revenue, the days its driver is paid for, and the investor it
+//   pays: 382 production rows, $313,923.93, 356 of them carrying a driver
+//   ($296,350.93) and $83,073.34 of it inside owner 5's already-PAID 2026-05 and
+//   2026-06 payouts. Then it refuses.
+//
+// ⚠️ IT IS NOT THE "DOES THIS ROW CONTRIBUTE TODAY?" PREDICATE statusOverrideBlocker()
+// warns against, and the difference is load-bearing. That predicate asks only
+// about the BEFORE state, so it answers "no" for the 25 Cancelled rows sitting
+// in locked months ($29,166.25) and waves through the flip to Delivered that
+// injects them. This asks about BOTH sides — `completed(before) || completed(after)`
+// — so the injection is material by the AFTER state and the erasure by the
+// BEFORE state, and both refuse. Reviving a cancelled load is allowed (it moves
+// $0, and reviving one cancelled by mistake is the 2026-08-05 incident), but the
+// COMPLETION that would book its money is then refused here and by
+// statusOverrideBlocker() alike. The guard fires where the money moves.
+//
+// Materiality is the union of three tests, any one sufficient:
+//   1. completed on EITHER side — the write changes what the month is made of;
+//   2. the write MOVES the row's months — jobTrackingMonthCols().dateCol takes
+//      the FIRST header matching status-update/completion/assigned date. On
+//      production "Assigned Date" (20) wins over "Status Update Date" (21) and
+//      "Completion Date" (22), so PUT /api/driver/status stamping those two is
+//      inert — but that is header luck, not a property of the route (the same
+//      trap statusOverrideBlocker() documents). On a layout resolving to Status
+//      Update Date, that stamp moves the load's revenue month, which is why the
+//      months are compared before ∪ after and never before-only (PR #218);
+//   3. the status column cannot be told apart from a date column — fail closed.
+//
+// ⚠️ "THE CANCELLED FLAG CHANGED" WAS CONSIDERED AS A FOURTH TEST AND REJECTED —
+// do not add it back. It looks necessary because excludeDroppedLoads() drops a
+// cancelled row from every aggregate, so crossing that boundary visibly changes
+// what the month contains. But every crossing that moves MONEY already has a
+// completed side and is caught by test 1: Delivered → Cancelled is the erasure,
+// Cancelled → Delivered the injection. What is left over is exactly
+// Cancelled ↔ Dispatched/Assigned/Unassigned/mid-trip, where revenue and driver
+// pay are $0 on both sides — so the test protected nothing and cost the one
+// operation this route exists for on a closed month: reviving a load cancelled
+// by mistake, which is the 2026-08-05 incident that put a reason field on
+// POST /api/dispatch/cancel. The revived load then sits at "Dispatched" until
+// someone reopens the period, because its COMPLETION is what test 1 refuses.
+//
+// Fails closed on an unreadable period_locks and, once material, on a row whose
+// months cannot be resolved on either side. A NON-material write is allowed
+// without resolving months at all, and that is not a fail-open: if no settled
+// figure moves, it does not matter which month the row belongs to.
+//
+// Ungated on PERIOD_FINALIZE_ENABLED, like every other lock guard: flag off
+// means period_locks is empty, nothing is locked, one indexed SELECT.
+//
+// `before` is the header-keyed row as it stands; `edits` is the header-keyed
+// delta the route would apply, i.e. after = {...before, ...edits}.
+function dispatchWriteBlocker(headers, before, edits) {
+	// RUNG 1 — refuse FIRST on an unreadable lock table. isLocked() swallows
+	// every error and answers "not locked", so without this the guard would be
+	// present, silent and open.
+	if (!periodLocksReadable()) return { code: "PERIOD_LOCK_UNREADABLE", periods: [] };
+
+	const after = { ...before, ...(edits || {}) };
+	const statusName = jobStatusColumnName(headers);
+	const statusOf = (row) => (statusName ? String(row[statusName] == null ? "" : row[statusName]).trim() : "");
+	const isCompleted = (row) => DISPATCH_COMPLETED_RE.test(statusOf(row));
+
+	// Status-blind by construction, exactly like loadRowPeriods' other callers:
+	// it reads dates only, which is what makes the cancelled-row resurrection
+	// case above come out right for free.
+	const cols = jobTrackingMonthCols(headers);
+	const pBefore = loadRowPeriods(before, cols);
+	const pAfter = loadRowPeriods(after, cols);
+
+	const material =
+		!statusName ||
+		isCompleted(before) || isCompleted(after) ||
+		pBefore.periods.join("|") !== pAfter.periods.join("|");
+	if (!material) return null;
+
+	// PERIOD_FINALIZED outranks PERIOD_UNRESOLVED, matching statusOverrideBlocker():
+	// "this would restate June" is the answer an operator can act on, and the
+	// remedy (reopen the period) is the same either way.
+	const locked = lockedAmong([...new Set([...pBefore.periods, ...pAfter.periods])]);
+	if (locked.length) return { code: "PERIOD_FINALIZED", periods: locked };
+	if (!pBefore.resolved || !pAfter.resolved) return { code: "PERIOD_UNRESOLVED", periods: [] };
+	return null;
+}
+
+// One refusal shape for all four routes, and the audit line that goes with it.
+// Refusals are recorded as well as successes: `super_admin` is a shared login,
+// so an untraced refusal would make a repeated attempt to rewrite a closed month
+// invisible in the one place anyone looks afterwards.
+function sendDispatchRefusal(req, res, blocked, action, loadId, what) {
+	const periods = blocked.periods || [];
+	logAudit(
+		req, action, "load", loadId || "",
+		`Blocked ${what} [${blocked.code}]${periods.length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code: blocked.code, periods })}`
+	);
+	if (blocked.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(res, "unreadable");
+	if (blocked.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(res, "unresolved", null, what);
+	return sendPeriodRefusal(res, "finalized", periods, what);
+}
+
+// Read Job Tracking's header row and ONE data row in a single round trip.
+// `Job Tracking!{n}:{n}` is the whole row — NOT `A{n}`, which A1 reads as the
+// single cell A{n} (the live data-loss bug PR #218 found in the broker splice).
+// Returns null on a failed read; callers refuse rather than fall through, since
+// the months depend on this read and the months are what cannot be guessed.
+async function readJobTrackingRowWithHeaders(sheets, rowIndex) {
+	try {
+		const resp = await sheets.spreadsheets.values.batchGet({
+			spreadsheetId: SPREADSHEET_ID,
+			ranges: ["Job Tracking!1:1", `Job Tracking!${rowIndex}:${rowIndex}`],
+		});
+		const ranges = resp.data.valueRanges || [];
+		return {
+			headers: ((ranges[0] && ranges[0].values) || [[]])[0] || [],
+			row: ((ranges[1] && ranges[1].values) || [[]])[0] || [],
+		};
+	} catch (e) {
+		console.error(`Job Tracking row ${rowIndex} unreadable:`, e.message);
+		return null;
+	}
+}
+
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
+//
+// ⚠️ PERIOD-GUARDED — see dispatchWriteBlocker() above for where the line is
+// drawn and why it is not a blanket refusal.
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const { rowIndex: rawRowIndex, driver: rawDriver, loadId, origin, destination } = req.body;
@@ -18438,11 +18615,17 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// were noisy and confused drivers about which load to work next).
 
 		const sheets = await getSheets();
-		const headerResp = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking!1:1",
-		});
-		const headers = (headerResp.data.values || [[]])[0];
+		// Headers AND the target row in one round trip — the row is what the
+		// period guard below judges. RUNG 2: a failed read REFUSES rather than
+		// falling through to a generic 500.
+		const snapshot = await readJobTrackingRowWithHeaders(sheets, rowIndex);
+		if (!snapshot) {
+			return sendDispatchRefusal(
+				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
+				"dispatch_blocked", loadId, `Assigning ${driver} to load ${loadId || "(unknown)"}`
+			);
+		}
+		const headers = snapshot.headers;
 		const driverColIdx = headers.findIndex((h) => /driver/i.test(h));
 		const statusColIdx = headers.findIndex((h) => /status/i.test(h));
 
@@ -18467,6 +18650,29 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 		const truckUnit = truckForDriver ? truckForDriver.unit_number : '';
 		const ownerId = truckForDriver ? truckForDriver.owner_id : 0;
+
+		// PERIOD GUARD — before the first write, including the header-ensure
+		// update just below. Assigning a driver to a load that is not completed
+		// moves $0 and is allowed in any month; doing it to a COMPLETED load
+		// un-completes it and erases that load's revenue and driver-pay days
+		// from the month it settled in. See dispatchWriteBlocker().
+		{
+			const before = sheetRowToObject(headers, snapshot.row);
+			const edits = {};
+			if (headers[driverColIdx]) edits[headers[driverColIdx]] = driver;
+			if (statusColIdx !== -1 && headers[statusColIdx]) edits[headers[statusColIdx]] = "Dispatched";
+			// Truck / Owner ID are written too, but they carry neither a status
+			// nor a date, so they cannot change this guard's answer; when their
+			// headers do not exist yet the route creates them below, which also
+			// changes nothing the guard reads.
+			const blocked = dispatchWriteBlocker(headers, before, edits);
+			if (blocked) {
+				return sendDispatchRefusal(
+					req, res, blocked, "dispatch_blocked", loadId,
+					`Assigning ${driver} to load ${loadId || "(unknown)"}`
+				);
+			}
+		}
 
 		// Ensure Truck and Owner ID columns exist in sheet
 		let truckColIdx = headers.findIndex(h => /^truck$/i.test(h));
@@ -18557,11 +18763,16 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		const newDriver = userMatch ? userMatch.driver_name : rawNewDriver.trim();
 
 		const sheets = await getSheets();
-		const headerResp = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking!1:1",
-		});
-		const headers = (headerResp.data.values || [[]])[0];
+		// Headers AND the target row in one round trip; RUNG 2 refuses on a
+		// failed read. Same shape as POST /api/dispatch above.
+		const snapshot = await readJobTrackingRowWithHeaders(sheets, rowIndex);
+		if (!snapshot) {
+			return sendDispatchRefusal(
+				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
+				"reassign_blocked", loadId, `Reassigning load ${loadId || "(unknown)"} to ${newDriver}`
+			);
+		}
+		const headers = snapshot.headers;
 		const driverCol = headers.findIndex((h) => /driver/i.test(h));
 		if (driverCol === -1) {
 			return res.status(400).json({ error: "Driver column not found" });
@@ -18588,6 +18799,28 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		}
 		const truckUnit = truckForDriver ? truckForDriver.unit_number : '';
 		const ownerId = truckForDriver ? truckForDriver.owner_id : 0;
+
+		// PERIOD GUARD — before the first write. This route writes NO status, so
+		// it can never move a row across the completed boundary: its materiality
+		// collapses to "is this row already completed?", which for a status-blind
+		// write is the whole question. On a completed load in a settled month,
+		// Driver moves that load's active-day pay to another person and Owner ID
+		// moves its entire revenue to another investor — 356 production rows,
+		// $296,350.93, some inside payouts already marked PAID. Written as the
+		// before ∪ after union anyway, so it stays correct if this route ever
+		// learns to write a status.
+		{
+			const before = sheetRowToObject(headers, snapshot.row);
+			const edits = {};
+			if (headers[driverCol]) edits[headers[driverCol]] = newDriver;
+			const blocked = dispatchWriteBlocker(headers, before, edits);
+			if (blocked) {
+				return sendDispatchRefusal(
+					req, res, blocked, "reassign_blocked", loadId,
+					`Reassigning load ${loadId || "(unknown)"} to ${newDriver}`
+				);
+			}
+		}
 
 		// Ensure Truck and Owner ID columns exist (same approach as /api/dispatch).
 		let truckColIdx = headers.findIndex(h => /^truck$/i.test(h));
@@ -18664,6 +18897,12 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			db.prepare("DELETE FROM load_responses WHERE load_id = ? AND driver_name = ?")
 				.run(loadId, newDriver.trim().toLowerCase());
 		}
+		// This route wrote Driver, Truck and Owner ID with NO audit line at all —
+		// the only trace was a dispatch notification, which is a feed item, not a
+		// record. Refusals are now audited (see sendDispatchRefusal), and auditing
+		// only the blocks would make the trail read as if reassignment never
+		// succeeded.
+		logAudit(req, 'reassign_load', 'load', loadId, `Reassigned load ${loadId} from ${oldDriver || 'unknown'} to ${newDriver} (truck ${truckUnit || 'none'}, owner ${ownerId})`);
 		notifyChange("dashboard"); jtCacheInvalidate();
 		res.json({ success: true });
 	} catch (error) {
@@ -19156,10 +19395,44 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 			return res.status(409).json({ error: "You have already accepted this load" });
 		}
 
+		const sheets = await getSheets();
+
+		// PERIOD GUARD — before the first write of either kind, including the
+		// load_responses row below. Included with its three siblings because a
+		// DECLINE writes Driver = "" and Job Status = "Unassigned": on a completed
+		// load in a settled month that erases the load's revenue AND its
+		// driver-pay days, which is the same accounting event PUT
+		// /api/driver/status is guarded against three routes down. Leaving it out
+		// would make that guard decorative — the same Driver could reach the same
+		// cells by declining instead. An ACCEPT writes "Assigned", which is not a
+		// completed status, so ordinary acceptance is unaffected in any month.
+		{
+			const snapshot = await readJobTrackingRowWithHeaders(sheets, rowIndex);
+			if (!snapshot) {
+				return sendDispatchRefusal(
+					req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
+					"driver_respond_blocked", loadId, `Recording "${response}" on load ${loadId || "(unknown)"}`
+				);
+			}
+			const rHeaders = snapshot.headers;
+			const before = sheetRowToObject(rHeaders, snapshot.row);
+			const sIdx = rHeaders.findIndex((h) => /status/i.test(h));
+			const dIdx = rHeaders.findIndex((h) => /^driver$/i.test(h));
+			const edits = {};
+			if (sIdx !== -1 && rHeaders[sIdx]) edits[rHeaders[sIdx]] = response === "accepted" ? "Assigned" : "Unassigned";
+			if (response !== "accepted" && dIdx !== -1 && rHeaders[dIdx]) edits[rHeaders[dIdx]] = "";
+			const blocked = dispatchWriteBlocker(rHeaders, before, edits);
+			if (blocked) {
+				return sendDispatchRefusal(
+					req, res, blocked, "driver_respond_blocked", loadId,
+					`Recording "${response}" on load ${loadId || "(unknown)"}`
+				);
+			}
+		}
+
 		// Insert response
 		insertLoadResponse.run(loadId, rowIndex, driverName.trim().toLowerCase(), response);
 
-		const sheets = await getSheets();
 		const now = new Date();
 		const logId = `LOG-${now.getTime()}`;
 		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
@@ -20671,9 +20944,23 @@ app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter
 // PUT /api/driver/status — Update load status
 app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
-		let { rowIndex, loadId, newStatus, rowData } = req.body;
+		let { rowIndex: rawRowIndex, loadId, newStatus, rowData } = req.body;
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return;
+		// ⚠️ ROW 1 IS THE HEADER ROW. This route had NO rowIndex validation of any
+		// kind — which is why it survived PR #222's sweep for `if (!rowIndex)`,
+		// the shape its three siblings carried. The row re-resolution below is
+		// gated on `if (rowData && …)` and rowData is OPTIONAL, so `{rowIndex: 1}`
+		// with no rowData skipped re-resolution entirely and wrote the Job Tracking
+		// HEADER row. Every column in this app is resolved by matching header text,
+		// so that one request re-points the dashboard, the driver app,
+		// /api/financials, /api/investor, the payout ledger and invoicing at once —
+		// silently, with no data row touched and no period guard fired, because no
+		// data row WAS touched. Driver-reachable: this is the lowest-privilege
+		// write surface in the app. Same helper, status code and body as the
+		// siblings, so the four cannot answer differently.
+		let rowIndex = resolveSheetDataRow(res, rawRowIndex);
+		if (rowIndex === null) return; // 400 already sent
 		// SECURITY: drivers can only update loads assigned to them.
 		// Admin/Dispatcher use the /api/loads/:loadId/status-override flow,
 		// which has its own audit/reason gate, so this guard is Driver-only.
@@ -20795,6 +21082,35 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 		// See houstonStamp() — the date part here decides revenue month,
 		// invoice week, and driver-pay day.
 		const dateTime = houstonStamp(now);
+
+		// PERIOD GUARD — on the FINAL resolved row, after the re-resolution above,
+		// so it judges the row that actually gets written and not the one the
+		// caller claimed. This is the last unguarded path to a completed status:
+		// PUT /api/loads/:loadId/status-override got the same treatment in PR #223
+		// and is admin-only, so without this a Driver could book a load into a
+		// settled month by the route built for them. Mid-trip statuses (At
+		// Shipper, In Transit, At Receiver) move $0 and stay unblocked in any
+		// month; crossing the completed boundary in either direction does not.
+		{
+			const before = sheetRowToObject(headers, currentRow);
+			const edits = {};
+			if (headers[statusIdx]) edits[headers[statusIdx]] = newStatus;
+			// The dates this route stamps are part of the AFTER state — inert on
+			// production's header order, but see dispatchWriteBlocker() test 2.
+			if (dateIdx !== -1 && headers[dateIdx]) edits[headers[dateIdx]] = dateTime;
+			if (/^(delivered|completed|pod received)$/i.test(newStatus)) {
+				const cIdx = headers.findIndex((h) => /completion.*date/i.test(h));
+				if (cIdx !== -1 && headers[cIdx]) edits[headers[cIdx]] = dateTime;
+			}
+			const blocked = dispatchWriteBlocker(headers, before, edits);
+			if (blocked) {
+				return sendDispatchRefusal(
+					req, res, blocked, "status_update_blocked", loadId,
+					`Setting load ${loadId || "(unknown)"} to "${newStatus}"`
+				);
+			}
+		}
+
 		const updateData = [
 			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[newStatus]] },
 		];
