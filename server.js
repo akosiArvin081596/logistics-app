@@ -39119,7 +39119,34 @@ app.use((err, req, res, next) => {
 // Start Server
 // ============================================================
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, async () => {
+// ⚠️ Bind to LOOPBACK, not every interface.
+//
+// This bound `*:3000` until 2026-08-09, so production answered
+// `http://76.13.22.110:3000/` with a 200 straight from the internet —
+// nginx entirely out of the path. Three consequences, all live at once:
+//
+//   1. No TLS. Login bodies crossed in cleartext. (Session cookies did NOT:
+//      `secure: true` means no Set-Cookie is issued over plain HTTP — so the
+//      exposure was credentials-in-transit, not session theft.)
+//   2. Every header nginx adds — nosniff, Referrer-Policy, X-Frame-Options,
+//      Content-Security-Policy — was absent on that path.
+//   3. `trust proxy: 1` (see the note beside it) makes Express believe the
+//      caller's own X-Forwarded-For once nginx isn't upstream, so EVERY
+//      IP-keyed limiter — loginLimiter, publicFormLimiter, poiLimiter,
+//      expenseOcrLimiter — was bypassable by rotating one header. That is
+//      also what made the new signed_ip forgeable (see writeSigningEvidence).
+//
+// A firewall rule closes the same hole, and one was applied that day — but it
+// lives outside the repo, `iptables-persistent` is not installed on the VPS,
+// and it therefore dies on the next reboot. Binding here needs no firewall and
+// travels with the code.
+//
+// BIND_HOST is the escape hatch for anything that genuinely needs an external
+// bind (a container with its own network namespace, say). It defaults CLOSED:
+// an environment that forgets to set it gets the safe behaviour, not the
+// exposed one.
+const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
+server.listen(PORT, BIND_HOST, async () => {
 	console.log(`Server running at http://localhost:${PORT}`);
 	console.log(`API endpoints:`);
 	console.log(`  GET    /api/tabs           — List sheet tabs`);
