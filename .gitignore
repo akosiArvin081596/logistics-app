@@ -40,6 +40,13 @@ scripts/docs/app.db.*
 # routine cleanup — they now live in onboarding-templates/pdf/. See that README.
 uploads/
 
+# Superseded signed legal documents (PII — tax ids, bank routing/account).
+# Deliberately OUTSIDE uploads/ so express.static can never reach it: these are
+# the originals a force-regenerate replaced, kept as evidence, and the only way
+# to read one is on the box. Same "runtime data only, track nothing" rule as
+# uploads/ above, and for a strictly worse payload.
+evidence-archive/
+
 # Local backups and ad-hoc test artifacts
 attachments/
 *.bak

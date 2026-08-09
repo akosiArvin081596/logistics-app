@@ -531,10 +531,21 @@ async function main() {
 
 	// 3f. Signatures are a legal artefact and, as base64 images, also most of
 	//     the weight of the onboarding tables.
+	//     ⚠️ The SIGNING EVIDENCE columns go with them. `signed_ip` and
+	//     `signed_user_agent` are personal data about the signer — an address
+	//     and a browser fingerprint — and `consent_text` is free text off the
+	//     wire. Without this, every refresh copies real signer IPs into a 644
+	//     app.db on the shared VPS and onto every developer's laptop, and the
+	//     assertion block below passes while it happens, because it only knows
+	//     to look for emails, sessions and bank numbers. `evidence_version` and
+	//     `artifact_sha256` are deliberately KEPT: the version is what marks a
+	//     row as captured-under-the-evidence-regime, and a digest of a file that
+	//     is not copied anyway discloses nothing.
 	let sigs = 0;
-	sigs += setCols("onboarding_documents", { signature_text: "REDACTED" });
-	sigs += setCols("investor_onboarding_documents", { signature_text: "REDACTED", signature_image: "" });
-	if (sigs) summary.push(`signatures: ${sigs} redacted`);
+	const EVIDENCE_REDACTIONS = { signed_ip: "", signed_ip_source: "", signed_user_agent: "", consent_text: "" };
+	sigs += setCols("onboarding_documents", { signature_text: "REDACTED", ...EVIDENCE_REDACTIONS });
+	sigs += setCols("investor_onboarding_documents", { signature_text: "REDACTED", signature_image: "", ...EVIDENCE_REDACTIONS });
+	if (sigs) summary.push(`signatures + signing evidence: ${sigs} redacted`);
 
 	// 3g. Onboarding access tokens are live bearer credentials for the PUBLIC
 	//     /api/public/investor-onboarding/:id/* flow. Regenerating them means a
@@ -673,6 +684,16 @@ const REDACTED_EMPTY = [
 	["investor_applications", "ein_ssn", "investor-application EIN/SSN"],
 	["job_applications", "ssn", "applicant SSN"],
 	["job_applications", "drivers_license", "applicant driver's licence number"],
+	// Signing evidence. Asserted, not assumed — the whole point is that a
+	// redaction step which silently stops matching (a renamed column, a new
+	// table) must fail the run rather than ship a database everyone believes is
+	// clean. `evidence_version` and `artifact_sha256` are deliberately NOT here:
+	// the version marks a row as captured under the evidence regime, and a digest
+	// of a file this script never copies discloses nothing.
+	["onboarding_documents", "signed_ip", "signer IP address"],
+	["onboarding_documents", "signed_user_agent", "signer user agent"],
+	["investor_onboarding_documents", "signed_ip", "signer IP address"],
+	["investor_onboarding_documents", "signed_user_agent", "signer user agent"],
 ];
 const REDIRECTED_EMAIL = [
 	["users", "email"], ["drivers_directory", "email"], ["investors", "email"],

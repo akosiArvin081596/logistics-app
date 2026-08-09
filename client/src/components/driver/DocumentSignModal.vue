@@ -25,7 +25,7 @@
 
             <label class="sign-checkbox">
               <input type="checkbox" v-model="agreed" />
-              <span>I have read and agree to the terms of this document</span>
+              <span>{{ SIGNING_CONSENT_TEXT }}</span>
             </label>
 
             <div class="sign-field">
@@ -116,6 +116,7 @@ import { ref, computed, watch, nextTick } from 'vue'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
 import { useGoogleMaps } from '../../composables/useGoogleMaps'
+import { SIGNING_CONSENT_TEXT, buildConsent } from '../../lib/signingConsent'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -270,7 +271,11 @@ async function handleSign() {
       bankAcctName: bankAcctName.value,
       accountType: accountType.value,
     } : undefined
-    await driverStore.signDocument(props.doc.doc_key, signatureText.value.trim(), signatureImage, payInfo)
+    // The checkbox is now TRANSMITTED, not just enforced locally. `canSign`
+    // already requires `agreed`, so this cannot send false — but it is built
+    // from the same ref rather than hardcoded `true`, so the assertion stays
+    // tied to what the signer actually did.
+    await driverStore.signDocument(props.doc.doc_key, signatureText.value.trim(), signatureImage, payInfo, buildConsent(agreed.value))
     toast('Document signed successfully', 'success')
     emit('signed', props.doc.doc_key)
     // Refresh PDF panel to show the signed version (don't close modal)

@@ -2932,6 +2932,47 @@ try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signature_im
 try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signing_error TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE investor_onboarding_documents ADD COLUMN signing_failed_at TEXT DEFAULT ''"); } catch { /* exists */ }
 
+// --- Signing evidence (both onboarding document tables) ---
+// #202 proved an artifact EXISTS; #234 proved it says something. Neither
+// recorded WHO asserted consent, FROM WHERE, or THAT THE FILE ON DISK IS THE
+// FILE THAT WAS SIGNED. A signed contractor agreement, W-9 or vehicle lease
+// therefore held a signature PNG and a server clock reading and nothing else —
+// no counterparty evidence at all, on documents carrying tax ids and bank
+// account numbers.
+//
+// The "I have read and agree" checkbox existed the whole time and NEVER LEFT
+// THE BROWSER: DocumentSignModal.vue and InvestorSignModal.vue both gate the
+// signature pad on `agreed`, and neither ever put it in the request. A control
+// the server cannot see is not a control; it is a UI affordance. The server now
+// requires it to be transmitted and refuses a signature without it.
+//
+// ⚠️ GRANDFATHERING. `evidence_version` is the discriminator, and it is a
+// POSITIVE assertion rather than an inference from empty columns. Existing rows
+// take 0 by ALTER default — they legitimately hold no evidence, and reading or
+// rendering them must keep working forever. Only a signature captured under
+// this regime writes SIGNING_EVIDENCE_VERSION. Do NOT re-derive "is this a new
+// row" from "is signed_ip non-empty": a proxy can legitimately strip a header,
+// and admin regeneration writes a hash onto a legacy row WITHOUT writing a
+// consent claim it never witnessed (see the regenerate route). Only the version
+// column stays honest across both.
+const SIGNING_EVIDENCE_VERSION = 1;
+for (const t of ["onboarding_documents", "investor_onboarding_documents"]) {
+	for (const col of [
+		"signed_ip TEXT DEFAULT ''",              // the immediate peer, or the forwarded client when the peer is our own nginx
+		"signed_ip_source TEXT DEFAULT ''",       // 'proxy' | 'socket' — WHICH of those, because :3000 is directly reachable
+		"signed_user_agent TEXT DEFAULT ''",      // capped; free text from the wire
+		"consent_agreed INTEGER DEFAULT 0",       // the TRANSMITTED flag — 0 on every legacy row, and that is the truth
+		"consent_text TEXT DEFAULT ''",           // the exact wording the signer was shown — "" when none was transmitted
+		"artifact_sha256 TEXT DEFAULT ''",        // SHA-256 of the bytes ON DISK, re-read after writing
+		"artifact_bytes INTEGER DEFAULT 0",       // separates "different document" from "truncated write"
+		"effective_date TEXT DEFAULT ''",         // the date PRINTED on the artifact, so a re-render cannot invent a new one
+		"superseded_artifacts TEXT DEFAULT ''",   // JSON array — every artifact this row has ever replaced
+		"evidence_version INTEGER DEFAULT 0",     // 0 = grandfathered, pre-feature. Never backfilled.
+	]) {
+		try { db.exec(`ALTER TABLE ${t} ADD COLUMN ${col}`); } catch { /* exists */ }
+	}
+}
+
 // A failed signing is only useful if somebody hears about it. Alerts are
 // once-per-(scope, owner, doc), the same shape as fuel_event_alerts and
 // ratecon_reconcile_alerts: the repo's own cautionary tale is the 13 ignored
@@ -3270,10 +3311,24 @@ function assignDriverToTruck(truckId, driverName) {
 	}
 }
 
+// `confidential` mirrors ONBOARDING_DOCS above. It is NOT stored on
+// investor_onboarding_documents (that table has no such column) — this list is
+// the declaration, and isConfidentialOnboardingDoc() is the single reader.
+//
+// ⚠️ Decided from the FIELD MAPS, not from the document's name. Before this,
+// only `w9` was treated as confidential, on the reasoning that it is "the one
+// carrying a tax id". That was wrong on the evidence: lib/policy-field-maps.js
+// puts `data.einSsn` on BOTH other documents, and master_agreement additionally
+// prints `Routing number` and `Account number`. So the single most sensitive
+// investor document in the system — tax id AND full bank details on one page —
+// was the one document whose reads were never recorded.
 const INVESTOR_ONBOARDING_DOCS = [
-	{ key: "master_agreement", name: "Master Participation & Management Agreement" },
-	{ key: "vehicle_lease", name: "Commercial Vehicle Lease Agreement" },
-	{ key: "w9", name: "W-9 Tax Form" },
+	// "Tax ID SSN" + "Routing number" + "Account number"  (policy-field-maps.js master_agreement)
+	{ key: "master_agreement", name: "Master Participation & Management Agreement", confidential: 1 },
+	// "EIN SSN"                                            (policy-field-maps.js vehicle_lease)
+	{ key: "vehicle_lease", name: "Commercial Vehicle Lease Agreement", confidential: 1 },
+	// SSN/EIN flattened into the IRS AcroForm               (fillW9Form)
+	{ key: "w9", name: "W-9 Tax Form", confidential: 1 },
 ];
 
 // Session store in SQLite (persists across server restarts)
@@ -5218,6 +5273,23 @@ function auditConfidentialRead(req, entity, entityId, label) {
 	try { logAudit(req, "read_confidential_document", entity, entityId, label); } catch {}
 }
 
+// Does this document carry data whose disclosure is worth a row in audit_trail?
+// One reader for both scopes, so the two lists are the only place the answer
+// lives and adding a document to either forces the decision.
+//
+// ⚠️ FAILS CLOSED. An unrecognized doc_key is treated as confidential. The cost
+// of being wrong that way is one extra audit row; the cost of the other way is
+// a document carrying a tax id read with nothing recorded — which is exactly
+// the state this function exists to end. Orphaned artifacts on disk outnumber
+// tracked rows here (54 of 88, per CLAUDE.md), so unknown keys are not
+// hypothetical.
+function isConfidentialOnboardingDoc(scope, docKey) {
+	const list = scope === "driver" ? ONBOARDING_DOCS : INVESTOR_ONBOARDING_DOCS;
+	const def = list.find((d) => d.key === String(docKey || "").toLowerCase());
+	if (!def) return true;                 // unknown → fail closed
+	return !!def.confidential;
+}
+
 // Driver signed docs. `id` here is the row's own id; ownership is `user_id`.
 function guardDriverSignedDoc(req, res, next, url) {
 	let row;
@@ -5240,8 +5312,17 @@ function guardDriverSignedDoc(req, res, next, url) {
 	const uid = Number(user && user.id);
 	const owner = Number(row.user_id);
 	if (uid > 0 && owner > 0 && uid === owner) return next();
+
+	// ⚠️ ONE value drives both the audit and the access decision. The stored
+	// column is authoritative when set, widened by the declared list so a row
+	// seeded before `confidential` existed — or carrying a key no longer in
+	// ONBOARDING_DOCS — cannot read as public. Computing these separately is how
+	// an audit row comes to say "confidential" about a document the very next
+	// line hands to a Dispatcher.
+	const isConfidential = !!row.confidential || isConfidentialOnboardingDoc("driver", row.doc_key);
+
 	if (user.role === "Super Admin") {
-		if (row.confidential) auditConfidentialRead(req, "onboarding_document", row.id, `${row.doc_key} (driver user ${row.user_id})`);
+		if (isConfidential) auditConfidentialRead(req, "onboarding_document", row.id, `${row.doc_key} (driver user ${row.user_id})`);
 		return next();
 	}
 	// Dispatchers review the policy documents (equipment/mobile/substance) and
@@ -5249,12 +5330,18 @@ function guardDriverSignedDoc(req, res, next, url) {
 	// GET /api/drivers-directory/:id/documents. Handing them the W-9 PDF would
 	// walk straight around that decision, so `confidential` is what they cannot
 	// cross.
-	if (user.role === "Dispatcher" && !row.confidential) return next();
+	if (user.role === "Dispatcher" && !isConfidential) return next();
 	return res.status(404).end();
 }
 
-// Investor signed docs. No `confidential` column on this table; the W-9 is the
-// one carrying a tax id, so it is named directly.
+// Investor signed docs. No `confidential` column on this table, so the flag on
+// INVESTOR_ONBOARDING_DOCS is the declaration and isConfidentialOnboardingDoc()
+// reads it.
+//
+// ⚠️ This used to hardcode `doc_key === "w9"`, which meant master_agreement —
+// tax id AND bank routing AND account number on one document — was read by a
+// SHARED super_admin login with nothing written down, ever. All three investor
+// documents carry confidential data; see the field-map citations on the list.
 function guardInvestorSignedDoc(req, res, next, url) {
 	let row;
 	try {
@@ -5266,7 +5353,7 @@ function guardInvestorSignedDoc(req, res, next, url) {
 	}
 	if (!row) return res.status(404).end();
 
-	const isConfidential = String(row.doc_key || "").toLowerCase() === "w9";
+	const isConfidential = isConfidentialOnboardingDoc("investor", row.doc_key);
 	const user = req.session.user;
 	if (user.role === "Super Admin") {
 		if (isConfidential) auditConfidentialRead(req, "investor_onboarding_document", row.id, `${row.doc_key} (application ${row.application_id})`);
@@ -6162,17 +6249,27 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		if (!signatures || Object.keys(signatures).length < INVESTOR_ONBOARDING_DOCS.length) {
 			return res.status(400).json({ error: "All documents must be signed." });
 		}
+		// Consent is validated for EVERY document BEFORE anything is written.
+		// applyTx() commits the application, the banking details and all three
+		// signature rows in one shot, so a per-document refusal discovered inside
+		// the render loop would leave a committed applicant who cannot be
+		// completed. Collect first, then write.
+		const consentByDoc = {};
 		for (const doc of INVESTOR_ONBOARDING_DOCS) {
 			const sig = signatures[doc.key];
 			if (!sig || !sig.text || !sig.text.trim()) {
 				return res.status(400).json({ error: `Signature required for ${doc.name}.` });
 			}
+			const consent = readTransmittedConsent(sig, res, { docLabel: doc.name });
+			if (!consent) return;
+			consentByDoc[doc.key] = consent;
 		}
+		const net = signerNetworkEvidence(req);
 
 		const accessToken = crypto.randomUUID();
 		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
 		const now = new Date().toISOString();
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
 		const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 
 		// 1. Insert all DB records in a single transaction
@@ -6216,10 +6313,22 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			// work that had not happened; the generation loop below then swallowed
 			// its own errors, so the promise was never checked. Rows start at 0 and
 			// are promoted one by one, only against a verified artifact.
-			const insertDoc = db.prepare("INSERT INTO investor_onboarding_documents (application_id, doc_key, doc_name, signed, signature_text, signature_image, signed_at, signed_pdf_url) VALUES (?, ?, ?, 0, ?, ?, ?, '')");
+			//
+			// The evidence columns are written HERE, beside the signature, not on
+			// the success path below. The consent, the address it came from and the
+			// agent that sent it are properties of the signing ACT, which has
+			// already happened; a document whose render then fails must keep them,
+			// exactly as it keeps the signature. Only artifact_sha256 waits for an
+			// artifact to exist.
+			const insertDoc = db.prepare(`INSERT INTO investor_onboarding_documents
+				(application_id, doc_key, doc_name, signed, signature_text, signature_image, signed_at, signed_pdf_url,
+				 signed_ip, signed_ip_source, signed_user_agent, consent_agreed, consent_text, effective_date, evidence_version)
+				VALUES (?, ?, ?, 0, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)`);
 			for (const doc of INVESTOR_ONBOARDING_DOCS) {
 				const sig = signatures[doc.key];
-				insertDoc.run(appId, doc.key, doc.name, sig.text.trim(), sig.image || "", now);
+				const consent = consentByDoc[doc.key];
+				insertDoc.run(appId, doc.key, doc.name, sig.text.trim(), sig.image || "", now,
+					net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text, effectiveDate, SIGNING_EVIDENCE_VERSION);
 			}
 
 			return appId;
@@ -6259,13 +6368,13 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 				effectiveDate, signedAt, vehiclesOverride: vehiclesArr,
 			});
 			try {
-				const signedPdfUrl = await writeSignedArtifact({
+				const artifact = await writeSignedArtifact({
 					render, signedPath,
 					publicUrl: `/uploads/investor-onboarding-signed/${signedFileName}`,
 					label: doc.name || doc.key,
 				});
-				db.prepare("UPDATE investor_onboarding_documents SET signed = 1, signed_pdf_url = ?, signing_error = '', signing_failed_at = '' WHERE application_id = ? AND doc_key = ?")
-					.run(signedPdfUrl, appId, doc.key);
+				db.prepare("UPDATE investor_onboarding_documents SET signed = 1, signed_pdf_url = ?, artifact_sha256 = ?, artifact_bytes = ?, signing_error = '', signing_failed_at = '' WHERE application_id = ? AND doc_key = ?")
+					.run(artifact.url, artifact.sha256, artifact.bytes, appId, doc.key);
 			} catch (pdfErr) {
 				db.prepare("UPDATE investor_onboarding_documents SET signing_error = ?, signing_failed_at = ? WHERE application_id = ? AND doc_key = ?")
 					.run(pdfErr.message, new Date().toISOString(), appId, doc.key);
@@ -6449,6 +6558,192 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 // artifact itself is the single thing worth asserting on.
 const SIGNED_ARTIFACT_MIN_BYTES = 1000; // a real signed PDF is 8 KB+; this only catches truncation
 
+// ============================================================
+// Signing evidence
+// ============================================================
+// The wording both shipped modals render (client/src/lib/signingConsent.js),
+// recorded here so a reviewer can see what the field is expected to contain.
+//
+// ⚠️ It is NOT a fallback. An earlier draft substituted it when a client sent
+// `agreed: true` with no text, which produced a row asserting "the signer was
+// shown: I have read and agree…" on the strength of nothing — a server
+// invention presented as a witnessed fact, and unfalsifiable afterwards. The
+// column is documented as the exact wording the signer was shown, so when no
+// wording is transmitted it stores "". The absence IS the information.
+const SIGNING_CONSENT_TEXT_EXPECTED = "I have read and agree to the terms of this document";
+const CONSENT_TEXT_MAX = 300;
+const USER_AGENT_MAX = 512;
+
+// Free text off the wire, headed for a legal record and eventually a human's
+// screen.
+//
+// C0/C1/DEL go because a CR/LF in a stored consent statement forges a second
+// audit line and makes the record unreadable. The rest of the class is there
+// for a sharper reason: `consent_text` exists to answer "what sentence did the
+// signer read?", so a BIDI OVERRIDE (U+202A–202E, U+2066–2069) that renders the
+// stored string to a reviewer in a different order than it is stored is a
+// direct attack on the one field whose whole job is fidelity — Trojan Source,
+// aimed at a dispute rather than a compiler. U+2028/2029 are line terminators
+// in JS and in several log viewers and survive JSON.stringify literally.
+// NFC-normalized so two byte-different spellings of the same sentence compare
+// equal.
+const EVIDENCE_TEXT_STRIP = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g;
+function sanitizeEvidenceText(v, max) {
+	const s = String(v == null ? "" : v).normalize("NFC").replace(EVIDENCE_TEXT_STRIP, " ").trim();
+	// Array.from, not slice: cutting at a UTF-16 boundary can split a surrogate
+	// pair and store a lone surrogate, which SQLite renders as U+FFFD. Cosmetic
+	// anywhere else; this is an evidence field.
+	return Array.from(s).slice(0, max).join("");
+}
+
+// Refuses a signature that did not TRANSMIT consent. Returns null once it has
+// answered the request.
+//
+// ⚠️ `agreed === true` STRICTLY. Not truthy — a client that means to assert
+// consent sends a JSON boolean, and accepting "false"/"0"/1 here would let the
+// exact shapes that arise from a half-migrated caller pass as agreement. The
+// point of the check is that somebody deliberately wired it.
+//
+// ⚠️ This is a HARD refusal on the live public investor path, so the SPA must
+// ship with it. That is deliberate: a checkbox nobody verifies is the defect.
+function readTransmittedConsent(source, res, { docLabel } = {}) {
+	const consent = source && typeof source === "object" ? source.consent : null;
+	if (!consent || consent.agreed !== true) {
+		if (res) {
+			// Two different failures wearing one message strands the wrong person.
+			// A caller that sent no `consent` object at all is running an OLD
+			// BUNDLE — telling them to tick a box they already ticked is advice
+			// that cannot work, and localStorage keeps the form alive across a
+			// deploy, so this is reachable by an applicant who did nothing wrong.
+			const stale = !consent || typeof consent !== "object";
+			res.status(400).json({
+				error: stale
+					? "This page is out of date and cannot record your agreement. Please reload and sign again — nothing you have entered is lost."
+					: `Please confirm you have read and agree to the terms${docLabel ? ` of ${docLabel}` : ""} before signing.`,
+				code: "CONSENT_REQUIRED",
+				reason: stale ? "CONSENT_NOT_TRANSMITTED" : "CONSENT_NOT_GIVEN",
+			});
+		}
+		return null;
+	}
+	return {
+		agreed: 1,
+		// "" when nothing usable was transmitted — never the server's own guess.
+		text: sanitizeEvidenceText(consent.text, CONSENT_TEXT_MAX),
+	};
+}
+
+// Who, and from where.
+//
+// ⚠️⚠️ `req.ip` ALONE IS NOT EVIDENCE HERE, and the reason is not nginx's
+// configuration — it is that nginx can be skipped. `app.set("trust proxy", 1)`
+// makes Express believe whoever connected is the proxy, and `server.listen()`
+// binds 0.0.0.0, so production answers on :3000 with nginx out of the path.
+// On such a connection `req.ip` is simply the last value of the caller's OWN
+// `X-Forwarded-For` header — and BOTH routes that record an external party's
+// address (POST /api/public/investor-apply, POST /api/public/investor-onboarding
+// /:id/sign/:docKey) are unauthenticated. A legal record whose "from where" the
+// signer chooses is worth less than no record: it helps a forger.
+//
+// So the address is taken from the IMMEDIATE PEER, and the forwarded value is
+// believed only when that peer is loopback — i.e. only when something on this
+// box (nginx, which appends $remote_addr) actually handed it to us. Direct
+// callers are recorded by their socket address, which they cannot forge, and
+// `signed_ip_source` says which of the two happened so a row can never claim
+// more than it knows.
+//
+// ⚠️ THE REAL FIX IS INFRASTRUCTURE and is NOT in this file: bind Express to
+// 127.0.0.1 (or firewall :3000). Until that lands, :3000 also exposes every
+// IP-keyed limiter to XFF rotation and accepts tax ids and bank details over
+// cleartext HTTP. This function makes its own field honest; it does not make
+// the port safe.
+//
+// An unresolvable address is recorded as "" rather than refused: consent is the
+// assertion this feature requires, and `evidence_version` — never a populated
+// signed_ip — is what says a row was captured under this regime.
+function isLoopbackAddr(a) {
+	const s = String(a || "").replace(/^::ffff:/, "");
+	return s === "127.0.0.1" || s === "::1" || s.startsWith("127.");
+}
+function signerNetworkEvidence(req) {
+	let peer = "";
+	try { peer = String(req.socket?.remoteAddress || req.connection?.remoteAddress || ""); } catch { peer = ""; }
+	const viaLocalProxy = isLoopbackAddr(peer);
+	let ip = peer;
+	let source = "socket";
+	if (viaLocalProxy) {
+		// Behind our own nginx: trust the forwarded chain Express already resolved.
+		try { ip = String(req.ip || peer || ""); } catch { ip = peer; }
+		source = "proxy";
+	}
+	return {
+		ip: String(ip || "").slice(0, 45),                               // INET6_ADDRSTRLEN
+		ipSource: source,
+		userAgent: sanitizeEvidenceText(req.get && req.get("user-agent"), USER_AGENT_MAX),
+	};
+}
+
+// Reproduces the effectiveDate a signature ORIGINALLY rendered with. Only ever
+// a FALLBACK — a row captured under this feature stores `effective_date`
+// verbatim and never comes through here.
+//
+// ⚠️ PINNED TO UTC, and that is the whole point. The signing routes compute
+// `effectiveDate` as `new Date().toLocaleDateString("en-US", …)` with no
+// timeZone, i.e. in the SERVER's zone — and the server that rendered every
+// executed document is the VPS, which runs UTC. Leaving the zone absent here
+// would instead use the zone of whatever host happens to run the regeneration,
+// so the same signed contract would reprint as April 15 on the VPS and April 16
+// on a developer's machine. Measured on the 9 executed investor rows: 6 of them
+// straddle midnight that way. Pinning UTC is a NO-OP in production and removes
+// the host dependency everywhere else.
+//
+// ⚠️ EVERY site that renders an effective date uses this constant — the three
+// signing routes that CREATE the date, the three preview routes, and the
+// re-render. Pinning only the re-render would leave the two halves agreeing by
+// host configuration rather than by construction: one `TZ=America/Chicago` in
+// the pm2 env (entirely plausible — the Houston timezone audit already moved
+// month-close and invoice dating to CT) and a fresh signature would stamp CT
+// while a re-render of that same document stamped UTC, reintroducing exactly
+// the drift this removes.
+const EVIDENCE_DATE_TZ = "UTC";
+function effectiveDateFromStamp(stamp) {
+	if (!stamp) return "";
+	const d = new Date(stamp);
+	if (isNaN(d.getTime())) return "";
+	return d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
+}
+
+function sha256File(filePath) {
+	return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+// ⚠️ Three existing routes read these tables with a bare `SELECT *` and return
+// the rows to a client, so ADDING COLUMNS SILENTLY WIDENED THEM. Two of the
+// three are not the signer: `GET /api/onboarding/:userId` restricts only the
+// Driver role, so a DISPATCHER would have started receiving a driver's signing
+// IP and user agent; and the token-gated investor route would publish the
+// artifact digests and the supersession history to anyone holding the link.
+//
+// The evidence is for a dispute, not for a screen — no UI reads any of it —
+// so it is stripped from every payload except the Super Admin evidence route.
+// Done by deleting keys AFTER the query rather than by enumerating columns:
+// SQLite has no `SELECT * EXCEPT`, and re-listing the columns of a table that
+// has already been ALTERed six times is how a future column goes missing from a
+// screen nobody thought to re-check.
+const SIGNING_EVIDENCE_COLUMNS = [
+	"signed_ip", "signed_ip_source", "signed_user_agent", "consent_agreed", "consent_text",
+	"artifact_sha256", "artifact_bytes", "superseded_artifacts", "evidence_version",
+];
+function stripSigningEvidence(rows) {
+	const strip = (r) => {
+		if (!r || typeof r !== "object") return r;
+		const out = { ...r };
+		for (const c of SIGNING_EVIDENCE_COLUMNS) delete out[c];
+		return out;
+	};
+	return Array.isArray(rows) ? rows.map(strip) : strip(rows);
+}
+
 // Is there a real signed PDF at this path right now? Same two tests
 // writeSignedArtifact() applies after writing (size floor + %PDF magic), kept
 // in one place so "the artifact exists" cannot come to mean two different
@@ -6473,9 +6768,16 @@ function signedArtifactLooksValid(signedPath) {
 	}
 }
 
-// Renders, writes, and then PROVES the artifact — returns the public URL, or
-// throws a tagged error the callers turn into a recorded failure. Never returns
-// a URL it has not just stat'd.
+// Renders, writes, and then PROVES the artifact — returns
+// `{ url, sha256, bytes }`, or throws a tagged error the callers turn into a
+// recorded failure. Never returns a URL it has not just stat'd.
+//
+// ⚠️ The hash is taken by RE-READING THE FILE, then compared against a hash of
+// the buffer that was written. Hashing only the in-memory buffer would make the
+// stored digest a claim about a variable, not about the artifact — and the
+// whole point is to answer "is the PDF on disk today the PDF that was signed?".
+// The comparison also catches a short or interleaved write, which the existing
+// size floor cannot: a truncated PDF over 1000 bytes still starts with %PDF.
 async function writeSignedArtifact({ render, signedPath, publicUrl, label }) {
 	let bytes;
 	try {
@@ -6505,18 +6807,102 @@ async function writeSignedArtifact({ render, signedPath, publicUrl, label }) {
 		e.code = "DOCUMENT_RENDER_FAILED";
 		throw e;
 	}
+	let onDiskSha;
+	let onDiskBytes;
 	try {
 		fs.writeFileSync(signedPath, buf);
 		const stat = fs.statSync(signedPath);
 		if (!stat.size || stat.size < SIGNED_ARTIFACT_MIN_BYTES) {
 			throw new Error(`wrote only ${stat.size} bytes`);
 		}
+		onDiskSha = sha256File(signedPath);
+		onDiskBytes = stat.size;
+		const inMemorySha = crypto.createHash("sha256").update(buf).digest("hex");
+		if (onDiskSha !== inMemorySha) {
+			// The file is not what we rendered. Refusing here is what keeps
+			// `artifact_sha256` meaningful: a digest recorded against bytes we
+			// could not read back proves nothing at all.
+			throw new Error(`stored bytes do not match the rendered document (${onDiskBytes} bytes on disk)`);
+		}
 	} catch (err) {
 		const e = new Error(`${label}: could not store the signed PDF — ${err.message}`);
 		e.code = "DOCUMENT_STORE_FAILED";
 		throw e;
 	}
-	return publicUrl;
+	return { url: publicUrl, sha256: onDiskSha, bytes: onDiskBytes };
+}
+
+// Move an existing signed artifact aside instead of letting a re-render
+// destroy it. Returns the archive record, or null when there was nothing worth
+// keeping (no file, or a file that never passed the artifact tests — a broken
+// stub is not evidence).
+//
+// ⚠️ IT WRITES OUTSIDE `uploads/`, WHICH express.static NEVER SEES. An earlier
+// draft kept the copy beside the original with a name matching no
+// `signed_pdf_url`, relying on the /uploads guard to 404 it. That did hold —
+// but only INCIDENTALLY, because a filename happened not to match a column, so
+// any later backfill, rename, or listing route that wrote an archive name into
+// `signed_pdf_url` would have republished it. These are permanent, unpruned
+// copies of master agreements and vehicle leases carrying tax id + routing +
+// account, and CLAUDE.md's "PII at rest" section already counts plaintext PDFs
+// on disk as a named, accepted exposure — growing that inventory inside the
+// web root, defended by a lookup miss, is the wrong shape. A directory the
+// static handler cannot reach removes the class instead of guarding it.
+const SIGNED_ARCHIVE_DIR = path.join(__dirname, "evidence-archive", "signed-artifacts");
+function archiveSignedArtifact(signedPath) {
+	if (!signedArtifactLooksValid(signedPath)) return null;
+	if (!fs.existsSync(SIGNED_ARCHIVE_DIR)) fs.mkdirSync(SIGNED_ARCHIVE_DIR, { recursive: true });
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const dir = SIGNED_ARCHIVE_DIR;
+	const base = path.basename(signedPath, ".pdf");
+	let target = path.join(dir, `${base}.superseded-${stamp}.pdf`);
+	// COPYFILE_EXCL so an archive is never itself overwritten. Two supersessions
+	// inside the same millisecond would otherwise collapse into one record.
+	for (let n = 0; n < 50; n++) {
+		try {
+			fs.copyFileSync(signedPath, target, fs.constants.COPYFILE_EXCL);
+			return {
+				at: new Date().toISOString(),
+				file: path.basename(target),
+				sha256: sha256File(target),
+				bytes: fs.statSync(target).size,
+			};
+		} catch (err) {
+			if (err.code !== "EEXIST") throw err;
+			target = path.join(dir, `${base}.superseded-${stamp}-${n + 1}.pdf`);
+		}
+	}
+	throw new Error("could not archive the existing signed document");
+}
+
+// Append one archive record to the row's history, preserving whatever is there.
+// A malformed column is replaced rather than allowed to swallow the new record.
+function appendSupersededArtifact(existingJson, record) {
+	let list = [];
+	try {
+		const parsed = JSON.parse(existingJson || "[]");
+		if (Array.isArray(parsed)) list = parsed;
+	} catch { list = []; }
+	list.push(record);
+	return JSON.stringify(list);
+}
+
+// Commit one archive record to the row.
+//
+// ⚠️ RE-READS INSIDE A TRANSACTION, and that is the whole reason it exists as a
+// function. The caller holds a `docRow` fetched before a multi-second `await`,
+// so read-modify-writing the JSON from that snapshot loses a concurrent
+// supersession's record while its file sits on disk referenced by nothing —
+// the same read-before-await hazard CLAUDE.md documents for PUT /api/users/:id,
+// and `onboardingSignLimiter` (20/15 min) leaves ample room for two clicks.
+// better-sqlite3 transactions are synchronous, so nothing can interleave here.
+function persistSupersededArtifact(appId, docKey, record, reason, by) {
+	const entry = { ...record, reason, by };
+	db.transaction(() => {
+		const fresh = db.prepare("SELECT superseded_artifacts FROM investor_onboarding_documents WHERE application_id=? AND doc_key=?").get(appId, docKey);
+		db.prepare("UPDATE investor_onboarding_documents SET superseded_artifacts=? WHERE application_id=? AND doc_key=?")
+			.run(appendSupersededArtifact(fresh?.superseded_artifacts, entry), appId, docKey);
+	})();
 }
 
 // Once-per-(scope, owner, doc) alert, mirroring sweepFuelEvents(). A signer who
@@ -6751,6 +7137,23 @@ const onboardingPreviewLimiter = rateLimit({
 // adds a handful more when a render fails. 20 covers the worst honest run (all
 // 5 driver docs, each retried twice) with headroom and still caps a scripted
 // loop. Lower than the preview cap on purpose: this half also WRITES.
+// GET /api/admin/onboarding-evidence — 60/15 min, keyed per user.
+// ⚠️ This limiter is NOT about CPU. Both tables carry UNIQUE(owner, doc_key),
+// so the fan-out is hard-bounded at 5 (driver) / 3 (investor) hashes — about a
+// millisecond. It is about AUDIT-ROW INJECTION: the route writes an
+// `audit_trail` row per call, so it is capped for the same reason it is
+// refuseCrossSite'd below.
+const onboardingEvidenceLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many evidence requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
 const onboardingSignLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 20,
@@ -6780,7 +7183,9 @@ app.get("/api/public/investor-onboarding/:id", (req, res) => {
 		if (!appId) return;
 		const application = db.prepare("SELECT id, legal_name, dba, entity_type, address, contact_person, email, phone, status FROM investor_applications WHERE id = ?").get(appId);
 		const onboarding = db.prepare("SELECT * FROM investor_onboarding WHERE application_id = ?").get(appId);
-		const documents = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id").all(appId);
+		const documents = stripSigningEvidence(
+			db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id").all(appId)
+		);
 		res.json({ application, onboarding, documents, totalDocs: INVESTOR_ONBOARDING_DOCS.length });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -6889,9 +7294,13 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 		if (!docRow) return res.status(404).json({ error: "Document not found" });
 		if (docRow.signed) return res.json({ success: true, message: "Already signed" });
 
+		const consent = readTransmittedConsent(req.body, res, { docLabel: docRow.doc_name || docKey });
+		if (!consent) return;
+		const net = signerNetworkEvidence(req);
+
 		// The application row is read inside buildInvestorDocRender(), at render
 		// time, so it reflects any vehicle written just below.
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
 		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 		const signedFileName = `${docKey}-inv-${appId}-signed.pdf`;
@@ -6920,9 +7329,9 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 		});
 
 		const now = new Date().toISOString();
-		let signedPdfUrl;
+		let artifact;
 		try {
-			signedPdfUrl = await writeSignedArtifact({
+			artifact = await writeSignedArtifact({
 				render,
 				signedPath,
 				publicUrl,
@@ -6941,8 +7350,13 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 			// genuinely signed, which reads downstream exactly like the bug this
 			// PR fixes (checkAndCompleteOnboarding drops docs with no url) and
 			// would re-open the alert on a document that is fine.
-			const failWrite = db.prepare("UPDATE investor_onboarding_documents SET signature_text=?, signature_image=?, signing_error=?, signing_failed_at=?, signed_pdf_url='' WHERE application_id=? AND doc_key=? AND signed = 0")
-				.run(signatureText.trim(), signatureImage || "", genErr.message, now, appId, docKey);
+			//
+			// The evidence goes down on the FAILURE path too — same reasoning as
+			// the signature beside it. The consent was given; only the artifact is
+			// missing, so artifact_sha256 is the one thing left blank.
+			const failWrite = db.prepare("UPDATE investor_onboarding_documents SET signature_text=?, signature_image=?, signed_ip=?, signed_ip_source=?, signed_user_agent=?, consent_agreed=?, consent_text=?, effective_date=?, evidence_version=?, signing_error=?, signing_failed_at=?, signed_pdf_url='' WHERE application_id=? AND doc_key=? AND signed = 0")
+				.run(signatureText.trim(), signatureImage || "", net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text,
+					effectiveDate, SIGNING_EVIDENCE_VERSION, genErr.message, now, appId, docKey);
 			// Only alert for a document that is actually unsigned. 0 changes means
 			// another request already signed it; there is nothing wrong to report.
 			if (failWrite.changes > 0) {
@@ -6958,8 +7372,12 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimit
 			});
 		}
 
-		db.prepare("UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signature_image=?, signed_at=?, signed_pdf_url=?, signing_error='', signing_failed_at='' WHERE application_id=? AND doc_key=?")
-			.run(signatureText.trim(), signatureImage || "", now, signedPdfUrl, appId, docKey);
+		db.prepare(`UPDATE investor_onboarding_documents SET signed=1, signature_text=?, signature_image=?, signed_at=?, signed_pdf_url=?,
+			signed_ip=?, signed_ip_source=?, signed_user_agent=?, consent_agreed=?, consent_text=?, artifact_sha256=?, artifact_bytes=?, effective_date=?, evidence_version=?,
+			signing_error='', signing_failed_at='' WHERE application_id=? AND doc_key=?`)
+			.run(signatureText.trim(), signatureImage || "", now, artifact.url,
+				net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text, artifact.sha256, artifact.bytes, effectiveDate, SIGNING_EVIDENCE_VERSION,
+				appId, docKey);
 		resolveOnboardingDocAlert({ scope: "investor-application", ownerId: appId, docKey });
 
 		// Check if all docs signed → advance status
@@ -7033,6 +7451,151 @@ app.get("/api/admin/onboarding-doc-failures", requireRole("Super Admin"), (req, 
 	}
 });
 
+// GET — Super Admin. The signing evidence for one signer's document set, with
+// the stored hash CHECKED AGAINST THE FILE ON DISK RIGHT NOW.
+//
+// Storing a digest and never comparing it is half a control: the claim this
+// feature exists to support is "the artifact on disk is the artifact that was
+// signed", and that claim is only worth anything if somebody can test it. This
+// is that test, so a dispute is answered from the app rather than from an SSH
+// session and a mental model of how the file was named.
+//
+// Structurally read-only as to the DOCUMENT tables: no render, no UPDATE, no fs
+// write.
+//
+// ⚠️ BUT IT WRITES AN audit_trail ROW PER CALL, and that is why it carries
+// `refuseCrossSite` + a limiter even though its CPU cost is ~1 ms. Session
+// cookies are `sameSite:'none'`, there is no CSRF token, and this is a *simple*
+// GET — so `<img src="…/onboarding-evidence/driver/7">` on any page a Super
+// Admin opens would forge `read_confidential_document` entries naming document
+// sets nobody opened, burying the genuine reads underneath them. CORS hides the
+// response, not the effect. Manufacturing false entries in the very control
+// this feature strengthens is worse than the billed-call case `refuseCrossSite`
+// was built for, and with a SHARED `super_admin` login there is no second
+// signal to tell the real reads from the injected ones.
+// `requireRole` sits BEFORE both so an unauthorized caller cannot spend the
+// budget on 403s — same ordering as the fuel routes.
+//
+// ⚠️ VERDICTS ARE DELIBERATELY THREE-VALUED. `unverifiable` is not `mismatch`.
+// A grandfathered row has no stored hash, and reporting that as tampering would
+// make every historical document look forged — the precise outcome the
+// grandfathering rule exists to prevent.
+app.get("/api/admin/onboarding-evidence/:scope/:ownerId", requireRole("Super Admin"), refuseCrossSite, onboardingEvidenceLimiter, (req, res) => {
+	try {
+		const scope = String(req.params.scope || "").toLowerCase();
+		const ownerId = parseInt(req.params.ownerId, 10);
+		if (!ownerId || isNaN(ownerId)) return res.status(400).json({ error: "Invalid owner id" });
+		if (scope !== "driver" && scope !== "investor") {
+			return res.status(400).json({ error: 'scope must be "driver" or "investor"', code: "UNKNOWN_SCOPE" });
+		}
+		const isDriver = scope === "driver";
+		const rows = db.prepare(
+			isDriver
+				? `SELECT id, doc_key, doc_name, signed, signed_at, signed_pdf_url, signed_ip, signed_ip_source, signed_user_agent,
+				          consent_agreed, consent_text, artifact_sha256, artifact_bytes, effective_date,
+				          superseded_artifacts, evidence_version, signing_error
+				     FROM onboarding_documents WHERE user_id = ? ORDER BY id`
+				: `SELECT id, doc_key, doc_name, signed, signed_at, signed_pdf_url, signed_ip, signed_ip_source, signed_user_agent,
+				          consent_agreed, consent_text, artifact_sha256, artifact_bytes, effective_date,
+				          superseded_artifacts, evidence_version, signing_error
+				     FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id`
+		).all(ownerId);
+
+		const signedDir = path.join(__dirname, "uploads", isDriver ? "onboarding-signed" : "investor-onboarding-signed");
+		const documents = rows.map((r) => {
+			// Resolve the file from signed_pdf_url, never by rebuilding the name —
+			// the stored URL is what every other reader uses, so verifying a
+			// different path would verify a different thing.
+			const fileName = path.basename(String(r.signed_pdf_url || ""));
+			const onDiskPath = fileName ? path.join(signedDir, fileName) : "";
+			let actualSha = null;
+			let actualBytes = null;
+			if (onDiskPath && signedArtifactLooksValid(onDiskPath)) {
+				try {
+					actualSha = sha256File(onDiskPath);
+					actualBytes = fs.statSync(onDiskPath).size;
+				} catch { actualSha = null; actualBytes = null; }
+			}
+			let verdict;
+			if (!r.artifact_sha256) verdict = actualSha ? "unverifiable_no_stored_hash" : "unverifiable_no_artifact";
+			else if (!actualSha) verdict = "artifact_missing";
+			else verdict = actualSha === r.artifact_sha256 ? "match" : "MISMATCH";
+
+			let superseded = [];
+			try {
+				const parsed = JSON.parse(r.superseded_artifacts || "[]");
+				if (Array.isArray(parsed)) superseded = parsed;
+			} catch { superseded = []; }
+
+			return {
+				id: r.id,
+				docKey: r.doc_key,
+				docName: r.doc_name,
+				confidential: isConfidentialOnboardingDoc(isDriver ? "driver" : "investor", r.doc_key),
+				signed: !!r.signed,
+				signedAt: r.signed_at || "",
+				effectiveDate: r.effective_date || "",
+				signedPdfUrl: r.signed_pdf_url || "",
+				// `grandfathered` is the whole contract with the reader: true means
+				// "this document predates evidence capture and legitimately has
+				// none", not "this document is suspect".
+				grandfathered: (r.evidence_version || 0) < SIGNING_EVIDENCE_VERSION,
+				evidenceVersion: r.evidence_version || 0,
+				signedIp: r.signed_ip || "",
+				// 'proxy' = arrived through our own nginx, so the forwarded client
+				// is believable. 'socket' = the immediate peer's own address,
+				// recorded because :3000 is directly reachable and a forwarded
+				// header from such a caller is self-asserted. Publish it beside the
+				// address so nobody reads one as the other.
+				signedIpSource: r.signed_ip_source || "",
+				userAgent: r.signed_user_agent || "",
+				consentAgreed: !!r.consent_agreed,
+				consentText: r.consent_text || "",
+				// "Was this signer shown OUR standard wording?" — the question a
+				// dispute actually asks, answered here rather than by eyeballing two
+				// strings. false on a grandfathered row (no text was captured) and
+				// false if a future client ever ships different copy, which is worth
+				// knowing rather than smoothing over.
+				consentTextMatchesExpected: (r.consent_text || "") === SIGNING_CONSENT_TEXT_EXPECTED,
+				storedSha256: r.artifact_sha256 || "",
+				storedBytes: r.artifact_bytes || 0,
+				actualSha256: actualSha,
+				actualBytes,
+				verdict,
+				supersededArtifacts: superseded,
+				signingError: r.signing_error || "",
+			};
+		});
+
+		// Reading this page IS a read of who signed what and from where, on a set
+		// that includes documents carrying tax ids and bank details — and
+		// `super_admin` is a shared login. Record it like any other confidential
+		// read rather than treating "it is only metadata" as a reason not to.
+		//
+		// ⚠️ A DISTINCT entity name, not `onboarding_document`. The two /uploads
+		// guards log that entity with `entity_id = row.id` (a DOCUMENT id), while
+		// this route's id is an OWNER id. Reusing the name would silently merge
+		// two id namespaces, so "who read onboarding_document 7" would mix
+		// document 7 with user 7 — an audit trail you cannot join unambiguously
+		// is a weaker audit trail.
+		auditConfidentialRead(req, "onboarding_evidence", ownerId,
+			`signing evidence for ${scope} ${ownerId} (${documents.length} documents)`);
+
+		res.json({
+			scope, ownerId, documents,
+			summary: {
+				total: documents.length,
+				grandfathered: documents.filter((d) => d.grandfathered).length,
+				withConsent: documents.filter((d) => d.consentAgreed).length,
+				hashMatch: documents.filter((d) => d.verdict === "match").length,
+				hashMismatch: documents.filter((d) => d.verdict === "MISMATCH").length,
+			},
+		});
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // POST — Super Admin. Re-render ONE parked investor document from the signature
 // already stored on its row, then clear the failure state and resolve the alert.
 //
@@ -7074,20 +7637,59 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 		// the artifact itself, not the `signed` flag — a row can read signed = 1
 		// while the file behind it is gone, which is exactly the state an admin
 		// would be reaching for this route to fix.
+		const artifactPresent = signedArtifactLooksValid(signedPath);
 		if (!force && docRow.signed && docRow.signed_pdf_url) {
-			if (signedArtifactLooksValid(signedPath)) {
+			if (artifactPresent) {
 				resolveOnboardingDocAlert({ scope: "investor-application", ownerId: appId, docKey });
 				return res.json({ success: true, regenerated: false, reason: "ALREADY_PRESENT", signedPdfUrl: docRow.signed_pdf_url });
 			}
 		}
 
-		// Same effectiveDate/signedAt shape the signing route uses. The original
-		// signing timestamp is preserved below — this is a re-render of an act
-		// that already happened, not a new one.
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		// ⚠️ THE DESTRUCTIVE CASE. `force` used to mean "skip the short-circuit",
+		// and writeSignedArtifact() then overwrote the file IN PLACE — so one flag
+		// destroyed the executed bytes of a signed contract, with the row still
+		// asserting it was signed. Two things are true only in this branch, and
+		// only here does the route need a human to own the decision:
+		//   1. the document is signed, and
+		//   2. a valid artifact exists to destroy.
+		// #234's recovery path satisfies NEITHER (its documents are `signed = 0`,
+		// or their file is missing), so it is untouched and still needs no reason:
+		// a document that never rendered has nothing to preserve.
+		//
+		// A bare `reason` is the gate, matching POST /api/dispatch/cancel — the
+		// other place a click was destroying a record that named nothing about
+		// why. The original is archived below regardless; the reason is what makes
+		// the audit row answer the question anyone will actually ask.
+		const supersedesSignedArtifact = force && !!docRow.signed && artifactPresent;
+		// Sanitized like consent_text, and for the same reason: it is stored on
+		// the row AND written into an audit_trail line, so a newline in it would
+		// forge a second audit entry and make the record unreadable.
+		const supersedeReason = sanitizeEvidenceText(req.body?.reason, CONSENT_TEXT_MAX);
+		if (supersedesSignedArtifact && supersedeReason.length < 10) {
+			return res.status(409).json({
+				error: "This document is signed and its artifact is on disk. Re-rendering replaces an executed record, so it needs a written reason (10 characters or more). The original will be archived, not deleted.",
+				code: "SIGNED_ARTIFACT_SUPERSEDE_REASON_REQUIRED",
+			});
+		}
+
+		// ⚠️ effectiveDate is PRESERVED, not recomputed. It used to be
+		// `new Date()`, so re-rendering a lease executed in April silently
+		// reprinted it dated today — a different contract, over the same
+		// signature, with nothing recording the change. Order of preference:
+		//   1. effective_date, captured at signing (rows from this feature on);
+		//   2. the original signing stamp, which IS what the signing route passed
+		//      as effectiveDate — so a grandfathered row reprints correctly;
+		//   3. today, and ONLY for a document that has never rendered and
+		//      therefore carries no date to preserve.
 		const originalSignedAt = docRow.signed_at || docRow.signing_failed_at || "";
+		const preservedEffectiveDate = (docRow.effective_date || "").trim() || effectiveDateFromStamp(originalSignedAt);
+		const effectiveDate = preservedEffectiveDate || new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		// Same UTC pinning, same reasoning as effectiveDateFromStamp: production
+		// renders in UTC, so this prints "UTC" there either way — but without the
+		// pin a re-render run anywhere else stamps a different wall clock (and a
+		// different DAY, for 6 of the 9 executed rows) onto an executed document.
 		const signedAtLabel = originalSignedAt
-			? new Date(originalSignedAt).toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" })
+			? new Date(originalSignedAt).toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short", timeZone: EVIDENCE_DATE_TZ })
 			: effectiveDate;
 
 		const render = buildInvestorDocRender({
@@ -7099,10 +7701,58 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 		});
 
 		const nowIso = new Date().toISOString();
-		let signedPdfUrl;
+
+		// ⚠️ ARCHIVE BEFORE RENDERING. writeSignedArtifact() writes to signedPath,
+		// so the original is gone the instant it succeeds — moving the copy aside
+		// afterwards would copy the replacement. Doing it here also means a render
+		// that then fails costs one extra file on disk and destroys nothing.
+		//
+		// Failing to archive ABORTS the regeneration (503) rather than proceeding.
+		// The whole point of the branch is that the original must survive; a
+		// "best-effort" archive that silently no-ops leaves exactly the behaviour
+		// this fixes.
+		let archived = null;
+		if (supersedesSignedArtifact) {
+			try {
+				archived = archiveSignedArtifact(signedPath);
+			} catch (arcErr) {
+				logAudit(req, "regenerate_investor_document", "investor_application", appId,
+					`REFUSED to regenerate "${docKey}": could not archive the existing signed artifact (${arcErr.code || "ARCHIVE_FAILED"})`);
+				return res.status(503).json({
+					error: "The existing signed document could not be archived, so it was left untouched and nothing was regenerated.",
+					code: "ARCHIVE_FAILED",
+					// A code, not err.message — that string carries the server's
+					// absolute path on EACCES/ENOSPC, and #234's rule is that these
+					// responses name labels, never values.
+					detail: arcErr.code || "unknown",
+				});
+			}
+			// ⚠️ RECORDED THE MOMENT IT EXISTS, not after the render. The render
+			// takes seconds and can fail; recording afterwards leaves a real
+			// archive of an executed contract on disk that NO ROW POINTS AT, which
+			// is indistinguishable from litter and is exactly what somebody tidying
+			// stray files would delete.
+			persistSupersededArtifact(appId, docKey, archived, supersedeReason, req.session?.user?.username || "");
+		}
+
+		let artifact;
 		try {
-			signedPdfUrl = await writeSignedArtifact({ render, signedPath, publicUrl, label: docRow.doc_name || docKey });
+			artifact = await writeSignedArtifact({ render, signedPath, publicUrl, label: docRow.doc_name || docKey });
 		} catch (genErr) {
+			// ⚠️ RESTORE FIRST. writeSignedArtifact writes the file BEFORE it checks
+			// the size floor and the hash, so a DOCUMENT_STORE_FAILED leaves the
+			// bad bytes sitting at signed_pdf_url while the row still says signed=1
+			// with the OLD artifact_sha256 — i.e. the evidence endpoint would report
+			// MISMATCH on a document nobody tampered with. The archive is a
+			// byte-identical copy taken moments ago, so putting it back returns the
+			// row to a true state.
+			let restored = false;
+			if (archived) {
+				try {
+					fs.copyFileSync(path.join(SIGNED_ARCHIVE_DIR, archived.file), signedPath);
+					restored = signedArtifactLooksValid(signedPath) && sha256File(signedPath) === archived.sha256;
+				} catch { restored = false; }
+			}
 			// Still broken. Record why and leave the row parked — a failed
 			// regeneration must not look like a fresh failure, so the alert is only
 			// (re)raised for a document that is genuinely unsigned.
@@ -7114,11 +7764,17 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 					docName: docRow.doc_name, reason: genErr.message,
 				});
 			}
-			logAudit(req, "regenerate_investor_document", "investor_application", appId, `FAILED to regenerate "${docKey}": ${genErr.code || "DOCUMENT_RENDER_FAILED"}`);
+			logAudit(req, "regenerate_investor_document", "investor_application", appId,
+				`FAILED to regenerate "${docKey}": ${genErr.code || "DOCUMENT_RENDER_FAILED"}`
+				+ (archived ? ` — original archived as ${archived.file}; live artifact ${restored ? "RESTORED from it" : "NOT restored, see the archive"}` : ""));
 			return res.status(503).json({
-				error: "The document still could not be produced. The signature is untouched.",
+				error: archived && !restored
+					// Do not tell an operator the artifact is untouched when it is not.
+					? "The document could not be produced and the previous signed copy could NOT be restored in place. It is preserved in the evidence archive — see the audit entry."
+					: "The document still could not be produced. The signature is untouched.",
 				code: genErr.code || "DOCUMENT_RENDER_FAILED",
 				detail: genErr.message,
+				supersededArtifact: archived ? { file: archived.file, sha256: archived.sha256, restored } : null,
 				retryable: genErr.code !== "DOCUMENT_FIELDS_UNFILLED",
 			});
 		}
@@ -7126,13 +7782,39 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 		// signed_at keeps the ORIGINAL signing time where there is one — the
 		// investor signed when they signed, and stamping today's date onto a
 		// recovered document would misstate the contract.
-		db.prepare("UPDATE investor_onboarding_documents SET signed=1, signed_at=COALESCE(NULLIF(signed_at,''), ?), signed_pdf_url=?, signing_error='', signing_failed_at='' WHERE application_id=? AND doc_key=?")
-			.run(nowIso, signedPdfUrl, appId, docKey);
+		//
+		// ⚠️ `evidence_version` is deliberately NOT written here. Regeneration
+		// witnesses no consent — it re-renders an act that already happened — so a
+		// grandfathered row gains a hash and its archive history while staying
+		// honestly marked as pre-evidence. Writing the version here would
+		// manufacture a consent claim out of an admin button press.
+		// `effective_date` IS backfilled, because the value stored is the date the
+		// artifact actually carries, which we have just proven by printing it.
+		//
+		// ⚠️ `superseded_artifacts` is NOT written here. It was already persisted
+		// by persistSupersededArtifact() above, against a row re-read inside a
+		// transaction. Computing it here from `docRow` would reintroduce a lost
+		// update: `docRow` was read before a multi-second `await`, so two
+		// overlapping force-regenerations would each archive a real file and the
+		// second UPDATE would overwrite the first's history — the same
+		// read-before-await hazard CLAUDE.md documents for PUT /api/users/:id.
+		db.prepare(`UPDATE investor_onboarding_documents SET signed=1, signed_at=COALESCE(NULLIF(signed_at,''), ?), signed_pdf_url=?,
+			artifact_sha256=?, artifact_bytes=?, effective_date=?,
+			signing_error='', signing_failed_at='' WHERE application_id=? AND doc_key=?`)
+			.run(nowIso, artifact.url, artifact.sha256, artifact.bytes, effectiveDate, appId, docKey);
 		resolveOnboardingDocAlert({ scope: "investor-application", ownerId: appId, docKey });
 		const onboardingStatus = refreshInvestorOnboardingStatus(appId);
 
-		logAudit(req, "regenerate_investor_document", "investor_application", appId, `Regenerated "${docRow.doc_name || docKey}" from the stored signature`);
-		res.json({ success: true, regenerated: true, signedPdfUrl, onboardingStatus });
+		logAudit(req, "regenerate_investor_document", "investor_application", appId,
+			archived
+				? `SUPERSEDED signed "${docRow.doc_name || docKey}" — original archived as ${archived.file} (sha256 ${archived.sha256.slice(0, 16)}…, ${archived.bytes} bytes), replacement sha256 ${artifact.sha256.slice(0, 16)}…, effective date preserved as ${effectiveDate}. Reason: ${supersedeReason}`
+				: `Regenerated "${docRow.doc_name || docKey}" from the stored signature (effective date ${effectiveDate})`);
+		res.json({
+			success: true, regenerated: true, signedPdfUrl: artifact.url, onboardingStatus,
+			effectiveDate, effectiveDatePreserved: !!preservedEffectiveDate,
+			artifactSha256: artifact.sha256, artifactBytes: artifact.bytes,
+			supersededArtifact: archived ? { file: archived.file, sha256: archived.sha256, bytes: archived.bytes, at: archived.at } : null,
+		});
 	} catch (err) {
 		console.error("Investor document regenerate error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -7146,7 +7828,7 @@ app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", onboardingP
 		if (!appId) return;
 		const { docKey } = req.params;
 		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
 
 		if (docKey === "master_agreement" || docKey === "vehicle_lease") {
 			let vehicles = [];
@@ -7299,7 +7981,7 @@ app.post("/api/public/investor-preview-pdf/:docKey", pdfPreviewLimiter, async (r
 		if (signatureImage && !safeSignatureImage(signatureImage)) {
 			return res.status(400).json({ error: "signatureImage must be an inline base64 image data URI" });
 		}
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
 		const signedAt = signatureText ? new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" }) : undefined;
 		const vehiclesArr = Array.isArray(vehicles) ? vehicles : [];
 		const appData = {
@@ -8366,7 +9048,12 @@ app.get("/api/onboarding/:userId", requireAuth, (req, res) => {
 			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
 		).get(userId);
 		if (!onboarding) return res.status(404).json({ error: "No onboarding record" });
-		const documents = db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId);
+		// Stripped because this route restricts only the Driver role — a
+		// Dispatcher reaches it, and a driver's signing IP and user agent are
+		// not dispatch's business. See stripSigningEvidence().
+		const documents = stripSigningEvidence(
+			db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId)
+		);
 		res.json({ onboarding, documents, totalDocs: ONBOARDING_DOCS.length });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -8389,6 +9076,10 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		if (!docRow) return res.status(404).json({ error: "Document not found" });
 		if (docRow.signed) return res.json({ success: true, message: "Already signed" });
 
+		const consent = readTransmittedConsent(req.body, res, { docLabel: docRow.doc_name || docKey });
+		if (!consent) return;
+		const net = signerNetworkEvidence(req);
+
 		const signedDir = path.join(__dirname, "uploads", "onboarding-signed");
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 		const signedFileName = `${docKey}-${userId}-signed.pdf`;
@@ -8402,7 +9093,7 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		// invoice flow at POST /api/invoices/generate.
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 		const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
 		const resolvedFullName = user?.driver_name || application?.full_name || signatureText.trim();
 
 		// Contractor agreement has banking info — persist it before rendering, and
@@ -8458,9 +9149,9 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		};
 
 		const nowIso = new Date().toISOString();
-		let signedPdfUrl;
+		let artifact;
 		try {
-			signedPdfUrl = await writeSignedArtifact({
+			artifact = await writeSignedArtifact({
 				render,
 				signedPath,
 				publicUrl,
@@ -8480,9 +9171,14 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 			// genuinely signed, which reads downstream exactly like the bug this
 			// PR fixes (checkAndCompleteOnboarding drops docs with no url) and
 			// would re-open the alert on a document that is fine.
+			//
+			// Evidence lands on the FAILURE path too: the consent, the address and
+			// the agent describe the signing act, which happened. Only the artifact
+			// hash waits for an artifact.
 			const failWrite = db.prepare(
-				"UPDATE onboarding_documents SET signature_text = ?, signing_error = ?, signing_failed_at = ?, signed_pdf_url = '' WHERE user_id = ? AND doc_key = ? AND signed = 0"
-			).run(signatureText.trim(), genErr.message, nowIso, userId, docKey);
+				"UPDATE onboarding_documents SET signature_text = ?, signed_ip = ?, signed_ip_source = ?, signed_user_agent = ?, consent_agreed = ?, consent_text = ?, effective_date = ?, evidence_version = ?, signing_error = ?, signing_failed_at = ?, signed_pdf_url = '' WHERE user_id = ? AND doc_key = ? AND signed = 0"
+			).run(signatureText.trim(), net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text, effectiveDate, SIGNING_EVIDENCE_VERSION,
+				genErr.message, nowIso, userId, docKey);
 			// Only alert for a document that is actually unsigned. 0 changes means
 			// another request already signed it; there is nothing wrong to report.
 			if (failWrite.changes > 0) {
@@ -8499,8 +9195,12 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		}
 
 		db.prepare(
-			"UPDATE onboarding_documents SET signed = 1, signature_text = ?, signed_at = ?, signed_pdf_url = ?, signing_error = '', signing_failed_at = '' WHERE user_id = ? AND doc_key = ?"
-		).run(signatureText.trim(), nowIso, signedPdfUrl, userId, docKey);
+			`UPDATE onboarding_documents SET signed = 1, signature_text = ?, signed_at = ?, signed_pdf_url = ?,
+			 signed_ip = ?, signed_ip_source = ?, signed_user_agent = ?, consent_agreed = ?, consent_text = ?, artifact_sha256 = ?, artifact_bytes = ?, effective_date = ?, evidence_version = ?,
+			 signing_error = '', signing_failed_at = '' WHERE user_id = ? AND doc_key = ?`
+		).run(signatureText.trim(), nowIso, artifact.url,
+			net.ip, net.ipSource, net.userAgent, consent.agreed, consent.text, artifact.sha256, artifact.bytes, effectiveDate, SIGNING_EVIDENCE_VERSION,
+			userId, docKey);
 		resolveOnboardingDocAlert({ scope: "driver", ownerId: userId, docKey });
 
 		const updated = await checkAndCompleteOnboarding(userId);
@@ -8566,7 +9266,7 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, onboardingPreviewL
 		const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 		const application = db.prepare("SELECT * FROM job_applications WHERE id = (SELECT application_id FROM driver_onboarding WHERE user_id = ?)").get(userId);
 		const driverName = user?.driver_name || application?.full_name || "";
-		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: EVIDENCE_DATE_TZ });
 
 		if (docKey === "w9") {
 			// W-9: fill form fields (same as investor) — preview without signature
@@ -17057,9 +17757,17 @@ app.get("/api/trucks/:id/driver-files", requireRole("Super Admin", "Dispatcher")
 		// Only non-confidential onboarding docs. Never expose signature_text.
 		// Super Admin gets to see the full list via a different endpoint; this
 		// one is scoped to what dispatchers legitimately need for operations.
+		//
+		// ⚠️ The SQL filter is kept AND re-judged in JS by the shared predicate,
+		// so this listing cannot disagree with the /uploads guard about what
+		// "confidential" means. Without the second pass a row carrying an unknown
+		// doc_key with confidential = 0 would be LISTED here and then 404 at the
+		// file — the guard fails closed, so it is harmless, but a link that always
+		// breaks is worse than no link, and the point of one predicate is that
+		// there is exactly one answer.
 		const onboardingDocs = db.prepare(
 			"SELECT doc_key, doc_name, signed, signed_at, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND (confidential = 0 OR confidential IS NULL) ORDER BY id"
-		).all(user.id);
+		).all(user.id).filter((d) => !isConfidentialOnboardingDoc("driver", d.doc_key));
 		const drugTest = onboarding && onboarding.drug_test_result ? {
 			result: onboarding.drug_test_result,
 			file_url: onboarding.drug_test_file_url,
@@ -23224,7 +23932,7 @@ app.get("/api/driver/:driverName", requireAuth, async (req, res) => {
 			"SELECT id, user_id, application_id, driver_name, status, onboarded_at, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM driver_onboarding WHERE user_id = ?"
 		).get(userId) || null;
 		const onboardingDocs = onboarding
-			? db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId)
+			? stripSigningEvidence(db.prepare("SELECT * FROM onboarding_documents WHERE user_id = ? ORDER BY id").all(userId))
 			: [];
 		// Also fetch the original application so the driver Kit can display
 		// the documents and qualifications the applicant submitted. SSN is
