@@ -20800,6 +20800,116 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 	}
 });
 
+// The only statuses this route may write, and the exact spelling it writes them
+// in. `newStatus` used to be unconstrained free text, so anything at all could be
+// dropped into the column every KPI branches on.
+//
+// It is the SAME seven the modal offers (ActiveLoadsTab.vue `statusOptions`),
+// enforced server-side for the same reason CANCEL_REASON_REQUIRED is: the guard
+// has to hold for any caller, not just the one screen. Matching is
+// case-insensitive but the write is canonical, so "delivered" lands as
+// "Delivered" and the sheet keeps one spelling per status.
+//
+// ⚠️ "Cancelled" is deliberately NOT here, even though it is a perfectly
+// legitimate status elsewhere in the app. Two independent reasons, either alone
+// sufficient:
+//   1. PRIVILEGE. Cancelling has its own route — POST /api/dispatch/cancel — which
+//      is **Super Admin only** (dispatchers lost it by client decision 2026-04-19),
+//      demands a reason, stamps load_status_history, notifies the driver over the
+//      `load-cancelled` socket and audits `cancel_load`. This route is Super Admin
+//      **or Dispatcher**, so accepting "Cancelled" here is a plain walk-around of
+//      that gate, and it produces a cancellation none of that plumbing recorded.
+//   2. MONEY. CANCELED_STATUS_RE in excludeDroppedLoads() drops a cancelled load
+//      out of revenue, driver pay and every KPI — it is the one value on the
+//      allowlist's doorstep that ERASES a figure rather than moving it.
+// The opposite direction — reviving a load cancelled by mistake — is unaffected:
+// pick any of the seven. "Completed" and "POD Received" are likewise absent
+// because the modal never offered them and "Delivered" already satisfies
+// completedStatuses, so nothing is lost.
+const STATUS_OVERRIDE_ALLOWED = ["Dispatched", "Heading to Shipper", "At Shipper", "Loading", "In Transit", "At Receiver", "Delivered"];
+
+// May this status override be written? Returns null to allow, else the 409 body.
+//
+// ⚠️ THE UNION OF BEFORE AND AFTER, exactly as sheetRowUpdateBlocker() spells out
+// at length — read that comment, it is the canonical statement of this problem.
+// Two things make it non-obvious that this route needs it:
+//
+//   • BEFORE covers the RESURRECTION, and it does so only because
+//     loadRowPeriods() is deliberately status-blind. 26 rows sit at
+//     "Cancelled"/"Canceled" and are dropped from every aggregate by
+//     excludeDroppedLoads(), so a guard phrased as "does this row contribute to a
+//     locked month TODAY?" answers *no* for all of them and waves the write
+//     through. 25 of those 26 are inside a locked month and carry $29,166.25
+//     between them (the 26th, load 512441414, sits in an unlocked 2025-04) — so
+//     flipping them to "Delivered" INJECTS that money into closed months,
+//     including load 554481641, $4,100, assigned 2026-06, a month whose payout is
+//     already `paid`. Asking loadRowPeriods() instead — which reads dates and
+//     never looks at the status — gets that right for free, and is why no
+//     status-aware predicate belongs here. (Counts measured 2026-08-09; recount
+//     the CANCELLED rows and you get 26, not 25. The gap is the unlocked one.)
+//   • AFTER covers the DATES THIS ROUTE ITSELF WRITES. It stamps Status Update
+//     Date and sets or clears Completion Date, and jobTrackingMonthCols().dateCol
+//     matches `status.*update.*date|completion.*date|assigned.*date` on the FIRST
+//     header that hits. On production "Assigned Date" sits ahead of both, so the
+//     revenue month is untouched and the after-state is inert — but that is header
+//     luck, not a property of the route. On a sheet resolving to Status Update
+//     Date this write MOVES the load's revenue month to today (into a locked
+//     current month, if one was closed early), and on one resolving to Completion
+//     Date clearing the cell makes the month unresolvable. A before-only guard
+//     cannot see either, by construction.
+//
+// Fails closed on an unreadable period_locks and on a row whose months cannot be
+// resolved on EITHER side. Not gated on PERIOD_FINALIZE_ENABLED, matching
+// isLocked() and every other lock guard: flag off means period_locks is empty,
+// nothing is locked, and this costs one indexed SELECT.
+//
+// `rows` are header-keyed Job Tracking rows (parseSheet's shape) — EVERY row
+// carrying the load id, not the last one. `edits` is the header-keyed delta the
+// write would apply, i.e. after = {...before, ...edits}.
+function statusOverrideBlocker(headers, rows, edits) {
+	if (!periodLocksReadable()) {
+		return {
+			code: "PERIOD_LOCK_UNREADABLE",
+			periods: [],
+		};
+	}
+	const cols = jobTrackingMonthCols(headers);
+	const periods = new Set();
+	let allResolved = true;
+	for (const before of rows) {
+		const after = { ...before, ...edits };
+		for (const side of [before, after]) {
+			const p = loadRowPeriods(side, cols);
+			if (!p.resolved) allResolved = false;
+			p.periods.forEach((m) => periods.add(m));
+		}
+	}
+
+	// PERIOD_FINALIZED outranks the other two: when a row both names a closed
+	// month and carries an unreadable date, "this would restate June" is the
+	// answer the operator can act on, and the remedy (reopen the period) is the
+	// same either way.
+	const locked = lockedAmong([...periods]);
+	if (locked.length) return { code: "PERIOD_FINALIZED", periods: locked };
+
+	// A row whose dates cannot be read could be booked anywhere, including a
+	// closed month. Same asymmetry as everywhere else: refusing costs a retry,
+	// permitting costs a restated settlement nobody can see happen.
+	if (!allResolved) return { code: "PERIOD_UNRESOLVED", periods: [] };
+
+	// AMBIGUITY IS A REFUSAL, NOT A TIE-BREAK. The old loop took the LAST matching
+	// row, and 87 load ids inside locked months sit on 2+ rows — so the write could
+	// land on a row other than the one the modal displayed, silently, with the
+	// audit naming a load id that identifies neither. There is no correct guess:
+	// the request carries a load id and nothing else, so nothing in it distinguishes
+	// the rows. (Reached only after the period checks above, which have already
+	// judged EVERY candidate row, so an ambiguous load in a closed month is told
+	// about the closed month first.)
+	if (rows.length > 1) return { code: "AMBIGUOUS_LOAD", periods: [] };
+
+	return null;
+}
+
 // PUT /api/loads/:loadId/status-override — Admin status reversion
 //
 // CEO requirement (2026-05-05): Super Admins and Dispatchers must be able to
@@ -20807,6 +20917,14 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 // marked Delivered before POD was uploaded). Bypasses the POD gate that
 // blocks PUT /api/driver/status — that's the whole point of an override.
 // Every override is reason-tagged and audit-logged.
+//
+// ⚠️ PERIOD-GUARDED, same three fail-closed rungs as DELETE /api/loads/:loadId.
+// This was the last route that could rewrite a settled month: it writes Job
+// Status — the column excludeDroppedLoads() and every `completedStatuses` test
+// branch on — with no period check of any kind. Measured on production
+// 2026-08-09: 407 of 421 rows sit in locked periods, $313,922.93 of completed-load
+// revenue erasable from closed months, plus the $29,166.25 of resurrection
+// described on statusOverrideBlocker() above.
 app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const { loadId } = req.params;
@@ -20814,15 +20932,61 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		if (!newStatus || typeof newStatus !== "string") {
 			return res.status(400).json({ error: "newStatus is required" });
 		}
+		// Record every refusal. `super_admin` is a shared login, so a refusal that
+		// left no trace would make a repeated attempt to rewrite a closed month
+		// invisible in the one place anyone looks afterwards.
+		const auditBlocked = (code, periods, statusLabel) => logAudit(
+			req, "status_override_blocked", "load", loadId,
+			`Blocked override to "${statusLabel}" [${code}]${(periods || []).length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code, periods: periods || [] })}`
+		);
+
+		// Canonicalize against the allowlist. See STATUS_OVERRIDE_ALLOWED above for
+		// why "Cancelled" is refused here rather than silently accepted.
+		const canonicalStatus = STATUS_OVERRIDE_ALLOWED.find((s) => s.toLowerCase() === newStatus.trim().toLowerCase());
+		if (!canonicalStatus) {
+			const cancelling = CANCELED_STATUS_RE.test(newStatus.trim());
+			// A cancel attempt lands in the audit trail; an ordinary typo does not.
+			// This one is a privilege-boundary event — POST /api/dispatch/cancel is
+			// Super Admin only and this route is not — so a Dispatcher reaching for it
+			// is worth a trace, while auditing every malformed string would bury that
+			// signal in noise.
+			if (cancelling) auditBlocked("CANCEL_NOT_AN_OVERRIDE", [], newStatus.trim());
+			return res.status(400).json({
+				error: cancelling
+					? "Cancelling a load is not an override. Use POST /api/dispatch/cancel (Super Admin), which records the reason, notifies the driver and audits the cancellation — a cancelled load drops out of revenue and every KPI, so it must not be set silently."
+					: `'${newStatus}' is not a status this override can set. Allowed: ${STATUS_OVERRIDE_ALLOWED.join(", ")}.`,
+				code: cancelling ? "CANCEL_NOT_AN_OVERRIDE" : "INVALID_STATUS",
+				allowed: STATUS_OVERRIDE_ALLOWED,
+			});
+		}
 		if (!reason || typeof reason !== "string" || reason.trim().length < 5) {
 			return res.status(400).json({ error: "reason is required (min 5 chars)" });
 		}
 
+		// RUNG 1 — fail CLOSED before anything else: isLocked() swallows every error
+		// and answers "not locked", so an unreadable period_locks would leave the
+		// guard present, silent and open.
+		if (!periodLocksReadable()) {
+			auditBlocked("PERIOD_LOCK_UNREADABLE", [], canonicalStatus);
+			return sendPeriodRefusal(res, "unreadable");
+		}
+
+		// RUNG 2 — a failed sheet read REFUSES. It used to fall through to a generic
+		// 500, which is fail-closed by accident rather than by decision; now the
+		// months depend on this read, and the months are exactly what cannot be
+		// guessed at.
 		const sheets = await getSheets();
-		const sheetRes = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking",
-		});
+		let sheetRes;
+		try {
+			sheetRes = await sheets.spreadsheets.values.get({
+				spreadsheetId: SPREADSHEET_ID,
+				range: "Job Tracking",
+			});
+		} catch (e) {
+			console.error("Status override blocked — Job Tracking unreadable:", e.message);
+			auditBlocked("PERIOD_UNRESOLVED", [], canonicalStatus);
+			return sendPeriodRefusal(res, "unresolved", null, `Load ${loadId}`);
+		}
 		const allRows = sheetRes.data.values || [];
 		const headers = allRows[0] || [];
 		const dataRows = allRows.slice(1);
@@ -20836,21 +21000,31 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		if (statusIdx === -1 || loadIdIdx === -1) {
 			return res.status(400).json({ error: "Status or Load ID column not found in sheet" });
 		}
-
-		// Find the matching row (last match wins for safety with corrected duplicates)
-		const targetLid = loadId.toString().trim().toLowerCase().replace(/^#/, "");
-		let rowIndex = -1;
-		for (let i = dataRows.length - 1; i >= 0; i--) {
-			const lid = (dataRows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
-			if (lid === targetLid) { rowIndex = i + 2; break; }
+		// The three write targets must be three distinct columns. `/status/i` also
+		// matches "Status Update Date", so a sheet with no plain status column
+		// resolves statusIdx and dateIdx to the same cell — the route would then
+		// write it twice with different values, and `edits` (keyed by header name)
+		// would collapse to one entry describing a state the sheet never reaches.
+		// Refuse rather than write a delta the guard did not judge.
+		if (dateIdx === statusIdx || compDateIdx === statusIdx || (dateIdx !== -1 && dateIdx === compDateIdx)) {
+			return res.status(400).json({
+				error: "Job Tracking's status and date columns cannot be told apart, so this override cannot be applied safely.",
+				code: "SHEET_COLUMNS_AMBIGUOUS",
+			});
 		}
-		if (rowIndex === -1) {
+
+		// EVERY row carrying this load id, not the last one — see the AMBIGUOUS_LOAD
+		// note on statusOverrideBlocker(). The guard has to answer for all of them
+		// because nothing in the request says which was meant.
+		const targetLid = loadId.toString().trim().toLowerCase().replace(/^#/, "");
+		const matches = [];
+		for (let i = 0; i < dataRows.length; i++) {
+			const lid = (dataRows[i][loadIdIdx] || "").toString().trim().toLowerCase().replace(/^#/, "");
+			if (lid === targetLid) matches.push({ row: dataRows[i], rowIndex: i + 2 });
+		}
+		if (!matches.length) {
 			return res.status(404).json({ error: `Load ${loadId} not found` });
 		}
-
-		const currentRow = dataRows[rowIndex - 2] || [];
-		const oldStatus = currentRow[statusIdx] || "";
-		const driverName = driverIdx !== -1 ? (currentRow[driverIdx] || "") : "";
 
 		const now = new Date();
 		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
@@ -20858,20 +21032,53 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		// See houstonStamp() — the date part here decides revenue month,
 		// invoice week, and driver-pay day.
 		const dateTime = houstonStamp(now);
-
-		const updateData = [
-			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[newStatus]] },
-		];
-		if (dateIdx !== -1) {
-			updateData.push({ range: `Job Tracking!${colLetter(dateIdx)}${rowIndex}`, values: [[dateTime]] });
-		}
 		// Reverting away from a completed status: clear the Completion Date so the
 		// column doesn't lie. Setting to a completed status: populate it.
+		const isCompletion = /^(delivered|completed|pod received)$/i.test(canonicalStatus);
+
+		// RUNG 3 — the period guard, over the union of before and after for EVERY
+		// candidate row. `edits` is byte-identical to the cells written below; both
+		// are built from the same three values so the state judged and the state
+		// written cannot drift apart.
+		const edits = { [headers[statusIdx]]: canonicalStatus };
+		if (dateIdx !== -1) edits[headers[dateIdx]] = dateTime;
+		if (compDateIdx !== -1) edits[headers[compDateIdx]] = isCompletion ? dateTime : "";
+		const asObject = (arr) => {
+			const o = {};
+			headers.forEach((h, i) => { o[h] = arr[i] == null ? "" : arr[i]; });
+			return o;
+		};
+		const blocker = statusOverrideBlocker(headers, matches.map((m) => asObject(m.row)), edits);
+		if (blocker) {
+			auditBlocked(blocker.code, blocker.periods, canonicalStatus);
+			if (blocker.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(res, "unreadable");
+			if (blocker.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(res, "unresolved", null, `Load ${loadId}`);
+			if (blocker.code === "PERIOD_FINALIZED") {
+				return sendPeriodRefusal(res, "finalized", blocker.periods, `Changing the status of load ${loadId}`);
+			}
+			return res.status(409).json({
+				error: `Load ${loadId} appears on ${matches.length} rows of Job Tracking (${matches.map((m) => m.rowIndex).join(", ")}), so the server cannot tell which one this override means. Give the duplicate rows distinct load ids — or remove the stale one — and try again.`,
+				code: "AMBIGUOUS_LOAD",
+				rowIndices: matches.map((m) => m.rowIndex),
+			});
+		}
+
+		const { row: currentRow, rowIndex } = matches[0];
+		const oldStatus = currentRow[statusIdx] || "";
+		const driverName = driverIdx !== -1 ? (currentRow[driverIdx] || "") : "";
+
+		// Written straight out of `edits`, so what the guard judged and what lands in
+		// the sheet are the same three values by construction.
+		const updateData = [
+			{ range: `Job Tracking!${colLetter(statusIdx)}${rowIndex}`, values: [[edits[headers[statusIdx]]]] },
+		];
+		if (dateIdx !== -1) {
+			updateData.push({ range: `Job Tracking!${colLetter(dateIdx)}${rowIndex}`, values: [[edits[headers[dateIdx]]]] });
+		}
 		if (compDateIdx !== -1) {
-			const isCompletion = /^(delivered|completed|pod received)$/i.test(newStatus);
 			updateData.push({
 				range: `Job Tracking!${colLetter(compDateIdx)}${rowIndex}`,
-				values: [[isCompletion ? dateTime : ""]],
+				values: [[edits[headers[compDateIdx]]]],
 			});
 		}
 
@@ -20882,23 +21089,27 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 
 		jtCacheInvalidate();
 		const overrideUser = req.session?.user?.username || "admin";
-		const detailMsg = `Override: "${oldStatus}" → "${newStatus}" — ${reason.trim()}`;
-		io.to("dispatch").emit("status-updated", { loadId, driverName, newStatus });
+		// canonicalStatus, never the raw `newStatus`: the socket event, the dispatch
+		// feed, the status history and the audit line must all say what actually
+		// landed in the cell, or a lowercase request leaves four records disagreeing
+		// with the sheet.
+		const detailMsg = `Override: "${oldStatus}" → "${canonicalStatus}" — ${reason.trim()}`;
+		io.to("dispatch").emit("status-updated", { loadId, driverName, newStatus: canonicalStatus });
 		insertDispatchNotification.run(
 			'status-override',
-			`${driverName || "Load"}: ${newStatus} (override)`,
+			`${driverName || "Load"}: ${canonicalStatus} (override)`,
 			detailMsg,
-			JSON.stringify({ loadId, driverName, newStatus, oldStatus, reason: reason.trim(), by: overrideUser })
+			JSON.stringify({ loadId, driverName, newStatus: canonicalStatus, oldStatus, reason: reason.trim(), by: overrideUser })
 		);
 		io.to("dispatch").emit("dispatch-notification", {
 			type: 'status-override',
-			title: `${driverName || "Load"}: ${newStatus} (override)`,
+			title: `${driverName || "Load"}: ${canonicalStatus} (override)`,
 			body: detailMsg,
 		});
 
-		logAudit(req, 'status_override', 'load', loadId, `Override "${oldStatus}" → "${newStatus}" by ${overrideUser}: ${reason.trim()}`);
-		recordStatusChange({ loadId, oldStatus, newStatus, source: 'override', actor: overrideUser });
-		res.json({ success: true, oldStatus, newStatus });
+		logAudit(req, 'status_override', 'load', loadId, `Override "${oldStatus}" → "${canonicalStatus}" by ${overrideUser}: ${reason.trim()}`);
+		recordStatusChange({ loadId, oldStatus, newStatus: canonicalStatus, source: 'override', actor: overrideUser });
+		res.json({ success: true, oldStatus, newStatus: canonicalStatus });
 	} catch (error) {
 		console.error("Error overriding load status:", error.message);
 		res.status(500).json({ error: error.message });
