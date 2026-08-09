@@ -75,7 +75,7 @@ Migrations are idempotent and run on every boot. A fresh `app.db` and a long-liv
 
 ## Authentication & authorization
 
-Session-based, no JWTs. Cookies are `httpOnly`, `secure` in production, `sameSite=strict`. The session secret comes from `SESSION_SECRET` in `.env` — in development there is a default fallback, but production must set it.
+Session-based, no JWTs. Cookies are `httpOnly`, `secure` in production, `sameSite=lax` (override with `SESSION_COOKIE_SAMESITE`; unset means `lax`). The session secret comes from `SESSION_SECRET` in `.env` — in development there is a default fallback, but production must set it.
 
 Four roles enforced by two middlewares:
 

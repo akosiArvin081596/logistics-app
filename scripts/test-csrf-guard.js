@@ -142,8 +142,41 @@ for (const r of MONEY_ROUTES) {
 	ok("requireRole precedes the guard on " + r,
 		Boolean(line) && line.indexOf("requireRole") < line.indexOf("refuseCrossOrigin"));
 }
+// The ratecon-reconcile pair. NOT a money route — it is the one route in #253's
+// table that tightening the session cookie to SameSite=Lax could not cover,
+// because lax still carries the cookie on a top-level cross-site GET NAVIGATION
+// and this route inserted an alert row and sent mail on a GET. Split into a
+// structurally read-only GET and a POST .../run, both guarded. Asserted here so
+// neither half can quietly lose the guard, and so the GET cannot silently regain
+// the ability to alert.
+const RECONCILE_ROUTES = [
+	["get", "/api/admin/ratecon-reconcile"],
+	["post", "/api/admin/ratecon-reconcile/run"],
+];
+for (const [verb, r] of RECONCILE_ROUTES) {
+	// The quotes in the match are what keep "/…/ratecon-reconcile" from also
+	// matching the "/…/ratecon-reconcile/run" line.
+	const line = src.split("\n").find((l) => l.includes('"' + r + '"') && l.startsWith("app." + verb + "("));
+	ok("route registered: " + verb.toUpperCase() + " " + r, Boolean(line));
+	ok("refuseCrossOrigin mounted on " + r, Boolean(line) && line.includes("refuseCrossOrigin"));
+	ok("requireRole precedes the guard on " + r,
+		Boolean(line) && line.indexOf("requireRole") < line.indexOf("refuseCrossOrigin"));
+}
+// The GET must pass alert=false and the POST alert=true. This is the assertion
+// that stops the write half creeping back onto the safe verb — the exact shape
+// the route had before (a ?dryRun query parameter choosing the side effect).
+const getReconcile = src.split("\n").find((l) => l.includes('"/api/admin/ratecon-reconcile"') && l.startsWith("app.get("));
+const postReconcile = src.split("\n").find((l) => l.includes('"/api/admin/ratecon-reconcile/run"') && l.startsWith("app.post("));
+const nextLineAfter = (needle) => { const a = src.split("\n"); const i = a.findIndex((l) => l === needle); return i < 0 ? "" : a[i + 1]; };
+ok("GET ratecon-reconcile is structurally read-only (alert hardcoded false)",
+	/rateConReconcileHttp\(req, res, false\)/.test(String(getReconcile) + nextLineAfter(getReconcile)));
+ok("POST ratecon-reconcile/run is the alerting verb (alert true)",
+	/rateConReconcileHttp\(req, res, true\)/.test(String(postReconcile) + nextLineAfter(postReconcile)));
+ok("no query parameter reaches the alert decision",
+	!/reconcileRateCons\(\{\s*alert:\s*!?dryRun/.test(src));
+
 const mountCount = (name) => src.split("\n").filter((l) => /^app\.(get|post|put|delete|patch)\(/.test(l) && l.includes(name + ",")).length;
-eq("refuseCrossOrigin mount count", mountCount("refuseCrossOrigin"), 4);
+eq("refuseCrossOrigin mount count", mountCount("refuseCrossOrigin"), 6);
 eq("refuseCrossSite mount count (fuel-gallons GET + apply)", mountCount("refuseCrossSite"), 2);
 
 // ⚠️ The non-browser integrations must stay untouched. They present no
@@ -195,6 +228,81 @@ const legacy = (req, res, next) => {
 ok("MUTANT d: the pre-fix guard admits the pre-Sec-Fetch attack", allows(legacy, OLD_SAFARI_CROSS));
 ok("MUTANT d: the pre-fix guard admits a sibling subdomain", allows(legacy, SIBLING_SUBDOMAIN));
 ok("MUTANT d: the pre-fix guard still stops the modern form", allows(legacy, CROSS_FORM) === false);
+
+// ── 4. the session cookie — the control that closes the CLASS ───────────────
+// Everything above filters a request. This section pins the attribute that stops
+// the browser attaching the cookie in the first place, which is the actual fix:
+// SameSite went None -> Lax on 2026-08-09. Lifted from server.js by the same
+// discipline as the guard block, so a reimplementation cannot drift from it.
+const S_START = "function resolveSessionSameSite(raw, secure) {";
+const S_END = "const SESSION_COOKIE_SAMESITE = resolveSessionSameSite(";
+const s0 = src.indexOf(S_START);
+const s1 = src.indexOf(S_END);
+ok("sameSite resolver located in server.js", s0 > 0 && s1 > s0);
+const SBLOCK = s0 > 0 && s1 > s0 ? src.slice(s0, s1) : "";
+function buildSameSite(block) {
+	// console.warn is stubbed: the resolver warns deliberately and loudly, and
+	// that noise would otherwise drown the test output.
+	const f = new Function("console", block + "\nreturn resolveSessionSameSite;");
+	return f({ warn() {}, error() {}, log() {} });
+}
+const resolve = buildSameSite(SBLOCK);
+
+// Default-safe. This is the whole point: unset must mean lax, never none.
+eq("unset -> lax", resolve(undefined, true), "lax");
+eq("empty string -> lax", resolve("", true), "lax");
+eq("whitespace -> lax", resolve("   ", true), "lax");
+// Explicit values, case- and whitespace-insensitive.
+eq("lax -> lax", resolve("lax", true), "lax");
+eq("LAX (case) -> lax", resolve("LAX", true), "lax");
+eq(" None  (case+space), secure -> none", resolve("  None  ", true), "none");
+eq("strict -> strict", resolve("strict", true), "strict");
+// Garbage must fall back safe, not throw and not pass through.
+eq("garbage -> lax", resolve("banana", true), "lax");
+eq("injection-ish -> lax", resolve("none; Secure", true), "lax");
+eq("null -> lax", resolve(null, true), "lax");
+// ⚠️ none REQUIRES secure. Browsers reject SameSite=None without Secure, so
+// honoring it on an insecure cookie drops the cookie entirely — "logged out on
+// every request", the exact total outage the override exists to back out of.
+eq("none WITHOUT secure -> lax (browsers reject None sans Secure)", resolve("none", false), "lax");
+eq("none WITH secure -> none", resolve("none", true), "none");
+eq("lax without secure stays lax", resolve("lax", false), "lax");
+
+// The shipped cookie must actually USE the resolver — a resolver nothing reads
+// is decorative, and this is the assertion that catches a revert to a literal.
+ok("session cookie reads the resolved value", /sameSite:\s*SESSION_COOKIE_SAMESITE,/.test(src));
+// Comments are excluded deliberately: both this file and server.js record what
+// the values USED to be, and a naive whole-file regex reads that history as a
+// regression. Judge the code, not the prose about the code.
+const codeLines = src.split("\n").filter((l) => !l.trim().startsWith("//"));
+ok("no hardcoded sameSite literal remains on the cookie",
+	!codeLines.some((l) => /sameSite:\s*["'](none|strict)["']/.test(l)));
+ok("secure flag still production-gated", /const SESSION_COOKIE_SECURE = process\.env\.NODE_ENV === "production";/.test(src));
+ok("cookie is still httpOnly", /httpOnly:\s*true,/.test(src));
+// The CORS allowlist must default EMPTY. Its old default shipped two dev origins
+// to production, and that list is crossSiteGuard's first leg — i.e. a standing
+// bypass of the money guards, not merely a stale CORS header.
+ok("DRIVER_MOBILE_ORIGINS defaults to empty",
+	/const DRIVER_MOBILE_ORIGINS = \(process\.env\.DRIVER_MOBILE_ORIGINS \|\| ""\)/.test(src));
+ok("no hardcoded dev origin default remains",
+	!codeLines.some((l) => l.includes("https://localhost:3002,https://192.168.8.106:3002")));
+
+// self-discrimination: real mutants of the resolver must flip these.
+function mutateSameSite(find, replace) {
+	ok("sameSite mutant target present: " + find.slice(0, 34), SBLOCK.includes(find));
+	return buildSameSite(SBLOCK.replace(find, replace));
+}
+// (e) default open -> unset silently republishes the whole CSRF class.
+const defaultNone = mutateSameSite('if (!want) return "lax";', 'if (!want) return "none";');
+eq("MUTANT e: a default-open resolver returns none when unset", defaultNone(undefined, true), "none");
+// (f) drop the Secure coupling -> None is emitted on an insecure cookie, which
+//     browsers discard: everyone is logged out on every request.
+const noSecureGate = mutateSameSite("if (want === \"none\" && !secure) {", "if (false) {");
+eq("MUTANT f: without the Secure gate, none survives on an insecure cookie", noSecureGate("none", false), "none");
+// (g) drop the allowlist validation -> arbitrary attacker-ish strings pass into
+//     a Set-Cookie attribute.
+const noValidation = mutateSameSite('if (!["lax", "strict", "none"].includes(want)) {', "if (false) {");
+eq("MUTANT g: without validation, garbage reaches the cookie", noValidation("banana", true), "banana");
 
 if (failures.length) {
 	console.error("FAILED " + failures.length + " of " + (passed + failures.length) + ":");
