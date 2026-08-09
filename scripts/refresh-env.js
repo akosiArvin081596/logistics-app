@@ -26,7 +26,37 @@
 //                               [--telemetry-days N | --telemetry-all]
 //                               [--allow-mail] [--dry-run] [--no-backup]
 //
+//   node scripts/refresh-env.js --sanitize-only --from <snap> --emit <out.gz>   # ON THE VPS
+//   node scripts/refresh-env.js --check-env-only --to <app.db>                  # gates only
+//   node scripts/refresh-env.js --verify <file.db|.gz> [--strict-scan]          # assert only
+//   node scripts/refresh-env.js --from <sanitized.gz> --to <app.db> --from-sanitized …
+//
 // See scripts/README-env-refresh.md for the full runbook.
+//
+// ---------------------------------------------------------------------------
+// WHY --sanitize-only EXISTS: the sanitizer has to run BEFORE the file moves
+//
+//   Until 2026-08-09 refresh-local.sh scp'd the production snapshot to a laptop
+//   and sanitized it there. Every gate below was real, every assertion held —
+//   and all of it ran AFTER a full plaintext copy of every SSN, EIN and bank
+//   account number had already been written to a developer's disk. The redaction
+//   was correct and pointless: the egress had already happened.
+//
+//   The four modes above split the one thing this script used to do into the
+//   pieces that flow needs, so that each piece can run where it belongs:
+//
+//     --check-env-only   on the LAPTOP, first — judges the target environment
+//                        (sheet / mail / autogen) before a single byte moves.
+//     --sanitize-only    on the VPS — reads a snapshot, writes a sanitized .gz,
+//                        installs nothing anywhere.
+//     --verify           anywhere — re-runs the assertions on a finished file.
+//     --from-sanitized   on the LAPTOP — install an already-sanitized artifact,
+//                        asserting it is clean rather than trusting the sender.
+//
+//   Nothing was removed. `--from … --to …` still does the whole job in one pass
+//   for callers where the snapshot never leaves the box it is on — which is
+//   exactly refresh-staging.sh, whose source and target share a filesystem.
+// ---------------------------------------------------------------------------
 "use strict";
 
 const fs = require("fs");
@@ -77,6 +107,26 @@ const NO_BACKUP = has("--no-backup");
 const TELEMETRY_ALL = has("--telemetry-all");
 const TELEMETRY_DAYS = TELEMETRY_ALL ? null : Math.max(0, parseInt(opt("--telemetry-days", String(DEFAULT_TELEMETRY_DAYS)), 10) || 0);
 
+const EMIT = opt("--emit");
+const VERIFY = opt("--verify");
+const STRICT_SCAN = has("--strict-scan");
+const FROM_SANITIZED = has("--from-sanitized");
+
+// One of: install | sanitize-only | check-env-only | verify.
+const MODE = has("--verify") ? "verify"
+	: has("--sanitize-only") ? "sanitize-only"
+	: has("--check-env-only") ? "check-env-only"
+	: "install";
+
+// Only these two modes put a database into an environment that will later be
+// BOOTED, so only these two are judged by the target-environment gates. The
+// other two install nothing: --sanitize-only writes a standalone artifact and
+// --verify opens a file read-only. Applying a gate about somebody else's .env
+// to them would not add safety, it would just make the gate meaningless in the
+// one place people would then learn to bypass it.
+const NEEDS_TARGET_ENV = MODE === "install" || MODE === "check-env-only";
+const INSTALLS = MODE === "install";
+
 const log = (m) => console.log(`[refresh] ${m}`);
 const warn = (m) => console.log(`[refresh] WARNING: ${m}`);
 function refuse(m, ...extra) {
@@ -86,15 +136,25 @@ function refuse(m, ...extra) {
 }
 const human = (b) => (b >= 1 << 30 ? (b / (1 << 30)).toFixed(2) + " GB" : (b / (1 << 20)).toFixed(1) + " MB");
 
-if (!FROM || !TO) {
+function usage() {
 	console.error("usage: node scripts/refresh-env.js --from <snapshot.db|.gz> --to <app.db> --yes-non-prod");
 	console.error("       [--telemetry-days N | --telemetry-all] [--allow-mail] [--dry-run] [--no-backup]");
+	console.error("       [--from-sanitized]");
+	console.error("   or: node scripts/refresh-env.js --sanitize-only --from <snap> --emit <out.gz>");
+	console.error("   or: node scripts/refresh-env.js --check-env-only --to <app.db>");
+	console.error("   or: node scripts/refresh-env.js --verify <file.db|.gz> [--strict-scan]");
 	process.exit(2);
 }
+if (MODE === "install" && (!FROM || !TO)) usage();
+if (MODE === "sanitize-only" && (!FROM || !EMIT)) usage();
+if (MODE === "check-env-only" && !TO) usage();
+if (MODE === "verify" && !VERIFY) usage();
 
-const srcPath = path.resolve(FROM);
-const dstPath = path.resolve(TO);
-const dstDir = path.dirname(dstPath);
+const srcPath = FROM ? path.resolve(FROM) : null;
+const dstPath = TO ? path.resolve(TO) : null;
+const dstDir = dstPath ? path.dirname(dstPath) : null;
+const emitPath = EMIT ? path.resolve(EMIT) : null;
+const verifyPath = VERIFY ? path.resolve(VERIFY) : null;
 
 // ===========================================================================
 // SAFETY GATES
@@ -106,19 +166,43 @@ const dstDir = path.dirname(dstPath);
 // Sheet.
 // ===========================================================================
 
+// 0. Never READ the live production database. The header has always claimed
+//    this ("It never reads the LIVE production app.db") and nothing enforced
+//    it. --sanitize-only is designed to be run ON the VPS, one directory away
+//    from that file, so the claim now has to be a check: the live app.db has a
+//    writer, and better-sqlite3 opening it would also create -wal/-shm sidecars
+//    beside a database this script has no business touching.
+const PROD_LIVE_DB = path.join(PROD_APP_DIR, "app.db");
+if (srcPath && (srcPath === PROD_LIVE_DB || srcPath === `${PROD_LIVE_DB}-wal` || srcPath === `${PROD_LIVE_DB}-shm`)) {
+	refuse(
+		`--from is the LIVE production database (${srcPath}).`,
+		"Use a snapshot from /var/www/logistics-app/backups/ — those are Online-Backup-API",
+		"copies that have already passed integrity_check and have no writer."
+	);
+}
+
 // 1. Never the production application directory. Note this is deliberately
 //    narrower than prepare-test-fixtures' blanket /var/www refusal: staging
 //    lives at /var/www/logisx-staging and IS a legitimate target.
-if (dstPath === path.join(PROD_APP_DIR, "app.db") || dstDir === PROD_APP_DIR || dstPath.startsWith(PROD_APP_DIR + path.sep)) {
-	refuse(`${dstPath} is inside the production application directory (${PROD_APP_DIR}).`);
+//    Applies to --emit as well as --to: --sanitize-only runs on the VPS, so it
+//    is the one mode with production's own directory within easy reach.
+for (const [flag, p] of [["--to", dstPath], ["--emit", emitPath]]) {
+	if (!p) continue;
+	if (p === PROD_LIVE_DB || path.dirname(p) === PROD_APP_DIR || p.startsWith(PROD_APP_DIR + path.sep)) {
+		refuse(`${flag} ${p} is inside the production application directory (${PROD_APP_DIR}).`);
+	}
 }
-if (srcPath === dstPath) refuse("--from and --to are the same file.");
+if (srcPath && dstPath && srcPath === dstPath) refuse("--from and --to are the same file.");
+if (srcPath && emitPath && srcPath === emitPath) refuse("--from and --emit are the same file.");
 
-// 2. NODE_ENV.
-if (process.env.NODE_ENV === "production") refuse("NODE_ENV=production.");
+// 2. NODE_ENV. Scoped to the modes that install: --sanitize-only replaces no
+//    database anywhere, and it is meant to run on the VPS, where a shell that
+//    happens to export NODE_ENV=production must not be able to stop a run whose
+//    entire purpose is to make the data safe to move.
+if (INSTALLS && process.env.NODE_ENV === "production") refuse("NODE_ENV=production.");
 
-// 3. Explicit opt-in.
-if (!CONFIRMED) {
+// 3. Explicit opt-in — again only where a database is replaced.
+if (INSTALLS && !CONFIRMED) {
 	refuse("pass --yes-non-prod to confirm this is a throwaway local/staging database.", `target would have been: ${dstPath}`);
 }
 
@@ -149,67 +233,80 @@ function parseEnvFile(p) {
 	return out;
 }
 
-const envPath = path.join(dstDir, ".env");
-const env = parseEnvFile(envPath);
-// An explicit SPREADSHEET_ID in the caller's environment overrides the file,
-// exactly as dotenv behaves at boot.
-const effectiveSheet = process.env.SPREADSHEET_ID || env.SPREADSHEET_ID || "";
+let effectiveSheet = "";
+function runTargetEnvGates() {
+	const envPath = path.join(dstDir, ".env");
+	const env = parseEnvFile(envPath);
+	// An explicit SPREADSHEET_ID in the caller's environment overrides the file,
+	// exactly as dotenv behaves at boot.
+	effectiveSheet = process.env.SPREADSHEET_ID || env.SPREADSHEET_ID || "";
 
-if (!effectiveSheet) {
-	refuse(
-		"no SPREADSHEET_ID for the target environment.",
-		`checked: ${envPath} and the SPREADSHEET_ID environment variable.`,
-		"server.js falls through to the PRODUCTION sheet when this is unset, so a database",
-		"refreshed next to such an .env would be a production writer on first boot.",
-		"Set a non-production SPREADSHEET_ID before refreshing."
-	);
-}
-if (effectiveSheet === PROD_SHEET_ID) {
-	refuse(`the target environment's SPREADSHEET_ID is the PRODUCTION sheet (${PROD_SHEET_ID}).`);
-}
-log(`target sheet: ${effectiveSheet} (not production)`);
+	if (!effectiveSheet) {
+		refuse(
+			"no SPREADSHEET_ID for the target environment.",
+			`checked: ${envPath} and the SPREADSHEET_ID environment variable.`,
+			"server.js falls through to the PRODUCTION sheet when this is unset, so a database",
+			"refreshed next to such an .env would be a production writer on first boot.",
+			"Set a non-production SPREADSHEET_ID before refreshing."
+		);
+	}
+	if (effectiveSheet === PROD_SHEET_ID) {
+		refuse(`the target environment's SPREADSHEET_ID is the PRODUCTION sheet (${PROD_SHEET_ID}).`);
+	}
+	log(`target sheet: ${effectiveSheet} (not production)`);
 
-const effectiveArchive = process.env.ARCHIVE_SPREADSHEET_ID || env.ARCHIVE_SPREADSHEET_ID || "";
-if (!effectiveArchive) {
-	warn("ARCHIVE_SPREADSHEET_ID is unset — the archive viewer will read the PRODUCTION archive.");
-	warn("  That sheet is read-only in this app, so it is a leak of scope, not a write risk.");
-} else if (effectiveArchive === PROD_ARCHIVE_ID) {
-	warn("ARCHIVE_SPREADSHEET_ID is the production archive (read-only; scope leak, not a write risk).");
+	const effectiveArchive = process.env.ARCHIVE_SPREADSHEET_ID || env.ARCHIVE_SPREADSHEET_ID || "";
+	if (!effectiveArchive) {
+		warn("ARCHIVE_SPREADSHEET_ID is unset — the archive viewer will read the PRODUCTION archive.");
+		warn("  That sheet is read-only in this app, so it is a leak of scope, not a write risk.");
+	} else if (effectiveArchive === PROD_ARCHIVE_ID) {
+		warn("ARCHIVE_SPREADSHEET_ID is the production archive (read-only; scope leak, not a write risk).");
+	}
+
+	// -----------------------------------------------------------------------
+	// 5. OUTBOUND-EFFECT GATE.
+	//
+	// Scrubbing addresses out of the database is only half the job. The other
+	// half is the environment: a staging box holding production's Gmail app
+	// password can email a real driver the moment a code path fires, whatever
+	// the DB says. Both halves are required — one is the belt, one the braces.
+	// -----------------------------------------------------------------------
+	const mailArmed = Boolean(env.GMAIL_USER && env.GMAIL_APP_PASSWORD);
+	if (mailArmed && !ALLOW_MAIL) {
+		refuse(
+			`${envPath} has BOTH GMAIL_USER and GMAIL_APP_PASSWORD set.`,
+			"This environment can send real email (onboarding acceptance, investor outreach,",
+			"the auto-invoice batch summary) and draft real invoices over IMAP.",
+			"Remove them from the target .env, or pass --allow-mail if you have deliberately",
+			"pointed them at a throwaway mailbox."
+		);
+	}
+	if (mailArmed && ALLOW_MAIL) warn("--allow-mail: this environment CAN send email. Addresses are still scrubbed below.");
+
+	if (String(env.INVOICE_AUTOGEN_ENABLED || "").toLowerCase() === "true") {
+		refuse(
+			`${envPath} has INVOICE_AUTOGEN_ENABLED=true.`,
+			"That batch generates AND auto-submits weekly driver invoices on a timer, then emails a",
+			"summary. It moves money and it fires without anyone touching the UI. Turn it off in",
+			"the target environment before refreshing."
+		);
+	}
+	for (const k of ["N8N_WEBHOOK_SECRET", "N8N_EXTRACT_SECRET"]) {
+		if (env[k]) warn(`${k} is set — n8n could reach this environment and create loads. Remove it unless that is intended.`);
+	}
 }
 
-// ---------------------------------------------------------------------------
-// 5. OUTBOUND-EFFECT GATE.
-//
-// Scrubbing addresses out of the database is only half the job. The other half
-// is the environment: a staging box holding production's Gmail app password can
-// email a real driver the moment a code path fires, whatever the DB says. Both
-// halves are required — one is the belt, one the braces.
-// ---------------------------------------------------------------------------
-const mailArmed = Boolean(env.GMAIL_USER && env.GMAIL_APP_PASSWORD);
-if (mailArmed && !ALLOW_MAIL) {
-	refuse(
-		`${envPath} has BOTH GMAIL_USER and GMAIL_APP_PASSWORD set.`,
-		"This environment can send real email (onboarding acceptance, investor outreach,",
-		"the auto-invoice batch summary) and draft real invoices over IMAP.",
-		"Remove them from the target .env, or pass --allow-mail if you have deliberately",
-		"pointed them at a throwaway mailbox."
-	);
-}
-if (mailArmed && ALLOW_MAIL) warn("--allow-mail: this environment CAN send email. Addresses are still scrubbed below.");
+// The gates run BEFORE any source file is read, and — the point of
+// --check-env-only — before refresh-local.sh has opened an ssh connection.
+if (NEEDS_TARGET_ENV) runTargetEnvGates();
 
-if (String(env.INVOICE_AUTOGEN_ENABLED || "").toLowerCase() === "true") {
-	refuse(
-		`${envPath} has INVOICE_AUTOGEN_ENABLED=true.`,
-		"That batch generates AND auto-submits weekly driver invoices on a timer, then emails a",
-		"summary. It moves money and it fires without anyone touching the UI. Turn it off in",
-		"the target environment before refreshing."
-	);
-}
-for (const k of ["N8N_WEBHOOK_SECRET", "N8N_EXTRACT_SECRET"]) {
-	if (env[k]) warn(`${k} is set — n8n could reach this environment and create loads. Remove it unless that is intended.`);
+if (MODE === "check-env-only") {
+	log("target environment gates passed. Nothing was read, copied or written.");
+	process.exit(0);
 }
 
-if (!fs.existsSync(srcPath)) refuse(`source snapshot not found: ${srcPath}`);
+const readPath = MODE === "verify" ? verifyPath : srcPath;
+if (!fs.existsSync(readPath)) refuse(`${MODE === "verify" ? "file to verify" : "source snapshot"} not found: ${readPath}`);
 
 // ---------------------------------------------------------------------------
 let Database;
@@ -231,28 +328,57 @@ if (!bcrypt) refuse("bcryptjs not available — run this from the application di
 // 2026-08-08T13:19:23.456Z -> 20260808131923 (14 chars; 15 would trail the
 // milliseconds' dot into every backup filename).
 const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-const workPath = `${dstPath}.refresh-${stamp}.tmp`;
+// The work file sits beside whatever this run is producing: the target database
+// when installing, the emitted artifact when sanitizing on the VPS, and the
+// file itself when merely verifying one.
+const workBase = MODE === "sanitize-only" ? emitPath : MODE === "verify" ? verifyPath : dstPath;
+const workPath = `${workBase}.refresh-${stamp}.tmp`;
 function rmWork() {
 	for (const p of [workPath, `${workPath}-shm`, `${workPath}-wal`]) {
 		try { fs.unlinkSync(p); } catch {}
 	}
 }
 
-(async () => {
+// Anything this script materializes from a production snapshot is a full copy
+// of the data it is about to redact, so it is owner-only from the instant it
+// exists — not after the sanitize, which is the window that matters.
+function materialize(from, to) {
+	// Create the file empty and restricted BEFORE any bytes land in it: a mode
+	// applied afterwards leaves the whole write readable to everyone.
+	fs.writeFileSync(to, "", { mode: 0o600 });
+	try { fs.chmodSync(to, 0o600); } catch {}
+	if (/\.gz$/i.test(from)) {
+		log("decompressing snapshot…");
+		return pipeline(fs.createReadStream(from), zlib.createGunzip(), fs.createWriteStream(to, { flags: "w", mode: 0o600 }));
+	}
+	// Copy rather than open-and-backup: the nightly snapshot has no writer, so a
+	// byte copy is already consistent, and it is much faster.
+	fs.copyFileSync(from, to);
+	try { fs.chmodSync(to, 0o600); } catch {}
+	return Promise.resolve();
+}
+
+// Declared, not invoked, here: the call sits at the very bottom of the file so
+// that every const below has been initialized before any mode runs. --verify on
+// an uncompressed file reaches collectLeaks with no await in front of it, which
+// during module evaluation is a temporal-dead-zone ReferenceError rather than a
+// verification.
+async function main() {
+	if (MODE === "verify") return runVerify();
+
 	log(`source: ${srcPath} (${human(fs.statSync(srcPath).size)})`);
-	log(`target: ${dstPath}`);
+	log(MODE === "sanitize-only" ? `emit:   ${emitPath}` : `target: ${dstPath}`);
 	if (DRY_RUN) log("DRY RUN — the target will not be replaced.");
 
 	// -- 1. materialize the source into the work file ------------------------
-	if (/\.gz$/i.test(srcPath)) {
-		log("decompressing snapshot…");
-		await pipeline(fs.createReadStream(srcPath), zlib.createGunzip(), fs.createWriteStream(workPath));
-	} else {
-		// Copy rather than open-and-backup: the nightly snapshot has no writer,
-		// so a byte copy is already consistent, and it is much faster.
-		fs.copyFileSync(srcPath, workPath);
-	}
+	await materialize(srcPath, workPath);
 	log(`working copy ${human(fs.statSync(workPath).size)}`);
+
+	// An artifact that is already sanitized is installed, not re-sanitized: the
+	// assertions are what make it safe, and they run either way. Re-running the
+	// scrub would also re-hash every password and mint new onboarding tokens for
+	// no gain, on data that has already been proven clean.
+	if (FROM_SANITIZED) return installSanitized();
 
 	const db = new Database(workPath, { fileMustExist: true });
 	// The work file is a throwaway we are about to rewrite wholesale. Durability
@@ -456,24 +582,9 @@ function rmWork() {
 	}
 
 	// A sanitizer that silently no-ops is worse than none: it produces a file
-	// everyone believes is clean. Assert the two invariants that must hold.
-	const leaks = [];
-	{
-		const check = new Database(workPath, { readonly: true });
-		const one = (sql, label) => {
-			try { return check.prepare(sql).get().c; } catch { warn(`post-check "${label}" skipped (table absent)`); return 0; }
-		};
-		const badMail = one(
-			`SELECT COUNT(*) c FROM users WHERE COALESCE(email,'') <> '' AND email NOT LIKE '%@${MAIL_DOMAIN}'`,
-			"users.email"
-		);
-		if (badMail) leaks.push(`${badMail} users.email row(s) still hold a routable address`);
-		const sess = one("SELECT COUNT(*) c FROM sessions", "sessions");
-		if (sess) leaks.push(`${sess} session row(s) survived`);
-		const bank = one("SELECT COUNT(*) c FROM investor_payment_info WHERE COALESCE(account_number,'') <> ''", "investor_payment_info");
-		if (bank) leaks.push(`${bank} investor bank account number(s) survived`);
-		check.close();
-	}
+	// everyone believes is clean.
+	const { leaks, advisories } = collectLeaks(workPath);
+	for (const a of advisories) warn(a);
 	if (leaks.length) {
 		rmWork();
 		refuse("post-sanitization check failed — nothing was replaced.", ...leaks);
@@ -490,6 +601,13 @@ function rmWork() {
 		log("DRY RUN — work file discarded, target untouched.");
 		return;
 	}
+
+	// -- 4b. emit, for the run that happens ON THE VPS ------------------------
+	// This is the whole point of --sanitize-only: the bytes that leave the box
+	// are these bytes, produced after every redaction above and after the
+	// assertions just passed. Nothing is installed; the caller transfers the
+	// artifact and deletes the working copy.
+	if (MODE === "sanitize-only") return emitArtifact();
 
 	// -- 5. swap in ----------------------------------------------------------
 	if (fs.existsSync(dstPath) && !NO_BACKUP) {
@@ -514,7 +632,239 @@ function rmWork() {
 	log(`Every account's password is now: ${PASSWORD}`);
 	log("Start the server with an explicit non-production SPREADSHEET_ID:");
 	log(`  SPREADSHEET_ID=${effectiveSheet} PORT=<non-3000> npm start`);
-})().catch((e) => {
+}
+
+// ===========================================================================
+// THE ASSERTIONS
+//
+// One function, used by all three of the places that need to answer "is this
+// file safe to move?": the sanitize pass, `--verify` on a finished artifact,
+// and `--from-sanitized` before it installs one. Written once on purpose —
+// a second copy is a second thing to forget to update when a column is added
+// to the scrub list, and the whole value of these checks is that they fail
+// when the scrub silently stops covering something.
+//
+// TIERED, and the tiering is load-bearing.
+//   leaks      — a named column that the sanitizer redacts is still populated.
+//                Precise, so it is a hard refusal.
+//   advisories — the free-text sweep. It reads columns nobody redacts
+//                (message bodies, audit notes), where a broker's address is
+//                ordinary content rather than a leak. Failing on those would
+//                make the refusal routine, and a routine refusal gets bypassed
+//                with a flag and then permanently. --strict-scan promotes them
+//                for callers who know their data has none.
+// ===========================================================================
+
+// ###-##-#### only. NEVER a bare 9-digit run: load ids in this system are
+// exactly that shape (562620213, 563593554), so a 9-digit rule would flag the
+// Job Tracking mirror on every single run and teach everyone to ignore it.
+const SSN_SHAPE = /\b\d{3}-\d{2}-\d{4}\b/;
+const ROUTABLE_EMAIL = new RegExp(String.raw`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]*[A-Za-z0-9]\.[A-Za-z]{2,}`);
+
+// Columns the scrub above is responsible for. Kept adjacent to it deliberately:
+// if a column is added there and not here, the assertion stops covering it, and
+// this comment is the only thing standing between that and a silent regression.
+const REDACTED_EMPTY = [
+	["investor_payment_info", "routing_number", "investor bank routing number"],
+	["investor_payment_info", "account_number", "investor bank account number"],
+	["driver_payment_info", "bank_routing", "driver bank routing number"],
+	["driver_payment_info", "bank_account", "driver bank account number"],
+	["investors", "ein_ssn", "investor EIN/SSN"],
+	["investor_applications", "ein_ssn", "investor-application EIN/SSN"],
+	["job_applications", "ssn", "applicant SSN"],
+	["job_applications", "drivers_license", "applicant driver's licence number"],
+];
+const REDIRECTED_EMAIL = [
+	["users", "email"], ["drivers_directory", "email"], ["investors", "email"],
+	["investor_applications", "email"], ["investor_outreach_log", "email"],
+	["job_applications", "email"], ["sheet_job_tracking", "email"],
+];
+const MUST_BE_EMPTY_TABLES = [
+	["sessions", "session row(s) survived — each caches a user record and authenticates against the pre-refresh hash"],
+	["driver_locations", "retired phone-GPS position row(s) survived"],
+];
+
+function collectLeaks(dbPath, { scan = true } = {}) {
+	const leaks = [];
+	const advisories = [];
+	const check = new Database(dbPath, { readonly: true });
+	try {
+		const cols = (t) => {
+			try { return new Set(check.prepare(`PRAGMA table_info("${t}")`).all().map((c) => c.name)); } catch { return new Set(); }
+		};
+		const has_ = (t, c) => cols(t).has(c);
+		const count = (sql) => { try { return check.prepare(sql).get().c; } catch { return 0; } };
+
+		for (const [t, c, label] of REDACTED_EMPTY) {
+			if (!has_(t, c)) continue;
+			const n = count(`SELECT COUNT(*) c FROM "${t}" WHERE COALESCE("${c}",'') <> ''`);
+			if (n) leaks.push(`${n} ${label}(s) survived in ${t}.${c}`);
+		}
+		for (const [t, c] of REDIRECTED_EMAIL) {
+			if (!has_(t, c)) continue;
+			const n = count(`SELECT COUNT(*) c FROM "${t}" WHERE COALESCE("${c}",'') <> '' AND "${c}" NOT LIKE '%@${MAIL_DOMAIN}'`);
+			if (n) leaks.push(`${n} ${t}.${c} row(s) still hold a routable address`);
+		}
+		for (const [t, why] of MUST_BE_EMPTY_TABLES) {
+			const n = count(`SELECT COUNT(*) c FROM "${t}"`);
+			if (n) leaks.push(`${n} ${why}`);
+		}
+
+		if (scan) {
+			// Every TEXT-ish column in the database, read once. Values are counted
+			// and located, never printed — a leak report that quotes the leak is
+			// the same disclosure in a log file.
+			const tables = check.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name);
+			const redactedCols = new Set(REDACTED_EMPTY.map(([t, c]) => `${t}.${c}`));
+			for (const t of tables) {
+				let info = [];
+				try { info = check.prepare(`PRAGMA table_info("${t}")`).all(); } catch { continue; }
+				const textCols = info.filter((c) => !/^(INT|REAL|NUM|BLOB)/i.test(String(c.type || ""))).map((c) => c.name);
+				if (!textCols.length) continue;
+				let rows;
+				try { rows = check.prepare(`SELECT ${textCols.map((c) => `"${c}"`).join(",")} FROM "${t}"`).all(); } catch { continue; }
+				const hits = new Map();
+				for (const row of rows) {
+					for (const c of textCols) {
+						const v = row[c];
+						if (typeof v !== "string" || v.length < 5) continue;
+						const ssn = SSN_SHAPE.test(v);
+						const mail = ROUTABLE_EMAIL.test(v) && !v.includes(`@${MAIL_DOMAIN}`);
+						if (!ssn && !mail) continue;
+						const k = `${c}|${ssn ? "ssn" : ""}${mail ? "email" : ""}`;
+						hits.set(k, (hits.get(k) || 0) + 1);
+					}
+				}
+				for (const [k, n] of hits) {
+					const [c, kind] = k.split("|");
+					const msg = `${t}.${c}: ${n} value(s) matching ${kind === "ssn" ? "an SSN shape (###-##-####)" : "a routable email address"}`;
+					// A hit inside a column the scrub owns is never advisory.
+					if (STRICT_SCAN || redactedCols.has(`${t}.${c}`)) leaks.push(msg);
+					else advisories.push(`free-text scan — ${msg}`);
+				}
+			}
+		}
+	} finally {
+		try { check.close(); } catch {}
+	}
+	return { leaks, advisories };
+}
+
+// --- --verify ---------------------------------------------------------------
+// Read-only, so it can be pointed at anything: the artifact that just arrived
+// over scp, a local app.db of unknown provenance, an old snapshot found in a
+// temp directory. A .gz is expanded to a private work file and removed again.
+async function runVerify() {
+	log(`verifying: ${verifyPath} (${human(fs.statSync(verifyPath).size)})`);
+	let target = verifyPath;
+	if (/\.gz$/i.test(verifyPath)) {
+		await materialize(verifyPath, workPath);
+		target = workPath;
+	}
+	let result;
+	try {
+		const integrity = new Database(target, { readonly: true });
+		const ok = integrity.pragma("integrity_check", { simple: true });
+		integrity.close();
+		if (String(ok).toLowerCase() !== "ok") {
+			rmWork();
+			refuse(`integrity_check returned "${ok}".`);
+		}
+		result = collectLeaks(target, { scan: true });
+	} finally {
+		if (target === workPath) rmWork();
+	}
+	for (const a of result.advisories) warn(a);
+	if (result.leaks.length) {
+		refuse(`${verifyPath} is NOT sanitized.`, ...result.leaks);
+	}
+	log(`clean: no routable address, bank number, tax id or session survives${STRICT_SCAN ? " (strict scan)" : ""}.`);
+	log("integrity_check ok");
+}
+
+// --- --sanitize-only --------------------------------------------------------
+function emitArtifact() {
+	// gzip, because the artifact exists to cross a network. Written 600 from the
+	// first byte and only then moved into place, so there is no window in which
+	// a complete database sits at the emit path world-readable.
+	const tmpOut = `${emitPath}.partial`;
+	return pipeline(
+		fs.createReadStream(workPath),
+		zlib.createGzip({ level: 6 }),
+		fs.createWriteStream(tmpOut, { mode: 0o600 })
+	).then(() => {
+		try { fs.chmodSync(tmpOut, 0o600); } catch {}
+		fs.renameSync(tmpOut, emitPath);
+		rmWork();                       // the unsanitized-then-sanitized working copy goes now
+		log("");
+		log(`emitted ${emitPath} (${human(fs.statSync(emitPath).size)}, mode 600)`);
+		log("working copy removed. Only the sanitized artifact remains.");
+	}).catch((e) => {
+		try { fs.unlinkSync(tmpOut); } catch {}
+		rmWork();
+		refuse(`emit failed: ${e.message}`);
+	});
+}
+
+// --- --from-sanitized -------------------------------------------------------
+// Installs an artifact produced by --sanitize-only elsewhere. It re-asserts
+// rather than trusting: the sanitizer that produced this file ran on another
+// machine, possibly from an older checkout, and "the sender says it is clean"
+// is not a property of the bytes. If the assertions fail the install is
+// refused, which is the correct outcome — that artifact must not land.
+function installSanitized() {
+	const integrity = new Database(workPath, { readonly: true });
+	const ok = integrity.pragma("integrity_check", { simple: true });
+	const tables = integrity.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table'").get().c;
+	let users = 0, telemetry = 0;
+	try { users = integrity.prepare("SELECT COUNT(*) c FROM users").get().c; } catch {}
+	try { telemetry = integrity.prepare("SELECT COUNT(*) c FROM routemate_telemetry").get().c; } catch {}
+	integrity.close();
+	if (String(ok).toLowerCase() !== "ok") {
+		rmWork();
+		refuse(`integrity_check on the received artifact returned "${ok}" — nothing was replaced.`);
+	}
+
+	const { leaks, advisories } = collectLeaks(workPath);
+	for (const a of advisories) warn(a);
+	if (leaks.length) {
+		rmWork();
+		refuse(
+			"the received artifact is NOT sanitized — nothing was replaced.",
+			...leaks,
+			"This should be impossible: --sanitize-only asserts the same things before it emits.",
+			"Do not work around it by sanitizing locally — find out why the remote pass did not run."
+		);
+	}
+	log(`received artifact verified: integrity ok, ${tables} tables, ${users} users, ${telemetry} telemetry rows, 0 leaks`);
+
+	if (DRY_RUN) {
+		rmWork();
+		log("DRY RUN — work file discarded, target untouched.");
+		return;
+	}
+	if (fs.existsSync(dstPath) && !NO_BACKUP) {
+		const bak = `${dstPath}.pre-refresh-${stamp}`;
+		fs.renameSync(dstPath, bak);
+		for (const sfx of ["-wal", "-shm"]) {
+			try { fs.renameSync(`${dstPath}${sfx}`, `${bak}${sfx}`); } catch {}
+		}
+		log(`previous database moved to ${path.basename(bak)}`);
+	} else if (fs.existsSync(dstPath)) {
+		for (const sfx of ["-wal", "-shm"]) { try { fs.unlinkSync(`${dstPath}${sfx}`); } catch {} }
+		fs.unlinkSync(dstPath);
+	}
+	fs.renameSync(workPath, dstPath);
+	for (const sfx of ["-wal", "-shm"]) { try { fs.unlinkSync(`${workPath}${sfx}`); } catch {} }
+	log(`installed ${dstPath}`);
+	log("");
+	log(`Every account's password is now: ${PASSWORD}`);
+	log("Start the server with an explicit non-production SPREADSHEET_ID:");
+	log(`  SPREADSHEET_ID=${effectiveSheet} PORT=<non-3000> npm start`);
+}
+
+// ---------------------------------------------------------------------------
+main().catch((e) => {
 	rmWork();
 	refuse(e && e.message ? e.message : String(e));
 });
