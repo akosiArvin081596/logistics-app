@@ -119,6 +119,14 @@ function extractIftaSheetToIso() {
 	return braceMatch(SRC.indexOf(needle));
 }
 
+// A module-scope `const NAME = …;` one-liner, lifted verbatim. Same
+// exactly-one-definition assertion as extractFn, for the same reason.
+function extractConst(name) {
+	const hits = SRC.match(new RegExp(`\\nconst ${name} = [^\\n]*;`, "g")) || [];
+	if (hits.length !== 1) throw new Error(`expected exactly 1 const ${name}, found ${hits.length}`);
+	return hits[0].trim();
+}
+
 const RFC2822_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const DEPS = [
 	extractFn("moneySheetDate"),
@@ -126,6 +134,13 @@ const DEPS = [
 	extractFn("jtFmtDate"),
 	extractFn("jtExpandDateRange"),
 ].join("\n");
+
+// loadAssignedMonthKey() and loadRowPeriods() now share LOCKABLE_MONTH_KEY (the
+// L-2 bound, section 11), so every builder that extracts the pair has to carry
+// the constant too — otherwise the extraction throws a ReferenceError at call
+// time and the section it feeds silently tests nothing.
+const MONTH_KEY_CONST = extractConst("LOCKABLE_MONTH_KEY");
+const PERIOD_FNS = `${MONTH_KEY_CONST}\n${extractFn("loadAssignedMonthKey")}\n${extractFn("loadRowPeriods")}`;
 
 function build(windowSrc, iftaSrc) {
 	return new Function("RFC2822_MONTHS",
@@ -381,7 +396,7 @@ eq(moneyRead(MONEY_NEW, "", "", "").pickup, null, "no pickup and no assigned dat
 console.log("\n8. loadWindowDays — union widens, and NEVER flips the refusal");
 
 const PERIODS = new Function("RFC2822_MONTHS",
-	`${DEPS}\n${WINDOW_SRC}\n${extractFn("loadAssignedMonthKey")}\n${extractFn("loadRowPeriods")}\nreturn { loadRowPeriods, loadWindowDays };`
+	`${DEPS}\n${WINDOW_SRC}\n${PERIOD_FNS}\nreturn { loadRowPeriods, loadWindowDays };`
 )(RFC2822_MONTHS);
 
 // The production row, through the GUARD: it keeps 09-22 (the assigned-date reading)
@@ -423,7 +438,7 @@ const PRE_UNION = build(OLD_WINDOW_PICKUP_SRC, IFTA_SRC);
 
 let unionMonotone = true, unionWidened = 0, resolvedStable = true;
 const PRE_UNION_PERIODS = new Function("RFC2822_MONTHS",
-	`${DEPS}\n${OLD_WINDOW_PICKUP_SRC}\n${extractFn("loadAssignedMonthKey")}\n${extractFn("loadRowPeriods")}\nreturn { loadRowPeriods };`
+	`${DEPS}\n${OLD_WINDOW_PICKUP_SRC}\n${PERIOD_FNS}\nreturn { loadRowPeriods };`
 )(RFC2822_MONTHS);
 for (const shape of PICKUP_SHAPES) {
 	for (const assigned of ["9/20/2025", "Date: Mon, 22 Sep 2025 08:45:51 -0500", "TBD", ""]) {
@@ -455,7 +470,7 @@ const NAIVE_WINDOW_SRC = OLD_WINDOW_PICKUP_SRC.replace(
 ok(NAIVE_WINDOW_SRC !== OLD_WINDOW_PICKUP_SRC, "the naive substitute-at-the-guard variant could be built");
 const NAIVE = build(NAIVE_WINDOW_SRC, IFTA_SRC);
 const NAIVE_PERIODS = new Function("RFC2822_MONTHS",
-	`${DEPS}\n${NAIVE_WINDOW_SRC}\n${extractFn("loadAssignedMonthKey")}\n${extractFn("loadRowPeriods")}\nreturn { loadRowPeriods };`
+	`${DEPS}\n${NAIVE_WINDOW_SRC}\n${PERIOD_FNS}\nreturn { loadRowPeriods };`
 )(RFC2822_MONTHS);
 
 const PICKUP_DISCRIMINATORS = [
@@ -507,9 +522,269 @@ eq(NAIVE_PERIODS.loadRowPeriods(UNRESOLVABLE, COLS).resolved, true,
 eq(PERIODS.loadRowPeriods(UNRESOLVABLE, COLS).resolved, false,
 	"…while the shipped union keeps refusing it — this pair IS the design decision");
 
-// ------------------------------------------------------- 10. timezone invariance
+// ============================================================================
+//  THE EXCLUDED-DAY GATE — PR #245's M-1 and L-2 (sections 10-11)
+// ============================================================================
+//
+// M-1: excludedDayPeriods()'s tail DISPLACED the day's own month rather than
+// adding it — `return months.size ? [...months].sort() : [own];` — so the
+// moment any co-covering load existed, `own` dropped out of the answer. A
+// covering load in an OPEN month could therefore suppress a LOCKED one and the
+// gate would permit a write that restates it. Unlike its sibling guards,
+// excludedDayGate() has no `unresolved` rung to catch that.
+//
+// L-2: loadAssignedMonthKey()/loadRowPeriods() built their month key with
+// jtFmtDate(…).slice(0, 7), which is only a month when the year is exactly 4
+// digits. lockedAmong()'s /^\d{4}-\d{2}$/ SILENTLY DROPS anything else, so a
+// key like "275760-" or "999-01-" left it nothing to match → locked.length 0 →
+// PERMIT, while `resolved` still said true so the refusal rung never fired.
+//
+// Both are fail-OPENs, and both are fixed in the fail-CLOSED direction: M-1 by
+// unioning, L-2 by bounding the year to 1970-2999 (the bound sheetCellMonths()
+// already applies) and letting an out-of-range key become NO key.
+
+// The gate's real decision, minus the two DB reads excludedDayGate() makes
+// first. isLocked() is the ONLY stub — lockedAmong()'s /^\d{4}-\d{2}$/ filter is
+// the shipped one, which is what makes section 11's assertions honest.
+const GATE_DEPS = [extractFn("findCol"), extractFn("jobTrackingMonthCols"), extractFn("normalizeDriverName")].join("\n");
+const EDP_SRC = extractFn("excludedDayPeriods");
+function buildGate(edpSrc, periodFns, lockedList) {
+	return new Function("RFC2822_MONTHS", "LOCKED", `
+		${DEPS}
+		${GATE_DEPS}
+		${WINDOW_SRC}
+		${periodFns}
+		${edpSrc}
+		const isLocked = (p) => LOCKED.has(p);
+		${extractFn("lockedAmong")}
+		return {
+			excludedDayPeriods, lockedAmong, loadRowPeriods, loadAssignedMonthKey,
+			// excludedDayGate()'s tail, verbatim in behaviour: refuse iff any
+			// reported month is locked.
+			verdict: (a) => (lockedAmong(excludedDayPeriods(a)).length ? "finalized" : null),
+		};
+	`)(RFC2822_MONTHS, new Set(lockedList));
+}
+
+// Production's lock state on 2026-08-09: 2025-05 … 2026-07 closed, 2026-08 open.
+const LOCKED_PERIODS = ["2025-05", "2025-06", "2025-07", "2025-08", "2025-09", "2025-10", "2025-11",
+	"2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07"];
+const GATE = buildGate(EDP_SRC, PERIOD_FNS, LOCKED_PERIODS);
+
+const JT_HEADERS = ["Load ID", "Driver", "Assigned Date", "Pickup Appointment", "Drop-off Appointment"];
+const jtRow = (driver, assigned, pickup, dropoff) => ({
+	"Load ID": "L1", Driver: driver, "Assigned Date": assigned || "",
+	"Pickup Appointment": pickup || "", "Drop-off Appointment": dropoff || "",
+});
+const jt = (...rows) => ({ headers: JT_HEADERS, data: rows });
+const DRV = "howard reddie";
+
+// ------------------------------- 10. excludedDayPeriods — own month is UNIONED
+console.log("\n10. excludedDayPeriods — the day's own month is ADDED, never displaced");
+
+// THE BUG, as a decision. 2026-07-15 sits in a LOCKED month; its only covering
+// load is assigned in OPEN 2026-08, so the covering load's month displaced the
+// locked one and the gate cleared the write.
+const CROSS = jt(jtRow(DRV, "2026-08-03", "2026-07-15", "2026-07-16"));
+eq(GATE.excludedDayPeriods({ driver: DRV, date: "2026-07-15", action: "remove", jobTracking: CROSS }),
+	["2026-07", "2026-08"],
+	"a co-covering OPEN-month load no longer displaces the date's own LOCKED month");
+eq(GATE.verdict({ driver: DRV, date: "2026-07-15", action: "remove", jobTracking: CROSS }), "finalized",
+	"⚠️ …so the gate now REFUSES the write that would restate 2026-07");
+
+// The production shape from PR #211: the date's own month is OPEN and the
+// covering load's is LOCKED. That case always worked and must not move.
+const OWN_OPEN = jt(jtRow(DRV, "2026-04-02", "2026-08-01", "2026-08-02"));
+eq(GATE.excludedDayPeriods({ driver: DRV, date: "2026-08-01", action: "remove", jobTracking: OWN_OPEN }),
+	["2026-04", "2026-08"], "the covering load's locked month is still reported beside the day's own");
+eq(GATE.verdict({ driver: DRV, date: "2026-08-01", action: "remove", jobTracking: OWN_OPEN }), "finalized",
+	"…and still refuses on the covering load's month (PR #211's headline case)");
+
+console.log("\n   controls — every no-covering-load path stays byte-identical");
+eq(GATE.excludedDayPeriods({ driver: DRV, date: "2026-08-05", action: "remove", jobTracking: jt() }),
+	["2026-08"], "no covering load at all still yields exactly [own]");
+eq(GATE.excludedDayPeriods({ driver: DRV, date: "2026-08-05", action: "remove", jobTracking: jt(jtRow("someone else", "2026-08-01", "2026-08-05")) }),
+	["2026-08"], "a covering load for ANOTHER driver still yields exactly [own]");
+eq(GATE.excludedDayPeriods({ driver: DRV, date: "2026-07-15", action: "add", jobTracking: CROSS }),
+	["2026-07"], "action:'add' is untouched — the date's own month, full stop");
+eq(GATE.excludedDayPeriods({ driver: DRV, date: "2026-07-15", action: "remove", jobTracking: null }),
+	["2026-07"], "a null jobTracking still yields [own]");
+eq(GATE.excludedDayPeriods({ driver: DRV, date: "2026-07-15", action: "remove", jobTracking: { headers: ["Load ID", "Assigned Date"], data: [] } }),
+	["2026-07"], "no Driver column still yields [own]");
+eq(GATE.excludedDayPeriods({ driver: DRV, date: "2026-07-15", action: "remove", jobTracking: jt(jtRow(DRV, "2026-07-03", "2026-07-15", "2026-07-16")) }),
+	["2026-07"], "a covering load in the SAME month is unchanged (no duplicate, no growth)");
+
+console.log("\n   ⚠️ fail-CLOSED — a wider set must never permit what the narrower one refused");
+// The property that makes this safe regardless of data: the reported set only
+// ever GROWS, and its one consumer re-filters it through lockedAmong(), so a
+// month added can only ever produce a refusal isLocked() independently justifies.
+const EDP_PRE_SRC = EDP_SRC.replace(
+	"return [...new Set([...months, own])].sort();",
+	"return months.size ? [...months].sort() : [own];");
+ok(EDP_PRE_SRC !== EDP_SRC, "the pre-fix DISPLACING excludedDayPeriods could be reconstructed");
+const GATE_PRE = buildGate(EDP_PRE_SRC, PERIOD_FNS, LOCKED_PERIODS);
+
+const SWEEP_ASSIGNED = ["2026-08-03", "2026-07-03", "2026-04-02", "2025-09-02", "TBD", ""];
+const SWEEP_DATES = ["2026-08-01", "2026-07-15", "2026-04-10", "2025-09-23", "2021-03-12"];
+let superset = true, everPermitted = 0, widenedPairs = 0, newRefusals = 0;
+for (const date of SWEEP_DATES) {
+	for (const a1 of SWEEP_ASSIGNED) {
+		for (const a2 of SWEEP_ASSIGNED) {
+			// Two co-covering loads, which is exactly the shape that triggers the
+			// displacement: one alone could never hide `own` behind another month.
+			const tracking = jt(jtRow(DRV, a1, date, date), jtRow(DRV, a2, date, date));
+			const arg = { driver: DRV, date, action: "remove", jobTracking: tracking };
+			const before = GATE_PRE.excludedDayPeriods(arg), after = GATE.excludedDayPeriods(arg);
+			if (before.some((m) => !after.includes(m))) {
+				superset = false;
+				console.log(`    ${JSON.stringify([date, a1, a2])} LOST ${JSON.stringify(before.filter((m) => !after.includes(m)))}`);
+			}
+			if (after.length > before.length) widenedPairs++;
+			const vBefore = GATE_PRE.verdict(arg), vAfter = GATE.verdict(arg);
+			if (vBefore === "finalized" && vAfter === null) {
+				everPermitted++;
+				console.log(`    ${JSON.stringify([date, a1, a2])} FAIL-OPEN: refused before, permitted after`);
+			}
+			if (vBefore === null && vAfter === "finalized") newRefusals++;
+		}
+	}
+}
+// ⚠️ SCOPED TO THE UNION IN ISOLATION — both sides here run the SAME (post-L-2)
+// period functions, so this measures the tail change and nothing else. The
+// COMPOSITE against the true pre-branch build is deliberately NOT a superset:
+// the L-2 leg drops unmatchable keys like "999-01-", which is the point of it.
+// That combination is asserted separately at the end of section 11.
+ok(superset, "the union in isolation is always a SUPERSET — no month is ever lost to it");
+eq(everPermitted, 0, "⚠️ NO combination is refused before and permitted after (the union cannot fail open)");
+ok(widenedPairs > 0, `the union does widen where it should (${widenedPairs} of ${SWEEP_DATES.length * 36} combinations)`);
+ok(newRefusals > 0, `…and converts fail-opens into refusals (${newRefusals} combinations newly refused)`);
+
+// ------------------------------------- 11. L-2 — a non-month key must REFUSE
+console.log("\n11. loadRowPeriods — a month key that is not a month must REFUSE, not permit");
+
+// ⚠️ NOT `/^const LOCKABLE_MONTH_KEY = /` — extractConst() builds its result from
+// exactly that prefix, so such an assertion can never fail and is not a check.
+// The property actually worth pinning is that the regex carries NO g/y flag: a
+// module-scope regex with `g` makes .test() STATEFUL (lastIndex advances), so it
+// would return true/false on alternate calls and silently wave through every
+// other row — a fail-open that no functional test on a single row would catch.
+ok(!/\/[gy]/.test(MONTH_KEY_CONST.replace(/^const \w+ = /, "")),
+	"LOCKABLE_MONTH_KEY carries no g/y flag (a stateful .test() would skip alternate rows)");
+ok(/LOCKABLE_MONTH_KEY\.test\(key\)/.test(extractFn("loadAssignedMonthKey")), "the assigned leg applies the shape test");
+ok(/filter\(\(m\) => LOCKABLE_MONTH_KEY\.test\(m\)\)/.test(extractFn("loadRowPeriods")), "the window leg applies it too");
+// ⚠️ THE PREDICATE MUST BE lockedAmong's OWN, AND SHARED. Anything STRICTER
+// discards a key the lock table could legitimately hold — a fail-open. Pinned
+// structurally so a later "tidy-up" cannot reintroduce sheetCellMonths' bound.
+ok(/LOCKABLE_MONTH_KEY\.test\(p\)/.test(extractFn("lockedAmong")),
+	"⚠️ lockedAmong filters on the SAME shared regex — producer and consumer cannot drift");
+ok(!/const MONTH = /.test(extractFn("lockedAmong")), "…and keeps no local copy of it");
+
+const lrow = (assigned, pickup, dropoff) => jtRow(DRV, assigned, pickup, dropoff);
+const RP = (assigned, pickup, dropoff) => GATE.loadRowPeriods(lrow(assigned, pickup, dropoff), COLS);
+// Shapes that drive the year out of the 4-digit range, through moneySheetDate's
+// NORMAL branches. `1 Jan 0999` is the realistic one and the reason this is not
+// merely theoretical: production's Assigned Date column IS RFC 2822
+// ("Date: Tue, 1 Jul 2025 11:33:05 -0500"), and that branch's `(\d{4})` happily
+// takes a zero-padded 0999, so a mistyped year is one keystroke away.
+//
+// ⚠️ EVERY CELL HERE MUST BE TIMEZONE-STABLE, which rules out the largest ones.
+// 275760-09-13 is EXACTLY the maximum representable JS Date, so "275760-09-13"
+// (parsed as UTC midnight) resolves while "Sat Sep 13 275760" (parsed as LOCAL
+// midnight) overflows to Invalid Date in any zone behind UTC — measured: both
+// yield "275760-" under UTC/Kolkata/Kiritimati and null under America/Chicago.
+// They were in this list on the first draft and the TZ run caught them: they
+// still "refuse", but for the wrong reason (unparseable, not bounded), so they
+// cannot carry the discriminator below. Boundary case kept as its own assertion.
+const BAD_YEAR_CELLS = ["10000-01-01", "Jan 1 10000", "1 Jan 10000",
+	"0999-01-01", "1 Jan 0999", "Sat Jan 01 999", "Jan 1 999"];
+let badRefused = 0, badKeyBlank = 0;
+for (const cell of BAD_YEAR_CELLS) {
+	if (RP(cell, "", "").resolved === false) badRefused++;
+	if (GATE.loadAssignedMonthKey(lrow(cell, "", ""), COLS) === "") badKeyBlank++;
+}
+eq(badRefused, BAD_YEAR_CELLS.length, `all ${BAD_YEAR_CELLS.length} out-of-range years answer resolved:FALSE (the guard refuses)`);
+eq(badKeyBlank, BAD_YEAR_CELLS.length, "…and loadAssignedMonthKey returns NO key rather than an unmatchable one");
+// The window leg has its own path in: jtExpandDateRange builds days with
+// jtFmtDate too, so an ISO "0999-01-01" pickup reaches it as "999-01-".
+eq(RP("TBD", "0999-01-01", ""), { periods: [], resolved: false },
+	"the WINDOW leg also refuses an out-of-range year (not only the assigned leg)");
+// The JS-Date boundary case, asserted on the OUTCOME both readings share rather
+// than on a key, so it holds in every zone (see the ⚠️ above).
+eq(RP("275760-09-13", "", "").resolved, false, "the max-representable-date cell refuses in every timezone");
+eq(RP("Sat Sep 13 275760", "", "").resolved, false, "…and so does its local-midnight spelling, which Invalid-Dates west of UTC");
+
+console.log("\n   controls — real months stay, and so does anything LOCKABLE");
+eq(RP("2026-07-15", "", ""), { periods: ["2026-07"], resolved: true }, "an ordinary assigned date is unchanged");
+eq(RP("Date: Tue, 1 Jul 2025 11:33:05 -0500", "", ""), { periods: ["2025-07"], resolved: true },
+	"production's RFC 2822 assigned date is unchanged");
+eq(RP("TBD", "9/23/2025", "9/25/2025"), { periods: ["2025-09"], resolved: true }, "the window leg still resolves a real month");
+
+// ⚠️ THESE ARE THE SECURITY REVIEW'S FINDING, AS ASSERTIONS. An implausible but
+// well-FORMED month is lockable — POST /api/periods/:period/finalize admits
+// anything matching /^\d{4}-\d{2}$/ and period_locks has no CHECK — so it must
+// be KEPT and offered to isLocked(). Dropping it (as sheetCellMonths' tighter
+// 1970-2999 bound would) turns a refusal into a permit. Measured with such a
+// lock present: 128 REFUSE→permit flips over 1,183 gate combinations.
+eq(RP("1969-12-05", "", ""), { periods: ["1969-12"], resolved: true },
+	"⚠️ a pre-1970 but WELL-FORMED month is KEPT — it is lockable, so it must be judged");
+eq(RP("3000-01-05", "", ""), { periods: ["3000-01"], resolved: true },
+	"⚠️ …and so is a post-2999 one, for the same reason");
+eq(RP("1000-01-05", "", ""), { periods: ["1000-01"], resolved: true }, "the 4-digit floor is kept");
+eq(RP("12/31/9999", "", ""), { periods: ["9999-12"], resolved: true }, "the 4-digit ceiling is kept");
+
+console.log("\n   ⚠️ the pre-fix code PERMITTED these — resolved:true with nothing lockedAmong could match");
+const PERIOD_FNS_PRE = `${MONTH_KEY_CONST}
+${extractFn("loadAssignedMonthKey").replace(
+		'\tif (!d || isNaN(d)) return "";\n\tconst key = jtFmtDate(d).slice(0, 7);\n\treturn LOCKABLE_MONTH_KEY.test(key) ? key : "";',
+		'\treturn d && !isNaN(d) ? jtFmtDate(d).slice(0, 7) : "";')}
+${extractFn("loadRowPeriods").replace(".filter((m) => LOCKABLE_MONTH_KEY.test(m))", "")}`;
+ok(!/LOCKABLE_MONTH_KEY\.test\(key\)/.test(PERIOD_FNS_PRE) && !/filter\(\(m\) => LOCKABLE_MONTH_KEY/.test(PERIOD_FNS_PRE),
+	"the pre-bound loadAssignedMonthKey/loadRowPeriods could be reconstructed");
+const GATE_L2_PRE = buildGate(EDP_SRC, PERIOD_FNS_PRE, LOCKED_PERIODS);
+const RP_PRE = (assigned) => GATE_L2_PRE.loadRowPeriods(lrow(assigned, "", ""), COLS);
+let preFailOpen = 0;
+// TZ-stable cells only — see the ⚠️ on BAD_YEAR_CELLS.
+for (const cell of ["10000-01-01", "Jan 1 10000", "0999-01-01", "1 Jan 0999", "Sat Jan 01 999"]) {
+	const p = RP_PRE(cell);
+	// The fail-open signature: resolved TRUE, periods NON-EMPTY, and yet
+	// lockedAmong() can match none of them — so locked.length is 0 → permit.
+	if (p.resolved && p.periods.length && GATE_L2_PRE.lockedAmong(p.periods).length === 0) preFailOpen++;
+	else console.log(`    !! ${cell} does not discriminate: ${JSON.stringify(p)}`);
+}
+eq(preFailOpen, 5, "all 5 reproduce the pre-fix fail-open (resolved:true, key unmatchable by lockedAmong)");
+eq(RP_PRE("1 Jan 0999").periods, ["999-01-"], "…the unmatchable key is literally '999-01-' — a truncated year, not a month");
+
+console.log("\n   ⚠️ COMPOSITE, under an ADVERSARIAL lock table — the fix must not fail open");
+// Section 10's sweep isolates the union (pre-M-1 vs shipped, both post-L-2).
+// This one runs BOTH changes together against the TRUE pre-branch behaviour, with
+// a lock table holding periods the finalize route permits but a tighter bound
+// would have discarded. That combination is the only way the L-2 leg could fail
+// open, so it is the case worth pinning rather than describing.
+const ADVERSARIAL_LOCKS = LOCKED_PERIODS.concat(["1900-05", "1969-12", "1000-01", "3000-01"]);
+const PRE_BRANCH = buildGate(EDP_PRE_SRC, PERIOD_FNS_PRE, ADVERSARIAL_LOCKS);   // neither fix
+const SHIPPED_ADV = buildGate(EDP_SRC, PERIOD_FNS, ADVERSARIAL_LOCKS);          // both fixes
+let advPermits = 0, advCombos = 0, advRefusals = 0;
+for (const date of ["2026-08-01", "2026-07-15", "1969-12-05", "1900-05-05"]) {
+	for (const a1 of ["2026-08-03", "2026-07-03", "1900-05-05", "1969-12-05", "3000-01-05", "1 Jan 0999", "TBD"]) {
+		for (const a2 of ["2026-08-03", "1900-05-05", "1 Jan 0999", "TBD"]) {
+			const jobTracking = jt(jtRow(DRV, a1, date, date), jtRow(DRV, a2, date, date));
+			const arg = { driver: DRV, date, action: "remove", jobTracking };
+			advCombos++;
+			const before = PRE_BRANCH.verdict(arg), after = SHIPPED_ADV.verdict(arg);
+			if (before === "finalized" && after === null) {
+				advPermits++;
+				console.log(`    FAIL-OPEN ${JSON.stringify([date, a1, a2])}: ${JSON.stringify(PRE_BRANCH.excludedDayPeriods(arg))} -> ${JSON.stringify(SHIPPED_ADV.excludedDayPeriods(arg))}`);
+			}
+			if (before === null && after === "finalized") advRefusals++;
+		}
+	}
+}
+eq(advPermits, 0, `⚠️ 0 of ${advCombos} combinations go REFUSE→permit even with out-of-range periods locked`);
+ok(advRefusals > 0, `…while the union still converts fail-opens into refusals (${advRefusals} newly refused)`);
+
+// ------------------------------------------------------- 12. timezone invariance
 if (!process.env.TZ_CHILD) {
-	console.log("\n10. timezone invariance — same verdicts under UTC / Chicago / Kolkata");
+	console.log("\n12. timezone invariance — same verdicts under UTC / Chicago / Kolkata");
 	const probe = [
 		"2025-09-24", "Date: Tue, 13 May 2025 11:56:47 -0500",
 		"Date: Wed, 31 Dec 2025 20:00:00 -0600", "9/24/2025", "2025/09/24 23:59", "9:00",
@@ -533,12 +808,21 @@ if (!process.env.TZ_CHILD) {
 // drop-off, as a guard-side pickup (union) and as a money-side pickup (shift).
 // A probe that only exercised the drop-off would let a timezone-dependent pickup
 // read through, which is the half added here.
+//
+// The last two entries carry the excluded-day gate: the reported months AND the
+// refuse/allow verdict. Both are month-keyed strings derived from local-time
+// Date fields, so a value that resolved to a different DAY under a far-east zone
+// could land in a different MONTH and flip a refusal — precisely the class this
+// file exists to catch, and it would be invisible probing loadWindowDays alone.
 module.exports.probe = (v) => [
 	NEW.sheetToIso(v),
 	NEW.loadWindowDays(row("9/23/2025", v), COLS),
 	NEW.loadWindowDays(row(v, "9/25/2025", "Date: Mon, 22 Sep 2025 08:45:51 -0500"), COLS),
 	PERIODS.loadRowPeriods(row(v, "9/25/2025", "TBD"), COLS),
 	moneyRead(MONEY_NEW, v, "9/25/2025", "Date: Mon, 22 Sep 2025 08:45:51 -0500"),
+	GATE.excludedDayPeriods({ driver: DRV, date: "2026-07-15", action: "remove", jobTracking: jt(jtRow(DRV, v, "2026-07-15", "2026-07-16")) }),
+	GATE.verdict({ driver: DRV, date: "2026-08-01", action: "remove", jobTracking: jt(jtRow(DRV, v, "2026-08-01", "2026-08-02")) }),
+	GATE.loadRowPeriods(jtRow(DRV, v, "", ""), COLS),
 ];
 
 if (!process.env.TZ_CHILD) {

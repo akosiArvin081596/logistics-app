@@ -20494,16 +20494,50 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 //     2026-07-31 on a load assigned in August moves AUGUST. The date's own month
 //     can be neither of them.
 // Hence the sheet read: the covering loads are the only place the answer lives.
-// With no covering load the override is inert today, and we fall back to the
-// date's own month — the bucket it would take the moment a load with no readable
-// assigned date covers it. That is the conservative direction and costs nothing:
-// an admin excluding a day in a closed month should be reopening it either way.
+//
+// ⚠️ THE DATE'S OWN MONTH IS ADDED TO THE COVERING LOADS' MONTHS, NEVER
+// DISPLACED BY THEM. This tail used to read
+//
+//     return months.size ? [...months].sort() : [own];   // `own` DISPLACED
+//
+// i.e. `own` survived only while NO covering load existed, and the moment one
+// did the day's own month dropped out of the answer entirely. That is a
+// fail-OPEN, and the only one of its kind at this gate: unlike the sibling
+// guards, excludedDayGate() has no `unresolved` rung to catch it — a month that
+// is not in this array is simply never offered to isLocked(), so a co-covering
+// load in an OPEN month silently suppresses a LOCKED one and the write goes
+// through and restates it.
+//
+// The `[own]` fallback was never merely cosmetic: `own` is the bucket the day
+// takes the moment a load with no readable assigned date covers it (see
+// loadRowPeriods — that is the one path by which days fall back to their own
+// calendar months). Reported by PR #245's security review as M-1, because #245
+// is what made the bad state REACHABLE: a row with an unreadable assigned date
+// plus a pickup only moneySheetDate() can read now yields a counted pay day on
+// the money side while loadWindowDays() still returns [] for the guard. Before
+// #245 such a row's window was empty and it contributed nothing.
+//
+// Not reachable on today's data — 0 of 421 raw production rows have an
+// unreadable assigned date — so this is the cheap moment to close it. Measured
+// read-only on production (2026-08-09, 421 raw → 305 deduped rows, 354
+// (driver, date) pairs): 40 pairs report MORE months, 0 report fewer, and the
+// gate's refuse/allow verdict flips on 0 — 0 new refusals and 0 new permits.
+// 18 of the 40 were already being refused and now name more months in the 409.
+// The union direction is fail-CLOSED by construction, not just by measurement:
+// the array's only consumer re-filters it through lockedAmong(), so a month
+// this adds can only ever produce a refusal that isLocked() independently
+// justifies. It can never permit a write the narrower set refused.
 //
 // Covering loads are matched regardless of STATUS, unlike the pay loop, which
 // counts completed ones only. Status is mutable and the override row is not, so
 // a load one status change away from counting would otherwise be one status
 // change away from silently restating a closed month.
 function excludedDayPeriods({ driver, date, action, jobTracking }) {
+	// ⚠️ `own` is deliberately NOT run through LOCKABLE_MONTH_KEY. `date` is
+	// route-validated /^\d{4}-\d{2}-\d{2}$/ before the gate is called, so this is
+	// always a matchable key already — and filtering it would DROP it from the
+	// array, which is a permit. The producers below need the test because they
+	// build their keys from arbitrary sheet cells; this one does not.
 	const own = String(date || "").slice(0, 7);
 	if (action === "add" || !jobTracking) return [own];
 	const cols = jobTrackingMonthCols(jobTracking.headers);
@@ -20514,7 +20548,9 @@ function excludedDayPeriods({ driver, date, action, jobTracking }) {
 		if (!loadWindowDays(row, cols).includes(date)) continue;
 		loadRowPeriods(row, cols).periods.forEach((m) => months.add(m));
 	}
-	return months.size ? [...months].sort() : [own];
+	// UNION, not displacement — see the ⚠️ above. With no covering load this is
+	// still exactly [own], so the no-load case is byte-identical to before.
+	return [...new Set([...months, own])].sort();
 }
 
 // The gate itself: `{ refuse: 'unreadable'|'unresolved'|'finalized'|null, periods }`.
@@ -21567,10 +21603,52 @@ function jobTrackingMonthCols(headers) {
 // that expression was replaced on 2026-08-08 (see moneySheetDate) this had to
 // move with it, in the same commit. Sharing the function is what makes drifting
 // apart impossible; do not re-inline a copy.
+//
+// ⚠️ A MONTH KEY THAT IS NOT A MONTH IS A PERMIT, NOT A REFUSAL — hence the
+// shape test below. lockedAmong() filters candidates through this same regex and
+// SILENTLY DROPS anything else, so a key like "275760-" or "999-01-" leaves it
+// nothing to match, `locked.length` is 0, and every guard clears the write —
+// while `resolved` still says true, so the `unresolved` rung never fires either.
+// Both month-key sites — here and loadRowPeriods()'s window leg — build the key
+// the same way, and that is where it comes from: jtFmtDate() writes the year
+// unpadded and unbounded, so for any Date whose year is not exactly 4 digits
+// the .slice(0, 7) cuts in the wrong place.
+//
+// It is plantable through moneySheetDate's normal branches, not just exotica.
+// Probed 2026-08-09: the `new Date()` tail reads "Sat Sep 13 275760",
+// "10000-01-01" and "September 13, 275760"; the ISO branch reads "0999-01-01"
+// (parseInt drops the pad → year 999); and the RFC-2822 branch reads
+// "1 Jan 0999" — that last is the realistic one, because production's Assigned
+// Date column IS RFC 2822 ("Date: Tue, 1 Jul 2025 11:33:05 -0500"), so a
+// mistyped year is one keystroke away from a silent permit.
+//
+// Fail-CLOSED: an unmatchable key becomes NO key, which drops loadRowPeriods()
+// to its window leg and, failing that, to `resolved:false` — which every caller
+// treats as a refusal. Reported as L-2 on PR #245. Measured read-only on
+// production 2026-08-09: 0 of 305 deduped rows change their loadRowPeriods()
+// answer, 0 resolved flips, 0 rows in the bad state today.
+//
+// ⚠️ THE PREDICATE IS lockedAmong()'s OWN, SHARED — NOT sheetCellMonths' TIGHTER
+// 1970–2999 BOUND, WHICH PR #245'S L-2 SUGGESTED AND WHICH IS A FAIL-OPEN HERE.
+// The two functions are answering different questions. sheetCellMonths INVENTS
+// candidate months from ambiguous text, so bounding them to plausible years is
+// conservative. This one only has to emit keys isLocked() can be ASKED about, and
+// any predicate STRICTER than lockedAmong's discards a key the lock table could
+// legitimately hold — silently converting a refusal into a permit, i.e. the very
+// bug being fixed. That is not hypothetical: period_locks.period has no CHECK and
+// POST /api/periods/:period/finalize admits anything matching /^\d{4}-\d{2}$/, so
+// "1900-05" and "1969-12" ARE lockable today. Caught by security review on this
+// PR; measured with a 1970–2999 bound and such a lock present: 128 REFUSE→permit
+// flips over 1,183 gate combinations, versus 0 with the shared predicate. Sharing
+// one regex is what makes producer and consumer unable to drift apart — do not
+// re-narrow it here, and do not copy sheetCellMonths' bound into it.
+const LOCKABLE_MONTH_KEY = /^\d{4}-\d{2}$/;
 function loadAssignedMonthKey(row, cols) {
 	if (!cols.dateCol || !row[cols.dateCol]) return "";
 	const d = moneySheetDate(row[cols.dateCol]);
-	return d && !isNaN(d) ? jtFmtDate(d).slice(0, 7) : "";
+	if (!d || isNaN(d)) return "";
+	const key = jtFmtDate(d).slice(0, 7);
+	return LOCKABLE_MONTH_KEY.test(key) ? key : "";
 }
 
 // The active-day window a load contributes, as "YYYY-MM-DD" strings. Mirrors the
@@ -21677,7 +21755,18 @@ function loadRowPeriods(row, cols) {
 	// No assigned month: revenue drops out entirely (the P&L needs that key to
 	// bucket at all) and the active days fall back to their own calendar months —
 	// the only path by which one load reaches two periods.
-	const months = [...new Set(loadWindowDays(row, cols).map((d) => d.slice(0, 7)))].sort();
+	//
+	// Same LOCKABLE_MONTH_KEY test as the assigned leg above, and required for the
+	// same reason: jtExpandDateRange() builds these days with jtFmtDate() too, so
+	// an ISO pickup like "0999-01-01" reaches here as "999-01-" and lockedAmong()
+	// would drop it. Filtering rather than bailing is deliberate, and safe ONLY
+	// because the predicate is lockedAmong's own: what it discards is exactly what
+	// lockedAmong could never have matched, so discarding it cannot cost a refusal.
+	// (Were this tightened — see the ⚠️ on LOCKABLE_MONTH_KEY — the filter would
+	// start dropping lockable months and this line would become the fail-open.)
+	// When it filters everything out, `months` is empty and the row answers
+	// resolved:false, i.e. the guard refuses.
+	const months = [...new Set(loadWindowDays(row, cols).map((d) => d.slice(0, 7)).filter((m) => LOCKABLE_MONTH_KEY.test(m)))].sort();
 	return { periods: months, resolved: months.length > 0 };
 }
 
@@ -21685,8 +21774,11 @@ function loadRowPeriods(row, cols) {
 // Callers must have checked periodLocksReadable() first — isLocked() answers
 // "not locked" on an unreadable table, so this alone is not a guard.
 function lockedAmong(periods) {
-	const MONTH = /^\d{4}-\d{2}$/;
-	return [...new Set((periods || []).filter((p) => MONTH.test(p) && isLocked(p)))].sort();
+	// THE SAME regex object the producers filter on (see LOCKABLE_MONTH_KEY). It
+	// was a local copy; sharing it is what makes a gap between "keys we emit" and
+	// "keys we can match" structurally impossible, because a key silently dropped
+	// here reads as "nothing locked" and permits the write.
+	return [...new Set((periods || []).filter((p) => LOCKABLE_MONTH_KEY.test(p) && isLocked(p)))].sort();
 }
 
 // Compute per-driver FIFO queues from Job Tracking + load_responses.
