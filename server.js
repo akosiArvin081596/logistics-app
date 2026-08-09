@@ -7418,8 +7418,16 @@ function generateInvoiceNumber(driverName, weekStart) {
 	const days = Math.floor((d - jan1) / 86400000);
 	const weekNum = Math.ceil((days + jan1.getDay() + 1) / 7);
 	const weekStr = String(weekNum).padStart(2, "0");
-	// Check for existing invoices this week for this driver
-	const existing = db.prepare("SELECT COUNT(*) AS cnt FROM invoices WHERE driver = ? AND week_start = ?")
+	// Check for existing invoices this week for this driver.
+	// LOWER(driver) on BOTH sides — the same one-sided fold as the two Driver
+	// ownership checks (see driverOwnsInvoice()): `driver = ?` against an
+	// already-lowercased parameter silently skips any pre-convention display-case
+	// row. That is not cosmetic here — this COUNT is the sequence suffix, so a
+	// week that already held such an invoice restarted at `-01` and minted a
+	// DUPLICATE invoice number. Matches the duplicate guard in
+	// generateInvoiceHandler and the driver-facing list queries, all of which
+	// already use LOWER(driver); this site was the one that disagreed.
+	const existing = db.prepare("SELECT COUNT(*) AS cnt FROM invoices WHERE LOWER(driver) = ? AND week_start = ?")
 		.get(driverName.toLowerCase(), weekStart).cnt;
 	const seq = String(existing + 1).padStart(2, "0");
 	return `INV-${initials}-${year}W${weekStr}-${seq}`;
@@ -11366,14 +11374,47 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 	}
 });
 
+// Driver ownership fold for the two Driver-facing invoice routes.
+//
+// ⚠️ `invoices.driver` case is a WATERMARK, not rename drift. Both INSERT paths
+// write `driverName.toLowerCase()` / `payee.toLowerCase()`, but rows written
+// before that convention landed kept display case — production carries exactly
+// one (#40, "Shorn King", Paid) against 13 lowercase rows for the same driver.
+// The old check was `invoice.driver !== (user.driverName || "").toLowerCase()`,
+// a ONE-SIDED fold: the session name was lowercased and the stored value was
+// compared raw, so the only currently active driver got a 403 on his own paid
+// $1,500 invoice — while the list that showed it to him used `LOWER(driver) = ?`
+// and displayed it fine. Fold BOTH sides, through the same normalizeDriverName()
+// every other driver-name match in this file already uses.
+//
+// Deliberately NOT fixed by normalising the row: #40 is Paid and its billing
+// week straddles two locked periods, so rewriting it is a write into a closed
+// month. It moves no settlement figure (every money join already folds case),
+// but "harmless write into a finalized period" is not a precedent to set.
+//
+// One deliberate NARROWING: an empty session name is refused outright instead of
+// compared. Under the old code a Driver whose `driverName` was blank compared
+// "" !== "" and was granted access to any row with a blank driver. Production
+// has zero such invoice rows, so this costs no real access — it just stops the
+// fold from being an authorization bypass if one is ever written.
+//
+// Whole-value `===`, so the "Shorn King" ⊂ "Deshorn King" substring trap that
+// bites the dispatch_notifications rewrites cannot apply here.
+function driverOwnsInvoice(user, invoice) {
+	const sessionName = normalizeDriverName(user && user.driverName);
+	if (!sessionName) return false;
+	return normalizeDriverName(invoice && invoice.driver) === sessionName;
+}
+
 // GET /api/invoices/:id/pdf — serve invoice PDF
 app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
 		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
-		// Drivers can only access their own
+		// Drivers can only access their own — see driverOwnsInvoice() above for why
+		// this folds both sides rather than normalising the stored row.
 		const user = req.session.user;
-		if (user.role === "Driver" && invoice.driver !== (user.driverName || "").toLowerCase()) {
+		if (user.role === "Driver" && !driverOwnsInvoice(user, invoice)) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
 		// Soft-deleted invoices stay viewable by Super Admin only (audit/restore).
@@ -11402,7 +11443,7 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
 		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
 		const user = req.session.user;
-		if (user.role === "Driver" && invoice.driver !== (user.driverName || "").toLowerCase()) {
+		if (user.role === "Driver" && !driverOwnsInvoice(user, invoice)) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
 		if (invoice.status !== "Draft") {
@@ -11675,9 +11716,17 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
 		if (!invoice.deleted_at) return res.status(400).json({ error: "Invoice is not deleted" });
 		if (!invoice.is_manual) {
+			// LOWER(driver) on both sides. Both operands are stored values here, so
+			// this read looked symmetric — but the comparison is still BINARY, and
+			// `invoices.driver` holds two spellings of the same driver (see
+			// driverOwnsInvoice()). Restoring a soft-deleted "shorn king" row for a
+			// week already covered by the live display-case "Shorn King" row found
+			// no clash and produced TWO live weekly invoices for one driver-week —
+			// the exact double-billing idx_invoices_driver_week exists to prevent,
+			// and which that index cannot catch either while its collation is BINARY.
 			const clash = db.prepare(
-				"SELECT invoice_number FROM invoices WHERE driver = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0 AND id != ?"
-			).get(invoice.driver, invoice.week_start, invoice.id);
+				"SELECT invoice_number FROM invoices WHERE LOWER(driver) = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0 AND id != ?"
+			).get(String(invoice.driver || "").toLowerCase(), invoice.week_start, invoice.id);
 			if (clash) {
 				return res.status(409).json({ error: `Cannot restore — ${clash.invoice_number} already covers that driver/week. Delete it first.` });
 			}
