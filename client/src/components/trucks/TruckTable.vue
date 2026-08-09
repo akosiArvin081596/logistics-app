@@ -318,6 +318,11 @@
               <input id="edit-truck-in-service-date" v-model="editForm.inServiceDate" type="date" />
               <div class="field-hint">Fixed costs below are billed from this month onward. Leave blank to fall back to the date the truck record was created.</div>
             </div>
+            <div class="edit-field">
+              <label for="edit-truck-retired-at">Retired On</label>
+              <input id="edit-truck-retired-at" v-model="editForm.retiredAt" type="date" />
+              <div class="field-hint">Stops the fixed costs below. The retirement month is billed in full, so set the date the truck actually left the fleet. Leave blank while it is still in service. Backdating into a closed accounting month is refused.</div>
+            </div>
             <div class="edit-row">
               <div class="edit-field">
                 <label>Insurance ($/mo)</label>
@@ -388,6 +393,11 @@
             <span class="view-label">In Service Since</span>
             <span v-if="inServiceDate(viewTruck)">{{ formatInServiceDate(inServiceDate(viewTruck)) }}</span>
             <span v-else class="view-unset" title="No in-service date set \u2014 fixed costs are billed from the date this truck record was created.">Not set</span>
+          </div>
+          <div class="view-row">
+            <span class="view-label">Retired On</span>
+            <span v-if="retiredAt(viewTruck)">{{ formatInServiceDate(retiredAt(viewTruck)) }}</span>
+            <span v-else class="view-unset" title="Still in service \u2014 fixed costs keep accruing every month.">In service</span>
           </div>
           <div class="view-row"><span class="view-label">Insurance</span><span>{{ viewTruck.InsuranceMonthly ? '$' + viewTruck.InsuranceMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
@@ -482,7 +492,7 @@ const editForm = reactive({
   vin: '', licensePlate: '', status: 'Active', assignedDriver: '', ownerId: 0, notes: '',
   photo: '', insuranceMonthly: 0, eldMonthly: 0, truckPaymentMonthly: 0, hvutAnnual: 0, irpAnnual: 0, adminFeePct: 50, driverPayDaily: 0,
   purchasePrice: 0, titleStatus: 'Clean', maintenanceFundMonthly: 0,
-  fuelTankGallons: '', avgMpg: '', inServiceDate: '',
+  fuelTankGallons: '', avgMpg: '', inServiceDate: '', retiredAt: '',
 })
 
 // Year + make + model in one cell — "2022 Freightliner Cascadia" is how a fleet
@@ -513,6 +523,13 @@ function tankGallons(truck) {
 // value round-trips whichever key the server ends up emitting.
 function inServiceDate(truck) {
   return (truck?.InServiceDate ?? truck?.in_service_date ?? '') || ''
+}
+
+// The mirror bound. Same dual-spelling read as inServiceDate above: GET
+// /api/trucks serializes RetiredAt, but read the snake_case form too so a raw
+// row (or an older cached payload) still renders.
+function retiredAt(truck) {
+  return (truck?.RetiredAt ?? truck?.retired_at ?? '') || ''
 }
 
 // Current mileage, derived server-side from the latest ELD fix. Same defensive
@@ -589,6 +606,7 @@ function openEdit(truck) {
   editForm.avgMpg = truck.AvgMpg || ''
   // '' when unset — an empty date input is what keeps the created_at fallback.
   editForm.inServiceDate = inServiceDate(truck)
+  editForm.retiredAt = retiredAt(truck)
   showEdit.value = true
 }
 
@@ -634,6 +652,8 @@ function handleSaveEdit() {
       // Both key styles — the trucks API mixes camelCase and snake_case.
       in_service_date: editForm.inServiceDate || '',
       inServiceDate: editForm.inServiceDate || '',
+      retired_at: editForm.retiredAt || '',
+      retiredAt: editForm.retiredAt || '',
     },
   })
   showEdit.value = false

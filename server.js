@@ -552,6 +552,30 @@ try { db.exec("ALTER TABLE trucks ADD COLUMN truck_payment_monthly REAL DEFAULT 
 // column is additive + reversible. Read only through truckChargeFromMonth().
 try { db.exec("ALTER TABLE trucks ADD COLUMN in_service_date TEXT DEFAULT ''"); } catch {}
 
+// The mirror of in_service_date: the LAST month a truck is charged fixed costs.
+//
+// in_service_date gave a truck a first billed month; nothing gave it a last, so a
+// truck that left the fleet kept accruing insurance/ELD/payment/HVUT/IRP into
+// every open month forever. The obvious workaround — flipping `status` to
+// Inactive — is refused by truckEditLockBlockers() check (1), and correctly so:
+// `status` has no time dimension, so it removes the truck from EVERY month
+// including the finalized ones it was legitimately billed in. That left no
+// correct way to remove a truck from the fleet at all.
+//
+// ⚠️ INCLUSIVE, exactly like in_service_date. The retirement month IS billed, in
+// full, with no proration — a truck in service 2026-04-15 is billed all of April,
+// so a truck retired 2026-07-27 is billed all of July. The interval a human reads
+// off the two fields is [in_service_date, retired_at], both ends inclusive.
+// This is not a coin flip: under the exclusive reading, retiring a truck at the
+// end of the month that just closed would REMOVE that month's costs from a
+// finalized period and be refused — i.e. the feature would be unusable for the
+// exact case it exists for. See truckChargeUntilMonth().
+//
+// Bare 'YYYY-MM-DD', deliberately NOT backfilled: empty means "never retired,
+// charge forever", so every existing row behaves exactly as it does today and
+// this column is additive + reversible. Read only through truckChargeUntilMonth().
+try { db.exec("ALTER TABLE trucks ADD COLUMN retired_at TEXT DEFAULT ''"); } catch {}
+
 // Trailers table
 db.exec(`
 	CREATE TABLE IF NOT EXISTS trailers (
@@ -14942,27 +14966,32 @@ function userDeleteLockBlockers(user, cascadeName) {
 		).all().map((r) => r.period);
 		const newestLock = lockedPeriods[0] || "";
 		if (newestLock) {
-			// ⚠️ `!from ||` is load-bearing, not defensive noise. truckChargeFromMonth()
-			// returns "" when in_service_date is not a bare YYYY-MM-DD AND created_at is
-			// falsy, and the fixed-cost math reads that empty value as "charge this truck
-			// in EVERY month" (`if (truckKey && monthKey < truckKey) continue;` — the
-			// short-circuit means the skip never fires). Written as `from && from <= …`
-			// this guard read the identical value as "never charged" and waved the truck
-			// through — a guard disagreeing with the money math it is protecting, which is
-			// exactly what the note above blockedExpensePeriods() forbids. Unknown
-			// in-service date now blocks, matching how it is billed.
-			const chargedFrom = (t) => truckChargeFromMonth(t) || "";
+			// ⚠️ Delegates to truckFixedCostLockedMonths rather than re-deriving the
+			// bound, which is how the retirement upper bound reached this route with no
+			// edit to the predicate — and, more importantly, is what stops this guard
+			// drifting from the money math it protects.
+			//
+			// The rule it used to spell out by hand still applies and now lives in that
+			// helper: an EMPTY bound is NO bound, at BOTH ends. truckChargeFromMonth()
+			// returns "" when in_service_date is not a bare YYYY-MM-DD and created_at is
+			// falsy, and the fixed-cost math reads that as "charge this truck in EVERY
+			// month"; truckChargeUntilMonth() returns "" for "not retired", which the
+			// math reads as "charge forever". A guard reading either "" the other way
+			// would wave through precisely the truck with the most exposure — the
+			// inversion corrected in PR #205 and again in PR #216.
+			const chargedMonths = new Map();
 			const charged = db.prepare(
-				"SELECT id, unit_number, in_service_date, created_at FROM trucks WHERE owner_id = ?"
+				"SELECT id, unit_number, in_service_date, retired_at, created_at FROM trucks WHERE owner_id = ?"
 			).all(user.id).filter((t) => {
-				const from = chargedFrom(t);
-				return !from || from <= newestLock;
+				const months = truckFixedCostLockedMonths(t, lockedPeriods);
+				if (months.length) chargedMonths.set(t.id, months);
+				return months.length > 0;
 			});
 			if (charged.length) blockers.push({
 				table: "trucks",
 				rows: charged.length,
 				units: charged.map((t) => t.unit_number).filter(Boolean),
-				periods: lockedPeriods.filter((p) => charged.some((t) => { const k = chargedFrom(t); return !k || k <= p; })).sort(),
+				periods: [...new Set(charged.flatMap((t) => chargedMonths.get(t.id) || []))].sort(),
 				detail: `${charged.length} truck${charged.length === 1 ? "" : "s"} (${charged.map((t) => t.unit_number || `#${t.id}`).join(", ")}) would be left without a valid owner, restating the fixed costs inside finalized months`,
 			});
 		}
@@ -15380,6 +15409,10 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			// instant, and re-emitting it as ...T00:00:00Z is exactly how it would
 			// display a day early in Houston. Empty means "falls back to CreatedAt".
 			InServiceDate: t.in_service_date || '',
+			// The mirror bound. Same bare-string passthrough as InServiceDate — never
+			// run through strftime or new Date, which would shift a bare date back a
+			// day in Houston (see truckChargeUntilMonth).
+			RetiredAt: t.retired_at || '',
 			Photo: t.photo || '',
 			InsuranceMonthly: t.insurance_monthly || 0,
 			EldMonthly: t.eld_monthly || 0,
@@ -15474,6 +15507,44 @@ function parseInServiceDate(raw) {
 	return { value: day };
 }
 
+// Retirement date — the LAST month a truck accrues fixed costs
+// (truckChargeUntilMonth). Deliberately the same shape, the same validations and
+// the same {error}|{value} contract as parseInServiceDate, so the pair cannot
+// drift. Shared by nothing else: POST /api/trucks does NOT accept it (a truck is
+// not created retired), which removes a whole gate from truckCreateLockBlockers.
+//
+// Every check has a mirrored reason, and each failure is silent in the OPPOSITE
+// direction to the in-service half:
+//   - the exact YYYY-MM-DD shape, because truckChargeUntilMonth falls through to
+//     "" (charge FOREVER) on anything else. A '2026-8-4' typed straight into the
+//     API would look retired in the UI and keep billing in the ledger.
+//   - a real month, because '2026-13-01' yields the end month '2026-13', which
+//     every real 2026 month sorts BELOW — so the truck would never stop being
+//     charged, silently, having been "retired".
+//   - a sane horizon. The in-service cap exists because a far-future start books
+//     $0 forever; the retirement cap exists because a far-future end is simply
+//     not a retirement, and accepting '2062-08-04' stores something that reads
+//     as an answer while behaving exactly like the unset column.
+// Same 24-month window, so one number governs both ends of the interval.
+function parseRetiredAt(raw) {
+	if (raw === undefined) return { value: undefined };
+	const day = String(raw || "").trim();
+	if (!day) return { value: "" };
+	const m = day.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+	if (!m) return { error: "retired_at must be YYYY-MM-DD or empty" };
+	const mo = parseInt(m[2], 10), dd = parseInt(m[3], 10);
+	if (mo < 1 || mo > 12 || dd < 1 || dd > 31) {
+		return { error: "retired_at must be a real calendar date (YYYY-MM-DD)" };
+	}
+	const today = todayKeyCT();
+	const capIdx = parseInt(today.slice(0, 4), 10) * 12 + (parseInt(today.slice(5, 7), 10) - 1) + IN_SERVICE_MAX_MONTHS_AHEAD;
+	const cap = `${Math.floor(capIdx / 12)}-${String((capIdx % 12) + 1).padStart(2, "0")}`;
+	if (day.slice(0, 7) > cap) {
+		return { error: `retired_at cannot be more than ${IN_SERVICE_MAX_MONTHS_AHEAD} months in the future` };
+	}
+	return { value: day };
+}
+
 // ============================================================
 // Truck edits / truck deletion and the month-end lock
 // ============================================================
@@ -15509,17 +15580,25 @@ function lockedPeriodsDesc() {
 
 // Which CLOSED months this truck's monthly fixed costs are billed into.
 //
-// ⚠️ Mirrors getMonthlyFixedCosts()'s gate exactly:
-//         if (truckKey && monthKey < truckKey) continue;
-// The `truckKey &&` short-circuit means an EMPTY charge-from month never skips
-// anything — the money math reads "no usable in-service date" as "charge this
-// truck in EVERY month". A guard that read the same "" as "never charged" would
-// wave through precisely the truck with the most exposure. That exact inversion
-// shipped once in the user-delete guard (PR #205) and had to be corrected there;
-// `from ? … : locked.slice()` is the same fix, stated positively.
+// ⚠️ This does not merely "mirror" getMonthlyFixedCosts()'s gate any more — it
+// calls THE SAME PREDICATE, truckChargedInMonth(). That is deliberate and is the
+// whole reason a retirement bound could be added safely. Mirroring by hand is
+// what created the inversions that had to be fixed in PR #205 and again in
+// PR #216: two copies of one rule, edited once. There are now four money gates
+// and this guard, and all five read one function, so the guard cannot disagree
+// with the math it protects without failing a unit assertion.
+//
+// Both bounds are INCLUSIVE and an EMPTY bound is NO bound:
+//   • empty charge-from  → "charge in EVERY month" (the `from &&` short-circuit).
+//     A guard reading that "" as "never charged" would wave through precisely
+//     the truck with the most exposure — the PR #205 inversion.
+//   • empty charge-until → "charge FOREVER". A guard reading that "" as "retired
+//     long ago" would report zero exposure for EVERY truck in the fleet, since
+//     every row is "" today, and wave through every retroactive edit there is.
+//     Same inversion, mirrored, and strictly more dangerous because it is the
+//     default value rather than an edge case.
 function truckFixedCostLockedMonths(truck, locked) {
-	const from = truckChargeFromMonth(truck) || "";
-	return from ? locked.filter((p) => p >= from) : locked.slice();
+	return locked.filter((p) => truckChargedInMonth(truck, p));
 }
 
 // maintenance_fund / compliance_fees rows for a unit, bucketed into the month
@@ -15760,6 +15839,36 @@ function truckEditLockBlockers(truck, changed) {
 			to: changed.in_service_date || "(unset — bills from created_at)",
 			periods: moved,
 			detail: `in-service date ${String(truck.in_service_date || "") || "unset"} → ${changed.in_service_date || "unset"} ${afterSet.size < beforeSet.size ? "removes" : "adds"} ${money(monthly * moved.length)} of fixed costs ${afterSet.size < beforeSet.size ? "from" : "to"} ${moved.length} finalized month${moved.length === 1 ? "" : "s"}`,
+		});
+	}
+
+	// (4b) retired_at — the mirror of (4), and it needs its own check for the
+	// reason PR #216 named: SETTING a retirement date is itself retroactive.
+	// Naming a past month REMOVES that truck's fixed costs from every month after
+	// it, and those months may be finalized and already paid — on production,
+	// LogisX-#33 carries $12,173.32 across four locked months, two of which back
+	// PAID payouts.
+	//
+	// Identical symmetric-difference shape to (4), and identical for a reason:
+	// both fields name a MONTH rather than an amount, so the months at risk are
+	// the ones that CHANGE, not the whole history. That is what keeps the feature
+	// usable after the books close — and, because the bound is inclusive, it makes
+	// the ordinary case legal: retiring a truck effective the month that just
+	// closed leaves that month billed, so nothing moves and the edit is allowed.
+	// Retiring it one month earlier removes a finalized month and is refused.
+	//
+	// Covers CLEARING the date too (un-retiring), which adds months back — the
+	// same symmetric difference catches both directions with no extra branch.
+	if (has("retired_at") && chargesFixed) {
+		const after = truckFixedCostLockedMonths({ ...truck, retired_at: changed.retired_at }, locked);
+		const beforeSet = new Set(fixedMonths), afterSet = new Set(after);
+		const moved = [...new Set([...fixedMonths, ...after])].filter((p) => beforeSet.has(p) !== afterSet.has(p)).sort();
+		if (moved.length) blockers.push({
+			field: "retired_at",
+			from: String(truck.retired_at || "") || "(not retired)",
+			to: changed.retired_at || "(not retired)",
+			periods: moved,
+			detail: `retirement date ${String(truck.retired_at || "") || "unset"} → ${changed.retired_at || "unset"} ${afterSet.size < beforeSet.size ? "removes" : "adds"} ${money(monthly * moved.length)} of fixed costs ${afterSet.size < beforeSet.size ? "from" : "to"} ${moved.length} finalized month${moved.length === 1 ? "" : "s"}`,
 		});
 	}
 
@@ -16668,6 +16777,41 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		}
 		const inServiceParsed = inServiceCheck.value;
 
+		// Retirement date — the LAST month this truck accrues fixed costs
+		// (truckChargeUntilMonth). Same undefined/"" contract as the in-service date:
+		// undefined = field not sent, "" = explicitly un-retired (charge forever).
+		const retiredCheck = parseRetiredAt(req.body.retired_at ?? req.body.retiredAt);
+		if (retiredCheck.error) {
+			return res.status(400).json({ error: retiredCheck.error });
+		}
+		const retiredParsed = retiredCheck.value;
+
+		// Cross-field: a truck cannot be retired before it entered service. The
+		// interval would be empty, truckBilledMonthCount would floor to 0 and every
+		// fixed-cost gate would skip the truck in every month — i.e. it silently
+		// behaves like a truck that never existed, which is indistinguishable from a
+		// typo and is exactly the failure mode the two malformed-date branches are
+		// written to avoid. Compared as MONTHS, not days, because the bounds are
+		// inclusive month bounds: in service and retired in the same month is one
+		// billed month and is legitimate (a truck bought and written off in March).
+		// Both sides resolved through the same helpers the money math uses, against
+		// the values this request would actually store.
+		{
+			const nextTruck = {
+				...truck,
+				in_service_date: inServiceParsed !== undefined ? inServiceParsed : truck.in_service_date,
+				retired_at: retiredParsed !== undefined ? retiredParsed : truck.retired_at,
+			};
+			const from = truckChargeFromMonth(nextTruck);
+			const until = truckChargeUntilMonth(nextTruck);
+			if (from && until && until < from) {
+				return res.status(400).json({
+					error: `retired_at (${until}) is before the truck's in-service month (${from}) — it would never be charged in any month`,
+					code: "RETIRED_BEFORE_IN_SERVICE",
+				});
+			}
+		}
+
 		// ⚠️ GUARD BEFORE THE FIRST WRITE. assignDriverToTruck() runs inside the
 		// field loop below and writes truck_assignments + trucks.assigned_driver
 		// the moment it is reached, and this app has no transactions — a refusal
@@ -16704,6 +16848,9 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (driverPayParsed) diff("driver_pay_daily", driverPayParsed.value);
 		if (inServiceParsed !== undefined && inServiceParsed !== String(truck.in_service_date || "").trim()) {
 			changed.in_service_date = inServiceParsed;
+		}
+		if (retiredParsed !== undefined && retiredParsed !== String(truck.retired_at || "").trim()) {
+			changed.retired_at = retiredParsed;
 		}
 		const lock = truckEditLockBlockers(truck, changed);
 		if (lock.unreadable) return periodLockUnreadableResponse(res, "Editing a truck");
@@ -16781,6 +16928,15 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			updates.push("in_service_date = ?"); params.push(inServiceParsed);
 		}
 
+		// Retirement date — the month this truck STOPS being charged fixed costs.
+		// Written ONLY when the caller sends one, and with no auto-stamp on any
+		// status flip, for exactly the reason spelled out above for in_service_date:
+		// the column is not backfilled, so "retired_at is empty" is true of every
+		// truck in the fleet and cannot be used to infer intent.
+		if (retiredParsed !== undefined) {
+			updates.push("retired_at = ?"); params.push(retiredParsed);
+		}
+
 		if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 		params.push(id);
 		db.prepare(`UPDATE trucks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
@@ -16804,6 +16960,13 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			const fmtDay = (v) => (v ? v : "unset (falls back to created_at)");
 			logAudit(req, "update_truck_in_service_date", "truck", String(id),
 				`In-service date for ${truck.unit_number}: ${fmtDay(String(truck.in_service_date || "").trim())} → ${fmtDay(inServiceParsed)}`);
+		}
+		// Retiring (or un-retiring) a truck removes or restores whole months of
+		// fixed costs from an investor's ledger. Same treatment, same reason.
+		if (retiredParsed !== undefined && retiredParsed !== String(truck.retired_at || "").trim()) {
+			const fmtRetire = (v) => (v ? v : "not retired");
+			logAudit(req, "update_truck_retired_at", "truck", String(id),
+				`Retirement date for ${truck.unit_number}: ${fmtRetire(String(truck.retired_at || "").trim())} → ${fmtRetire(retiredParsed)}`);
 		}
 		// Re-parenting a truck moves its whole fixed-cost history between two
 		// investors' ledgers. It is as consequential as a pay-rate or status change
@@ -28424,6 +28587,18 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			const truckStart = inServiceDate || ((createdAt && !isNaN(createdAt))
 				? createdAt
 				: fleetEarliestCreated); // legacy data fallback
+			// The retirement end, built the same component-wise way and for the same
+			// UTC-midnight reason. null = never retired = no upper bound (see
+			// truckChargeUntilMonth: "" must never read as "retired long ago").
+			// ⚠️ This site is the reason retired_at is a DATE rather than a bare
+			// month: it clamps against a caller-supplied range with DAY granularity,
+			// so a month-only column would force an invented day here — and an
+			// unstated "last day of the month" convention is exactly the kind of
+			// thing that drifts away from the month gates.
+			const retired = String(t.retired_at || "").trim();
+			const retiredDate = /^\d{4}-\d{2}-\d{2}$/.test(retired)
+				? new Date(parseInt(retired.slice(0, 4), 10), parseInt(retired.slice(5, 7), 10) - 1, parseInt(retired.slice(8, 10), 10))
+				: null;
 			let start, end;
 			if (filterStart || filterEnd) {
 				start = filterStart || truckStart || reportNow;
@@ -28434,8 +28609,14 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), async (r
 			}
 			// If the truck entered service after the period ended, zero months.
 			if (truckStart && filterEnd && truckStart > filterEnd) return 0;
+			// Mirror image: if it was retired before the period began, zero months.
+			if (retiredDate && filterStart && retiredDate < filterStart) return 0;
 			// Clamp start to the truck's service start.
 			if (truckStart && start < truckStart) start = truckStart;
+			// ...and the end to its retirement. Inclusive of the retirement MONTH,
+			// matching truckChargedInMonth — the month arithmetic below counts whole
+			// months, so a truck retired mid-month still bills that month in full.
+			if (retiredDate && end > retiredDate) end = retiredDate;
 			if (end < start) return 0;
 			const months = (end.getFullYear() - start.getFullYear()) * 12
 				+ (end.getMonth() - start.getMonth()) + 1;
@@ -32148,6 +32329,110 @@ function truckChargeFromMonth(t) {
 	return "";
 }
 
+// The LAST 'YYYY-MM' a truck may be charged monthly fixed costs for, or "" when
+// it has not been retired (callers then charge forever — today's behavior for
+// every existing row, so this is a no-op until someone sets the column).
+//
+// Exact mirror of truckChargeFromMonth, and every property of that helper is
+// deliberately reproduced rather than re-invented:
+//
+// ⚠️ "" MEANS "CHARGE FOREVER", NOT "RETIRED AT THE EPOCH". This is the single
+// most dangerous value in the pair. truckChargeFromMonth's callers read its ""
+// as "charge in EVERY month" via the `truckKey &&` short-circuit; the mirror
+// short-circuit `untilKey &&` must therefore read "" as "no upper bound". A gate
+// or a guard that read "" as "retired long ago" would silently stop billing the
+// ENTIRE fleet — every row has "" today — and a GUARD that read it that way
+// would wave through precisely the truck with the most exposure. That exact
+// inversion shipped once in the user-delete guard (PR #205) and once more in the
+// truck-create guard (PR #216), from opposite directions, on the FROM half.
+//
+// ⚠️ The regex guard is load-bearing for the same reason it is on the FROM half,
+// but the failure is MIRRORED and therefore worse. There, a malformed date
+// ('2026-8-4', 'not-a-date') slices to something no month sorts above, so the
+// truck silently books $0 forever. Here, a malformed value slices to something
+// EVERY month sorts above, so a retired truck would keep billing — the failure
+// is silent in both cases but points the opposite way. Anything not exactly
+// YYYY-MM-DD therefore falls through to "" (never retired), which is the same
+// "stale but sane" direction the FROM half takes to created_at, and is the
+// conservative direction here: it keeps billing rather than stopping.
+//
+// ⚠️ Slices the STRING, never round-trips through new Date(). A bare date parses
+// as UTC midnight, which in America/Chicago is 19:00 the PREVIOUS day — a truck
+// retired 2026-08-01 would read back as July and drop a month of costs it is
+// owed. Same trap, same fix, as the in_service_date branch above.
+//
+// There is deliberately NO created_at fallback. created_at is a lower bound by
+// nature and means nothing as an end date; the only honest answer for a truck
+// nobody has retired is "not retired".
+function truckChargeUntilMonth(t) {
+	const retired = String(t.retired_at || "").trim();
+	const m = retired.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+	if (!m) return "";
+	// ⚠️ DELIBERATE ASYMMETRY with truckChargeFromMonth: the month is range-checked
+	// here and is not there. '2026-13-01' passes a bare shape test and slices to
+	// '2026-13', which every real 2026 month sorts BELOW — so a truck "retired"
+	// that way would bill all of 2026 and then silently stop in 2027. Neither
+	// half of that is a retirement.
+	//
+	// The FROM half is not given the same check on purpose. It has a created_at
+	// FALLBACK, so tightening it would change which months an existing malformed
+	// row bills — a live behaviour change on rows that already have money against
+	// them, for a case parseInServiceDate already refuses at the API boundary.
+	// This half has no fallback and no existing rows at all, so validating costs
+	// nothing and collapses an ambiguous state into the CONSERVATIVE one: "" =
+	// keep billing. Direct SQL and scripts/patch-*.js are the paths the API
+	// validators do not cover, and they are exactly how a '2026-13-01' arrives.
+	const mo = parseInt(m[2], 10), dd = parseInt(m[3], 10);
+	if (mo < 1 || mo > 12 || dd < 1 || dd > 31) return "";
+	return retired.slice(0, 7);
+}
+
+// Is this truck charged fixed costs in `monthKey`? THE single predicate behind
+// every fixed-cost month gate, so the interval can never be spelled two ways.
+// Both bounds INCLUSIVE; an empty bound is no bound (see the two helpers above).
+function truckChargedInMonth(t, monthKey) {
+	const from = truckChargeFromMonth(t);
+	if (from && monthKey < from) return false;
+	const until = truckChargeUntilMonth(t);
+	if (until && monthKey > until) return false;
+	return true;
+}
+
+// How many months of fixed costs has this truck accrued as of `now`?
+//
+// The month-gate sites above ask "is this truck billed in month X" and walk a
+// month cursor. The ALL-TIME total sites instead multiply one monthly figure by
+// a COUNT of months — a second shape that needs its own end bound, because
+// clamping the gate does nothing to a multiplication. There were four
+// hand-rolled copies of this arithmetic (two in /api/investor, two in
+// /api/financials); they are now one function for the same reason the gate is.
+//
+// Returns null when the start month is unparseable, so each caller keeps its own
+// established fallback (`monthsOfOperation`) rather than having a new one
+// imposed here — preserving today's behavior byte-for-byte for every row that
+// has no retirement date.
+//
+// Floor 0, not 1: a forward-dated truck accrues nothing yet. Inclusive of BOTH
+// endpoint months (+1), matching truckChargedInMonth — a truck in service and
+// retired in the same month is billed exactly one month, not zero.
+function truckBilledMonthCount(t, now) {
+	const from = truckChargeFromMonth(t);
+	const sy = parseInt(from.slice(0, 4), 10);
+	const sm = parseInt(from.slice(5, 7), 10) - 1;
+	if (!Number.isFinite(sy) || !Number.isFinite(sm)) return null;
+	// End month = the current month, pulled back to the retirement month when the
+	// truck has one. Never pushed FORWARD: a truck retired in the future is still
+	// accruing today, so a later retired_at must not invent months it has not
+	// lived through.
+	let ey = now.getFullYear(), em = now.getMonth();
+	const until = truckChargeUntilMonth(t);
+	if (until) {
+		const uy = parseInt(until.slice(0, 4), 10), um = parseInt(until.slice(5, 7), 10) - 1;
+		if (Number.isFinite(uy) && Number.isFinite(um) && uy * 12 + um < ey * 12 + em) { ey = uy; em = um; }
+	}
+	return Math.max(0, (ey - sy) * 12 + (em - sm) + 1);
+}
+
 // returns: { monthlyEarnings: [...], currentMonthKey }
 async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null }) {
 	const jobTracking = await getJobTrackingCached();
@@ -32456,14 +32741,17 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	// Monthly fixed costs — Active trucks only, charged from the truck's
 	// in-service month (truckChargeFromMonth: in_service_date, else created_at).
 	const truckFixedQuery = investorDriverSet
-		? "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE owner_id = ? AND status = 'Active'"
-		: "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE status = 'Active'";
+		? "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+		: "SELECT unit_number, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE status = 'Active'";
 	const fixedTrucks = db.prepare(truckFixedQuery).all(...(investorDriverSet ? [user.id] : []));
 	const getMonthlyFixedCosts = (monthKey) => {
 		let total = 0;
 		for (const t of fixedTrucks) {
-			const truckKey = truckChargeFromMonth(t);
-			if (truckKey && monthKey < truckKey) continue;
+			// In service by this month AND not yet retired. truckChargedInMonth is
+			// the single predicate all four month gates share, so the settlement
+			// figure, its drill-down, /api/investor, /api/financials and the
+			// truckFixedCostLockedMonths GUARD cannot disagree about the interval.
+			if (!truckChargedInMonth(t, monthKey)) continue;
 			total += truckMonthlyFixed(t).total;
 		}
 		// Cents, not whole dollars — this figure is shown beside its own itemized
@@ -32477,8 +32765,7 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	// month is zero-activity.
 	if (detail) {
 		for (const t of fixedTrucks) {
-			const truckKey = truckChargeFromMonth(t);
-			if (truckKey && detailForMonth < truckKey) continue;
+			if (!truckChargedInMonth(t, detailForMonth)) continue;
 			detail.fixedCostItems.push({ truck: t.unit_number || "", ...truckMonthlyFixed(t) });
 		}
 	}
@@ -33423,8 +33710,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// truck is flipped off Active in the Trucks UI, its IRP/HVUT/ELD/
 			// insurance stops accruing on the investor bottom-line.
 			const truckQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE owner_id = ? AND status = 'Active'"
-				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE status = 'Active'";
+				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE status = 'Active'";
 			const truckArgs = investorDriverSet ? [user.id] : [];
 			const fleetTrucks = db.prepare(truckQuery).all(...truckArgs);
 			for (const t of fleetTrucks) {
@@ -33433,25 +33720,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// Accrue from the in-service month, not the row's created_at — same
 				// start month the monthlyEarnings gate uses, so this all-time total
 				// stays the sum of the months shown below it.
+				// Bounded at BOTH ends by truckBilledMonthCount: from the in-service
+				// month, to the retirement month when the truck has one. null means
+				// the start month is unparseable — fall through to full fleet months,
+				// exactly as the old !isNaN(truckDate) guard did.
 				let truckMonths = monthsOfOperation;
-				const chargeFrom = truckChargeFromMonth(t);
-				const startYear = parseInt(chargeFrom.slice(0, 4), 10);
-				const startMonthIdx = parseInt(chargeFrom.slice(5, 7), 10) - 1;
-				// Number.isFinite() rejects an unparseable date exactly as the old
-				// !isNaN(truckDate) guard did — fall through to full fleet months.
-				if (Number.isFinite(startYear) && Number.isFinite(startMonthIdx)) {
-					// Floor 0, not 1: a truck dated into the future accrues nothing
-					// yet. The old floor of 1 was unreachable while the start month
-					// could only come from created_at (never future), but
-					// forward-dating is now the actual workflow — #91 was entered
-					// 2026-05-21 for 2026-08-04 — and a floor of 1 would charge a
-					// month here while every monthly row correctly shows $0.
-					truckMonths = Math.max(0,
-						(now.getFullYear() - startYear) * 12
-						+ (now.getMonth() - startMonthIdx) + 1
-					);
-					truckMonths = Math.min(truckMonths, monthsOfOperation);
-				}
+				const billed = truckBilledMonthCount(t, now);
+				if (billed !== null) truckMonths = Math.min(billed, monthsOfOperation);
 				totalExpenses += fixedPerMonth * truckMonths;
 			}
 		}
@@ -33609,8 +33884,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// fix above. Reserve budget ≠ actual cost; actual maintenance
 			// flows through monthlyTripExp / maintByTruck.
 			const truckFixedQuery = investorDriverSet
-				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE owner_id = ? AND status = 'Active'"
-				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE status = 'Active'";
+				? "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE owner_id = ? AND status = 'Active'"
+				: "SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE status = 'Active'";
 			const truckFixedArgs = investorDriverSet ? [user.id] : [];
 			const fixedTrucks = db.prepare(truckFixedQuery).all(...truckFixedArgs);
 			// Same shared per-truck math AND the same start-month gate as
@@ -33619,9 +33894,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			function getMonthlyFixedCosts(monthKey) {
 				let total = 0;
 				for (const t of fixedTrucks) {
-					// Only count from the month the truck entered service
-					const truckKey = truckChargeFromMonth(t);
-					if (truckKey && monthKey < truckKey) continue; // not in service yet
+					// In service by this month and not yet retired — shared predicate.
+					if (!truckChargedInMonth(t, monthKey)) continue;
 					total += truckMonthlyFixed(t).total;
 				}
 				return Math.round(total * 100) / 100;
@@ -33695,14 +33969,34 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const totalStartupExpenses = 5000 * totalTrucks;
 		const netRevenueToDate = Math.round(totalRevenue - totalExpenses);
 
-		// Fixed cost breakdown (per-category sums across fleet, monthly)
+		// Fixed cost breakdown (per-category sums across fleet, monthly).
+		//
+		// This is a PRESENT-TENSE RATE — "what the fleet costs per month right now",
+		// rendered as the fixed-cost tiles in EarningsSection.vue. A retired truck is
+		// no longer costing anything, so it must drop out of the rate the month after
+		// it retires. Bounded on the RETIREMENT half only, deliberately:
+		//   • the in-service half is left alone so a forward-dated truck keeps
+		//     appearing exactly as it does today (byte-identical for every existing
+		//     row, which all have retired_at = "");
+		//   • `until >= thisMonth` keeps a truck retired THIS month in the tile,
+		//     matching truckChargedInMonth's inclusive upper bound — it really is
+		//     still being paid for this month.
+		// ⚠️ Pre-existing and deliberately NOT changed here: this set has no status
+		// filter, so INACTIVE trucks are already counted in these tiles. That is a
+		// separate inconsistency with the status-filtered monthly math; fixing it
+		// would move a displayed number for reasons unrelated to retirement.
+		const rateMonthKey = houstonDay(now).slice(0, 7);
+		const fixedRateTrucks = allOwnedTrucks.filter((t) => {
+			const until = truckChargeUntilMonth(t);
+			return !until || until >= rateMonthKey;
+		});
 		const fixedCostBreakdown = {
-			insurance: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.insurance_monthly || 0), 0)),
-			eld: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.eld_monthly || 0), 0)),
-			truckPayment: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.truck_payment_monthly || 0), 0)),
-			irp: Math.round(allOwnedTrucks.reduce((s, t) => s + ((t.irp_annual || 0) / 12), 0)),
-			hvut: Math.round(allOwnedTrucks.reduce((s, t) => s + ((t.hvut_annual || 0) / 12), 0)),
-			maintReserve: Math.round(allOwnedTrucks.reduce((s, t) => s + (t.maintenance_fund_monthly || 0), 0)),
+			insurance: Math.round(fixedRateTrucks.reduce((s, t) => s + (t.insurance_monthly || 0), 0)),
+			eld: Math.round(fixedRateTrucks.reduce((s, t) => s + (t.eld_monthly || 0), 0)),
+			truckPayment: Math.round(fixedRateTrucks.reduce((s, t) => s + (t.truck_payment_monthly || 0), 0)),
+			irp: Math.round(fixedRateTrucks.reduce((s, t) => s + ((t.irp_annual || 0) / 12), 0)),
+			hvut: Math.round(fixedRateTrucks.reduce((s, t) => s + ((t.hvut_annual || 0) / 12), 0)),
+			maintReserve: Math.round(fixedRateTrucks.reduce((s, t) => s + (t.maintenance_fund_monthly || 0), 0)),
 			truckCount: totalTrucks,
 		};
 
@@ -33746,17 +34040,20 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// fleet loop above for why the old floor of 1 was safe until
 				// in_service_date made future start months reachable).
 				let truckMonths = monthsOfOperation;
-				const chargeFrom = truckChargeFromMonth(truck);
-				const sy = parseInt(chargeFrom.slice(0, 4), 10);
-				const sm = parseInt(chargeFrom.slice(5, 7), 10) - 1;
-				if (Number.isFinite(sy) && Number.isFinite(sm)) {
-					truckMonths = Math.max(0, (now.getFullYear() - sy) * 12 + (now.getMonth() - sm) + 1);
-					truckMonths = Math.min(truckMonths, monthsOfOperation);
-				}
+				const billedMonths = truckBilledMonthCount(truck, now);
+				if (billedMonths !== null) truckMonths = Math.min(billedMonths, monthsOfOperation);
 				const driverPay = driverPayDetails[driverName]?.totalPay || 0;
 				const unitTotalExpenses = varExp + maintExp + compExp + (fixedPerMonth * truckMonths) + driverPay;
-				const avgMonthlyGross = Math.round(unitTotalGross / truckMonths);
-				const avgMonthlyExpenses = Math.round(unitTotalExpenses / truckMonths);
+				// ⚠️ truckMonths is a DIVISOR here and its floor is 0, so this is a
+				// live division by zero — Math.round(x/0) is Infinity, which
+				// JSON.stringify emits as null and the UI renders as a blank cell.
+				// Reachable before retirement (a truck forward-dated past the current
+				// month counts 0) but retirement makes it ordinary: a truck retired
+				// before its own in-service month counts 0 as well. Averaging over a
+				// span the truck never operated in is meaningless either way, so the
+				// honest answer for a zero-month truck is 0, not Infinity.
+				const avgMonthlyGross = truckMonths > 0 ? Math.round(unitTotalGross / truckMonths) : 0;
+				const avgMonthlyExpenses = truckMonths > 0 ? Math.round(unitTotalExpenses / truckMonths) : 0;
 				// Miles from the haversine accumulators computed in the single-pass
 				// loop above. Prefer truck-column attribution over driver-based
 				// (same fallback pattern as loadCount below).
@@ -33918,7 +34215,21 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// > windowStart, so an undated truck is treated as long-standing (the safe
 				// direction: it keeps projecting rather than blanking out).
 				const chargeFrom = truck ? truckChargeFromMonth(truck) : "";
-				insufficient[unit] = !!(windowStart && chargeFrom && chargeFrom > windowStart);
+				// Mirror of the same argument at the other end of the interval: a truck
+				// RETIRED partway through the window stopped being given the chance to
+				// earn across it, so its share is just as much an artifact as a truck
+				// that arrived partway through. Compared against the LAST month of the
+				// window, not the first — a truck retired before the window even began
+				// is caught by this too, and correctly so.
+				// "" is never < any month key, so an un-retired truck keeps projecting
+				// exactly as it does today (the same safe direction the chargeFrom half
+				// relies on).
+				const chargeUntil = truck ? truckChargeUntilMonth(truck) : "";
+				const windowEnd = trailingWindow.length ? trailingWindow[trailingWindow.length - 1] : null;
+				insufficient[unit] = !!(
+					(windowStart && chargeFrom && chargeFrom > windowStart)
+					|| (windowEnd && chargeUntil && chargeUntil < windowEnd)
+				);
 			}
 
 			// Allocate the fleet annual ONCE, then split it — never round each truck's
@@ -35900,16 +36211,17 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				);
 			} else {
 				// No loads: accrue from the in-service month (in_service_date, else
-				// created_at) rather than the day the row was entered in the UI.
-				// Floor 0 so a forward-dated truck accrues nothing yet, matching
-				// the $0 its monthly rows show.
-				const chargeFrom = truckChargeFromMonth(t);
-				const sy = parseInt(chargeFrom.slice(0, 4), 10);
-				const sm = parseInt(chargeFrom.slice(5, 7), 10) - 1;
-				if (Number.isFinite(sy) && Number.isFinite(sm)) {
-					truckMonths = Math.max(0, (now.getFullYear() - sy) * 12 + (now.getMonth() - sm) + 1);
-					truckMonths = Math.min(truckMonths, monthsOfOperation);
-				}
+				// created_at) to the retirement month, rather than from the day the
+				// row was entered in the UI to today. Floor 0 so a forward-dated truck
+				// accrues nothing yet, matching the $0 its monthly rows show.
+				//
+				// ⚠️ The truckLoadDates branch above is deliberately NOT retirement-
+				// clamped. It spans first load → last load, so it is already bounded by
+				// the truck's real activity and a retired truck's last load is in the
+				// past by construction. Clamping it too would double-count the bound
+				// and could shorten a span the truck genuinely worked.
+				const billed = truckBilledMonthCount(t, now);
+				if (billed !== null) truckMonths = Math.min(billed, monthsOfOperation);
 			}
 			totalFixedCosts += perMonth * truckMonths;
 		}
@@ -35992,14 +36304,11 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					+ (last.getMonth() - first.getMonth()) + 1
 				);
 			} else {
-				// Floor 0, same as the fleet loop — these two must not diverge.
-				const chargeFrom = truckChargeFromMonth(truck);
-				const sy = parseInt(chargeFrom.slice(0, 4), 10);
-				const sm = parseInt(chargeFrom.slice(5, 7), 10) - 1;
-				if (Number.isFinite(sy) && Number.isFinite(sm)) {
-					truckMonths = Math.max(0, (now.getFullYear() - sy) * 12 + (now.getMonth() - sm) + 1);
-					truckMonths = Math.min(truckMonths, monthsOfOperation);
-				}
+				// Floor 0 and retirement-bounded, same as the fleet loop — these two
+				// must not diverge, because the fleet KPI is documented as reconciling
+				// to sum(perTruck.fixedTotal).
+				const billed = truckBilledMonthCount(truck, now);
+				if (billed !== null) truckMonths = Math.min(billed, monthsOfOperation);
 			}
 
 			// Driver pay: per-truck active days × this truck's daily rate.
@@ -36212,13 +36521,13 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// drill-down's cents — that rounding is this chart's own convention and
 			// is left alone.
 			const fixedTrucks = db.prepare(
-				"SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date FROM trucks WHERE status = 'Active'"
+				"SELECT insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, created_at, in_service_date, retired_at FROM trucks WHERE status = 'Active'"
 			).all();
 			const monthlyFixedCosts = (mk) => {
 				let total = 0;
 				for (const t of fixedTrucks) {
-					const truckKey = truckChargeFromMonth(t);
-					if (truckKey && mk < truckKey) continue; // not in service yet
+					// Not in service yet, or already retired — shared predicate.
+					if (!truckChargedInMonth(t, mk)) continue;
 					total += (t.insurance_monthly || 0) + (t.eld_monthly || 0) + (t.truck_payment_monthly || 0)
 						+ ((t.hvut_annual || 0) / 12) + ((t.irp_annual || 0) / 12);
 				}
