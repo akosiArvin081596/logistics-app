@@ -19874,37 +19874,257 @@ function dispatchWriteBlocker(headers, before, edits) {
 // Refusals are recorded as well as successes: `super_admin` is a shared login,
 // so an untraced refusal would make a repeated attempt to rewrite a closed month
 // invisible in the one place anyone looks afterwards.
+//
+// ⚠️ `loadId` and `what` are caller-derived and capped for the same reason
+// sendLoadBindRefusal() caps them: `what` interpolates `driver` / `newDriver`,
+// which fall back to the caller's raw string, and neither this function nor
+// logAudit() bounded them. Reachable here only when the period guard fires
+// (locked month + material write) rather than on demand — but the two refusal
+// helpers sit side by side, and one of them capping is worse than neither,
+// because it reads as a decision that the other case is safe.
 function sendDispatchRefusal(req, res, blocked, action, loadId, what) {
 	const periods = blocked.periods || [];
 	logAudit(
-		req, action, "load", loadId || "",
-		`Blocked ${what} [${blocked.code}]${periods.length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code: blocked.code, periods })}`
+		req, action, "load",
+		(typeof loadId === "string" || typeof loadId === "number") ? String(loadId).slice(0, 100) : "",
+		`Blocked ${String(what == null ? "" : what).slice(0, 200)} [${blocked.code}]${periods.length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code: blocked.code, periods })}`
 	);
 	if (blocked.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(res, "unreadable");
 	if (blocked.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(res, "unresolved", null, what);
 	return sendPeriodRefusal(res, "finalized", periods, what);
 }
 
-// Read Job Tracking's header row and ONE data row in a single round trip.
-// `Job Tracking!{n}:{n}` is the whole row — NOT `A{n}`, which A1 reads as the
-// single cell A{n} (the live data-loss bug PR #218 found in the broker splice).
+// Read Job Tracking's header row, EVERY data row, and the caller's target row
+// in a single round trip.
+//
+// ⚠️ THE FULL-TAB RANGE IS THE POINT, AND IT COSTS NOTHING EXTRA. This replaced
+// a two-range batchGet (`Job Tracking!1:1` + `Job Tracking!{n}:{n}`) at the SAME
+// API-call count — the Sheets 300/min quota counts requests, not bytes — because
+// resolveLoadBinding() below has to answer "how many rows carry this load id?",
+// and the column holding the id is only known AFTER the header row is read, so
+// it cannot be named as a third range in the same batchGet. PUT
+// /api/driver/status and PUT /api/loads/:loadId/status-override already read the
+// whole tab on every call, and this family is user-initiated and low-frequency.
+//
+// ⚠️ NOT getJobTrackingCached(), for two independent reasons, either sufficient:
+//   1. it is up to 60 s stale, and a row that moved WITHIN those 60 s is exactly
+//      the state the binding exists to catch;
+//   2. it returns deduplicateLoads() output — last row per load id wins — which
+//      HIDES the duplicate rows AMBIGUOUS_LOAD is looking for.
+// The binding has to be judged against the sheet as it is at write time.
+//
 // Returns null on a failed read; callers refuse rather than fall through, since
-// the months depend on this read and the months are what cannot be guessed.
-async function readJobTrackingRowWithHeaders(sheets, rowIndex) {
+// the months AND the binding both depend on this read, and neither can be guessed.
+async function readJobTrackingSnapshot(sheets, rowIndex) {
 	try {
-		const resp = await sheets.spreadsheets.values.batchGet({
+		const resp = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
-			ranges: ["Job Tracking!1:1", `Job Tracking!${rowIndex}:${rowIndex}`],
+			range: "Job Tracking",
 		});
-		const ranges = resp.data.valueRanges || [];
+		const all = resp.data.values || [];
+		const rows = all.slice(1);
 		return {
-			headers: ((ranges[0] && ranges[0].values) || [[]])[0] || [],
-			row: ((ranges[1] && ranges[1].values) || [[]])[0] || [],
+			headers: all[0] || [],
+			rows,
+			// Row 1 is the header row, so data row 0 is sheet row 2. An index past
+			// the end yields [] — which carries no load id and is therefore refused
+			// by the binding, never written to.
+			row: rows[rowIndex - 2] || [],
 		};
 	} catch (e) {
-		console.error(`Job Tracking row ${rowIndex} unreadable:`, e.message);
+		console.error(`Job Tracking read failed (target row ${rowIndex}):`, e.message);
 		return null;
 	}
+}
+
+// Does the row the caller named actually hold the load the caller named?
+//
+// ⚠️ `rowIndex` AND `loadId` ARE INDEPENDENT BODY FIELDS, AND UNTIL THIS GUARD
+// NOTHING COMPARED THEM. Every route in this family writes to `rowIndex` while
+// recording `loadId`: POST /api/dispatch/cancel set `Job Status = "Cancelled"`
+// and blanked `Driver` at the caller's row, then audited, notified the driver,
+// posted to the dispatch feed and stamped load_status_history — all naming a
+// load it had never confirmed was there. A client whose cached row numbers no
+// longer match the sheet therefore cancels WHATEVER LOAD SITS AT ROW N while
+// every record names a different one.
+//
+// That is the 2026-08-05 incident again — a live $1,050 load cancelled instead
+// of the one the broker called off — and the mandatory-reason guard shipped
+// after it makes the outcome WORSE, not better: the reason is now attached to
+// the wrong load, so the record reads as deliberate and correct.
+//
+// It is not theoretical. Rows shift: DELETE /api/data/:rowIndex uses
+// deleteDimension, which moves every row below it up by one, and nothing
+// invalidates a client's cached `_rowIndex`. PR #246's own test harness derived
+// row numbers from `Job Tracking!A:A` — short, because `Contract ID` is blank on
+// ingested rows — and aimed writes at two real production rows.
+//
+// Resolution order, and why each rung is where it is:
+//
+//   1. NO LOAD ID → refuse. Without one there is nothing to bind the row to, and
+//      omitting the field would otherwise be a free bypass of this whole guard.
+//      It refuses no real work: on the local copy of production 8 of 412 rows
+//      carry no load id, ALL EIGHT are already `Completed`, and
+//      recordStatusChange() already discards the history row for a blank id
+//      (`if (!lid || !ns) return`) — so such a cancel was never recordable.
+//   2. NO LOAD ID COLUMN → refuse. Fail closed: the binding cannot be judged, and
+//      "cannot judge" must never read as "allow" (the rung-1 lesson from
+//      statusOverrideBlocker()).
+//   3. THE ID IS ON NO ROW → refuse. The caller is acting on a load this sheet
+//      does not have.
+//   4. THE ID IS ON 2+ ROWS → refuse, #223's AMBIGUOUS_LOAD. Even when the
+//      caller's row is one of them, cancelling one of two copies is a coin flip
+//      on whether it takes effect at all: the dashboard reads deduplicateLoads()
+//      (last row wins), so cancelling the earlier copy changes nothing visible
+//      while load_status_history records the load as cancelled. Measured before
+//      choosing this: 87 of 288 distinct load ids sit on 2+ rows, but ZERO of
+//      those 87 have a row that is not already completed or cancelled — the
+//      duplicates are entirely historical, so this refuses no live work. That
+//      measurement is the argument; without it this rung would be exactly the
+//      "guard that refuses ordinary work and then gets switched off" #211 warns
+//      about.
+//   5. THE ID IS ON EXACTLY ONE ROW, AND IT IS NOT THE CALLER'S → refuse, and
+//      name the row it IS on so the caller can refresh rather than guess.
+//
+// ⚠️ MATCH ON THE NORMALISED ID. Job Tracking stores both "513987502" and
+// "#513987502" — 93 of 412 rows on the local copy carry the '#' — so a raw
+// string compare would refuse a large slice of legitimate cancels. normLoadKey()
+// is the app's single normaliser (defined beside getLoadCoordsRow(), which
+// exists for this same inconsistency); a second copy here would be free to drift
+// from the one every other load lookup uses.
+//
+// ⚠️ THE REFUSAL NEVER ECHOES WHAT THE TARGET ROW ACTUALLY HOLDS. Saying "row 14
+// holds load 562787563" would turn this into a load-id oracle for the one caller
+// who can reach it without being an admin — a Driver on POST /api/driver/respond
+// — who could sweep rowIndex 2..N with their own load id and read the whole
+// sheet's ids back. Load ids are not inert: GET /api/public/track/:loadId is
+// unauthenticated and keyed on nothing else. The caller is told their OWN load's
+// row, which they already named, and nothing about anyone else's.
+//
+// ⚠️ THIS NARROWS THE WINDOW; IT DOES NOT CLOSE IT. Sheets has no transactions,
+// so a row deleted between the snapshot read and the write still shifts the
+// target — the app-wide "no transactions" caveat, not something specific here.
+// What changes is the size: the unguarded window was "however long this client's
+// cached _rowIndex has been stale", which is unbounded and in practice hours;
+// the remaining one is the few hundred ms of a single request, and it needs a
+// concurrent DELETE to land inside it. Closing it entirely needs an idempotency
+// key or a row id the sheet does not have — worth doing, not worth blocking this.
+//
+// Pure: no I/O, no clock, no database. Returns null to allow, else the refusal.
+function resolveLoadBinding(headers, rows, rowIndex, loadId) {
+	// ⚠️ TYPE FIRST, because normLoadKey() goes through String() and JS array
+	// coercion is not the identity: String(["562620213"]) === "562620213", so a
+	// one-element array would bind exactly as the bare id does. That is not a
+	// binding bug — it resolves to the right row — but the same value then flows
+	// on to logAudit(), insertNotification.run() and a `db.prepare(...).run()`,
+	// where better-sqlite3 refuses a non-primitive and throws AFTER the sheet has
+	// already been written. Refusing the type here is one rule instead of a
+	// case-by-case audit of every sink, and mirrors PR #246's `typeof newStatus
+	// !== "string"` on the sibling route.
+	// ⚠️ LENGTH IS PART OF THE TYPE GATE, and it is not cosmetic. `.trim()` strips
+	// SP/TAB/NBSP/ZWNBSP/LS, so `" ".repeat(200000) + "#562620213"` normalises to
+	// a real load id and BINDS — after which the routes hand the *raw* value
+	// (never the normalised one) to insertLoadResponse.run, insertNotification.run,
+	// insertDispatchNotification.run, logAudit and io.emit, none of which cap it,
+	// against a 50mb body limit with body-parser inflation. Capping here is what
+	// makes the 64/100-char caps below a policy rather than a coincidence. 128
+	// clears every real id many times over: production ids are 6-12 digits and the
+	// longest alphanumeric broker ref seen is SHP2607-A3BJ112 (15).
+	const typed = (typeof loadId === "string" || (typeof loadId === "number" && Number.isFinite(loadId)))
+		&& String(loadId).length <= 128;
+	// Capped before it is echoed anywhere. The body limit is 50mb and
+	// body-parser inflates, so an unbounded id in an error string is the same
+	// reflection PR #246 capped on the status route — and POST /api/driver/respond
+	// is Driver-reachable at driverWriteLimiter's 60/min.
+	const shown = typed ? String(loadId).trim().slice(0, 64) : "";
+	const wanted = typed ? normLoadKey(loadId) : "";
+	if (!wanted) {
+		return {
+			http: 400,
+			code: "LOAD_ID_REQUIRED",
+			// Deliberately does not echo the value — there is nothing useful to show
+			// a caller who sent 200 KB of padding.
+			error: "A load id is required: text or a number, at most 128 characters. This route writes to the row number the caller supplies, so without a load id the server cannot confirm that row holds the load you meant — and the audit entry, the driver notification and the status history would all name nothing.",
+		};
+	}
+
+	const loadIdIdx = (headers || []).findIndex((h) => /load.?id|job.?id/i.test(h));
+	if (loadIdIdx === -1) {
+		return {
+			http: 409,
+			code: "SHEET_LOAD_ID_MISSING",
+			error: "Job Tracking has no Load ID column, so the server cannot confirm that the row it was given holds the load you named. Refusing rather than writing to an unverified row.",
+		};
+	}
+
+	const carrying = [];
+	for (let i = 0; i < (rows || []).length; i++) {
+		if (normLoadKey((rows[i] || [])[loadIdIdx]) === wanted) carrying.push(i + 2);
+	}
+
+	if (!carrying.length) {
+		return {
+			http: 404,
+			code: "LOAD_NOT_ON_SHEET",
+			error: `Load ${shown} is not on Job Tracking, so there is no row to act on. Refresh and try again.`,
+		};
+	}
+	if (carrying.length > 1) {
+		return {
+			http: 409,
+			code: "AMBIGUOUS_LOAD",
+			rowIndices: carrying,
+			error: `Load ${shown} appears on ${carrying.length} rows of Job Tracking (${carrying.join(", ")}), so the server cannot tell which one you mean. Give the duplicate rows distinct load ids — or remove the stale one — and try again.`,
+		};
+	}
+	if (carrying[0] !== rowIndex) {
+		return {
+			http: 409,
+			code: "ROW_LOAD_MISMATCH",
+			rowIndex: carrying[0],
+			error: `Row ${rowIndex} of Job Tracking does not hold load ${shown}, so this would have been applied to a different load. Your view of the board is out of date — rows move when one is deleted. Refresh and try again: load ${shown} is on row ${carrying[0]}.`,
+		};
+	}
+	return null;
+}
+
+// One refusal shape for the binding, and the audit line that goes with it.
+// Refusals are recorded as well as successes, for the same reason
+// sendDispatchRefusal() records its own: `super_admin` is a shared login, so an
+// untraced refusal would make a repeated attempt to write to a row that is not
+// the load being named invisible in the one place anyone looks afterwards — and
+// "someone tried to cancel row 14 claiming it was load X" is precisely the
+// signal the 2026-08-05 incident had no record of.
+//
+// Reuses each route's existing `*_blocked` action so a period refusal and a
+// binding refusal read out of one place, and caps the audited id at 100 chars
+// exactly as PR #246 does (logAudit stores entity_id unbounded).
+//
+// ⚠️ `what` IS CAPPED TOO, and that one is the sharper edge. It is built by the
+// callers from `driver` / `newDriver`, which fall back to the caller's raw
+// `rawDriver.trim()` when no users row matches — unbounded, against a 50mb body
+// limit, on two routes (POST /api/dispatch, /api/dispatch/reassign) that carry
+// NO rate limiter at all. A ROW_LOAD_MISMATCH is triggerable on demand, so
+// without this cap a dispatcher session could write tens of MB per request into
+// audit_trail, which has no retention job. logAudit() itself caps nothing.
+//
+// ⚠️ STRINGIFY ONLY PRIMITIVES. `String(x)` on a deeply-nested array recurses
+// through Array.prototype.toString and throws RangeError on a body like
+// [[[[…]]]] — inside the refusal path, so the 409 would become a 500.
+function sendLoadBindRefusal(req, res, refusal, action, loadId, what) {
+	const detail = refusal.rowIndices
+		? ` rows=${refusal.rowIndices.join(",").slice(0, 200)}`
+		: (refusal.rowIndex ? ` load is on row ${refusal.rowIndex}` : "");
+	const auditId = (typeof loadId === "string" || typeof loadId === "number")
+		? String(loadId).slice(0, 100) : "";
+	logAudit(
+		req, action, "load", auditId,
+		`Blocked ${String(what == null ? "" : what).slice(0, 200)} [${refusal.code}]${detail}`
+	);
+	const body = { error: refusal.error, code: refusal.code };
+	if (refusal.rowIndices) body.rowIndices = refusal.rowIndices;
+	else if (refusal.rowIndex) body.rowIndex = refusal.rowIndex;
+	return res.status(refusal.http).json(body);
 }
 
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
@@ -19934,10 +20154,11 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// were noisy and confused drivers about which load to work next).
 
 		const sheets = await getSheets();
-		// Headers AND the target row in one round trip — the row is what the
-		// period guard below judges. RUNG 2: a failed read REFUSES rather than
-		// falling through to a generic 500.
-		const snapshot = await readJobTrackingRowWithHeaders(sheets, rowIndex);
+		// Headers, every row, AND the target row in one round trip — the target
+		// row is what the period guard below judges, and the rest is what the
+		// load binding needs. RUNG 2: a failed read REFUSES rather than falling
+		// through to a generic 500.
+		const snapshot = await readJobTrackingSnapshot(sheets, rowIndex);
 		if (!snapshot) {
 			return sendDispatchRefusal(
 				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
@@ -19945,6 +20166,21 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			);
 		}
 		const headers = snapshot.headers;
+
+		// LOAD BINDING — before the period guard, and before every write. The
+		// period guard reasons about the row at `rowIndex`; if that row is not the
+		// load the caller named, its verdict is about the wrong load, so the
+		// subject has to be established first. See resolveLoadBinding().
+		{
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			if (unbound) {
+				return sendLoadBindRefusal(
+					req, res, unbound, "dispatch_blocked", loadId,
+					`assigning ${driver} to row ${rowIndex}`
+				);
+			}
+		}
+
 		const driverColIdx = headers.findIndex((h) => /driver/i.test(h));
 		const statusColIdx = headers.findIndex((h) => /status/i.test(h));
 
@@ -20082,9 +20318,9 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		const newDriver = userMatch ? userMatch.driver_name : rawNewDriver.trim();
 
 		const sheets = await getSheets();
-		// Headers AND the target row in one round trip; RUNG 2 refuses on a
-		// failed read. Same shape as POST /api/dispatch above.
-		const snapshot = await readJobTrackingRowWithHeaders(sheets, rowIndex);
+		// Headers, every row AND the target row in one round trip; RUNG 2 refuses
+		// on a failed read. Same shape as POST /api/dispatch above.
+		const snapshot = await readJobTrackingSnapshot(sheets, rowIndex);
 		if (!snapshot) {
 			return sendDispatchRefusal(
 				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
@@ -20092,6 +20328,21 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			);
 		}
 		const headers = snapshot.headers;
+
+		// LOAD BINDING — before the period guard and every write, same reasoning
+		// as POST /api/dispatch. On this route an unbound row moves the WHOLE
+		// load's revenue to another investor (Owner ID) and its active-day pay to
+		// another person (Driver), on a load nobody asked about.
+		{
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			if (unbound) {
+				return sendLoadBindRefusal(
+					req, res, unbound, "reassign_blocked", loadId,
+					`reassigning row ${rowIndex} to ${newDriver}`
+				);
+			}
+		}
+
 		const driverCol = headers.findIndex((h) => /driver/i.test(h));
 		if (driverCol === -1) {
 			return res.status(400).json({ error: "Driver column not found" });
@@ -20248,10 +20499,16 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 		// and this route then writes `Job Status = "Cancelled"` and blanks `Driver`
 		// on whatever row it was handed, re-pointing every findCol() regex in the app.
 		//
-		// ⚠️ NO PERIOD GUARD HERE, DELIBERATELY. #211 left cancel unguarded because a
-		// broker calling off a July load in August is ordinary business, and a guard
-		// that refuses ordinary work gets switched off. This change is ONLY the
-		// rowIndex validation; do not fold a period check in with it.
+		// That guard stops row 1. It does NOT stop row N: the load binding further
+		// down is what stops the row being some OTHER live load — see
+		// resolveLoadBinding().
+		//
+		// ⚠️ NO PERIOD GUARD HERE, DELIBERATELY, AND STILL NONE. #211 left cancel
+		// unguarded because a broker calling off a July load in August is ordinary
+		// business, and a guard that refuses ordinary work gets switched off. The
+		// binding below is a different question — "is this the load you named?",
+		// which has one right answer in every month — so it is not a period check
+		// in disguise. Do not fold one in.
 		const rowIndex = resolveSheetDataRow(res, rawRowIndex);
 		if (rowIndex === null) return; // 400 already sent
 
@@ -20270,11 +20527,41 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 		}
 
 		const sheets = await getSheets();
-		const headerResp = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking!1:1",
-		});
-		const headers = (headerResp.data.values || [[]])[0];
+		// ⚠️ THIS ROUTE USED TO READ ONLY `Job Tracking!1:1` — the header row — and
+		// then write to whatever row it was handed. It never checked that the row
+		// carried the load it was about to audit, notify the driver about and
+		// stamp onto load_status_history. See resolveLoadBinding() for why that is
+		// the 2026-08-05 mis-cancel exactly, and why the mandatory reason above
+		// makes an unbound cancel read as deliberate rather than as a mistake.
+		const snapshot = await readJobTrackingSnapshot(sheets, rowIndex);
+		if (!snapshot) {
+			// The sheet could not be read, so the row cannot be confirmed to hold
+			// this load. Refusing is the only answer that is not a guess — and
+			// unlike a period check, retrying costs nothing once the read works.
+			return sendLoadBindRefusal(
+				req, res,
+				{
+					http: 503,
+					code: "SHEET_UNREADABLE",
+					error: "Job Tracking could not be read, so the server cannot confirm that this row holds the load you are cancelling. Nothing was changed. Try again in a moment.",
+				},
+				"cancel_blocked", loadId, `cancelling row ${rowIndex}`
+			);
+		}
+		const headers = snapshot.headers;
+
+		// LOAD BINDING — the row must actually hold this load before anything is
+		// written, audited or pushed to the driver's phone.
+		{
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			if (unbound) {
+				return sendLoadBindRefusal(
+					req, res, unbound, "cancel_blocked", loadId,
+					`cancelling row ${rowIndex}`
+				);
+			}
+		}
+
 		const driverColIdx = headers.findIndex((h) => /driver/i.test(h));
 		const statusColIdx = headers.findIndex((h) => /status/i.test(h));
 
@@ -20762,6 +21049,35 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 
 		const sheets = await getSheets();
 
+		// ONE read serves the binding, the period guard and both write branches
+		// below. It used to be three separate reads of `Job Tracking!1:1` on top of
+		// the guard's own, and headers resolved separately per branch can drift
+		// from the headers the guard judged.
+		const snapshot = await readJobTrackingSnapshot(sheets, rowIndex);
+		if (!snapshot) {
+			return sendDispatchRefusal(
+				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
+				"driver_respond_blocked", loadId, `Recording "${response}" on load ${loadId || "(unknown)"}`
+			);
+		}
+		const headers = snapshot.headers;
+
+		// LOAD BINDING — before the period guard and before the load_responses
+		// insert. loadBelongsToDriver() above scopes `loadId`, but `rowIndex` is an
+		// INDEPENDENT field: a driver who genuinely owns load X could send X with
+		// any row number and land the decline's `Driver = ""` / `Job Status =
+		// "Unassigned"` on a stranger's live load. Ownership of the id is not
+		// ownership of the row, so the two have to be tied together.
+		{
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			if (unbound) {
+				return sendLoadBindRefusal(
+					req, res, unbound, "driver_respond_blocked", loadId,
+					`recording "${response}" on row ${rowIndex}`
+				);
+			}
+		}
+
 		// PERIOD GUARD — before the first write of either kind, including the
 		// load_responses row below. Included with its three siblings because a
 		// DECLINE writes Driver = "" and Job Status = "Unassigned": on a completed
@@ -20772,21 +21088,13 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 		// cells by declining instead. An ACCEPT writes "Assigned", which is not a
 		// completed status, so ordinary acceptance is unaffected in any month.
 		{
-			const snapshot = await readJobTrackingRowWithHeaders(sheets, rowIndex);
-			if (!snapshot) {
-				return sendDispatchRefusal(
-					req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
-					"driver_respond_blocked", loadId, `Recording "${response}" on load ${loadId || "(unknown)"}`
-				);
-			}
-			const rHeaders = snapshot.headers;
-			const before = sheetRowToObject(rHeaders, snapshot.row);
-			const sIdx = rHeaders.findIndex((h) => /status/i.test(h));
-			const dIdx = rHeaders.findIndex((h) => /^driver$/i.test(h));
+			const before = sheetRowToObject(headers, snapshot.row);
+			const sIdx = headers.findIndex((h) => /status/i.test(h));
+			const dIdx = headers.findIndex((h) => /^driver$/i.test(h));
 			const edits = {};
-			if (sIdx !== -1 && rHeaders[sIdx]) edits[rHeaders[sIdx]] = response === "accepted" ? "Assigned" : "Unassigned";
-			if (response !== "accepted" && dIdx !== -1 && rHeaders[dIdx]) edits[rHeaders[dIdx]] = "";
-			const blocked = dispatchWriteBlocker(rHeaders, before, edits);
+			if (sIdx !== -1 && headers[sIdx]) edits[headers[sIdx]] = response === "accepted" ? "Assigned" : "Unassigned";
+			if (response !== "accepted" && dIdx !== -1 && headers[dIdx]) edits[headers[dIdx]] = "";
+			const blocked = dispatchWriteBlocker(headers, before, edits);
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "driver_respond_blocked", loadId,
@@ -20807,13 +21115,15 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 		const dateTime = houstonStamp(now);
 
 		if (response === "accepted") {
-			// Update Job Status to "Assigned" in the sheet
-			const headerResp2 = await sheets.spreadsheets.values.get({
-				spreadsheetId: SPREADSHEET_ID,
-				range: "Job Tracking!1:1",
-			});
-			const headers2 = (headerResp2.data.values || [[]])[0];
-			const statusColIdx2 = headers2.findIndex((h) => /status/i.test(h));
+			// Update Job Status to "Assigned" in the sheet, using the SAME headers
+			// the binding and the period guard were judged against.
+			//
+			// ⚠️ colLetter(), not String.fromCharCode(65 + idx), which this branch
+			// used: that expression is only correct for the first 26 columns and
+			// emits `[`, `\`, `]` past column Z, so on a wider sheet it would build
+			// a malformed A1 range. Job Tracking is 26 columns wide today, i.e. it
+			// is one added column away from being wrong.
+			const statusColIdx2 = headers.findIndex((h) => /status/i.test(h));
 			if (statusColIdx2 !== -1) {
 				// colLetter(), not String.fromCharCode(65 + idx) — the latter emits "["
 				// at index 26 and silently writes to a garbage range on any sheet wider
@@ -20844,12 +21154,9 @@ app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res
 				body: `Driver confirmed assignment`,
 			});
 		} else {
-			// Decline: clear driver and set Unassigned
-			const headerResp = await sheets.spreadsheets.values.get({
-				spreadsheetId: SPREADSHEET_ID,
-				range: "Job Tracking!1:1",
-			});
-			const headers = (headerResp.data.values || [[]])[0];
+			// Decline: clear driver and set Unassigned — again off the SAME headers
+			// the binding and the period guard used, so the cells written are the
+			// cells that were judged.
 			const driverColIdx = headers.findIndex((h) => /^driver$/i.test(h));
 			const statusColIdx = headers.findIndex((h) => /status/i.test(h));
 

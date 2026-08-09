@@ -313,9 +313,39 @@ check("dispatchWriteBlocker is called from exactly the 4 routes",
 	SRC.split("const blocked = dispatchWriteBlocker(").length - 1, 4);
 check("PUT /api/driver/status validates rowIndex through the shared helper",
 	/rowIndex: rawRowIndex, loadId, newStatus, rowData[\s\S]{0,1400}resolveSheetDataRow\(res, rawRowIndex\)/.test(SRC), true);
-// A1: `Job Tracking!5:5` is the whole row; `A5` is one cell (PR #218's bug).
-check("the row read uses whole-row A1 notation, never A{n}",
-	/ranges: \["Job Tracking!1:1", `Job Tracking!\$\{rowIndex\}:\$\{rowIndex\}`\]/.test(SRC), true);
+// The guard judges a WHOLE row, never a single cell (PR #218's `A{n}` bug, where
+// `Job Tracking!A5` reads one cell rather than row 5). The two-range batchGet that
+// used to carry this property was replaced by a full-tab read, because the load
+// binding has to count how many rows carry a load id and the id's column is only
+// known after the headers are read — so the property is now pinned on the read
+// and the slice instead of on the A1 shape.
+// Sliced out by hand rather than via extract(), whose needle is `\nfunction ` —
+// this one is an `async function`. Same "found exactly once" discipline.
+const SNAPSHOT = (() => {
+	const needle = "\nasync function readJobTrackingSnapshot(";
+	const hits = SRC.split(needle).length - 1;
+	if (hits !== 1) throw new Error(`expected exactly 1 readJobTrackingSnapshot(), found ${hits}`);
+	const start = SRC.indexOf(needle) + 1;
+	let depth = 0;
+	for (let j = SRC.indexOf("{", start); j < SRC.length; j++) {
+		if (SRC[j] === "{") depth++;
+		else if (SRC[j] === "}") { depth--; if (depth === 0) return SRC.slice(start, j + 1); }
+	}
+	throw new Error("unbalanced braces extracting readJobTrackingSnapshot()");
+})();
+check("the snapshot reads the whole tab, not a cell or a column",
+	/range: "Job Tracking",/.test(SNAPSHOT), true);
+check("no single-cell A{n} range survives in the snapshot read",
+	/Job Tracking!\$\{?[A-Za-z]/.test(SNAPSHOT), false);
+check("the target row is the header-offset slice of the data rows",
+	/row: rows\[rowIndex - 2\] \|\| \[\]/.test(SNAPSHOT), true);
+check("every data row is returned, so the binding can count duplicates",
+	/const rows = all\.slice\(1\);/.test(SNAPSHOT), true);
+// ⚠️ NOT getJobTrackingCached(): it is up to 60s stale (a row that moved inside
+// that window is exactly what the binding catches) and it returns
+// deduplicateLoads() output, which hides the duplicates AMBIGUOUS_LOAD looks for.
+check("the snapshot does not read through the 60s deduplicated cache",
+	/getJobTrackingCached/.test(SNAPSHOT), false);
 
 // ------------------------------------------------------------------ report
 console.log(`\n${"=".repeat(60)}`);
