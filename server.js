@@ -18384,13 +18384,45 @@ app.post("/api/webhook/new-load", (req, res) => {
 	res.json({ ok: true });
 });
 
+// Validate a caller-supplied Job Tracking row number, or refuse the request.
+// Returns the coerced integer, or null AFTER sending a 400 — the same
+// "already responded, just return" convention as resolveDriverActor() below.
+//
+// ⚠️ ROW 1 IS THE HEADER ROW, and `if (!rowIndex)` does not stop a write to it:
+// 1 is truthy. Every column in this app is resolved by matching header TEXT
+// (findCol, headers.findIndex(/driver/i), the /rate|amount|revenue|pay/ money
+// pattern), so overwriting row 1 re-points the dashboard, the driver app,
+// /api/financials, /api/investor and the invoice batch at once, silently, with
+// no data row touched. That is why PUT /api/data/:rowIndex has refused
+// `rowIndex < 2` since #209 — this is the same rule, the same status code and
+// the same error body, so the two can't answer differently.
+//
+// Number(), not parseInt(): parseInt("5abc") is 5 and parseInt("2.9") is 2, so
+// a malformed index silently picks a real row. Callers use the RETURNED number
+// (never the raw body value) to build their A1 ranges, so the row that gets
+// written is always the row that was validated — a string like "2:D1000" can no
+// longer widen `Job Tracking!D2` into a range.
+function resolveSheetDataRow(res, value) {
+	const rowIndex = Number(value);
+	if (!Number.isInteger(rowIndex) || rowIndex < 2) {
+		res.status(400).json({
+			error: "rowIndex must be a whole number of 2 or more — row 1 is the header row, and rewriting it re-points every column this app resolves by header text.",
+			code: "INVALID_ROW_INDEX",
+		});
+		return null;
+	}
+	return rowIndex;
+}
+
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex, driver: rawDriver, loadId, origin, destination } = req.body;
-		if (!rowIndex || !rawDriver) {
+		const { rowIndex: rawRowIndex, driver: rawDriver, loadId, origin, destination } = req.body;
+		if (!rawDriver) {
 			return res.status(400).json({ error: "rowIndex and driver required" });
 		}
+		const rowIndex = resolveSheetDataRow(res, rawRowIndex);
+		if (rowIndex === null) return; // 400 already sent
 
 		// Normalize driver name against users table to prevent misspelling mismatches
 		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawDriver.trim());
@@ -18512,10 +18544,13 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 // POST /api/dispatch/reassign — Reassign a load to a different driver
 app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex, newDriver: rawNewDriver, loadId, oldDriver } = req.body;
-		if (!rowIndex || !rawNewDriver) {
+		const { rowIndex: rawRowIndex, newDriver: rawNewDriver, loadId, oldDriver } = req.body;
+		if (!rawNewDriver) {
 			return res.status(400).json({ error: "rowIndex and newDriver required" });
 		}
+		// Row 1 is the header row — see resolveSheetDataRow() above.
+		const rowIndex = resolveSheetDataRow(res, rawRowIndex);
+		if (rowIndex === null) return; // 400 already sent
 
 		// Normalize against users table (same pattern as /api/dispatch).
 		const userMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(rawNewDriver.trim());
@@ -19092,12 +19127,18 @@ const locationLimiter = rateLimit({
 // POST /api/driver/respond — Driver accepts or declines a load assignment
 app.post("/api/driver/respond", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
-		const { loadId, rowIndex, response } = req.body;
+		const { loadId, rowIndex: rawRowIndex, response } = req.body;
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return; // 401/403 already sent
-		if (!loadId || !rowIndex || !response || !driverName) {
+		if (!loadId || !response || !driverName) {
 			return res.status(400).json({ error: "loadId, rowIndex, response, and driverName required" });
 		}
+		// Row 1 is the header row — see resolveSheetDataRow() above. This route is
+		// the Driver-reachable one: loadBelongsToDriver() below scopes `loadId`,
+		// but `rowIndex` is independent of it and lands straight in an A1 range,
+		// so without this a driver could rewrite the header row of the whole app.
+		const rowIndex = resolveSheetDataRow(res, rawRowIndex);
+		if (rowIndex === null) return; // 400 already sent
 		if (!["accepted", "declined"].includes(response)) {
 			return res.status(400).json({ error: "response must be 'accepted' or 'declined'" });
 		}
