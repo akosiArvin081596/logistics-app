@@ -54,7 +54,7 @@ Drivers can photograph a fuel or repair receipt and the form pre-fills from a Ge
 
 ## n8n — broker email ingestion
 
-When a broker emails a Rate Confirmation to `info@logisx.com`, an n8n workflow parses the PDF and posts a structured payload to `POST /api/n8n/job`. The server appends a new row to the Job Tracking sheet with status `Unassigned`, and a `dispatch-notification` socket event fires immediately so dispatchers see the new load without refreshing.
+When a broker emails a Rate Confirmation to `info@logisx.com`, an n8n workflow hands the PDF to the app for extraction (see **PDF parsing** below) and posts a structured payload to `POST /api/n8n/job`. The server appends a new row to the Job Tracking sheet with status `Unassigned`, and a `dispatch-notification` socket event fires immediately so dispatchers see the new load without refreshing.
 
 **Auth.** Shared secret in the `x-webhook-secret` header. Matches `N8N_WEBHOOK_SECRET` from `.env`. n8n stores the secret in its own credentials.
 
@@ -64,7 +64,11 @@ When a broker emails a Rate Confirmation to `info@logisx.com`, an n8n workflow p
 
 **Replay.** A `replay-via-webhook-injection.js` script (committed alongside the n8n workflows) lets us re-run a single message through the pipeline when a workflow change should be applied retroactively.
 
-**PDF parsing.** The actual PDF parsing happens inside n8n using LlamaParse, with a "Validate Parse Quality" node that gates on confidence before posting downstream. The server doesn't see the PDF — it only receives the structured payload.
+**PDF parsing.** Extraction runs in **the app, not n8n**. The workflow goes `Merge Attachment + Email → Prep PDF Base64 (Code) → Extract via LogisX (HTTP) → Normalize Load Fields`, calling `POST /api/n8n/extract-pdf-via-gemini` with the PDF as base64. So the server *does* see the PDF, and it is the server's Gemini call — the same `RATECON_PDF_SYSTEM_PROMPT` the drag-and-drop path uses — that produces the fields. The route returns `{output:{…}}`, the shape n8n's old Information Extractor emitted, so downstream expressions were unchanged by the move.
+
+**Auth for that call** is `N8N_EXTRACT_SECRET` — deliberately *not* `N8N_WEBHOOK_SECRET`, which also gates `POST /api/webhook/new-load`. n8n node parameters are stored as plaintext in the workflow JSON, so the two secrets are kept separate to limit what one leak reaches.
+
+**LlamaParse was retired 2026-08-08** (54 → 45 nodes, applied to the live workflow). It had been the first step of a lossy `LlamaParse (PDF→markdown) → Information Extractor` chain that flattened the tables rate-con data lives in: measured on the same PDF, n8n returned `Load Number: null, Broker: null, Rate: null` — while its own quality gate reported `isValid: true` and pulled the word "Confirmation" as the load id — where the app returned every field. That failure lost load `562787563`. The old "Validate Parse Quality"/`Markdown Quality OK?` gate and the whole LlamaParse fallback chain no longer exist; `Prep PDF Base64` and `Extract via LogisX` instead route `onError` → `Build Failure Context` → `Send Failure Alert`, so a failure now alerts rather than silently degrading to a worse extractor.
 
 ## Routemate — ELD telematics (off by default)
 
