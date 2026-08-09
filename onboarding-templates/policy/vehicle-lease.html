@@ -534,9 +534,11 @@
   <!-- ⚠️ The two sides of this receipt are deliberately NOT symmetrical.
        LESSEE is `Lessee signature`, the same label as the lease execution page, so
        it fills: the lessee genuinely executes this page at signing time, and the
-       field map says so — it stamps the delivery location and date/time above and
-       defaults all 10 condition checkboxes to checked, commented "Lessee is
-       attesting the unit is in inspection-pass condition when signing".
+       field map says so — it stamps the delivery location and date/time above.
+       It does NOT tick the 10 condition checkboxes: they defaulted to checked
+       until 2026-08-09, which certified an inspection nobody performed, and now
+       default to unchecked. Nothing in this template carries a literal `checked`
+       attribute, so the field map is the only thing that could ever tick them.
        LESSOR is `Lessor delivery signature`, a label NOTHING maps, so it renders
        BLANK ON PURPOSE — this is not the querySelector bug, and do not "fix" it by
        pointing it back at `Lessor signature`. There is no counterpart intent for
