@@ -177,7 +177,16 @@ ok("no query parameter reaches the alert decision",
 
 const mountCount = (name) => src.split("\n").filter((l) => /^app\.(get|post|put|delete|patch)\(/.test(l) && l.includes(name + ",")).length;
 eq("refuseCrossOrigin mount count", mountCount("refuseCrossOrigin"), 6);
-eq("refuseCrossSite mount count (fuel-gallons GET + apply)", mountCount("refuseCrossSite"), 2);
+// ⚠️ Assert the ROUTES, not just a count. A bare count goes stale the moment a
+// new guarded route lands — this pin said 2 and broke when #250 correctly added
+// the onboarding-evidence GET, which reads signer IP/user-agent and is exactly
+// the kind of admin GET that should carry it. Naming them says WHICH is missing.
+const mountedOn = (name) => src.split("\n")
+	.filter((l) => /^app\.(get|post|put|delete|patch)\(/.test(l) && l.includes(name + ","))
+	.map((l) => (l.match(/"([^"]+)"/) || [, "?"])[1]).sort();
+eq("refuseCrossSite is on exactly the cost/exposure GETs", mountedOn("refuseCrossSite").join(" "),
+	["/api/admin/fuel-gallons-recovery", "/api/admin/fuel-gallons-recovery/apply",
+	 "/api/admin/onboarding-evidence/:scope/:ownerId"].sort().join(" "));
 
 // ⚠️ The non-browser integrations must stay untouched. They present no
 // Sec-Fetch-* and no Origin, so the guard would let them through anyway — but
