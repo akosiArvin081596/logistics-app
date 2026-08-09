@@ -15,6 +15,23 @@
  *      guard could conclude a row touches fewer months than it does — failing
  *      OPEN.
  *
+ *   3. THE PICKUP END, which #237 reported and deliberately left. Its primary read
+ *      was the strict parser too, and its `null` is indistinguishable from a blank
+ *      cell — so a present-but-unreadable pickup fell through to the ASSIGNED date,
+ *      contradicting that fallback's own comment ("when blank").
+ *
+ *      Unlike the drop-off it is NOT strictly widening, which is why it is fixed
+ *      DIFFERENTLY on the two sides and why sections 7-9 exist:
+ *        • the three MONEY sites take the true pickup (a SHIFT — the window can
+ *          lose a day), because that is the day the driver worked and it is what
+ *          POST /api/invoices/generate already reads;
+ *        • loadWindowDays(), which backs every period-lock guard, takes the UNION
+ *          of the old and new readings, so the guard's window can only ever GROW
+ *          and its `resolved:false` refusal condition is byte-identical.
+ *      Substituting at the guard instead of unioning would flip resolved:false ->
+ *      resolved:true — a change to a REFUSAL DEFAULT. Section 9 builds exactly that
+ *      naive variant and asserts it flips, so the choice is enforced, not described.
+ *
  * WHY IT LOADS THE FUNCTIONS OUT OF server.js SOURCE INSTEAD OF require()-ing IT:
  * same reason as scripts/test-money-date.js — server.js opens SQLite, reads a
  * service-account key and starts listening on import, so it cannot be required.
@@ -55,9 +72,22 @@ function eq(actual, expected, label) {
 }
 
 // ---------------------------------------------------------------- extraction
-function braceMatch(start) {
+// The body opens at the first `{` AFTER the parameter list, not the first `{`
+// after the name. server.js has functions that DESTRUCTURE their parameter
+// (excludedDayPeriods({ driver, date, ... })), and a scan from the name closes on
+// the parameter object and silently returns the signature as if it were the whole
+// function — which compiles to nothing useful and tests nothing.
+function bodyStart(afterName) {
 	let depth = 0;
-	for (let j = SRC.indexOf("{", start); j < SRC.length; j++) {
+	for (let j = afterName; j < SRC.length; j++) {
+		if (SRC[j] === "(") depth++;
+		else if (SRC[j] === ")") { depth--; if (depth === 0) return SRC.indexOf("{", j); }
+	}
+	throw new Error("unbalanced parens from offset " + afterName);
+}
+function braceMatch(start, from) {
+	let depth = 0;
+	for (let j = from === undefined ? SRC.indexOf("{", start) : from; j < SRC.length; j++) {
 		if (SRC[j] === "{") depth++;
 		else if (SRC[j] === "}") { depth--; if (depth === 0) return SRC.slice(start, j + 1); }
 	}
@@ -67,7 +97,19 @@ function extractFn(name) {
 	const needle = `\nfunction ${name}(`;
 	const hits = SRC.split(needle).length - 1;
 	if (hits !== 1) throw new Error(`expected exactly 1 definition of ${name}(), found ${hits}`);
-	return braceMatch(SRC.indexOf(needle) + 1);
+	const start = SRC.indexOf(needle) + 1;
+	return braceMatch(start, bodyStart(start + `function ${name}`.length));
+}
+// Pull one statement out of server.js verbatim, asserting how many times it
+// occurs. This is how the money sites are tested: they are three inline
+// expressions inside 18k lines of handler, not a function, so the only honest way
+// to exercise "the code that ships" is to lift the exact statements and run them.
+function extractStmt(re, expectedHits, label) {
+	const hits = SRC.match(re) || [];
+	if (hits.length !== expectedHits) throw new Error(`expected ${expectedHits} × ${label}, found ${hits.length}`);
+	const uniq = [...new Set(hits)];
+	if (uniq.length !== 1) throw new Error(`${label} is not identical at all sites: ${JSON.stringify(uniq)}`);
+	return uniq[0];
 }
 // The IFTA helper is a const arrow inside the route handler.
 function extractIftaSheetToIso() {
@@ -261,12 +303,217 @@ for (const [label, fn, expected] of CONTROLS) {
 }
 eq(controlsHeld, CONTROLS.length, `all ${CONTROLS.length} controls pass on BOTH old and new (so the suite is not just failing everything)`);
 
-// ------------------------------------------------------- 6. timezone invariance
+// ============================================================================
+// THE PICKUP END (#237 reported it and left it — this is the other half)
+// ============================================================================
+
+// ------------------------------------ 6. structural — the money sites and only them
+console.log("\n6. structural — the pickup end reads the shared resolver at the 3 MONEY sites");
+
+const PICKUP_STMT = extractStmt(/let pickup = \w+\(pickupDateCol \? r\[pickupDateCol\] : null\);/g, 3, "money-site pickup read");
+const MONEY_DROP_STMT = extractStmt(/const dropoff = \w+\(dropoffDateCol \? r\[dropoffDateCol\] : null\);/g, 3, "money-site drop-off read");
+const MONEY_FALLBACK_STMT = extractStmt(/if \(!pickup && jtDateCol && r\[jtDateCol\]\) pickup = \w+\(r\[jtDateCol\]\);/g, 3, "money-site assigned-date fallback");
+
+ok(/let pickup = moneySheetDate\(/.test(PICKUP_STMT), "all 3 money sites read the pickup via moneySheetDate()");
+ok(!/let pickup = parseSheetDate\(/.test(SRC), "no money site still reads the pickup with the local strict parser");
+ok(!/const parseSheetDate = \(val\) => \{/.test(SRC),
+	"computeInvestorMonthlyEarnings' local parseSheetDate copy is DELETED, not merely unused");
+// One local copy survives, deliberately and out of scope: GET /api/investor/load-report
+// buckets by the ASSIGNED date with it, which is a separate defect of the same class
+// (it drops RFC 2822 rows). Pinning the count here is what stops it silently becoming
+// two again.
+const localParsers = (SRC.match(/\n\t*function parseSheetDate\(val\) \{/g) || []).length;
+eq(localParsers, 1, "exactly 1 local parseSheetDate survives (GET /api/investor/load-report, reported not fixed)");
+ok(/app\.get\("\/api\/investor\/load-report"[\s\S]{0,4000}?function parseSheetDate\(val\) \{/.test(SRC),
+	"…and the survivor is inside /api/investor/load-report, not a money site");
+
+// The guard keeps its narrow read AND gains the wide one — union, not substitution.
+ok(/let pickup = jtParseSheetDate\(cols\.pickupDateCol \? row\[cols\.pickupDateCol\] : null\);/.test(WINDOW_SRC),
+	"loadWindowDays KEEPS the narrow strict pickup read (the refusal condition depends on it)");
+ok(/const pickupShared = moneySheetDate\(cols\.pickupDateCol \? row\[cols\.pickupDateCol\] : null\);/.test(WINDOW_SRC),
+	"loadWindowDays ADDS the shared-resolver pickup read beside it");
+ok(/if \(!pickup \|\| isNaN\(pickup\)\) return \[\];/.test(WINDOW_SRC),
+	"loadWindowDays' `return []` refusal line is untouched");
+
+// ------------------------------ 7. the money sites' pickup semantics (the SHIFT)
+console.log("\n7. money sites — the pickup SHIFT (driver pay, i.e. the settlement)");
+
+// Built from the three statements lifted verbatim above, in the shipped order.
+function buildMoneyWindow(pickupStmt) {
+	return new Function("RFC2822_MONTHS", `
+		${extractFn("moneySheetDate")}
+		${extractFn("jtParseSheetDate")}
+		${extractFn("jtFmtDate")}
+		const parseSheetDate = jtParseSheetDate; // the local copy, byte-identical
+		return function (r, pickupDateCol, dropoffDateCol, jtDateCol) {
+			${pickupStmt}
+			${MONEY_DROP_STMT}
+			${MONEY_FALLBACK_STMT}
+			return { pickup: pickup && !isNaN(pickup) ? jtFmtDate(pickup) : null,
+			         dropoff: dropoff && !isNaN(dropoff) ? jtFmtDate(dropoff) : null };
+		};`)(RFC2822_MONTHS);
+}
+const MONEY_NEW = buildMoneyWindow(PICKUP_STMT);
+const mrow = (pickup, dropoff, assigned) => ({ P: pickup, D: dropoff, A: assigned });
+const moneyRead = (fn, p, d, a) => fn(mrow(p, d, a), "P", "D", "A");
+
+// THE PRODUCTION ROW. Load 529227269: the pickup cell is unreadable by the strict
+// parser, so pay used to start the window at the ASSIGNED date (2025-09-22, when the
+// rate-con email landed) instead of at the pickup (2025-09-23).
+eq(moneyRead(MONEY_NEW, "2025/09/23 23:59", "2025/09/24 23:59", "Date: Mon, 22 Sep 2025 08:45:51 -0500").pickup,
+	"2025-09-23", "production row 529227269 now starts its pay window at the PICKUP, not the assigned date");
+eq(moneyRead(MONEY_NEW, "Date: 9/23/2025", "", "9/20/2025").pickup, "2025-09-23",
+	"a 'Date:'-prefixed pickup resolves instead of falling through to the assigned date");
+
+console.log("\n   controls — the fallback must still fire where it is supposed to");
+eq(moneyRead(MONEY_NEW, "", "", "9/20/2025").pickup, "2025-09-20", "BLANK pickup still falls back to the assigned date");
+eq(moneyRead(MONEY_NEW, "14:00", "", "6/23/2026, 7:11:25 PM").pickup, "2026-06-23",
+	"production row 557861739's time-only pickup ('14:00') STILL falls back — a time is not a date");
+eq(moneyRead(MONEY_NEW, "07:00 Appt.", "", "9/20/2025").pickup, "2025-09-20",
+	"'07:00 Appt.' (raw sheet, row #522314810) still falls back");
+eq(moneyRead(MONEY_NEW, "9/23/2025", "", "9/20/2025").pickup, "2025-09-23", "US-slash pickup unchanged");
+eq(moneyRead(MONEY_NEW, "2025-09-23", "", "9/20/2025").pickup, "2025-09-23", "ISO pickup unchanged");
+eq(moneyRead(MONEY_NEW, "9/23/25 06:00-18:00 Appt.", "", "9/20/2025").pickup, "2025-09-23",
+	"the common 'M/D/YY window Appt.' shape unchanged");
+eq(moneyRead(MONEY_NEW, "", "", "").pickup, null, "no pickup and no assigned date still yields nothing");
+
+// ------------------- 8. the guard's window — UNION, and the refusal default holds
+console.log("\n8. loadWindowDays — union widens, and NEVER flips the refusal");
+
+const PERIODS = new Function("RFC2822_MONTHS",
+	`${DEPS}\n${WINDOW_SRC}\n${extractFn("loadAssignedMonthKey")}\n${extractFn("loadRowPeriods")}\nreturn { loadRowPeriods, loadWindowDays };`
+)(RFC2822_MONTHS);
+
+// The production row, through the GUARD: it keeps 09-22 (the assigned-date reading)
+// AND gains 09-23/09-24, so the guard still answers for every month either basis
+// could book the load into.
+eq(NEW.loadWindowDays(row("2025/09/23 23:59", "2025/09/24 23:59", "Date: Mon, 22 Sep 2025 08:45:51 -0500"), COLS),
+	["2025-09-22", "2025-09-23", "2025-09-24"],
+	"guard window is the UNION of the assigned-date reading and the true pickup");
+// A union that crosses a month boundary must show BOTH months to the guard.
+eq([...new Set(NEW.loadWindowDays(row("2025/10/01 08:00", "", "Date: Tue, 30 Sep 2025 08:45:51 -0500"), COLS).map((d) => d.slice(0, 7)))],
+	["2025-09", "2025-10"], "a pickup that shifts across a month boundary yields BOTH months to the guard");
+
+console.log("\n   ⚠️ the refusal default — fail-CLOSED must survive the widening");
+// The only way to reach loadRowPeriods' window path is an unreadable assigned date.
+// With one, an unreadable-by-strict-but-readable-by-shared pickup MUST still refuse.
+const UNRESOLVABLE = row("2025/09/23 23:59", "2025/09/24 23:59", "TBD");
+eq(NEW.loadWindowDays(UNRESOLVABLE, COLS), [], "unreadable assigned date + widened pickup STILL returns no window");
+eq(PERIODS.loadRowPeriods(UNRESOLVABLE, COLS), { periods: [], resolved: false },
+	"…so loadRowPeriods still answers resolved:FALSE — the guard refuses, as before");
+eq(PERIODS.loadRowPeriods(row("", "", "TBD"), COLS), { periods: [], resolved: false },
+	"a row with nothing readable still refuses");
+eq(PERIODS.loadRowPeriods(row("9/23/2025", "9/25/2025", "TBD"), COLS),
+	{ periods: ["2025-09"], resolved: true }, "a readable strict pickup still resolves via the window path");
+eq(PERIODS.loadRowPeriods(row("2025/09/23 23:59", "", "9/20/2025"), COLS),
+	{ periods: ["2025-09"], resolved: true }, "a readable assigned date still short-circuits to its own month");
+
+console.log("\n   monotonicity — the guard's window can only ever GROW");
+const PICKUP_SHAPES = [
+	"", "9/23/2025", "09/23/2025", "9/23/25", "2025-09-23", "2025/09/23 23:59",
+	"Date: Tue, 23 Sep 2025 08:00:00 -0500", "23 Sep 2025", "9:00", "14:00", "07:00 Appt.",
+	"TBD", "ASAP", "9/23/25 06:00-18:00 Appt.", "2027-01-01", "1400",
+];
+const OLD_WINDOW_PICKUP_SRC = WINDOW_SRC
+	.replace(/\n\tconst pickupShared = moneySheetDate\(cols\.pickupDateCol \? row\[cols\.pickupDateCol\] : null\);/, "")
+	.replace(/\tconst days = jtExpandDateRange\(pickup, dropoff \|\| pickup\);\n[\s\S]*?\treturn \[\.\.\.new Set\(days\.concat\(jtExpandDateRange\(pickupShared, dropoff \|\| pickupShared\)\)\)\]\.sort\(\);/,
+		"\treturn jtExpandDateRange(pickup, dropoff || pickup);");
+ok(!/pickupShared/.test(OLD_WINDOW_PICKUP_SRC), "the pre-union loadWindowDays could be reconstructed");
+const PRE_UNION = build(OLD_WINDOW_PICKUP_SRC, IFTA_SRC);
+
+let unionMonotone = true, unionWidened = 0, resolvedStable = true;
+const PRE_UNION_PERIODS = new Function("RFC2822_MONTHS",
+	`${DEPS}\n${OLD_WINDOW_PICKUP_SRC}\n${extractFn("loadAssignedMonthKey")}\n${extractFn("loadRowPeriods")}\nreturn { loadRowPeriods };`
+)(RFC2822_MONTHS);
+for (const shape of PICKUP_SHAPES) {
+	for (const assigned of ["9/20/2025", "Date: Mon, 22 Sep 2025 08:45:51 -0500", "TBD", ""]) {
+		const r = row(shape, "9/25/2025", assigned);
+		const before = PRE_UNION.loadWindowDays(r, COLS), after = NEW.loadWindowDays(r, COLS);
+		const lost = before.filter((d) => !after.includes(d));
+		if (lost.length) { unionMonotone = false; console.log(`    ${JSON.stringify([shape, assigned])} LOST ${JSON.stringify(lost)}`); }
+		if (after.length > before.length) unionWidened++;
+		if (PRE_UNION_PERIODS.loadRowPeriods(r, COLS).resolved !== PERIODS.loadRowPeriods(r, COLS).resolved) {
+			resolvedStable = false; console.log(`    ${JSON.stringify([shape, assigned])} FLIPPED resolved`);
+		}
+	}
+}
+ok(unionMonotone, "no pickup shape ever LOSES a day from the guard's window");
+ok(resolvedStable, "⚠️ no pickup shape ever flips loadRowPeriods' `resolved` — the refusal default is unchanged");
+ok(unionWidened > 0, `the union does widen where it should (${unionWidened} of ${PICKUP_SHAPES.length * 4} combinations)`);
+
+// -------------------- 9. DISCRIMINATION — pre-fix money, and the NAIVE guard fix
+console.log("\n9. discrimination — pre-fix money AND the naive guard fix must both fail");
+
+const OLD_PICKUP_STMT = PICKUP_STMT.replace("moneySheetDate(", "parseSheetDate(");
+ok(OLD_PICKUP_STMT !== PICKUP_STMT, "the pre-fix money pickup read could be reconstructed");
+const MONEY_OLD = buildMoneyWindow(OLD_PICKUP_STMT);
+
+// The naive fix: substitute at the guard instead of unioning. This is the variant
+// #237 declined, and the reason it declined it is asserted here rather than argued.
+const NAIVE_WINDOW_SRC = OLD_WINDOW_PICKUP_SRC.replace(
+	"let pickup = jtParseSheetDate(", "let pickup = moneySheetDate(");
+ok(NAIVE_WINDOW_SRC !== OLD_WINDOW_PICKUP_SRC, "the naive substitute-at-the-guard variant could be built");
+const NAIVE = build(NAIVE_WINDOW_SRC, IFTA_SRC);
+const NAIVE_PERIODS = new Function("RFC2822_MONTHS",
+	`${DEPS}\n${NAIVE_WINDOW_SRC}\n${extractFn("loadAssignedMonthKey")}\n${extractFn("loadRowPeriods")}\nreturn { loadRowPeriods };`
+)(RFC2822_MONTHS);
+
+const PICKUP_DISCRIMINATORS = [
+	["money/prod-row-529227269", () => moneyRead(MONEY_OLD, "2025/09/23 23:59", "2025/09/24 23:59", "Date: Mon, 22 Sep 2025 08:45:51 -0500").pickup, "2025-09-23"],
+	["money/Date-prefixed", () => moneyRead(MONEY_OLD, "Date: 9/23/2025", "", "9/20/2025").pickup, "2025-09-23"],
+	// The guard only DIFFERS where the two readings do not nest. Below, the strict
+	// path falls back to a 30 Sep assigned date with a blank drop-off (a 1-day
+	// window) while the true pickup is 1 Oct — disjoint, so the union is strictly
+	// larger and shows the guard a second month.
+	["guard/union-two-months", () => JSON.stringify([...new Set(PRE_UNION.loadWindowDays(row("2025/10/01 08:00", "", "Date: Tue, 30 Sep 2025 08:45:51 -0500"), COLS).map((d) => d.slice(0, 7)))]), '["2025-09","2025-10"]'],
+];
+let pFlipped = 0;
+for (const [label, fn, expected] of PICKUP_DISCRIMINATORS) {
+	const got = String(fn());
+	if (got !== expected) { pFlipped++; console.log(`    pre-fix FAILS ${label}: got ${got}`); }
+	else console.log(`    !! pre-fix PASSES ${label} — this assertion does not discriminate`);
+}
+eq(pFlipped, PICKUP_DISCRIMINATORS.length, `all ${PICKUP_DISCRIMINATORS.length} pickup discriminators fail against pre-fix code`);
+
+// ⚠️ THE PRODUCTION ROW IS A CONTROL AT THE GUARD, AND THAT IS THE HEADLINE RESULT.
+// [09-22..09-24] ∪ [09-23..09-24] = [09-22..09-24]: the true pickup NESTS inside the
+// assigned-date window, so the guard's answer is byte-identical before and after.
+// This is precisely why replaying all 305 deduplicated production rows measured 0
+// window changes, 0 period changes and 0 resolved flips. Stated as an assertion so
+// nobody later "strengthens" the guard into the substitution that does move it.
+const PICKUP_CONTROLS = [
+	["guard/prod-row-nests", () => JSON.stringify(PRE_UNION.loadWindowDays(row("2025/09/23 23:59", "2025/09/24 23:59", "Date: Mon, 22 Sep 2025 08:45:51 -0500"), COLS)), '["2025-09-22","2025-09-23","2025-09-24"]'],
+	["guard/blank-pickup", () => JSON.stringify(PRE_UNION.loadWindowDays(row("", "9/25/2025", "9/23/2025"), COLS)), '["2025-09-23","2025-09-24","2025-09-25"]'],
+	["guard/time-only-pickup", () => JSON.stringify(PRE_UNION.loadWindowDays(row("14:00", "", "9/23/2025"), COLS)), '["2025-09-23"]'],
+	["guard/refuses-unresolvable", () => String(PRE_UNION_PERIODS.loadRowPeriods(UNRESOLVABLE, COLS).resolved), "false"],
+	["money/blank-pickup-falls-back", () => moneyRead(MONEY_OLD, "", "", "9/20/2025").pickup, "2025-09-20"],
+	["money/time-only-falls-back", () => moneyRead(MONEY_OLD, "14:00", "", "6/23/2026, 7:11:25 PM").pickup, "2026-06-23"],
+];
+let pControls = 0;
+for (const [label, fn, expected] of PICKUP_CONTROLS) {
+	if (String(fn()) === expected) pControls++;
+	else console.log(`    control MOVED under pre-fix: ${label} -> ${fn()}`);
+}
+eq(pControls, PICKUP_CONTROLS.length, `all ${PICKUP_CONTROLS.length} pickup controls pass on BOTH old and new`);
+
+console.log("\n   ⚠️ the naive guard fix — it must LOSE a day and FLIP the refusal");
+ok(PRE_UNION.loadWindowDays(row("2025/09/23 23:59", "2025/09/24 23:59", "Date: Mon, 22 Sep 2025 08:45:51 -0500"), COLS)
+	.includes("2025-09-22")
+	&& !NAIVE.loadWindowDays(row("2025/09/23 23:59", "2025/09/24 23:59", "Date: Mon, 22 Sep 2025 08:45:51 -0500"), COLS)
+		.includes("2025-09-22"),
+	"substituting at the guard LOSES 2025-09-22 on the production row (the union does not)");
+eq(NAIVE_PERIODS.loadRowPeriods(UNRESOLVABLE, COLS).resolved, true,
+	"substituting at the guard turns the unreadable-assigned-date REFUSAL into a permission");
+eq(PERIODS.loadRowPeriods(UNRESOLVABLE, COLS).resolved, false,
+	"…while the shipped union keeps refusing it — this pair IS the design decision");
+
+// ------------------------------------------------------- 10. timezone invariance
 if (!process.env.TZ_CHILD) {
-	console.log("\n6. timezone invariance — same verdicts under UTC / Chicago / Kolkata");
+	console.log("\n10. timezone invariance — same verdicts under UTC / Chicago / Kolkata");
 	const probe = [
 		"2025-09-24", "Date: Tue, 13 May 2025 11:56:47 -0500",
 		"Date: Wed, 31 Dec 2025 20:00:00 -0600", "9/24/2025", "2025/09/24 23:59", "9:00",
+		"2025/09/23 23:59", "14:00", "07:00 Appt.", "23 Sep 2025", "Date: 9/23/2025",
 	];
 	// process.stdout.write, NOT console.log — the child suppresses console.log to
 	// keep this file's own output out of the comparison, and a suppressed probe
@@ -282,7 +529,17 @@ if (!process.env.TZ_CHILD) {
 	ok(outs[0] === outs[1] && outs[1] === outs[2], "resolution is timezone-independent");
 	console.log("   " + outs[0].slice(0, 160) + (outs[0].length > 160 ? " …" : ""));
 }
-module.exports.probe = (v) => [NEW.sheetToIso(v), NEW.loadWindowDays(row("9/23/2025", v), COLS)];
+// Probes the value in EVERY position it can occupy: as an IFTA cell, as a
+// drop-off, as a guard-side pickup (union) and as a money-side pickup (shift).
+// A probe that only exercised the drop-off would let a timezone-dependent pickup
+// read through, which is the half added here.
+module.exports.probe = (v) => [
+	NEW.sheetToIso(v),
+	NEW.loadWindowDays(row("9/23/2025", v), COLS),
+	NEW.loadWindowDays(row(v, "9/25/2025", "Date: Mon, 22 Sep 2025 08:45:51 -0500"), COLS),
+	PERIODS.loadRowPeriods(row(v, "9/25/2025", "TBD"), COLS),
+	moneyRead(MONEY_NEW, v, "9/25/2025", "Date: Mon, 22 Sep 2025 08:45:51 -0500"),
+];
 
 if (!process.env.TZ_CHILD) {
 	console.log(`\n${pass} passed, ${fail} failed`);

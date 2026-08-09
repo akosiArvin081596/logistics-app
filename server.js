@@ -21491,14 +21491,19 @@ function getAllExcludedDriverDays() {
 // case is therefore not a workflow being blocked — it IS the unreadable-data
 // case, which fails closed anyway.
 //
-// ⚠️ The three parsers below are a deliberate copy of the pair already inlined in
-// the /api/investor and /api/financials handlers (which are byte-identical to
-// each other). They live inside those closures and cannot be called from here.
-// The copy is the point: a guard that parsed dates its own way would answer for
-// a different month than the SUM it is protecting — the same failure the
-// truckChargeFromMonth note in userDeleteLockBlockers() describes. If the parse
-// rule ever changes, every copy changes together or this guard silently drifts
-// off the money it is guarding.
+// ⚠️ The three helpers below are a deliberate copy of the ones inlined in the
+// /api/investor and /api/financials handlers, which live inside those closures
+// and cannot be called from here. The copy is the point: a guard that expanded
+// dates its own way would answer for a different month than the SUM it is
+// protecting — the same failure the truckChargeFromMonth note in
+// userDeleteLockBlockers() describes. If the rule ever changes, every copy
+// changes together or this guard silently drifts off the money it is guarding.
+//
+// The money handlers' own `parseSheetDate` copies are GONE (they now read every
+// date through the shared moneySheetDate()), so jtParseSheetDate has exactly one
+// surviving caller: the NARROW leg of loadWindowDays() below, which is kept
+// deliberately — see the union note there. It is no longer a mirror of anything
+// in the money math and must not be re-adopted as one.
 function jtParseSheetDate(val) {
 	if (!val) return null;
 	const s = String(val).trim();
@@ -21588,16 +21593,59 @@ function loadAssignedMonthKey(row, cols) {
 // shapes are added; and jtExpandDateRange starts `if (e < s) return [fmtDate(s)]`,
 // so a resolved drop-off can never yield fewer days than a null one. The window
 // is therefore always a superset => the guard only ever refuses MORE.
+//
+// ⚠️ THE PICKUP END IS A UNION, NOT A SUBSTITUTION, AND THAT ASYMMETRY WITH THE
+// DROP-OFF ABOVE IS THE WHOLE POINT. The pay loop resolves the pickup CELL through
+// moneySheetDate() (it must — that is the day the driver actually worked, and it is
+// what POST /api/invoices/generate already reads). Copying that here verbatim would
+// break the guard in two ways the drop-off change could not, because widening the
+// pickup is not monotone the way widening the drop-off is:
+//
+//   1. IT SHIFTS THE WINDOW'S START, so the window can LOSE a day rather than only
+//      gain one. Measured on production 2026-08-09: load 529227269's Pickup
+//      Appointment is "2025/09/23 23:59", which the strict parser cannot read, so
+//      today the fallback below starts the window at the ASSIGNED date 2025-09-22.
+//      Reading the cell moves the start to 09-23 and drops 09-22 — and a start that
+//      moves can cross a month boundary, i.e. hide a month from the guard.
+//   2. IT WOULD FLIP resolved:false -> resolved:true. The `return []` below is what
+//      makes loadRowPeriods() answer "I cannot read this row", which every caller
+//      treats as a REFUSAL. It is reached only when the assigned date is also
+//      unreadable — exactly the case a widened pickup would start resolving. Turning
+//      a refusal into a permission is the one direction a guard must never move, and
+//      no measurement makes it safe: it is a change to the DEFAULT.
+//
+// So the narrow reading is kept exactly as it was — same `pickup`, same fallback,
+// same `return []` — and the wide reading is added as a SECOND leg. The result is a
+// superset of the pre-change window (property 1 restored) while the refusal
+// condition is untouched (property 2 restored). The guard then answers for the
+// months of BOTH readings, so it refuses whether the money books the load against
+// the assigned date or against the true pickup, which is what keeps it correct
+// while the two ends of that read are being brought into line.
+//
+// Measured on production 2026-08-09 across all 305 deduplicated Job Tracking rows
+// (the set the guards actually see — they do NOT run excludeDroppedLoads): windows
+// changed 0, days lost 0, loadRowPeriods changed 0, resolved flips 0. The union is
+// inert on today's data and is here for the row that has not arrived yet.
 function loadWindowDays(row, cols) {
 	let pickup = jtParseSheetDate(cols.pickupDateCol ? row[cols.pickupDateCol] : null);
+	// The same cell through the shared resolver. NOT a replacement for the line
+	// above — see the ⚠️ note. Production carries 2 such cells (of 252 non-empty),
+	// of which 1 resolves: "2025/09/23 23:59"; "14:00" is a time and stays null.
+	const pickupShared = moneySheetDate(cols.pickupDateCol ? row[cols.pickupDateCol] : null);
 	const dropoff = moneySheetDate(cols.dropoffDateCol ? row[cols.dropoffDateCol] : null);
 	if (!pickup && cols.dateCol && row[cols.dateCol]) {
 		// Same shared resolver as the pay loop's own assigned-date fallback, for
 		// the same reason as loadAssignedMonthKey above.
 		pickup = moneySheetDate(row[cols.dateCol]);
 	}
+	// UNCHANGED — this line alone decides loadRowPeriods()'s `resolved`, so the
+	// refusal default is byte-identical to before the pickup end was widened.
 	if (!pickup || isNaN(pickup)) return [];
-	return jtExpandDateRange(pickup, dropoff || pickup);
+	const days = jtExpandDateRange(pickup, dropoff || pickup);
+	if (!pickupShared || isNaN(pickupShared) || +pickupShared === +pickup) return days;
+	// Both readings agreed on nothing but the drop-off — take their union, so the
+	// guard sees every month either basis could book this load into.
+	return [...new Set(days.concat(jtExpandDateRange(pickupShared, dropoff || pickupShared)))].sort();
 }
 
 // Every settlement month one Job Tracking row feeds. `resolved:false` means the
@@ -31034,21 +31082,15 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const investorSplit = (parseFloat(config && config.investor_split_pct) || 50) / 100;
 
 	// Local date helpers — identical to the ones inside GET /api/investor.
-	const parseSheetDate = (val) => {
-		if (!val) return null;
-		const s = String(val).trim();
-		const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-		if (iso) {
-			const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
-			return isNaN(d) ? null : d;
-		}
-		const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-		if (!m) return null;
-		let yr = parseInt(m[3]);
-		if (yr < 100) yr += 2000;
-		const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
-		return isNaN(d) ? null : d;
-	};
+	//
+	// ⚠️ THE LOCAL `parseSheetDate` IS DELETED, NOT MERELY UNUSED. Every date read
+	// in this function now goes through the shared moneySheetDate(). A strict
+	// ISO+US-only parser left sitting inline in a money handler is precisely how
+	// this whole class of defect keeps coming back: the next date read reaches for
+	// the nearest helper, gets a parser narrower than the sheet, and silently drops
+	// or mis-dates the rows it cannot read (PR #215 assigned dates, PR #237 IFTA
+	// rows and the drop-off end, this one the pickup end). Do not reintroduce it —
+	// call moneySheetDate().
 	const fmtDate = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 	const expandDateRange = (start, end) => {
 		const dates = [];
@@ -31156,7 +31198,34 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			}
 		}
 		if (completedStatuses.test(st) && driver) {
-			let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
+			// ⚠️ BOTH ENDS RESOLVE THROUGH moneySheetDate(), and the pickup end is the
+			// half that was left behind by the drop-off fix. It used to call the strict
+			// local parseSheetDate(), whose null is indistinguishable from a blank cell —
+			// so the fallback on the line below fired on a cell that was present and
+			// merely unreadable, silently starting the window at the ASSIGNED date (when
+			// the rate-con email arrived) instead of at the pickup. That fallback's own
+			// comment says "blank", which is what the code was documented to do and not
+			// what it did.
+			//
+			// Unlike the drop-off this is a SHIFT, not a widening, so it was measured on
+			// its own before shipping (see the union note at loadWindowDays for the guard
+			// half). Production 2026-08-09, all 275 live rows: of 252 non-empty Pickup
+			// Appointment cells exactly 2 are unreadable by the strict parser, and 1
+			// resolves — load 529227269, "2025/09/23 23:59", whose window moves
+			// [09-22, 09-23, 09-24] -> [09-23, 09-24], i.e. it LOSES 2025-09-22. The
+			// per-period driver-pay delta is nevertheless $0.00 on EVERY period, on the
+			// Super-Admin fleet scope and on all three investor scopes, because the
+			// driver-month day set is a UNION and 2025-09-22 is independently supplied by
+			// load 529231436 (pickup "9/22/25 16:00-18:00"). 2025-09 is locked and its
+			// payout is unchanged. The other unreadable cell, "14:00" on 557861739, stays
+			// null under both parsers — it is a time, not a date.
+			//
+			// It also ends a live disagreement inside the trio CLAUDE.md requires to
+			// reconcile: POST /api/invoices/generate already reads that same cell as
+			// 2025-09-23 (its parseInvoiceDate has a native-Date fallback), while this
+			// function and GET /api/financials read 2025-09-22. Same load, same column,
+			// two different pay windows.
+			let pickup = moneySheetDate(pickupDateCol ? r[pickupDateCol] : null);
 			// ⚠️ Drop-off resolves through moneySheetDate(), like the pickup fallback
 			// on the next line. The local parseSheetDate() reads only ISO and US
 			// M/D/Y, so a drop-off in any other shape returned null and collapsed
@@ -31907,24 +31976,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const pickupDateCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
 		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
 
-		// Helper: parse a messy date cell like "5/16/25 9:00", "5/16/25 06:00-18:00 Appt.",
-		// or ISO "2026-05-13" (n8n + the reassign endpoint write the ISO form) into a Date.
-		function parseSheetDate(val) {
-			if (!val) return null;
-			const s = String(val).trim();
-			// ISO YYYY-MM-DD first — the US M/D/Y regex below would mis-read "2026-05-13".
-			const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-			if (iso) {
-				const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
-				return isNaN(d) ? null : d;
-			}
-			const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-			if (!m) return null;
-			let yr = parseInt(m[3]);
-			if (yr < 100) yr += 2000;
-			const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
-			return isNaN(d) ? null : d;
-		}
+		// ⚠️ The local `parseSheetDate` is DELETED, not merely unused — every date
+		// read in this handler now goes through the shared moneySheetDate(). See the
+		// note at the top of computeInvestorMonthlyEarnings() for why leaving a
+		// narrower parser inline in a money handler is the defect, not a convenience.
 		// Helper: format a Date as "YYYY-MM-DD" using LOCAL time (avoids UTC shift)
 		function fmtDate(d) {
 			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -32103,15 +32158,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// either. Falls back to the full pickup→delivery window only when the
 			// truck has no ELD link/data.
 			if (completedStatuses.test(st) && driver) {
-				let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
-				// Drop-off resolves through the shared moneySheetDate(), matching the
-				// pickup fallback below and the twin sites in
-				// computeInvestorMonthlyEarnings() and GET /api/financials — see the
-				// full rationale and production measurement at the first of those.
-				// These three MUST stay in lockstep or the investor portal, the P&L and
-				// the weekly invoice stop reconciling.
+				// BOTH ends resolve through the shared moneySheetDate(), matching the
+				// fallback below and the twin sites in computeInvestorMonthlyEarnings()
+				// and GET /api/financials — see the full rationale and production
+				// measurement at the first of those. These three MUST stay in lockstep
+				// or the investor portal, the P&L and the weekly invoice stop
+				// reconciling; the pickup end is the half that was still diverging from
+				// POST /api/invoices/generate.
+				let pickup = moneySheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = moneySheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
-				// Completed load with a blank pickup → fall back to its assigned date.
+				// Completed load with an unreadable or blank pickup → fall back to its
+				// assigned date. Now genuinely the last resort: before the line above
+				// read the cell through the shared resolver, a present-but-unreadable
+				// pickup landed here too, contradicting this comment.
 				if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
 				if (pickup && !isNaN(pickup)) {
 					const windowDays = expandDateRange(pickup, dropoff || pickup);
@@ -34330,22 +34389,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
-		function parseSheetDate(val) {
-			if (!val) return null;
-			const s = String(val).trim();
-			// ISO YYYY-MM-DD first — the US M/D/Y regex below would mis-read "2026-05-13".
-			const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-			if (iso) {
-				const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
-				return isNaN(d) ? null : d;
-			}
-			const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-			if (!m) return null;
-			let yr = parseInt(m[3]);
-			if (yr < 100) yr += 2000;
-			const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
-			return isNaN(d) ? null : d;
-		}
+		// ⚠️ The local `parseSheetDate` is DELETED, not merely unused — every date
+		// read in this handler now goes through the shared moneySheetDate(). See the
+		// note at the top of computeInvestorMonthlyEarnings() for why leaving a
+		// narrower parser inline in a money handler is the defect, not a convenience.
 		function fmtDate(d) {
 			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 		}
@@ -34540,14 +34587,17 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// fallback when the sheet has no truck-column attribution. Trucks with
 			// no ELD link fall back to the full pickup→delivery window.
 			if (completedStatuses.test(st)) {
-				let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
-				// Drop-off resolves through the shared moneySheetDate(), matching the
-				// pickup fallback below and the twin sites in
-				// computeInvestorMonthlyEarnings() and GET /api/investor — see the full
-				// rationale and production measurement at the first of those. These
-				// three MUST stay in lockstep or the P&L, the investor portal and the
-				// weekly invoice stop reconciling.
+				// BOTH ends resolve through the shared moneySheetDate(), matching the
+				// fallback below and the twin sites in computeInvestorMonthlyEarnings()
+				// and GET /api/investor — see the full rationale and production
+				// measurement at the first of those. These three MUST stay in lockstep
+				// or the P&L, the investor portal and the weekly invoice stop
+				// reconciling; the pickup end is the half that was still diverging from
+				// POST /api/invoices/generate.
+				let pickup = moneySheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = moneySheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
+				// Unreadable or blank pickup → fall back to the assigned date. Now
+				// genuinely the last resort; see the note at the first site.
 				if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
 				if (pickup && !isNaN(pickup)) {
 					const windowDays = expandDateRange(pickup, dropoff || pickup);
