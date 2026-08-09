@@ -657,6 +657,124 @@ function logAudit(req, action, entity, entityId, details) {
 	} catch (err) { console.error("Audit log error:", err.message); }
 }
 
+// ============================================================================
+// REFUSAL AUDITING — coalescing + bounded retention
+// ============================================================================
+// ⚠️ AUDIT ROWS ARE EVIDENCE. Nothing below may ever touch a row that records a
+// WRITE. The split that makes that safe is already enforced by naming: every
+// guard in this file audits its refusal under a DISTINCT action from its success
+// (`update_sheet_row_blocked` vs `update_sheet_row`, `cancel_blocked` vs
+// `cancel_load`), and `*_failed` is a THIRD thing again — a write that got past
+// the guards and then threw, i.e. possibly a partial write, which is the most
+// important row in the table and is never purged or coalesced.
+//
+// The problem this solves, reported by PR #248: refusals are trivially generated
+// and every one INSERTs. A Driver holding one legitimate load can drive
+// `driver_respond_blocked` at driverWriteLimiter's 60/min, and the load-binding
+// refusals added by #248 and by this PR are reachable on demand by design — a
+// wrong `rowIndex` is a 409 every time. The whole audit_trail is 1,314 rows over
+// its first four months (measured on the production copy, ~11.5 rows/day, ALL of
+// them evidence of a write or a read); a single scripted client would out-write
+// that entire history in about two minutes and bury the signal the refusal row
+// exists to preserve.
+const REFUSAL_AUDIT_WINDOW_MS = 60 * 1000;
+// ⚠️ THE COALESCE KEY DELIBERATELY EXCLUDES entity_id. Keying on the load id
+// would look more precise and would be useless: the cheapest flood varies the id
+// on every request, so every request would be a fresh key, coalescing would never
+// fire, and the key map would grow without bound — turning a log-volume problem
+// into a memory one. Keyed on (user, action, code) the map is bounded by a small
+// finite product (users x guards x codes), and the signal actually worth keeping
+// is "this actor is repeatedly being refused for this reason", which is exactly
+// what that key names. The first refusal in each window is written in full and
+// still carries its own entity_id, so the specific load is never lost.
+const refusalAuditWindows = new Map();
+
+function logAuditRefusal(req, action, entity, entityId, details, code) {
+	try {
+		const user = req.session?.user || {};
+		const key = `${user.id || 0}|${action}|${code || ""}`;
+		const now = Date.now();
+		const prev = refusalAuditWindows.get(key);
+		if (prev && now - prev.windowStart < REFUSAL_AUDIT_WINDOW_MS) {
+			prev.suppressed++;
+			return;
+		}
+		// Cheap bound on the map itself. Keys are already finite, but a long-lived
+		// process should not accumulate one entry per user who was ever refused.
+		if (refusalAuditWindows.size > 500) {
+			for (const [k, v] of refusalAuditWindows) {
+				if (now - v.windowStart >= REFUSAL_AUDIT_WINDOW_MS) refusalAuditWindows.delete(k);
+			}
+		}
+		const suppressed = prev ? prev.suppressed : 0;
+		refusalAuditWindows.set(key, { windowStart: now, suppressed: 0 });
+		// The count is carried on the NEXT row rather than dropped, so a burst is
+		// summarised rather than silently discarded.
+		// ⚠️ KNOWN LIMIT, stated rather than glossed: the tally of a burst that is
+		// never followed by another refusal on the same key is never written — it
+		// sits in the map until the process restarts. What is NEVER lost is the
+		// existence of the burst: the FIRST refusal in every window is written in
+		// full, with its own entity_id and timestamp. So "this actor was refused
+		// for this reason, starting at T" is always on the record, and only the
+		// magnitude of a trailing burst can go unreported. Flushing that would mean
+		// a timer per key writing rows after the fact, which is more machinery than
+		// the signal is worth — the rate limiter, not this log, is the control that
+		// stops the flood.
+		logAudit(req, action, entity, entityId, suppressed
+			? `${details || ""} [+${suppressed} more identical refusal(s) suppressed in the previous ${Math.round(REFUSAL_AUDIT_WINDOW_MS / 1000)}s]`
+			: details);
+	} catch (err) { console.error("Audit refusal log error:", err.message); }
+}
+
+// ⚠️ AN EXPLICIT ALLOWLIST, NEVER `action LIKE '%_blocked'`. A pattern would
+// silently adopt any future action someone names with that suffix, including one
+// that records a write; and it would just as silently MISS a refusal named
+// otherwise. Each entry below was checked against every call site: all are
+// written only on a path that returns before any sheet or database write.
+// Deliberately ABSENT, and each for its own reason:
+//   • `setup_refused` — the only refusal on an UNAUTHENTICATED route (the admin
+//     minter). It is itself the security evidence of a distributed guess, it is
+//     capped at 5/15min by setupLimiter so it cannot flood, and a campaign slower
+//     than the retention window is exactly the one worth catching. Kept forever.
+//   • every `*_failed` action — those record a write that already started.
+//   • every success action — the entire rest of the table.
+const PURGEABLE_REFUSAL_ACTIONS = [
+	"dispatch_blocked",
+	"reassign_blocked",
+	"cancel_blocked",
+	"driver_respond_blocked",
+	"status_update_blocked",
+	"status_override_blocked",
+	"create_sheet_row_blocked",
+	"update_sheet_row_blocked",
+];
+const REFUSAL_AUDIT_RETENTION_DAYS = 90;
+
+// Purge refusal rows older than the retention window. Mirrors
+// purgeOldDriverLocations() below: run once at boot to seed, then weekly.
+// ⚠️ The cutoff is computed in JS as an ISO string, NOT with
+// datetime('now','-90 days'). logAudit() is the ONLY writer of this table and
+// always stores `new Date().toISOString()` (verified: 0 of 1,314 production rows
+// deviate), so an ISO-to-ISO comparison is exact — whereas SQLite's datetime()
+// renders `YYYY-MM-DD HH:MM:SS`, and comparing that to `YYYY-MM-DDTHH:MM:SS.sssZ`
+// is a string comparison in which the 'T' sorts above the space. That happens to
+// fail SAFE here (it keeps a row a fraction longer) but it is an accident, and an
+// accident is not something to leave in a DELETE aimed at an audit table.
+function purgeOldAuditRefusals() {
+	try {
+		const cutoff = new Date(Date.now() - REFUSAL_AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+		const placeholders = PURGEABLE_REFUSAL_ACTIONS.map(() => "?").join(",");
+		const result = db
+			.prepare(`DELETE FROM audit_trail WHERE action IN (${placeholders}) AND timestamp < ?`)
+			.run(...PURGEABLE_REFUSAL_ACTIONS, cutoff);
+		if (result.changes > 0) console.log(`[cleanup] Purged ${result.changes} audit_trail refusal rows older than ${REFUSAL_AUDIT_RETENTION_DAYS} days`);
+	} catch (err) {
+		console.error("[cleanup] audit_trail refusal purge failed:", err.message);
+	}
+}
+purgeOldAuditRefusals();
+setInterval(purgeOldAuditRefusals, 7 * 24 * 60 * 60 * 1000); // weekly
+
 // Load status phase history — append-only transition log. Powers the per-phase
 // started/ended/duration timeline (admin load modals + driver app). Forward-only:
 // rows accrue from the moment this ships; pre-existing loads have none. Mirrors
@@ -19884,10 +20002,15 @@ function dispatchWriteBlocker(headers, before, edits) {
 // because it reads as a decision that the other case is safe.
 function sendDispatchRefusal(req, res, blocked, action, loadId, what) {
 	const periods = blocked.periods || [];
-	logAudit(
+	// Coalesced — see logAuditRefusal(). A period refusal is far harder to spam
+	// than a binding one (it needs a locked month AND a material write), but the
+	// two helpers sit side by side and one coalescing while its neighbour does not
+	// reads as a decision that the other case cannot flood.
+	logAuditRefusal(
 		req, action, "load",
 		(typeof loadId === "string" || typeof loadId === "number") ? String(loadId).slice(0, 100) : "",
-		`Blocked ${String(what == null ? "" : what).slice(0, 200)} [${blocked.code}]${periods.length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code: blocked.code, periods })}`
+		`Blocked ${String(what == null ? "" : what).slice(0, 200)} [${blocked.code}]${periods.length ? ` periods=${periods.join(",")}` : ""} — ${JSON.stringify({ code: blocked.code, periods })}`,
+		blocked.code
 	);
 	if (blocked.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(res, "unreadable");
 	if (blocked.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(res, "unresolved", null, what);
@@ -19983,6 +20106,33 @@ async function readJobTrackingSnapshot(sheets, rowIndex) {
 //      measurement is the argument; without it this rung would be exactly the
 //      "guard that refuses ordinary work and then gets switched off" #211 warns
 //      about.
+//
+//      ⚠️ opts.callerRowWinsAmongDuplicates RELAXES RUNG 4 — AND ONLY RUNG 4,
+//      AND ONLY WHEN THE CALLER'S OWN ROW IS ONE OF THE COPIES. It exists
+//      because the measurement above is true for the four routes #248 wired and
+//      FALSE for PUT /api/driver/status, the driver app's main write path.
+//      Re-measured against the PRODUCTION sheet (read-only) over the whole
+//      load_status_history window 2026-06-15 .. 2026-08-06: of 199 real manual
+//      status changes, 195 (98.0%) bind cleanly, 0 hit LOAD_ID_REQUIRED, 0 hit
+//      LOAD_NOT_ON_SHEET — and 4 hit AMBIGUOUS_LOAD. Those 4 are not stray
+//      traffic: they are Howard Reddie advancing load 7052901 through Heading
+//      to Shipper → In Transit → At Receiver → Delivered on 2026-07-11..14. The
+//      id is duplicated because row 383 holds the live load and row 388 holds a
+//      "#7052901" copy that was CANCELLED. A blanket rung 4 would have refused
+//      a driver in the cab, four times, on his own load, with the only remedy
+//      (delete the stale row) being Super-Admin-only — the exact shape of guard
+//      #211 warns gets switched off, after which it protects nothing.
+//      The relaxation keeps the whole security property intact, because the
+//      invariant it preserves is the one that matters: THE WRITTEN ROW ALWAYS
+//      HOLDS THE NAMED LOAD. A row can only be accepted here by carrying the
+//      caller's own load id, so no input reaches another load's row — to do
+//      that an attacker would need the victim row to carry the attacker's load
+//      id, which is a contradiction. What the caller gains is only the choice of
+//      WHICH COPY OF THEIR OWN LOAD to advance, and a status write is scoped to
+//      its row (unlike a cancel, whose whole purpose is to take the load off the
+//      board). Ambiguity is still refused when the caller's row is NOT one of
+//      the copies, because then the server would have to guess which copy — and
+//      guessing is precisely what produced the 2026-08-05 incident.
 //   5. THE ID IS ON EXACTLY ONE ROW, AND IT IS NOT THE CALLER'S → refuse, and
 //      name the row it IS on so the caller can refresh rather than guess.
 //
@@ -20011,7 +20161,9 @@ async function readJobTrackingSnapshot(sheets, rowIndex) {
 // key or a row id the sheet does not have — worth doing, not worth blocking this.
 //
 // Pure: no I/O, no clock, no database. Returns null to allow, else the refusal.
-function resolveLoadBinding(headers, rows, rowIndex, loadId) {
+// `opts.callerRowWinsAmongDuplicates` defaults OFF, so the four routes #248 wired
+// keep byte-identical behaviour; only PUT /api/driver/status opts in.
+function resolveLoadBinding(headers, rows, rowIndex, loadId, opts) {
 	// ⚠️ TYPE FIRST, because normLoadKey() goes through String() and JS array
 	// coercion is not the identity: String(["562620213"]) === "562620213", so a
 	// one-element array would bind exactly as the bare id does. That is not a
@@ -20070,6 +20222,11 @@ function resolveLoadBinding(headers, rows, rowIndex, loadId) {
 		};
 	}
 	if (carrying.length > 1) {
+		// The caller named one of the copies, and this route opted in: the row
+		// demonstrably holds the named load, which is the only question this guard
+		// asks. See the ⚠️ on rung 4 above for the measurement that forced this and
+		// for why it cannot reach another load's row.
+		if (opts && opts.callerRowWinsAmongDuplicates && carrying.includes(rowIndex)) return null;
 		return {
 			http: 409,
 			code: "AMBIGUOUS_LOAD",
@@ -20117,9 +20274,13 @@ function sendLoadBindRefusal(req, res, refusal, action, loadId, what) {
 		: (refusal.rowIndex ? ` load is on row ${refusal.rowIndex}` : "");
 	const auditId = (typeof loadId === "string" || typeof loadId === "number")
 		? String(loadId).slice(0, 100) : "";
-	logAudit(
+	// Coalesced — see logAuditRefusal(). This is the helper PR #248 flagged: a
+	// binding refusal is reachable on demand (a wrong rowIndex is a 409 every
+	// time), on routes one of which a Driver can call 60x a minute.
+	logAuditRefusal(
 		req, action, "load", auditId,
-		`Blocked ${String(what == null ? "" : what).slice(0, 200)} [${refusal.code}]${detail}`
+		`Blocked ${String(what == null ? "" : what).slice(0, 200)} [${refusal.code}]${detail}`,
+		refusal.code
 	);
 	const body = { error: refusal.error, code: refusal.code };
 	if (refusal.rowIndices) body.rowIndices = refusal.rowIndices;
@@ -20491,7 +20652,10 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 // without cancelling, they still use the reassign dropdown.
 app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) => {
 	try {
-		const { rowIndex: rawRowIndex, loadId, driver } = req.body;
+		// ⚠️ `driver` IS NO LONGER TAKEN FROM THE BODY. It is read off the bound row
+		// instead — see the note beside `boundDriver` below. Not destructured at all,
+		// so no later edit can quietly reach for the caller's version again.
+		const { rowIndex: rawRowIndex, loadId } = req.body;
 		// Row 1 is the header row — see resolveSheetDataRow() above. This was the
 		// last route in the family still carrying the `if (!rowIndex)` shape PR #222
 		// fixed on its three siblings; it was skipped there only to avoid colliding
@@ -20565,6 +20729,25 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 		const driverColIdx = headers.findIndex((h) => /driver/i.test(h));
 		const statusColIdx = headers.findIndex((h) => /status/i.test(h));
 
+		// ⚠️ THE DRIVER COMES FROM THE BOUND ROW, NOT FROM req.body.driver. This
+		// completes PR #248's own thesis: that PR made the ROW trustworthy, and this
+		// is the one field that was still taken on the caller's word. Until now a
+		// Super Admin could cancel load X on row N and push "Load Cancelled: X" to
+		// ANY driver they named — someone with nothing to do with the load — while
+		// `audit_trail`, the dispatch feed and the driver's own phone all agreed with
+		// each other and with nothing on the sheet. It also cuts the ordinary-mistake
+		// case: a stale board that names the previous driver of a reassigned load
+		// notified the wrong person, which is the same 2026-08-05 shape (right
+		// intent, wrong subject) one field further along.
+		//
+		// `snapshot.row` is the row at `rowIndex`, and resolveLoadBinding() has just
+		// proved that row carries `loadId` — so this value is the driver the sheet
+		// says is on the load being cancelled, and it is read BEFORE the write below
+		// blanks the cell. A sheet cell is always a string, which also removes the
+		// `.trim()`-on-a-non-string throw the body value carried. An unassigned load
+		// yields "" and notifies nobody, exactly as an absent body field used to.
+		const boundDriver = driverColIdx === -1 ? "" : String((snapshot.row || [])[driverColIdx] || "").trim();
+
 		// Clear driver (no point keeping a driver on a cancelled load) and set
 		// status to Cancelled so the load is excluded from every KPI loop.
 		if (driverColIdx !== -1) {
@@ -20584,17 +20767,17 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 			});
 		}
 		recordStatusChange({ loadId, newStatus: 'Cancelled', source: 'cancel', actor: req.session?.user?.username || '', reason: cancelReason });
-		logAudit(req, 'cancel_load', 'load', loadId, `Cancelled load ${loadId || 'N/A'}${driver ? ` (driver: ${driver})` : ''} — reason: ${cancelReason}`);
+		logAudit(req, 'cancel_load', 'load', loadId, `Cancelled load ${loadId || 'N/A'}${boundDriver ? ` (driver: ${boundDriver})` : ''} — reason: ${cancelReason}`);
 
-		// Notify driver
-		if (driver) {
+		// Notify driver — the one the SHEET says is on this load.
+		if (boundDriver) {
 			const cancelNotif = insertNotification.run(
-				driver.trim().toLowerCase(), 'load-assigned',
+				boundDriver.toLowerCase(), 'load-assigned',
 				`Load Cancelled: ${loadId || 'Load'}`,
 				`Cancelled by dispatch — ${cancelReason}`,
 				JSON.stringify({ loadId, rowIndex, reason: cancelReason })
 			);
-			io.to(driver.trim().toLowerCase()).emit("load-cancelled", {
+			io.to(boundDriver.toLowerCase()).emit("load-cancelled", {
 				loadId,
 				rowIndex,
 				notificationId: cancelNotif.lastInsertRowid,
@@ -20605,13 +20788,13 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 		insertDispatchNotification.run(
 			'load-cancelled',
 			`Cancelled Load ${loadId || 'N/A'}`,
-			`Was assigned to ${driver || 'unknown'} — ${cancelReason}`,
-			JSON.stringify({ loadId, driver, rowIndex, reason: cancelReason })
+			`Was assigned to ${boundDriver || 'unknown'} — ${cancelReason}`,
+			JSON.stringify({ loadId, driver: boundDriver, rowIndex, reason: cancelReason })
 		);
 		io.to("dispatch").emit("dispatch-notification", {
 			type: 'load-cancelled',
 			title: `Cancelled Load ${loadId || 'N/A'}`,
-			body: `Was assigned to ${driver || 'unknown'} — ${cancelReason}`,
+			body: `Was assigned to ${boundDriver || 'unknown'} — ${cancelReason}`,
 		});
 		notifyChange("dashboard"); jtCacheInvalidate();
 		res.json({ success: true });
@@ -22818,12 +23001,15 @@ const STATUS_OVERRIDE_ALLOWED = ["Dispatched", "Heading to Shipper", "At Shipper
 // PUT /api/driver/status — Update load status
 app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
-		let { rowIndex: rawRowIndex, loadId, newStatus, rowData } = req.body;
+		// `rowData` is deliberately NOT destructured any more — see the load-binding
+		// block below. Clients still send it and it is simply ignored, so no client
+		// needs a change.
+		let { rowIndex: rawRowIndex, loadId, newStatus } = req.body;
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return;
 		// ⚠️ ROW 1 IS THE HEADER ROW. This route had NO rowIndex validation of any
 		// kind — which is why it survived PR #222's sweep for `if (!rowIndex)`,
-		// the shape its three siblings carried. The row re-resolution below is
+		// the shape its three siblings carried. The old row re-resolution was
 		// gated on `if (rowData && …)` and rowData is OPTIONAL, so `{rowIndex: 1}`
 		// with no rowData skipped re-resolution entirely and wrote the Job Tracking
 		// HEADER row. Every column in this app is resolved by matching header text,
@@ -22833,7 +23019,14 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 		// data row WAS touched. Driver-reachable: this is the lowest-privilege
 		// write surface in the app. Same helper, status code and body as the
 		// siblings, so the four cannot answer differently.
-		let rowIndex = resolveSheetDataRow(res, rawRowIndex);
+		//
+		// ⚠️ `const`, NOT `let` — and that is load-bearing, not tidiness. The whole
+		// defect this route carried was that `rowIndex` meant one thing on the way in
+		// and another by the time the write happened, because the re-resolution below
+		// reassigned it. Nothing reassigns it now, so "the row the caller named is the
+		// row that gets written" is true BY CONSTRUCTION rather than by inspection,
+		// and the load binding below is what decides whether that row is allowed.
+		const rowIndex = resolveSheetDataRow(res, rawRowIndex);
 		if (rowIndex === null) return; // 400 already sent
 
 		// ⚠️ `newStatus` WAS UNCONSTRAINED FREE TEXT, on the one status-writing route
@@ -22885,9 +23078,13 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 			// authorization, and the 400 is byte-identical either way, so it leaks
 			// nothing) — but do not read the trail as an access record.
 			if (cancelling) {
-				logAudit(
+				// Coalesced like every other refusal on this route — see
+				// logAuditRefusal(). A Driver can reach this 60x a minute, and the
+				// suppressed count preserves the burst, which is the signal here.
+				logAuditRefusal(
 					req, "status_update_blocked", "load", String(loadId || "").slice(0, 100),
-					`Blocked status write "${newStatus.trim()}" [CANCEL_NOT_A_STATUS_UPDATE] — ${JSON.stringify({ code: "CANCEL_NOT_A_STATUS_UPDATE", periods: [] })}`
+					`Blocked status write "${newStatus.trim()}" [CANCEL_NOT_A_STATUS_UPDATE] — ${JSON.stringify({ code: "CANCEL_NOT_A_STATUS_UPDATE", periods: [] })}`,
+					"CANCEL_NOT_A_STATUS_UPDATE"
 				);
 			}
 			return res.status(400).json({
@@ -22917,65 +23114,84 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 		}
 		const sheets = await getSheets();
 
-		// Read entire sheet to verify exact row
-		const allSheetRes = await sheets.spreadsheets.values.get({
-			spreadsheetId: SPREADSHEET_ID,
-			range: "Job Tracking",
-		});
-		const allRows = (allSheetRes.data.values || []);
-		const headers = allRows[0] || [];
-		const dataRows = allRows.slice(1);
+		// Headers + EVERY data row in one round trip. This route always read the
+		// whole tab; routing it through the shared helper means the binding below,
+		// the one-active-job scan and the period guard all judge one snapshot, and
+		// costs no extra Sheets call (the 300/min quota counts requests, not bytes).
+		const snapshot = await readJobTrackingSnapshot(sheets, rowIndex);
+		if (!snapshot) {
+			// The sheet could not be read, so the row cannot be confirmed to hold this
+			// load. Refusing is the only answer that is not a guess, and unlike a
+			// period refusal, retrying costs nothing once the read works.
+			return sendLoadBindRefusal(
+				req, res,
+				{
+					http: 503,
+					code: "SHEET_UNREADABLE",
+					error: "Job Tracking could not be read, so the server cannot confirm that this row holds the load you are updating. Nothing was changed. Try again in a moment.",
+				},
+				"status_update_blocked", loadId, `setting row ${rowIndex} to "${newStatus}"`
+			);
+		}
+		const headers = snapshot.headers;
+		const dataRows = snapshot.rows;
+
+		// ⚠️ LOAD BINDING — REPLACES A THREE-STEP `rowMatchesData` RE-RESOLUTION THAT
+		// WAS NOT A BINDING AT ALL. PR #248 fixed the four sibling routes and reported
+		// this one; it is the LIVE hole, because the POD gate, the audit line, the
+		// socket, the dispatch feed and load_status_history all key on the CLAIMED
+		// `loadId` while the sheet write went to the caller's `rowIndex` — so a Driver
+		// holding a genuine POD for their own load could stamp "Delivered" + a
+		// Completion Date onto an ARBITRARY row, including another driver's live load
+		// and including a completed one in a closed month.
+		//
+		// The old code failed on three independent counts, and all three are gone:
+		//   1. `rowData` WAS OPTIONAL and the whole re-resolution was gated on it
+		//      (`if (rowData && !rowMatchesData(...))`). Omit it and nothing was
+		//      re-resolved or compared — the write simply went to `rowIndex`. Not
+		//      hypothetical: the legacy public/driver.html posts `values`, NOT
+		//      `rowData`, so that client has always taken the ungated path.
+		//   2. EVEN SUPPLIED IT WAS NOT A LOAD-ID CHECK. It compared only NON-EMPTY
+		//      expected values, so `{}` matched every row, and it need not contain the
+		//      Load ID column at all. `rowData` is caller-supplied, so this bound the
+		//      write to the caller's own assertion rather than to evidence about the
+		//      load — the thing a guard must never do.
+		//   3. ITS FALLBACK SILENTLY RETARGETED to the LAST row carrying the id,
+		//      last-match-wins across the 87 duplicated ids on this sheet — the guess
+		//      #223 refused. So `rowIndex` was advisory in one branch and authoritative
+		//      in the other: two trust models in one handler.
+		//
+		// `rowMatchesData` does NOT survive in any form, and that is deliberate rather
+		// than incidental. Once the binding has proved that `rowIndex` holds `loadId`,
+		// a rowData comparison could only ever move the write AWAY from a correctly
+		// bound row — and it would do so routinely, because rowData carries the status
+		// the client last saw and geofence auto-advance (live since 2026-08-05) rewrites
+		// that server-side behind the client's back. Keeping it would re-introduce the
+		// retarget under a guard built to stop retargeting.
+		//
+		// `rowData` is still ACCEPTED in the body and ignored, so no client needs a
+		// change; it is simply no longer consulted.
+		{
+			const unbound = resolveLoadBinding(headers, dataRows, rowIndex, loadId, {
+				// ⚠️ See the rung-4 ⚠️ in resolveLoadBinding(): measured on the
+				// production sheet, a blanket AMBIGUOUS_LOAD would have refused 4 real
+				// driver taps on load 7052901 and stranded the driver mid-load. The
+				// caller's row must still carry the caller's own load id.
+				callerRowWinsAmongDuplicates: true,
+			});
+			if (unbound) {
+				return sendLoadBindRefusal(
+					req, res, unbound, "status_update_blocked", loadId,
+					`setting row ${rowIndex} to "${newStatus}"`
+				);
+			}
+		}
 
 		const statusIdx = headers.findIndex((h) => /status/i.test(h));
 		const dateIdx = headers.findIndex((h) => /status.*update.*date|update.*date/i.test(h));
-		const loadIdIdx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
 
 		if (statusIdx === -1) {
 			return res.status(400).json({ error: "Status column not found in sheet" });
-		}
-
-		// Helper: check if a sheet row matches the frontend rowData on all columns
-		function rowMatchesData(sheetRow) {
-			if (!rowData || !sheetRow) return false;
-			for (let c = 0; c < headers.length; c++) {
-				const col = headers[c];
-				if (!col) continue;
-				const expected = (rowData[col] != null ? String(rowData[col]) : "").trim();
-				const actual = (sheetRow[c] || "").trim();
-				if (expected && expected !== actual) return false;
-			}
-			return true;
-		}
-
-		// Step 1: verify row at given rowIndex matches all column data
-		const rowAtIndex = dataRows[rowIndex - 2] || [];
-		if (rowData && !rowMatchesData(rowAtIndex)) {
-			// Step 2: scan all rows to find the exact match
-			let foundRow = -1;
-			for (let i = dataRows.length - 1; i >= 0; i--) {
-				if (rowMatchesData(dataRows[i])) { foundRow = i + 2; break; }
-			}
-			if (foundRow === -1) {
-				// Step 3: fallback to Load ID match (last row with that ID).
-				// Logged so we can spot stale-rowData patterns in the wild —
-				// if this fires often, clients are sending out-of-date rowData
-				// and we may need a refresh-before-update flow.
-				let usedLoadIdFallback = false;
-				if (loadId && loadIdIdx !== -1) {
-					const targetLid = loadId.toString().trim().toLowerCase().replace(/^#/, "");
-					for (let i = dataRows.length - 1; i >= 0; i--) {
-						const lid = (dataRows[i][loadIdIdx] || "").trim().toLowerCase().replace(/^#/, "");
-						if (lid === targetLid) { foundRow = i + 2; usedLoadIdFallback = true; break; }
-					}
-				}
-				if (foundRow === -1) {
-					return res.status(404).json({ error: `Could not find exact row for Load ID ${loadId}` });
-				}
-				if (usedLoadIdFallback) {
-					console.warn(`[status-update] stale rowData driver=${driverName} loadId=${loadId} rowIndex=${rowIndex}->${foundRow}; falling back to loadId match.`);
-				}
-			}
-			rowIndex = foundRow;
 		}
 
 		// Enforce one active job at a time: block transition to "At Shipper" if another load is active

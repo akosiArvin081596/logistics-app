@@ -124,8 +124,15 @@ const CANCELED_STATUS_RE = eval(extractCanceledRe()); // eslint-disable-line no-
 // Wrap the extracted gate so its `return`s land here. `newStatus` is the
 // parameter, exactly as the route's `let` destructure makes it, so the shipped
 // `newStatus = canonicalStatus` reassignment is exercised rather than simulated.
+// ⚠️ The injected audit sink is `logAuditRefusal`, not `logAudit`. The
+// audit-retention PR routed every refusal in this family through the coalescing
+// wrapper so a Driver cannot flood audit_trail at 60/min; the cancel-attempt row
+// this suite asserts on is still written, just through that helper. Injecting it
+// under the name the route actually calls is what keeps this test exercising the
+// shipped line — a stale `logAudit` parameter would make the gate throw
+// ReferenceError rather than silently pass, which is how this was caught.
 const runGate = new Function(
-	"newStatus", "res", "req", "loadId", "logAudit", "STATUS_OVERRIDE_ALLOWED", "CANCELED_STATUS_RE",
+	"newStatus", "res", "req", "loadId", "logAuditRefusal", "STATUS_OVERRIDE_ALLOWED", "CANCELED_STATUS_RE",
 	`${extractGate()}\n\t\treturn { written: newStatus };`
 );
 
@@ -138,7 +145,7 @@ function judge(raw, opts = {}) {
 	};
 	const out = runGate(
 		raw, res, {}, opts.loadId || "L1",
-		(_req, action, entity, entityId, details) => audits.push({ action, entity, entityId, details }),
+		(_req, action, entity, entityId, details, code) => audits.push({ action, entity, entityId, details, code }),
 		STATUS_OVERRIDE_ALLOWED, CANCELED_STATUS_RE
 	);
 	// `body` defaults to {} so an assertion on a refusal that did NOT happen
@@ -308,8 +315,12 @@ check("the gate is inside PUT /api/driver/status", at(GATE_START.trim()) > -1, t
 // a full Job Tracking read, and it reveals nothing about the load.
 check("validation runs BEFORE the driver ownership check",
 	at("const canonicalStatus") < at("loadBelongsToDriver"), true);
+// ⚠️ The route's inline `spreadsheets.values.get` became
+// readJobTrackingSnapshot(), the shared full-tab read the load binding needs.
+// The property is unchanged and is what is pinned: an invalid status is refused
+// without paying for a Job Tracking read at all.
 check("validation runs BEFORE the sheet is read",
-	at("const canonicalStatus") < at("spreadsheets.values.get"), true);
+	at("const canonicalStatus") < at("readJobTrackingSnapshot("), true);
 check("validation runs BEFORE the row is written",
 	at("const canonicalStatus") < at("spreadsheets.values.batchUpdate"), true);
 check("the rowIndex guard still runs first (#222/#230)",
@@ -335,8 +346,14 @@ section("6. POST /api/dispatch/cancel — the header row");
 check("the truthy `if (!rowIndex)` shape is gone", /if \(!rowIndex\)/.test(CANCEL_CODE), false);
 check("it validates through the shared helper, not a fourth copy",
 	/const rowIndex = resolveSheetDataRow\(res, rawRowIndex\)/.test(CANCEL), true);
+// ⚠️ `driver` LEFT THIS DESTRUCTURE. The notification target is now read off the
+// bound row (`snapshot.row[driverColIdx]`) instead of being taken on the caller's
+// word, so the body field is not destructured at all — which is what stops a
+// later edit reaching for it again. Pinned in its own right below.
 check("it destructures the RAW value, so the validated number is what gets used",
-	/const \{ rowIndex: rawRowIndex, loadId, driver \} = req\.body/.test(CANCEL), true);
+	/const \{ rowIndex: rawRowIndex, loadId \} = req\.body/.test(CANCEL), true);
+check("cancel no longer destructures a caller-supplied driver",
+	/rowIndex: rawRowIndex, loadId, driver \} = req\.body/.test(CANCEL), false);
 check("the validated row number reaches both A1 ranges",
 	CANCEL.split("${colLetter(").length - 1, 2);
 check("the row guard runs before the reason guard, matching the old order",
