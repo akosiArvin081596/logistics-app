@@ -313,6 +313,186 @@ eq("MUTANT f: without the Secure gate, none survives on an insecure cookie", noS
 const noValidation = mutateSameSite('if (!["lax", "strict", "none"].includes(want)) {', "if (false) {");
 eq("MUTANT g: without validation, garbage reaches the cookie", noValidation("banana", true), "banana");
 
+// ── 5. BOOT ORDER — the one failure in this file that is a TOTAL OUTAGE ─────
+// Every assertion above asks whether a guard DECIDES correctly. This section
+// asks whether the process STARTS AT ALL.
+//
+// `refuseCrossSite` / `refuseCrossOrigin` are `const`, so they sit in the
+// temporal dead zone until their own line executes. Mounting either on a route
+// registered ABOVE those lines throws
+//   ReferenceError: Cannot access 'refuseCrossOrigin' before initialization
+// while server.js is still being evaluated — so it is not a 403, and not one
+// broken route: the app does not boot. PR #254 relocated the block up beside
+// requireRole precisely to escape this, and the 165-line comment above
+// originIsSelf documents the crash — but nothing PINNED the position, and a
+// comment is not a test. This section is that pin.
+//
+// ⚠️ `node --check server.js` — the repo's documented pre-commit step — CANNOT
+// SEE THIS. TDZ is a runtime error, not a parse error; the mutants below pass
+// `node --check` and die on boot. That gap is the whole reason this exists.
+//
+// ⚠️ The exposure is not hypothetical: 10 route registrations currently sit
+// above the definitions (the three /api/n8n/* routes, the drivers-directory
+// CRUD, and two profile-picture uploads). Every one is an ordinary admin route
+// on which a guard reads like a sensible hardening, and every one is an instant
+// outage. requireRole is safe there only because a `function` declaration
+// hoists and a `const` does not — the asymmetry that caused the original crash.
+const LINES = src.split("\n");
+const ROUTE_HEAD_RE = /^app\.(get|post|put|delete|patch|use|all)\(/;
+// String literals are stripped before any identifier match so that PROSE cannot
+// trip these assertions. server.js legitimately names these guards in comments
+// and in a console.warn ABOVE their definitions; judging the code means judging
+// the code, the same call made for the sameSite literal scan above.
+const stripLiterals = (s) => s.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''").replace(/`[^`]*`/g, "``");
+const isCommentLine = (l) => {
+	const t = l.trim();
+	return t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+};
+
+// First route registration naming each identifier in its middleware chain.
+// Continuation lines are joined (up to the handler) because a multi-line
+// `app.post(\n  path,\n  mw,\n  handler)` is already present in server.js, and a
+// line-only scan would be blind to a guard mounted on its own line.
+function routeMountIndex(lines) {
+	const first = new Map();
+	for (let i = 0; i < lines.length; i++) {
+		if (!ROUTE_HEAD_RE.test(lines[i])) continue;
+		let head = lines[i];
+		for (let k = 1; k <= 10 && !/=>|function/.test(head); k++) {
+			if (i + k >= lines.length) break;
+			head += "\n" + lines[i + k];
+		}
+		for (const raw of stripLiterals(head).match(/\b[A-Za-z_$][\w$]*\s*,/g) || []) {
+			const n = raw.replace(/\s*,$/, "");
+			if (!first.has(n)) first.set(n, i);
+		}
+	}
+	return first;
+}
+// Module-scope `const`/`let`/`var` bindings — matched at column 0, which is what
+// makes them TDZ-shaped AND reachable from a route registration.
+function topLevelBindingIndex(lines) {
+	const d = new Map();
+	for (let i = 0; i < lines.length; i++) {
+		const m = lines[i].match(/^(const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/);
+		if (m && !d.has(m[2])) d.set(m[2], i);
+	}
+	return d;
+}
+// Any reference in CODE, wherever it appears — not just in a route chain.
+const firstCodeRefIndex = (lines, name) => {
+	const re = new RegExp("\\b" + name + "\\b");
+	return lines.findIndex((l) => !isCommentLine(l) && re.test(stripLiterals(l)));
+};
+
+// ⚠️ ASSERTED GENERALLY, NOT FOR THE TWO GUARDS. The invariant is not "the CSRF
+// guards are special" — it is "a `const` middleware must be defined above every
+// route that mounts it", and server.js has 30 of them, every rate limiter
+// included. The guards are merely the ones with room to get it wrong: a limiter
+// is declared 1-6 lines above its own route, while refuseCrossOrigin is 6,106
+// lines above its first mount, so the guards are where the gap is wide enough
+// for a plausible edit to fall into it.
+function bootOrderViolations(srcText) {
+	const ls = srcText.split("\n");
+	const mounts = routeMountIndex(ls);
+	const decls = topLevelBindingIndex(ls);
+	const out = [];
+	for (const [name, mIdx] of mounts) {
+		const dIdx = decls.get(name);
+		// Skipped deliberately: hoisted `function` declarations (requireAuth,
+		// generateInvoiceHandler), handler params, and imports. None can be in a
+		// TDZ at registration time, so none can produce this crash.
+		if (dIdx === undefined) continue;
+		if (mIdx < dIdx) out.push(name + " (def line " + (dIdx + 1) + ", mounted line " + (mIdx + 1) + ")");
+	}
+	return out;
+}
+
+const tdzMiddlewares = [...routeMountIndex(LINES).keys()].filter((n) => topLevelBindingIndex(LINES).has(n));
+// ⚠️ Guard against a VACUOUS PASS. "0 violations" is also what a scan that found
+// nothing reports, so a regex that silently stopped matching would read as a
+// clean bill of health forever. Pin the population, not just the verdict.
+ok("boot-order scan actually found the const middlewares (>=20)", tdzMiddlewares.length >= 20);
+eq("no const middleware is mounted above its own definition", bootOrderViolations(src).join(" | "), "");
+
+for (const g of ["refuseCrossSite", "refuseCrossOrigin"]) {
+	const defIdx = LINES.findIndex((l) => l.startsWith("const " + g + " = crossSiteGuard("));
+	const mountIdx = routeMountIndex(LINES).get(g);
+	ok(g + ": definition located", defIdx > -1);
+	ok(g + ": at least one route mounts it", mountIdx !== undefined);
+	// (1) the literal ask: first mount below the definition.
+	ok(g + ": first mount is BELOW its definition", defIdx > -1 && mountIdx > defIdx);
+	// (2) the stronger form — nothing above the block touches it at all, by any
+	// route, array, wrapper or re-export. This is NOT redundant with (1): MUTANT
+	// i below is a real TDZ crash that (1) cannot see, because the reference is
+	// not on an `app.VERB(` line. Being defined-before-first-USE is the actual
+	// language rule; "before first mount" is only the common case of it.
+	ok(g + ": NO code above its definition references it", firstCodeRefIndex(LINES, g) === defIdx);
+}
+
+// ── 5b. self-discrimination — the assertions must FAIL on broken source ──────
+// Mutation is in memory, never on disk: server.js is read by seven other agents
+// and by every other suite, so a test that rewrites it to prove a point can
+// leave the repo broken if it dies mid-run. Byte-integrity is therefore
+// structural rather than restored-afterwards.
+const MUT_MOUNT = 'app.get("/api/mutant", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {});';
+const guardDefLine = LINES.findIndex((l) => l.startsWith('const refuseCrossOrigin = crossSiteGuard('));
+const spliceAbove = (text) => {
+	const ls = LINES.slice();
+	ls.splice(guardDefLine - 40, 0, text);
+	return ls;
+};
+
+// ⚠️ Judged as a CONTROL/TREATMENT pair on the violation NAMES, never on a
+// count. Two traps live here, both hit while writing this: a hardcoded `0`
+// misreports whenever the real assertion above is already failing — i.e.
+// exactly when someone is reading this output to find out what broke — and a
+// "+1" is wrong too, because violations are keyed per IDENTIFIER, so a second
+// bad mount of a guard already flagged adds no new entry. Absent-then-present
+// is the claim, and it holds whatever state the base source is in.
+const violationNames = (text) => new Set(bootOrderViolations(text).map((v) => v.split(" ")[0]));
+const baseNames = violationNames(src);
+
+// (h) a guard mounted on a route above the definitions — the PR #254 crash.
+const mutantRoute = spliceAbove(MUT_MOUNT);
+const routeViolations = bootOrderViolations(mutantRoute.join("\n"));
+ok("MUTANT h control: the SHIPPED source flags no guard", !baseNames.has("refuseCrossOrigin"));
+ok("MUTANT h: mounting a guard above its definition IS flagged",
+	violationNames(mutantRoute.join("\n")).has("refuseCrossOrigin"));
+ok("MUTANT h: and the violation names the guard, its def line and its mount line",
+	routeViolations.some((v) => /^refuseCrossOrigin \(def line \d+, mounted line \d+\)$/.test(v)));
+
+// (i) the same crash reached through a plain array — invisible to assertion (1),
+//     caught only by the stronger form. This is the mutant that earns (2).
+const mutantArray = spliceAbove("const earlyChain = [requireAuth, refuseCrossOrigin];");
+const arrayNames = violationNames(mutantArray.join("\n"));
+ok("MUTANT i: an array reference adds NO route-mount violation (assertion 1 is blind)",
+	arrayNames.size === baseNames.size && [...arrayNames].every((n) => baseNames.has(n)));
+ok("MUTANT i: the stronger form catches it anyway",
+	firstCodeRefIndex(mutantArray, "refuseCrossOrigin") < mutantArray.findIndex((l) => l.startsWith("const refuseCrossOrigin = crossSiteGuard(")));
+
+// (j) ⚠️ PROVE THE CRASH, not merely that a regex fires. The SHIPPED guard block
+//     (already lifted above as BLOCK) is executed with a mount placed before it
+//     and after it. Before → the exact ReferenceError the server.js comment
+//     quotes. After → clean. So the premise of this whole section is executable,
+//     and it demonstrates the outage without booting anything or touching a port.
+function bootProbe(body) {
+	try {
+		new Function("app", "DRIVER_MOBILE_ORIGINS", "requireRole", body)(
+			{ get() {}, post() {}, put() {}, delete() {}, patch() {}, use() {} },
+			ALLOWLIST,
+			() => (req, res, next) => next()
+		);
+		return null;
+	} catch (e) { return e; }
+}
+const bootAbove = bootProbe(MUT_MOUNT + "\n" + BLOCK);
+const bootBelow = bootProbe(BLOCK + "\n" + MUT_MOUNT);
+ok("MUTANT j: mounting ABOVE the shipped block throws at evaluation time", bootAbove instanceof ReferenceError);
+ok("MUTANT j: and the message is the documented boot error",
+	/Cannot access 'refuseCrossOrigin' before initialization/.test(String(bootAbove && bootAbove.message)));
+ok("MUTANT j: mounting BELOW the same block does not throw", bootBelow === null);
+
 if (failures.length) {
 	console.error("FAILED " + failures.length + " of " + (passed + failures.length) + ":");
 	for (const f of failures) console.error("  - " + f);
