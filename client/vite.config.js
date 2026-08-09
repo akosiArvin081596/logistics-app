@@ -52,9 +52,24 @@ export default defineConfig(({ mode }) => {
             'vendor-vant': ['vant'],
             // pdf.js + its Vue wrapper (the invoice PDF zoom viewer). Only
             // reached via a dynamic import() in PdfZoomViewer, so this chunk
-            // stays lazy — it just gives the ~2.4MB pdf.js split a clear name
+            // stays lazy — it just gives the pdf.js split a clear name
             // instead of the confusing "index" Rollup derives from its entry file.
-            'vendor-pdf': ['vue-pdf-embed', 'pdfjs-dist'],
+            //
+            // These are the EXACT specifiers in the module graph, not the bare
+            // package names. PdfZoomViewer imports vue-pdf-embed's essential
+            // entry (see the comment there — the default entry inlines pdf.js
+            // and makes the pdfjs-dist pin unenforceable), and that entry pulls
+            // the `legacy/` pdf.js build. Bare 'vue-pdf-embed'/'pdfjs-dist'
+            // resolve to the default and modern builds respectively — neither is
+            // in the graph, so they silently produced a 1-byte empty vendor-pdf
+            // while the real 772 kB landed in an "index.essential" chunk. Worse,
+            // naming the modern build here would drag a SECOND copy of pdf.js
+            // into the bundle. Keep these in step with PdfZoomViewer's imports.
+            'vendor-pdf': [
+              'vue-pdf-embed/dist/index.essential.mjs',
+              'pdfjs-dist/legacy/build/pdf.mjs',
+              'pdfjs-dist/legacy/web/pdf_viewer.mjs',
+            ],
           },
         },
       },
