@@ -25167,19 +25167,6 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		const destCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
-		// Same messy-date parser as /api/investor's inline helper (kept local).
-		function parseSheetDate(val) {
-			if (!val) return null;
-			const s = String(val).trim();
-			const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-			if (iso) { const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3])); return isNaN(d) ? null : d; }
-			const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-			if (!m) return null;
-			let yr = parseInt(m[3]); if (yr < 100) yr += 2000;
-			const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
-			return isNaN(d) ? null : d;
-		}
-
 		const filtered = investorDriverSet
 			? data.filter((r) => {
 				if (ownerIdCol) {
@@ -25195,8 +25182,35 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 		for (const r of filtered) {
 			const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
 			if (!lid) continue;
-			const dt = dateCol ? parseSheetDate(r[dateCol]) : null;
-			if (!dt) continue; // un-dateable rows can't be bucketed
+			// ⚠️ moneySheetDate(), NOT a local ISO/US-slash parser. This handler used
+			// to define its own `parseSheetDate` — ISO + US-slash only, null for
+			// anything else — and the `continue` below then dropped the row. The
+			// comment said "un-dateable"; the rows were perfectly dateable. n8n copies
+			// the rate-con email's own `Date:` header into Assigned Date, so they are
+			// RFC 2822 ("Date: Tue, 13 May 2025 11:56:47 -0500"), which that parser
+			// could not read. MEASURED READ-ONLY ON PRODUCTION 2026-08-09: 205 of the
+			// 421 sheet rows are RFC 2822; after the dedupe + excludeDroppedLoads this
+			// route already applies, 106 of 275 eligible rows are — so the report
+			// rendered 162 loads and silently hid 105 of them, $68,801 of gross. It
+			// was worst in the months that look emptiest: 2025-06/07/09/10/11 each
+			// reported $0 gross while holding real delivered loads.
+			//
+			// NOTHING IS RESTATED, which is why this was safe to change under the
+			// no-restatement rule. The settlement math is NOT this route — payouts
+			// come from /api/investor's monthlyRevenue, which resolves the SAME column
+			// with the SAME regexes through moneySheetDate() already (see the loop by
+			// `assignedMonthKey`), so those 105 loads have always been inside the
+			// figures. Only the document describing them hid them. This route writes
+			// nothing, and "Your Net Result" is passed IN via ?net= from the dashboard
+			// rather than derived here. Verified on the same read: 0 rows change their
+			// resolved month and 0 change their resolved day — every one of the 105 is
+			// an appearance, not a move. The one investor with `paid` payouts (owner 5)
+			// owns 0 of them.
+			//
+			// Do NOT reintroduce a local parser. Two disagreeing resolvers over one
+			// column is what produced this bug; moneySheetDate() is the single one.
+			const dt = dateCol ? moneySheetDate(r[dateCol]) : null;
+			if (!dt || isNaN(dt)) continue; // genuinely un-dateable (blank / non-date text)
 			const dayKey = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
 			if (startBound && dayKey < startBound) continue;
 			if (endBound && dayKey > endBound) continue;
