@@ -200,6 +200,34 @@
           <p v-if="bulkOutcomeFootnote" class="bulk-outcome-foot">{{ bulkOutcomeFootnote }}</p>
         </div>
 
+        <!-- A deep link (/expenses?expense=N, from the Data Issues queue) that
+             could not be honoured. ON SCREEN rather than in a toast, for the same
+             reason the bulk result above is: the admin followed a link to look at
+             one specific receipt, so "it isn't here" is the whole answer to the
+             thing they asked for, and a 3-second animation is the wrong weight for
+             it — they may well be looking at another window when it fires.
+             role="status" + aria-live="polite" to match, since it reports the
+             outcome of a navigation rather than interrupting one. -->
+        <div v-if="focusNotice" ref="focusNoticeEl" class="focus-notice" role="status" aria-live="polite">
+          <div class="focus-notice-top">
+            <strong class="focus-notice-headline">{{ focusNoticeHeadline }}</strong>
+            <button
+              type="button"
+              class="focus-notice-dismiss"
+              aria-label="Dismiss this notice"
+              title="Dismiss"
+              @click="focusNotice = null"
+            >&times;</button>
+          </div>
+          <p class="focus-notice-body">{{ focusNoticeBody }}</p>
+          <button
+            v-if="focusNotice.reason === 'filtered'"
+            type="button"
+            class="focus-notice-action"
+            @click="clearFiltersAndRetryFocus"
+          >Clear filters and open it</button>
+        </div>
+
         <PaginationBar :page="page" :page-size="pageSize" :total="allExpenses.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
 
         <div v-if="allExpenses.length === 0" class="empty-msg">No expenses found.</div>
@@ -1404,7 +1432,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { usePagination } from '../../composables/usePagination'
 import PaginationBar from '../shared/PaginationBar.vue'
 import { useApi } from '../../composables/useApi'
@@ -1427,6 +1455,18 @@ import {
   odometerConflicts,
   tankCalibration, countCalibrationChecks, calibrationVerdict, anyBimodal,
 } from '../../lib/fuelReview'
+
+// Deep link into one receipt: /expenses?expense=<id>, currently emitted by the
+// Data Issues duplicate-receipt queue. The VIEW owns the query param and this
+// component owns the modal, which is the same split DashboardView/ActiveLoadsTab
+// already use for /dashboard?load=<loadId> — prop in, `focus-consumed` out, and
+// the view clears the param so a refresh or a back-navigation does not re-open
+// the modal. Kept as a String because it arrives as one and this component is
+// the place that decides whether it is a usable id (see applyExpenseFocus).
+const props = defineProps({
+  focusExpenseId: { type: String, default: '' },
+})
+const emit = defineEmits(['focus-consumed'])
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -2140,6 +2180,9 @@ async function loadAll() {
   // about to become a different list.
   clearSelection()
   bulkOutcome.value = null
+  // Same rule for the deep-link notice: it names one row's relationship to THIS
+  // list ("the filters above exclude it"), so it cannot outlive the list.
+  focusNotice.value = null
   goTo(1) // filters/data changed → jump back to the first page
   try {
     const data = await api.get(`/api/expenses/all${buildAllExpensesQuery()}`)
@@ -2864,6 +2907,130 @@ function openReceiptRow(r) {
   }
   selectedId.value = r.id
 }
+
+// --- Deep link: /expenses?expense=<id> --------------------------------------
+//
+// Same job as openReceiptRow above and it goes THROUGH openReceiptRow rather
+// than setting selectedId itself: one way to open this modal, so a rule added to
+// that function (the finalized-month refusal, the membership test) can never
+// apply to a click and not to a link.
+//
+// What a link has that a click does not is a way to fail. A review-queue row is
+// on screen, so "that one" is never in doubt; a link carries a bare id from
+// another page and the row may be paginated away, filtered out, or gone. Each of
+// those gets an answer below, because the behaviour being replaced here — the
+// link landing on the page and doing nothing at all — is the bug.
+//
+// `null` when there is nothing to report; `{ id, label, reason }` otherwise,
+// where reason is 'filtered' (the row exists but the active filters exclude it)
+// or 'missing' (no such row).
+const focusNotice = ref(null)
+const focusNoticeEl = ref(null)
+
+// Bring it into view when it appears. On a phone this notice sits below the ZIP
+// download and Log Expense cards — a screenful down from where a deep link lands
+// — so without this the "visible beat" is only visible to someone who scrolls,
+// which is the same silence being fixed. No `behavior: 'smooth'`: the default
+// respects a reduced-motion preference and there is nothing to animate for.
+watch(focusNotice, async (n) => {
+  if (!n) return
+  await nextTick()
+  focusNoticeEl.value?.scrollIntoView({ block: 'center' })
+})
+
+const focusNoticeHeadline = computed(() =>
+  focusNotice.value ? `Expense #${focusNotice.value.label} isn't in this list` : ''
+)
+const focusNoticeBody = computed(() => {
+  if (!focusNotice.value) return ''
+  return focusNotice.value.reason === 'filtered'
+    ? 'It exists, but the filters above exclude it. Clear them to bring it back.'
+    : 'No expense with that id exists — it may have been deleted since the link was made.'
+})
+
+// Open one expense by id, having already established that the id is well formed.
+//
+// The distinction between the two failures is exact rather than a guess: this
+// list is the whole expenses table whenever no filter is set, so an id that is
+// absent from an UNFILTERED list is genuinely gone, and an id absent from a
+// filtered one is only hidden. buildAllExpensesQuery() is the same string that
+// produced the list, so the two can't disagree about which case this is.
+function focusExpenseById(id) {
+  // The link means "this receipt", and the receipt lives on the All Expenses
+  // sub-tab — arriving on Fuel Logs with a modal open over it would be a
+  // non-sequitur. (Mirrors DashboardView switching to Active Loads on ?load=.)
+  activeSubTab.value = 'all'
+  const idx = allExpenses.value.findIndex(e => e.id === id)
+  if (idx < 0) {
+    focusNotice.value = {
+      id,
+      label: String(id),
+      reason: buildAllExpensesQuery() ? 'filtered' : 'missing',
+    }
+    return
+  }
+  focusNotice.value = null
+  // Page to the row, not just to the modal. The modal resolves against the whole
+  // filtered list rather than the rendered page, so it would open from any page —
+  // but closing it would then leave the admin on page 1 hunting for the row they
+  // were just sent to, which is the hunt this deep link exists to remove.
+  goTo(Math.floor(idx / pageSize.value) + 1)
+  openReceiptRow(allExpenses.value[idx])
+}
+
+// Entry point for the prop. Always reports back, on every branch: the param has
+// been dealt with whether or not the row was found, and leaving it in the URL
+// would re-run this on the next refresh — including re-showing a notice the
+// admin had dismissed.
+function applyExpenseFocus(raw) {
+  const label = String(raw ?? '').trim().slice(0, 24)
+  const id = Number(label)
+  if (!label) {
+    // A blank/whitespace param is not a link anyone followed — nothing to say.
+    emit('focus-consumed')
+    return
+  }
+  if (Number.isInteger(id) && id > 0) {
+    focusExpenseById(id)
+  } else {
+    // Not an id this table could ever hold (ids are positive integers), so it is
+    // knowably absent without asking the server. Reported, not swallowed.
+    activeSubTab.value = 'all'
+    focusNotice.value = { id: null, label, reason: 'missing' }
+  }
+  emit('focus-consumed')
+}
+
+// The one repair the notice can offer. Only rendered for 'filtered', where the
+// row is known to exist.
+async function clearFiltersAndRetryFocus() {
+  const target = focusNotice.value?.id
+  if (target == null) return
+  allFilter.driver = ''; allFilter.type = ''; allFilter.status = ''
+  allFilter.truck = ''; allFilter.state = ''; allFilter.from = ''; allFilter.to = ''
+  allQ.value = ''
+  // Clearing the search box arms its 300ms debounce, and that deferred loadAll()
+  // would land AFTER the reload below and call goTo(1) — yanking the list off the
+  // page we are about to select. nextTick lets the watcher set its timer so there
+  // is something to cancel; the reload we do here is the one that counts.
+  await nextTick()
+  clearTimeout(allQTimer)
+  await loadAll()
+  focusExpenseById(target)
+}
+
+// Wait for the first load to resolve before judging "not found" — on a cold
+// deep link the prop is set while allExpenses is still empty, and answering then
+// would report every existing receipt as missing. allLoading is always released
+// (loadAll's catch swallows failures), so this cannot hang.
+watch(
+  [() => props.focusExpenseId, allLoading],
+  ([focus, loading]) => {
+    if (!focus || loading) return
+    applyExpenseFocus(focus)
+  },
+  { immediate: true }
+)
 
 // --- Clickable rows, made reachable from the keyboard ----------------------
 //
@@ -3875,6 +4042,70 @@ tr:hover td { background: var(--surface-hover); }
   font-size: 0.7rem;
   line-height: 1.5;
   color: #a16207;
+}
+
+/* Unresolved deep link. Same amber "needs your attention, is not an error"
+   surface as .bulk-outcome above — a red box would read as a failure of the
+   page, when the page is working and the row simply isn't in this list. */
+.focus-notice {
+  margin-bottom: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid #fde68a;
+  border-radius: var(--radius);
+  background: #fffbeb;
+}
+.focus-notice-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+.focus-notice-headline {
+  flex: 1;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.5;
+  color: #78350f;
+}
+.focus-notice-dismiss {
+  flex: none;
+  padding: 0 0.3rem;
+  margin: -0.15rem -0.2rem 0 0;
+  font-size: 1.05rem;
+  line-height: 1.2;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: #92400e;
+  cursor: pointer;
+  font-family: inherit;
+}
+.focus-notice-dismiss:hover { background: #fef3c7; }
+.focus-notice-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.focus-notice-body {
+  margin-top: 0.35rem;
+  font-size: 0.74rem;
+  line-height: 1.55;
+  color: #92400e;
+}
+.focus-notice-action {
+  margin-top: 0.5rem;
+  padding: 0.28rem 0.6rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-family: inherit;
+  color: #78350f;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.focus-notice-action:hover { background: #fde68a; }
+.focus-notice-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .action-cell { white-space: nowrap; }
