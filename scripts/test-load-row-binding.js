@@ -330,10 +330,15 @@ for (const sig of ['app.post("/api/dispatch"', 'app.post("/api/dispatch/reassign
 	check(`${sig.slice(9, -1)} binds before the period guard runs`,
 		body.indexOf("resolveLoadBinding(") < body.indexOf("dispatchWriteBlocker("), true);
 }
-check("resolveLoadBinding is called from exactly the 4 routes",
-	SRC.split("const unbound = resolveLoadBinding(").length - 1, 4);
-check("all four read the sheet through the one snapshot helper",
-	SRC.split("await readJobTrackingSnapshot(sheets, rowIndex)").length - 1, 4);
+// ⚠️ 4 → 5. PUT /api/driver/status joined the family: it was the fifth route
+// taking `rowIndex` and `loadId` as independent body fields, and the only one
+// this suite's own header comment listed as "reported, not fixed". The count is
+// deliberately an equality, not a `>=`, so ADDING a sixth caller-row route
+// without binding it fails here rather than passing quietly.
+check("resolveLoadBinding is called from exactly the 5 routes",
+	SRC.split("const unbound = resolveLoadBinding(").length - 1, 5);
+check("all five read the sheet through the one snapshot helper",
+	SRC.split("await readJobTrackingSnapshot(sheets, rowIndex)").length - 1, 5);
 
 // ⚠️ #211's carve-out, re-pinned here because this PR touches the cancel route:
 // a broker calling off a July load in August is ordinary business, and a guard
