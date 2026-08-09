@@ -117,6 +117,7 @@
           <StepCertifications v-if="step === 3" :form="form" />
           <StepReferences v-if="step === 4" :form="form" />
 
+          <div v-if="restoreNotice" class="notice-bar" role="status">{{ restoreNotice }}</div>
           <div v-if="error" class="error-bar">{{ error }}</div>
 
           <div class="step-actions">
@@ -254,6 +255,7 @@
 
 <script setup>
 import { ref, reactive, watch, onMounted } from 'vue'
+import { createFormDraft, deleteIndexedDb } from '../lib/formDraft'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import StepPersonalInfo from '../components/apply/StepPersonalInfo.vue'
 import StepExperience from '../components/apply/StepExperience.vue'
@@ -308,91 +310,91 @@ const defaultForm = () => ({
 
 const form = reactive(defaultForm())
 
-// ── State persistence: localStorage for text + IndexedDB for photos ──
-const STORAGE_KEY = 'logisx_apply_state'
-const IDB_NAME = 'logisx_apply'
-const IDB_STORE = 'uploads'
+// ── Draft persistence — see client/src/lib/formDraft.js for the reasoning ──
+//
+// The identity credentials on step 1 are held in memory ONLY and are never
+// written to any browser store. Everything else is tab-scoped (sessionStorage)
+// so a refresh or a back-navigation still restores the applicant's typing.
+//
+// SENSITIVE_FIELDS is the whole privacy contract of this form, so it is worth
+// being explicit about why each entry is on it rather than merely "personal":
+//   ssn / dob / drivers_license  — the identity-theft primitives themselves.
+//   cdl_front / cdl_back / medical_card — photographs of the licence, which carry
+//     the number, DOB, address, face AND signature. These are the single most
+//     sensitive artifact in the flow, and they used to be the most durably stored
+//     of the lot: text went to localStorage, but the photos went to IndexedDB.
+//   signature — the applicant's typed legal attestation. Excluded on integrity
+//     grounds rather than privacy (the name is on the form either way): a restored
+//     signature means the form can be submitted as "signed" without anyone
+//     deliberately signing it.
+const SENSITIVE_FIELDS = [
+  'ssn', 'dob', 'drivers_license',
+  'cdl_front', 'cdl_back', 'medical_card',
+  'signature',
+]
 
-// localStorage: all text fields (sync, reliable, same as /invest)
+const draft = createFormDraft({
+  key: 'logisx_apply_draft',
+  sensitiveKeys: SENSITIVE_FIELDS,
+  legacyKeys: ['logisx_apply_state'],
+})
+
+// Shown when a restore silently dropped the credentials, so the applicant is told
+// why step 1 looks half-empty instead of assuming the form lost their work.
+const restoreNotice = ref('')
+
 function saveState() {
-  try {
-    const { cdl_front, cdl_back, medical_card, ...lite } = form
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      step: step.value, maxStep: maxStep.value, form: lite,
-      submitted: submitted.value,
-    }))
-  } catch { /* full */ }
-}
-
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return
-    const s = JSON.parse(raw)
-    if (s.step != null) step.value = s.step
-    if (s.maxStep != null) maxStep.value = s.maxStep
-    if (s.form) Object.assign(form, s.form)
-    if (s.submitted) submitted.value = s.submitted
-    maxStep.value = Math.max(maxStep.value, step.value)
-  } catch { /* corrupt */ }
-}
-
-// IndexedDB: photo uploads only (handles large base64)
-function idbOpen() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1)
-    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE)
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
+  // ⚠️ Once submitted, persist the success flag and nothing else. `draft.clear()`
+  // on submit is NOT enough on its own: setting `submitted` triggers this watcher,
+  // which runs on the next tick — i.e. AFTER the clear — and would put the whole
+  // form straight back. Verified: sessionStorage still held the draft post-submit.
+  // The applicant's data has been delivered at that point and the only thing the
+  // success screen still needs is the first name it greets them by.
+  if (submitted.value) {
+    draft.save({ submitted: true, form: { first_name: form.first_name } })
+    return
+  }
+  draft.save({
+    step: step.value, maxStep: maxStep.value, form: { ...form },
+    submitted: false,
   })
 }
 
-function idbSave(key, value) {
-  idbOpen().then(db => {
-    const tx = db.transaction(IDB_STORE, 'readwrite')
-    tx.objectStore(IDB_STORE).put(value, key)
-    tx.oncomplete = () => db.close()
-    tx.onerror = () => db.close()
-  }).catch(() => {})
+function loadState() {
+  const s = draft.load()
+  if (!s) return
+  if (s.form) Object.assign(form, s.form)
+  if (s.submitted) submitted.value = s.submitted
+  if (s.step != null) step.value = s.step
+  if (s.maxStep != null) maxStep.value = s.maxStep
+  maxStep.value = Math.max(maxStep.value, step.value)
+
+  // ⚠️ Without this the privacy fix would create a data-integrity bug. The
+  // credentials live on step 1 but `submitForm` only validated the step it was
+  // on, so a restore at step 5 with a dropped SSN submitted a blank SSN — a
+  // silently incomplete application, which is worse than a lost draft.
+  // Rewinding to step 1 (maxStep too, or the sidebar walks straight back past it)
+  // puts them in front of the only fields that did not survive.
+  if (!submitted.value && validate(0)) {
+    if (step.value > 0) {
+      restoreNotice.value = 'For your security we did not save your SSN, date of birth, licence number or document photos. Please re-enter them to continue — the rest of your application was restored.'
+    }
+    step.value = 0
+    maxStep.value = 0
+  }
 }
 
-function idbLoad(key) {
-  return idbOpen().then(db => new Promise((resolve) => {
-    const tx = db.transaction(IDB_STORE, 'readonly')
-    const req = tx.objectStore(IDB_STORE).get(key)
-    req.onsuccess = () => { db.close(); resolve(req.result || '') }
-    req.onerror = () => { db.close(); resolve('') }
-  })).catch(() => '')
-}
+onMounted(() => {
+  loadState()
+  // Purge the pre-fix photo store. Base64 images of a driver's licence sat in
+  // IndexedDB with no expiry, cleared only on a successful submit.
+  deleteIndexedDb('logisx_apply')
+})
 
-function idbClear() {
-  idbOpen().then(db => {
-    const tx = db.transaction(IDB_STORE, 'readwrite')
-    tx.objectStore(IDB_STORE).clear()
-    tx.oncomplete = () => db.close()
-  }).catch(() => {})
-}
-
-// Save photos to IndexedDB when they change
-watch(() => form.cdl_front, (v) => { if (v) idbSave('cdl_front', v) })
-watch(() => form.cdl_back, (v) => { if (v) idbSave('cdl_back', v) })
-watch(() => form.medical_card, (v) => { if (v) idbSave('medical_card', v) })
-
-// Auto-save text to localStorage on any change
+// Auto-save on any change
 watch(step, saveState)
 watch(submitted, saveState)
 watch(form, saveState, { deep: true })
-
-// Load on mount: localStorage (sync) + IndexedDB photos (async)
-onMounted(async () => {
-  loadState()
-  const [cdl_front, cdl_back, medical_card] = await Promise.all([
-    idbLoad('cdl_front'), idbLoad('cdl_back'), idbLoad('medical_card'),
-  ])
-  if (cdl_front) form.cdl_front = cdl_front
-  if (cdl_back) form.cdl_back = cdl_back
-  if (medical_card) form.medical_card = medical_card
-})
 
 function goToStep(i) {
   if (submitted.value) return
@@ -429,14 +431,27 @@ function nextStep() {
   const err = validate(step.value)
   if (err) { error.value = err; return }
   error.value = ''
+  restoreNotice.value = ''
   step.value++
   maxStep.value = Math.max(maxStep.value, step.value)
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
 async function submitForm() {
-  const err = validate(step.value)
-  if (err) { error.value = err; return }
+  // Validate EVERY step, not just the current one. The old single-step check was
+  // safe only because the step gate made it impossible to reach the end with an
+  // earlier step invalid — an assumption that stops holding the moment a restore
+  // can legitimately blank a field on step 1.
+  for (let s = 0; s <= 4; s++) {
+    const stepErr = validate(s)
+    if (stepErr) {
+      step.value = s
+      maxStep.value = Math.max(maxStep.value, s)
+      error.value = stepErr
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+      return
+    }
+  }
   error.value = ''
   submitting.value = true
   try {
@@ -449,8 +464,8 @@ async function submitForm() {
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || 'Submission failed')
     submitted.value = true
-    localStorage.removeItem(STORAGE_KEY)
-    idbClear()
+    draft.clear()
+    deleteIndexedDb('logisx_apply')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   } catch (err) {
     error.value = err.message
@@ -569,6 +584,13 @@ async function submitForm() {
 .error-bar {
   background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px;
   padding: 0.6rem 1rem; font-size: 0.82rem; color: #dc2626; margin-top: 1rem;
+}
+
+/* Informational, not a failure — the applicant did nothing wrong. */
+.notice-bar {
+  background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;
+  padding: 0.6rem 1rem; font-size: 0.82rem; color: #1d4ed8; margin-top: 1rem;
+  line-height: 1.5;
 }
 
 /* ─── Success ─── */

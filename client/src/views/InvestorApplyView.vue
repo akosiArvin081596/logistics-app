@@ -76,6 +76,8 @@
       </div>
 
       <template v-else>
+        <div v-if="restoreNotice" class="notice-bar" role="status">{{ restoreNotice }}</div>
+
         <!-- STEP 1: Application -->
         <div v-if="step === 0" class="step-panel">
           <div class="content-header">
@@ -294,7 +296,7 @@
 
           <div class="step-actions">
             <div></div>
-            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" data-wizard-target="continue-step1" @click="vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
+            <button class="btn-primary" :disabled="!allVehiclesValid || signedCount < totalDocs" data-wizard-target="continue-step1" @click="restoreNotice = ''; vehicleInfoDone = true; step = 2; maxStep = Math.max(maxStep, 2)">
               Continue
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
@@ -512,6 +514,7 @@
 import { ref, computed, reactive, onMounted, watch } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { createFormDraft } from '../lib/formDraft'
 import InvestorSignModal from '../components/invest/InvestorSignModal.vue'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import InvestWizardOverlay from '../wizard/components/InvestWizardOverlay.vue'
@@ -522,7 +525,6 @@ const sidebarSteps = [
   { title: 'Banking', desc: 'ACH settlement details' },
 ]
 
-const STORAGE_KEY = 'logisx_invest_state'
 const addressInput = ref(null)
 const showMapPicker = ref(false)
 const geolocating = ref(false)
@@ -666,38 +668,85 @@ const banking = reactive({
   bank_name: '', account_type: '', routing_number: '', account_number: '', account_name: '',
 })
 
-// ── State persistence ──
+// ── Draft persistence — see client/src/lib/formDraft.js for the reasoning ──
+//
+// Credentials are held in memory ONLY and never written to a browser store;
+// everything else is tab-scoped (sessionStorage) so a refresh or a
+// back-navigation still restores the applicant's typing.
+//
+//   ein_ssn                          — the tax id, i.e. an SSN for a sole trader.
+//   routing_number / account_number  — where money is sent. Note `account_type`
+//     and `account_name` are deliberately NOT here: the strip is an exact
+//     name match, so a substring rule would have eaten both.
+//   signatures                       — `{docKey: {text, image}}`, where `image` is
+//     a base64 bitmap of a handwritten signature that signs the W-9 (carrying the
+//     tax id) and the lease (carrying the bank details). A stored signature image
+//     is a directly forgeable asset, and restoring one also lets the flow submit
+//     documents as "signed" that nobody deliberately signed this session.
+const SENSITIVE_FIELDS = ['ein_ssn', 'routing_number', 'account_number', 'signatures']
+
+const draft = createFormDraft({
+  key: 'logisx_invest_draft',
+  sensitiveKeys: SENSITIVE_FIELDS,
+  legacyKeys: ['logisx_invest_state'],
+})
+
+// Shown when a restore silently dropped the credentials, so the applicant is told
+// why a step looks half-empty instead of assuming the form lost their work.
+const restoreNotice = ref('')
+
 function saveState() {
-  try {
-    // Strip photo base64 from vehicles to avoid exceeding localStorage 5MB limit
-    const vehiclesLite = vehicles.value.map(({ photo, ...rest }) => rest)
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      step: step.value, maxStep: maxStep.value, form: { ...form },
-      vehicles: vehiclesLite, banking: { ...banking },
-      vehicleInfoDone: vehicleInfoDone.value, activeVehicleTab: activeVehicleTab.value,
-      signatures: { ...signatures },
-      completed: completed.value,
-    }))
-  } catch { /* full storage */ }
+  // ⚠️ Once completed, persist the flag and nothing else. `draft.clear()` on
+  // submit is NOT enough on its own: setting `completed` triggers this watcher,
+  // which runs on the next tick — i.e. AFTER the clear — and would put the whole
+  // application straight back.
+  if (completed.value) {
+    draft.save({ completed: true })
+    return
+  }
+  // Vehicle photos are stripped for SIZE, not privacy — a few base64 truck
+  // photos blow the ~5 MB store on their own.
+  const vehiclesLite = vehicles.value.map(({ photo, ...rest }) => rest)
+  draft.save({
+    step: step.value, maxStep: maxStep.value, form: { ...form },
+    vehicles: vehiclesLite, banking: { ...banking },
+    vehicleInfoDone: vehicleInfoDone.value, activeVehicleTab: activeVehicleTab.value,
+    signatures: { ...signatures },
+    completed: completed.value,
+  })
 }
 
 function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return
-    const s = JSON.parse(raw)
-    if (s.step != null) step.value = s.step
-    if (s.maxStep != null) maxStep.value = s.maxStep
-    if (s.form) Object.assign(form, s.form)
-    if (s.vehicles?.length) vehicles.value = s.vehicles
-    if (s.banking) Object.assign(banking, s.banking)
-    if (s.vehicleInfoDone != null) vehicleInfoDone.value = s.vehicleInfoDone
-    if (s.activeVehicleTab != null) activeVehicleTab.value = s.activeVehicleTab
-    if (s.signatures) Object.assign(signatures, s.signatures)
-    if (s.completed) completed.value = s.completed
-    // Ensure maxStep is at least the current step
-    maxStep.value = Math.max(maxStep.value, step.value)
-  } catch { /* corrupt data */ }
+  const s = draft.load()
+  if (!s) return
+  if (s.form) Object.assign(form, s.form)
+  if (s.vehicles?.length) vehicles.value = s.vehicles
+  if (s.banking) Object.assign(banking, s.banking)
+  if (s.activeVehicleTab != null) activeVehicleTab.value = s.activeVehicleTab
+  if (s.signatures) Object.assign(signatures, s.signatures)
+  if (s.completed) completed.value = s.completed
+  if (s.vehicleInfoDone != null) vehicleInfoDone.value = s.vehicleInfoDone
+  if (s.step != null) step.value = s.step
+  if (s.maxStep != null) maxStep.value = s.maxStep
+  maxStep.value = Math.max(maxStep.value, step.value)
+
+  // ⚠️ Without this the privacy fix would create a data-integrity bug. The final
+  // submit is gated only by `canSubmitBanking` (step 3's own fields), so a restore
+  // at step 3 would happily submit an application with a blank tax id and zero
+  // signed documents. Rewind to the earliest step whose credentials did not
+  // survive — maxStep too, or the sidebar walks straight back past it.
+  if (completed.value) return
+  if (!form.ein_ssn && step.value > 0) {
+    restoreNotice.value = 'For your security we did not save your EIN/SSN. Please re-enter it to continue — the rest of your application was restored.'
+    step.value = 0
+    maxStep.value = 0
+    vehicleInfoDone.value = false
+  } else if (signedCount.value < totalDocs && step.value > 1) {
+    restoreNotice.value = 'For your security we did not save your signatures. Please sign the documents again to continue — the rest of your application was restored.'
+    step.value = 1
+    maxStep.value = 1
+    vehicleInfoDone.value = false
+  }
 }
 
 // Auto-save on any change (individual watchers for reliability)
@@ -807,6 +856,7 @@ const canSubmitBanking = computed(() => banking.bank_name && banking.routing_num
 
 // Step 0 → Step 1: just navigate, no server call
 function submitApplication() {
+  restoreNotice.value = ''
   step.value = 1
   maxStep.value = Math.max(maxStep.value, 1)
 }
@@ -882,6 +932,29 @@ async function handleSigned({ docKey, text, image }) {
 // Final single submission — all data in one request
 async function submitOnboarding() {
   if (submitting.value) return
+  // Backstop for the same hazard `loadState` rewinds for: never post an
+  // application missing a credential the UI believes was collected on an
+  // earlier step. Cheap, and it holds even if a future step is added above.
+  if (!canProceedStep1.value) {
+    step.value = 0
+    maxStep.value = Math.max(maxStep.value, 0)
+    showReviewModal.value = false
+    toast('Please complete your business details before submitting.', 'error')
+    return
+  }
+  if (signedCount.value < totalDocs) {
+    step.value = 1
+    maxStep.value = Math.max(maxStep.value, 1)
+    showReviewModal.value = false
+    toast('Please sign all onboarding documents before submitting.', 'error')
+    return
+  }
+  if (!canSubmitBanking.value) {
+    step.value = 2
+    showReviewModal.value = false
+    toast('Please complete your banking details before submitting.', 'error')
+    return
+  }
   submitting.value = true
   try {
     const stripped = vehicles.value.map(({ photo, photoName, ...rest }) => rest)
@@ -892,7 +965,7 @@ async function submitOnboarding() {
       signatures: { ...signatures },
     })
     completed.value = true
-    localStorage.removeItem(STORAGE_KEY)
+    draft.clear()
     toast('Onboarding complete!', 'success')
     setTimeout(() => { window.location.href = 'https://logisx.com/' }, 5000)
   } catch (err) {
@@ -1095,6 +1168,13 @@ async function submitOnboarding() {
   flex: 1;
   padding: 2rem 3rem 2rem;
   width: 100%;
+}
+
+/* Informational, not a failure — the applicant did nothing wrong. */
+.notice-bar {
+  background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;
+  padding: 0.7rem 1rem; font-size: 0.82rem; color: #1d4ed8; line-height: 1.5;
+  margin: 1.5rem 3rem -0.5rem;
 }
 
 /* ─── Content header ─── */
