@@ -4851,10 +4851,84 @@ function guardInvestorSignedDoc(req, res, next, url) {
 	return res.status(404).end();
 }
 
+// Weekly driver-pay invoice PDFs. Same class as the two signed-doc directories
+// above, and the filename is MORE enumerable, not less: the file is written as
+// `${invoiceNumber}.pdf`, and generateInvoiceNumber() builds
+// `INV-{<=3 initials}-{YYYY}W{WW}-{NN}` — a colleague's initials are visible all
+// over the app (dispatch board, messages, load history), which leaves ~53 weeks
+// crossed with a tiny sequence, i.e. on the order of 100 requests to sweep a
+// full year for one person. The PDF carries that driver's weekly pay, active
+// days, the load/BOL list and the expense deductions.
+//
+// GET /api/invoices/:id/pdf has always enforced ownership. This directory was
+// simply never listed below, so that check was bypassed ENTIRELY by asking
+// express.static for the file instead — measured, not theorized: a Driver
+// session read another driver's pay PDF in all seven path shapes tested,
+// including the plain one. Nothing in the client ever links to
+// /uploads/invoices/… (every legitimate read goes through the API route), so
+// this guard removes attack surface and no capability.
+//
+// ⚠️ MEMBERSHIP TEST over every row sharing the filename, NOT
+// fetch-one-then-compare. `invoices.pdf_file_name` has no unique index, and the
+// duplicate invoice-NUMBER bug generateInvoiceNumber() carried until PR #225 is
+// exactly how two rows come to share one file name — `.get()` would then return
+// an arbitrary one of them and could refuse the real owner while admitting a
+// stranger. Same reasoning as guardInvestorSignedDoc's application_id test.
+//
+// Authority is the DB row, not the filename, so an orphaned PDF on disk fails
+// closed. 404 and never 403 on refusal: a 403 confirms the invoice exists, which
+// is the one bit an enumerator is fishing for.
+function guardInvoicePdf(req, res, next, url, file) {
+	let rows;
+	try {
+		rows = db.prepare(
+			"SELECT id, driver, deleted_at FROM invoices WHERE pdf_file_name = ?"
+		).all(file);
+	} catch {
+		return res.status(404).end();   // unreadable table → fail closed
+	}
+	if (!rows.length) return res.status(404).end();
+
+	const user = req.session.user;
+	// Super Admin sees everything, soft-deleted rows included — the same rule
+	// GET /api/invoices/:id/pdf applies, which keeps them viewable for
+	// audit/restore after a soft delete.
+	if (user.role === "Super Admin") return next();
+	// Everyone else: a Driver, their own invoice, and only a live row.
+	//
+	// driverOwnsInvoice() is the SAME predicate the API route uses (PR #225).
+	// This bug is "the ownership rule had a second door"; it must not also
+	// acquire a second copy of the rule. It folds both sides through
+	// normalizeDriverName() and refuses a blank session name outright — which is
+	// what denies a Dispatcher and an Investor here without naming either role,
+	// since neither carries a driver_name. (Hoisted function declaration; it is
+	// defined beside the invoice routes, next to the comment explaining the fold.)
+	if (user.role === "Driver" && rows.some(r => !r.deleted_at && driverOwnsInvoice(user, r))) return next();
+	return res.status(404).end();
+}
+
 // Directory → rule. Prefixes are matched against the NORMALIZED path, so every
 // encoding of the same file lands on the same rule.
 //
-// WHY ONLY THESE TWO (plus rate-cons), and what was considered and left:
+// WHY THESE THREE (plus rate-cons), and what was considered and left:
+//   uploads/invoices/ was added 2026-08-09 (issue #228). It is precisely the
+//   case the ⚠️ at the end of this comment predicted and nobody acted on: the
+//   names were ALWAYS predictable, the ownership rule already existed on
+//   GET /api/invoices/:id/pdf, and the directory was never listed here — so the
+//   rule had a second door standing open to every authenticated session.
+//   See guardInvoicePdf above.
+//
+//   Swept at the same time and deliberately left (all four are timestamped, so
+//   the URL is a weak secret rather than a free enumeration, and none has a
+//   sub-second-guessable name):
+//     uploads/ root         `${loadId}_POD_${Date.now()}.pdf`  — PODs/BOLs
+//     uploads/chat/         `chat_${Date.now()}_${rand5}.<ext>`
+//     uploads/expense-receipts/  `${Date.now()}-${12 hex}.<ext>`
+//     uploads/legal/        `${scope}_${DocType}_${Date.now()}.pdf`
+//   uploads/onboarding-templates/ holds blank forms — no PII, nothing to guard.
+//   uploads/rate-cons/ IS `${loadId}.pdf`, i.e. fully enumerable, and is
+//   role-gated in the handler below rather than by an ownership rule.
+//
 //   uploads/onboarding/ holds DRUG TEST results — medical data, and arguably
 //   the most sensitive tree here. It is deliberately NOT guarded, because the
 //   property that made the signed docs exploitable is absent: those filenames
@@ -4872,6 +4946,7 @@ function guardInvestorSignedDoc(req, res, next, url) {
 const GUARDED_UPLOAD_DIRS = [
 	{ dir: "/onboarding-signed/", guard: guardDriverSignedDoc },
 	{ dir: "/investor-onboarding-signed/", guard: guardInvestorSignedDoc },
+	{ dir: "/invoices/", guard: guardInvoicePdf },
 ];
 
 app.use("/uploads", requireAuth, (req, res, next) => {
@@ -4913,7 +4988,13 @@ app.use("/uploads", requireAuth, (req, res, next) => {
 		const file = norm.slice(dir.length);
 		// These directories are flat. A nested path is not a legitimate shape.
 		if (!file || file.includes("/")) return res.status(404).end();
-		return guard(req, res, next, "/uploads" + dir + file);
+		// `file` (the bare name) is passed alongside the full URL because the two
+		// guard families resolve DIFFERENT columns: the signed-doc guards look up a
+		// stored `signed_pdf_url`, which is a whole /uploads/… path, while the
+		// invoice guard looks up `invoices.pdf_file_name`, which is a bare filename.
+		// Handing over both keeps each guard querying its own column instead of
+		// re-deriving one from the other and drifting when a prefix changes.
+		return guard(req, res, next, "/uploads" + dir + file, file);
 	}
 	next();
 });
@@ -12433,7 +12514,29 @@ app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {
 		// Drivers can only access their own — see driverOwnsInvoice() above for why
 		// this folds both sides rather than normalising the stored row.
 		const user = req.session.user;
-		if (user.role === "Driver" && !driverOwnsInvoice(user, invoice)) {
+		// ⚠️ `!== "Super Admin"`, not `=== "Driver"`. The old gate named only the
+		// Driver role, so a Dispatcher or an Investor — neither of which carries a
+		// driver_name — fell through it and reached ANY invoice by id. That
+		// contradicted this feature's own listing contract: GET /api/invoices scopes
+		// every non-Super-Admin caller to `LOWER(driver) = <their own name>`, which
+		// hands a Dispatcher and an Investor zero rows, and both client surfaces are
+		// already narrower still (the /invoices view is `meta.roles: ['Super Admin']`;
+		// the driver app shows a driver only their own). So this is the detail route
+		// catching up with the list, not a capability being withdrawn.
+		//
+		// An Investor is an EXTERNAL party and driver compensation is a carrier cost,
+		// not investor data — their portal already receives driver pay as a monthly
+		// aggregate. getInvestorDriverSet() was considered as a way to let an investor
+		// read their own drivers' invoices and rejected: it needs live Carrier
+		// Database sheet rows to be complete, so an authorization decision taken on it
+		// fails OPEN for the truck-linked subset and closed for the rest depending on
+		// whether a sheet read succeeded. If Dispatchers are ever meant to have this,
+		// widen GET /api/invoices first — deciding it here alone would give them a
+		// capability they cannot discover an id for.
+		//
+		// driverOwnsInvoice() refusing a blank session name is what makes the single
+		// test above sufficient: it denies both roles without enumerating them.
+		if (user.role !== "Super Admin" && !driverOwnsInvoice(user, invoice)) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
 		// Soft-deleted invoices stay viewable by Super Admin only (audit/restore).
@@ -12462,7 +12565,29 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id));
 		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
 		const user = req.session.user;
-		if (user.role === "Driver" && !driverOwnsInvoice(user, invoice)) {
+		// ⚠️ `!== "Super Admin"`, not `=== "Driver"`. The old gate named only the
+		// Driver role, so a Dispatcher or an Investor — neither of which carries a
+		// driver_name — fell through it and reached ANY invoice by id. That
+		// contradicted this feature's own listing contract: GET /api/invoices scopes
+		// every non-Super-Admin caller to `LOWER(driver) = <their own name>`, which
+		// hands a Dispatcher and an Investor zero rows, and both client surfaces are
+		// already narrower still (the /invoices view is `meta.roles: ['Super Admin']`;
+		// the driver app shows a driver only their own). So this is the detail route
+		// catching up with the list, not a capability being withdrawn.
+		//
+		// An Investor is an EXTERNAL party and driver compensation is a carrier cost,
+		// not investor data — their portal already receives driver pay as a monthly
+		// aggregate. getInvestorDriverSet() was considered as a way to let an investor
+		// read their own drivers' invoices and rejected: it needs live Carrier
+		// Database sheet rows to be complete, so an authorization decision taken on it
+		// fails OPEN for the truck-linked subset and closed for the rest depending on
+		// whether a sheet read succeeded. If Dispatchers are ever meant to have this,
+		// widen GET /api/invoices first — deciding it here alone would give them a
+		// capability they cannot discover an id for.
+		//
+		// driverOwnsInvoice() refusing a blank session name is what makes the single
+		// test above sufficient: it denies both roles without enumerating them.
+		if (user.role !== "Super Admin" && !driverOwnsInvoice(user, invoice)) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
 		if (invoice.status !== "Draft") {
