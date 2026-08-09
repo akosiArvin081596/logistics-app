@@ -176,7 +176,7 @@ ok("no query parameter reaches the alert decision",
 	!/reconcileRateCons\(\{\s*alert:\s*!?dryRun/.test(src));
 
 const mountCount = (name) => src.split("\n").filter((l) => /^app\.(get|post|put|delete|patch)\(/.test(l) && l.includes(name + ",")).length;
-eq("refuseCrossOrigin mount count", mountCount("refuseCrossOrigin"), 6);
+eq("refuseCrossOrigin mount count", mountCount("refuseCrossOrigin"), 7);
 // ⚠️ Assert the ROUTES, not just a count. A bare count goes stale the moment a
 // new guarded route lands — this pin said 2 and broke when #250 correctly added
 // the onboarding-evidence GET, which reads signer IP/user-agent and is exactly
