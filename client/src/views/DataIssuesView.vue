@@ -703,10 +703,12 @@ function verdictLabel(t) {
 // only action a row earns is going to look at it. Precedent: openReceiptRow()
 // in ExpensesTab, which likewise navigates rather than mutating.
 //
-// NOTE: ExpensesTab does not read `?expense=` yet, so this lands on the
-// Expenses page rather than opening that row's modal; the id is rendered in the
-// table so it stays findable. Consuming the query there is a small follow-up
-// owned by whoever owns that file.
+// `?expense=<id>` is consumed by ExpensesView/ExpensesTab (PR #265): it pages to
+// the row, opens it through that same openReceiptRow(), and clears the param.
+// So this hands off a row id and nothing more — deciding what to do when the id
+// cannot be shown belongs there, on the surface that knows the filter state, and
+// must not be second-guessed here. The expense id stays rendered in the table
+// regardless, so a row remains identifiable without relying on the navigation.
 function openExpense(row) {
   if (row?.id == null) return
   router.push({ path: '/expenses', query: { expense: String(row.id) } })
