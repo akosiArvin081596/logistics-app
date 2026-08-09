@@ -81,8 +81,33 @@ Database files and user uploads are now gitignored. Existing tracked files (the 
 ## Sprint 5 — Dependency advisories: the 4 that remain, and why
 
 PR #213 took `npm audit` from 29 advisories to 8, entirely inside the declared semver
-ranges. A follow-up pass then cleared 3 more (2 high + 1 that #213 had mis-assessed).
+ranges. A follow-up pass (#241) then cleared 3 more — 2 high in `picomatch`
+(GHSA-3v7f-55p6-f55p, GHSA-c2c7-rcm5-vvqj) and 1 high in `nodemailer`
+(GHSA-p6gq-j5cr-w38f), which #213 had mis-assessed as unfixable.
 **4 moderate advisories remain, all in one chain, and they are deliberately not fixed.**
+
+**⚠️ The numbers above are in two different units and therefore do not subtract.**
+"8 − 3 = 5" is the wrong arithmetic on the wrong quantities, and 5 has never been
+the answer — do not "correct" the 4 to match it. `npm audit`'s headline total counts
+vulnerable **package entries**; the prose counts **GHSAs**. `picomatch` is two GHSAs
+but a single package entry, so #241 closed 3 advisories while moving the headline
+by 2. Measured against the two lockfiles (root only; `client/` is **0** either way,
+before and after):
+
+| | package entries | breakdown |
+|---|---|---|
+| before #241 (`e4d355c^`) | **6** | 4 moderate, 2 high |
+| after #241 (current) | **4** | 4 moderate, 0 high |
+
+Both are reproducible without installing anything —
+`git show <ref>:package-lock.json` into a scratch dir alongside its `package.json`,
+then `npm audit --package-lock-only --prefix <dir>`. The lockfile changed at exactly
+two commits (#213, #241), so `e4d355c^` *is* the post-#213 state.
+
+**The 29 and the 8 are as-measured on their date, against the advisory database of
+that day, and are not reproducible now** — the same post-#213 lockfile audits to 6
+today. Re-measure rather than quoting either. That drift is the whole reason the
+counts are pinned to a command here instead of to prose.
 
 Re-verify with `npm audit`; do not re-litigate from the advisory text alone — every
 verdict below was reached from *this app's* call sites, not from the CVSS score.

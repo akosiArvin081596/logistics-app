@@ -119,10 +119,43 @@ async function readSheet() {
  * LLM's route summary into its `Details` column — so that string is the join
  * key back to the load's real pickup/drop-off addresses.
  */
+
+/**
+ * Resolve Job Details' retired LLM-output column.
+ *
+ * ⚠️ The header is being RENAMED (to something like
+ * `output (retired 2026-08-09 — n8n AI Agent, do not reuse)`) now that the
+ * `AI Agent` node is deleted and `POST /api/n8n/load-distance` returns a FLAT
+ * body that never contains an `output` key. The 151 stored values stay put for
+ * audit, so this harness must keep reading them under either spelling — hence a
+ * PREFIX match rather than a second hardcoded literal, which would break again
+ * the next time the retirement note is reworded.
+ *
+ * ⚠️ It THROWS when the column is absent, and that is the point. The previous
+ * `jdH.indexOf("output")` returned -1, `row[-1]` is `undefined`, and every row
+ * was then skipped by the `if (!raw) continue` below — so a renamed or dropped
+ * column produced a clean run reporting ZERO records, indistinguishable from
+ * "the LLM never wrote anything". A measurement harness that silently measures
+ * nothing is worse than one that stops.
+ */
+function retiredOutputIndex(jdH) {
+	const norm = (h) => String(h == null ? "" : h).trim().toLowerCase();
+	let i = jdH.findIndex((h) => norm(h) === "output");
+	if (i < 0) i = jdH.findIndex((h) => norm(h).startsWith("output"));
+	if (i < 0) {
+		throw new Error(
+			"Job Details has no `output` column (nor a renamed `output …` variant). " +
+			"That column holds the 151 stored LLM answers this script measures; " +
+			`without it there is nothing to compare. Headers seen: ${JSON.stringify(jdH)}`
+		);
+	}
+	return i;
+}
+
 function link(jt, jd) {
 	const jtH = jt[0] || [], jdH = jd[0] || [];
 	const jti = (n) => jtH.indexOf(n);
-	const jdi = (n) => jdH.indexOf(n);
+	const outputIdx = retiredOutputIndex(jdH);
 
 	const byDetails = new Map();
 	for (let i = 1; i < jt.length; i++) {
@@ -142,7 +175,7 @@ function link(jt, jd) {
 
 	const recs = [];
 	for (let i = 1; i < jd.length; i++) {
-		const raw = String(jd[i][jdi("output")] || "").trim();
+		const raw = String(jd[i][outputIdx] || "").trim();
 		if (!raw) continue;
 		let j;
 		try { j = JSON.parse(raw); } catch (e) { continue; }
