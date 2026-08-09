@@ -999,7 +999,7 @@
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
-            "Details": "={{ $json.output.details }}",
+            "Details": "={{ $json.Details }}",
             "Load ID": "={{ $('JOB DETAILS ENTRY').item.json['Load ID'] }}"
           },
           "matchingColumns": [
@@ -1412,55 +1412,6 @@
       ],
       "id": "email-input-passthrough-001",
       "name": "Email Input"
-    },
-    {
-      "parameters": {
-        "promptType": "define",
-        "text": "=System Role: You are a logistics logistics coordinator specializing in load calculation.Task: > 1. Identify the City, State, and Zip Code for both the Pickup and Drop-off addresses.2. Calculate the driving distance between the two locations.3. Calculate the Rate Per Mile (RPM) using the formula: $RPM = \\frac{\\text{Total Rate}}{\\text{Distance}}$Input Data:Pickup Address: {{ $json['Pickup Address'] }}Drop-off Address: {{ $json['Drop-off Address'] }} Payment: {{ $('Normalize Load Fields').item.json.output.Rate }}Instructions:Format the \"details\" field exactly as: \"City, ST, Zip - City, ST, Zip\".Ensure \"rate_per_mile\" is a number rounded to two decimal places.Output only valid JSON. Do not include any conversational text.",
-        "hasOutputParser": true,
-        "options": {}
-      },
-      "type": "@n8n/n8n-nodes-langchain.agent",
-      "typeVersion": 3.1,
-      "position": [
-        6816,
-        1344
-      ],
-      "id": "38e479f9-9c90-4a5a-b7d3-1a46936939a7",
-      "name": "AI Agent"
-    },
-    {
-      "parameters": {
-        "options": {},
-        "modelName": "models/gemini-3.5-flash"
-      },
-      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
-      "typeVersion": 1,
-      "position": [
-        6824,
-        1568
-      ],
-      "id": "b57582c5-ef7e-4184-b880-5324f0701bee",
-      "name": "Google Gemini Chat Model1",
-      "credentials": {
-        "googlePalmApi": {
-          "id": "kzlHx6lePVcSV9B8",
-          "name": "Google Gemini(PaLM) Api account"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "jsonSchemaExample": "{\n  \"details\": \"City, ST, Zip - City, ST, Zip\",\n  \"distance\": 0,\n  \"Payment\": 0,\n  \"rate_per_mile\": 0\n}"
-      },
-      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
-      "typeVersion": 1.3,
-      "position": [
-        6952,
-        1568
-      ],
-      "id": "11edca5b-b6a3-442c-b698-fd3b6bc83800",
-      "name": "Structured Output Parser"
     },
     {
       "parameters": {
@@ -1964,6 +1915,36 @@
       ],
       "id": "b0a1c2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
       "name": "Build Failure Context"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://app.logisx.com/api/n8n/load-distance",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-webhook-secret",
+              "value": "__REDACTED__SET_IN_N8N__X_WEBHOOK_SECRET__"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ load_id: $json['Load ID'], pickup_address: $json['Pickup Address'], dropoff_address: $json['Drop-off Address'], rate: $('Normalize Load Fields').item.json.output.Rate }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6816,
+        1344
+      ],
+      "id": "b7d1f0a4-3c65-4e2b-9a18-5f0c7d2e6a91",
+      "name": "Distance via LogisX",
+      "onError": "continueErrorOutput"
     }
   ],
   "connections": {
@@ -2168,39 +2149,6 @@
         ]
       ]
     },
-    "AI Agent": {
-      "main": [
-        [
-          {
-            "node": "Update Job Details (Distance)",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Google Gemini Chat Model1": {
-      "ai_languageModel": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "ai_languageModel",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Structured Output Parser": {
-      "ai_outputParser": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "ai_outputParser",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Build Email Context": {
       "main": [
         [
@@ -2301,7 +2249,7 @@
       "main": [
         [
           {
-            "node": "AI Agent",
+            "node": "Distance via LogisX",
             "type": "main",
             "index": 0
           }
@@ -2458,6 +2406,24 @@
         [
           {
             "node": "Send Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Distance via LogisX": {
+      "main": [
+        [
+          {
+            "node": "Update Job Details (Distance)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Failure Context",
             "type": "main",
             "index": 0
           }
