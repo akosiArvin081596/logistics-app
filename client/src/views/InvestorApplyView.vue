@@ -723,7 +723,23 @@ function loadState() {
   if (s.vehicles?.length) vehicles.value = s.vehicles
   if (s.banking) Object.assign(banking, s.banking)
   if (s.activeVehicleTab != null) activeVehicleTab.value = s.activeVehicleTab
-  if (s.signatures) Object.assign(signatures, s.signatures)
+  // ⚠️ A signature restored from BEFORE consent was captured is not a complete
+  // signing act, so it is dropped rather than restored. Without this, an applicant
+  // who signed before consent shipped would see ticked documents and then hit a
+  // terminal 400 CONSENT_REQUIRED at submit, with no way to tell which one was
+  // wrong. Dropping it re-opens those documents for signing, which is the honest
+  // state: the server has no record that they agreed, so neither should this screen
+  // claim one.
+  //
+  // Belt AND braces: `signatures` is also in SENSITIVE_FIELDS, so `draft.load()`
+  // already strips it on read and `s.signatures` is normally undefined — this loop
+  // is unreachable today and deliberately kept. It is the guard that holds if that
+  // strip is ever relaxed, and it costs nothing while the strip stands.
+  if (s.signatures) {
+    for (const [k, v] of Object.entries(s.signatures)) {
+      if (v && v.consent && v.consent.agreed === true) signatures[k] = v
+    }
+  }
   if (s.completed) completed.value = s.completed
   if (s.vehicleInfoDone != null) vehicleInfoDone.value = s.vehicleInfoDone
   if (s.step != null) step.value = s.step
@@ -923,8 +939,12 @@ function closeReviewPdf() {
 }
 
 // Capture signature locally, then refresh preview with signature overlay
-async function handleSigned({ docKey, text, image }) {
-  signatures[docKey] = { text, image }
+async function handleSigned({ docKey, text, image, consent }) {
+  // `consent` rides along with the signature all the way to
+  // POST /api/public/investor-apply, which refuses any document without it
+  // (400 CONSENT_REQUIRED). Dropping it here is the exact failure this change
+  // exists to fix — the flag existing in a component and never reaching a row.
+  signatures[docKey] = { text, image, consent }
   selectedDoc.value = documents.value.find(d => d.doc_key === docKey) || selectedDoc.value
   await fetchPreview(docKey, { text, image })
 }

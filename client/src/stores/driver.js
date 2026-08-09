@@ -428,13 +428,19 @@ export const useDriverStore = defineStore('driver', {
       this.notifications.unshift(notif)
     },
 
-    async signDocument(docKey, signatureText, signatureImage, paymentInfo) {
+    // `consent` is REQUIRED by the server (400 CONSENT_REQUIRED without it) —
+    // see lib/signingConsent.js. It is a positional argument rather than being
+    // synthesized here on purpose: this store has no idea whether a checkbox
+    // was ticked, and a default of `{agreed:true}` would turn the guard back
+    // into the client-side-only affordance it replaced.
+    async signDocument(docKey, signatureText, signatureImage, paymentInfo, consent) {
       const userId = this.onboarding?.user_id
       if (!userId) throw new Error('No onboarding record')
       const data = await api.post(`/api/onboarding/${userId}/documents/${docKey}/sign`, {
         signatureText,
         signatureImage: signatureImage || undefined,
         paymentInfo: paymentInfo || undefined,
+        consent,
       })
       await this.loadData()
       return data

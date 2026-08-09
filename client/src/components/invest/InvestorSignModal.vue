@@ -25,7 +25,7 @@
 
             <label class="sign-checkbox">
               <input type="checkbox" v-model="agreed" />
-              <span>I have read and agree to the terms of this document</span>
+              <span>{{ SIGNING_CONSENT_TEXT }}</span>
             </label>
 
             <div class="sign-field name-field">
@@ -74,6 +74,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
+import { SIGNING_CONSENT_TEXT, buildConsent } from '../../lib/signingConsent'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -155,6 +156,10 @@ function handleSign() {
     docKey: props.doc.doc_key,
     text: signatureText.value.trim(),
     image: signatureImage,
+    // Carried per document, not once for the whole application: the investor
+    // ticks this box separately for the master agreement, the lease and the
+    // W-9, and one blanket flag would assert three agreements from one act.
+    consent: buildConsent(agreed.value),
   })
 }
 </script>
