@@ -3,6 +3,14 @@
     <div class="page-header">
       <h2>Data Cleanup Tools</h2>
       <p class="page-desc">Scan and fix data quality issues in Google Sheets and SQLite before connecting to the production database.</p>
+      <!-- The scan-on-click tools below are for sheet/SQLite hygiene. The
+           always-on detectors (duplicate receipts, rate cons with no load,
+           failed onboarding documents, unattributed GPS, fuel range accuracy)
+           are a standing queue rather than a scan, so they live on their own
+           page. -->
+      <router-link to="/admin/data-issues" class="cross-link">
+        Data Issues &mdash; duplicate receipts and other detected problems &rarr;
+      </router-link>
     </div>
 
     <!-- Tool 1: Duplicate Load IDs -->
@@ -595,6 +603,18 @@ async function fixName(oldName, newName) {
   min-width: 200px;
   text-align: right;
 }
+
+/* Pointer to the standing detector queue. The header is a flex row, so this
+   claims its own line rather than competing with the description for space. */
+.cross-link {
+  flex-basis: 100%;
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent, #6d28d9);
+  text-decoration: none;
+}
+.cross-link:hover { text-decoration: underline; }
 
 .card {
   background: var(--surface);
