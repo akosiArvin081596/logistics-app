@@ -3384,20 +3384,63 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 // - Keeps Maps server-side. n8n no longer holds a Google Maps key at all (the
 //   plaintext one in the deleted `Get Distance Matrix` node was the last), so
 //   GOOGLE_MAPS_API_KEY can stay IP-restricted to the VPS.
-const n8nDistanceLimiter = rateLimit({
-	windowMs: 15 * 60 * 1000,
-	max: 60,
-	message: { error: "Too many distance requests. Try again later." },
-	standardHeaders: true,
-});
-app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
+// Shared by the limiter's keyGenerator and the handler, so the two can never
+// disagree about who is authorized.
+//
+// The `secret &&` guards are load-bearing, not defensive noise: safeEqual("", "")
+// and safeEqual(undefined, undefined) both return TRUE, so with the env var unset
+// an empty header would authorize. A falsy env var short-circuits first.
+function n8nDistanceAuthorized(req) {
 	const presented = req.headers["x-webhook-secret"];
 	const sharedSecret = process.env.N8N_WEBHOOK_SECRET;
 	const extractSecret = process.env.N8N_EXTRACT_SECRET;
-	const authorized =
+	return Boolean(
 		(sharedSecret && safeEqual(presented, sharedSecret)) ||
-		(extractSecret && safeEqual(presented, extractSecret));
-	if (!authorized) {
+		(extractSecret && safeEqual(presented, extractSecret))
+	);
+}
+const n8nDistanceLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	// ⚠️ Keyed on the PRESENTED SECRET, not the IP. This endpoint has exactly one
+	// legitimate caller — n8n Cloud — whose egress IPs are shared across tenants
+	// and rotate, so a per-IP cap both leaks budget to whoever shares that egress
+	// and resets for free the moment the IP changes, i.e. it does not bind the one
+	// caller it exists to bind. Hashed so the bucket name can never become the
+	// secret in a memory dump or an error string. Unauthenticated callers fall
+	// back to their own per-IP bucket (same `u:`/`ip:` shape as poiLimiter), so a
+	// 401 flood can never consume n8n's allowance.
+	// ⚠️ Keyed on a VALID secret, not on whatever was presented. Keying on the
+	// presented value would hand an attacker a fresh 60-call bucket for every
+	// string they invent — and an unbounded number of live entries in the
+	// in-memory store. Authorizing here first means every real caller shares ONE
+	// bucket while every bad one is keyed by IP, exactly as before.
+	keyGenerator: (req) => {
+		if (n8nDistanceAuthorized(req)) {
+			// Hashed so the bucket name can never become the secret in a heap dump
+			// or an error string.
+			const presented = String(req.headers["x-webhook-secret"]);
+			return "n8n:" + crypto.createHash("sha256").update(presented).digest("hex").slice(0, 16);
+		}
+		return `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many distance requests. Try again later." },
+	standardHeaders: true,
+});
+// Unauthorized attempts are otherwise completely invisible — a leaked secret being
+// abused would show up only as a line on the Google Maps bill, and a distributed
+// guessing campaign would leave no trace at all. Counted and logged at a throttle
+// so the log cannot itself be flooded. The presented value is NEVER logged.
+let n8nDistanceUnauthorized = 0;
+let n8nDistanceUnauthorizedLoggedAt = 0;
+app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
+	if (!n8nDistanceAuthorized(req)) {
+		n8nDistanceUnauthorized++;
+		const now = Date.now();
+		if (now - n8nDistanceUnauthorizedLoggedAt > 60_000) {
+			n8nDistanceUnauthorizedLoggedAt = now;
+			console.warn(`n8n load-distance: ${n8nDistanceUnauthorized} unauthorized attempt(s), most recent from ${req.ip || "unknown ip"}`);
+		}
 		return res.status(401).json({ error: "Unauthorized" });
 	}
 	try {
@@ -3405,6 +3448,12 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 		// Addresses are capped rather than rejected on length: they are
 		// broker-authored free text and an over-long one should still be
 		// measured, not 400'd into the failure-alert cascade.
+		//
+		// ⚠️ THE 500 IS A SECURITY CONTROL, not a UX choice — do not raise it
+		// without re-measuring. cityStateZip()'s regex is super-linear in the input
+		// length (see the note beside it); at 500 chars the worst adversarial shape
+		// costs ~0.26 ms, at 5,000 it is ~19 ms, and before that regex was made
+		// unambiguous 5,000 chars cost 9.4 SECONDS of blocked event loop.
 		const pickupAddress = String(body.pickup_address ?? "").trim().slice(0, 500);
 		const dropoffAddress = String(body.dropoff_address ?? "").trim().slice(0, 500);
 		const loadId = String(body.load_id ?? "").trim().slice(0, 64);
@@ -3435,8 +3484,17 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 					`&destinations=${encodeURIComponent(dropoffAddress)}` +
 					`&units=imperial&key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}`;
 				const dmResp = await fetch(dmUrl, { signal: controller.signal });
-				clearTimeout(timer);
-				distanceMatrix = await dmResp.json();
+				// ⚠️ clearTimeout AFTER the body read, not between. The signal
+				// otherwise stops applying the moment response headers arrive, so a
+				// slow-drip body has no ceiling at all and parks the handler — the
+				// exact shape of the 2026-08-06 Sheets outage that GOOGLE_API_TIMEOUT_MS
+				// exists to prevent (it is applied twice, independently, for this
+				// reason). n8n's own 30 s node timeout frees the CLIENT, not us.
+				try {
+					distanceMatrix = await dmResp.json();
+				} finally {
+					clearTimeout(timer);
+				}
 			} catch (e) {
 				lookupError = e.message || "distance_matrix_failed";
 				console.error(`n8n load-distance: Distance Matrix failed${loadId ? ` (load ${loadId})` : ""}:`, lookupError);
