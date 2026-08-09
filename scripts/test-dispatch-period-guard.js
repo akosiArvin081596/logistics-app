@@ -81,7 +81,12 @@ const REAL = [
 	"loadWindowDays", "moneySheetDate", "jtParseSheetDate", "jtExpandDateRange",
 	"jtFmtDate", "findCol", "lockedAmong",
 ];
-const CONSTS = ["DISPATCH_COMPLETED_RE", "CANCELED_STATUS_RE", "RFC2822_MONTHS"];
+// ⚠️ LOCKABLE_MONTH_KEY was added by PR #251, which made it the SHARED month-key
+// pattern between isPlausibleLockPeriod() and lockedAmong() — so loadAssignedMonthKey
+// now closes over it. It was not added here, and the suite has thrown
+// `ReferenceError: LOCKABLE_MONTH_KEY is not defined` on main ever since. Note
+// `node --check` cannot catch this either: the lift is evaluated at runtime.
+const CONSTS = ["DISPATCH_COMPLETED_RE", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "LOCKABLE_MONTH_KEY"];
 
 let locked = new Set();
 let locksReadable = true;
