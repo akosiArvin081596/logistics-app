@@ -20240,10 +20240,20 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 // without cancelling, they still use the reassign dropdown.
 app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) => {
 	try {
-		const { rowIndex, loadId, driver } = req.body;
-		if (!rowIndex) {
-			return res.status(400).json({ error: "rowIndex required" });
-		}
+		const { rowIndex: rawRowIndex, loadId, driver } = req.body;
+		// Row 1 is the header row — see resolveSheetDataRow() above. This was the
+		// last route in the family still carrying the `if (!rowIndex)` shape PR #222
+		// fixed on its three siblings; it was skipped there only to avoid colliding
+		// with another agent, not because it was safe. `1` is truthy, so it passed —
+		// and this route then writes `Job Status = "Cancelled"` and blanks `Driver`
+		// on whatever row it was handed, re-pointing every findCol() regex in the app.
+		//
+		// ⚠️ NO PERIOD GUARD HERE, DELIBERATELY. #211 left cancel unguarded because a
+		// broker calling off a July load in August is ordinary business, and a guard
+		// that refuses ordinary work gets switched off. This change is ONLY the
+		// rowIndex validation; do not fold a period check in with it.
+		const rowIndex = resolveSheetDataRow(res, rawRowIndex);
+		if (rowIndex === null) return; // 400 already sent
 
 		// A reason is MANDATORY. Cancelling drops the load from every KPI, wipes
 		// the driver assignment and pushes "cancelled" to their phone — and on
@@ -22280,6 +22290,64 @@ app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter
 	}
 });
 
+// THE JOB STATUS VOCABULARY — the only values a human-driven route may write into
+// the Job Status column, and the exact spelling each is written in. `newStatus`
+// used to be unconstrained free text on BOTH routes that write this column, so
+// anything at all could be dropped into the field every KPI branches on.
+//
+// ⚠️ ONE LIST, TWO ROUTES, ON PURPOSE. It governs `PUT /api/driver/status`
+// (below — Driver/Dispatcher/Super Admin) and `PUT /api/loads/:loadId/status-override`
+// (further down — Super Admin/Dispatcher, PR #223, which is where the name comes
+// from). The legal values of a sheet column are a property of the DATA MODEL, not
+// of the route that happens to write it, and two lists that merely ought to agree
+// are the drift `DRIVER_RENAME_TARGETS` was consolidated to stop — an override that
+// could set a status the ordinary route could not (or the reverse) is incoherent,
+// since the override exists to bypass the POD gate on the SAME vocabulary. Per-route
+// POLICY still differs and belongs in the routes: the POD gate and the one-active-job
+// 409 here, the reason requirement and the ambiguity refusal there.
+//
+// It is the union of every client that posts to either route, and equals the
+// widest of them exactly:
+//   • ActiveLoadsTab.vue `statusOptions`  — all 7 (dispatch dropdown -> status route;
+//     the override modal defaults to statusOptions[0], so it is the same list)
+//   • StatusStepper.vue `statusFlow`      — 6; no "Dispatched" (a driver never moves
+//     a load backwards to it)
+//   • public/driver.html `STATUS_FLOW`    — 5; legacy, also no "Heading to Shipper"
+// The last two are strict SUBSETS, so the unit test asserts subset for them and
+// equality only for statusOptions — asserting equality on all three would fail on
+// a list that is correct. What must never happen is a client offering a button the
+// server refuses; that is the direction the subset test pins.
+//
+// Enforced server-side for the same reason CANCEL_REASON_REQUIRED is: the guard has
+// to hold for any caller, not just the one screen. Matching is case-insensitive but
+// the write is canonical, so "delivered" lands as "Delivered" and the sheet keeps
+// one spelling per status.
+//
+// ⚠️ "Cancelled" is deliberately NOT here, even though it is a perfectly
+// legitimate status elsewhere in the app. Two independent reasons, either alone
+// sufficient:
+//   1. PRIVILEGE. Cancelling has its own route — POST /api/dispatch/cancel — which
+//      is **Super Admin only** (dispatchers lost it by client decision 2026-04-19),
+//      demands a reason, stamps load_status_history, notifies the driver over the
+//      `load-cancelled` socket and audits `cancel_load`. Neither route here is
+//      Super-Admin-only — the status route is reachable by a **Driver**, the lowest
+//      privilege in the app — so accepting "Cancelled" is a plain walk-around of
+//      that gate, and it produces a cancellation none of that plumbing recorded.
+//   2. MONEY. CANCELED_STATUS_RE in excludeDroppedLoads() drops a cancelled load
+//      out of revenue, driver pay and every KPI — it is the one value on the
+//      allowlist's doorstep that ERASES a figure rather than moving it. PR #230
+//      refuses this in a CLOSED month (it crosses the completed boundary, or lands
+//      on a completed row); in an OPEN month nothing stopped it, and an open month
+//      is exactly the one still being accrued into.
+// The opposite direction — reviving a load cancelled by mistake — is unaffected:
+// pick any of the seven. "Completed" and "POD Received" are likewise absent because
+// no client ever offered them and "Delivered" already satisfies completedStatuses,
+// so nothing is lost. "Assigned"/"Unassigned" are absent for the same reason: they
+// are written by POST /api/driver/respond, never by a status write, and a load
+// sitting at either still steps forward normally (StatusStepper maps both, plus
+// "Dispatched", to "Heading to Shipper" as the next step).
+const STATUS_OVERRIDE_ALLOWED = ["Dispatched", "Heading to Shipper", "At Shipper", "Loading", "In Transit", "At Receiver", "Delivered"];
+
 // PUT /api/driver/status — Update load status
 app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) => {
 	try {
@@ -22300,6 +22368,79 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 		// siblings, so the four cannot answer differently.
 		let rowIndex = resolveSheetDataRow(res, rawRowIndex);
 		if (rowIndex === null) return; // 400 already sent
+
+		// ⚠️ `newStatus` WAS UNCONSTRAINED FREE TEXT, on the one status-writing route
+		// a **Driver** can reach. PR #223 constrained the admin-only override route and
+		// PR #230 closed the locked-month half here, but an OPEN month was unchanged:
+		// a driver could write any string at all into the column excludeDroppedLoads()
+		// and every completedStatuses branch read — including "Cancelled", which drops
+		// the load out of revenue, driver pay and every KPI with none of the reason,
+		// notification or `cancel_load` audit that POST /api/dispatch/cancel demands.
+		// See STATUS_OVERRIDE_ALLOWED above for why the two routes share one list.
+		//
+		// Placed AFTER the row guard and BEFORE the ownership check on purpose: it is
+		// request validation, not an authorization decision, so it reveals nothing
+		// about the load and must not cost an ownership lookup or a full sheet read.
+		if (!newStatus || typeof newStatus !== "string") {
+			return res.status(400).json({ error: "newStatus is required" });
+		}
+		// ⚠️ CAP THE LENGTH BEFORE trimming, lower-casing, or echoing it back. The
+		// body limit is 50mb and body-parser inflates by default, so a ~50 KB gzip
+		// payload expands to a 50 MB string; the INVALID_STATUS branch below echoes
+		// the value into the response and this route is Driver-reachable at
+		// driverWriteLimiter's 60/min. Refusing early keeps a bad request O(1) instead
+		// of several copies of a very large string. 64 clears the longest member of
+		// the list ("Heading to Shipper", 18) many times over. Deliberately does NOT
+		// echo the value — there is nothing useful to show a caller who sent 50 MB.
+		if (newStatus.length > 64) {
+			return res.status(400).json({
+				error: `That is not a status this route can set. Allowed: ${STATUS_OVERRIDE_ALLOWED.join(", ")}.`,
+				code: "INVALID_STATUS",
+				allowed: STATUS_OVERRIDE_ALLOWED,
+			});
+		}
+		const canonicalStatus = STATUS_OVERRIDE_ALLOWED.find((s) => s.toLowerCase() === newStatus.trim().toLowerCase());
+		if (!canonicalStatus) {
+			const cancelling = CANCELED_STATUS_RE.test(newStatus.trim());
+			// A cancel attempt lands in the audit trail; an ordinary typo does not —
+			// same split as PR #223. This one is a privilege-boundary event (cancel is
+			// Super-Admin-only and a Driver can reach this route), so it is worth a
+			// trace, while auditing every malformed string would bury that signal.
+			// Reuses this route's own `status_update_blocked` action, so a period
+			// refusal and a vocabulary refusal read from one place.
+			//
+			// ⚠️ Two things about this row. (a) `loadId` is caller-supplied and
+			// logAudit stores it unbounded, so it is capped here — see the 64-char
+			// note above for why a Driver-reachable route cannot trust a body string's
+			// length. (b) It is written BEFORE the ownership check below, so a
+			// `status_update_blocked` row naming load X is NOT evidence the actor
+			// could reach X. That ordering is deliberate (validation is not
+			// authorization, and the 400 is byte-identical either way, so it leaks
+			// nothing) — but do not read the trail as an access record.
+			if (cancelling) {
+				logAudit(
+					req, "status_update_blocked", "load", String(loadId || "").slice(0, 100),
+					`Blocked status write "${newStatus.trim()}" [CANCEL_NOT_A_STATUS_UPDATE] — ${JSON.stringify({ code: "CANCEL_NOT_A_STATUS_UPDATE", periods: [] })}`
+				);
+			}
+			return res.status(400).json({
+				error: cancelling
+					? "Cancelling a load is not a status update. Use POST /api/dispatch/cancel (Super Admin), which records the reason, notifies the driver and audits the cancellation — a cancelled load drops out of revenue and every KPI, so it must not be set silently."
+					: `'${newStatus}' is not a status this route can set. Allowed: ${STATUS_OVERRIDE_ALLOWED.join(", ")}.`,
+				// Twin of PR #223's CANCEL_NOT_AN_OVERRIDE: same policy, named for the
+				// route the operator actually called, since this one is not an override.
+				code: cancelling ? "CANCEL_NOT_A_STATUS_UPDATE" : "INVALID_STATUS",
+				allowed: STATUS_OVERRIDE_ALLOWED,
+			});
+		}
+		// Everything downstream — the one-active-job 409, the POD gate, the period
+		// guard, the sheet write, the socket event, the dispatch feed, the audit line
+		// and load_status_history — must see the CANONICAL spelling, never the raw
+		// request string. Reassigning the destructured binding (already `let`, like
+		// `rowIndex` below) is what makes that true by construction: it leaves no site
+		// that could still read the caller's version, which a separate variable would.
+		newStatus = canonicalStatus;
+
 		// SECURITY: drivers can only update loads assigned to them.
 		// Admin/Dispatcher use the /api/loads/:loadId/status-override flow,
 		// which has its own audit/reason gate, so this guard is Driver-only.
@@ -22495,34 +22636,6 @@ app.put("/api/driver/status", requireAuth, driverWriteLimiter, async (req, res) 
 		res.status(500).json({ error: error.message });
 	}
 });
-
-// The only statuses this route may write, and the exact spelling it writes them
-// in. `newStatus` used to be unconstrained free text, so anything at all could be
-// dropped into the column every KPI branches on.
-//
-// It is the SAME seven the modal offers (ActiveLoadsTab.vue `statusOptions`),
-// enforced server-side for the same reason CANCEL_REASON_REQUIRED is: the guard
-// has to hold for any caller, not just the one screen. Matching is
-// case-insensitive but the write is canonical, so "delivered" lands as
-// "Delivered" and the sheet keeps one spelling per status.
-//
-// ⚠️ "Cancelled" is deliberately NOT here, even though it is a perfectly
-// legitimate status elsewhere in the app. Two independent reasons, either alone
-// sufficient:
-//   1. PRIVILEGE. Cancelling has its own route — POST /api/dispatch/cancel — which
-//      is **Super Admin only** (dispatchers lost it by client decision 2026-04-19),
-//      demands a reason, stamps load_status_history, notifies the driver over the
-//      `load-cancelled` socket and audits `cancel_load`. This route is Super Admin
-//      **or Dispatcher**, so accepting "Cancelled" here is a plain walk-around of
-//      that gate, and it produces a cancellation none of that plumbing recorded.
-//   2. MONEY. CANCELED_STATUS_RE in excludeDroppedLoads() drops a cancelled load
-//      out of revenue, driver pay and every KPI — it is the one value on the
-//      allowlist's doorstep that ERASES a figure rather than moving it.
-// The opposite direction — reviving a load cancelled by mistake — is unaffected:
-// pick any of the seven. "Completed" and "POD Received" are likewise absent
-// because the modal never offered them and "Delivered" already satisfies
-// completedStatuses, so nothing is lost.
-const STATUS_OVERRIDE_ALLOWED = ["Dispatched", "Heading to Shipper", "At Shipper", "Loading", "In Transit", "At Receiver", "Delivered"];
 
 // May this status override be written? Returns null to allow, else the 409 body.
 //
