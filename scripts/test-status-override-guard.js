@@ -75,6 +75,18 @@ function extractAllowList() {
 	return JSON.parse(m[1].replace(/'/g, '"'));
 }
 
+// A module-scope `const NAME = …;` one-liner, lifted verbatim. loadRowPeriods()
+// and loadAssignedMonthKey() reference LOCKABLE_MONTH_KEY — lockedAmong()'s OWN
+// shape test, shared with it, which stops a non-month key like "999-01-" being
+// silently dropped there and read as "nothing locked". Extracting the functions
+// without it throws a ReferenceError the moment the guard evaluates a row.
+function extractConst(name) {
+	const hits = SRC.match(new RegExp(`\\nconst ${name} = [^\\n]*;`, "g")) || [];
+	if (hits.length !== 1) throw new Error(`expected exactly 1 const ${name} in server.js, found ${hits.length}`);
+	return hits[0].trim();
+}
+
+const REAL_CONSTS = ["LOCKABLE_MONTH_KEY"];
 const REAL = [
 	"statusOverrideBlocker", "jobTrackingMonthCols", "loadRowPeriods",
 	"loadAssignedMonthKey", "loadWindowDays", "moneySheetDate",
@@ -90,7 +102,7 @@ const periodLocksReadable = () => LOCKS_READABLE;
 
 const { statusOverrideBlocker } = new Function(
 	"RFC2822_MONTHS", "isLocked", "periodLocksReadable",
-	`${REAL.map(extract).join("\n")}\nreturn { statusOverrideBlocker };`
+	`${REAL_CONSTS.map(extractConst).join("\n")}\n${REAL.map(extract).join("\n")}\nreturn { statusOverrideBlocker };`
 )(RFC2822_MONTHS, isLocked, periodLocksReadable);
 
 const STATUS_OVERRIDE_ALLOWED = extractAllowList();

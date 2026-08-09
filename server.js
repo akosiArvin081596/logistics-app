@@ -20494,16 +20494,50 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 //     2026-07-31 on a load assigned in August moves AUGUST. The date's own month
 //     can be neither of them.
 // Hence the sheet read: the covering loads are the only place the answer lives.
-// With no covering load the override is inert today, and we fall back to the
-// date's own month — the bucket it would take the moment a load with no readable
-// assigned date covers it. That is the conservative direction and costs nothing:
-// an admin excluding a day in a closed month should be reopening it either way.
+//
+// ⚠️ THE DATE'S OWN MONTH IS ADDED TO THE COVERING LOADS' MONTHS, NEVER
+// DISPLACED BY THEM. This tail used to read
+//
+//     return months.size ? [...months].sort() : [own];   // `own` DISPLACED
+//
+// i.e. `own` survived only while NO covering load existed, and the moment one
+// did the day's own month dropped out of the answer entirely. That is a
+// fail-OPEN, and the only one of its kind at this gate: unlike the sibling
+// guards, excludedDayGate() has no `unresolved` rung to catch it — a month that
+// is not in this array is simply never offered to isLocked(), so a co-covering
+// load in an OPEN month silently suppresses a LOCKED one and the write goes
+// through and restates it.
+//
+// The `[own]` fallback was never merely cosmetic: `own` is the bucket the day
+// takes the moment a load with no readable assigned date covers it (see
+// loadRowPeriods — that is the one path by which days fall back to their own
+// calendar months). Reported by PR #245's security review as M-1, because #245
+// is what made the bad state REACHABLE: a row with an unreadable assigned date
+// plus a pickup only moneySheetDate() can read now yields a counted pay day on
+// the money side while loadWindowDays() still returns [] for the guard. Before
+// #245 such a row's window was empty and it contributed nothing.
+//
+// Not reachable on today's data — 0 of 421 raw production rows have an
+// unreadable assigned date — so this is the cheap moment to close it. Measured
+// read-only on production (2026-08-09, 421 raw → 305 deduped rows, 354
+// (driver, date) pairs): 40 pairs report MORE months, 0 report fewer, and the
+// gate's refuse/allow verdict flips on 0 — 0 new refusals and 0 new permits.
+// 18 of the 40 were already being refused and now name more months in the 409.
+// The union direction is fail-CLOSED by construction, not just by measurement:
+// the array's only consumer re-filters it through lockedAmong(), so a month
+// this adds can only ever produce a refusal that isLocked() independently
+// justifies. It can never permit a write the narrower set refused.
 //
 // Covering loads are matched regardless of STATUS, unlike the pay loop, which
 // counts completed ones only. Status is mutable and the override row is not, so
 // a load one status change away from counting would otherwise be one status
 // change away from silently restating a closed month.
 function excludedDayPeriods({ driver, date, action, jobTracking }) {
+	// ⚠️ `own` is deliberately NOT run through LOCKABLE_MONTH_KEY. `date` is
+	// route-validated /^\d{4}-\d{2}-\d{2}$/ before the gate is called, so this is
+	// always a matchable key already — and filtering it would DROP it from the
+	// array, which is a permit. The producers below need the test because they
+	// build their keys from arbitrary sheet cells; this one does not.
 	const own = String(date || "").slice(0, 7);
 	if (action === "add" || !jobTracking) return [own];
 	const cols = jobTrackingMonthCols(jobTracking.headers);
@@ -20514,7 +20548,9 @@ function excludedDayPeriods({ driver, date, action, jobTracking }) {
 		if (!loadWindowDays(row, cols).includes(date)) continue;
 		loadRowPeriods(row, cols).periods.forEach((m) => months.add(m));
 	}
-	return months.size ? [...months].sort() : [own];
+	// UNION, not displacement — see the ⚠️ above. With no covering load this is
+	// still exactly [own], so the no-load case is byte-identical to before.
+	return [...new Set([...months, own])].sort();
 }
 
 // The gate itself: `{ refuse: 'unreadable'|'unresolved'|'finalized'|null, periods }`.
@@ -21491,14 +21527,19 @@ function getAllExcludedDriverDays() {
 // case is therefore not a workflow being blocked — it IS the unreadable-data
 // case, which fails closed anyway.
 //
-// ⚠️ The three parsers below are a deliberate copy of the pair already inlined in
-// the /api/investor and /api/financials handlers (which are byte-identical to
-// each other). They live inside those closures and cannot be called from here.
-// The copy is the point: a guard that parsed dates its own way would answer for
-// a different month than the SUM it is protecting — the same failure the
-// truckChargeFromMonth note in userDeleteLockBlockers() describes. If the parse
-// rule ever changes, every copy changes together or this guard silently drifts
-// off the money it is guarding.
+// ⚠️ The three helpers below are a deliberate copy of the ones inlined in the
+// /api/investor and /api/financials handlers, which live inside those closures
+// and cannot be called from here. The copy is the point: a guard that expanded
+// dates its own way would answer for a different month than the SUM it is
+// protecting — the same failure the truckChargeFromMonth note in
+// userDeleteLockBlockers() describes. If the rule ever changes, every copy
+// changes together or this guard silently drifts off the money it is guarding.
+//
+// The money handlers' own `parseSheetDate` copies are GONE (they now read every
+// date through the shared moneySheetDate()), so jtParseSheetDate has exactly one
+// surviving caller: the NARROW leg of loadWindowDays() below, which is kept
+// deliberately — see the union note there. It is no longer a mirror of anything
+// in the money math and must not be re-adopted as one.
 function jtParseSheetDate(val) {
 	if (!val) return null;
 	const s = String(val).trim();
@@ -21562,10 +21603,52 @@ function jobTrackingMonthCols(headers) {
 // that expression was replaced on 2026-08-08 (see moneySheetDate) this had to
 // move with it, in the same commit. Sharing the function is what makes drifting
 // apart impossible; do not re-inline a copy.
+//
+// ⚠️ A MONTH KEY THAT IS NOT A MONTH IS A PERMIT, NOT A REFUSAL — hence the
+// shape test below. lockedAmong() filters candidates through this same regex and
+// SILENTLY DROPS anything else, so a key like "275760-" or "999-01-" leaves it
+// nothing to match, `locked.length` is 0, and every guard clears the write —
+// while `resolved` still says true, so the `unresolved` rung never fires either.
+// Both month-key sites — here and loadRowPeriods()'s window leg — build the key
+// the same way, and that is where it comes from: jtFmtDate() writes the year
+// unpadded and unbounded, so for any Date whose year is not exactly 4 digits
+// the .slice(0, 7) cuts in the wrong place.
+//
+// It is plantable through moneySheetDate's normal branches, not just exotica.
+// Probed 2026-08-09: the `new Date()` tail reads "Sat Sep 13 275760",
+// "10000-01-01" and "September 13, 275760"; the ISO branch reads "0999-01-01"
+// (parseInt drops the pad → year 999); and the RFC-2822 branch reads
+// "1 Jan 0999" — that last is the realistic one, because production's Assigned
+// Date column IS RFC 2822 ("Date: Tue, 1 Jul 2025 11:33:05 -0500"), so a
+// mistyped year is one keystroke away from a silent permit.
+//
+// Fail-CLOSED: an unmatchable key becomes NO key, which drops loadRowPeriods()
+// to its window leg and, failing that, to `resolved:false` — which every caller
+// treats as a refusal. Reported as L-2 on PR #245. Measured read-only on
+// production 2026-08-09: 0 of 305 deduped rows change their loadRowPeriods()
+// answer, 0 resolved flips, 0 rows in the bad state today.
+//
+// ⚠️ THE PREDICATE IS lockedAmong()'s OWN, SHARED — NOT sheetCellMonths' TIGHTER
+// 1970–2999 BOUND, WHICH PR #245'S L-2 SUGGESTED AND WHICH IS A FAIL-OPEN HERE.
+// The two functions are answering different questions. sheetCellMonths INVENTS
+// candidate months from ambiguous text, so bounding them to plausible years is
+// conservative. This one only has to emit keys isLocked() can be ASKED about, and
+// any predicate STRICTER than lockedAmong's discards a key the lock table could
+// legitimately hold — silently converting a refusal into a permit, i.e. the very
+// bug being fixed. That is not hypothetical: period_locks.period has no CHECK and
+// POST /api/periods/:period/finalize admits anything matching /^\d{4}-\d{2}$/, so
+// "1900-05" and "1969-12" ARE lockable today. Caught by security review on this
+// PR; measured with a 1970–2999 bound and such a lock present: 128 REFUSE→permit
+// flips over 1,183 gate combinations, versus 0 with the shared predicate. Sharing
+// one regex is what makes producer and consumer unable to drift apart — do not
+// re-narrow it here, and do not copy sheetCellMonths' bound into it.
+const LOCKABLE_MONTH_KEY = /^\d{4}-\d{2}$/;
 function loadAssignedMonthKey(row, cols) {
 	if (!cols.dateCol || !row[cols.dateCol]) return "";
 	const d = moneySheetDate(row[cols.dateCol]);
-	return d && !isNaN(d) ? jtFmtDate(d).slice(0, 7) : "";
+	if (!d || isNaN(d)) return "";
+	const key = jtFmtDate(d).slice(0, 7);
+	return LOCKABLE_MONTH_KEY.test(key) ? key : "";
 }
 
 // The active-day window a load contributes, as "YYYY-MM-DD" strings. Mirrors the
@@ -21588,16 +21671,79 @@ function loadAssignedMonthKey(row, cols) {
 // shapes are added; and jtExpandDateRange starts `if (e < s) return [fmtDate(s)]`,
 // so a resolved drop-off can never yield fewer days than a null one. The window
 // is therefore always a superset => the guard only ever refuses MORE.
+//
+// ⚠️ THE PICKUP END IS A UNION, NOT A SUBSTITUTION, AND THAT ASYMMETRY WITH THE
+// DROP-OFF ABOVE IS THE WHOLE POINT. The pay loop resolves the pickup CELL through
+// moneySheetDate() (it must — that is the day the driver actually worked, and it is
+// what POST /api/invoices/generate already reads). Copying that here verbatim would
+// break the guard in two ways the drop-off change could not, because widening the
+// pickup is not monotone the way widening the drop-off is:
+//
+//   1. IT SHIFTS THE WINDOW'S START, so the window can LOSE a day rather than only
+//      gain one. Measured on production 2026-08-09: load 529227269's Pickup
+//      Appointment is "2025/09/23 23:59", which the strict parser cannot read, so
+//      today the fallback below starts the window at the ASSIGNED date 2025-09-22.
+//      Reading the cell moves the start to 09-23 and drops 09-22 — and a start that
+//      moves can cross a month boundary, i.e. hide a month from the guard.
+//   2. IT WOULD FLIP resolved:false -> resolved:true. The `return []` below is what
+//      makes loadRowPeriods() answer "I cannot read this row", which every caller
+//      treats as a REFUSAL. It is reached only when the assigned date is also
+//      unreadable — exactly the case a widened pickup would start resolving. Turning
+//      a refusal into a permission is the one direction a guard must never move, and
+//      no measurement makes it safe: it is a change to the DEFAULT.
+//
+// So the narrow reading is kept exactly as it was — same `pickup`, same fallback,
+// same `return []` — and the wide reading is added as a SECOND leg. The result is a
+// superset of the pre-change window (property 1 restored) while the refusal
+// condition is untouched (property 2 restored).
+//
+// ⚠️ WHICH CALLER ACTUALLY GETS THE UNION — do not mis-read this as the thing that
+// keeps the load-delete and status-override guards correct. IT IS NOT, and those
+// two never see it at all. loadRowPeriods() below reaches this function only when
+// loadAssignedMonthKey() returned "", i.e. moneySheetDate() could not read the
+// assigned date — which is exactly the condition that makes the fallback above
+// yield null too. So on that path `pickup` is always the strict read, and either it
+// is null (→ `return []`, unchanged) or it resolved, in which case moneySheetDate()
+// on the same cell returns the IDENTICAL instant (the strict ISO/US branches are a
+// byte-for-byte subset of moneySheetDate's, and its only extra pre-step, stripping
+// a leading "Date:", cannot apply to a string those ^-anchored regexes matched) and
+// the equality test below short-circuits. Verified by instrumenting the union leg:
+// it fired 0 times in 312 combinations that reach the window path via
+// loadRowPeriods, against 144 times on the direct call. What keeps those two guards
+// byte-identical is the untouched `return []` plus that subset property — NOT the
+// union. Deleting the union would not weaken them; adding a third leg would not
+// strengthen them.
+//
+// The union's one live consumer is the DIRECT call in excludedDayPeriods(), whose
+// `loadWindowDays(row, cols).includes(date)` coverage test runs on rows whose
+// assigned date IS readable. Keeping that test monotone is the whole job: a row
+// that covered a date before must still cover it, or the gate silently stops
+// consulting that load's months.
+//
+// Measured on production 2026-08-09 across all 305 deduplicated Job Tracking rows
+// (the set the guards actually see — they do NOT run excludeDroppedLoads): windows
+// changed 0, days lost 0, loadRowPeriods changed 0, resolved flips 0. The union is
+// inert on today's data and is here for the row that has not arrived yet.
 function loadWindowDays(row, cols) {
 	let pickup = jtParseSheetDate(cols.pickupDateCol ? row[cols.pickupDateCol] : null);
+	// The same cell through the shared resolver. NOT a replacement for the line
+	// above — see the ⚠️ note. Production carries 2 such cells (of 252 non-empty),
+	// of which 1 resolves: "2025/09/23 23:59"; "14:00" is a time and stays null.
+	const pickupShared = moneySheetDate(cols.pickupDateCol ? row[cols.pickupDateCol] : null);
 	const dropoff = moneySheetDate(cols.dropoffDateCol ? row[cols.dropoffDateCol] : null);
 	if (!pickup && cols.dateCol && row[cols.dateCol]) {
 		// Same shared resolver as the pay loop's own assigned-date fallback, for
 		// the same reason as loadAssignedMonthKey above.
 		pickup = moneySheetDate(row[cols.dateCol]);
 	}
+	// UNCHANGED — this line alone decides loadRowPeriods()'s `resolved`, so the
+	// refusal default is byte-identical to before the pickup end was widened.
 	if (!pickup || isNaN(pickup)) return [];
-	return jtExpandDateRange(pickup, dropoff || pickup);
+	const days = jtExpandDateRange(pickup, dropoff || pickup);
+	if (!pickupShared || isNaN(pickupShared) || +pickupShared === +pickup) return days;
+	// Both readings agreed on nothing but the drop-off — take their union, so the
+	// guard sees every month either basis could book this load into.
+	return [...new Set(days.concat(jtExpandDateRange(pickupShared, dropoff || pickupShared)))].sort();
 }
 
 // Every settlement month one Job Tracking row feeds. `resolved:false` means the
@@ -21609,7 +21755,18 @@ function loadRowPeriods(row, cols) {
 	// No assigned month: revenue drops out entirely (the P&L needs that key to
 	// bucket at all) and the active days fall back to their own calendar months —
 	// the only path by which one load reaches two periods.
-	const months = [...new Set(loadWindowDays(row, cols).map((d) => d.slice(0, 7)))].sort();
+	//
+	// Same LOCKABLE_MONTH_KEY test as the assigned leg above, and required for the
+	// same reason: jtExpandDateRange() builds these days with jtFmtDate() too, so
+	// an ISO pickup like "0999-01-01" reaches here as "999-01-" and lockedAmong()
+	// would drop it. Filtering rather than bailing is deliberate, and safe ONLY
+	// because the predicate is lockedAmong's own: what it discards is exactly what
+	// lockedAmong could never have matched, so discarding it cannot cost a refusal.
+	// (Were this tightened — see the ⚠️ on LOCKABLE_MONTH_KEY — the filter would
+	// start dropping lockable months and this line would become the fail-open.)
+	// When it filters everything out, `months` is empty and the row answers
+	// resolved:false, i.e. the guard refuses.
+	const months = [...new Set(loadWindowDays(row, cols).map((d) => d.slice(0, 7)).filter((m) => LOCKABLE_MONTH_KEY.test(m)))].sort();
 	return { periods: months, resolved: months.length > 0 };
 }
 
@@ -21617,8 +21774,11 @@ function loadRowPeriods(row, cols) {
 // Callers must have checked periodLocksReadable() first — isLocked() answers
 // "not locked" on an unreadable table, so this alone is not a guard.
 function lockedAmong(periods) {
-	const MONTH = /^\d{4}-\d{2}$/;
-	return [...new Set((periods || []).filter((p) => MONTH.test(p) && isLocked(p)))].sort();
+	// THE SAME regex object the producers filter on (see LOCKABLE_MONTH_KEY). It
+	// was a local copy; sharing it is what makes a gap between "keys we emit" and
+	// "keys we can match" structurally impossible, because a key silently dropped
+	// here reads as "nothing locked" and permits the write.
+	return [...new Set((periods || []).filter((p) => LOCKABLE_MONTH_KEY.test(p) && isLocked(p)))].sort();
 }
 
 // Compute per-driver FIFO queues from Job Tracking + load_responses.
@@ -31034,21 +31194,15 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 	const investorSplit = (parseFloat(config && config.investor_split_pct) || 50) / 100;
 
 	// Local date helpers — identical to the ones inside GET /api/investor.
-	const parseSheetDate = (val) => {
-		if (!val) return null;
-		const s = String(val).trim();
-		const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-		if (iso) {
-			const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
-			return isNaN(d) ? null : d;
-		}
-		const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-		if (!m) return null;
-		let yr = parseInt(m[3]);
-		if (yr < 100) yr += 2000;
-		const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
-		return isNaN(d) ? null : d;
-	};
+	//
+	// ⚠️ THE LOCAL `parseSheetDate` IS DELETED, NOT MERELY UNUSED. Every date read
+	// in this function now goes through the shared moneySheetDate(). A strict
+	// ISO+US-only parser left sitting inline in a money handler is precisely how
+	// this whole class of defect keeps coming back: the next date read reaches for
+	// the nearest helper, gets a parser narrower than the sheet, and silently drops
+	// or mis-dates the rows it cannot read (PR #215 assigned dates, PR #237 IFTA
+	// rows and the drop-off end, this one the pickup end). Do not reintroduce it —
+	// call moneySheetDate().
 	const fmtDate = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 	const expandDateRange = (start, end) => {
 		const dates = [];
@@ -31156,7 +31310,34 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 			}
 		}
 		if (completedStatuses.test(st) && driver) {
-			let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
+			// ⚠️ BOTH ENDS RESOLVE THROUGH moneySheetDate(), and the pickup end is the
+			// half that was left behind by the drop-off fix. It used to call the strict
+			// local parseSheetDate(), whose null is indistinguishable from a blank cell —
+			// so the fallback on the line below fired on a cell that was present and
+			// merely unreadable, silently starting the window at the ASSIGNED date (when
+			// the rate-con email arrived) instead of at the pickup. That fallback's own
+			// comment says "blank", which is what the code was documented to do and not
+			// what it did.
+			//
+			// Unlike the drop-off this is a SHIFT, not a widening, so it was measured on
+			// its own before shipping (see the union note at loadWindowDays for the guard
+			// half). Production 2026-08-09, all 275 live rows: of 252 non-empty Pickup
+			// Appointment cells exactly 2 are unreadable by the strict parser, and 1
+			// resolves — load 529227269, "2025/09/23 23:59", whose window moves
+			// [09-22, 09-23, 09-24] -> [09-23, 09-24], i.e. it LOSES 2025-09-22. The
+			// per-period driver-pay delta is nevertheless $0.00 on EVERY period, on the
+			// Super-Admin fleet scope and on all three investor scopes, because the
+			// driver-month day set is a UNION and 2025-09-22 is independently supplied by
+			// load 529231436 (pickup "9/22/25 16:00-18:00"). 2025-09 is locked and its
+			// payout is unchanged. The other unreadable cell, "14:00" on 557861739, stays
+			// null under both parsers — it is a time, not a date.
+			//
+			// It also ends a live disagreement inside the trio CLAUDE.md requires to
+			// reconcile: POST /api/invoices/generate already reads that same cell as
+			// 2025-09-23 (its parseInvoiceDate has a native-Date fallback), while this
+			// function and GET /api/financials read 2025-09-22. Same load, same column,
+			// two different pay windows.
+			let pickup = moneySheetDate(pickupDateCol ? r[pickupDateCol] : null);
 			// ⚠️ Drop-off resolves through moneySheetDate(), like the pickup fallback
 			// on the next line. The local parseSheetDate() reads only ISO and US
 			// M/D/Y, so a drop-off in any other shape returned null and collapsed
@@ -31907,24 +32088,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const pickupDateCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
 		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
 
-		// Helper: parse a messy date cell like "5/16/25 9:00", "5/16/25 06:00-18:00 Appt.",
-		// or ISO "2026-05-13" (n8n + the reassign endpoint write the ISO form) into a Date.
-		function parseSheetDate(val) {
-			if (!val) return null;
-			const s = String(val).trim();
-			// ISO YYYY-MM-DD first — the US M/D/Y regex below would mis-read "2026-05-13".
-			const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-			if (iso) {
-				const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
-				return isNaN(d) ? null : d;
-			}
-			const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-			if (!m) return null;
-			let yr = parseInt(m[3]);
-			if (yr < 100) yr += 2000;
-			const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
-			return isNaN(d) ? null : d;
-		}
+		// ⚠️ The local `parseSheetDate` is DELETED, not merely unused — every date
+		// read in this handler now goes through the shared moneySheetDate(). See the
+		// note at the top of computeInvestorMonthlyEarnings() for why leaving a
+		// narrower parser inline in a money handler is the defect, not a convenience.
 		// Helper: format a Date as "YYYY-MM-DD" using LOCAL time (avoids UTC shift)
 		function fmtDate(d) {
 			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -32103,15 +32270,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// either. Falls back to the full pickup→delivery window only when the
 			// truck has no ELD link/data.
 			if (completedStatuses.test(st) && driver) {
-				let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
-				// Drop-off resolves through the shared moneySheetDate(), matching the
-				// pickup fallback below and the twin sites in
-				// computeInvestorMonthlyEarnings() and GET /api/financials — see the
-				// full rationale and production measurement at the first of those.
-				// These three MUST stay in lockstep or the investor portal, the P&L and
-				// the weekly invoice stop reconciling.
+				// BOTH ends resolve through the shared moneySheetDate(), matching the
+				// fallback below and the twin sites in computeInvestorMonthlyEarnings()
+				// and GET /api/financials — see the full rationale and production
+				// measurement at the first of those. These three MUST stay in lockstep
+				// or the investor portal, the P&L and the weekly invoice stop
+				// reconciling; the pickup end is the half that was still diverging from
+				// POST /api/invoices/generate.
+				let pickup = moneySheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = moneySheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
-				// Completed load with a blank pickup → fall back to its assigned date.
+				// Completed load with an unreadable or blank pickup → fall back to its
+				// assigned date. Now genuinely the last resort: before the line above
+				// read the cell through the shared resolver, a present-but-unreadable
+				// pickup landed here too, contradicting this comment.
 				if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
 				if (pickup && !isNaN(pickup)) {
 					const windowDays = expandDateRange(pickup, dropoff || pickup);
@@ -34330,22 +34501,10 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const completedStatuses = /^(delivered|completed|pod received)$/i;
 
-		function parseSheetDate(val) {
-			if (!val) return null;
-			const s = String(val).trim();
-			// ISO YYYY-MM-DD first — the US M/D/Y regex below would mis-read "2026-05-13".
-			const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-			if (iso) {
-				const d = new Date(parseInt(iso[1]), parseInt(iso[2]) - 1, parseInt(iso[3]));
-				return isNaN(d) ? null : d;
-			}
-			const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-			if (!m) return null;
-			let yr = parseInt(m[3]);
-			if (yr < 100) yr += 2000;
-			const d = new Date(yr, parseInt(m[1]) - 1, parseInt(m[2]));
-			return isNaN(d) ? null : d;
-		}
+		// ⚠️ The local `parseSheetDate` is DELETED, not merely unused — every date
+		// read in this handler now goes through the shared moneySheetDate(). See the
+		// note at the top of computeInvestorMonthlyEarnings() for why leaving a
+		// narrower parser inline in a money handler is the defect, not a convenience.
 		function fmtDate(d) {
 			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 		}
@@ -34540,14 +34699,17 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// fallback when the sheet has no truck-column attribution. Trucks with
 			// no ELD link fall back to the full pickup→delivery window.
 			if (completedStatuses.test(st)) {
-				let pickup = parseSheetDate(pickupDateCol ? r[pickupDateCol] : null);
-				// Drop-off resolves through the shared moneySheetDate(), matching the
-				// pickup fallback below and the twin sites in
-				// computeInvestorMonthlyEarnings() and GET /api/investor — see the full
-				// rationale and production measurement at the first of those. These
-				// three MUST stay in lockstep or the P&L, the investor portal and the
-				// weekly invoice stop reconciling.
+				// BOTH ends resolve through the shared moneySheetDate(), matching the
+				// fallback below and the twin sites in computeInvestorMonthlyEarnings()
+				// and GET /api/investor — see the full rationale and production
+				// measurement at the first of those. These three MUST stay in lockstep
+				// or the P&L, the investor portal and the weekly invoice stop
+				// reconciling; the pickup end is the half that was still diverging from
+				// POST /api/invoices/generate.
+				let pickup = moneySheetDate(pickupDateCol ? r[pickupDateCol] : null);
 				const dropoff = moneySheetDate(dropoffDateCol ? r[dropoffDateCol] : null);
+				// Unreadable or blank pickup → fall back to the assigned date. Now
+				// genuinely the last resort; see the note at the first site.
 				if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
 				if (pickup && !isNaN(pickup)) {
 					const windowDays = expandDateRange(pickup, dropoff || pickup);
