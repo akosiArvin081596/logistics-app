@@ -131,6 +131,7 @@
             :load="mapLoad"
             :headers="mapHeaders"
             :driver-position="driverPosition"
+            :preset-route="presetRoute"
             :public-mode="true"
             :dispatch-mode="!data.lastPing"
           />
@@ -335,6 +336,21 @@ const mapLoad = computed(() => {
 const driverPosition = computed(() => {
   if (!data.value || !data.value.lastPing) return null
   return { latitude: data.value.lastPing.lat, longitude: data.value.lastPing.lng }
+})
+
+// The route line arrives ON the tracker payload. DriverRouteMap would otherwise
+// fetch it from GET /api/route, which is role-gated — an anonymous customer got
+// a silent 401 and the map rendered markers with no polyline, no distance and
+// no ETA. Shaped exactly like that endpoint's lean response so the component
+// consumes it unchanged. Null until the first payload lands; the component
+// re-applies whenever this object changes.
+const presetRoute = computed(() => {
+  if (!data.value) return null
+  return {
+    route: Array.isArray(data.value.route) ? data.value.route : [],
+    distanceMiles: data.value.distanceMiles ?? null,
+    etaMinutes: data.value.etaMinutes ?? null,
+  }
 })
 
 const originDisplay = computed(() => {

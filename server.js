@@ -8362,6 +8362,56 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			eta = { distanceMiles, minutesRemaining, expectedAt, onTime };
 		}
 
+		// --- Route line ------------------------------------------------------
+		// The customer map draws its polyline from THIS payload. It used to call
+		// GET /api/route itself, which is requireRole("Super Admin","Dispatcher",
+		// "Driver") — so an anonymous customer got a 401 per render, the client
+		// swallowed it silently, and the tracker showed markers with no line, no
+		// distance and no ETA line since the day it shipped.
+		//
+		// ⚠️ Do NOT "fix" that by relaxing the guard on /api/route. That route
+		// takes caller-supplied coordinates, so it is a free Google Routes
+		// oracle — the same reasoning that makes /api/poi/fuel-stops refuse raw
+		// coordinates from a Driver. Resolving the waypoints HERE, from the
+		// load's own row, is what keeps an anonymous caller from choosing them.
+		//
+		// This widens the whitelist by nothing: originLat/originLng/destLat/
+		// destLng are already in the payload, so the line between them
+		// discloses no new location. And the LEAN getRoute() field mask carries
+		// only polyline + distance + duration — never the turn-by-turn steps,
+		// per-route fuel consumption or toll prices that the `alternatives=true`
+		// form returns, none of which a customer should ever see. Do not pass
+		// { alternatives: true } here.
+		//
+		// Waypoints are the load's own pickup → drop-off, i.e. FIXED. That is
+		// the point: routeCacheKey() is stable for the life of the load, so
+		// every poll (30s tracker cache, 60/15min limiter) is a routeCache hit
+		// and bills Google nothing, and the client never has to re-fetch as the
+		// truck moves — it trims the static lane at the truck pin instead.
+		let routeLine = null;
+		let routeDistanceMiles = null;
+		let routeEtaMinutes = null;
+		if (originLat != null && originLng != null && destLat != null && destLng != null) {
+			const lane = await getRoute(
+				{ latitude: originLat, longitude: originLng },
+				{ latitude: destLat, longitude: destLng },
+			);
+			if (lane && Array.isArray(lane.points) && lane.points.length >= 2) {
+				routeLine = lane.points;
+				routeDistanceMiles = lane.distanceMiles;
+				routeEtaMinutes = lane.durationMin;
+			}
+		}
+		// The figures rendered beside the line describe the trip the customer is
+		// actually being told about: what is LEFT once the truck is reporting,
+		// otherwise the planned haul the line itself depicts. Taken verbatim
+		// from `eta` rather than recomputed, so the map's info strip can never
+		// contradict the ETA card sitting directly above it.
+		if (eta) {
+			routeDistanceMiles = eta.distanceMiles;
+			routeEtaMinutes = eta.minutesRemaining;
+		}
+
 		let truckUnit = "";
 		if (driverNameRaw) {
 			const t = db.prepare("SELECT unit_number FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) LIMIT 1").get(driverNameRaw);
@@ -8403,6 +8453,12 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			truckUnit,
 			lastPing,
 			eta,
+			// Polyline geometry + the figures for the leg it depicts. Shape
+			// matches the lean GET /api/route response ({route, distanceMiles,
+			// etaMinutes}) so DriverRouteMap consumes it unchanged.
+			route: routeLine,
+			distanceMiles: routeDistanceMiles,
+			etaMinutes: routeEtaMinutes,
 			scheduledPickup: pickupDateCol ? (load[pickupDateCol] || "").toString().trim() : "",
 			scheduledDelivery: deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "",
 			deliveredAt,
