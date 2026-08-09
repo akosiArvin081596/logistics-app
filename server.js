@@ -3402,23 +3402,23 @@ function n8nDistanceAuthorized(req) {
 const n8nDistanceLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 60,
-	// ⚠️ Keyed on the PRESENTED SECRET, not the IP. This endpoint has exactly one
-	// legitimate caller — n8n Cloud — whose egress IPs are shared across tenants
-	// and rotate, so a per-IP cap both leaks budget to whoever shares that egress
-	// and resets for free the moment the IP changes, i.e. it does not bind the one
-	// caller it exists to bind. Hashed so the bucket name can never become the
-	// secret in a memory dump or an error string. Unauthenticated callers fall
-	// back to their own per-IP bucket (same `u:`/`ip:` shape as poiLimiter), so a
-	// 401 flood can never consume n8n's allowance.
-	// ⚠️ Keyed on a VALID secret, not on whatever was presented. Keying on the
-	// presented value would hand an attacker a fresh 60-call bucket for every
-	// string they invent — and an unbounded number of live entries in the
-	// in-memory store. Authorizing here first means every real caller shares ONE
-	// bucket while every bad one is keyed by IP, exactly as before.
+	// ⚠️ Keyed on a VALID secret — NOT per-IP, and NOT on whatever was presented.
+	//
+	// Not per-IP: this endpoint has exactly one legitimate caller, n8n Cloud, whose
+	// egress IPs are shared across tenants and rotate. A per-IP cap therefore both
+	// leaks budget to whoever shares that egress and resets for free when the IP
+	// changes — i.e. it fails to bind the single caller it exists to bind.
+	//
+	// Not on the presented value: that would hand an attacker a fresh 60-call
+	// bucket for every string they invent, plus an unbounded number of live entries
+	// in the in-memory store. Authorizing FIRST means every real caller shares one
+	// bucket and every bad one is keyed by IP, so a 401 flood can never consume
+	// n8n's allowance and cannot escape its own bucket by rotating the header.
+	//
+	// The hash is so the bucket name can never become the secret in a heap dump or
+	// an error string.
 	keyGenerator: (req) => {
 		if (n8nDistanceAuthorized(req)) {
-			// Hashed so the bucket name can never become the secret in a heap dump
-			// or an error string.
 			const presented = String(req.headers["x-webhook-secret"]);
 			return "n8n:" + crypto.createHash("sha256").update(presented).digest("hex").slice(0, 16);
 		}
