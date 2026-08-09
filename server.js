@@ -5707,29 +5707,9 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 
-		// appData feeds both fillW9Form (W-9) and renderPolicy (master_agreement, vehicle_lease).
-		// The HTML templates need the extra fields (years_in_operation, fleet_size, vehicle_*,
-		// banking) that aren't in the old minimal appData shape.
-		const appData = {
-			legalName: legal_name,
-			dba: dba || "",
-			entityType: entity_type || "",
-			address,
-			contactPerson: contact_person || "",
-			contactTitle: contact_title || "",
-			phone,
-			email,
-			einSsn: ein_ssn,
-			effectiveDate,
-			// Extended fields for HTML templates
-			yearsInOperation: years_in_operation || "",
-			fleetSize: fleet_size || "",
-			vehicles: vehiclesArr,
-			bankName: banking?.bank_name || "",
-			bankRouting: banking?.routing_number || "",
-			bankAccount: banking?.account_number || "",
-			accountType: banking?.account_type || "",
-		};
+		// The per-document render data (the old `appData` literal) now comes from
+		// buildInvestorDocRender(), which reads it back off the rows applyTx()
+		// just committed — one shape for all three investor render paths.
 
 		// Promote each document to signed = 1 only once its artifact is on disk.
 		// A failure here does NOT fail the request: the application, banking and
@@ -5742,22 +5722,18 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 			const sig = signatures[doc.key];
 			const signedFileName = `${doc.key}-inv-${appId}-signed.pdf`;
 			const signedPath = path.join(signedDir, signedFileName);
-			const render = () => {
-				if (doc.key === "w9") {
-					return fillW9Form({ ...appData, signatureText: sig.text.trim(), signatureImage: sig.image });
-				}
-				if (doc.key === "master_agreement" || doc.key === "vehicle_lease") {
-					return renderPolicy(doc.key, {
-						...appData,
-						signatureText: sig.text.trim(),
-						signatureImage: sig.image,
-						signedAt,
-					});
-				}
-				const e = new Error(`No renderer registered for investor document "${doc.key}"`);
-				e.code = "DOCUMENT_RENDERER_MISSING";
-				throw e;
-			};
+			// Same builder as the per-document signing route and the admin
+			// regenerate route — this was the third divergent copy of the same
+			// render setup, and three copies is how a regenerated document ends up
+			// subtly unlike the one it replaces. Reading the rows back is
+			// equivalent here by construction: applyTx() has already committed the
+			// application, the vehicles and investor_payment_info, which is
+			// everything appData was assembled from.
+			const render = buildInvestorDocRender({
+				appId, docKey: doc.key,
+				signatureText: sig.text, signatureImage: sig.image,
+				effectiveDate, signedAt, vehiclesOverride: vehiclesArr,
+			});
 			try {
 				const signedPdfUrl = await writeSignedArtifact({
 					render, signedPath,
@@ -5949,6 +5925,30 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 // artifact itself is the single thing worth asserting on.
 const SIGNED_ARTIFACT_MIN_BYTES = 1000; // a real signed PDF is 8 KB+; this only catches truncation
 
+// Is there a real signed PDF at this path right now? Same two tests
+// writeSignedArtifact() applies after writing (size floor + %PDF magic), kept
+// in one place so "the artifact exists" cannot come to mean two different
+// things. Used by the admin regenerate route to decide whether a row claiming
+// signed = 1 is actually backed by a file.
+//
+// ⚠️ Like those tests, this proves a FILE, not its CONTENTS — the contents are
+// asserted at generation time by fillW9Form() and renderPolicy().
+function signedArtifactLooksValid(signedPath) {
+	let fd;
+	try {
+		const st = fs.statSync(signedPath);
+		if (!st.size || st.size < SIGNED_ARTIFACT_MIN_BYTES) return false;
+		const head = Buffer.alloc(4);
+		fd = fs.openSync(signedPath, "r");
+		fs.readSync(fd, head, 0, 4, 0);
+		return head.toString("latin1") === "%PDF";
+	} catch {
+		return false;
+	} finally {
+		if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already gone */ } }
+	}
+}
+
 // Renders, writes, and then PROVES the artifact — returns the public URL, or
 // throws a tagged error the callers turn into a recorded failure. Never returns
 // a URL it has not just stat'd.
@@ -5957,8 +5957,13 @@ async function writeSignedArtifact({ render, signedPath, publicUrl, label }) {
 	try {
 		bytes = await render();
 	} catch (err) {
-		const e = new Error(`${label}: render failed — ${err.message}`);
-		e.code = "DOCUMENT_RENDER_FAILED";
+		// Preserve a specific code the generator already assigned
+		// (DOCUMENT_FIELDS_UNFILLED, DOCUMENT_RENDERER_MISSING) rather than
+		// flattening every cause into one. "The template renamed its fields" and
+		// "Puppeteer crashed" need different fixes, and the code is what the
+		// retry/regenerate paths and the ops alert read.
+		const e = new Error(err.code ? `${label}: ${err.message}` : `${label}: render failed — ${err.message}`);
+		e.code = err.code || "DOCUMENT_RENDER_FAILED";
 		throw e;
 	}
 	// fillW9Form returns null when no template resolves. That null is the exact
@@ -6053,17 +6058,39 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		try { form.getTextField(fieldName).updateAppearances(font); } catch {}
 	};
 
-	// Helper to set text and update appearance
+	// Helper to set text and update appearance.
+	//
+	// This swallowed every failure, and that is the whole defect: getTextField()
+	// throws on a field name the template does not have, so an IRS revision that
+	// renames the AcroForm fields produced a perfectly well-formed ~147 KB %PDF
+	// that was a COMPLETELY BLANK W-9 — and writeSignedArtifact() accepted it,
+	// because %PDF magic + >= 1000 bytes + a successful re-stat prove a FILE
+	// exists, not that it says anything. Measured on the shipped fw9.pdf: the
+	// blank one is 147,638 bytes against the filled one's 147,694, and the
+	// signer's name goes from 1 occurrence to 0 under pdftotext.
+	//
+	// It now REPORTS instead, and the caller asserts on the two fields that make
+	// this a tax document rather than a blank form.
+	const unfilledFields = [];
 	const setField = (name, value) => {
+		const want = value == null ? "" : String(value);
 		try {
 			const f = form.getTextField(name);
-			f.setText(value);
+			f.setText(want);
 			f.updateAppearances(font);
-		} catch {}
+			// Read it straight back off the AcroForm — "setText did not throw" is a
+			// weaker claim than "the value is in the form". MUST run before
+			// form.flatten() below, after which the fields no longer exist to read.
+			if ((f.getText() || "") !== want) { unfilledFields.push(name); return false; }
+			return true;
+		} catch { unfilledFields.push(name); return false; }
 	};
 
+	let nameLanded = false;
+	let tinLanded = false;
+
 	// Line 1: Name
-	if (legalName) setField("topmostSubform[0].Page1[0].f1_01[0]", legalName);
+	if (legalName) nameLanded = setField("topmostSubform[0].Page1[0].f1_01[0]", legalName);
 	// Line 2: DBA
 	if (dba) setField("topmostSubform[0].Page1[0].f1_02[0]", dba);
 
@@ -6097,15 +6124,41 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 		const looksLikeEin = /^\d{2}-\d{7}$/.test(einSsn.trim());
 		const isIndividual = (!entityType || entityType === "Sole Prop") && !looksLikeEin;
 		if (isIndividual && digits.length === 9) {
-			// SSN fields (3 + 2 + 4) — for individuals/sole props only
-			setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3));
-			setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5));
-			setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5));
+			// SSN fields (3 + 2 + 4) — for individuals/sole props only.
+			// All three must land: a partial TIN is not a lesser version of the
+			// right answer, it is a different (wrong) number on a tax form.
+			const a = setField("topmostSubform[0].Page1[0].f1_11[0]", digits.slice(0, 3));
+			const b = setField("topmostSubform[0].Page1[0].f1_12[0]", digits.slice(3, 5));
+			const c = setField("topmostSubform[0].Page1[0].f1_13[0]", digits.slice(5));
+			tinLanded = a && b && c;
 		} else if (digits.length >= 2) {
 			// EIN fields (2 + remaining) — for LLCs, corps, partnerships, trusts
-			setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2));
-			if (digits.length > 2) setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2));
+			const a = setField("topmostSubform[0].Page1[0].f1_14[0]", digits.slice(0, 2));
+			const b = digits.length > 2 ? setField("topmostSubform[0].Page1[0].f1_15[0]", digits.slice(2)) : true;
+			tinLanded = a && b;
 		}
+	}
+
+	// Refuse a W-9 that does not carry the two things that make it a W-9: whose
+	// it is, and the taxpayer identification number on it. Asserted HERE, before
+	// flatten() turns the fields into static text and leaves nothing to read.
+	//
+	// Only what was actually asked for is asserted, so the unsigned previews
+	// (which pass no einSsn, and sometimes no legalName) are unaffected.
+	//
+	// ⚠️ The message names FIELDS, never values. It is persisted to
+	// onboarding_documents.signing_error / investor_onboarding_documents and is
+	// emailed by alertOnboardingDocFailure() — an SSN or EIN must never reach it.
+	const w9Missing = [];
+	if (legalName && !nameLanded) w9Missing.push("Line 1 (name)");
+	if (einSsn && !tinLanded) w9Missing.push("Part I (TIN)");
+	if (w9Missing.length) {
+		const e = new Error(
+			`W-9 template did not accept ${w9Missing.join(" and ")} — its AcroForm field names no longer match ` +
+			`(rejected: ${unfilledFields.join(", ") || "none"}). Refusing to produce a blank W-9.`,
+		);
+		e.code = "DOCUMENT_FIELDS_UNFILLED";
+		throw e;
 	}
 
 	// Flatten form so fields become static text
@@ -6134,6 +6187,57 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", address =
 	return await pdfDoc.save();
 }
 
+// --- Onboarding render limiters -------------------------------------------
+// PR #214 capped the ANONYMOUS preview route (pdfPreviewLimiter + a
+// process-wide concurrency cap) and fixed the SSRF at the renderer sink, so all
+// four render paths are SSRF-safe. Its three siblings kept spending a full
+// Puppeteer render per request once a credential is known:
+//   - GET  /api/public/investor-onboarding/:id/documents/:docKey/pdf  (token)
+//   - POST /api/public/investor-onboarding/:id/sign/:docKey           (token)
+//   - POST /api/onboarding/:userId/documents/:docKey/sign             (session)
+// A render is the single most expensive thing any of them can be made to do,
+// and none of them bounded how often.
+//
+// ⚠️ Keyed on the SESSION USER where there is one, else the IP — deliberately
+// NOT on the application id. Both token routes call verifyInvestorToken()
+// INSIDE the handler, so an anonymous caller reaches the limiter first; an
+// appId key would therefore let anyone lock a specific investor out of their
+// own onboarding by hammering their id unauthenticated. Per-IP, a prober only
+// exhausts their own bucket. On the two authenticated routes the guard
+// (requireAuth / requireRole) is mounted BEFORE the limiter, so a caller with
+// no business there cannot spend the budget on 403s — same ordering as
+// fuelEventsLimiter.
+//
+// 30 / 15 min for previews: the post-application twin of pdfPreviewLimiter, so
+// it gets the same number for the same reason — a thorough investor opening,
+// signing, re-opening and reviewing 3 documents makes ~12 calls.
+const onboardingPreviewLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 30,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many document preview requests. Try again later." },
+	standardHeaders: true,
+});
+
+// 20 / 15 min for signing and regeneration. Signing is once per document by
+// construction — 3 investor documents, 5 driver ones — and #202's retry path
+// adds a handful more when a render fails. 20 covers the worst honest run (all
+// 5 driver docs, each retried twice) with headroom and still caps a scripted
+// loop. Lower than the preview cap on purpose: this half also WRITES.
+const onboardingSignLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 20,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many signing requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
 // Helper: verify investor access token
 function verifyInvestorToken(req, res) {
 	const appId = parseInt(req.params.id);
@@ -6159,8 +6263,97 @@ app.get("/api/public/investor-onboarding/:id", (req, res) => {
 	}
 });
 
+// Builds the render closure for ONE investor onboarding document.
+//
+// Extracted so the signing route and the admin regenerate route below cannot
+// drift apart. That is the same rule the two load-ingestion paths follow: a
+// document produced by a regeneration has to be indistinguishable from one
+// produced at signing, and the only way to guarantee that is for both to run
+// this function. `application` and `payInfo` are read at RENDER time, not at
+// closure-construction time, so a vehicle written moments earlier is included.
+function buildInvestorDocRender({ appId, docKey, signatureText, signatureImage, effectiveDate, signedAt, vehiclesOverride }) {
+	return () => {
+		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
+		if (docKey === "w9") {
+			return fillW9Form({
+				legalName: application?.legal_name || "", dba: application?.dba || "",
+				entityType: application?.entity_type || "", address: application?.address || "",
+				einSsn: application?.ein_ssn || "", signatureText: (signatureText || "").trim(),
+				signatureImage, effectiveDate,
+			});
+		}
+		if (docKey === "master_agreement" || docKey === "vehicle_lease") {
+			// Load any stored vehicles (from vehicles_json or the vehicle_* fallback columns)
+			let storedVehicles = Array.isArray(vehiclesOverride) ? vehiclesOverride : [];
+			if (!storedVehicles.length) {
+				try { storedVehicles = JSON.parse(application?.vehicles_json || "[]"); } catch { storedVehicles = []; }
+				if (!storedVehicles.length && application?.vehicle_year) {
+					storedVehicles = [{
+						year: application.vehicle_year, make: application.vehicle_make, model: application.vehicle_model,
+						vin: application.vehicle_vin, mileage: application.vehicle_mileage,
+						titleState: application.vehicle_title_state, liens: application.vehicle_liens,
+						registeredOwner: application.vehicle_registered_owner,
+					}];
+				}
+			}
+			const payInfo = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
+			return renderPolicy(docKey, {
+				legalName: application?.legal_name || "",
+				dba: application?.dba || "",
+				entityType: application?.entity_type || "",
+				address: application?.address || "",
+				contactPerson: application?.contact_person || "",
+				contactTitle: application?.contact_title || "",
+				phone: application?.phone || "",
+				email: application?.email || "",
+				einSsn: application?.ein_ssn || "",
+				yearsInOperation: application?.years_in_operation || "",
+				fleetSize: application?.fleet_size || "",
+				vehicles: storedVehicles,
+				bankName: payInfo?.bank_name || "",
+				bankRouting: payInfo?.routing_number || "",
+				bankAccount: payInfo?.account_number || "",
+				accountType: payInfo?.account_type || "",
+				effectiveDate,
+				signatureText: (signatureText || "").trim(),
+				signatureImage,
+				signedAt,
+			});
+		}
+		// No silent fall-through. The old if/else-if chain had no else, so a
+		// docKey outside these three rendered NOTHING and still wrote
+		// signed = 1 with a signed_pdf_url pointing at a file that was never
+		// created — a phantom document that only 404s when someone opens it.
+		const e = new Error(`No renderer registered for investor document "${docKey}"`);
+		e.code = "DOCUMENT_RENDERER_MISSING";
+		throw e;
+	};
+}
+
+// Re-evaluates whether an investor's document set is complete. Shared by the
+// signing route and the regenerate route so a recovered document advances the
+// application exactly as signing it would have.
+function refreshInvestorOnboardingStatus(appId) {
+	const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
+	if (signedCount !== INVESTOR_ONBOARDING_DOCS.length) return null;
+	const hasBanking = db.prepare("SELECT 1 FROM investor_payment_info WHERE application_id=?").get(appId);
+	if (hasBanking) {
+		// onboarded_at is OVERWRITTEN with the completion time, not preserved.
+		// The row is INSERTed with onboarded_at = now at application time (status
+		// 'documents_pending'), so the column is never empty and a
+		// COALESCE(NULLIF(...)) "keep the first value" would pin it to the moment
+		// the applicant submitted — i.e. it would never record when onboarding
+		// actually completed. This mirrors the original signing route exactly.
+		db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=? WHERE application_id=?")
+			.run(new Date().toISOString(), appId);
+		return "fully_onboarded";
+	}
+	db.prepare("UPDATE investor_onboarding SET status='banking_pending' WHERE application_id=?").run(appId);
+	return "banking_pending";
+}
+
 // POST /api/public/investor-onboarding/:id/sign/:docKey — Sign a document (token required)
-app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) => {
+app.post("/api/public/investor-onboarding/:id/sign/:docKey", onboardingSignLimiter, async (req, res) => {
 	try {
 		const appId = verifyInvestorToken(req, res);
 		if (!appId) return;
@@ -6172,7 +6365,8 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		if (!docRow) return res.status(404).json({ error: "Document not found" });
 		if (docRow.signed) return res.json({ success: true, message: "Already signed" });
 
-		const application = db.prepare("SELECT * FROM investor_applications WHERE id = ?").get(appId);
+		// The application row is read inside buildInvestorDocRender(), at render
+		// time, so it reflects any vehicle written just below.
 		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
@@ -6194,62 +6388,12 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 				JSON.stringify(vehiclesArr), appId);
 		}
 
-		const render = () => {
-			if (docKey === "w9") {
-				return fillW9Form({
-					legalName: application?.legal_name || "", dba: application?.dba || "",
-					entityType: application?.entity_type || "", address: application?.address || "",
-					einSsn: application?.ein_ssn || "", signatureText: signatureText.trim(),
-					signatureImage, effectiveDate,
-				});
-			}
-			if (docKey === "master_agreement" || docKey === "vehicle_lease") {
-				const signedAt = new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
-				// Load any stored vehicles (from vehicles_json or the vehicle_* fallback columns)
-				let storedVehicles = vehiclesArr;
-				if (!storedVehicles.length) {
-					try { storedVehicles = JSON.parse(application?.vehicles_json || "[]"); } catch { storedVehicles = []; }
-					if (!storedVehicles.length && application?.vehicle_year) {
-						storedVehicles = [{
-							year: application.vehicle_year, make: application.vehicle_make, model: application.vehicle_model,
-							vin: application.vehicle_vin, mileage: application.vehicle_mileage,
-							titleState: application.vehicle_title_state, liens: application.vehicle_liens,
-							registeredOwner: application.vehicle_registered_owner,
-						}];
-					}
-				}
-				const payInfo = db.prepare("SELECT * FROM investor_payment_info WHERE application_id = ?").get(appId);
-				return renderPolicy(docKey, {
-					legalName: application?.legal_name || "",
-					dba: application?.dba || "",
-					entityType: application?.entity_type || "",
-					address: application?.address || "",
-					contactPerson: application?.contact_person || "",
-					contactTitle: application?.contact_title || "",
-					phone: application?.phone || "",
-					email: application?.email || "",
-					einSsn: application?.ein_ssn || "",
-					yearsInOperation: application?.years_in_operation || "",
-					fleetSize: application?.fleet_size || "",
-					vehicles: storedVehicles,
-					bankName: payInfo?.bank_name || "",
-					bankRouting: payInfo?.routing_number || "",
-					bankAccount: payInfo?.account_number || "",
-					accountType: payInfo?.account_type || "",
-					effectiveDate,
-					signatureText: signatureText.trim(),
-					signatureImage,
-					signedAt,
-				});
-			}
-			// No silent fall-through. The old if/else-if chain had no else, so a
-			// docKey outside these three rendered NOTHING and still wrote
-			// signed = 1 with a signed_pdf_url pointing at a file that was never
-			// created — a phantom document that only 404s when someone opens it.
-			const e = new Error(`No renderer registered for investor document "${docKey}"`);
-			e.code = "DOCUMENT_RENDERER_MISSING";
-			throw e;
-		};
+		const render = buildInvestorDocRender({
+			appId, docKey,
+			signatureText, signatureImage, effectiveDate,
+			signedAt: new Date().toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" }),
+			vehiclesOverride: vehiclesArr,
+		});
 
 		const now = new Date().toISOString();
 		let signedPdfUrl;
@@ -6295,16 +6439,7 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 		resolveOnboardingDocAlert({ scope: "investor-application", ownerId: appId, docKey });
 
 		// Check if all docs signed → advance status
-		const signedCount = db.prepare("SELECT COUNT(*) AS cnt FROM investor_onboarding_documents WHERE application_id=? AND signed=1").get(appId).cnt;
-		if (signedCount === INVESTOR_ONBOARDING_DOCS.length) {
-			const hasBanking = db.prepare("SELECT 1 FROM investor_payment_info WHERE application_id=?").get(appId);
-			if (hasBanking) {
-				db.prepare("UPDATE investor_onboarding SET status='fully_onboarded', onboarded_at=? WHERE application_id=?")
-					.run(new Date().toISOString(), appId);
-			} else {
-				db.prepare("UPDATE investor_onboarding SET status='banking_pending' WHERE application_id=?").run(appId);
-			}
-		}
+		refreshInvestorOnboardingStatus(appId);
 
 		res.json({ success: true });
 	} catch (err) {
@@ -6313,8 +6448,175 @@ app.post("/api/public/investor-onboarding/:id/sign/:docKey", async (req, res) =>
 	}
 });
 
+// ============================================================
+// ADMIN: recover a document that failed to render
+// ============================================================
+// #202 made a failed render RECOVERABLE — signature kept, `signed` left 0,
+// signing_error recorded, an alert raised. It did not make it RECOVERED: for an
+// investor there was no route that could ever finish the job.
+//
+// The per-document public route below is token-gated on
+// investor_applications.access_token, and that token is generated server-side,
+// stored, and NEVER emitted — not in a response body, not in either admin
+// payload (both strip it unconditionally), not in any email. `client/src` has
+// zero references to /api/public/investor-onboarding/ or to the token. The live
+// path is the bulk POST /api/public/investor-apply, which by design does not
+// fail the request. So a document that failed to render parked at
+// documents_pending until somebody hand-edited SQLite.
+//
+// These two routes are that missing path: find the parked documents, then
+// re-render one from the signature already on file.
+//
+// GET — Super Admin. Every open onboarding-document failure, both scopes.
+// Read-only; no render, so it carries no limiter (cf. the fuel-events GET,
+// where cost — not the verb — is what decides).
+app.get("/api/admin/onboarding-doc-failures", requireRole("Super Admin"), (req, res) => {
+	try {
+		const includeResolved = req.query.includeResolved === "true";
+		const alerts = db.prepare(
+			`SELECT alert_key, scope, owner_id, doc_key, doc_name, reason,
+			        strftime('%Y-%m-%dT%H:%M:%SZ', first_seen) AS first_seen,
+			        alerted_at, resolved_at
+			   FROM onboarding_doc_alerts
+			  ${includeResolved ? "" : "WHERE resolved_at IS NULL"}
+			  ORDER BY first_seen DESC`
+		).all();
+
+		// Join each alert to the document row it is about, so an admin can see
+		// whether the signature is still on file (i.e. whether regenerating can
+		// actually work) without a second round trip.
+		const enriched = alerts.map((a) => {
+			let row = null;
+			if (a.scope === "investor-application") {
+				row = db.prepare("SELECT signed, signed_pdf_url, signing_error, signing_failed_at, LENGTH(signature_text) AS sig_len FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(a.owner_id, a.doc_key);
+			} else if (a.scope === "driver") {
+				row = db.prepare("SELECT signed, signed_pdf_url, signing_error, signing_failed_at, LENGTH(signature_text) AS sig_len FROM onboarding_documents WHERE user_id = ? AND doc_key = ?").get(a.owner_id, a.doc_key);
+			}
+			return {
+				...a,
+				signed: row ? !!row.signed : null,
+				signedPdfUrl: row ? row.signed_pdf_url : null,
+				signingError: row ? row.signing_error : null,
+				hasStoredSignature: row ? (row.sig_len || 0) > 0 : null,
+				// Only the investor scope has an admin regenerate route. A driver
+				// retries by signing again in their own app, which is reachable.
+				regeneratable: a.scope === "investor-application",
+			};
+		});
+		res.json({ failures: enriched, count: enriched.length });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST — Super Admin. Re-render ONE parked investor document from the signature
+// already stored on its row, then clear the failure state and resolve the alert.
+//
+// ⚠️ It NEVER accepts a signature (or any document content) from the request
+// body. The signature is the legally meaningful act and it already happened; a
+// route that let an admin supply one would let an admin manufacture an
+// investor's signature from an admin console. Same reasoning as the gallons
+// recovery POST refusing client-supplied gallons — a route that takes the value
+// it is supposed to be recovering makes the recovery decorative.
+//
+// A row with no stored signature is therefore 409, not a silent unsigned PDF.
+app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requireRole("Super Admin"), onboardingSignLimiter, async (req, res) => {
+	try {
+		const appId = parseInt(req.params.id, 10);
+		const { docKey } = req.params;
+		const force = req.body?.force === true;
+		if (!appId || isNaN(appId)) return res.status(400).json({ error: "Invalid application ID" });
+		const docDef = INVESTOR_ONBOARDING_DOCS.find((d) => d.key === docKey);
+		if (!docDef) return res.status(404).json({ error: "Unknown document", code: "UNKNOWN_DOC_KEY" });
+
+		const docRow = db.prepare("SELECT * FROM investor_onboarding_documents WHERE application_id = ? AND doc_key = ?").get(appId, docKey);
+		if (!docRow) return res.status(404).json({ error: "Document not found" });
+
+		const storedSignature = (docRow.signature_text || "").trim();
+		if (!storedSignature) {
+			return res.status(409).json({
+				error: "This document has no signature on file, so there is nothing to regenerate. The investor must sign it.",
+				code: "NO_STORED_SIGNATURE",
+			});
+		}
+
+		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
+		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
+		const signedFileName = `${docKey}-inv-${appId}-signed.pdf`;
+		const signedPath = path.join(signedDir, signedFileName);
+		const publicUrl = `/uploads/investor-onboarding-signed/${signedFileName}`;
+
+		// Already whole? Don't spend a Puppeteer render re-proving it. The test is
+		// the artifact itself, not the `signed` flag — a row can read signed = 1
+		// while the file behind it is gone, which is exactly the state an admin
+		// would be reaching for this route to fix.
+		if (!force && docRow.signed && docRow.signed_pdf_url) {
+			if (signedArtifactLooksValid(signedPath)) {
+				resolveOnboardingDocAlert({ scope: "investor-application", ownerId: appId, docKey });
+				return res.json({ success: true, regenerated: false, reason: "ALREADY_PRESENT", signedPdfUrl: docRow.signed_pdf_url });
+			}
+		}
+
+		// Same effectiveDate/signedAt shape the signing route uses. The original
+		// signing timestamp is preserved below — this is a re-render of an act
+		// that already happened, not a new one.
+		const effectiveDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+		const originalSignedAt = docRow.signed_at || docRow.signing_failed_at || "";
+		const signedAtLabel = originalSignedAt
+			? new Date(originalSignedAt).toLocaleString("en-US", { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" })
+			: effectiveDate;
+
+		const render = buildInvestorDocRender({
+			appId, docKey,
+			signatureText: storedSignature,
+			signatureImage: docRow.signature_image || undefined,
+			effectiveDate,
+			signedAt: signedAtLabel,
+		});
+
+		const nowIso = new Date().toISOString();
+		let signedPdfUrl;
+		try {
+			signedPdfUrl = await writeSignedArtifact({ render, signedPath, publicUrl, label: docRow.doc_name || docKey });
+		} catch (genErr) {
+			// Still broken. Record why and leave the row parked — a failed
+			// regeneration must not look like a fresh failure, so the alert is only
+			// (re)raised for a document that is genuinely unsigned.
+			const failWrite = db.prepare("UPDATE investor_onboarding_documents SET signing_error=?, signing_failed_at=? WHERE application_id=? AND doc_key=? AND signed = 0")
+				.run(genErr.message, nowIso, appId, docKey);
+			if (failWrite.changes > 0) {
+				alertOnboardingDocFailure({
+					scope: "investor-application", ownerId: appId, docKey,
+					docName: docRow.doc_name, reason: genErr.message,
+				});
+			}
+			logAudit(req, "regenerate_investor_document", "investor_application", appId, `FAILED to regenerate "${docKey}": ${genErr.code || "DOCUMENT_RENDER_FAILED"}`);
+			return res.status(503).json({
+				error: "The document still could not be produced. The signature is untouched.",
+				code: genErr.code || "DOCUMENT_RENDER_FAILED",
+				detail: genErr.message,
+				retryable: genErr.code !== "DOCUMENT_FIELDS_UNFILLED",
+			});
+		}
+
+		// signed_at keeps the ORIGINAL signing time where there is one — the
+		// investor signed when they signed, and stamping today's date onto a
+		// recovered document would misstate the contract.
+		db.prepare("UPDATE investor_onboarding_documents SET signed=1, signed_at=COALESCE(NULLIF(signed_at,''), ?), signed_pdf_url=?, signing_error='', signing_failed_at='' WHERE application_id=? AND doc_key=?")
+			.run(nowIso, signedPdfUrl, appId, docKey);
+		resolveOnboardingDocAlert({ scope: "investor-application", ownerId: appId, docKey });
+		const onboardingStatus = refreshInvestorOnboardingStatus(appId);
+
+		logAudit(req, "regenerate_investor_document", "investor_application", appId, `Regenerated "${docRow.doc_name || docKey}" from the stored signature`);
+		res.json({ success: true, regenerated: true, signedPdfUrl, onboardingStatus });
+	} catch (err) {
+		console.error("Investor document regenerate error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // Serve investor onboarding document PDFs (preview, token required)
-app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", async (req, res) => {
+app.get("/api/public/investor-onboarding/:id/documents/:docKey/pdf", onboardingPreviewLimiter, async (req, res) => {
 	try {
 		const appId = verifyInvestorToken(req, res);
 		if (!appId) return;
@@ -7548,7 +7850,7 @@ app.get("/api/onboarding/:userId", requireAuth, (req, res) => {
 });
 
 // POST /api/onboarding/:userId/documents/:docKey/sign — driver signs a document
-app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, async (req, res) => {
+app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardingSignLimiter, async (req, res) => {
 	try {
 		const userId = parseInt(req.params.userId);
 		const { docKey } = req.params;
@@ -7726,7 +8028,11 @@ app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async 
 });
 
 // GET /api/onboarding/documents/:docKey/pdf — serve onboarding PDF (HTML template rendered via Puppeteer)
-app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, async (req, res) => {
+// The fourth render route, and the driver-side twin of the token-gated investor
+// preview above: requireAuth only, one Puppeteer render per request, no cap.
+// Same limiter and the same reasoning — previewing is a read, so it gets the
+// looser 30, and the guard stays mounted before the limiter.
+app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, onboardingPreviewLimiter, async (req, res) => {
 	try {
 		const { docKey } = req.params;
 		const docDef = ONBOARDING_DOCS.find(d => d.key === docKey);
