@@ -98,6 +98,35 @@ const days = (ms) => (ms / 86400000).toFixed(1) + "d";
 //   - --dry-run prints the plan and deletes nothing.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// File permissions.
+//
+// A snapshot is a full copy of every SSN, EIN and bank routing/account number in
+// the business. Production runs with four non-root login accounts (ubuntu,
+// nodeapp, deploy, postgres) and these files were 644 in a 755 directory, so any
+// of them could read the lot with `cp` — no exploit required.
+//
+// Scope, deliberately: this restricts only files THIS script creates. Existing
+// modes and the directory itself belong to scripts/secure-backups.sh, which is
+// explicit, has a dry run and is run by a human. A cron job that silently
+// re-permissions a production directory at 02:00 is a surprise waiting to
+// happen, and the one-time remediation is a decision, not a default.
+// ---------------------------------------------------------------------------
+const FILE_MODE = 0o600;
+function restrict(p) {
+	try { fs.chmodSync(p, FILE_MODE); } catch (e) { log(`WARNING: could not chmod ${path.basename(p)}: ${e.message}`); }
+}
+function warnIfDirIsReadable(dir) {
+	try {
+		const mode = fs.statSync(dir).mode & 0o777;
+		if (mode & 0o077) {
+			log(`WARNING: ${dir} is mode 0${mode.toString(8)} — group/other can list every snapshot.`);
+			log("WARNING:   new files are written 0600, but the existing ones keep their modes.");
+			log("WARNING:   fix once with: scripts/secure-backups.sh --apply   (dry run by default)");
+		}
+	} catch { /* not worth failing a backup over */ }
+}
+
 const BACKUP_PREFIX = "app.db.";
 const SIDECAR_RE = /(-shm|-wal)$/;
 const TMP_RE = /\.tmp$/;
@@ -288,7 +317,12 @@ async function main() {
 	}
 
 	if (!fs.existsSync(SRC)) fail(`source database not found: ${SRC}`);
-	fs.mkdirSync(OUT_DIR, { recursive: true });
+	// 0700 applies only when this call CREATES the directory. An existing one is
+	// deliberately left alone: changing the mode of a live production directory
+	// from inside a cron job, at 02:00, unattended, is not this script's call.
+	// scripts/secure-backups.sh does that, explicitly and with a dry run.
+	fs.mkdirSync(OUT_DIR, { recursive: true, mode: 0o700 });
+	warnIfDirIsReadable(OUT_DIR);
 
 	let Database;
 	try { Database = require("better-sqlite3"); }
@@ -313,6 +347,12 @@ async function main() {
 		try { src && src.close(); } catch {}
 	}
 	if (!fs.existsSync(tmp)) fail("snapshot produced no file");
+	// Before anything else touches it. This file is a complete copy of every SSN,
+	// EIN and bank account number in the system; better-sqlite3 created it at
+	// 0644 & ~umask, and the rename/gzip below preserve whatever it starts with.
+	// Restricting NEW files needs no sign-off — it changes no existing mode and
+	// it is what stops tomorrow's run undoing secure-backups.sh.
+	restrict(tmp);
 	log(`snapshot written ${human(fs.statSync(tmp).size)}`);
 
 	// 2. Verify BEFORE keeping it. A backup nobody has opened is a guess.
@@ -333,7 +373,8 @@ async function main() {
 	if (GZIP) {
 		finalPath = `${base}.gz`;
 		try {
-			await pipeline(fs.createReadStream(tmp), zlib.createGzip({ level: 9 }), fs.createWriteStream(finalPath));
+			await pipeline(fs.createReadStream(tmp), zlib.createGzip({ level: 9 }), fs.createWriteStream(finalPath, { mode: 0o600 }));
+			restrict(finalPath);
 			rmTmp(tmp);
 		} catch (e) {
 			try { fs.unlinkSync(finalPath); } catch {}
@@ -342,6 +383,7 @@ async function main() {
 		}
 	} else {
 		fs.renameSync(tmp, base);
+		restrict(base);        // rename preserves the mode; assert it anyway
 		rmTmp(tmp);            // rename moves the db; the sidecars remain
 	}
 	const outSize = fs.statSync(finalPath).size;
