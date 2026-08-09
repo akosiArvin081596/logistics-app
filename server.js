@@ -20009,10 +20009,30 @@ function loadAssignedMonthKey(row, cols) {
 // So the narrow reading is kept exactly as it was — same `pickup`, same fallback,
 // same `return []` — and the wide reading is added as a SECOND leg. The result is a
 // superset of the pre-change window (property 1 restored) while the refusal
-// condition is untouched (property 2 restored). The guard then answers for the
-// months of BOTH readings, so it refuses whether the money books the load against
-// the assigned date or against the true pickup, which is what keeps it correct
-// while the two ends of that read are being brought into line.
+// condition is untouched (property 2 restored).
+//
+// ⚠️ WHICH CALLER ACTUALLY GETS THE UNION — do not mis-read this as the thing that
+// keeps the load-delete and status-override guards correct. IT IS NOT, and those
+// two never see it at all. loadRowPeriods() below reaches this function only when
+// loadAssignedMonthKey() returned "", i.e. moneySheetDate() could not read the
+// assigned date — which is exactly the condition that makes the fallback above
+// yield null too. So on that path `pickup` is always the strict read, and either it
+// is null (→ `return []`, unchanged) or it resolved, in which case moneySheetDate()
+// on the same cell returns the IDENTICAL instant (the strict ISO/US branches are a
+// byte-for-byte subset of moneySheetDate's, and its only extra pre-step, stripping
+// a leading "Date:", cannot apply to a string those ^-anchored regexes matched) and
+// the equality test below short-circuits. Verified by instrumenting the union leg:
+// it fired 0 times in 312 combinations that reach the window path via
+// loadRowPeriods, against 144 times on the direct call. What keeps those two guards
+// byte-identical is the untouched `return []` plus that subset property — NOT the
+// union. Deleting the union would not weaken them; adding a third leg would not
+// strengthen them.
+//
+// The union's one live consumer is the DIRECT call in excludedDayPeriods(), whose
+// `loadWindowDays(row, cols).includes(date)` coverage test runs on rows whose
+// assigned date IS readable. Keeping that test monotone is the whole job: a row
+// that covered a date before must still cover it, or the gate silently stops
+// consulting that load's months.
 //
 // Measured on production 2026-08-09 across all 305 deduplicated Job Tracking rows
 // (the set the guards actually see — they do NOT run excludeDroppedLoads): windows
