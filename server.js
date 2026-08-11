@@ -3042,6 +3042,25 @@ try {
 	db.pragma("foreign_keys = ON");
 }
 
+// Soft delete for investor applications. Same shape as `job_applications`
+// (NULL = live; every reader filters `deleted_at IS NULL`), so recovery is one
+// UPDATE away and there is a `/restore` route for it.
+//
+// ⚠️ SOFT, NEVER HARD. `investor_onboarding` and `investor_onboarding_documents`
+// both declare FOREIGN KEY (application_id) REFERENCES investor_applications(id)
+// and `foreign_keys = ON`, so a hard DELETE either raises a constraint error for
+// exactly the applications that got furthest — the ones carrying signed
+// documents — or, with a cascade, destroys signed evidence. Neither is
+// acceptable for a table whose purpose was only ever "this is spam, or a
+// duplicate, get it off my list".
+//
+// ⚠️ THIS ALTER MUST STAY BELOW THE RENAME-RECREATE ABOVE. That migration
+// copies rows with an EXPLICIT column list ending `vehicles_json, status,
+// created_at` — so a column added before it is silently dropped on any database
+// that still needs the CHECK rebuild.
+try { db.exec("ALTER TABLE investor_applications ADD COLUMN deleted_at DATETIME DEFAULT NULL"); } catch { /* exists */ }
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_ia_deleted_at ON investor_applications(deleted_at)"); } catch {}
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_onboarding (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -7465,12 +7484,31 @@ const onboardingSignLimiter = rateLimit({
 });
 
 // Helper: verify investor access token
+//
+// ⚠️ A SOFT-DELETED APPLICATION'S TOKEN NO LONGER AUTHORIZES ANYTHING. This is
+// the deliberate answer to "does the bearer credential survive the delete?", and
+// it is decided HERE because this is the single choke point every public
+// onboarding route passes through — the alternative is five copies of the rule.
+//
+// The token is not merely disclosive. It is a NON-EXPIRING bearer credential
+// accepted with no session at all, and it authorizes e-signing as that investor
+// and `POST …/banking`, which rewrites where money is sent. Soft-deleting is an
+// admin asserting "this application is spam, or a duplicate, or not real";
+// continuing to honour a write credential attached to it would mean a deleted
+// application could still sign contracts and nominate a bank account. Restoring
+// the row restores the token unchanged, so nothing is lost — the credential is
+// suspended with the record, not revoked from it.
+//
+// ⚠️ REFUSED AS 404, NOT 403, and via the same branch as a non-existent id. A
+// distinct status or message would turn this into an oracle for "an application
+// with this id exists but was removed" against an unauthenticated route. Same
+// rule the signed-document guards follow: a 403 confirms the thing exists.
 function verifyInvestorToken(req, res) {
 	const appId = parseInt(req.params.id);
 	const token = req.query.token || req.body?.accessToken || req.headers["x-access-token"] || "";
 	if (!appId || isNaN(appId)) { res.status(400).json({ error: "Invalid application ID" }); return null; }
-	const app = db.prepare("SELECT id, access_token FROM investor_applications WHERE id = ?").get(appId);
-	if (!app) { res.status(404).json({ error: "Application not found" }); return null; }
+	const app = db.prepare("SELECT id, access_token, deleted_at FROM investor_applications WHERE id = ?").get(appId);
+	if (!app || app.deleted_at) { res.status(404).json({ error: "Application not found" }); return null; }
 	if (!app.access_token || app.access_token !== token) { res.status(403).json({ error: "Invalid access token" }); return null; }
 	return appId;
 }
@@ -8778,11 +8816,17 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 // Admin: list investor applications
 app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => {
 	try {
+		// `?include_deleted=true` is how an admin FINDS a row to restore, exactly
+		// as GET /api/applications does. This is the only investor-application
+		// reader that offers the escape hatch: it is a list, so it cannot be used
+		// to pull one specific removed record, and without it a soft delete would
+		// be indistinguishable from a hard one.
+		const includeDeleted = req.query.include_deleted === "true";
 		const apps = db.prepare(`SELECT ia.*, io.status AS onboarding_status,
 			(SELECT COUNT(*) FROM investor_onboarding_documents WHERE application_id=ia.id AND signed=1) AS signed_count
 			FROM investor_applications ia
 			LEFT JOIN investor_onboarding io ON io.application_id = ia.id
-			WHERE ia.status != 'Draft'
+			WHERE ia.status != 'Draft'${includeDeleted ? "" : " AND ia.deleted_at IS NULL"}
 			ORDER BY ia.created_at DESC`).all();
 		// The LIST leaks more than the detail view did: `SELECT ia.*` carries
 		// ein_ssn for EVERY application and fires on page load, so simply opening
@@ -8811,12 +8855,18 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 app.get("/api/investor-applications/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		const appId = parseInt(req.params.id);
+		// ⚠️ The detail route filters too. Filtering only the LIST is the classic
+		// half-done soft delete: the row disappears from the screen and stays
+		// fully readable — tax id, banking, signed documents — to anyone who kept
+		// or guessed the id. `?include_deleted=true` is honoured so the restore UI
+		// can show what it is about to bring back, and nothing else uses it.
+		const includeDeleted = req.query.include_deleted === "true";
 		const application = db.prepare(`SELECT ia.*, io.status AS onboarding_status,
 			(SELECT COUNT(*) FROM investor_onboarding_documents WHERE application_id=ia.id AND signed=1) AS signed_count
 			FROM investor_applications ia
 			LEFT JOIN investor_onboarding io ON io.application_id = ia.id
 			WHERE ia.id = ?`).get(appId);
-		if (!application) return res.status(404).json({ error: "Application not found" });
+		if (!application || (application.deleted_at && !includeDeleted)) return res.status(404).json({ error: "Application not found" });
 		let vehicles = [];
 		try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
 		const banking = db.prepare("SELECT bank_name, account_type, routing_number, account_number, account_name FROM investor_payment_info WHERE application_id=?").get(appId) || {};
@@ -8847,8 +8897,13 @@ app.get("/api/investor-applications/:id/sensitive", requireRole("Super Admin"), 
 	try {
 		const appId = Number(req.params.id);
 		if (!Number.isFinite(appId) || appId <= 0) return res.status(400).json({ error: "Invalid application id" });
-		const application = db.prepare("SELECT id, legal_name, ein_ssn FROM investor_applications WHERE id = ?").get(appId);
-		if (!application) return res.status(404).json({ error: "Application not found" });
+		// ⚠️ NO include_deleted ESCAPE HATCH HERE, unlike the list and detail
+		// routes. This is the audited full-PII reveal — tax id plus routing and
+		// account numbers — and there is no legitimate reason to unmask an
+		// application an admin has removed as spam or a duplicate. Restore is one
+		// call away and leaves a record of who did it, which is the point.
+		const application = db.prepare("SELECT id, legal_name, ein_ssn, deleted_at FROM investor_applications WHERE id = ?").get(appId);
+		if (!application || application.deleted_at) return res.status(404).json({ error: "Application not found" });
 		const banking = db.prepare("SELECT routing_number, account_number FROM investor_payment_info WHERE application_id = ?").get(appId) || {};
 		logAudit(req, "reveal_investor_pii", "investor_application", appId,
 			`Revealed EIN/SSN + banking for ${application.legal_name || "application " + appId} from ${req.ip || "unknown ip"}`);
@@ -8864,6 +8919,196 @@ app.get("/api/investor-applications/:id/sensitive", requireRole("Super Admin"), 
 	}
 });
 
+// Admin: remove an investor application from the list.
+//
+// SOFT, and that is forced by the schema as much as by taste: three tables
+// (`investor_onboarding`, `investor_onboarding_documents`, `investor_payment_info`)
+// declare FOREIGN KEY (application_id) REFERENCES investor_applications(id) with
+// `foreign_keys = ON`, so a hard DELETE would raise a constraint error for
+// exactly the applications that got furthest — the ones carrying signed
+// documents — while a cascade would destroy signed evidence. The public
+// application form is unauthenticated, so spam and duplicates are routine, and
+// until now there was NO delete route at all: a junk row was permanent.
+//
+// Mirrors DELETE /api/applications/:id exactly (status/reason-free, audited,
+// reversible by POST …/restore).
+app.delete("/api/investor-applications/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		if (!Number.isInteger(id) || id <= 0) {
+			return res.status(400).json({ error: "Invalid application id" });
+		}
+		const row = db.prepare("SELECT legal_name, status FROM investor_applications WHERE id = ?").get(id);
+		// ⚠️ REPORT WHAT THIS SUSPENDS — do not refuse, and do not stay silent.
+		// Removing an application that is mid-onboarding also stops the
+		// investor's existing link working (see verifyInvestorToken), which is a
+		// support incident nobody would connect back to this click. A refusal is
+		// the wrong answer — a duplicate that was mistakenly Accepted is exactly
+		// what an admin needs to remove — so the caller is told instead, and
+		// restore is one call away.
+		const signedCount = db.prepare(
+			"SELECT COUNT(*) AS c FROM investor_onboarding_documents WHERE application_id = ? AND signed = 1"
+		).get(id)?.c || 0;
+		const onboarding = db.prepare("SELECT status FROM investor_onboarding WHERE application_id = ?").get(id);
+		const result = db.prepare(
+			"UPDATE investor_applications SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
+		).run(id);
+		if (result.changes === 0) {
+			return res.status(404).json({ error: "Application not found or already deleted" });
+		}
+		const warnings = [];
+		if (signedCount) warnings.push(`${signedCount} signed document${signedCount === 1 ? "" : "s"} stay on file and are unaffected, but are no longer reachable from the applications list.`);
+		if (onboarding && onboarding.status !== "fully_onboarded") warnings.push("Onboarding was still in progress — the investor's existing onboarding link will stop working until this is restored.");
+		if (row?.status === "Accepted") warnings.push("This application was already Accepted; any user account created from it is unaffected and still works.");
+
+		// Named in the audit line because the delete also SUSPENDS a live bearer
+		// credential — a later reader needs to know the investor's onboarding link
+		// stopped working, and why.
+		logAudit(req, "soft_delete_investor_application", "investor_application", id,
+			`Removed ${row?.legal_name || id} (status ${row?.status || "unknown"}) from the list; its onboarding access token no longer authorizes signing or banking changes` +
+			(signedCount ? `; ${signedCount} signed document(s) retained` : ""));
+		res.json({ success: true, warnings });
+	} catch (err) {
+		console.error("investor application soft-delete failed:", err);
+		res.status(500).json({ error: "Delete failed. Please try again." });
+	}
+});
+
+// Restore a soft-deleted investor application. The access_token is deliberately
+// NOT regenerated: it was suspended with the record, not revoked from it, so the
+// onboarding link the investor already has starts working again.
+app.post("/api/investor-applications/:id/restore", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		if (!Number.isInteger(id) || id <= 0) {
+			return res.status(400).json({ error: "Invalid application id" });
+		}
+		const row = db.prepare("SELECT legal_name FROM investor_applications WHERE id = ?").get(id);
+		const result = db.prepare("UPDATE investor_applications SET deleted_at = NULL WHERE id = ?").run(id);
+		if (result.changes === 0) {
+			return res.status(404).json({ error: "Application not found" });
+		}
+		logAudit(req, "restore_investor_application", "investor_application", id,
+			`Restored ${row?.legal_name || id} from soft-delete; its onboarding access token authorizes again`);
+		res.json({ success: true });
+	} catch (err) {
+		console.error("investor application restore failed:", err);
+		res.status(500).json({ error: "Restore failed. Please try again." });
+	}
+});
+
+// ============================================================
+// GET /api/admin/orphaned-signed-artifacts — signed PDFs on disk with no row
+// ============================================================
+// Production carries 54 signed artifacts (of 88) that no database row points at
+// — 13 W-9s with an SSN or EIN flattened into the IRS AcroForm, 7 contractor
+// agreements carrying bank routing and account numbers. They all date from one
+// seven-day window (2026-04-07 → 2026-04-13), and `onboarding_documents` holding
+// exactly 25 rows = 5 users × 5 doc types says the database was rolled back or
+// replaced while `uploads/` persisted.
+//
+// ⚠️ NOTHING IN THIS CODEBASE EVER DELETES A SIGNED ARTIFACT — zero
+// `DELETE FROM onboarding_documents`, zero `fs.unlink` against either signed
+// directory. So the mechanism that produced them is UNFIXED; it simply has not
+// fired since. Any future restore, rollback or environment refresh produces new
+// orphans on identical terms, which is why this is a RECONCILER and not a
+// deleter: it reports, a human decides. (`archiveSignedArtifact` only ever
+// copies, and the user-delete cascade above copies before removing a row, so
+// this route is also how you notice the copy that got left behind.)
+//
+// ⚠️ AUTHORITY IS THE DB ROW, NEVER THE FILENAME, AND IDS ARE NOT MATCHED ON.
+// `guardDriverSignedDoc` / `guardInvestorSignedDoc` resolve a request by looking
+// up `signed_pdf_url`, so "orphan" means exactly "no row carries this URL" —
+// which is the same question as "can anyone ever read this file over HTTP?"
+// (no: those guards fail closed). Parsing `${docKey}-${id}-signed.pdf` and
+// checking that the id exists would be a DIFFERENT and wrong test: the driver
+// filename's id is a `users.id` while the investor filename's is an
+// application id, the two id spaces are unrelated, and a file can be
+// unreferenced while its id is perfectly alive.
+//
+// Read-only, and it reports metadata only — never file contents.
+app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), (req, res) => {
+	try {
+		const scopes = [
+			{ scope: "driver", dir: "onboarding-signed", table: "onboarding_documents", owner: "user_id" },
+			{ scope: "investor", dir: "investor-onboarding-signed", table: "investor_onboarding_documents", owner: "application_id" },
+		];
+		const orphans = [];
+		const missing = [];
+		let filesScanned = 0;
+		let rowsScanned = 0;
+
+		for (const s of scopes) {
+			const absDir = path.join(__dirname, "uploads", s.dir);
+			// One membership SET per scope, built from the DB. A row-per-file query
+			// would be N lookups and, worse, would invite matching on something
+			// other than the URL.
+			let rows = [];
+			try {
+				rows = db.prepare(
+					`SELECT ${s.owner} AS owner_id, doc_key, COALESCE(signed_pdf_url, '') AS signed_pdf_url, signed
+					   FROM ${s.table} WHERE COALESCE(signed_pdf_url, '') <> ''`
+				).all();
+			} catch { rows = []; }   // table absent on this database
+			rowsScanned += rows.length;
+			const referenced = new Set(rows.map((r) => r.signed_pdf_url));
+
+			let files = [];
+			try { files = fs.readdirSync(absDir); } catch { files = []; }   // directory absent
+			for (const file of files) {
+				if (!/\.pdf$/i.test(file)) continue;
+				let stat;
+				try { stat = fs.statSync(path.join(absDir, file)); } catch { continue; }
+				if (!stat.isFile()) continue;
+				filesScanned++;
+				const url = `/uploads/${s.dir}/${file}`;
+				// Exact string equality, deliberately — it is the comparison the
+				// access guards make, so this answers the question they answer.
+				if (referenced.has(url)) continue;
+				orphans.push({
+					scope: s.scope,
+					dir: s.dir,
+					file,
+					url,
+					bytes: stat.size,
+					modifiedAt: new Date(stat.mtimeMs).toISOString(),
+					// Cheap, useful triage: a W-9 or a contractor agreement is a
+					// plaintext SSN/EIN or bank account sitting unreferenced.
+					confidential: isConfidentialOnboardingDoc(s.scope === "driver" ? "driver" : "investor", String(file).split("-")[0]),
+				});
+			}
+
+			// The other half of the reconciliation, and the more urgent one: a row
+			// asserting `signed = 1` whose artifact is not on disk. That is a legal
+			// claim with nothing behind it, which is exactly the state the
+			// signing_error columns were added to stop being silent about.
+			for (const r of rows) {
+				const base = path.basename(r.signed_pdf_url);
+				if (!base || base === "." || base === "..") continue;
+				if (fs.existsSync(path.join(absDir, base))) continue;
+				missing.push({ scope: s.scope, ownerId: r.owner_id, docKey: r.doc_key, url: r.signed_pdf_url, signed: !!r.signed });
+			}
+		}
+
+		orphans.sort((a, b) => String(a.modifiedAt).localeCompare(String(b.modifiedAt)));
+		res.json({
+			orphans,
+			count: orphans.length,
+			confidentialCount: orphans.filter((o) => o.confidential).length,
+			missing,
+			missingCount: missing.length,
+			filesScanned,
+			rowsScanned,
+			// The remedy, stated once so no caller has to invent one. Deleting is
+			// NOT it: some of these may be the only surviving record of an executed
+			// contract.
+			remedy: "Move orphans out of the web root (evidence-archive/signed-artifacts) rather than deleting them — an orphan may be the only surviving copy of an executed contract. Rows listed under `missing` assert a signature with no artifact behind them and should be regenerated or corrected.",
+		});
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // Admin: accept/reject investor application
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
@@ -8872,6 +9117,19 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			return res.status(400).json({ error: "Invalid status" });
 		}
 		const appId = parseInt(req.params.id);
+		// ⚠️ CHECKED BEFORE THE UPDATE, and this is the reader where filtering
+		// matters most. `status = 'Accepted'` does not merely set a column: it
+		// CREATES A USER ACCOUNT, mints a temporary password and emails it. A
+		// removed application must never be able to do that, and the guard has to
+		// sit above the write because the status flip itself is what triggers it.
+		const target = db.prepare("SELECT id, deleted_at FROM investor_applications WHERE id = ?").get(appId);
+		if (!target) return res.status(404).json({ error: "Application not found" });
+		if (target.deleted_at) {
+			return res.status(409).json({
+				error: "This application was removed. Restore it first if the decision needs to change — POST /api/investor-applications/:id/restore.",
+				code: "APPLICATION_DELETED",
+			});
+		}
 		db.prepare("UPDATE investor_applications SET status=? WHERE id=?").run(status, appId);
 
 		if (status === "Accepted") {
