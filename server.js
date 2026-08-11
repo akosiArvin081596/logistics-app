@@ -9059,7 +9059,44 @@ app.post("/api/investor-applications/:id/restore", requireRole("Super Admin"), (
 // unreferenced while its id is perfectly alive.
 //
 // Read-only, and it reports metadata only — never file contents.
-app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), (req, res) => {
+//
+// ⚠️ IT DID ITS WHOLE SCAN ON THE REQUEST PATH WITH NO CAP. One call is a
+// `readdirSync` per scope, a `statSync` per PDF and an `existsSync` per row —
+// synchronous, so every one of them blocks the event loop for the entire
+// process, and the work grows with the orphan pile this route exists to measure
+// (88 files today; the mechanism that produced 54 of them is UNFIXED, per the
+// note above, so the next rollback or refresh adds more). It is also the
+// inventory listing of which unreferenced files carry an SSN or a bank account.
+// 10 / 15 min, matching dbAdminLimiter: the same class of read-only
+// reconnaissance over the same sensitive inventory, and a legitimate operator
+// runs a reconciliation a handful of times, not in a loop.
+//
+// ⚠️ requireRole BEFORE the limiter. Mounted the other way an unauthenticated
+// caller spends the whole budget on 403s and locks the Super Admin out of an
+// admin-only route — see the same ordering on fuelEventsLimiter,
+// fuelGallonsLimiter, onboardingEvidenceLimiter and dbAdminLimiter.
+//
+// ⚠️ DELIBERATELY NO refuseCrossSite, and the reason is the rule the guarded
+// routes already state: it is the EFFECT, not the sensitivity, that earns the
+// guard. Every route carrying it has a side effect a cross-site GET navigation
+// can force while SameSite=Lax still sends the cookie — fuel-gallons-recovery
+// fires up to 25 BILLED Gemini calls, onboarding-evidence forges an audit_trail
+// row per call, /api/db/download dumps 313 MB of plaintext PII — and the
+// adjacent fuel-events GET is explicitly denied it because ~140 ms of local CPU
+// is not an effect. This route writes nothing: no row, no audit line, no
+// spend, and CORS already withholds the response body from the page that forced
+// the navigation. The limiter is the right control for the scan cost.
+// ⚠️ THAT CHANGES THE DAY THIS ROUTE GAINS AN audit_trail ROW. A bulk read of
+// this inventory arguably deserves one (it is why /api/db/* got theirs), but an
+// audited GET is precisely the audit-row-injection shape onboarding-evidence
+// carries refuseCrossSite for — add the guard in the same commit as the row.
+const orphanScanLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 10,
+	message: { error: "Too many artifact reconciliation scans. Try again later." },
+	standardHeaders: true,
+});
+app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), orphanScanLimiter, (req, res) => {
 	try {
 		const scopes = [
 			{ scope: "driver", dir: "onboarding-signed", table: "onboarding_documents", owner: "user_id" },
@@ -15050,12 +15087,26 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 //      could remove every account including their own.
 //   3. A restore, a botched refresh, or a hand-edit that truncates the table.
 //
-// And there is no way back. CLAUDE.md documents
-// `scripts/reset-super-admin-password.js`, but that file does not exist in this
-// repo — recovery from "no Super Admin" today means hand-editing app.db on the
-// VPS. So the failure is symmetric and both halves are severe: leave it open and
-// a stranger owns the fleet; close it wrongly and the owner is locked out of
-// their own system with no scripted way in.
+// And there is no way back THROUGH THE API. `scripts/reset-super-admin-password.js`
+// exists (running on production since 2026-04-13) and is a real recovery tool: it
+// takes the plaintext from the `NEW_PASSWORD` environment variable and never from
+// argv — so it stays out of shell history and out of `ps` — enforces a 16-character
+// minimum, verifies the bcrypt round-trip before it commits, refuses unless exactly
+// one row changed, and CLEARS `sessions`. That last step is what makes a reset an
+// actual revocation rather than a new password sitting beside a live 24 h cookie;
+// see purgeUserSessions() below, which exists for the same reason.
+//
+// ⚠️ BUT IT RESETS A PASSWORD — IT DOES NOT MINT AN ADMIN. It needs an existing
+// Super Admin row to act on, and a root shell on the VPS to run at all. Neither is
+// available in the state this route guards against: zero Super Admins, reached over
+// HTTP by someone who has only HTTP. So it answers "I lost the password", not "there
+// is no Super Admin" — and recovery from THAT is still hand-editing app.db, or
+// SETUP_RECOVERY_TOKEN below. The script's existence therefore takes nothing away
+// from the guards; do not read it as a safety net for this failure.
+//
+// So the failure is symmetric and both halves are severe: leave it open and a
+// stranger owns the fleet; close it wrongly and the owner is locked out of their own
+// system with no scripted way in.
 //
 // THE FIX HAS TWO HALVES, AND THE FIRST ONE IS THE IMPORTANT HALF.
 //
@@ -16928,25 +16979,51 @@ function userDeleteLockBlockers(user, cascadeName) {
 // regenerate route makes the identical call (503 ARCHIVE_FAILED) for the
 // identical reason: a "best-effort" archive that silently no-ops leaves precisely
 // the behaviour this exists to prevent.
+// ⚠️ A SKIP IS REPORTED, NOT SILENT — and it is still NOT a failure.
+// `archiveSignedArtifact` returns null when there is nothing worth keeping, and
+// the delete MUST proceed on that: a row pointing at a file that was never
+// written is exactly the state that made onboarded drivers undeletable, which is
+// the bug this whole cascade exists to fix. Turning null into a 503 would
+// re-create it. But "there was no evidence to lose" and "the evidence was lost"
+// look identical in an audit trail that records only what was archived, and this
+// is the one moment the row is destroyed — so the count of rows that asserted
+// `signed = 1` and yielded no artifact ships in the audit line and the response.
+// That is also a free, per-delete sample of the same defect
+// GET /api/admin/orphaned-signed-artifacts reports fleet-wide as `missing`.
+//
+// Returns `{ archived, skipped }`. `archived.length` is unchanged from the
+// pre-report shape by construction — nothing moved between the two lists.
 function archiveUserSignedArtifacts(userId) {
 	const dir = path.join(__dirname, "uploads", "onboarding-signed");
 	const rows = db.prepare(
 		"SELECT doc_key, doc_name, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND signed = 1 AND COALESCE(signed_pdf_url, '') <> ''"
 	).all(userId);
 	const archived = [];
+	const skipped = [];
+	// One reason string, deliberately. The three ways to get here — an unusable
+	// basename, a missing file, a stub that fails the artifact tests — are all the
+	// same finding to the person reading the audit row later: this row claimed a
+	// signed document and no valid artifact stood behind it. Splitting it into
+	// three codes would invite the reader to treat one of them as benign.
+	const skip = (r) => skipped.push({
+		docKey: r.doc_key,
+		url: String(r.signed_pdf_url || ""),
+		reason: "no-valid-artifact",
+	});
 	for (const r of rows) {
 		// ⚠️ basename ONLY. `signed_pdf_url` is a stored `/uploads/…` string, and
 		// joining it straight onto __dirname would let a row written by any past
 		// or future code path steer the read. The directory is ours, not the
 		// row's; the row only names a file inside it.
 		const file = path.basename(String(r.signed_pdf_url || ""));
-		if (!file || file === "." || file === "..") continue;
+		if (!file || file === "." || file === "..") { skip(r); continue; }
 		const rec = archiveSignedArtifact(path.join(dir, file));
 		// null = nothing worth keeping (no file, or a stub that never passed the
 		// artifact tests). That is not a failure: there is no evidence to lose.
 		if (rec) archived.push({ docKey: r.doc_key, ...rec });
+		else skip(r);
 	}
-	return archived;
+	return { archived, skipped };
 }
 
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
@@ -16968,11 +17045,20 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// and that refusal has a remedy (reopen the period). These two have none, and
 	// the state they prevent is terminal: with no Super Admin, POST /api/users
 	// requires a Super Admin, PUT /api/users/:id requires a Super Admin, and
-	// POST /api/auth/setup refuses because `users` is not empty. CLAUDE.md points
-	// at scripts/reset-super-admin-password.js for exactly this, but that file
-	// does not exist in the repo — the only way back is hand-editing app.db on the
-	// VPS. Production runs TWO Super Admin accounts (`super_admin`, `ford_seeman`),
-	// so this is two clicks away, not a theoretical.
+	// POST /api/auth/setup refuses because `users` is not empty.
+	//
+	// ⚠️ AND scripts/reset-super-admin-password.js DOES NOT COVER THIS, despite
+	// being the obvious place to look. It exists (on production since 2026-04-13)
+	// and it is sound — the new plaintext comes from the `NEW_PASSWORD` environment
+	// variable rather than argv, so it never reaches shell history or `ps`; it
+	// enforces a 16-character minimum, verifies the bcrypt round-trip before
+	// committing, refuses unless exactly one row changed, and clears `sessions` so
+	// the reset revokes the old cookies instead of merely re-keying the account.
+	// But it RESETS a Super Admin's password; it cannot CREATE one. With zero Super
+	// Admins there is no row for it to act on, and it needs a root shell on the VPS
+	// besides — so the only way back from the state these guards prevent is still
+	// hand-editing app.db. Production runs TWO Super Admin accounts (`super_admin`,
+	// `ford_seeman`), so this is two clicks away, not a theoretical.
 	//
 	// They are ordered before the period guard on purpose: when both apply, "you
 	// cannot delete the last administrator" is the answer that helps, and the
@@ -17118,8 +17204,9 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// filesystem call, and a throw inside db.transaction() would be reported as
 	// DELETE_ROLLED_BACK, which names the wrong cause.
 	let archivedArtifacts = [];
+	let skippedArtifacts = [];
 	try {
-		archivedArtifacts = archiveUserSignedArtifacts(id);
+		({ archived: archivedArtifacts, skipped: skippedArtifacts } = archiveUserSignedArtifacts(id));
 	} catch (arcErr) {
 		logAudit(req, "delete_user", "user", id,
 			`REFUSED to delete ${user.username}: could not archive the signed onboarding artifacts (${arcErr.code || "ARCHIVE_FAILED"})`);
@@ -17282,9 +17369,15 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		(tally(removed) || "no rows") +
 		(tally(detached) ? `; detached: ${tally(detached)}` : "") +
 		(archivedArtifacts.length ? `; signed artifacts archived: ${archivedArtifacts.map((a) => a.file).join(", ")}` : "") +
+		// The COUNT, not the urls — the archived half names files because those
+		// exist and can be fetched; a skip names a row that pointed at nothing, so
+		// the path is noise and would push the audit detail unbounded on a user
+		// with many broken rows. `skippedArtifacts` carries the detail in the
+		// response for the admin who is looking at it right now.
+		(skippedArtifacts.length ? `; signed artifacts skipped (no valid file): ${skippedArtifacts.length}` : "") +
 		(tally(retained) ? `; retained (not deleted): ${tally(retained)}` : ""));
 	notifyChange("users");
-	res.json({ success: true, removed, detached, retained, archivedArtifacts });
+	res.json({ success: true, removed, detached, retained, archivedArtifacts, skippedArtifacts });
 });
 
 // List investor users (for owner dropdown)
