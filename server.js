@@ -16448,6 +16448,14 @@ function userDeleteLockBlockers(user, cascadeName) {
 		const locked = rows.filter(expenseRowPeriodLocked);
 		if (locked.length) blockers.push({
 			table: "expenses",
+			// ⚠️ EVERY BLOCKER CARRIES A CODE, so the handler can SELECT the response
+			// code instead of hardcoding one. Same reasoning as the rename planner:
+			// the moment one bucket refuses for a reason other than a closed month
+			// (see the INVOICE_ALREADY_PAID bucket in (4)), a hardcoded
+			// PERIOD_FINALIZED mislabels it and points the admin at a reopen that
+			// cannot help. PERIOD_FINALIZED still wins whenever it fires, so the wire
+			// contract is unchanged for every case that already existed.
+			code: "PERIOD_FINALIZED",
 			rows: locked.length,
 			periods: blockedExpensePeriods(locked),
 			detail: `${locked.length} expense row${locked.length === 1 ? "" : "s"} booked to a finalized month would be permanently deleted`,
@@ -16485,6 +16493,7 @@ function userDeleteLockBlockers(user, cascadeName) {
 		const paidRows = frozen.filter((r) => r.paid_at).length;
 		if (frozen.length) blockers.push({
 			table: "investor_payouts",
+			code: "PERIOD_FINALIZED",
 			rows: frozen.length,
 			paidRows,
 			periods: [...new Set(frozen.map((r) => r.period))].sort(),
@@ -16528,6 +16537,7 @@ function userDeleteLockBlockers(user, cascadeName) {
 			});
 			if (charged.length) blockers.push({
 				table: "trucks",
+				code: "PERIOD_FINALIZED",
 				rows: charged.length,
 				units: charged.map((t) => t.unit_number).filter(Boolean),
 				periods: [...new Set(charged.flatMap((t) => chargedMonths.get(t.id) || []))].sort(),
@@ -16566,15 +16576,34 @@ function userDeleteLockBlockers(user, cascadeName) {
 		const lockedByPeriod = frozen.filter(monthLocked);
 		const paidOnly = frozen.filter((r) => !monthLocked(r) && String(r.paid_at || "").trim());
 		const unresolvable = frozen.filter((r) => !monthLocked(r) && !String(r.paid_at || "").trim());
+		// ⚠️ TWO SENTINELS FOR ONE IDEA, AND THE HANDLER ONLY KNOWS ONE.
+		// namedLockedPeriods() emits "(unrecognized date)" where its sibling
+		// blockedExpensePeriods() — the source for blocker (1) — emits "(unknown)",
+		// and the 409 builder filters on "(unknown)". Unnormalised, the
+		// `unresolvable` bucket's sentinel survived that filter, got run through
+		// periodLabel() and was PRINTED AS IF IT WERE A REAL CLOSED MONTH, while
+		// `unresolved` stayed false so the sentence explaining it never fired — a
+		// refusal telling an admin to reopen a period that does not exist. Normalise
+		// here, exactly as PUT /api/users/:id does, rather than teaching the handler
+		// a second sentinel.
+		const asUnknown = (periods) => periods.map((p) => (p === "(unrecognized date)" ? "(unknown)" : p));
 		if (lockedByPeriod.length) blockers.push({
 			table: "invoices",
+			code: "PERIOD_FINALIZED",
 			rows: lockedByPeriod.length,
 			paidRows: lockedByPeriod.filter((r) => String(r.paid_at || "").trim()).length,
-			periods: namedLockedPeriods(lockedByPeriod.map((r) => [String(r.week_end || "").slice(0, 7), String(r.week_start || "").slice(0, 7)])),
+			periods: asUnknown(namedLockedPeriods(lockedByPeriod.map((r) => [String(r.week_end || "").slice(0, 7), String(r.week_start || "").slice(0, 7)]))),
 			detail: `${lockedByPeriod.length} weekly invoice${lockedByPeriod.length === 1 ? "" : "s"} in a finalized month would be left naming a driver with no account`,
 		});
 		if (paidOnly.length) blockers.push({
 			table: "invoices",
+			// ⚠️ NOT PERIOD_FINALIZED. invoiceRowPeriodLocked() freezes on `paid_at`
+			// INDEPENDENTLY of any lock, so these rows can sit in a wide-open month —
+			// there is no period to name and nothing for a reopen to do. The rename
+			// planner split this out for exactly that reason; a delete that answered
+			// PERIOD_FINALIZED with an empty `periods` array sent an admin to reopen
+			// a period the refusal had not even claimed was closed.
+			code: "INVOICE_ALREADY_PAID",
 			rows: paidOnly.length,
 			paidRows: paidOnly.length,
 			periods: [],
@@ -16582,8 +16611,9 @@ function userDeleteLockBlockers(user, cascadeName) {
 		});
 		if (unresolvable.length) blockers.push({
 			table: "invoices",
+			code: "PERIOD_FINALIZED",
 			rows: unresolvable.length,
-			periods: namedLockedPeriods(unresolvable.map(() => [])),
+			periods: asUnknown(namedLockedPeriods(unresolvable.map(() => []))),
 			detail: `${unresolvable.length} invoice${unresolvable.length === 1 ? "" : "s"} carry a billing week the server cannot resolve to a month`,
 		});
 	}
@@ -16712,12 +16742,30 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		});
 	}
 	if (lock.blockers.length) {
-		const named = [...new Set(lock.blockers.flatMap((b) => b.periods))].sort();
+		// Only a PERIOD_FINALIZED blocker may contribute a month to NAME — an
+		// INVOICE_ALREADY_PAID one carries no period by construction. Mirrors
+		// PUT /api/users/:id, which draws the same distinction.
+		const finalized = lock.blockers.filter((b) => b.code === "PERIOD_FINALIZED");
+		const named = [...new Set(finalized.flatMap((b) => b.periods))].sort();
 		const periods = named.filter((p) => p !== "(unknown)");
 		const unresolved = named.length !== periods.length;
-		const paidRows = lock.blockers.reduce((n, b) => n + (b.paidRows || 0), 0);
+		// ⚠️ An INVOICE_ALREADY_PAID blocker carries its count in `rows`, not
+		// `paidRows` — every row in it is paid by construction. Omitting it would
+		// leave `paidRows === 0` and print the reopen remedy for a condition
+		// reopening cannot fix.
+		const paidRows = lock.blockers.reduce(
+			(n, b) => n + (b.paidRows || 0) + (b.code === "INVOICE_ALREADY_PAID" ? b.rows : 0), 0);
 		const hasTrucks = lock.blockers.some((b) => b.table === "trucks");
 		const who = user.driver_name || user.username || `user ${id}`;
+
+		// ⚠️ SELECTED FROM THE BLOCKERS, NOT HARDCODED. PERIOD_FINALIZED wins
+		// whenever it fires — it is the stronger statement and the one with a
+		// defined remedy — but when the ONLY blocker is a paid invoice the honest
+		// code is INVOICE_ALREADY_PAID. Hardcoding answered PERIOD_FINALIZED with an
+		// EMPTY `periods` array for a block that came from invoices, and the remedy
+		// below then talked about investor payouts. Same fix, and the same reasoning,
+		// as the rename route's `code` selection.
+		const code = finalized.length ? "PERIOD_FINALIZED" : lock.blockers[0].code;
 
 		// The closed months get named; rows the guard withheld WITHOUT being able to
 		// name a month get their own sentence. Those are a data problem (an
@@ -16736,9 +16784,20 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		// no escape at all: the payee of money that left the bank has to stay
 		// attributable, which is why there is deliberately no force flag here.
 		const remedy = [];
-		if (paidRows) {
+		// ⚠️ THE PAID REMEDY IS PER-TABLE, NOT PER-COUNT. `paidRows` sums paid
+		// invoices as well as paid payouts, so a block coming purely from invoices
+		// printed the investor-payout sentence — an instruction with nothing to do
+		// with a driver's weekly invoice, and the delete route's version of the
+		// mislabel PUT /api/users/:id already fixed. Ask which table froze.
+		const paidPayoutRows = lock.blockers.filter((b) => b.table === "investor_payouts").reduce((n, b) => n + (b.paidRows || 0), 0);
+		const paidInvoiceRows = lock.blockers.filter((b) => b.table === "invoices").reduce((n, b) => n + (b.paidRows || 0) + (b.code === "INVOICE_ALREADY_PAID" ? b.rows : 0), 0);
+		if (paidPayoutRows) {
 			remedy.push("Payouts already marked PAID cannot be detached from their investor — this account has to stay in place.");
-		} else {
+		}
+		if (paidInvoiceRows) {
+			remedy.push(`${paidInvoiceRows} invoice${paidInvoiceRows === 1 ? " has" : "s have"} already been PAID — money moved against a document naming this driver, so ${paidInvoiceRows === 1 ? "it cannot" : "they cannot"} be left unattributable.`);
+		}
+		if (!paidRows) {
 			if (periods.length) remedy.push(`Reopen the affected period${periods.length === 1 ? "" : "s"} first — POST /api/periods/:period/reopen records a reason.`);
 			if (hasTrucks) remedy.push("Re-assign the trucks to their new owner deliberately, rather than letting this delete drop them to no owner.");
 			if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
@@ -16747,7 +16806,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 
 		return res.status(409).json({
 			error: `Cannot delete ${who}: ${lock.blockers.map((b) => b.detail).join("; ")}. ${cause} ${remedy.join(" ")}`.replace(/\s+/g, " ").trim(),
-			code: "PERIOD_FINALIZED",
+			code,
 			periods,
 			unresolved,
 			blockers: lock.blockers,
