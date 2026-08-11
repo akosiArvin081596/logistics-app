@@ -127,6 +127,42 @@ function warnIfDirIsReadable(dir) {
 	} catch { /* not worth failing a backup over */ }
 }
 
+// The LIVE database, checked for the same reason the directory is — except that
+// here a mode is not a one-time fix that stays fixed. `app.db` was hardened to
+// 0600 on 2026-08-11, but three ordinary operations replace the *inode* and hand
+// the new one the creating process's umask (0644 under root's default 022):
+// restoring a snapshot, a redeploy that recreates the file, and
+// scripts/refresh-env.js swapping a rebuilt database in. None of them errors,
+// nothing else looks, and the exposure is silently republished. This script is
+// the only thing that opens `app.db` every single night, so it is the natural
+// place to notice — the warning lands in backups/backup.log within a day.
+//
+// ⚠️ `-wal` is checked too and that is NOT belt-and-braces: in WAL mode committed
+// transactions live in `app.db-wal` until a checkpoint (it was 93 MB in
+// production), so a group-readable `-wal` republishes exactly the SSNs and bank
+// account numbers a 0600 main file is hiding. Hardening the main file alone is
+// not enough, and a check that only looked at it would report all-clear.
+//
+// Warn, never fail: the app runs as root and reads its database regardless of
+// mode, so permission drift must never cost the night's backup.
+const DB_MODE_TARGETS = ["", "-wal", "-shm"];
+function warnIfSourceIsReadable(src) {
+	const flagged = [];
+	for (const suffix of DB_MODE_TARGETS) {
+		const p = `${src}${suffix}`;
+		try {
+			if (!fs.existsSync(p)) continue;
+			const mode = fs.statSync(p).mode & 0o777;
+			if (mode & 0o077) flagged.push({ p, mode });
+		} catch { /* not worth failing a backup over */ }
+	}
+	if (!flagged.length) return;
+	log(`WARNING: the live database is group/other-readable: ${flagged.map(f => `${path.basename(f.p)} (0${f.mode.toString(8)})`).join(", ")}`);
+	log("WARNING:   that is every SSN, EIN and bank routing/account number in the business,");
+	log("WARNING:   and production has four non-root login accounts that can read it with cp.");
+	log(`WARNING:   fix with: chmod 0600 ${flagged.map(f => f.p).join(" ")}`);
+}
+
 const BACKUP_PREFIX = "app.db.";
 const SIDECAR_RE = /(-shm|-wal)$/;
 const TMP_RE = /\.tmp$/;
@@ -323,6 +359,7 @@ async function main() {
 	// scripts/secure-backups.sh does that, explicitly and with a dry run.
 	fs.mkdirSync(OUT_DIR, { recursive: true, mode: 0o700 });
 	warnIfDirIsReadable(OUT_DIR);
+	warnIfSourceIsReadable(SRC);
 
 	let Database;
 	try { Database = require("better-sqlite3"); }
