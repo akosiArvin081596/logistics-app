@@ -1,3 +1,40 @@
+// ---------------------------------------------------------------------------
+// PROCESS UMASK — must be the FIRST executable statement in this file.
+//
+// WHY. Node creates files as `0666 & ~umask` and directories as `0777 & ~umask`,
+// and pm2 inherits root's default `umask 022` — so every expense receipt, POD,
+// chat attachment, invoice PDF, signed W-9 and the SQLite database itself landed
+// mode 0644: world-readable, on a box with four non-root login accounts. The
+// one-time remediation (PR #271) chmodded the whole tree to 0640 files / 0750
+// dirs, but that is point-in-time: the very next upload re-published PII,
+// because nothing changed how new files are CREATED. 027 is the create-time
+// half of that fix, and the two must agree — 027 yields exactly 0640/0750.
+//
+// ⚠️ ORDERING IS THE WHOLE CONTROL. umask applies only to files created AFTER
+// it is set, so "late" is identical to "absent" for anything made during boot —
+// notably `new Database(...)` (app.db + -wal + -shm), the uploads directory
+// mkdirs, and any module that writes a cache on require. Hence line 1, above
+// even dotenv. Do not move this below the requires.
+//
+// ⚠️ THIS IS COUPLED TO RUNNING AS ROOT. The service runs as root under pm2, so
+// 0640 root-owned files are readable by the process that serves them, and nginx
+// here is proxy-only (no `root`/`alias`/`/uploads` block), so nginx never opens
+// them itself. The day this moves to a non-root user, 0640 root-owned files lock
+// the app out of its own uploads: whoever does that must re-own/re-permission
+// `app.db`, `uploads/` and `evidence-archive/` in the same change.
+//
+// Not applied to `client/dist` — that is built by a separate `npm run build`
+// process at deploy time, and is served by this app (root), not by nginx.
+// ---------------------------------------------------------------------------
+const BOOT_UMASK = 0o027;
+let bootUmaskPrevious = null;
+try {
+	// process.umask(mask) returns the PREVIOUS mask. It is a no-op on Windows.
+	bootUmaskPrevious = process.umask(BOOT_UMASK);
+} catch (err) {
+	console.error(`WARNING: could not set umask ${BOOT_UMASK.toString(8)} — new files may be world-readable:`, err.message);
+}
+
 require("dotenv").config();
 const express = require("express");
 const http = require("http");
@@ -39637,6 +39674,20 @@ const PORT = process.env.PORT || 3000;
 const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 server.listen(PORT, BIND_HOST, async () => {
 	console.log(`Server running at http://localhost:${PORT}`);
+	// Tripwire for the umask set at the top of this file — the create-time half
+	// of the uploads/app.db permission fix. Re-applying returns the PREVIOUS
+	// mask, so this both re-asserts and reads back the effective value without
+	// the deprecated no-argument form. Loud on drift: a refactor that moves the
+	// umask below a require, or a runtime that ignores it, shows up here rather
+	// than as world-readable receipts discovered months later.
+	try {
+		const effective = process.umask(BOOT_UMASK);
+		if (effective === BOOT_UMASK) {
+			console.log(`umask ${effective.toString(8).padStart(4, "0")} — new files 0640, new dirs 0750 (was ${bootUmaskPrevious === null ? "unset" : bootUmaskPrevious.toString(8).padStart(4, "0")})`);
+		} else {
+			console.error(`WARNING: umask is ${effective.toString(8).padStart(4, "0")}, expected ${BOOT_UMASK.toString(8).padStart(4, "0")} — new uploads may be world-readable`);
+		}
+	} catch {}
 	console.log(`API endpoints:`);
 	console.log(`  GET    /api/tabs           — List sheet tabs`);
 	console.log(`  GET    /api/data           — Read all rows`);
