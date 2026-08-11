@@ -16928,25 +16928,51 @@ function userDeleteLockBlockers(user, cascadeName) {
 // regenerate route makes the identical call (503 ARCHIVE_FAILED) for the
 // identical reason: a "best-effort" archive that silently no-ops leaves precisely
 // the behaviour this exists to prevent.
+// ⚠️ A SKIP IS REPORTED, NOT SILENT — and it is still NOT a failure.
+// `archiveSignedArtifact` returns null when there is nothing worth keeping, and
+// the delete MUST proceed on that: a row pointing at a file that was never
+// written is exactly the state that made onboarded drivers undeletable, which is
+// the bug this whole cascade exists to fix. Turning null into a 503 would
+// re-create it. But "there was no evidence to lose" and "the evidence was lost"
+// look identical in an audit trail that records only what was archived, and this
+// is the one moment the row is destroyed — so the count of rows that asserted
+// `signed = 1` and yielded no artifact ships in the audit line and the response.
+// That is also a free, per-delete sample of the same defect
+// GET /api/admin/orphaned-signed-artifacts reports fleet-wide as `missing`.
+//
+// Returns `{ archived, skipped }`. `archived.length` is unchanged from the
+// pre-report shape by construction — nothing moved between the two lists.
 function archiveUserSignedArtifacts(userId) {
 	const dir = path.join(__dirname, "uploads", "onboarding-signed");
 	const rows = db.prepare(
 		"SELECT doc_key, doc_name, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND signed = 1 AND COALESCE(signed_pdf_url, '') <> ''"
 	).all(userId);
 	const archived = [];
+	const skipped = [];
+	// One reason string, deliberately. The three ways to get here — an unusable
+	// basename, a missing file, a stub that fails the artifact tests — are all the
+	// same finding to the person reading the audit row later: this row claimed a
+	// signed document and no valid artifact stood behind it. Splitting it into
+	// three codes would invite the reader to treat one of them as benign.
+	const skip = (r) => skipped.push({
+		docKey: r.doc_key,
+		url: String(r.signed_pdf_url || ""),
+		reason: "no-valid-artifact",
+	});
 	for (const r of rows) {
 		// ⚠️ basename ONLY. `signed_pdf_url` is a stored `/uploads/…` string, and
 		// joining it straight onto __dirname would let a row written by any past
 		// or future code path steer the read. The directory is ours, not the
 		// row's; the row only names a file inside it.
 		const file = path.basename(String(r.signed_pdf_url || ""));
-		if (!file || file === "." || file === "..") continue;
+		if (!file || file === "." || file === "..") { skip(r); continue; }
 		const rec = archiveSignedArtifact(path.join(dir, file));
 		// null = nothing worth keeping (no file, or a stub that never passed the
 		// artifact tests). That is not a failure: there is no evidence to lose.
 		if (rec) archived.push({ docKey: r.doc_key, ...rec });
+		else skip(r);
 	}
-	return archived;
+	return { archived, skipped };
 }
 
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
@@ -17118,8 +17144,9 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// filesystem call, and a throw inside db.transaction() would be reported as
 	// DELETE_ROLLED_BACK, which names the wrong cause.
 	let archivedArtifacts = [];
+	let skippedArtifacts = [];
 	try {
-		archivedArtifacts = archiveUserSignedArtifacts(id);
+		({ archived: archivedArtifacts, skipped: skippedArtifacts } = archiveUserSignedArtifacts(id));
 	} catch (arcErr) {
 		logAudit(req, "delete_user", "user", id,
 			`REFUSED to delete ${user.username}: could not archive the signed onboarding artifacts (${arcErr.code || "ARCHIVE_FAILED"})`);
@@ -17282,9 +17309,15 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		(tally(removed) || "no rows") +
 		(tally(detached) ? `; detached: ${tally(detached)}` : "") +
 		(archivedArtifacts.length ? `; signed artifacts archived: ${archivedArtifacts.map((a) => a.file).join(", ")}` : "") +
+		// The COUNT, not the urls — the archived half names files because those
+		// exist and can be fetched; a skip names a row that pointed at nothing, so
+		// the path is noise and would push the audit detail unbounded on a user
+		// with many broken rows. `skippedArtifacts` carries the detail in the
+		// response for the admin who is looking at it right now.
+		(skippedArtifacts.length ? `; signed artifacts skipped (no valid file): ${skippedArtifacts.length}` : "") +
 		(tally(retained) ? `; retained (not deleted): ${tally(retained)}` : ""));
 	notifyChange("users");
-	res.json({ success: true, removed, detached, retained, archivedArtifacts });
+	res.json({ success: true, removed, detached, retained, archivedArtifacts, skippedArtifacts });
 });
 
 // List investor users (for owner dropdown)

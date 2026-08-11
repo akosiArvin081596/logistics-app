@@ -268,7 +268,18 @@ function seedOnboardedDriver(db) {
 	db.prepare("INSERT INTO onboarding_documents (user_id, doc_key, doc_name, signed, signed_pdf_url) VALUES (7,'equipment_policy','Equipment Policy',0,'')").run();
 
 	const M = A(root, fs, path, crypto, db, Number(minBytes));
-	const archived = M.archiveUserSignedArtifacts(7);
+	// ⚠️ `{ archived, skipped }`, and `archived` must still mean exactly what it
+	// meant before the skip report existed — nothing moved between the two lists.
+	// Every assertion below this line is unchanged for that reason.
+	const archiveResult = M.archiveUserSignedArtifacts(7);
+	// ⚠️ SHAPE FIRST, and the `= []` defaults below are what make it useful. A
+	// build that still returns a bare array destructures to two `undefined`s, and
+	// the next `archived.length` would be a TypeError — a stack trace that aborts
+	// the run and names nothing. With the defaults, source without the skip report
+	// fails as a row of NAMED assertions instead.
+	check("skip report: the archiver returns { archived, skipped }, not a bare array",
+		Array.isArray(archiveResult && archiveResult.archived) && Array.isArray(archiveResult && archiveResult.skipped), true);
+	const { archived = [], skipped = [] } = archiveResult;
 
 	check("archive: both real signed artifacts are archived", archived.length, 2);
 	check("archive: the archive lives OUTSIDE uploads/, where express.static cannot reach",
@@ -291,13 +302,47 @@ function seedOnboardedDriver(db) {
 	check("archive: an unsigned row is never considered",
 		archived.some((a) => a.docKey === "equipment_policy"), false);
 
+	// -----------------------------------------------------------------------
+	// THE SKIP IS REPORTED — a silent skip and a lost document look identical.
+	// -----------------------------------------------------------------------
+	// ⚠️ These assert REPORTING, never refusal. A skip must not become a 503:
+	// a row pointing at a file that was never written is exactly what made
+	// onboarded drivers undeletable, and that is the bug this cascade fixes.
+	// So `archived` is asserted unchanged above, and `skipped` is additive.
+	const skippedKeys = skipped.map((s) => s.docKey).sort().join(",");
+	check("skip report: both non-archivable rows are named — the stub and the missing file",
+		skippedKeys, "mobile_policy,substance_policy");
+	check("skip report: a row that DID archive never appears in it",
+		skipped.some((s) => s.docKey === "w9" || s.docKey === "contractor_agreement"), false);
+	check("skip report: an unsigned row is not a skip — it was never a claim",
+		skipped.some((s) => s.docKey === "equipment_policy"), false);
+	check("skip report: every entry carries the url the row asserted",
+		skipped.every((s) => typeof s.url === "string" && s.url.length > 0), true);
+	check("skip report: every entry carries the reason",
+		skipped.every((s) => s.reason === "no-valid-artifact"), true);
+	// The invariant that makes this safe to ship: reporting moved nothing.
+	check("skip report: archived + skipped accounts for every signed row with a url",
+		archived.length + skipped.length,
+		db.prepare("SELECT COUNT(*) AS c FROM onboarding_documents WHERE user_id = 7 AND signed = 1 AND COALESCE(signed_pdf_url,'') <> ''").get().c);
+
 	// Path safety: the row supplies a filename, never a directory.
 	fs.writeFileSync(path.join(root, "outside.pdf"), realPdf);
 	db.prepare("UPDATE onboarding_documents SET signed_pdf_url = '../../outside.pdf' WHERE doc_key = 'equipment_policy'").run();
 	db.prepare("UPDATE onboarding_documents SET signed = 1 WHERE doc_key = 'equipment_policy'").run();
-	const after = M.archiveUserSignedArtifacts(7);
+	const { archived: after = [], skipped: afterSkipped = [] } = M.archiveUserSignedArtifacts(7);
 	check("archive: a traversal in signed_pdf_url cannot escape the signed directory",
 		after.some((a) => a.docKey === "equipment_policy"), false);
+	// ...and the refusal is VISIBLE. A traversal attempt that vanished silently is
+	// the one skip an operator most needs to see.
+	check("skip report: the traversal row is reported as skipped, not swallowed",
+		afterSkipped.some((s) => s.docKey === "equipment_policy"), true);
+
+	// A row whose stored url has no usable basename at all ("..") — the branch
+	// that `continue`d with no record before this change.
+	db.prepare("UPDATE onboarding_documents SET signed_pdf_url = '..' WHERE doc_key = 'equipment_policy'").run();
+	const { skipped: dotdot = [] } = M.archiveUserSignedArtifacts(7);
+	check("skip report: an unusable basename is reported, not silently skipped",
+		dotdot.some((s) => s.docKey === "equipment_policy" && s.reason === "no-valid-artifact"), true);
 
 	db.close();
 	fs.rmSync(root, { recursive: true, force: true });
