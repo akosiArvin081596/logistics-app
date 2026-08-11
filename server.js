@@ -11783,24 +11783,130 @@ async function alertUnusableRateConExtraction({ loadId, unusable, fields }) {
 // (ROUTEMATE_ENABLED / SCANKIT_ENABLED / INVOICE_AUTOGEN_ENABLED). It only reads
 // the mailbox and sends mail, but it ships dormant so production opts in.
 const RATECON_RECONCILE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.RATECON_RECONCILE_ENABLED ?? "").trim());
-const RATECON_RECONCILE_DAYS = Math.max(1, Math.min(60, parseInt(process.env.RATECON_RECONCILE_DAYS ?? "14", 10) || 14));
+// ⚠️ THIS IS NOW A FLOOR, NOT A CEILING. It used to be the whole window, capped
+// at 60 days — which is how load 556354570 (16 Jun 2026) went eight weeks
+// undetected: it matched n8n's unread+starred trigger exactly, no execution ever
+// consumed it, and by the time this module went live the message had already
+// aged out of a 14-day lookback and could never come back into one. The window
+// is now a high-water mark (resolveSweepWindow) with this as its minimum, so it
+// can only ever widen relative to the shipped behaviour.
+const RATECON_RECONCILE_DAYS = Math.max(1, Math.min(400, parseInt(process.env.RATECON_RECONCILE_DAYS ?? "14", 10) || 14));
+const RATECON_RECONCILE_MAX_DAYS = Math.max(RATECON_RECONCILE_DAYS, Math.min(400, parseInt(process.env.RATECON_RECONCILE_MAX_DAYS ?? "400", 10) || 400));
+const RATECON_RECONCILE_DEEP_DAYS = Math.max(1, Math.min(RATECON_RECONCILE_MAX_DAYS, parseInt(process.env.RATECON_RECONCILE_DEEP_DAYS ?? "365", 10) || 365));
+const RATECON_RECONCILE_DEEP_EVERY_HOURS = Math.max(1, parseInt(process.env.RATECON_RECONCILE_DEEP_EVERY_HOURS ?? "168", 10) || 168);
+// Body/filename scanning. Both default ON but are staged (subject -> filename ->
+// body, each only where the previous found nothing), so the default is a strict
+// superset of the subject-only rule: measured on the full 745-message label the
+// two stages add ONE candidate and the staging refuses one phantom.
+const RATECON_RECONCILE_SCAN_FILENAMES = !/^(false|0|no|off)$/i.test(String(process.env.RATECON_RECONCILE_SCAN_FILENAMES ?? "").trim());
+const RATECON_RECONCILE_SCAN_BODY = !/^(false|0|no|off)$/i.test(String(process.env.RATECON_RECONCILE_SCAN_BODY ?? "").trim());
 const RATECON_RECONCILE_MAILBOX = String(process.env.RATECON_RECONCILE_MAILBOX ?? "RATECONs").trim() || "RATECONs";
 const RATECON_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;   // 4×/day
 let rateconReconcileRunning = false;
-const rateconReconcileHealth = { lastRun: null, lastError: null, lastGapCount: 0, lastScanned: 0, lastSelfSentSkipped: 0 };
+const rateconReconcileHealth = { lastRun: null, lastError: null, lastGapCount: 0, lastScanned: 0, lastSelfSentSkipped: 0, lastWindowDays: 0, lastMode: "" };
+
+// The high-water mark. One row per sweep, so "how far back must this sweep
+// read?" is answered by when we last actually looked rather than by a constant.
+// Mirrors invoice_autogen_runs, including its first-enable baseline.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS ratecon_reconcile_runs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ran_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		mode TEXT DEFAULT '',
+		since_days INTEGER DEFAULT 0,
+		scanned INTEGER DEFAULT 0,
+		gaps INTEGER DEFAULT 0,
+		newly_alerted INTEGER DEFAULT 0,
+		note TEXT DEFAULT ''
+	)
+`);
+// Archived load ids, memoized for an hour. The archive is a read-only snapshot
+// of closed months, so it changes at most when someone moves a month across —
+// re-reading 1,300 rows on every 6-hourly sweep would spend Sheets quota to
+// learn nothing. values.get only; nothing here writes.
+let archiveIdCache = { at: 0, ids: [] };
+const ARCHIVE_ID_CACHE_MS = 60 * 60 * 1000;
+async function getArchiveLoadIdsCached() {
+	if (archiveIdCache.ids.length && Date.now() - archiveIdCache.at < ARCHIVE_ID_CACHE_MS) return archiveIdCache.ids;
+	const sheets = await getSheets();
+	const resp = await sheets.spreadsheets.values.get({
+		spreadsheetId: ARCHIVE_SPREADSHEET_ID,
+		range: "Job Tracking",
+	});
+	const rows = resp.data.values || [];
+	const headers = (rows[0] || []).map((h) => String(h || "").trim());
+	const idx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
+	// No such column is a legitimate archive shape, not an error — return nothing
+	// rather than throwing and taking the whole sweep down with it.
+	const ids = idx < 0 ? [] : rows.slice(1).map((r) => String(r[idx] || "").trim()).filter(Boolean);
+	archiveIdCache = { at: Date.now(), ids };
+	return ids;
+}
+
+const rateconLastRunAt = (mode) => {
+	try {
+		const row = mode
+			? db.prepare("SELECT MAX(ran_at) AS t FROM ratecon_reconcile_runs WHERE mode = ?").get(mode)
+			: db.prepare("SELECT MAX(ran_at) AS t FROM ratecon_reconcile_runs").get();
+		// CURRENT_TIMESTAMP is UTC but serializes zone-less, which JS would parse
+		// as local time — a 5-6 hour error on the VPS, i.e. a silently short
+		// window. Stamp the zone back on before parsing.
+		return row && row.t ? row.t.replace(" ", "T") + "Z" : null;
+	} catch { return null; }
+};
 
 // Returns { scanned, missing[], newlyAlerted[], selfSentSkipped, retired[] };
 // `scanned` counts INBOUND mail only. Read-only against the mailbox
 // (EXAMINE + BODY.PEEK) — it must never set \Seen or touch \Flagged, because
 // n8n's Gmail Trigger selects on unread+starred and a sweep that marked mail
 // read would silently stop ingestion, i.e. cause the very outage it detects.
-async function reconcileRateCons({ alert = true } = {}) {
-	const { fetchRateConSubjects, findMissingLoads, splitSelfSent, extractLoadNumbers } = require("./lib/ratecon-reconcile.js");
+async function reconcileRateCons({ alert = true, forceFloorWindow = false } = {}) {
+	const { fetchRateConSubjects, findMissingLoads, splitSelfSent, extractMessageLoadNumbers, resolveSweepWindow, planReconcileAlert } = require("./lib/ratecon-reconcile.js");
+	// How far back to read: everything since the last successful sweep (never
+	// less than RATECON_RECONCILE_DAYS), plus a periodic deep pass that re-reads
+	// a year so nothing the incremental chain dropped stays dropped.
+	// ⚠️ `forceFloorWindow` exists for the INTERACTIVE caller, and it is not a
+	// nicety. The admin GET never advances the high-water mark (by design — a
+	// diagnostic must not narrow the next real sweep), so `lastDeepSweepAt` looks
+	// null to it and EVERY GET would otherwise resolve to `first-deep`: a
+	// 365-day read on a 15-minute server budget. The live caller is
+	// DataIssuesView.vue, which raises its client timeout to 60 s — so one click
+	// would time out in the browser while the server swept for up to 15 minutes
+	// holding the in-flight flag, 409ing the next click and blocking the
+	// scheduled sweep. The scheduled path and the explicit POST are unaffected.
+	const win = forceFloorWindow
+		? { sinceDays: RATECON_RECONCILE_DAYS, deep: false, reason: "floor-forced" }
+		: resolveSweepWindow({
+			now: Date.now(),
+			lastSweepAt: rateconLastRunAt(null),
+			lastDeepSweepAt: rateconLastRunAt("deep"),
+			floorDays: RATECON_RECONCILE_DAYS,
+			maxDays: RATECON_RECONCILE_MAX_DAYS,
+			deepDays: RATECON_RECONCILE_DEEP_DAYS,
+			deepEveryHours: RATECON_RECONCILE_DEEP_EVERY_HOURS,
+		});
+	// The FIRST deep sweep sees every historical gap at once — measured on
+	// production: 63, against 0 in the shipped 14-day window. The once-per-load
+	// contract means none of them can ever be repeated, so the risk is not
+	// repetition but that one wall of year-old loads teaches everyone to ignore
+	// the channel (this repo's own cautionary tale is the 13 unread "needs a
+	// manual check" emails). So the first one is labelled a baseline and its
+	// listing is bounded; every later run is unchanged.
+	const isBaseline = win.deep && !rateconLastRunAt(null);
 	const fetched = await fetchRateConSubjects({
 		user: process.env.GMAIL_USER,
 		pass: process.env.GMAIL_APP_PASSWORD,
 		mailbox: RATECON_RECONCILE_MAILBOX,
-		sinceDays: RATECON_RECONCILE_DAYS,
+		sinceDays: win.sinceDays,
+		scanFilenames: RATECON_RECONCILE_SCAN_FILENAMES,
+		scanBody: RATECON_RECONCILE_SCAN_BODY,
+		// Scaled with the window rather than a flat 15 min. ⚠️ A deep sweep that
+		// times out writes NO run marker, so lastDeepSweepAt stays null and the
+		// next sweep is another doomed `first-deep` — a self-perpetuating blind
+		// spot with exactly the shape of the bug being fixed here. Measured on
+		// production: 64 messages in 3.2 s, so a 365-day pass is ~35 s plus body
+		// fetches; the ceiling is headroom, not an expectation.
+		timeoutMs: Math.min(20 * 60 * 1000, Math.max(60 * 1000, win.sinceDays * 2000)),
 	});
 
 	// Only mail that ARRIVED is an ingestion signal. The label also catches our
@@ -11819,19 +11925,47 @@ async function reconcileRateCons({ alert = true } = {}) {
 	// out would re-report every cancelled load as "missing" forever.
 	const sheetIds = (jt.data || []).map((r) => r[loadIdCol]).filter(Boolean);
 
-	const missing = findMissingLoads(emails, sheetIds);
+	// ⚠️ A LOAD THAT WAS ARCHIVED DID REACH THE SHEET. Job Tracking is not the
+	// only place a load legitimately lives — completed months are moved to the
+	// read-only archive — so checking the live tab alone reports every archived
+	// load as an ingestion gap. That was invisible while the window was 14 days
+	// (nothing that recent is archived yet) and becomes the dominant false
+	// positive the moment it widens: measured, 12 of the 74 gaps a full-history
+	// sweep finds are archived loads, not lost ones. Best-effort — an archive
+	// that will not read must never fail the sweep, it only costs precision.
+	let archiveIds = [];
+	try {
+		archiveIds = await getArchiveLoadIdsCached();
+	} catch (e) {
+		console.warn("[ratecon-reconcile] archive unreadable, continuing without it:", e.message);
+	}
+
+	const missing = findMissingLoads(emails, sheetIds.concat(archiveIds), {
+		scanFilenames: RATECON_RECONCILE_SCAN_FILENAMES,
+		scanBody: RATECON_RECONCILE_SCAN_BODY,
+	});
 	rateconReconcileHealth.lastScanned = emails.length;
 	rateconReconcileHealth.lastSelfSentSkipped = selfSent.length;
 	rateconReconcileHealth.lastGapCount = missing.length;
+	rateconReconcileHealth.lastWindowDays = win.sinceDays;
+	rateconReconcileHealth.lastMode = win.deep ? "deep" : "incremental";
 
 	// Numbers only our own outbound mail ever produced. These are the rows the
 	// sender filter retires: no load will ever "appear" to resolve them, so left
 	// alone they sit open forever and every reader of this table has to remember
 	// which entries were real.
+	// ⚠️ DETECT AND RETIRE MUST USE THE SAME EXTRACTOR, or the asymmetry fails
+	// toward under-detection. findMissingLoads now also reads filenames and
+	// bodies; if inboundNums stayed subject-only, a load detected via one of
+	// those stages would be ABSENT from it, which widens selfOnlyNums — so any
+	// outbound message whose subject happened to carry that number would close
+	// the open alert row as 'self_sent'. A real gap would be filed as "never was
+	// a load" and never mentioned again.
+	const scanOpts = { scanFilenames: RATECON_RECONCILE_SCAN_FILENAMES, scanBody: RATECON_RECONCILE_SCAN_BODY };
 	const inboundNums = new Set();
-	for (const em of emails) for (const n of extractLoadNumbers(em.subject)) inboundNums.add(n);
+	for (const em of emails) for (const c of extractMessageLoadNumbers(em, scanOpts)) inboundNums.add(c.loadNumber);
 	const selfOnlyNums = new Set();
-	for (const em of selfSent) for (const n of extractLoadNumbers(em.subject)) if (!inboundNums.has(n)) selfOnlyNums.add(n);
+	for (const em of selfSent) for (const c of extractMessageLoadNumbers(em, scanOpts)) if (!inboundNums.has(c.loadNumber)) selfOnlyNums.add(c.loadNumber);
 
 	// Close out rows the mailbox has since settled, either way. Both closures are
 	// bookkeeping rather than alerting, so — like the resolve path that shipped
@@ -11840,7 +11974,10 @@ async function reconcileRateCons({ alert = true } = {}) {
 	// UPDATE is scoped to still-open rows, and a retired id can never come back
 	// because the outbound mail no longer reaches findMissingLoads.
 	const retired = [];
-	const sheetSet = new Set(sheetIds.map((v) => String(v).trim().toLowerCase().replace(/^#/, "")));
+	// Archive included here too: a load that was closed out and archived while
+	// its alert row was still open HAS appeared, and leaving the row open would
+	// keep reporting a load that shipped months ago.
+	const sheetSet = new Set(sheetIds.concat(archiveIds).map((v) => String(v).trim().toLowerCase().replace(/^#/, "")));
 	for (const row of db.prepare("SELECT load_id FROM ratecon_reconcile_alerts WHERE resolved_at IS NULL").all()) {
 		if (sheetSet.has(String(row.load_id).toLowerCase())) {
 			db.prepare("UPDATE ratecon_reconcile_alerts SET resolved_at = CURRENT_TIMESTAMP, resolution = 'appeared' WHERE load_id = ? AND resolved_at IS NULL").run(row.load_id);
@@ -11862,40 +11999,88 @@ async function reconcileRateCons({ alert = true } = {}) {
 	}
 
 	if (alert && newly.length) {
-		const rowsHtml = newly.map((m) =>
+		// A baseline run lists a bounded excerpt and says how many it withheld;
+		// an ordinary run lists everything, exactly as before.
+		const plan = planReconcileAlert(newly, { baseline: isBaseline, maxListed: 25 });
+		const rowsHtml = plan.listed.map((m) =>
 			`<tr><td style="padding:6px 10px;border:1px solid #ddd;"><b>${m.loadNumber}</b></td>` +
 			`<td style="padding:6px 10px;border:1px solid #ddd;">${String(m.subject).replace(/[<>]/g, "")}</td>` +
-			`<td style="padding:6px 10px;border:1px solid #ddd;">${String(m.date).replace(/[<>]/g, "")}</td></tr>`).join("");
+			`<td style="padding:6px 10px;border:1px solid #ddd;">${String(m.date).replace(/[<>]/g, "")}</td>` +
+			`<td style="padding:6px 10px;border:1px solid #ddd;">${String(m.via || "subject").replace(/[<>]/g, "")}</td></tr>`).join("");
 		const html =
-			`<p><b>${newly.length} rate-con email(s) never became a load.</b></p>` +
-			`<p>These arrived in the <code>${RATECON_RECONCILE_MAILBOX}</code> label but there is no matching row in Job Tracking, ` +
-			`so the load is not on the board, not dispatchable and not invoiceable.</p>` +
+			(isBaseline
+				? `<p><b>Deep sweep enabled — ${plan.total} historical rate-con gap(s) found across the last ${win.sinceDays} days.</b></p>` +
+					`<p>This is a one-time review list, not ${plan.total} new failures. The reconciler previously read only the last ` +
+					`${RATECON_RECONCILE_DAYS} days, so anything older than that had never been checked. Each load below is reported ` +
+					`<b>once, ever</b>; ongoing alerting continues as normal from here.</p>`
+				: `<p><b>${plan.total} rate-con email(s) never became a load.</b></p>` +
+					`<p>These arrived in the <code>${RATECON_RECONCILE_MAILBOX}</code> label but there is no matching row in Job Tracking, ` +
+					`so the load is not on the board, not dispatchable and not invoiceable.</p>`) +
 			`<table style="border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;">` +
-			`<tr><th style="padding:6px 10px;border:1px solid #ddd;">Load</th><th style="padding:6px 10px;border:1px solid #ddd;">Subject</th><th style="padding:6px 10px;border:1px solid #ddd;">Received</th></tr>` +
+			`<tr><th style="padding:6px 10px;border:1px solid #ddd;">Load</th><th style="padding:6px 10px;border:1px solid #ddd;">Subject</th>` +
+			`<th style="padding:6px 10px;border:1px solid #ddd;">Received</th><th style="padding:6px 10px;border:1px solid #ddd;">Found in</th></tr>` +
 			rowsHtml + `</table>` +
+			(plan.suppressedCount
+				? `<p style="margin-top:10px;">…and <b>${plan.suppressedCount}</b> older one(s), newest first above. ` +
+					`All of them are recorded — see <code>GET /api/admin/ratecon-reconcile</code> for the full list.</p>`
+				: "") +
 			`<p style="margin-top:14px;">To recover: open the rate con and drag the PDF onto the Job Board, which runs the same ingestion by hand.</p>` +
-			`<p style="color:#888;font-size:12px;">Each load is reported once. Scanned ${emails.length} inbound rate-con email(s) from the last ${RATECON_RECONCILE_DAYS} days` +
+			`<p style="color:#888;font-size:12px;">Each load is reported once. Scanned ${emails.length} inbound rate-con email(s) from the last ${win.sinceDays} days` +
+			` (${win.deep ? "deep" : "incremental"} sweep)` +
 			(selfSent.length ? `, skipping ${selfSent.length} sent by us` : "") + `.</p>`;
+		const subject = isBaseline
+			? `Rate-con deep sweep: ${plan.total} historical gap(s) recorded for review`
+			: `⚠️ ${plan.total} rate-con(s) missing from Job Tracking`;
 		try {
-			await sendEmail(process.env.GMAIL_USER, `⚠️ ${newly.length} rate-con(s) missing from Job Tracking`, html);
+			await sendEmail(process.env.GMAIL_USER, subject, html);
 		} catch (e) { console.error("[ratecon-reconcile] alert email failed:", e.message); }
 		try {
 			insertDispatchNotification.run(
 				"ratecon-gap",
-				`${newly.length} rate-con(s) never became a load`,
+				isBaseline
+					? `Deep sweep: ${plan.total} historical rate-con gap(s) recorded`
+					: `${plan.total} rate-con(s) never became a load`,
 				newly.map((m) => m.loadNumber).join(", "),
-				JSON.stringify({ missing: newly.map((m) => m.loadNumber) }),
+				JSON.stringify({ missing: newly.map((m) => m.loadNumber), baseline: isBaseline }),
 			);
 			io.to("dispatch").emit("dispatch-notification", {
 				type: "ratecon-gap",
-				title: `${newly.length} rate-con(s) never became a load`,
+				title: isBaseline
+					? `Deep sweep: ${plan.total} historical rate-con gap(s) recorded`
+					: `${plan.total} rate-con(s) never became a load`,
 				body: newly.map((m) => m.loadNumber).join(", "),
 			});
 		} catch (e) { console.error("[ratecon-reconcile] notification failed:", e.message); }
 		console.log(`[ratecon-reconcile] ALERT — missing loads: ${newly.map((m) => m.loadNumber).join(", ")}`);
 	}
 
-	return { scanned: emails.length, missing, newlyAlerted: newly, selfSentSkipped: selfSent.length, retired };
+	// ⚠️ ADVANCE THE HIGH-WATER MARK ONLY ON A REAL SWEEP, AND ONLY AT THE END.
+	//   * `alert: false` is the read-only admin GET. If a dry run moved the mark,
+	//     opening the report would narrow the next real sweep's window and could
+	//     skip the very days it just looked at — a diagnostic that causes the
+	//     blind spot it exists to diagnose.
+	//   * Writing it last means a sweep that THREW (IMAP down, Sheets down) leaves
+	//     the mark where it was, so the next sweep re-covers the failed period.
+	//     That self-healing is the entire point of a high-water mark; stamping it
+	//     up front would reinstate the fixed-window bug under a new name.
+	if (alert) {
+		try {
+			db.prepare(
+				"INSERT INTO ratecon_reconcile_runs (ran_at, mode, since_days, scanned, gaps, newly_alerted, note) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			).run(
+				new Date().toISOString().replace("T", " ").slice(0, 19),
+				win.deep ? "deep" : "incremental",
+				win.sinceDays, emails.length, missing.length, newly.length,
+				isBaseline ? "baseline (first deep sweep — historical gaps recorded once)" : win.reason,
+			);
+		} catch (e) { console.error("[ratecon-reconcile] run marker failed:", e.message); }
+	}
+
+	return {
+		scanned: emails.length, missing, newlyAlerted: newly, selfSentSkipped: selfSent.length, retired,
+		windowDays: win.sinceDays, mode: win.deep ? "deep" : "incremental", windowReason: win.reason, baseline: isBaseline,
+		archiveIdsChecked: archiveIds.length,
+	};
 }
 
 async function maybeReconcileRateCons() {
@@ -11905,7 +12090,7 @@ async function maybeReconcileRateCons() {
 		const r = await reconcileRateCons({ alert: true });
 		rateconReconcileHealth.lastRun = new Date().toISOString();
 		rateconReconcileHealth.lastError = null;
-		console.log(`[ratecon-reconcile] scanned ${r.scanned} inbound email(s) (${r.selfSentSkipped} of ours skipped), ${r.missing.length} gap(s), ${r.newlyAlerted.length} newly alerted`);
+		console.log(`[ratecon-reconcile] ${r.mode} sweep over ${r.windowDays}d (${r.windowReason}) — scanned ${r.scanned} inbound email(s) (${r.selfSentSkipped} of ours skipped), ${r.missing.length} gap(s), ${r.newlyAlerted.length} newly alerted`);
 	} catch (e) {
 		rateconReconcileHealth.lastError = e.message;
 		console.error("[ratecon-reconcile] failed:", e.message);
@@ -11917,7 +12102,7 @@ async function maybeReconcileRateCons() {
 if (RATECON_RECONCILE_ENABLED) {
 	setInterval(() => { maybeReconcileRateCons().catch(() => {}); }, RATECON_RECONCILE_INTERVAL_MS);
 	setTimeout(() => { maybeReconcileRateCons().catch(() => {}); }, 2 * 60 * 1000);   // boot run, after init
-	console.log(`[ratecon-reconcile] enabled — every 6h over the last ${RATECON_RECONCILE_DAYS} days of "${RATECON_RECONCILE_MAILBOX}"`);
+	console.log(`[ratecon-reconcile] enabled — every 6h over "${RATECON_RECONCILE_MAILBOX}"; window = high-water mark (min ${RATECON_RECONCILE_DAYS}d, max ${RATECON_RECONCILE_MAX_DAYS}d), deep ${RATECON_RECONCILE_DEEP_DAYS}d every ${RATECON_RECONCILE_DEEP_EVERY_HOURS}h`);
 }
 
 // Run the sweep on demand. Super Admin only.
@@ -11983,12 +12168,47 @@ async function rateConReconcileHttp(req, res, alert) {
 		if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
 			return res.status(503).json({ error: "GMAIL_USER / GMAIL_APP_PASSWORD not configured" });
 		}
-		const r = await reconcileRateCons({ alert });
+		// ⚠️ ONE SWEEP AT A TIME, ACROSS THE TIMER AND BOTH ROUTES. The unit of
+		// work grew by ~26x with the deep sweep (a year of mail, up to
+		// maxBodyFetch body prefixes, a 15-minute IMAP budget), and the guard
+		// used to cover only the scheduled path — so N concurrent admin calls
+		// meant N concurrent 15-minute IMAP sessions against one mailbox and N
+		// concurrent body-scan passes on a single-threaded process.
+		//
+		// The read-only GET is deliberately NOT exempt: it is the *more*
+		// expensive of the two, because it never advances the high-water mark, so
+		// `rateconLastRunAt("deep")` stays whatever it was and every GET resolves
+		// to a full deep sweep.
+		if (rateconReconcileRunning) {
+			return res.status(409).json({
+				error: "A rate-con reconcile sweep is already running",
+				code: "RECONCILE_IN_PROGRESS",
+			});
+		}
+		rateconReconcileRunning = true;
+		let r;
+		try {
+			// The read-only GET is INTERACTIVE and has a browser on the other end,
+			// so it reads the floor window unless a deep pass is asked for by name.
+			// The POST is the deliberate "sweep now" verb and keeps the resolver.
+			const forceFloorWindow = !alert && !/^(true|1|yes|on)$/i.test(String(req.query.deep ?? "").trim());
+			r = await reconcileRateCons({ alert, forceFloorWindow });
+		} finally {
+			rateconReconcileRunning = false;
+		}
 		res.json({
 			enabled: RATECON_RECONCILE_ENABLED,
 			alerted: alert,                         // what this call actually did
 			dryRun: !alert,                         // kept so old callers read the same shape
-			windowDays: RATECON_RECONCILE_DAYS,
+			// The window this call ACTUALLY read, not the configured floor — those
+			// are no longer the same number, and reporting the constant would
+			// misdescribe every sweep that widened past it.
+			windowDays: r.windowDays,
+			windowFloorDays: RATECON_RECONCILE_DAYS,
+			mode: r.mode,                           // "deep" | "incremental"
+			windowReason: r.windowReason,
+			baseline: r.baseline,
+			archiveIdsChecked: r.archiveIdsChecked,
 			mailbox: RATECON_RECONCILE_MAILBOX,
 			scanned: r.scanned,                     // inbound only
 			selfSentSkipped: r.selfSentSkipped,     // our own outbound mail under the same label
@@ -12002,9 +12222,24 @@ async function rateConReconcileHttp(req, res, alert) {
 		res.status(500).json({ error: error.message });
 	}
 }
-app.get("/api/admin/ratecon-reconcile", requireRole("Super Admin"), refuseCrossOrigin, (req, res) =>
+// Sibling of fuelEventsLimiter / fuelGallonsLimiter, and it earns its mount for
+// the same reason: one call is a full IMAP session against the production
+// mailbox — now up to a year of mail and a 15-minute budget, not the 14-day peek
+// it was when these routes shipped unlimited. `requireRole` stays mounted BEFORE
+// it (same convention as the two fuel pairs) so an unauthenticated caller cannot
+// spend the budget on 403s. 4 is comfortably above any real diagnostic session.
+const rateconReconcileLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 4,
+	message: { error: "Too many rate-con reconcile sweeps. Try again in a few minutes." },
+	standardHeaders: true,
+});
+// Order is requireRole -> refuseCrossOrigin -> limiter, matching the rule stated
+// beside crossSiteGuard: a request we are going to refuse must not first consume
+// the budget it was trying to drain. The budget is only 4.
+app.get("/api/admin/ratecon-reconcile", requireRole("Super Admin"), refuseCrossOrigin, rateconReconcileLimiter, (req, res) =>
 	rateConReconcileHttp(req, res, false));
-app.post("/api/admin/ratecon-reconcile/run", requireRole("Super Admin"), refuseCrossOrigin, (req, res) =>
+app.post("/api/admin/ratecon-reconcile/run", requireRole("Super Admin"), refuseCrossOrigin, rateconReconcileLimiter, (req, res) =>
 	rateConReconcileHttp(req, res, true));
 
 // ============================================================
