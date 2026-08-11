@@ -428,6 +428,223 @@ function seedOnboardedDriver(db) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// THE 409 BODY — what the admin is actually told.
+//
+// The blocker set being right is only half of it: the refusal that reaches the
+// screen is assembled in the route, and TWO defects lived there while every
+// blocker assertion above passed.
+//
+//   (1) namedLockedPeriods() emits "(unrecognized date)" where its sibling
+//       blockedExpensePeriods() emits "(unknown)", and the message builder
+//       filters only "(unknown)". So the unresolvable bucket's sentinel
+//       survived, was run through periodLabel() and PRINTED AS A CLOSED MONTH,
+//       while `unresolved` stayed false so the sentence explaining it never
+//       fired. The remedy then named a period that does not exist.
+//
+//   (2) `code` was hardcoded PERIOD_FINALIZED. A block coming only from a PAID
+//       invoice — which invoiceRowPeriodLocked() freezes INDEPENDENTLY of any
+//       lock, so it can sit in a wide-open month — was therefore reported as a
+//       period problem, with an EMPTY periods array and a remedy about
+//       investor payouts.
+//
+// These assert the RESPONSE, extracted verbatim from the handler, not a
+// reimplementation of it.
+// ---------------------------------------------------------------------------
+function extractDeleteRefusal() {
+	const marker = "Cannot delete ${who}:";
+	const hits = SRC.split(marker).length - 1;
+	if (hits !== 1) throw new Error(`expected exactly 1 '${marker}' in server.js, found ${hits}`);
+	const at = SRC.indexOf(marker);
+	// `^\tif (lock.blockers.length) {` is NOT unique in the file (the investor
+	// -application delete carries one too), so anchor on the unique error string
+	// and walk back — never the other way round.
+	const open = SRC.lastIndexOf("\n\tif (lock.blockers.length) {\n", at);
+	if (open < 0) throw new Error("the delete refusal is not inside `if (lock.blockers.length)`");
+	const end = SRC.indexOf("\n\t}\n", at);
+	if (end < 0) throw new Error("could not find the end of the delete refusal block");
+	const body = SRC.slice(open + 1, end + 3);
+	if (!body.includes(marker)) throw new Error("extracted the wrong refusal block");
+	return body;
+}
+const REFUSAL = extractDeleteRefusal();
+check("refusal extraction picked up the 409 and its code selection", [
+	/res\.status\(409\)/.test(REFUSAL),
+	/lock\.blockers\[0\]\.code/.test(REFUSAL),
+], [true, true]);
+
+{
+	let LOCKED = new Set();
+	const isLocked = (p) => LOCKED.has(p);
+
+	// The guard, with the REAL expenses/trucks legs stubbed out (they have their
+	// own suites) — same wiring as the invoices section above.
+	const G = new Function(
+		"db", "isLocked", "periodLocksReadable", "expenseRowPeriodLocked", "blockedExpensePeriods", "truckFixedCostLockedMonths",
+		`${extract("invoiceRowPeriodLocked")}
+		 ${extract("namedLockedPeriods")}
+		 ${extract("userDeleteLockBlockers")}
+		 return { userDeleteLockBlockers };`
+	);
+	const guardFor = (db, src) => new Function(
+		"db", "isLocked", "periodLocksReadable", "expenseRowPeriodLocked", "blockedExpensePeriods", "truckFixedCostLockedMonths",
+		`${extract("invoiceRowPeriodLocked")}
+		 ${extract("namedLockedPeriods")}
+		 ${src || extract("userDeleteLockBlockers")}
+		 return { userDeleteLockBlockers };`
+	)(db, isLocked, () => true, () => false, () => [], () => []);
+
+	// The refusal, verbatim. `periodLabel` is the REAL one — it is what turned the
+	// leaked sentinel into a printed month, so stubbing it would hide the defect.
+	const refuse = (lock, src) => {
+		let captured = null;
+		const res = { status: () => ({ json: (b) => { captured = b; return b; } }) };
+		new Function("lock", "user", "id", "res", "periodLabel",
+			`${extract("periodLabel")}\n${src || REFUSAL}`
+		)(lock, { driver_name: "shorn king", username: "sking" }, 7, res, null);
+		return captured;
+	};
+
+	const mkdb = () => {
+		const db = new Database(":memory:");
+		db.exec(`
+			CREATE TABLE expenses (id INTEGER PRIMARY KEY, driver TEXT, date TEXT, posted_period TEXT, created_at TEXT);
+			CREATE TABLE investor_payouts (id INTEGER PRIMARY KEY, owner_id INTEGER, period TEXT, status TEXT, paid_at TEXT, finalized_at TEXT);
+			CREATE TABLE period_locks (period TEXT, status TEXT);
+			CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, owner_id INTEGER, in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', created_at TEXT DEFAULT '');
+			CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT, driver TEXT, week_start TEXT, week_end TEXT, paid_at TEXT DEFAULT '', deleted_at TEXT DEFAULT '');
+		`);
+		return db;
+	};
+	const inv = (db, o) => db.prepare(
+		"INSERT INTO invoices (invoice_number, driver, week_start, week_end, paid_at, deleted_at) VALUES (?,?,?,?,?,?)"
+	).run(o.n, o.driver, o.ws, o.we, o.paid || "", o.del || "");
+	const lockFor = (db, src) => guardFor(db, src).userDeleteLockBlockers({ id: 7 }, "shorn king");
+
+	// A month is `YYYY-MM`. Anything else in `periods` is fabricated, whatever it
+	// says — this is the invariant both defects broke.
+	const MONTHISH = /^\d{4}-\d{2}$/;
+
+	// -- (2) a paid invoice in an OPEN month ---------------------------------
+	{
+		LOCKED = new Set();
+		const db = mkdb();
+		inv(db, { n: "INV-SK-2026W31-01", driver: "shorn king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
+		const body = refuse(lockFor(db));
+		check("409/paid-only: the code names the real reason, not a period",
+			body.code, "INVOICE_ALREADY_PAID");
+		check("409/paid-only: no month is named", body.periods, []);
+		check("409/paid-only: it does not claim an unreadable date either", body.unresolved, false);
+		check("409/paid-only: the remedy talks about the INVOICE",
+			/already been PAID/.test(body.error), true);
+		check("409/paid-only: and NOT about detaching an investor payout",
+			/detached from their investor/.test(body.error), false);
+		check("409/paid-only: it never tells the admin to reopen a period",
+			/reopen/i.test(body.error), false);
+		db.close();
+	}
+
+	// -- (1) an invoice whose billing week resolves to no month --------------
+	{
+		LOCKED = new Set();
+		const db = mkdb();
+		inv(db, { n: "INV-SK-BAD", driver: "shorn king", ws: "not-a-date", we: "" });
+		const body = refuse(lockFor(db));
+		check("409/unresolvable: the sentinel never reaches `periods`",
+			body.periods.filter((p) => !MONTHISH.test(p)), []);
+		check("409/unresolvable: so no month is named at all", body.periods, []);
+		check("409/unresolvable: and the flag that explains WHY is set", body.unresolved, true);
+		check("409/unresolvable: the explaining sentence fires",
+			/cannot resolve to a month/.test(body.error), true);
+		check("409/unresolvable: the raw sentinel is never printed",
+			/unrecognized date|\(unknown\)/.test(body.error), false);
+		check("409/unresolvable: it is still a period-class refusal", body.code, "PERIOD_FINALIZED");
+		db.close();
+	}
+
+	// -- the wire contract for the cases that already worked -----------------
+	{
+		LOCKED = new Set(["2026-05"]);
+		const db = mkdb();
+		inv(db, { n: "INV-SK-2026W19-01", driver: "shorn king", ws: "2026-05-09", we: "2026-05-15" });
+		const body = refuse(lockFor(db));
+		check("409/locked: unchanged — still PERIOD_FINALIZED", body.code, "PERIOD_FINALIZED");
+		check("409/locked: names the finalized month", body.periods, ["2026-05"]);
+		check("409/locked: unresolved stays false", body.unresolved, false);
+		check("409/locked: the reopen remedy is offered", /reopen/i.test(body.error), true);
+		db.close();
+	}
+
+	// PERIOD_FINALIZED outranks INVOICE_ALREADY_PAID when both fire: it is the
+	// stronger statement and the one with a defined remedy. Both sentences must
+	// still appear, or the admin fixes one and retries into the other.
+	{
+		LOCKED = new Set(["2026-05"]);
+		const db = mkdb();
+		inv(db, { n: "INV-SK-2026W19-01", driver: "shorn king", ws: "2026-05-09", we: "2026-05-15" });
+		inv(db, { n: "INV-SK-2026W31-01", driver: "shorn king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
+		const lock = lockFor(db);
+		const body = refuse(lock);
+		check("409/both: PERIOD_FINALIZED wins the code", body.code, "PERIOD_FINALIZED");
+		check("409/both: only the locked month is named", body.periods, ["2026-05"]);
+		check("409/both: the paid-invoice sentence still appears",
+			/already been PAID/.test(body.error), true);
+		check("409/both: every blocker carries a code",
+			lock.blockers.every((b) => typeof b.code === "string" && b.code.length > 0), true);
+		db.close();
+	}
+
+	// A settled PAYOUT must keep its own sentence — the per-table split must not
+	// have swapped one mislabel for another.
+	{
+		LOCKED = new Set();
+		const db = mkdb();
+		db.prepare("INSERT INTO investor_payouts (owner_id, period, status, paid_at, finalized_at) VALUES (?,?,?,?,?)")
+			.run(7, "2026-06", "paid", "2026-07-02", "");
+		const body = refuse(lockFor(db));
+		check("409/payout: the investor-payout sentence still fires",
+			/detached from their investor/.test(body.error), true);
+		check("409/payout: and the invoice sentence does not",
+			/already been PAID — money moved/.test(body.error), false);
+		db.close();
+	}
+
+	// -- MUTANTS: each reconstructs one of the two shipped defects ------------
+	// M1 — drop the sentinel normalisation from blocker (4).
+	{
+		// Paren count must be preserved — `asUnknown(namedLockedPeriods(` opens two,
+		// so the replacement opens two. (An extra one here throws a SyntaxError
+		// inside new Function, which would read as "the mutant was rejected" while
+		// actually testing nothing.)
+		const m1 = extract("userDeleteLockBlockers").split("asUnknown(namedLockedPeriods(").join("(namedLockedPeriods(");
+		check("mutant M1 removed the sentinel normalisation",
+			m1.includes("asUnknown(namedLockedPeriods("), false);
+		LOCKED = new Set();
+		const db = mkdb();
+		inv(db, { n: "INV-SK-BAD", driver: "shorn king", ws: "not-a-date", we: "" });
+		const body = refuse(lockFor(db, m1));
+		check("M1 rejected — the un-normalised sentinel is printed as a month",
+			body.periods, ["(unrecognized date)"]);
+		check("M1 rejected — and `unresolved` stays false, so nothing explains it",
+			body.unresolved, false);
+		db.close();
+	}
+	// M2 — put the hardcoded response code back.
+	{
+		const m2 = REFUSAL.replace(/\n\t\t\tcode,\n/, "\n\t\t\tcode: \"PERIOD_FINALIZED\",\n");
+		check("mutant M2 restored the hardcoded response code", m2 !== REFUSAL, true);
+		LOCKED = new Set();
+		const db = mkdb();
+		inv(db, { n: "INV-SK-2026W31-01", driver: "shorn king", ws: "2026-08-01", we: "2026-08-07", paid: "2026-08-09" });
+		const body = refuse(lockFor(db), m2);
+		check("M2 rejected — a paid invoice is reported as a period problem",
+			body.code, "PERIOD_FINALIZED");
+		check("M2 rejected — with an empty periods array beside that claim",
+			body.periods, []);
+		db.close();
+	}
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) {
 	console.log("\nFailures:");
