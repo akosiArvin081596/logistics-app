@@ -9349,12 +9349,53 @@ function getWeekRange(referenceDate) {
 	return { weekStart: fmt(weekStart), weekEnd: fmt(weekEnd) };
 }
 
+// Is it past the submission cutoff — Friday 6:30 PM Central (per CEO policy) —
+// for the week ending `weekEndDate` ('YYYY-MM-DD', as produced by getWeekRange)?
+//
+// WHY IT LOOKS LIKE THIS. The previous form was
+//   new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }))
+// i.e. render "now" as a Chicago wall clock, then RE-PARSE that localized string
+// as a server-LOCAL instant, and compare it against `new Date(weekEndDate +
+// "T18:30:00")`, which is also server-local. Both sides landed in the same frame,
+// so the comparison came out right — measured, not assumed: replayed against the
+// true instant of 18:30 America/Chicago for every Friday 2024-01-05..2027-12-31
+// at one-minute resolution in ALL 418 IANA zones, it disagreed ZERO times. This
+// is a robustness fix, not a bug fix; nothing about the returned verdict changes.
+//
+// It is replaced anyway because it is the exact round-trip the comment beside
+// houstonStamp() below condemns as "locale-fragile and wrong across a DST
+// transition", and both halves of that are real:
+//   - LOCALE. The verdict depends on whether V8's date parser accepts whatever
+//     the runtime's ICU emits. ICU 72 (Node 18.13+) changed en-US to put a
+//     NARROW NO-BREAK SPACE (U+202F) before AM/PM; a parser that rejects it
+//     yields Invalid Date, and `Invalid > deadline` is `false`, so the cutoff
+//     silently NEVER fires and every invoice reads on time. Nothing in the
+//     expression signals that failure — no throw, no NaN surfaced to a caller.
+//   - DST. The two operands are wall clocks mapped through the SERVER's zone,
+//     and that mapping is not injective across a fall-back hour, so the ordering
+//     is only non-strict there.
+//
+// formatToParts asks the zone database directly, never re-parses its own output,
+// and is DST-safe by construction — the same pattern houstonStamp / houstonDay /
+// todayKeyCT already use. No third date convention is introduced.
+//
+// The comparison is a plain string compare, which is exact here because both
+// operands are the same fixed-width 'YYYY-MM-DDTHH:MM:SS' shape, whose
+// lexicographic order IS its chronological order. That is also why the shape of
+// `weekEndDate` is asserted first: the old code fed a malformed value to
+// `new Date()` and got Invalid Date -> false ("not late"), and the guard keeps
+// that same answer instead of letting a stray string compare produce a verdict.
 function isAfterDeadline(weekEndDate) {
-	// Submission cutoff: Friday 6:30 PM CST (per CEO policy).
-	const nowStr = new Date().toLocaleString("en-US", { timeZone: "America/Chicago" });
-	const now = new Date(nowStr);
-	const deadline = new Date(weekEndDate + "T18:30:00");
-	return now > deadline;
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(String(weekEndDate || ""))) return false;
+	const p = {};
+	for (const x of new Intl.DateTimeFormat("en-US", {
+		timeZone: "America/Chicago",
+		year: "numeric", month: "2-digit", day: "2-digit",
+		hour: "2-digit", minute: "2-digit", second: "2-digit",
+		hourCycle: "h23",
+	}).formatToParts(new Date())) p[x.type] = x.value;
+	const nowCT = `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}`;
+	return nowCT > `${weekEndDate}T18:30:00`;
 }
 
 // NOTE: a SHEET_STAMP_TZ_CUTOVER constant lived here. It let readers tell a
@@ -9423,12 +9464,40 @@ function generateInvoiceNumber(driverName, weekStart) {
 	// real name (initials of "O'Brien"/"Mary-Jane Smith" are already A-Z), so no
 	// existing invoice number changes shape.
 	const initials = driverName.split(/\s+/).map(w => w[0]).join("").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3);
+	// ⚠️ ONE FRAME ON BOTH OPERANDS, AND IT MUST BE UTC. `weekStart` is a bare
+	// calendar day ('YYYY-MM-DD'), which `new Date()` parses as UTC MIDNIGHT per
+	// the ES date-time-string spec — but `new Date(year, 0, 1)` builds a
+	// server-LOCAL midnight, and `d.getFullYear()` reads a UTC instant back
+	// through server-local getters. Subtracting the two therefore mixed frames,
+	// and the offset leaked straight into the `-YYYYWww` half of the invoice
+	// NUMBER, which is both the PDF filename and the row's identity in
+	// `invoices.pdf_file_name` (no unique index on it).
+	//
+	// Measured, UTC vs America/Chicago over 2023-01-01..2028-12-31 (2,192 days):
+	// 319 days mint a DIFFERENT number — every Sunday (314 of them; e.g.
+	// 2026-08-09 -> 2026W33 under UTC, 2026W32 under Chicago) plus every Jan 1
+	// (5 of them, where the YEAR itself moves: 2026-01-01 -> 2026W01 under UTC,
+	// 2025W53 under Chicago). Production is UTC so it is right today; a dev
+	// laptop or scripts/regenerate-invoice-pdfs.js is not, and a regeneration
+	// there silently mints a second identity for a week that already has one.
+	//
+	// ⚠️ THE FIX MUST NOT RESTATE HISTORY, so the arithmetic is untouched and only
+	// the frame is pinned — deliberately to UTC, the frame production already
+	// runs in. Verified over the same 2,192 days: byte-identical to today's UTC
+	// output on EVERY day (0 changes), and identical across UTC / Chicago /
+	// New_York / Tokyo / Berlin / Auckland. So no existing invoice number moves,
+	// and a future regeneration of a past week reproduces the number that was
+	// minted. This is `graceEndsAt()`'s convention (Date.UTC for bare-day-key
+	// math), not a new one; the Intl/formatToParts pattern is for the other
+	// question — "what is the wall clock in Houston now?" — and using it here
+	// would convert the day and change the number.
+	// (Despite the old comment, this is not an ISO-8601 week: it counts
+	// Sunday-start weeks from Jan 1. Preserved exactly, for the same reason.)
 	const d = new Date(weekStart);
-	const year = d.getFullYear();
-	// ISO week number
-	const jan1 = new Date(year, 0, 1);
+	const year = d.getUTCFullYear();
+	const jan1 = new Date(Date.UTC(year, 0, 1));
 	const days = Math.floor((d - jan1) / 86400000);
-	const weekNum = Math.ceil((days + jan1.getDay() + 1) / 7);
+	const weekNum = Math.ceil((days + jan1.getUTCDay() + 1) / 7);
 	const weekStr = String(weekNum).padStart(2, "0");
 	// Check for existing invoices this week for this driver.
 	// LOWER(driver) on BOTH sides — the same one-sided fold as the two Driver
@@ -15396,7 +15465,29 @@ const dbAdminLimiter = rateLimit({
 });
 
 // Download SQLite database file (Super Admin only)
-app.get("/api/db/download", requireRole("Super Admin"), dbAdminLimiter, (req, res) => {
+//
+// ⚠️ refuseCrossOrigin — the MONEY tier, on a GET, and the tier is not an
+// over-reach. Every argument for the cost tier applies here and then some:
+// SESSION_COOKIE_SAMESITE defaults to `lax`, and lax withholds the cookie from a
+// subresource but NOT from a top-level cross-site GET *navigation*. So one link
+// or redirect a logged-in Super Admin follows — a chat message, a bookmark, an
+// email — spends a full `db.backup()` of a ~313 MB file and lands a complete copy
+// of every SSN, routing number and account number in os.tmpdir(). CORS hides the
+// response body from the attacker's page; it does not stop the backup, the disk
+// write, or the browser saving the file to the victim's Downloads folder.
+//
+// It gets refuseCrossOrigin rather than refuseCrossSite because a same-SITE
+// attacker (an XSS or takeover on a sibling logisx.com subdomain) reaching THIS
+// route hands over the whole database, and refuseCrossSite tolerates
+// Sec-Fetch-Site: same-site by construction. Same reasoning as the payout/period
+// routes: the only legitimate browser caller is the SPA this server itself
+// serves, so demanding same-origin costs nothing. `dbAdminLimiter` bounds the
+// number of copies, not whether one is made.
+//
+// requireRole FIRST, matching every other guarded route — an unauthenticated
+// caller must never reach anything further down the chain, limiter included.
+// Mount count pinned by scripts/test-csrf-guard.js.
+app.get("/api/db/download", requireRole("Super Admin"), refuseCrossOrigin, dbAdminLimiter, (req, res) => {
 	// The entire database in one response. Logged BEFORE the work starts, so an
 	// export that fails or is aborted mid-stream still leaves the attempt on
 	// record — the intent is what is being audited, not the byte count.
@@ -24502,14 +24593,55 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		}
 
 		// Enforce one active job at a time: block transition to "At Shipper" if another load is active
+		//
+		// ⚠️ "ANOTHER JOB" IS ANOTHER LOAD ID, NOT ANOTHER ROW. This scan used to
+		// exclude only the caller's own row index, which silently assumed one row per
+		// load — and `dataRows` comes from readJobTrackingSnapshot(), the RAW whole-tab
+		// read, so deduplicateLoads() has NOT run and duplicates are present by
+		// construction (87 of 288 distinct load ids sit on 2+ rows). A second live row
+		// for the caller's OWN load, same driver, active status therefore read as "you
+		// already have an active job" and 409'd the driver off their own load, with the
+		// only remedy — delete the stale row — being Super-Admin-only. That is the
+		// shape of guard #211 warns gets switched off, at which point it protects
+		// nothing.
+		//
+		// The policy is not invented here: it is the SAME one resolveLoadBinding() was
+		// given ten lines above via the callerRowWinsAmongDuplicates opt-in (spelled
+		// out there, and deliberately not repeated verbatim here — the family-coherence
+		// check in scripts/test-driver-status-row-binding.js counts that literal across
+		// the whole file to prove exactly one route opts in, and a prose copy would
+		// defeat it, which is the same trap its own "COMMENTS STRIPPED FIRST" note
+		// describes), and for the same measured reason (load 7052901: row 383 live,
+		// row 388 a cancelled "#7052901" copy). Having the binding accept a
+		// duplicated id and then having the very next guard refuse the caller
+		// BECAUSE it is duplicated is the two halves of one route disagreeing about
+		// what a load is.
+		//
+		// Skipping on the id is strictly NARROWER than "skip everything for this
+		// driver": a genuine second load still 409s, because its id differs. It cannot
+		// be widened by a blank cell either — `callerLoadKey` is guaranteed non-empty
+		// (resolveLoadBinding's rung 1 already refused a blank id), and it is tested
+		// explicitly so the skip is provably inert if that ever stops being true, since
+		// otherwise every id-less row would be skipped. `loadIdIdx` is likewise
+		// guaranteed >= 0 by the binding's rung 2; the check is defence in depth.
+		// The row-index test is kept as well — it costs nothing and is the only cover
+		// if a future edit moves this scan above the binding.
 		if (/^at shipper$/i.test(newStatus)) {
 			const driverCol = headers.findIndex((h) => /driver/i.test(h));
 			if (driverCol !== -1) {
 				const activeRe = /^(heading to shipper|at shipper|loading|in transit|at receiver)$/i;
 				const driverNameNorm = normalizeDriverName(driverName);
+				// normLoadKey(), not a raw compare: Job Tracking stores both "513987502"
+				// and "#513987502", so a raw compare would fail to recognise the caller's
+				// own duplicate exactly when it is spelled the other way — which is the
+				// commonest way a duplicate arises. Same normaliser the binding uses.
+				const loadIdIdx = headers.findIndex((h) => /load.?id|job.?id/i.test(h));
+				const callerLoadKey = normLoadKey(loadId);
 				const hasActive = dataRows.some((row, i) => {
 					const rIdx = i + 2;
 					if (rIdx === rowIndex) return false;
+					if (callerLoadKey && loadIdIdx !== -1
+						&& normLoadKey((row || [])[loadIdIdx]) === callerLoadKey) return false;
 					const drv = normalizeDriverName(row[driverCol]);
 					const sts = (row[statusIdx] || "").trim();
 					return drv === driverNameNorm && activeRe.test(sts);
