@@ -15,8 +15,11 @@
 //
 //   node scripts/audit-policy-labels.js
 //
-// Exit 0 = every label a map asks for exists in its template.
-// Exit 1 = at least one gap (prints each one).
+// Exit 0 = every label a map asks for exists in its template, and no CHECKBOX
+//          label is repeated (see the duplicated-label block below — the two
+//          kinds of repeat now have two different verdicts).
+// Exit 1 = at least one gap, or a repeated checkbox label the singular
+//          renderer would half-tick (prints each one).
 
 const fs = require("fs");
 const path = require("path");
@@ -93,18 +96,42 @@ function ariaLabelIndex(html) {
 			literals.set(raw, (literals.get(raw) || 0) + 1);
 		}
 	}
+
+	// A SECOND, checkbox-scoped index. lib/policy-renderer.js:290 selects with
+	// `input[type="checkbox"][aria-label="…"]`, so "is this label duplicated?"
+	// has to be asked of CHECKBOX elements only. Counting every aria-label
+	// instead would be wrong in both directions: a label carried by one checkbox
+	// and one text input is NOT a collision for that selector (it would be a
+	// false alarm), while the count that matters — two checkboxes, one label —
+	// is exactly what the general index cannot distinguish.
+	const checkboxLiterals = new Map();
+	const inputRe = /<input\b[^>]*>/gi;
+	let t;
+	while ((t = inputRe.exec(html))) {
+		const tag = t[0];
+		if (!/\btype\s*=\s*["']?checkbox\b/i.test(tag)) continue;
+		const la = /\saria-label="([^"]*)"/.exec(tag);
+		// An interpolated label belongs to markup the template's own script
+		// builds; it is not a literal anyone can duplicate by editing the HTML.
+		if (!la || la[1].includes("${")) continue;
+		checkboxLiterals.set(la[1], (checkboxLiterals.get(la[1]) || 0) + 1);
+	}
+
 	return {
 		literals,
 		patterns,
+		checkboxLiterals,
 		hasLiteral: (l) => literals.has(l),
 		matchPattern: (l) => patterns.find((p) => p.re.test(l)) || null,
 		has: (l) => literals.has(l) || patterns.some((p) => p.re.test(l)),
 		count: (l) => literals.get(l) || 0,
+		countCheckbox: (l) => checkboxLiterals.get(l) || 0,
 	};
 }
 
 let problems = 0;
-let dupWarnings = 0;
+let cbDuplicates = 0; // counted into `problems` — see the duplicated-label block
+let repeatNotes = 0; // informational only, never counted into `problems`
 
 for (const [docKey, file] of Object.entries(DOC_FILES)) {
 	const filePath = path.join(TPL_DIR, file);
@@ -143,27 +170,75 @@ for (const [docKey, file] of Object.entries(DOC_FILES)) {
 	const sigTarget = fields.signatureLabelForImage;
 	const sigMissing = sigTarget && !have.has(sigTarget);
 
-	// renderPolicy fills by querySelector (SINGULAR), so only the first element
-	// with a duplicated aria-label ever receives the value. Reported, not fatal:
-	// several templates legitimately repeat a signature line, and deciding what
-	// each repeat should say is an editorial call, not a build failure.
-	const duplicated = askedText.filter((l) => have.count(l) > 1);
+	// --- Duplicated aria-labels: ONE symptom, TWO renderers, TWO verdicts ------
+	//
+	// This block used to compute a single `duplicated` set from askedText only,
+	// and print "only the FIRST is filled — querySelector is singular". After PR
+	// #247 (bf98107) that sentence was false for the case it described and the
+	// case it was true of was not being checked at all — the script warned about
+	// the bug that was fixed and stayed silent about the one that was not.
+	//
+	// TEXT — informational, not a defect. lib/policy-renderer.js:218 now uses
+	// querySelectorAll and credits a label as verified only when EVERY slot took
+	// the value (:230-232), so a repeated text label loses nothing. It is still
+	// worth naming, because filling every match is safe only while each repeat
+	// belongs to the SAME party — the invariant recorded at :206-215. So this
+	// prints as something to confirm, and never fails the run: several templates
+	// legitimately repeat a signature line, and what each repeat should say is
+	// an editorial call.
+	const repeatedText = askedText.filter((l) => have.count(l) > 1);
 
-	const bad = missingText.length + missingCb.length + missingIds.length + orphanRequired.length + requiredNotInTemplate.length + (sigMissing ? 1 : 0);
+	// CHECKBOXES — fatal. lib/policy-renderer.js:290 is STILL querySelector
+	// (singular), and the comment above it at :280-287 records that as a
+	// MEASURED no-op — 32 distinct checkbox aria-labels across the 9 templates,
+	// not one of them repeated — with an explicit instruction, "Make it
+	// querySelectorAll then", for the day one is. Nothing enforced that
+	// measurement, so it was one template edit away from silently expiring.
+	// This is the check that enforces it.
+	//
+	// Fatal rather than a warning, and deliberately unlike the text case above:
+	// a repeated checkbox label is never an editorial choice. It ticks the first
+	// box and leaves the rest unchecked on an inspection or compliance
+	// attestation — a signed document asserting something nobody asserted — and
+	// the remedy is a one-line renderer change, not a template rewrite. Note the
+	// remedy is NOT this script's to make: report it and let the renderer's
+	// owner apply it.
+	const duplicatedCb = askedCb.filter((l) => have.countCheckbox(l) > 1);
+
+	const bad =
+		missingText.length +
+		missingCb.length +
+		missingIds.length +
+		orphanRequired.length +
+		requiredNotInTemplate.length +
+		(sigMissing ? 1 : 0) +
+		duplicatedCb.length;
 	problems += bad;
-	dupWarnings += duplicated.length;
+	cbDuplicates += duplicatedCb.length;
+	repeatNotes += repeatedText.length;
 
-	if (bad || duplicated.length) {
-		console.log(`\n${bad ? "FAIL" : "warn"}  ${docKey}  (${file})`);
+	if (bad || repeatedText.length) {
+		console.log(`\n${bad ? "FAIL" : "note"}  ${docKey}  (${file})`);
 		if (missingText.length) console.log(`   text labels asked but absent from template : ${missingText.join(", ")}`);
 		if (missingCb.length) console.log(`   checkbox labels asked but absent           : ${missingCb.join(", ")}`);
 		if (missingIds.length) console.log(`   checkbox ids asked but absent              : ${missingIds.join(", ")}`);
 		if (orphanRequired.length) console.log(`   requiredText names a key not in text{}     : ${orphanRequired.join(", ")}`);
 		if (requiredNotInTemplate.length) console.log(`   requiredText absent from template          : ${requiredNotInTemplate.join(", ")}`);
 		if (sigMissing) console.log(`   signatureLabelForImage absent from template: ${sigTarget}`);
-		if (duplicated.length) {
-			console.log(`   duplicated aria-labels (only the FIRST is filled — querySelector is singular):`);
-			for (const l of duplicated) console.log(`       "${l}" x${have.count(l)}`);
+		if (duplicatedCb.length) {
+			console.log(`   duplicated CHECKBOX aria-labels — only the FIRST is ticked, the rest stay`);
+			console.log(`   unchecked on a signed attestation (lib/policy-renderer.js:290 is still`);
+			console.log(`   querySelector, singular):`);
+			for (const l of duplicatedCb) console.log(`       "${l}" x${have.countCheckbox(l)}`);
+			console.log(`   fix: make that selector querySelectorAll, exactly as the comment at`);
+			console.log(`        lib/policy-renderer.js:280-287 instructs. Do not "fix" it here.`);
+		}
+		if (repeatedText.length) {
+			console.log(`   repeated text aria-labels — FILLED, not dropped: lib/policy-renderer.js:218`);
+			console.log(`   is querySelectorAll and credits the label only if every slot took the value.`);
+			console.log(`   Informational — confirm each repeat is the SAME party (policy-renderer.js:206-215),`);
+			console.log(`   or one party's value lands on another party's line:`);
+			for (const l of repeatedText) console.log(`       "${l}" x${have.count(l)}`);
 		}
 		if (runtimeText.length) console.log(`   (${runtimeText.length} label(s) generated at runtime by the template's own script — matched by pattern)`);
 	} else {
@@ -173,6 +248,9 @@ for (const [docKey, file] of Object.entries(DOC_FILES)) {
 }
 
 console.log(
-	`\n${problems ? "FAILED" : "PASSED"} — ${problems} gap(s), ${dupWarnings} duplicated-label warning(s) across ${Object.keys(DOC_FILES).length} documents.`,
+	`\n${problems ? "FAILED" : "PASSED"} — ${problems} problem(s)` +
+		` (of which ${cbDuplicates} duplicated checkbox label(s)),` +
+		` ${repeatNotes} repeated text label(s) [informational, not a defect]` +
+		` across ${Object.keys(DOC_FILES).length} documents.`,
 );
 process.exit(problems ? 1 : 0);

@@ -91,9 +91,14 @@ SCP=(scp -q -o BatchMode=yes -o ConnectTimeout=20 -i "$VPS_KEY")
 if [ "$SCAN_LEGACY" = "1" ]; then
   say "scanning for database copies of unknown provenance…"
   say ""
-  say "1. intermediates the old flow left in \$TMPDIR (it removed these on a clean"
-  say "   exit only — a crash, a SIGKILL or a closed lid kept them):"
-  find "${TMPDIR:-/tmp}" -maxdepth 3 -name 'prod-snapshot.gz' -o -maxdepth 3 -name 'app.db.*.gz' 2>/dev/null \
+  say "1. full-database copies in \$TMPDIR, from TWO different producers:"
+  say "   - prod-snapshot.gz / app.db.*.gz — intermediates of the old refresh flow"
+  say "     (removed on a clean exit only; a crash, a SIGKILL or a closed lid kept them)"
+  say "   - app_backup-*.db — the per-request temp copy GET /api/db/download makes"
+  say "     (server.js, os.tmpdir(), app_backup-<ms>-<hex>.db). It is unlinked after"
+  say "     a completed response, so every ABORTED download leaves one behind: a full"
+  say "     ~313 MB unsanitized database each, gitignored so nothing else notices."
+  find "${TMPDIR:-/tmp}" -maxdepth 3 \( -name 'prod-snapshot.gz' -o -name 'app.db.*.gz' -o -name 'app_backup-*.db' \) 2>/dev/null \
     | while read -r f; do echo "     $(du -h "$f" 2>/dev/null | cut -f1)  $f"; done || true
   say ""
   say "2. pre-refresh backups in this checkout (refresh-env.js renames the old"

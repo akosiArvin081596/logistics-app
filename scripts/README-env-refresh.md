@@ -284,8 +284,9 @@ SESSION_SECRET=<anything non-production>
 ## Already-downloaded copies — what to do about the ones the old flow left
 
 Fixing the flow does nothing about the copies it already made. Anyone who ran
-`refresh-local.sh` before 2026-08-09 may still hold unredacted production PII, in up to three
-places:
+`refresh-local.sh` before 2026-08-09 may still hold unredacted production PII, in up to four
+places — and note that the fourth has nothing to do with this flow, so "I never ran the old
+refresh" does not clear it:
 
 1. **`$TMPDIR/tmp.XXXXXXXX/prod-snapshot.gz`** — the raw download. The old script removed it
    with `trap … EXIT`, which covers a normal exit and a `Ctrl-C`, but **not** a crash, a
@@ -296,6 +297,13 @@ places:
    **first** one predates any sanitizing at all and is a full production database.
 3. **`app.db` itself**, if it was ever built by hand from a snapshot rather than by this
    script.
+4. **`$TMPDIR/app_backup-<ms>-<hex>.db`** — nothing to do with the refresh flow. `GET
+   /api/db/download` copies the whole database into `os.tmpdir()` per request and unlinks it
+   after a **completed** response, so every download that was cancelled, timed out or hit a
+   dropped connection left a full ~313 MB unsanitized database behind. Per-request names mean
+   they **accumulate** rather than overwrite, and `app_backup*.db` is gitignored, so nothing
+   else in the repo notices them. Added to `--scan-legacy` on 2026-08-09; a scan run before
+   that date did not look for them.
 
 **Recommendation — classify, then delete; do not delete blind.** `--verify` answers the
 question directly, read-only, printing counts and column names but never values:
