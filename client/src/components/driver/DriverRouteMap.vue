@@ -8,7 +8,11 @@
         <span v-if="distanceMiles != null" class="info-item">{{ distanceMiles }} mi</span>
         <span v-if="etaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
         <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
-        <button class="navmode-btn" @click="expanded = true" title="Navigation Mode">
+        <!-- Drive Mode is a DRIVER affordance (turn-by-turn for the truck) and
+             it needs `steps`, which the public payload deliberately omits — so
+             on the customer tracker the button would open an empty fullscreen
+             overlay. Hidden there rather than shipped broken. -->
+        <button v-if="!publicMode" class="navmode-btn" @click="expanded = true" title="Navigation Mode">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polygon points="3 11 22 2 13 21 11 13 3 11" />
           </svg>
@@ -49,8 +53,16 @@ const props = defineProps({
   dispatchMode: { type: Boolean, default: false },
   // When true, strip any driver-identifying info off the map. Used by the
   // public /track/:loadId customer page — customers see the pin but not the
-  // driver's name.
+  // driver's name. Also switches the route source: see presetRoute below.
   publicMode: { type: Boolean, default: false },
+  // Pre-computed route geometry, for a surface that cannot call GET /api/route.
+  // Shape matches that endpoint's LEAN response so nothing downstream changes:
+  //   { route: [{latitude, longitude}, ...], distanceMiles, etaMinutes }
+  // Deliberately carries no alternatives, no turn-by-turn steps and no fuel /
+  // toll figures — the public payload does not expose them, so the
+  // alternatives overlay, traffic overlay and Drive Mode stay empty here
+  // rather than rendering half a route.
+  presetRoute: { type: Object, default: null },
   // Which alternative is active. Parent (LoadDetail) owns this so the
   // RouteAlternatives card list it renders inline stays in sync with the
   // map. v-model-friendly: emit('update:selectedAltIdx', i).
@@ -290,7 +302,17 @@ function buildRoutePath(driverOverride = null) {
   // load status. Falling back to the raw route (origin→dest) drew the line
   // for the wrong leg of the journey while the truck was en route to
   // pickup, which is exactly what the user reported.
-  const dp = driverOverride || driverLatLng.value
+  //
+  // publicMode is the one exception, because it fetches nothing: it is handed
+  // the fixed pickup→drop-off haul (see applyPresetRoute), so trimming only
+  // makes sense once the truck is ON that haul. Pre-pickup the truck is still
+  // running to the shipper — projecting it onto the haul and then appending
+  // `origin` as the terminal below would draw the entire lane followed by a
+  // straight line back to its start. Draw the untrimmed lane instead; the
+  // truck pin still shows where it is.
+  const onHaul = !props.publicMode
+    || /^(at shipper|loading|in transit|at receiver|unloading)$/i.test(loadStatus.value)
+  const dp = onHaul ? (driverOverride || driverLatLng.value) : null
   if (!dp) {
     const path = points.map(p => ({ lat: p.latitude, lng: p.longitude }))
     if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
@@ -432,12 +454,53 @@ let initialFitDone = false
 // the correct current-leg distance/ETA with the whole planned haul. We apply only
 // the latest invocation's result so the ETA stays on the live leg.
 let fetchSeq = 0
+
+// Cheap identity for a preset route, so a 30s payload poll that returns the
+// same geometry does not tear down and rebuild every overlay (which resets the
+// dash animation and re-fits the bounds, yanking the map out from under a
+// customer who just panned it).
+function presetSignature(p) {
+  const pts = p && Array.isArray(p.route) ? p.route : []
+  const head = pts.length ? `${pts[0].latitude},${pts[0].longitude}` : ''
+  const tail = pts.length ? `${pts[pts.length - 1].latitude},${pts[pts.length - 1].longitude}` : ''
+  return `${pts.length}|${head}|${tail}|${p?.distanceMiles ?? ''}|${p?.etaMinutes ?? ''}`
+}
+let lastPresetSig = null
+
+// publicMode route source. The customer tracker is anonymous and
+// GET /api/route is requireRole("Super Admin","Dispatcher","Driver"), so every
+// fetch from this page answered 401 — swallowed by the catch in fetchRoute(),
+// leaving markers with no polyline, no distance and no ETA. The server now
+// resolves this load's own pickup→drop-off route and ships it on the
+// /api/public/track/:loadId payload; we render that instead.
+//
+// ⚠️ Never re-add an /api/route call on this path. That endpoint accepts
+// arbitrary caller coordinates and is a free Google Routes oracle, which is
+// precisely why it is role-gated.
+function applyPresetRoute(force = false) {
+  const preset = props.presetRoute
+  const sig = presetSignature(preset)
+  if (!force && sig === lastPresetSig) return
+  lastPresetSig = sig
+  const pts = preset && Array.isArray(preset.route) ? preset.route : []
+  allRoutes.value = []
+  recommendedIdx.value = 0
+  routePoints.value = pts.length >= 2 ? pts : []
+  distanceMiles.value = preset?.distanceMiles ?? null
+  etaMinutes.value = preset?.etaMinutes ?? null
+  if (map) renderMarkers()
+}
+
 async function fetchRoute(doFit = false) {
   const mySeq = ++fetchSeq
   routePoints.value = []
   distanceMiles.value = null
   etaMinutes.value = null
   if (!destLatLng.value) return
+
+  // Force: the three refs above were just cleared, so the signature guard must
+  // not short-circuit the re-apply.
+  if (props.publicMode) { applyPresetRoute(true); return }
 
   // Pick the right leg to render:
   //   - Has ELD + picked up:     truck→drop-off (current trajectory)
@@ -614,6 +677,17 @@ watch(loadStatus, (newStatus, oldStatus) => {
     lastRouteTime = 0
     fetchRoute(true)
   }
+})
+
+// The public payload is re-fetched every 30s and re-assigned wholesale, so the
+// preset arrives as a fresh object each poll — and it can land after the map
+// has already mounted. applyPresetRoute() compares geometry, not identity, so
+// an unchanged lane is a no-op.
+// Non-deep on purpose: the parent rebuilds the object every poll so the
+// reference always changes, and a deep traversal of a 1,500-point polyline
+// every 30s would buy nothing.
+watch(() => props.presetRoute, () => {
+  if (props.publicMode) applyPresetRoute()
 })
 
 // Driver swapped to a different alternative (or recommended changed). Re-sync
