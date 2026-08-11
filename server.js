@@ -21375,14 +21375,18 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// `5:5` returns 25). So `currentValues[i]` was undefined for every column
 		// past A, the `&& currentValues[i]` test never passed, and nothing was ever
 		// spliced back. Measured against production's layout, what a Dispatcher then
-		// wrote back was lossy: sanitizeBrokerColumns() picks its column with
+		// wrote back was lossy: sanitizeBrokerColumns() then picked its column with
 		// `headers.find(/phone|contact/i)`, which matches "Broker Contact Name"
 		// (it contains "Contact") BEFORE "Phone Number" — so the column actually
-		// redacted is Broker Contact Name, reduced by sanitizeBrokerContact() to
-		// `{"Name":…}`, and saving the row wrote that stripped copy over the stored
-		// `{"Name":…,"Email":…}`. ("Phone Number" is never reached, and so was never
-		// blanked.) Reading the real row above is what fixes it; the splice itself is
-		// unchanged, and its own /broker|phone|contact/i covers both columns.
+		// redacted was Broker Contact Name, and saving the row wrote that stripped
+		// copy over the stored value. Reading the real row above is what fixed the
+		// splice.
+		//
+		// ⚠️ THAT SHADOWING IS FIXED TOO — see resolveBrokerWithheldColumns().
+		// "Phone Number" and "Email" were reached by neither lookup, so they were
+		// served IN FULL to every non-Super-Admin caller; they are withheld now,
+		// which is exactly why the splice below must take its column list from the
+		// same resolver rather than carrying a second copy of the rule.
 		//
 		// ⚠️ RESTORE ONLY WHAT WAS REDACTED, not every matching column. Because the
 		// splice had never once run, "preserve broker columns" had never actually
@@ -21391,11 +21395,22 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// edit, answer {success:true}, and let the UI show the change until the next
 		// refresh. So the value is put back only when the caller sent back exactly
 		// the redacted copy GET /api/data served them; a genuine edit goes through.
+		//
+		// ⚠️ THE CANDIDATE SET IS DERIVED, NOT RE-SPELLED. This filter used to be
+		// its own hardcoded `/broker|phone|contact/i`, which does NOT match
+		// "Email" — so the moment the reader started redacting that column (it
+		// now does; it always should have), a Dispatcher's save would write ""
+		// straight over the stored address. A disclosure bug turns into DATA LOSS
+		// the instant the reader and the writer disagree about which columns were
+		// redacted, so both now ask resolveBrokerWithheldColumns(). The
+		// `served !== stored` test below remains the real authority; this is only
+		// the candidate list.
 		const preserved = [];
 		if (req.session.user.role !== "Super Admin") {
 			const servedRow = sanitizeBrokerColumns(headers, [rowObjectFromCells(headers, before)])[0] || {};
+			const withheldCols = new Set(resolveBrokerWithheldColumns(headers));
 			headers.forEach((h, i) => {
-				if (!/broker|phone|contact/i.test(h) || !before[i] || i >= values.length) return;
+				if (!withheldCols.has(h) || !before[i] || i >= values.length) return;
 				const stored = String(before[i]);
 				const served = servedRow[h] === undefined ? stored : String(servedRow[h]);
 				// Nothing was hidden from them for this column — let them edit it.
@@ -23645,22 +23660,76 @@ function sanitizeBrokerContact(value) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The broker-contact columns a non-Super-Admin must not receive in full.
+//
+// ⚠️ THIS IS A UNION RESOLVED BY NAME, NEVER `headers.find(...)`. The previous
+// version picked ONE column per role with two loose regexes:
+//
+//     const brokerCol = headers.find((h) => /broker/i.test(h));
+//     const phoneCol  = headers.find((h) => /phone|contact/i.test(h));
+//
+// and against production's real 26-column Job Tracking header row —
+// … "Broker Contact Name", "Phone Number", "Email" … — `/phone|contact/i`
+// matched "Broker **Contact** Name" FIRST, because it sorts before "Phone
+// Number". So both lookups resolved to the SAME column, and the function did the
+// exact inverse of its job:
+//   • the name column was blanked (it is not JSON, so it took the else branch),
+//   • and "Phone Number" and "Email" were never referenced by any lookup at all,
+//     so they were served IN FULL to every non-Super-Admin caller.
+// The harmless column was redacted and the two it exists to protect were
+// published. This is the same class of bug as the `pickAddressColumn` note
+// below, where a naive `headers.find(/pickup/i)` grabbed a broker-reference
+// column instead of the address — first-regex-wins over a 26-column sheet.
+//
+// The fix is a UNION: every matching column is withheld, so no column can be
+// shadowed by an earlier one. That makes the set a strict SUPERSET of what the
+// old code redacted on any sheet, i.e. this change can only ever narrow what is
+// served — it cannot widen it. `/contact/i` is deliberately kept for that
+// reason (a "Contact Number" column on some other sheet was redacted before and
+// still is); it is simply no longer allowed to *shadow* the phone column.
+//
+// DELIBERATE, not accidental: "Broker Contact Name" IS withheld. It was blanked
+// only by the bug above, but that is what every non-Super-Admin sees today, so
+// keeping it withheld makes this change strictly narrowing — no UI that already
+// copes with an empty cell regresses, and no new disclosure ships inside a leak
+// fix. It is also the coherent line: the control exists so dispatch cannot route
+// around the company to the broker, and a named agent at a known brokerage is a
+// directly actionable contact, so publishing the person while hiding the channel
+// is a weak boundary. Revealing it to Dispatchers is a product decision and
+// belongs in its own change, with the owner.
+//
+// ⚠️ `Contract ID`, `"  Payment  "` (real surrounding spaces) and `Owner ID`
+// match nothing here and are untouched — verified against the header row above.
+//
+// ⚠️ ONE SOURCE FOR READER AND WRITER. PUT /api/data/:rowIndex splices the real
+// values back in so a non-Super-Admin's save cannot overwrite the full record
+// with the redacted copy they were served. That path used its own hardcoded
+// `/broker|phone|contact/i`, which does NOT match "Email" — so widening the
+// redaction without it would have turned a disclosure bug into DATA LOSS: a
+// Dispatcher saving a row would write "" over the stored email. Both sides now
+// call this resolver.
+// ---------------------------------------------------------------------------
+const BROKER_WITHHELD_RE = /broker|phone|e-?mail|contact|\bfax\b|mobile|\bcell\b/i;
+function resolveBrokerWithheldColumns(headers) {
+	return (headers || []).filter((h) => BROKER_WITHHELD_RE.test(String(h == null ? "" : h)));
+}
+
 function sanitizeBrokerColumns(headers, rows) {
-	const brokerCol = (headers || []).find((h) => /broker/i.test(h)) || null;
-	const phoneCol = (headers || []).find((h) => /phone|contact/i.test(h)) || null;
-	if (!brokerCol && !phoneCol) return rows;
+	const withheld = resolveBrokerWithheldColumns(headers);
+	if (!withheld.length) return rows;
 	return rows.map((row) => {
 		const cleaned = { ...row };
-		if (brokerCol && cleaned[brokerCol]) {
-			cleaned[brokerCol] = sanitizeBrokerContact(cleaned[brokerCol]);
-		}
-		if (phoneCol && cleaned[phoneCol]) {
-			const val = (cleaned[phoneCol] || "").trim();
-			if (val.startsWith("{")) {
-				cleaned[phoneCol] = sanitizeBrokerContact(val);
-			} else {
-				cleaned[phoneCol] = "";
-			}
+		for (const col of withheld) {
+			if (!cleaned[col]) continue;
+			const val = String(cleaned[col]).trim();
+			// A legacy cell carrying a JSON contact blob degrades to just the
+			// name rather than vanishing — blanking it outright would destroy
+			// the load's broker association wholesale. Production's Job Tracking
+			// carries no such cell (the name column holds a plain string), so
+			// this branch is compatibility for older/other sheets and is left
+			// exactly as it behaved before.
+			cleaned[col] = val.startsWith("{") ? sanitizeBrokerContact(val) : "";
 		}
 		return cleaned;
 	});
