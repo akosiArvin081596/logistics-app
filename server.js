@@ -1,3 +1,40 @@
+// ---------------------------------------------------------------------------
+// PROCESS UMASK — must be the FIRST executable statement in this file.
+//
+// WHY. Node creates files as `0666 & ~umask` and directories as `0777 & ~umask`,
+// and pm2 inherits root's default `umask 022` — so every expense receipt, POD,
+// chat attachment, invoice PDF, signed W-9 and the SQLite database itself landed
+// mode 0644: world-readable, on a box with four non-root login accounts. The
+// one-time remediation (PR #271) chmodded the whole tree to 0640 files / 0750
+// dirs, but that is point-in-time: the very next upload re-published PII,
+// because nothing changed how new files are CREATED. 027 is the create-time
+// half of that fix, and the two must agree — 027 yields exactly 0640/0750.
+//
+// ⚠️ ORDERING IS THE WHOLE CONTROL. umask applies only to files created AFTER
+// it is set, so "late" is identical to "absent" for anything made during boot —
+// notably `new Database(...)` (app.db + -wal + -shm), the uploads directory
+// mkdirs, and any module that writes a cache on require. Hence line 1, above
+// even dotenv. Do not move this below the requires.
+//
+// ⚠️ THIS IS COUPLED TO RUNNING AS ROOT. The service runs as root under pm2, so
+// 0640 root-owned files are readable by the process that serves them, and nginx
+// here is proxy-only (no `root`/`alias`/`/uploads` block), so nginx never opens
+// them itself. The day this moves to a non-root user, 0640 root-owned files lock
+// the app out of its own uploads: whoever does that must re-own/re-permission
+// `app.db`, `uploads/` and `evidence-archive/` in the same change.
+//
+// Not applied to `client/dist` — that is built by a separate `npm run build`
+// process at deploy time, and is served by this app (root), not by nginx.
+// ---------------------------------------------------------------------------
+const BOOT_UMASK = 0o027;
+let bootUmaskPrevious = null;
+try {
+	// process.umask(mask) returns the PREVIOUS mask. It is a no-op on Windows.
+	bootUmaskPrevious = process.umask(BOOT_UMASK);
+} catch (err) {
+	console.error(`WARNING: could not set umask ${BOOT_UMASK.toString(8)} — new files may be world-readable:`, err.message);
+}
+
 require("dotenv").config();
 const express = require("express");
 const http = require("http");
@@ -2793,7 +2830,15 @@ try { db.exec("ALTER TABLE invoices ADD COLUMN render_data TEXT DEFAULT '{}'"); 
 
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_driver ON invoices(driver)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_week ON invoices(week_start, week_end)`); } catch {}
-db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_driver_week ON invoices(driver, week_start)`);
+// Bootstrap only — a fresh install has no `deleted_at`/`is_manual` columns yet
+// (they are ALTERed in below), so the partial NOCASE form cannot be created
+// here. The migration further down is the authority and re-asserts the final
+// shape on every boot; this line is a no-op on any database that has run it,
+// because the name already exists. Wrapped like its two siblings above so a
+// pathological row can never turn the bootstrap into a boot crash.
+try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_driver_week ON invoices(driver, week_start)`); } catch (err) {
+	console.error("invoices driver/week bootstrap index skipped:", err.message);
+}
 
 // Invoice management suite (owner requests 2026-06-11) — all additive ALTERs,
 // idempotent via try-catch, backward compatible.
@@ -2808,21 +2853,141 @@ try { db.exec("ALTER TABLE invoices ADD COLUMN delete_reason TEXT DEFAULT ''"); 
 // list/submit/approve/PDF pipeline as generated weekly invoices.
 try { db.exec("ALTER TABLE invoices ADD COLUMN is_manual INTEGER DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE invoices ADD COLUMN created_by TEXT DEFAULT ''"); } catch {}
-// Re-scope the one-invoice-per-driver-week guarantee to LIVE generated weekly
-// invoices only: a soft-deleted row must not block a regenerate, and manual
-// invoices may coexist with a weekly invoice (or each other) for the same
-// payee/period. SQLite can't alter an index, so drop + recreate as a partial
-// index under the same name (the plain CREATE IF NOT EXISTS above stays a
-// no-op on later boots because the name already exists).
+// ---------------------------------------------------------------------------
+// idx_invoices_driver_week — the one-invoice-per-driver-week constraint.
+//
+// Two properties, applied together because they were introduced apart:
+//
+//  1. PARTIAL — scoped to LIVE GENERATED weekly invoices. A soft-deleted row
+//     must not block a regenerate, and manual invoices (is_manual = 1, free-text
+//     payee) may coexist with a weekly invoice, or each other, for the same
+//     payee/period.
+//
+//  2. NOCASE — `invoices.driver` is a money join key and every reader folds case
+//     (`driverOwnsInvoice()`, `normalizeDriverName()`, `LOWER(driver) = ?`).
+//     The index did not. That is the worst combination: the readers merge the
+//     spellings while the constraint permits them, so `"Shorn King"` and
+//     `"shorn king"` are two index entries and a SECOND live weekly invoice for
+//     one driver-week is structurally insertable. Production carries exactly one
+//     mixed-case row (invoice #40, PAID, inside two locked periods) beside 13
+//     lowercase rows for the same driver.
+//
+// ⚠️ THIS IS NOT A SUBSTITUTE FOR THE READER FIX, and adding it does not change
+// any query's semantics. In SQLite the collation used by `driver = ?` comes from
+// the COLUMN's declared collation, never from an index — an index only has to
+// have a compatible collation to be USABLE for that comparison. So the readers
+// still have to fold case themselves (they do, via `driverOwnsInvoice()`); this
+// is purely the WRITE-side constraint that stops the second row existing.
+//
+// ⚠️ THE MIGRATION SHAPE IS THE POINT. The previous version did
+// `DROP INDEX` then `CREATE UNIQUE INDEX` as two statements, not in a
+// transaction, inside a catch that only console.error'd and let boot continue —
+// so a failure landing between them left the table with NO UNIQUE INDEX AT ALL,
+// silently, which is strictly weaker than never migrating. Three rules follow:
+//
+//   (a) COLLISION PRE-FLIGHT FIRST. Fold-to-one-name duplicates already in the
+//       table would make the CREATE throw. Detect them, abort LOUDLY, and leave
+//       the existing index untouched — never "resolve" them: which spelling is
+//       the real driver is a business question, and both rows are money.
+//       Scoped to `deleted_at = '' AND is_manual = 0`, exactly the index's own
+//       predicate, so a soft-deleted or manual row can never block the upgrade.
+//   (b) CREATE THE REPLACEMENT UNDER A TEMPORARY NAME FIRST, verify, and only
+//       then drop the old one and re-create under the canonical name. SQLite
+//       cannot rename an index, so create-then-drop is the ONLY ordering under
+//       which the table is never left unprotected: the temp index covers exactly
+//       the same rows, so it holds the constraint across the window where the
+//       canonical name does not exist. It is dropped last, and if any step
+//       fails it is deliberately LEFT IN PLACE — a duplicate constraint is
+//       harmless, an absent one is the bug.
+//   (c) THE REBUILD PREDICATE MUST TEST BOTH PROPERTIES. It used to test only
+//       `/\bWHERE\b/`, which is true forever once the partial index exists —
+//       so this migration would have been dead on arrival, never firing on any
+//       database that had already been upgraded (i.e. all of them).
+// ---------------------------------------------------------------------------
+const INVOICE_WEEK_IDX = "idx_invoices_driver_week";
+const INVOICE_WEEK_IDX_TMP = "idx_invoices_driver_week_migrating";
+const INVOICE_WEEK_IDX_COLS = `invoices(driver COLLATE NOCASE, week_start) WHERE deleted_at = '' AND is_manual = 0`;
+// ⚠️ IDENTIFIER INTERPOLATED INTO SQL — one of only two in this file, and this
+// is why it is safe. `name` is never caller-, request- or database-supplied: the
+// only two arguments this function is ever given are the module constants
+// INVOICE_WEEK_IDX and INVOICE_WEEK_IDX_TMP declared immediately above, both
+// hardcoded literals. It runs once at boot, before any listener exists.
+//
+// It is written this way because a bound parameter cannot carry an INDEX NAME in
+// the sibling CREATE/DROP statements, so the constants have to be interpolated
+// there regardless; matching that here keeps one spelling of the name.
+//
+// WHAT WOULD MAKE IT UNSAFE: passing anything derived from `req`, from a sheet,
+// or from a query result — including a name read back out of sqlite_master.
+// If this ever needs a dynamic name, whitelist it against those two constants
+// first (`if (name !== INVOICE_WEEK_IDX && name !== INVOICE_WEEK_IDX_TMP) throw`).
+// Note the VALUE half here could be parameterised (`name = ?`) even though the
+// DDL identifiers cannot — do that as well if the argument ever stops being a
+// constant.
+function invoiceWeekIndexSql(name) {
+	return `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = '${name}'`;
+}
+function invoiceWeekIndexIsCurrent(name) {
+	const row = db.prepare(invoiceWeekIndexSql(name)).get();
+	const sql = row && row.sql ? row.sql : "";
+	// (c) BOTH properties, or the predicate is false-forever on one of them.
+	return /\bWHERE\b/i.test(sql) && /\bNOCASE\b/i.test(sql);
+}
 try {
-	const driverWeekIdx = db.prepare(
-		"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_invoices_driver_week'"
-	).get();
-	if (!driverWeekIdx || !/\bWHERE\b/i.test(driverWeekIdx.sql || "")) {
-		db.exec("DROP INDEX IF EXISTS idx_invoices_driver_week");
-		db.exec("CREATE UNIQUE INDEX idx_invoices_driver_week ON invoices(driver, week_start) WHERE deleted_at = '' AND is_manual = 0");
+	if (!invoiceWeekIndexIsCurrent(INVOICE_WEEK_IDX)) {
+		// (a) Pre-flight. LOWER() and COLLATE NOCASE fold the same set of
+		// characters in SQLite (ASCII A-Z only), so this counts exactly what the
+		// index would refuse.
+		const clashes = db.prepare(`
+			SELECT LOWER(driver) AS driver_folded, week_start, COUNT(*) AS n
+			FROM invoices
+			WHERE deleted_at = '' AND is_manual = 0
+			GROUP BY LOWER(driver), week_start
+			HAVING n > 1
+		`).all();
+		if (clashes.length) {
+			const named = clashes.map((c) => `${JSON.stringify(c.driver_folded)} week ${c.week_start} (${c.n} rows)`).join("; ");
+			console.error(
+				`invoices unique-index migration SKIPPED — ${clashes.length} driver-week collision${clashes.length === 1 ? "" : "s"} ` +
+				`would violate a case-insensitive ${INVOICE_WEEK_IDX}: ${named}. ` +
+				`The existing index is intact and unchanged. Soft-delete or correct the duplicate invoices, then restart. ` +
+				`Do NOT resolve these automatically — which spelling is the real driver is a business decision and both rows carry money.`
+			);
+		} else {
+			// (b) Temp first. IF NOT EXISTS so a run interrupted midway resumes
+			// cleanly rather than throwing on a leftover temp index.
+			db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${INVOICE_WEEK_IDX_TMP} ON ${INVOICE_WEEK_IDX_COLS}`);
+			if (!invoiceWeekIndexIsCurrent(INVOICE_WEEK_IDX_TMP)) {
+				throw new Error(`${INVOICE_WEEK_IDX_TMP} did not materialise — refusing to drop ${INVOICE_WEEK_IDX}`);
+			}
+			// From here the table is covered by the temp index no matter what.
+			db.exec(`DROP INDEX IF EXISTS ${INVOICE_WEEK_IDX}`);
+			db.exec(`CREATE UNIQUE INDEX ${INVOICE_WEEK_IDX} ON ${INVOICE_WEEK_IDX_COLS}`);
+			if (!invoiceWeekIndexIsCurrent(INVOICE_WEEK_IDX)) {
+				throw new Error(`${INVOICE_WEEK_IDX} did not materialise — leaving ${INVOICE_WEEK_IDX_TMP} in place`);
+			}
+			db.exec(`DROP INDEX IF EXISTS ${INVOICE_WEEK_IDX_TMP}`);
+			console.log(`Migrated ${INVOICE_WEEK_IDX}: now case-insensitive (driver COLLATE NOCASE, week_start) over live generated invoices`);
+		}
+	} else {
+		// (d) SWEEP THE TEMP INDEX ON THE ALREADY-CURRENT PATH. Every step above is
+		// resumable EXCEPT the last one: if that final DROP is the thing that fails
+		// (or the process dies between it and the line before), the canonical index
+		// is already current, so the next boot takes THIS branch, skips the whole
+		// block, and the temp index survives forever — never revisited by anything.
+		// Harmless (it is a duplicate of a constraint already enforced) but
+		// permanent, and it costs a second write on every invoice insert.
+		//
+		// Safe precisely because it is guarded by invoiceWeekIndexIsCurrent(): the
+		// canonical index has been verified NOCASE + partial, so it is holding the
+		// constraint on its own and the temp is pure redundancy. This is the one
+		// state in which dropping it cannot leave the table unprotected — which is
+		// why the failure path above still deliberately leaves it in place.
+		db.exec(`DROP INDEX IF EXISTS ${INVOICE_WEEK_IDX_TMP}`);
 	}
 } catch (err) {
+	// The temp index is intentionally NOT cleaned up here: if we failed after
+	// creating it, it is the only thing still enforcing the constraint.
 	console.error("invoices unique-index migration failed:", err.message);
 }
 
@@ -2908,6 +3073,25 @@ try {
 	`);
 	db.pragma("foreign_keys = ON");
 }
+
+// Soft delete for investor applications. Same shape as `job_applications`
+// (NULL = live; every reader filters `deleted_at IS NULL`), so recovery is one
+// UPDATE away and there is a `/restore` route for it.
+//
+// ⚠️ SOFT, NEVER HARD. `investor_onboarding` and `investor_onboarding_documents`
+// both declare FOREIGN KEY (application_id) REFERENCES investor_applications(id)
+// and `foreign_keys = ON`, so a hard DELETE either raises a constraint error for
+// exactly the applications that got furthest — the ones carrying signed
+// documents — or, with a cascade, destroys signed evidence. Neither is
+// acceptable for a table whose purpose was only ever "this is spam, or a
+// duplicate, get it off my list".
+//
+// ⚠️ THIS ALTER MUST STAY BELOW THE RENAME-RECREATE ABOVE. That migration
+// copies rows with an EXPLICIT column list ending `vehicles_json, status,
+// created_at` — so a column added before it is silently dropped on any database
+// that still needs the CHECK rebuild.
+try { db.exec("ALTER TABLE investor_applications ADD COLUMN deleted_at DATETIME DEFAULT NULL"); } catch { /* exists */ }
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_ia_deleted_at ON investor_applications(deleted_at)"); } catch {}
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_onboarding (
@@ -7332,12 +7516,31 @@ const onboardingSignLimiter = rateLimit({
 });
 
 // Helper: verify investor access token
+//
+// ⚠️ A SOFT-DELETED APPLICATION'S TOKEN NO LONGER AUTHORIZES ANYTHING. This is
+// the deliberate answer to "does the bearer credential survive the delete?", and
+// it is decided HERE because this is the single choke point every public
+// onboarding route passes through — the alternative is five copies of the rule.
+//
+// The token is not merely disclosive. It is a NON-EXPIRING bearer credential
+// accepted with no session at all, and it authorizes e-signing as that investor
+// and `POST …/banking`, which rewrites where money is sent. Soft-deleting is an
+// admin asserting "this application is spam, or a duplicate, or not real";
+// continuing to honour a write credential attached to it would mean a deleted
+// application could still sign contracts and nominate a bank account. Restoring
+// the row restores the token unchanged, so nothing is lost — the credential is
+// suspended with the record, not revoked from it.
+//
+// ⚠️ REFUSED AS 404, NOT 403, and via the same branch as a non-existent id. A
+// distinct status or message would turn this into an oracle for "an application
+// with this id exists but was removed" against an unauthenticated route. Same
+// rule the signed-document guards follow: a 403 confirms the thing exists.
 function verifyInvestorToken(req, res) {
 	const appId = parseInt(req.params.id);
 	const token = req.query.token || req.body?.accessToken || req.headers["x-access-token"] || "";
 	if (!appId || isNaN(appId)) { res.status(400).json({ error: "Invalid application ID" }); return null; }
-	const app = db.prepare("SELECT id, access_token FROM investor_applications WHERE id = ?").get(appId);
-	if (!app) { res.status(404).json({ error: "Application not found" }); return null; }
+	const app = db.prepare("SELECT id, access_token, deleted_at FROM investor_applications WHERE id = ?").get(appId);
+	if (!app || app.deleted_at) { res.status(404).json({ error: "Application not found" }); return null; }
 	if (!app.access_token || app.access_token !== token) { res.status(403).json({ error: "Invalid access token" }); return null; }
 	return appId;
 }
@@ -8645,11 +8848,17 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 // Admin: list investor applications
 app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => {
 	try {
+		// `?include_deleted=true` is how an admin FINDS a row to restore, exactly
+		// as GET /api/applications does. This is the only investor-application
+		// reader that offers the escape hatch: it is a list, so it cannot be used
+		// to pull one specific removed record, and without it a soft delete would
+		// be indistinguishable from a hard one.
+		const includeDeleted = req.query.include_deleted === "true";
 		const apps = db.prepare(`SELECT ia.*, io.status AS onboarding_status,
 			(SELECT COUNT(*) FROM investor_onboarding_documents WHERE application_id=ia.id AND signed=1) AS signed_count
 			FROM investor_applications ia
 			LEFT JOIN investor_onboarding io ON io.application_id = ia.id
-			WHERE ia.status != 'Draft'
+			WHERE ia.status != 'Draft'${includeDeleted ? "" : " AND ia.deleted_at IS NULL"}
 			ORDER BY ia.created_at DESC`).all();
 		// The LIST leaks more than the detail view did: `SELECT ia.*` carries
 		// ein_ssn for EVERY application and fires on page load, so simply opening
@@ -8678,12 +8887,18 @@ app.get("/api/investor-applications", requireRole("Super Admin"), (req, res) => 
 app.get("/api/investor-applications/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		const appId = parseInt(req.params.id);
+		// ⚠️ The detail route filters too. Filtering only the LIST is the classic
+		// half-done soft delete: the row disappears from the screen and stays
+		// fully readable — tax id, banking, signed documents — to anyone who kept
+		// or guessed the id. `?include_deleted=true` is honoured so the restore UI
+		// can show what it is about to bring back, and nothing else uses it.
+		const includeDeleted = req.query.include_deleted === "true";
 		const application = db.prepare(`SELECT ia.*, io.status AS onboarding_status,
 			(SELECT COUNT(*) FROM investor_onboarding_documents WHERE application_id=ia.id AND signed=1) AS signed_count
 			FROM investor_applications ia
 			LEFT JOIN investor_onboarding io ON io.application_id = ia.id
 			WHERE ia.id = ?`).get(appId);
-		if (!application) return res.status(404).json({ error: "Application not found" });
+		if (!application || (application.deleted_at && !includeDeleted)) return res.status(404).json({ error: "Application not found" });
 		let vehicles = [];
 		try { vehicles = JSON.parse(application.vehicles_json || "[]"); } catch { /* skip */ }
 		const banking = db.prepare("SELECT bank_name, account_type, routing_number, account_number, account_name FROM investor_payment_info WHERE application_id=?").get(appId) || {};
@@ -8714,8 +8929,13 @@ app.get("/api/investor-applications/:id/sensitive", requireRole("Super Admin"), 
 	try {
 		const appId = Number(req.params.id);
 		if (!Number.isFinite(appId) || appId <= 0) return res.status(400).json({ error: "Invalid application id" });
-		const application = db.prepare("SELECT id, legal_name, ein_ssn FROM investor_applications WHERE id = ?").get(appId);
-		if (!application) return res.status(404).json({ error: "Application not found" });
+		// ⚠️ NO include_deleted ESCAPE HATCH HERE, unlike the list and detail
+		// routes. This is the audited full-PII reveal — tax id plus routing and
+		// account numbers — and there is no legitimate reason to unmask an
+		// application an admin has removed as spam or a duplicate. Restore is one
+		// call away and leaves a record of who did it, which is the point.
+		const application = db.prepare("SELECT id, legal_name, ein_ssn, deleted_at FROM investor_applications WHERE id = ?").get(appId);
+		if (!application || application.deleted_at) return res.status(404).json({ error: "Application not found" });
 		const banking = db.prepare("SELECT routing_number, account_number FROM investor_payment_info WHERE application_id = ?").get(appId) || {};
 		logAudit(req, "reveal_investor_pii", "investor_application", appId,
 			`Revealed EIN/SSN + banking for ${application.legal_name || "application " + appId} from ${req.ip || "unknown ip"}`);
@@ -8731,6 +8951,210 @@ app.get("/api/investor-applications/:id/sensitive", requireRole("Super Admin"), 
 	}
 });
 
+// Admin: remove an investor application from the list.
+//
+// SOFT, and that is forced by the schema as much as by taste: three tables
+// (`investor_onboarding`, `investor_onboarding_documents`, `investor_payment_info`)
+// declare FOREIGN KEY (application_id) REFERENCES investor_applications(id) with
+// `foreign_keys = ON`, so a hard DELETE would raise a constraint error for
+// exactly the applications that got furthest — the ones carrying signed
+// documents — while a cascade would destroy signed evidence. The public
+// application form is unauthenticated, so spam and duplicates are routine, and
+// until now there was NO delete route at all: a junk row was permanent.
+//
+// Mirrors DELETE /api/applications/:id exactly (status/reason-free, audited,
+// reversible by POST …/restore).
+app.delete("/api/investor-applications/:id", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		if (!Number.isInteger(id) || id <= 0) {
+			return res.status(400).json({ error: "Invalid application id" });
+		}
+		const row = db.prepare("SELECT legal_name, status FROM investor_applications WHERE id = ?").get(id);
+		// ⚠️ REPORT WHAT THIS SUSPENDS — do not refuse, and do not stay silent.
+		// Removing an application that is mid-onboarding also stops the
+		// investor's existing link working (see verifyInvestorToken), which is a
+		// support incident nobody would connect back to this click. A refusal is
+		// the wrong answer — a duplicate that was mistakenly Accepted is exactly
+		// what an admin needs to remove — so the caller is told instead, and
+		// restore is one call away.
+		const signedCount = db.prepare(
+			"SELECT COUNT(*) AS c FROM investor_onboarding_documents WHERE application_id = ? AND signed = 1"
+		).get(id)?.c || 0;
+		const onboarding = db.prepare("SELECT status FROM investor_onboarding WHERE application_id = ?").get(id);
+		const result = db.prepare(
+			"UPDATE investor_applications SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
+		).run(id);
+		if (result.changes === 0) {
+			return res.status(404).json({ error: "Application not found or already deleted" });
+		}
+		const warnings = [];
+		if (signedCount) warnings.push(`${signedCount} signed document${signedCount === 1 ? "" : "s"} stay on file and are unaffected, but are no longer reachable from the applications list.`);
+		if (onboarding && onboarding.status !== "fully_onboarded") warnings.push("Onboarding was still in progress — the investor's existing onboarding link will stop working until this is restored.");
+		if (row?.status === "Accepted") warnings.push("This application was already Accepted; any user account created from it is unaffected and still works.");
+
+		// Named in the audit line because the delete also SUSPENDS a live bearer
+		// credential — a later reader needs to know the investor's onboarding link
+		// stopped working, and why.
+		logAudit(req, "soft_delete_investor_application", "investor_application", id,
+			`Removed ${row?.legal_name || id} (status ${row?.status || "unknown"}) from the list; its onboarding access token no longer authorizes signing or banking changes` +
+			(signedCount ? `; ${signedCount} signed document(s) retained` : ""));
+		res.json({ success: true, warnings });
+	} catch (err) {
+		console.error("investor application soft-delete failed:", err);
+		res.status(500).json({ error: "Delete failed. Please try again." });
+	}
+});
+
+// Restore a soft-deleted investor application. The access_token is deliberately
+// NOT regenerated: it was suspended with the record, not revoked from it, so the
+// onboarding link the investor already has starts working again.
+app.post("/api/investor-applications/:id/restore", requireRole("Super Admin"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		if (!Number.isInteger(id) || id <= 0) {
+			return res.status(400).json({ error: "Invalid application id" });
+		}
+		const row = db.prepare("SELECT legal_name FROM investor_applications WHERE id = ?").get(id);
+		const result = db.prepare("UPDATE investor_applications SET deleted_at = NULL WHERE id = ?").run(id);
+		if (result.changes === 0) {
+			return res.status(404).json({ error: "Application not found" });
+		}
+		logAudit(req, "restore_investor_application", "investor_application", id,
+			`Restored ${row?.legal_name || id} from soft-delete; its onboarding access token authorizes again`);
+		res.json({ success: true });
+	} catch (err) {
+		console.error("investor application restore failed:", err);
+		res.status(500).json({ error: "Restore failed. Please try again." });
+	}
+});
+
+// ============================================================
+// GET /api/admin/orphaned-signed-artifacts — signed PDFs on disk with no row
+// ============================================================
+// Production carries 54 signed artifacts (of 88) that no database row points at
+// — 13 W-9s with an SSN or EIN flattened into the IRS AcroForm, 7 contractor
+// agreements carrying bank routing and account numbers. They all date from one
+// seven-day window (2026-04-07 → 2026-04-13), and `onboarding_documents` holding
+// exactly 25 rows = 5 users × 5 doc types says the database was rolled back or
+// replaced while `uploads/` persisted.
+//
+// ⚠️ NOTHING IN THIS CODEBASE EVER DELETES A SIGNED ARTIFACT — zero
+// `DELETE FROM onboarding_documents`, zero `fs.unlink` against either signed
+// directory. So the mechanism that produced them is UNFIXED; it simply has not
+// fired since. Any future restore, rollback or environment refresh produces new
+// orphans on identical terms, which is why this is a RECONCILER and not a
+// deleter: it reports, a human decides. (`archiveSignedArtifact` only ever
+// copies, and the user-delete cascade above copies before removing a row, so
+// this route is also how you notice the copy that got left behind.)
+//
+// ⚠️ AUTHORITY IS THE DB ROW, NEVER THE FILENAME, AND IDS ARE NOT MATCHED ON.
+// `guardDriverSignedDoc` / `guardInvestorSignedDoc` resolve a request by looking
+// up `signed_pdf_url`, so "orphan" means exactly "no row carries this URL" —
+// which is the same question as "can anyone ever read this file over HTTP?"
+// (no: those guards fail closed). Parsing `${docKey}-${id}-signed.pdf` and
+// checking that the id exists would be a DIFFERENT and wrong test: the driver
+// filename's id is a `users.id` while the investor filename's is an
+// application id, the two id spaces are unrelated, and a file can be
+// unreferenced while its id is perfectly alive.
+//
+// Read-only, and it reports metadata only — never file contents.
+app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), (req, res) => {
+	try {
+		const scopes = [
+			{ scope: "driver", dir: "onboarding-signed", table: "onboarding_documents", owner: "user_id" },
+			{ scope: "investor", dir: "investor-onboarding-signed", table: "investor_onboarding_documents", owner: "application_id" },
+		];
+		const orphans = [];
+		const missing = [];
+		let filesScanned = 0;
+		let rowsScanned = 0;
+
+		for (const s of scopes) {
+			const absDir = path.join(__dirname, "uploads", s.dir);
+			// One membership SET per scope, built from the DB. A row-per-file query
+			// would be N lookups and, worse, would invite matching on something
+			// other than the URL.
+			let rows = [];
+			// ⚠️ IDENTIFIERS INTERPOLATED INTO SQL — the second and last of the two
+			// in this file, and safe for the same reason as invoiceWeekIndexSql().
+			// `s.table` and `s.owner` are read from the `scopes` array literal a few
+			// lines above, which is hardcoded in this handler: two fixed table names
+			// and two fixed column names. Nothing from `req` reaches this query — the
+			// route takes no parameters at all — so there is no input to inject with.
+			// A table name and a column name also cannot be bound as parameters in
+			// SQLite, so this could not be parameterised even if it were dynamic.
+			//
+			// WHAT WOULD MAKE IT UNSAFE: sourcing a scope from the request (say
+			// `?scope=` picking the table), from a config file, or from a
+			// sqlite_master listing. If scopes ever stop being literals, resolve them
+			// through a hardcoded allowlist map and interpolate only the matched
+			// constant — never the caller's string, even after "validation".
+			try {
+				rows = db.prepare(
+					`SELECT ${s.owner} AS owner_id, doc_key, COALESCE(signed_pdf_url, '') AS signed_pdf_url, signed
+					   FROM ${s.table} WHERE COALESCE(signed_pdf_url, '') <> ''`
+				).all();
+			} catch { rows = []; }   // table absent on this database
+			rowsScanned += rows.length;
+			const referenced = new Set(rows.map((r) => r.signed_pdf_url));
+
+			let files = [];
+			try { files = fs.readdirSync(absDir); } catch { files = []; }   // directory absent
+			for (const file of files) {
+				if (!/\.pdf$/i.test(file)) continue;
+				let stat;
+				try { stat = fs.statSync(path.join(absDir, file)); } catch { continue; }
+				if (!stat.isFile()) continue;
+				filesScanned++;
+				const url = `/uploads/${s.dir}/${file}`;
+				// Exact string equality, deliberately — it is the comparison the
+				// access guards make, so this answers the question they answer.
+				if (referenced.has(url)) continue;
+				orphans.push({
+					scope: s.scope,
+					dir: s.dir,
+					file,
+					url,
+					bytes: stat.size,
+					modifiedAt: new Date(stat.mtimeMs).toISOString(),
+					// Cheap, useful triage: a W-9 or a contractor agreement is a
+					// plaintext SSN/EIN or bank account sitting unreferenced.
+					confidential: isConfidentialOnboardingDoc(s.scope === "driver" ? "driver" : "investor", String(file).split("-")[0]),
+				});
+			}
+
+			// The other half of the reconciliation, and the more urgent one: a row
+			// asserting `signed = 1` whose artifact is not on disk. That is a legal
+			// claim with nothing behind it, which is exactly the state the
+			// signing_error columns were added to stop being silent about.
+			for (const r of rows) {
+				const base = path.basename(r.signed_pdf_url);
+				if (!base || base === "." || base === "..") continue;
+				if (fs.existsSync(path.join(absDir, base))) continue;
+				missing.push({ scope: s.scope, ownerId: r.owner_id, docKey: r.doc_key, url: r.signed_pdf_url, signed: !!r.signed });
+			}
+		}
+
+		orphans.sort((a, b) => String(a.modifiedAt).localeCompare(String(b.modifiedAt)));
+		res.json({
+			orphans,
+			count: orphans.length,
+			confidentialCount: orphans.filter((o) => o.confidential).length,
+			missing,
+			missingCount: missing.length,
+			filesScanned,
+			rowsScanned,
+			// The remedy, stated once so no caller has to invent one. Deleting is
+			// NOT it: some of these may be the only surviving record of an executed
+			// contract.
+			remedy: "Move orphans out of the web root (evidence-archive/signed-artifacts) rather than deleting them — an orphan may be the only surviving copy of an executed contract. Rows listed under `missing` assert a signature with no artifact behind them and should be regenerated or corrected.",
+		});
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // Admin: accept/reject investor application
 app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), async (req, res) => {
 	try {
@@ -8739,6 +9163,19 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 			return res.status(400).json({ error: "Invalid status" });
 		}
 		const appId = parseInt(req.params.id);
+		// ⚠️ CHECKED BEFORE THE UPDATE, and this is the reader where filtering
+		// matters most. `status = 'Accepted'` does not merely set a column: it
+		// CREATES A USER ACCOUNT, mints a temporary password and emails it. A
+		// removed application must never be able to do that, and the guard has to
+		// sit above the write because the status flip itself is what triggers it.
+		const target = db.prepare("SELECT id, deleted_at FROM investor_applications WHERE id = ?").get(appId);
+		if (!target) return res.status(404).json({ error: "Application not found" });
+		if (target.deleted_at) {
+			return res.status(409).json({
+				error: "This application was removed. Restore it first if the decision needs to change — POST /api/investor-applications/:id/restore.",
+				code: "APPLICATION_DELETED",
+			});
+		}
 		db.prepare("UPDATE investor_applications SET status=? WHERE id=?").run(status, appId);
 
 		if (status === "Accepted") {
@@ -16057,6 +16494,14 @@ function userDeleteLockBlockers(user, cascadeName) {
 		const locked = rows.filter(expenseRowPeriodLocked);
 		if (locked.length) blockers.push({
 			table: "expenses",
+			// ⚠️ EVERY BLOCKER CARRIES A CODE, so the handler can SELECT the response
+			// code instead of hardcoding one. Same reasoning as the rename planner:
+			// the moment one bucket refuses for a reason other than a closed month
+			// (see the INVOICE_ALREADY_PAID bucket in (4)), a hardcoded
+			// PERIOD_FINALIZED mislabels it and points the admin at a reopen that
+			// cannot help. PERIOD_FINALIZED still wins whenever it fires, so the wire
+			// contract is unchanged for every case that already existed.
+			code: "PERIOD_FINALIZED",
 			rows: locked.length,
 			periods: blockedExpensePeriods(locked),
 			detail: `${locked.length} expense row${locked.length === 1 ? "" : "s"} booked to a finalized month would be permanently deleted`,
@@ -16094,6 +16539,7 @@ function userDeleteLockBlockers(user, cascadeName) {
 		const paidRows = frozen.filter((r) => r.paid_at).length;
 		if (frozen.length) blockers.push({
 			table: "investor_payouts",
+			code: "PERIOD_FINALIZED",
 			rows: frozen.length,
 			paidRows,
 			periods: [...new Set(frozen.map((r) => r.period))].sort(),
@@ -16137,6 +16583,7 @@ function userDeleteLockBlockers(user, cascadeName) {
 			});
 			if (charged.length) blockers.push({
 				table: "trucks",
+				code: "PERIOD_FINALIZED",
 				rows: charged.length,
 				units: charged.map((t) => t.unit_number).filter(Boolean),
 				periods: [...new Set(charged.flatMap((t) => chargedMonths.get(t.id) || []))].sort(),
@@ -16145,7 +16592,126 @@ function userDeleteLockBlockers(user, cascadeName) {
 		}
 	}
 
+	// (4) invoices — the leg this guard missed entirely, and the driver-side twin
+	// of (2). The delete does NOT remove invoices (see the cascade below: they are
+	// issued documents and are deliberately retained), but it does STRAND them.
+	// `driverOwnsInvoice()` resolves ownership through the session's driverName,
+	// and `GET /api/invoices`'s non-Super-Admin branch scopes to
+	// `LOWER(driver) = <own name>` — so once the account is gone the rows sit in
+	// the table naming a person the app can no longer resolve. For a row already
+	// marked PAID that is the same event blocker (2) refuses: money left the bank
+	// against a document naming this driver, and the payee has to stay
+	// attributable.
+	//
+	// Same predicate as the rename planner (`invoiceRowPeriodLocked`) and the same
+	// three-way split by WHY the row is frozen, because the three have different
+	// remedies. Folding "already paid" into the finalized list would send an admin
+	// to reopen a month that is open — the exact mislabel namedLockedPeriods()
+	// exists to prevent. Live rows only: a soft-deleted invoice is already out of
+	// every list, so stranding it changes nothing.
+	if (cascadeName) {
+		const rows = db.prepare(
+			"SELECT id, invoice_number, week_start, week_end, COALESCE(paid_at, '') AS paid_at FROM invoices WHERE LOWER(driver) = ? AND deleted_at = ''"
+		).all(cascadeName);
+		const frozen = rows.filter(invoiceRowPeriodLocked);
+		const MONTH = /^\d{4}-\d{2}$/;
+		const monthLocked = (r) => {
+			const s = String(r.week_start || "").slice(0, 7), e = String(r.week_end || "").slice(0, 7);
+			return (MONTH.test(s) && isLocked(s)) || (MONTH.test(e) && isLocked(e));
+		};
+		const lockedByPeriod = frozen.filter(monthLocked);
+		const paidOnly = frozen.filter((r) => !monthLocked(r) && String(r.paid_at || "").trim());
+		const unresolvable = frozen.filter((r) => !monthLocked(r) && !String(r.paid_at || "").trim());
+		// ⚠️ TWO SENTINELS FOR ONE IDEA, AND THE HANDLER ONLY KNOWS ONE.
+		// namedLockedPeriods() emits "(unrecognized date)" where its sibling
+		// blockedExpensePeriods() — the source for blocker (1) — emits "(unknown)",
+		// and the 409 builder filters on "(unknown)". Unnormalised, the
+		// `unresolvable` bucket's sentinel survived that filter, got run through
+		// periodLabel() and was PRINTED AS IF IT WERE A REAL CLOSED MONTH, while
+		// `unresolved` stayed false so the sentence explaining it never fired — a
+		// refusal telling an admin to reopen a period that does not exist. Normalise
+		// here, exactly as PUT /api/users/:id does, rather than teaching the handler
+		// a second sentinel.
+		const asUnknown = (periods) => periods.map((p) => (p === "(unrecognized date)" ? "(unknown)" : p));
+		if (lockedByPeriod.length) blockers.push({
+			table: "invoices",
+			code: "PERIOD_FINALIZED",
+			rows: lockedByPeriod.length,
+			paidRows: lockedByPeriod.filter((r) => String(r.paid_at || "").trim()).length,
+			periods: asUnknown(namedLockedPeriods(lockedByPeriod.map((r) => [String(r.week_end || "").slice(0, 7), String(r.week_start || "").slice(0, 7)]))),
+			detail: `${lockedByPeriod.length} weekly invoice${lockedByPeriod.length === 1 ? "" : "s"} in a finalized month would be left naming a driver with no account`,
+		});
+		if (paidOnly.length) blockers.push({
+			table: "invoices",
+			// ⚠️ NOT PERIOD_FINALIZED. invoiceRowPeriodLocked() freezes on `paid_at`
+			// INDEPENDENTLY of any lock, so these rows can sit in a wide-open month —
+			// there is no period to name and nothing for a reopen to do. The rename
+			// planner split this out for exactly that reason; a delete that answered
+			// PERIOD_FINALIZED with an empty `periods` array sent an admin to reopen
+			// a period the refusal had not even claimed was closed.
+			code: "INVOICE_ALREADY_PAID",
+			rows: paidOnly.length,
+			paidRows: paidOnly.length,
+			periods: [],
+			detail: `${paidOnly.length} invoice${paidOnly.length === 1 ? "" : "s"} already marked PAID would be left unattributable — money moved against a document naming this driver`,
+		});
+		if (unresolvable.length) blockers.push({
+			table: "invoices",
+			code: "PERIOD_FINALIZED",
+			rows: unresolvable.length,
+			periods: asUnknown(namedLockedPeriods(unresolvable.map(() => []))),
+			detail: `${unresolvable.length} invoice${unresolvable.length === 1 ? "" : "s"} carry a billing week the server cannot resolve to a month`,
+		});
+	}
+
 	return { unreadable: false, blockers };
+}
+
+// ============================================================
+// DELETING AN ONBOARDED DRIVER — the FK-bearing children
+// ============================================================
+// `db.pragma("foreign_keys = ON")` plus three FKs on users(id) —
+// `driver_onboarding`, `onboarding_documents` and `driver_payment_info` (the
+// ONLY three; verified by grepping REFERENCES users) — meant `DELETE FROM users`
+// raised `FOREIGN KEY constraint failed` for anyone who had ever been onboarded.
+// The whole cascade rolled back and the route answered a 500 `DELETE_ROLLED_BACK`
+// naming no cause, so the observable bug was not orphaning: ONBOARDED DRIVERS
+// WERE SIMPLY UNDELETABLE, with no message saying why.
+//
+// ⚠️ THE SIGNED PDFs ARE NOT UNLINKED, AND THE ROWS ARE NOT DELETED BLINDLY.
+// `onboarding_documents.signed = 1` is described a few lines from its own CREATE
+// as "a legal assertion — this person signed this contract, and we hold the
+// document". Deleting the row while leaving the file behind produces exactly the
+// orphan class that put 54 unreferenced W-9s and contractor agreements on
+// production disk, because `guardDriverSignedDoc()` resolves authority from the
+// ROW: no row, no reader, ever. So every signed artifact is COPIED into
+// `evidence-archive/signed-artifacts/` first — the same mechanism, and the same
+// out-of-the-web-root directory, that document regeneration already uses to stop
+// a re-render destroying its predecessor.
+//
+// ⚠️ A FAILED ARCHIVE REFUSES THE DELETE, it does not proceed best-effort. The
+// regenerate route makes the identical call (503 ARCHIVE_FAILED) for the
+// identical reason: a "best-effort" archive that silently no-ops leaves precisely
+// the behaviour this exists to prevent.
+function archiveUserSignedArtifacts(userId) {
+	const dir = path.join(__dirname, "uploads", "onboarding-signed");
+	const rows = db.prepare(
+		"SELECT doc_key, doc_name, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND signed = 1 AND COALESCE(signed_pdf_url, '') <> ''"
+	).all(userId);
+	const archived = [];
+	for (const r of rows) {
+		// ⚠️ basename ONLY. `signed_pdf_url` is a stored `/uploads/…` string, and
+		// joining it straight onto __dirname would let a row written by any past
+		// or future code path steer the read. The directory is ours, not the
+		// row's; the row only names a file inside it.
+		const file = path.basename(String(r.signed_pdf_url || ""));
+		if (!file || file === "." || file === "..") continue;
+		const rec = archiveSignedArtifact(path.join(dir, file));
+		// null = nothing worth keeping (no file, or a stub that never passed the
+		// artifact tests). That is not a failure: there is no evidence to lose.
+		if (rec) archived.push({ docKey: r.doc_key, ...rec });
+	}
+	return archived;
 }
 
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
@@ -16222,12 +16788,30 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		});
 	}
 	if (lock.blockers.length) {
-		const named = [...new Set(lock.blockers.flatMap((b) => b.periods))].sort();
+		// Only a PERIOD_FINALIZED blocker may contribute a month to NAME — an
+		// INVOICE_ALREADY_PAID one carries no period by construction. Mirrors
+		// PUT /api/users/:id, which draws the same distinction.
+		const finalized = lock.blockers.filter((b) => b.code === "PERIOD_FINALIZED");
+		const named = [...new Set(finalized.flatMap((b) => b.periods))].sort();
 		const periods = named.filter((p) => p !== "(unknown)");
 		const unresolved = named.length !== periods.length;
-		const paidRows = lock.blockers.reduce((n, b) => n + (b.paidRows || 0), 0);
+		// ⚠️ An INVOICE_ALREADY_PAID blocker carries its count in `rows`, not
+		// `paidRows` — every row in it is paid by construction. Omitting it would
+		// leave `paidRows === 0` and print the reopen remedy for a condition
+		// reopening cannot fix.
+		const paidRows = lock.blockers.reduce(
+			(n, b) => n + (b.paidRows || 0) + (b.code === "INVOICE_ALREADY_PAID" ? b.rows : 0), 0);
 		const hasTrucks = lock.blockers.some((b) => b.table === "trucks");
 		const who = user.driver_name || user.username || `user ${id}`;
+
+		// ⚠️ SELECTED FROM THE BLOCKERS, NOT HARDCODED. PERIOD_FINALIZED wins
+		// whenever it fires — it is the stronger statement and the one with a
+		// defined remedy — but when the ONLY blocker is a paid invoice the honest
+		// code is INVOICE_ALREADY_PAID. Hardcoding answered PERIOD_FINALIZED with an
+		// EMPTY `periods` array for a block that came from invoices, and the remedy
+		// below then talked about investor payouts. Same fix, and the same reasoning,
+		// as the rename route's `code` selection.
+		const code = finalized.length ? "PERIOD_FINALIZED" : lock.blockers[0].code;
 
 		// The closed months get named; rows the guard withheld WITHOUT being able to
 		// name a month get their own sentence. Those are a data problem (an
@@ -16246,9 +16830,20 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		// no escape at all: the payee of money that left the bank has to stay
 		// attributable, which is why there is deliberately no force flag here.
 		const remedy = [];
-		if (paidRows) {
+		// ⚠️ THE PAID REMEDY IS PER-TABLE, NOT PER-COUNT. `paidRows` sums paid
+		// invoices as well as paid payouts, so a block coming purely from invoices
+		// printed the investor-payout sentence — an instruction with nothing to do
+		// with a driver's weekly invoice, and the delete route's version of the
+		// mislabel PUT /api/users/:id already fixed. Ask which table froze.
+		const paidPayoutRows = lock.blockers.filter((b) => b.table === "investor_payouts").reduce((n, b) => n + (b.paidRows || 0), 0);
+		const paidInvoiceRows = lock.blockers.filter((b) => b.table === "invoices").reduce((n, b) => n + (b.paidRows || 0) + (b.code === "INVOICE_ALREADY_PAID" ? b.rows : 0), 0);
+		if (paidPayoutRows) {
 			remedy.push("Payouts already marked PAID cannot be detached from their investor — this account has to stay in place.");
-		} else {
+		}
+		if (paidInvoiceRows) {
+			remedy.push(`${paidInvoiceRows} invoice${paidInvoiceRows === 1 ? " has" : "s have"} already been PAID — money moved against a document naming this driver, so ${paidInvoiceRows === 1 ? "it cannot" : "they cannot"} be left unattributable.`);
+		}
+		if (!paidRows) {
 			if (periods.length) remedy.push(`Reopen the affected period${periods.length === 1 ? "" : "s"} first — POST /api/periods/:period/reopen records a reason.`);
 			if (hasTrucks) remedy.push("Re-assign the trucks to their new owner deliberately, rather than letting this delete drop them to no owner.");
 			if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
@@ -16257,7 +16852,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 
 		return res.status(409).json({
 			error: `Cannot delete ${who}: ${lock.blockers.map((b) => b.detail).join("; ")}. ${cause} ${remedy.join(" ")}`.replace(/\s+/g, " ").trim(),
-			code: "PERIOD_FINALIZED",
+			code,
 			periods,
 			unresolved,
 			blockers: lock.blockers,
@@ -16281,7 +16876,29 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// The Sheets sync is deliberately OUTSIDE and AFTER: it is a network call to
 	// Google, it must not be inside a write lock, and it must not run at all if
 	// the local delete rolled back.
+	// ⚠️ ARCHIVE BEFORE THE TRANSACTION, AND REFUSE IF IT FAILS. Two reasons for
+	// the ordering. (i) A DB rollback cannot un-copy a file, so doing it first
+	// means the worst case is a spare copy of evidence in an operator-only
+	// directory — never a deleted row whose artifact was not saved. (ii) It is a
+	// filesystem call, and a throw inside db.transaction() would be reported as
+	// DELETE_ROLLED_BACK, which names the wrong cause.
+	let archivedArtifacts = [];
+	try {
+		archivedArtifacts = archiveUserSignedArtifacts(id);
+	} catch (arcErr) {
+		logAudit(req, "delete_user", "user", id,
+			`REFUSED to delete ${user.username}: could not archive the signed onboarding artifacts (${arcErr.code || "ARCHIVE_FAILED"})`);
+		return res.status(503).json({
+			error: "The signed onboarding documents could not be archived, so nothing was deleted. The account is untouched.",
+			code: "ARCHIVE_FAILED",
+			// A code, never err.message — that string carries the server's absolute
+			// path on EACCES/ENOSPC. These responses name labels, not values.
+			detail: arcErr.code || "unknown",
+		});
+	}
+
 	const removed = {};
+	const detached = {};
 	try {
 		db.transaction(() => {
 			if (name) {
@@ -16292,10 +16909,48 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
 				removed.documents = db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name).changes;
 				removed.trucks_unassigned = db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ?").run(name).changes;
+				// DETACH, not delete. `trucks.assigned_driver` is cleared on the line
+				// above, so leaving the OPEN truck_assignments row would make the two
+				// halves of one fact disagree — and resolveTruckForDriverName() reads
+				// both, which is precisely the divergence it was written to close.
+				// Closing the row with an end_date is what assignDriverToTruck() itself
+				// does on a reassignment (same column, same ISO stamp), so the history
+				// this table exists for — and getInvestorDriverSet()'s leg 1b, which
+				// decides which drivers an investor's payout covers — is preserved.
+				// Deleting the rows would retroactively narrow that set and restate
+				// open months.
+				detached.truck_assignments_closed = db.prepare(
+					"UPDATE truck_assignments SET end_date = ? WHERE LOWER(driver_name) = ? AND end_date = ''"
+				).run(new Date().toISOString(), name).changes;
 			}
+			// ⚠️ THE THREE FK-BEARING CHILDREN — without these the DELETE below
+			// raises FOREIGN KEY constraint failed and an onboarded driver simply
+			// cannot be removed. They are keyed on users.id, not on the name string,
+			// so they are exact and cannot catch a second person who shares a name.
+			//
+			// These ARE deleted rather than detached, and that is forced rather than
+			// chosen: all three declare `user_id INTEGER NOT NULL`, so there is no
+			// null to detach to, and 0 is not a valid parent either. The evidence is
+			// preserved out of band instead — the signed PDFs were copied into
+			// evidence-archive above and the originals are deliberately left on disk.
+			// driver_payment_info additionally holds bank routing + account numbers,
+			// so removing it with the account is a reduction in the plaintext-PII
+			// inventory, not a loss.
+			removed.onboarding_documents = db.prepare("DELETE FROM onboarding_documents WHERE user_id = ?").run(id).changes;
+			removed.driver_onboarding = db.prepare("DELETE FROM driver_onboarding WHERE user_id = ?").run(id).changes;
+			removed.driver_payment_info = db.prepare("DELETE FROM driver_payment_info WHERE user_id = ?").run(id).changes;
 			if (user.role === "Investor") {
 				removed.trucks_reparented = db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id).changes;
 				removed.investor_config = db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id).changes;
+				// `investors.user_id` is UNIQUE and nullable with NO foreign key, so
+				// the delete leaves it pointing at an id that no longer exists — a
+				// dangling pointer that the next account created with that id would
+				// silently inherit. NULL is the honest value and SQLite permits many
+				// of them under a UNIQUE index. The investor RECORD itself stays:
+				// carrier name, entity, tax classification and its `investor_payouts`
+				// history are the counterparty to settled money, and blocker (2)
+				// already refuses the delete outright when any of that is frozen.
+				detached.investors_unlinked = db.prepare("UPDATE investors SET user_id = NULL WHERE user_id = ?").run(id).changes;
 			}
 			db.prepare("DELETE FROM users WHERE id = ?").run(id);
 		})();
@@ -16304,6 +16959,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		return res.status(500).json({
 			error: "The delete could not be completed and was rolled back. Nothing was removed.",
 			code: "DELETE_ROLLED_BACK",
+			// The old response named no cause at all, which is how a FOREIGN KEY
+			// failure read as "the app is broken" rather than "this user is
+			// onboarded". SQLite's message is schema text, not user data.
+			detail: err.message,
 		});
 	}
 
@@ -16318,14 +16977,79 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	if (user.role === "Driver" && user.driver_name) {
 		syncDriverToCarrierSheet(user.driver_name, { action: "delete" });
 	}
+	// ============================================================
+	// WHAT IS DELIBERATELY LEFT BEHIND — reported, never silently dropped
+	// ============================================================
+	// Thirteen of the twenty DRIVER_RENAME_TARGETS are absent from the cascade,
+	// and for most of them absence is the RIGHT answer — but an admin cannot tell
+	// "we decided to keep this" from "we forgot", so the counts ship in the
+	// response and the audit line. Each is a per-table decision:
+	//
+	//  • invoices              — issued documents, some already PAID. Never
+	//                            deleted; frozen ones REFUSE the delete outright
+	//                            (blocker 4 above). What remains here is live
+	//                            invoices in open months, kept because a weekly
+	//                            pay document is a record, not session state.
+	//  • drivers_directory     — `pay_daily` / `pay_percentage` are settlement
+	//                            INPUTS: getDriverPayStructures() reads them and
+	//                            resolveDailyRate() falls back to the truck's rate
+	//                            without them, so deleting the row silently
+	//                            re-prices every still-open month this driver
+	//                            worked. A directory row with no user row is also
+	//                            an ordinary, documented state — that table has
+	//                            its own lifecycle.
+	//  • carrier_driver_history— getInvestorDriverSet() leg 3. Deleting it
+	//                            retroactively narrows which loads an investor's
+	//                            payout covers.
+	//  • job_applications      — its own soft-delete and its own route
+	//                            (DELETE /api/applications/:id). Bulk-matching it
+	//                            on `full_name` is the Deshorn/Shorn trap: two
+	//                            real people, one a substring of the other. An
+	//                            admin removes it deliberately, by id.
+	//  • load_ratings          — per-load feedback. Left for the same reason as
+	//                            the above: an irreversible delete needs a
+	//                            stronger reason than a harmless leave-behind.
+	//  • routemate_dvir /
+	//    routemate_hos_daily   — FMCSA-regulated inspection and duty-time records.
+	//                            Retention is not ours to decide.
+	//  • investor_payouts      — blocker (2) refuses the delete while any row is
+	//                            paid, finalized or in a locked month; anything
+	//                            still counted here is an open month, which the
+	//                            next reconcile recomputes.
+	//
+	// Read-only: this runs AFTER the delete, so `users` is already gone and these
+	// are pure counts.
+	const retained = {};
+	const countRetained = (label, sql, ...args) => {
+		try {
+			const n = db.prepare(sql).get(...args);
+			if (n && n.cnt > 0) retained[label] = n.cnt;
+		} catch { /* table absent on this database — nothing retained */ }
+	};
+	if (name) {
+		countRetained("invoices", "SELECT COUNT(*) AS cnt FROM invoices WHERE LOWER(driver) = ? AND deleted_at = ''", name);
+		countRetained("drivers_directory", "SELECT COUNT(*) AS cnt FROM drivers_directory WHERE LOWER(driver_name) = ?", name);
+		countRetained("carrier_driver_history", "SELECT COUNT(*) AS cnt FROM carrier_driver_history WHERE LOWER(driver_name) = ?", name);
+		countRetained("job_applications", "SELECT COUNT(*) AS cnt FROM job_applications WHERE LOWER(full_name) = ? AND deleted_at IS NULL", name);
+		countRetained("load_ratings", "SELECT COUNT(*) AS cnt FROM load_ratings WHERE LOWER(driver_name) = ?", name);
+		countRetained("routemate_dvir", "SELECT COUNT(*) AS cnt FROM routemate_dvir WHERE LOWER(driver_name) = ?", name);
+		countRetained("routemate_hos_daily", "SELECT COUNT(*) AS cnt FROM routemate_hos_daily WHERE LOWER(driver_name) = ?", name);
+	}
+	countRetained("investor_payouts", "SELECT COUNT(*) AS cnt FROM investor_payouts WHERE owner_id = ?", id);
+
 	// The most destructive action in the app previously left no trace at all.
 	// The per-table counts are the point: "deleted a user" does not tell a later
-	// reader that 40 receipts went with it.
+	// reader that 40 receipts went with it — nor that 13 invoices and a signed
+	// W-9's archive record did NOT go with it.
+	const tally = (obj) => Object.entries(obj).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ");
 	logAudit(req, "delete_user", "user", id,
 		`${user.role} ${user.username}${user.driver_name ? ` (${user.driver_name})` : ""} deleted; cascade: ` +
-		(Object.entries(removed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ") || "no rows"));
+		(tally(removed) || "no rows") +
+		(tally(detached) ? `; detached: ${tally(detached)}` : "") +
+		(archivedArtifacts.length ? `; signed artifacts archived: ${archivedArtifacts.map((a) => a.file).join(", ")}` : "") +
+		(tally(retained) ? `; retained (not deleted): ${tally(retained)}` : ""));
 	notifyChange("users");
-	res.json({ success: true, removed });
+	res.json({ success: true, removed, detached, retained, archivedArtifacts });
 });
 
 // List investor users (for owner dropdown)
@@ -21242,14 +21966,18 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// `5:5` returns 25). So `currentValues[i]` was undefined for every column
 		// past A, the `&& currentValues[i]` test never passed, and nothing was ever
 		// spliced back. Measured against production's layout, what a Dispatcher then
-		// wrote back was lossy: sanitizeBrokerColumns() picks its column with
+		// wrote back was lossy: sanitizeBrokerColumns() then picked its column with
 		// `headers.find(/phone|contact/i)`, which matches "Broker Contact Name"
 		// (it contains "Contact") BEFORE "Phone Number" — so the column actually
-		// redacted is Broker Contact Name, reduced by sanitizeBrokerContact() to
-		// `{"Name":…}`, and saving the row wrote that stripped copy over the stored
-		// `{"Name":…,"Email":…}`. ("Phone Number" is never reached, and so was never
-		// blanked.) Reading the real row above is what fixes it; the splice itself is
-		// unchanged, and its own /broker|phone|contact/i covers both columns.
+		// redacted was Broker Contact Name, and saving the row wrote that stripped
+		// copy over the stored value. Reading the real row above is what fixed the
+		// splice.
+		//
+		// ⚠️ THAT SHADOWING IS FIXED TOO — see resolveBrokerWithheldColumns().
+		// "Phone Number" and "Email" were reached by neither lookup, so they were
+		// served IN FULL to every non-Super-Admin caller; they are withheld now,
+		// which is exactly why the splice below must take its column list from the
+		// same resolver rather than carrying a second copy of the rule.
 		//
 		// ⚠️ RESTORE ONLY WHAT WAS REDACTED, not every matching column. Because the
 		// splice had never once run, "preserve broker columns" had never actually
@@ -21258,11 +21986,22 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// edit, answer {success:true}, and let the UI show the change until the next
 		// refresh. So the value is put back only when the caller sent back exactly
 		// the redacted copy GET /api/data served them; a genuine edit goes through.
+		//
+		// ⚠️ THE CANDIDATE SET IS DERIVED, NOT RE-SPELLED. This filter used to be
+		// its own hardcoded `/broker|phone|contact/i`, which does NOT match
+		// "Email" — so the moment the reader started redacting that column (it
+		// now does; it always should have), a Dispatcher's save would write ""
+		// straight over the stored address. A disclosure bug turns into DATA LOSS
+		// the instant the reader and the writer disagree about which columns were
+		// redacted, so both now ask resolveBrokerWithheldColumns(). The
+		// `served !== stored` test below remains the real authority; this is only
+		// the candidate list.
 		const preserved = [];
 		if (req.session.user.role !== "Super Admin") {
 			const servedRow = sanitizeBrokerColumns(headers, [rowObjectFromCells(headers, before)])[0] || {};
+			const withheldCols = new Set(resolveBrokerWithheldColumns(headers));
 			headers.forEach((h, i) => {
-				if (!/broker|phone|contact/i.test(h) || !before[i] || i >= values.length) return;
+				if (!withheldCols.has(h) || !before[i] || i >= values.length) return;
 				const stored = String(before[i]);
 				const served = servedRow[h] === undefined ? stored : String(servedRow[h]);
 				// Nothing was hidden from them for this column — let them edit it.
@@ -23512,22 +24251,76 @@ function sanitizeBrokerContact(value) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The broker-contact columns a non-Super-Admin must not receive in full.
+//
+// ⚠️ THIS IS A UNION RESOLVED BY NAME, NEVER `headers.find(...)`. The previous
+// version picked ONE column per role with two loose regexes:
+//
+//     const brokerCol = headers.find((h) => /broker/i.test(h));
+//     const phoneCol  = headers.find((h) => /phone|contact/i.test(h));
+//
+// and against production's real 26-column Job Tracking header row —
+// … "Broker Contact Name", "Phone Number", "Email" … — `/phone|contact/i`
+// matched "Broker **Contact** Name" FIRST, because it sorts before "Phone
+// Number". So both lookups resolved to the SAME column, and the function did the
+// exact inverse of its job:
+//   • the name column was blanked (it is not JSON, so it took the else branch),
+//   • and "Phone Number" and "Email" were never referenced by any lookup at all,
+//     so they were served IN FULL to every non-Super-Admin caller.
+// The harmless column was redacted and the two it exists to protect were
+// published. This is the same class of bug as the `pickAddressColumn` note
+// below, where a naive `headers.find(/pickup/i)` grabbed a broker-reference
+// column instead of the address — first-regex-wins over a 26-column sheet.
+//
+// The fix is a UNION: every matching column is withheld, so no column can be
+// shadowed by an earlier one. That makes the set a strict SUPERSET of what the
+// old code redacted on any sheet, i.e. this change can only ever narrow what is
+// served — it cannot widen it. `/contact/i` is deliberately kept for that
+// reason (a "Contact Number" column on some other sheet was redacted before and
+// still is); it is simply no longer allowed to *shadow* the phone column.
+//
+// DELIBERATE, not accidental: "Broker Contact Name" IS withheld. It was blanked
+// only by the bug above, but that is what every non-Super-Admin sees today, so
+// keeping it withheld makes this change strictly narrowing — no UI that already
+// copes with an empty cell regresses, and no new disclosure ships inside a leak
+// fix. It is also the coherent line: the control exists so dispatch cannot route
+// around the company to the broker, and a named agent at a known brokerage is a
+// directly actionable contact, so publishing the person while hiding the channel
+// is a weak boundary. Revealing it to Dispatchers is a product decision and
+// belongs in its own change, with the owner.
+//
+// ⚠️ `Contract ID`, `"  Payment  "` (real surrounding spaces) and `Owner ID`
+// match nothing here and are untouched — verified against the header row above.
+//
+// ⚠️ ONE SOURCE FOR READER AND WRITER. PUT /api/data/:rowIndex splices the real
+// values back in so a non-Super-Admin's save cannot overwrite the full record
+// with the redacted copy they were served. That path used its own hardcoded
+// `/broker|phone|contact/i`, which does NOT match "Email" — so widening the
+// redaction without it would have turned a disclosure bug into DATA LOSS: a
+// Dispatcher saving a row would write "" over the stored email. Both sides now
+// call this resolver.
+// ---------------------------------------------------------------------------
+const BROKER_WITHHELD_RE = /broker|phone|e-?mail|contact|\bfax\b|mobile|\bcell\b/i;
+function resolveBrokerWithheldColumns(headers) {
+	return (headers || []).filter((h) => BROKER_WITHHELD_RE.test(String(h == null ? "" : h)));
+}
+
 function sanitizeBrokerColumns(headers, rows) {
-	const brokerCol = (headers || []).find((h) => /broker/i.test(h)) || null;
-	const phoneCol = (headers || []).find((h) => /phone|contact/i.test(h)) || null;
-	if (!brokerCol && !phoneCol) return rows;
+	const withheld = resolveBrokerWithheldColumns(headers);
+	if (!withheld.length) return rows;
 	return rows.map((row) => {
 		const cleaned = { ...row };
-		if (brokerCol && cleaned[brokerCol]) {
-			cleaned[brokerCol] = sanitizeBrokerContact(cleaned[brokerCol]);
-		}
-		if (phoneCol && cleaned[phoneCol]) {
-			const val = (cleaned[phoneCol] || "").trim();
-			if (val.startsWith("{")) {
-				cleaned[phoneCol] = sanitizeBrokerContact(val);
-			} else {
-				cleaned[phoneCol] = "";
-			}
+		for (const col of withheld) {
+			if (!cleaned[col]) continue;
+			const val = String(cleaned[col]).trim();
+			// A legacy cell carrying a JSON contact blob degrades to just the
+			// name rather than vanishing — blanking it outright would destroy
+			// the load's broker association wholesale. Production's Job Tracking
+			// carries no such cell (the name column holds a plain string), so
+			// this branch is compatibility for older/other sheets and is left
+			// exactly as it behaved before.
+			cleaned[col] = val.startsWith("{") ? sanitizeBrokerContact(val) : "";
 		}
 		return cleaned;
 	});
@@ -39637,6 +40430,20 @@ const PORT = process.env.PORT || 3000;
 const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 server.listen(PORT, BIND_HOST, async () => {
 	console.log(`Server running at http://localhost:${PORT}`);
+	// Tripwire for the umask set at the top of this file — the create-time half
+	// of the uploads/app.db permission fix. Re-applying returns the PREVIOUS
+	// mask, so this both re-asserts and reads back the effective value without
+	// the deprecated no-argument form. Loud on drift: a refactor that moves the
+	// umask below a require, or a runtime that ignores it, shows up here rather
+	// than as world-readable receipts discovered months later.
+	try {
+		const effective = process.umask(BOOT_UMASK);
+		if (effective === BOOT_UMASK) {
+			console.log(`umask ${effective.toString(8).padStart(4, "0")} — new files 0640, new dirs 0750 (was ${bootUmaskPrevious === null ? "unset" : bootUmaskPrevious.toString(8).padStart(4, "0")})`);
+		} else {
+			console.error(`WARNING: umask is ${effective.toString(8).padStart(4, "0")}, expected ${BOOT_UMASK.toString(8).padStart(4, "0")} — new uploads may be world-readable`);
+		}
+	} catch {}
 	console.log(`API endpoints:`);
 	console.log(`  GET    /api/tabs           — List sheet tabs`);
 	console.log(`  GET    /api/data           — Read all rows`);

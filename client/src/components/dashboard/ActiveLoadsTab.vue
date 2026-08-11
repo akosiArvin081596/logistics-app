@@ -350,15 +350,36 @@
         </DialogHeader>
         <div style="padding:1.25rem;display:flex;flex-direction:column;gap:0.85rem;overflow-y:auto;flex:1;">
           <div v-for="col in editableHeaders" :key="col">
-            <label style="font-size:0.7rem;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:0.04em;">{{ col }}</label>
+            <label :for="fieldId(col)" style="font-size:0.7rem;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:0.04em;">{{ col }}</label>
+            <!-- Broker contact columns the API withholds from this role: shown so the
+                 field list stays recognisable, disabled so it cannot look editable. -->
+            <input
+              v-if="withheldCols.has(col)"
+              :id="fieldId(col)"
+              :data-withheld="col"
+              type="text"
+              disabled
+              readonly
+              value=""
+              placeholder="Hidden for your role"
+              :aria-describedby="fieldId(col) + '-hint'"
+              style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #e5e7eb;border-radius:6px;font-family:inherit;font-size:0.875rem;background:#f9fafb;color:#9ca3af;cursor:not-allowed;"
+            />
+            <p
+              v-if="withheldCols.has(col)"
+              :id="fieldId(col) + '-hint'"
+              style="margin:0.25rem 0 0;font-size:0.7rem;color:#9ca3af;"
+            >Only a Super Admin can view or change this.</p>
             <textarea
-              v-if="MULTILINE_COLS.has(col)"
+              v-else-if="MULTILINE_COLS.has(col)"
+              :id="fieldId(col)"
               v-model="editForm[col]"
               rows="3"
               style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.875rem;resize:vertical;"
             />
             <input
               v-else
+              :id="fieldId(col)"
               v-model="editForm[col]"
               type="text"
               style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.875rem;"
@@ -503,6 +524,17 @@ const EDITABLE_COLS = [
   'Email',
 ]
 const MULTILINE_COLS = new Set(['Details', 'Pickup Info', 'Drop-off Info', 'Pickup Address', 'Drop-off Address'])
+// ⚠️ MIRROR OF server.js BROKER_WITHHELD_RE — keep the two in step.
+// GET /api/data (and /api/dashboard) redact these columns for every non-Super-Admin,
+// and PUT /api/data/:rowIndex splices the stored values back in so a redacted copy
+// can never overwrite the real record. That restore is correct, but it left the
+// dispatcher with inputs that render permanently blank, accept typing, "save", and
+// silently round-trip to the stored value — a form that looks broken. They are shown
+// read-only instead, so the UI states plainly what the API already enforces.
+// Matched as a regex, not a fixed name list, for the same reason the server derives
+// its set: a hardcoded copy is how the reader and writer came to disagree about
+// "Email" in the first place.
+const BROKER_WITHHELD_RE = /broker|phone|e-?mail|contact|\bfax\b|mobile|\bcell\b/i
 const selectedJob = ref(null); const selectedDriverPosition = ref(null); const reassignSelections = reactive({}); const statusSelections = reactive({}); const loadDocs = ref([]); const loadingDocs = ref(false); const loadRating = ref(0); const linkCopied = ref(false)
 const showDeleteConfirm = ref(false)
 const deleteError = ref('')
@@ -522,6 +554,16 @@ const editableHeaders = computed(() => {
   const want = new Set(EDITABLE_COLS.map(c => c.toLowerCase().trim()))
   return props.headers.filter(h => want.has((h || '').toLowerCase().trim()))
 })
+// Withheld from this user, so shown but not editable. Empty for a Super Admin,
+// who is served the real values and keeps full edit rights.
+const withheldCols = computed(() => {
+  if (auth.isSuperAdmin) return new Set()
+  return new Set(editableHeaders.value.filter(h => BROKER_WITHHELD_RE.test(String(h || ''))))
+})
+// Header names carry spaces ("Broker Contact Name") and the Payment column is
+// literally "  Payment  ", but an HTML id may not contain whitespace — so a raw
+// name would silently break the label's `for` and the hint's aria-describedby.
+const fieldId = (col) => 'edit-' + String(col || '').trim().replace(/[^a-zA-Z0-9]+/g, '-').toLowerCase()
 let linkCopiedTimer = null
 const copyBtnStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
@@ -701,6 +743,10 @@ function openEdit() {
   if (!selectedJob.value) return
   editError.value = ''
   for (const col of editableHeaders.value) {
+    // A withheld column must not acquire a key at all: submitEdit falls back to
+    // the row's own (redacted) value when the key is absent, which is byte-identical
+    // to what this form sent before and is what the server's splice restores.
+    if (withheldCols.value.has(col)) { delete editForm[col]; continue }
     editForm[col] = selectedJob.value[col] || ''
   }
   showEdit.value = true
@@ -731,7 +777,10 @@ async function submitEdit() {
       { values }
     )
     const patch = {}
-    for (const col of editableHeaders.value) patch[col] = editForm[col]
+    for (const col of editableHeaders.value) {
+      if (withheldCols.value.has(col)) continue
+      patch[col] = editForm[col]
+    }
     selectedJob.value = { ...selectedJob.value, ...patch }
     showEdit.value = false
     await dashStore.refresh()
