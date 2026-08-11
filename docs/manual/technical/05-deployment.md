@@ -149,7 +149,7 @@ git pull --ff-only origin main
 
 ## Backups
 
-There is no automated backup currently. The SQLite database can be downloaded by a Super Admin via `GET /api/db/download` — wired up for exactly this purpose. The Google Sheet is itself the system of record for loads and is implicitly backed up by Google.
+There is no automated backup currently. The SQLite database can be exported by a Super Admin via `POST /api/db/download` — wired up for exactly this purpose. It is a POST and not a GET (a GET returns 405); the `curl` recipe is in Operations → Database admin tools. The Google Sheet is itself the system of record for loads and is implicitly backed up by Google.
 
 Plan ahead for a routine snapshot of `app.db`, `.env`, `service-account-key.json`, and the contents of `uploads/`. The first three are tiny; `uploads/` can be larger depending on POD/receipt volume.
 
