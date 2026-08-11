@@ -794,6 +794,15 @@ function logAuditRefusal(req, action, entity, entityId, details, code) {
 //     minter). It is itself the security evidence of a distributed guess, it is
 //     capped at 5/15min by setupLimiter so it cannot flood, and a campaign slower
 //     than the retention window is exactly the one worth catching. Kept forever.
+//   • `db_export_blocked` — a refused cross-site attempt on POST /api/db/download,
+//     the route that hands over the ENTIRE database. Same call as setup_refused
+//     and for the same two reasons. It IS the security evidence: `super_admin` is
+//     a shared login, so audit_trail is the only who/when/from-where record that
+//     exists, and this is the highest-value single row it can hold. And it cannot
+//     flood — requireRole("Super Admin") is mounted BEFORE the guard, so only an
+//     already-authenticated admin session can produce one at all, and
+//     logAuditRefusal coalesces it to one row per minute per (user, action, code).
+//     A campaign slower than 90 days is, again, exactly the one worth catching.
 //   • every `*_failed` action — those record a write that already started.
 //   • every success action — the entire rest of the table.
 const PURGEABLE_REFUSAL_ACTIONS = [
@@ -5074,8 +5083,10 @@ function requireRole(...roles) {
 // read "beside requireRole" as "available everywhere": requireRole hoists and
 // these do not, which is the whole asymmetry that caused the crash.
 // scripts/test-csrf-guard.js lifts this block by the
-// `function originIsSelf(` / `const refuseCrossOrigin =` markers, so it follows
-// the block wherever it lives — but keep those two lines intact.
+// `function originIsSelf(` / `const refuseCrossOriginStrict = crossSiteGuard(`
+// markers, so it follows the block wherever it lives — but keep those two lines
+// intact, and keep refuseCrossOriginStrict LAST of the three tiers, because the
+// lift ends at it.
 //
 // A GET that SPENDS is not the same animal as a GET that reads, and the usual
 // "a read verb needs no CSRF defence" reasoning does not cover it.
@@ -5157,13 +5168,29 @@ function requireRole(...roles) {
 //
 // These guards are NOT redundant after that change, for three reasons:
 //   1. Lax still carries the cookie on a top-level cross-site GET NAVIGATION.
-//      Every mount below that is a GET — the fuel-gallons pair — is defending
+//      Every mount below that is a GET — the fuel-gallons pair, the
+//      onboarding-evidence read and the ratecon-reconcile GET — is defending
 //      exactly that, and it is the only thing defending it.
 //   2. Lax does not stop a same-SITE attacker, per (a) above.
 //   3. SESSION_COOKIE_SAMESITE can be set back to "none" in one env var, and
 //      the route guards are what keep the blast radius bounded if it ever is
 //      (e.g. to resurrect a cross-origin client). Defence that survives its own
 //      rollback is the point.
+//
+// ⚠️ (d) A GUARDED GET DOES NOT COVER A LINK FROM OUTSIDE A BROWSER TAB. This
+// is the gap the PR #264 review found, and it is the one thing the prose above
+// used to overclaim. `Sec-Fetch-Site: none` is allowed by both tiers, and `none`
+// is what the browser sends for a navigation with no initiator document — a
+// bookmark, an address-bar paste, or a link clicked in Slack desktop / Outlook /
+// Apple Mail / Teams, which launch the browser with no referring page. Lax
+// attaches the cookie to every one. So on a GET these guards cover the
+// PAGE-INITIATED link/redirect case and NOT bookmarks or native-app links.
+// Where that residue is unacceptable — the full database export — the answer was
+// not a stricter guard but a different VERB, because Lax withholds the cookie
+// from every cross-site POST and no link can produce one. Only after that could
+// `none` be refused (allowNoInitiator:false) without 403ing the route's own
+// users. Read any mount below in those terms: a guarded GET is defence against
+// a hostile PAGE, and a guarded POST is defence in depth behind the cookie.
 
 // Origin equality is judged on HOST, never on scheme. Behind nginx the scheme
 // the browser used and the scheme Express reconstructs come from proxy headers,
@@ -5182,44 +5209,132 @@ function originIsSelf(req, origin) {
 	return Boolean(name) && u.hostname.toLowerCase() === name;
 }
 
+// Header values that reach audit_trail are ATTACKER-SUPPLIED — `Origin` and the
+// Sec-Fetch-* trio are whatever the other page says they are. audit_trail rows
+// are EVIDENCE, and an unbounded, control-character-carrying string in an
+// evidence column is how a log becomes unreadable (or, worse, reads as though it
+// says something it does not) precisely when someone is reading it after an
+// incident. Clipped to a bounded length and reduced to printable ASCII.
+// "absent" and "present but empty" are reported distinctly, because on this
+// route the difference between "no Sec-Fetch-Site at all" (a script) and
+// "Sec-Fetch-Site: none" (a browser navigation with no initiator) is the whole
+// finding.
+function auditHeaderValue(raw, max) {
+	if (raw === undefined || raw === null) return "(absent)";
+	const s = String(raw).replace(/[^\x20-\x7E]/g, "?");
+	if (!s) return "(empty)";
+	return s.length > max ? s.slice(0, max) + "..." : s;
+}
+
 // `tolerate` is the LOOSEST Sec-Fetch-Site value still accepted:
 //   "same-site"   — cost guard. A sibling subdomain is allowed through.
 //   "same-origin" — money guard. Only this exact origin is allowed.
 // The Origin fallback is same-ORIGIN in both modes, deliberately: judging
 // "same site" from an Origin header needs a public-suffix list, and the fallback
 // only fires for pre-16.4 Safari, where being stricter is the safe direction.
-function crossSiteGuard(tolerate) {
-	const allowed = tolerate === "same-site"
-		? new Set(["same-origin", "same-site", "none"])
-		: new Set(["same-origin", "none"]);
-	const refuse = (res) =>
-		res.status(403).json({ error: "Cross-site request refused", code: "CROSS_SITE_REFUSED" });
+//
+// `opts` carries three switches. All THREE default to the behaviour this factory
+// has always had, so the factory keeps describing itself and every tightening is
+// visible at the construction site rather than hidden in here:
+//
+//   honorCorsAllowlist (default true) — whether an allowlisted Origin skips the
+//     Sec-Fetch-Site leg entirely. Every shipped tier below turns this OFF; see
+//     the block comment there for why, and keep the capability for the day a
+//     genuinely cross-origin client returns.
+//   allowNoInitiator (default true) — whether `Sec-Fetch-Site: none` is accepted.
+//     ⚠️ `none` IS NOT "no header". `none` is a browser stating that this
+//     navigation had NO INITIATOR DOCUMENT: a bookmark, a URL typed or pasted
+//     into the address bar, or a link opened from a native app (Slack desktop,
+//     Outlook, Apple Mail, Teams), which launches the browser with no referring
+//     page. SameSite=Lax attaches the session cookie to all of those, because
+//     each is a top-level GET navigation — so on a GET, `none` is simultaneously
+//     the attack shape AND the only legitimate browser shape, which is exactly
+//     why it cannot simply be refused. See POST /api/db/download.
+//     A request with NO Sec-Fetch-Site header at all is a different signal
+//     entirely — curl, test-suite.js, n8n, the Linxup receiver — and is still
+//     allowed by the fall-through below regardless of this switch.
+//   auditRefusal (default null) — {action, entity, entityId}. When set, every
+//     refusal writes a coalesced audit_trail row. Off by default because most
+//     mounts' refusals are ordinary browser hygiene; on where the ATTEMPT is
+//     itself the finding.
+function crossSiteGuard(tolerate, opts) {
+	const options = opts || {};
+	const honorCorsAllowlist = options.honorCorsAllowlist !== false;
+	const allowNoInitiator = options.allowNoInitiator !== false;
+	const auditRefusal = options.auditRefusal || null;
+	const base = tolerate === "same-site" ? ["same-origin", "same-site"] : ["same-origin"];
+	const allowed = new Set(allowNoInitiator ? base.concat("none") : base);
+	const refuse = (req, res) => {
+		if (auditRefusal) {
+			// logAuditRefusal, not logAudit: coalesced on (user, action, code), so
+			// this cannot be used to flood the table. The reason is recorded from the
+			// headers rather than inferred, so a later reader can tell a sibling
+			// subdomain (same-site) from a bookmark (none) from a hostile page
+			// (cross-site) without re-deriving the guard's logic.
+			logAuditRefusal(req, auditRefusal.action, auditRefusal.entity, auditRefusal.entityId,
+				`Refused: Sec-Fetch-Site=${auditHeaderValue(req.get("Sec-Fetch-Site"), 40)}`
+				+ ` Sec-Fetch-Mode=${auditHeaderValue(req.get("Sec-Fetch-Mode"), 40)}`
+				+ ` Sec-Fetch-Dest=${auditHeaderValue(req.get("Sec-Fetch-Dest"), 40)}`
+				+ ` Origin=${auditHeaderValue(req.get("Origin"), 200)}`
+				+ ` ip=${auditHeaderValue(req.ip, 60)}`,
+				"CROSS_SITE_REFUSED");
+		}
+		return res.status(403).json({ error: "Cross-site request refused", code: "CROSS_SITE_REFUSED" });
+	};
 	return function crossSiteGuardMiddleware(req, res, next) {
 		const origin = req.get("Origin");
-		// The CORS allowlist wins FIRST, and it has to: the driver-mobile-view is
-		// genuinely cross-site, so the Sec-Fetch-Site leg — which it cannot
-		// influence — would refuse the one cross-origin browser client this server
-		// actually has. A browser cannot forge Origin, and a non-browser is allowed
-		// anyway by the fall-through below, so trusting the allowlist here is
-		// exactly as safe as the CORS middleware that already trusts it.
-		if (origin && DRIVER_MOBILE_ORIGINS.includes(origin)) return next();
+		// The CORS allowlist wins FIRST where it is honoured at all, and it has to:
+		// the driver-mobile-view is genuinely cross-site, so the Sec-Fetch-Site leg
+		// — which it cannot influence — would refuse the one cross-origin browser
+		// client this server was ever built for. A browser cannot forge Origin, and
+		// a non-browser is allowed anyway by the fall-through below, so trusting the
+		// allowlist is exactly as safe as the CORS middleware that already trusts
+		// it. ⚠️ It is nonetheless OFF on every shipped tier — running before the
+		// Sec-Fetch-Site leg means an allowlisted Origin plus
+		// `Sec-Fetch-Site: cross-site` was waved straight through.
+		if (honorCorsAllowlist && origin && DRIVER_MOBILE_ORIGINS.includes(origin)) return next();
 		const site = req.get("Sec-Fetch-Site");
-		if (site) return allowed.has(site) ? next() : refuse(res);
+		if (site) return allowed.has(site) ? next() : refuse(req, res);
 		// No Sec-Fetch-Site. An Origin still means a browser (or something claiming
 		// to be one), and it has to be ours. Origin: null fails this by construction.
-		if (origin && !originIsSelf(req, origin)) return refuse(res);
+		if (origin && !originIsSelf(req, origin)) return refuse(req, res);
 		next();
 	};
 }
 
-// Cost guard — the original tolerance, plus the Origin fallback. Two call sites:
-// the fuel-gallons GET and apply.
-const refuseCrossSite = crossSiteGuard("same-site");
+// ── The shipped tiers. ALL of them pass honorCorsAllowlist:false. ────────────
+// ⚠️ THE ALLOWLIST LEG WAS A COMPLETE BYPASS OF THE TIER, on every guarded
+// route. It runs BEFORE the Sec-Fetch-Site leg, so `Origin: <allowlisted>` plus
+// `Sec-Fetch-Site: cross-site` returned next() — measured against a populated
+// allowlist: 200, and on the database export the backup ran. Inert TODAY
+// (DRIVER_MOBILE_ORIGINS defaults empty and is unset on the VPS, re-verified
+// read-only 2026-08-09) and it also needs SESSION_COOKIE_SAMESITE=none for the
+// cookie to ride — but that PAIR is the documented recipe for resurrecting a
+// cross-origin client (see the note beside DRIVER_MOBILE_ORIGINS, which already
+// names this leg as a standing bypass of the money routes' guards), so the
+// guards would fail exactly when the cookie stopped covering for them.
+//
+// Turned off on EVERY tier rather than only on the export, because none of the
+// guarded routes has a cross-origin caller to lose: they are Super-Admin
+// settlement writes, admin diagnostics, a PII-evidence read and the full
+// database export — and the client the allowlist exists for is a DRIVER app.
+// A future route that genuinely needs the escape asks for it by name.
+const refuseCrossSite = crossSiteGuard("same-site", { honorCorsAllowlist: false });
 // Money guard — same machinery, one notch tighter. Mounted on the four routes
-// that close a settlement month or move a payout. Their only legitimate browser
-// caller is the SPA this server itself serves, so demanding same-origin costs
-// nothing and removes the sibling-subdomain case above.
-const refuseCrossOrigin = crossSiteGuard("same-origin");
+// that close a settlement month or move a payout, plus the ratecon-reconcile
+// pair. Their only legitimate browser caller is the SPA this server itself
+// serves, so demanding same-origin costs nothing and removes the
+// sibling-subdomain case above.
+const refuseCrossOrigin = crossSiteGuard("same-origin", { honorCorsAllowlist: false });
+// Export guard — the money tier plus the two things only a route with NO browser
+// caller can afford: `Sec-Fetch-Site: none` is refused, and every refusal is
+// audited. One mount, POST /api/db/download; see the block comment there for why
+// refusing `none` was impossible while that route was a GET.
+const refuseCrossOriginStrict = crossSiteGuard("same-origin", {
+	honorCorsAllowlist: false,
+	allowNoInitiator: false,
+	auditRefusal: { action: "db_export_blocked", entity: "database", entityId: "app.db" },
+});
 
 // Rate cons state the BROKER RATE, so they are dispatch/ownership material, not
 // driver material — this app strips financial columns from the Driver role
@@ -15571,30 +15686,141 @@ const dbAdminLimiter = rateLimit({
 	standardHeaders: true,
 });
 
-// Download SQLite database file (Super Admin only)
+// ⚠️ THE ONE LEAK THE res.download CALLBACK CANNOT COVER: process death.
+// PR #264 established — against Express 4.22.1, and measured on a transfer cut
+// off at 475 KB of 313 MB — that the callback fires on EVERY request-lifecycle
+// outcome (`onaborted` / `onerror` / `onend` / `onfinish` all route into one
+// exactly-once callback) and unlinks unconditionally, so a `finally` would add
+// nothing. That reasoning is correct and is deliberately left alone below. What
+// it cannot cover is the PROCESS being killed mid-transfer — and
+// `pm2 restart logistics-app` is step 4 of the documented deploy, so this is not
+// hypothetical: a deploy landing during an export leaves a complete unencrypted
+// copy of every SSN, EIN and routing/account number sitting in /tmp forever.
 //
-// ⚠️ refuseCrossOrigin — the MONEY tier, on a GET, and the tier is not an
-// over-reach. Every argument for the cost tier applies here and then some:
-// SESSION_COOKIE_SAMESITE defaults to `lax`, and lax withholds the cookie from a
-// subresource but NOT from a top-level cross-site GET *navigation*. So one link
-// or redirect a logged-in Super Admin follows — a chat message, a bookmark, an
-// email — spends a full `db.backup()` of a ~313 MB file and lands a complete copy
-// of every SSN, routing number and account number in os.tmpdir(). CORS hides the
-// response body from the attacker's page; it does not stop the backup, the disk
-// write, or the browser saving the file to the victim's Downloads folder.
+// Boot is the right moment and the only one needed: nothing of ours is in flight
+// at boot, so every match is by definition an orphan. Deliberately NOT also on an
+// interval — the only producer is a dead process, and a sweep running alongside
+// live exports would have to reason about which file belongs to whom.
 //
-// It gets refuseCrossOrigin rather than refuseCrossSite because a same-SITE
-// attacker (an XSS or takeover on a sibling logisx.com subdomain) reaching THIS
-// route hands over the whole database, and refuseCrossSite tolerates
-// Sec-Fetch-Site: same-site by construction. Same reasoning as the payout/period
-// routes: the only legitimate browser caller is the SPA this server itself
-// serves, so demanding same-origin costs nothing. `dbAdminLimiter` bounds the
-// number of copies, not whether one is made.
+// ⚠️ THE ONE-HOUR FLOOR IS LOAD-BEARING, NOT A ROUND NUMBER. `logistics-app` and
+// `logisx-staging` run on the SAME VPS and therefore share /tmp, so restarting
+// one must not delete the other's in-flight temp copy. (Even if it did, POSIX
+// keeps the open fd valid and the transfer completes — the inode is only freed on
+// close — so this is belt and braces rather than the only thing standing there.)
+//
+// ⚠️ lstat + isFile(), never stat. /tmp is 1777 on the VPS, so any of the four
+// non-root login accounts can plant `app_backup-<anything>.db` as a SYMLINK
+// aimed at something valuable. unlink() removes the link and never the target, so
+// even following it would survive — but refusing a non-regular file outright
+// means this sweep can never be aimed at a path we did not create. Per-entry
+// failures are swallowed: in a sticky directory, unlinking another user's file
+// raises EPERM, which is correct behaviour and not our problem.
+const DB_EXPORT_TMP_PREFIX = "app_backup-";
+const DB_EXPORT_TMP_MAX_AGE_MS = 60 * 60 * 1000;
+function purgeOrphanedDbExports() {
+	let removed = 0;
+	try {
+		const dir = os.tmpdir();
+		const now = Date.now();
+		for (const name of fs.readdirSync(dir)) {
+			if (!name.startsWith(DB_EXPORT_TMP_PREFIX) || !name.endsWith(".db")) continue;
+			const p = path.join(dir, name);
+			try {
+				const st = fs.lstatSync(p);
+				if (!st.isFile()) continue;
+				if (now - st.mtimeMs < DB_EXPORT_TMP_MAX_AGE_MS) continue;
+				fs.unlinkSync(p);
+				removed++;
+			} catch { /* another user's file, or it vanished under us */ }
+		}
+		if (removed > 0) console.log(`[cleanup] Removed ${removed} orphaned database-export temp file(s) from ${dir}`);
+	} catch (err) {
+		console.error("[cleanup] orphaned database-export sweep failed:", err.message);
+	}
+	return removed;
+}
+purgeOrphanedDbExports();
+
+// ---------------------------------------------------------------------------
+// Export the SQLite database file (Super Admin only). POST, and THE METHOD IS
+// THE CONTROL.
+//
+// ⚠️ THIS WAS A GET UNTIL 2026-08-09, AND THE COMMENT IT REPLACES OVERCLAIMED.
+// It said `refuseCrossOrigin` stopped "one link or redirect a logged-in Super
+// Admin follows — a chat message, a bookmark, an email". Only the first of those
+// was ever true. crossSiteGuard allows `Sec-Fetch-Site: none`, and `none` is
+// exactly what a browser sends for a navigation with NO INITIATOR DOCUMENT: a
+// bookmark, an address-bar paste, and — the shapes that matter — a link opened
+// from Slack desktop, Outlook, Apple Mail or Teams, all of which launch the
+// browser with no referring page. SameSite=Lax attaches the session cookie to
+// every one of them, because each is a top-level GET navigation. So the guard
+// covered the page-initiated case and nothing else, and a full `db.backup()` of
+// ~313 MB — every SSN, EIN and routing/account number, unencrypted — ran and
+// landed in the victim's Downloads folder. The attacker cannot READ it (a
+// top-level cross-origin navigation, and CORS blocks the subresource shapes), so
+// this is materialisation and resource burn rather than exfiltration. It is
+// still a complete copy of the PII inventory in CLAUDE.md's "PII at rest"
+// section, on a machine nobody chose.
+//
+// ⚠️ REFUSING `none` ON THE GET WAS NOT AVAILABLE, because `none` was ALSO the
+// only legitimate browser shape. There is no UI caller — grep finds zero
+// references to this path anywhere in client/ — so the documented workflow
+// (docs/manual/technical/06-operations.md, 07-appendix-api.md, admin/14-faq.md)
+// is an admin hitting the URL directly, i.e. the address bar, i.e. `none`.
+// Refusing it would have 403'd the route's only real usage.
+//
+// THE FIX IS THE VERB. Lax withholds the session cookie from EVERY cross-site
+// POST — auto-submitting form, fetch, redirect chain — while a link, a bookmark
+// and a native-app launch can only ever produce a GET. That closes the class at
+// the cookie instead of filtering the request, and it frees `none` to be refused
+// at no cost, because no browser can produce a POST with no initiator.
+// Chosen over the reviewed alternative (`POST /api/db/export-token` minting a
+// short-lived single-use token for `GET …?t=`) because that puts a bearer
+// credential in a URL — nginx access logs, browser history, `Referer` — on the
+// one route whose entire purpose is exporting every SSN in the system, and buys
+// back a browser affordance nothing uses at the price of a token store, a TTL
+// and single-use bookkeeping.
+//
+// WHAT IT COSTS: the address bar stops working, which is the point — that was
+// the attack shape. `curl -X POST` keeps working (recipe in
+// docs/manual/technical/06-operations.md) and `scp` from the VPS was already the
+// documented alternative. Nothing in client/ changes. A Super-Admin-only export
+// button in the SPA would restore one-click and is the obvious follow-up; it is
+// deliberately out of this change.
+//
+// refuseCrossOriginStrict, not refuseCrossOrigin — defence in depth now rather
+// than the primary control, and it earns all three of its extra clauses:
+//   • it refuses `Sec-Fetch-Site: none`, which is unreachable for a POST from a
+//     browser and therefore free, and which is the clause that was impossible
+//     while this was a GET;
+//   • it refuses `same-site`, so an XSS or takeover on a sibling logisx.com
+//     subdomain — which SameSite=Lax does NOT stop — cannot reach it either;
+//   • it does not honour the CORS allowlist, so `DRIVER_MOBILE_ORIGINS` plus
+//     `SESSION_COOKIE_SAMESITE=none` cannot republish the route (that pair used
+//     to bypass the tier outright).
+// `SESSION_COOKIE_SAMESITE=none` undoes the verb's protection in one env var;
+// the guard is what keeps the blast radius bounded if it ever is.
 //
 // requireRole FIRST, matching every other guarded route — an unauthenticated
-// caller must never reach anything further down the chain, limiter included.
-// Mount count pinned by scripts/test-csrf-guard.js.
-app.get("/api/db/download", requireRole("Super Admin"), refuseCrossOrigin, dbAdminLimiter, (req, res) => {
+// caller must never reach anything further down the chain, limiter included, and
+// a 403 must never spend the limiter. Mounts pinned by
+// scripts/test-csrf-guard.js and scripts/test-db-export-guard.js.
+// ---------------------------------------------------------------------------
+
+// Method guard — mirrors POST /api/admin/routemate/sync-now. Without it a GET
+// (every stale bookmark, and the attack shape above) falls through to the SPA
+// catch-all at the bottom of this file and is answered with index.html and a
+// 200, which reads as though the export were world-readable.
+// ⚠️ Deliberately NOT audited. It performs no work, and an admin's own stale
+// bookmark is byte-for-byte indistinguishable from an attacker's link, so a row
+// here could not tell them apart — noise in an evidence table. The refusals
+// worth recording are the ones on the POST, where the cookie actually rode.
+app.all("/api/db/download", (req, res, next) => {
+	if (req.method === "POST") return next();
+	res.set("Allow", "POST");
+	res.status(405).json({ error: "Method not allowed", expected: "POST", code: "DB_EXPORT_METHOD" });
+});
+app.post("/api/db/download", requireRole("Super Admin"), refuseCrossOriginStrict, dbAdminLimiter, (req, res) => {
 	// The entire database in one response. Logged BEFORE the work starts, so an
 	// export that fails or is aborted mid-stream still leaves the attempt on
 	// record — the intent is what is being audited, not the byte count.
@@ -15615,7 +15841,31 @@ app.get("/api/db/download", requireRole("Super Admin"), refuseCrossOrigin, dbAdm
 	// gets cleared by the OS; `app_backup*.db` is also now gitignored, because
 	// two independent guards are cheap and this one leaks the whole database.
 	const tmpPath = path.join(os.tmpdir(), `app_backup-${Date.now()}-${crypto.randomBytes(8).toString("hex")}.db`);
+	// ⚠️ 0600, AND CREATED BEFORE THE BACKUP RATHER THAN CHMODDED AFTER IT.
+	// db.backup() creates the destination itself at mode 0644 (measured). On macOS
+	// that is harmless — os.tmpdir() is a per-user 0700 directory — but on the
+	// LINUX VPS os.tmpdir() is /tmp, mode 1777, unless TMPDIR is set, and the box
+	// has four non-root login accounts. A chmod AFTER the backup would still leave
+	// the whole multi-second write of a ~313 MB unencrypted dump of every SSN, EIN
+	// and routing/account number world-readable while it was being written, which
+	// is the entire window that matters.
+	//
+	// `wx` is O_CREAT|O_EXCL: it creates atomically and REFUSES if the path already
+	// exists, including as a symlink, so a hostile /tmp entry cannot redirect this
+	// write. The explicit chmod that follows defeats a restrictive-or-hostile
+	// umask (Node applies `mode & ~umask` to open(), chmod() ignores umask). The
+	// second chmod after the backup is belt and braces for a future
+	// better-sqlite3 that recreates the inode; verified today it does not — the
+	// pre-created 0600 file is written in place and the mode survives.
+	try {
+		fs.closeSync(fs.openSync(tmpPath, "wx", 0o600));
+		fs.chmodSync(tmpPath, 0o600);
+	} catch (err) {
+		console.error("db export: could not create temp file:", err.message);
+		return res.status(500).json({ error: "Could not create the temporary export file" });
+	}
 	db.backup(tmpPath).then(() => {
+		try { fs.chmodSync(tmpPath, 0o600); } catch {}
 		res.download(tmpPath, "app.db", () => {
 			try { fs.unlinkSync(tmpPath); } catch {}
 		});

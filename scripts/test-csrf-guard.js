@@ -34,25 +34,39 @@ function eq(name, got, want) {
 
 // ── lift the shipped middleware ─────────────────────────────────────────────
 const START = "function originIsSelf(req, origin) {";
-const END = "const refuseCrossOrigin = crossSiteGuard(\"same-origin\");";
+// The block now ends at the THIRD tier. Sliced to the terminating semicolon
+// rather than to a literal, because that construction spans several lines and
+// pinning its exact text here would make a formatting change a FATAL.
+const END = "const refuseCrossOriginStrict = crossSiteGuard(";
 const i0 = src.indexOf(START);
-const j0 = src.indexOf(END);
+// Searched FROM i0, not from 0: the comment above originIsSelf names both
+// markers in prose so a future reader knows not to rename them, and a bare
+// indexOf finds that mention first and slices backwards into nothing.
+const j0 = src.indexOf(END, i0);
 ok("guard block located in server.js", i0 > 0 && j0 > i0);
 if (i0 < 0 || j0 < i0) {
 	console.error("FATAL: could not find the guard block in server.js");
 	process.exit(1);
 }
-const BLOCK = src.slice(i0, j0 + END.length);
+const BLOCK = src.slice(i0, src.indexOf(";", j0) + 1);
 
 // The allowlist is injected rather than read from env so the test does not
 // depend on a .env, and so the allowlist LEG can be exercised deliberately.
 const ALLOWLIST = ["https://localhost:3002", "https://192.168.8.106:3002"];
+// logAuditRefusal is injected too, and CAPTURED: the export tier writes an
+// audit_trail row on every refusal, and "it is audited" is an assertion, not a
+// side effect to be swallowed. `crossSiteGuard` itself is returned so the test
+// can build tiers the server does not ship — which is the only honest way to
+// prove that an OPTION, rather than the surrounding code, is doing the work.
 function build(block) {
+	const auditCalls = [];
 	const f = new Function(
-		"DRIVER_MOBILE_ORIGINS",
-		block + "\nreturn { refuseCrossSite, refuseCrossOrigin, originIsSelf };"
+		"DRIVER_MOBILE_ORIGINS", "logAuditRefusal",
+		block + "\nreturn { refuseCrossSite, refuseCrossOrigin, refuseCrossOriginStrict, crossSiteGuard, originIsSelf };"
 	);
-	return f(ALLOWLIST);
+	const built = f(ALLOWLIST, (...args) => auditCalls.push(args));
+	built.auditCalls = auditCalls;
+	return built;
 }
 const G = build(BLOCK);
 
@@ -101,7 +115,14 @@ for (const [label, guard] of [["cost", G.refuseCrossSite], ["money", G.refuseCro
 	ok(label + ": same-origin SPA allowed", allows(guard, SPA_SAME_ORIGIN));
 	ok(label + ": address-bar navigation (none) allowed", allows(guard, ADDRESS_BAR));
 	ok(label + ": header-less server-to-server allowed", allows(guard, HEADERLESS));
-	ok(label + ": CORS-allowlisted driver-mobile allowed", allows(guard, DRIVER_MOBILE));
+	// ⚠️ FLIPPED 2026-08-09. The CORS-allowlist leg runs BEFORE the Sec-Fetch-Site
+	// leg, so `Origin: <allowlisted>` + `Sec-Fetch-Site: cross-site` was waved
+	// straight past the tier — a complete bypass of the money guard, and on the
+	// database export the backup ran. Every shipped tier now passes
+	// honorCorsAllowlist:false. The FACTORY still supports the escape; that it is
+	// the option and not the surrounding code doing the work is proven below.
+	ok(label + ": CORS-allowlisted driver-mobile is NO LONGER waved past the tier",
+		allows(guard, DRIVER_MOBILE) === false);
 	// An unrecognized Sec-Fetch-Site value fails CLOSED. Browsers send lowercase;
 	// anything else is either a new value or a liar, and neither earns a pass.
 	ok(label + ": unknown Sec-Fetch-Site value refused", allows(guard, { "Sec-Fetch-Site": "SAME-ORIGIN" }) === false);
@@ -111,6 +132,63 @@ for (const [label, guard] of [["cost", G.refuseCrossSite], ["money", G.refuseCro
 // The one deliberate difference between the two guards.
 ok("cost guard TOLERATES a sibling subdomain (same-site)", allows(G.refuseCrossSite, SIBLING_SUBDOMAIN));
 ok("money guard REFUSES a sibling subdomain (same-site)", allows(G.refuseCrossOrigin, SIBLING_SUBDOMAIN) === false);
+
+// ── 1b. the EXPORT tier — same-origin, and no "no initiator" ────────────────
+// `Sec-Fetch-Site: none` is not "no header". It is a browser stating the
+// navigation had no initiator document: a bookmark, an address-bar paste, or a
+// link opened from Slack desktop / Outlook / Apple Mail / Teams. SameSite=Lax
+// attaches the cookie to all of them. On a GET that made `none` both the attack
+// shape and the only legitimate browser shape, which is why POST /api/db/download
+// is a POST — and why refusing `none` there costs nothing.
+ok("export tier: address-bar / bookmark / native-app link (none) REFUSED",
+	allows(G.refuseCrossOriginStrict, ADDRESS_BAR) === false);
+ok("export tier: cross-site form refused", allows(G.refuseCrossOriginStrict, CROSS_FORM) === false);
+ok("export tier: sibling subdomain (same-site) refused", allows(G.refuseCrossOriginStrict, SIBLING_SUBDOMAIN) === false);
+ok("export tier: CORS-allowlisted driver-mobile refused", allows(G.refuseCrossOriginStrict, DRIVER_MOBILE) === false);
+ok("export tier: same-origin SPA still allowed", allows(G.refuseCrossOriginStrict, SPA_SAME_ORIGIN));
+// ⚠️ THE ONE THAT MUST NOT BREAK. curl / test-suite.js / a cron job send NO
+// Sec-Fetch-* at all, which is a different signal from `none` and stays allowed.
+// Refusing it would break the route's actual documented caller.
+ok("export tier: header-less curl / scripted caller STILL allowed",
+	allows(G.refuseCrossOriginStrict, HEADERLESS));
+ok("export tier: pre-Sec-Fetch cross-origin (old Safari) refused",
+	allows(G.refuseCrossOriginStrict, OLD_SAFARI_CROSS) === false);
+ok("export tier: pre-Sec-Fetch SAME-origin allowed", allows(G.refuseCrossOriginStrict, OLD_SAFARI_SELF));
+
+// ── 1c. the refusal is AUDITED, and only on the tier that asked for it ──────
+// super_admin is a SHARED login and audit_trail is the only who/when/from-where
+// record in the system, so a refused cross-site attempt on the full-database
+// export is close to the highest-signal row it can hold. It went unrecorded
+// entirely before this: logAudit sits inside the handler, which a 403 never
+// reaches.
+G.auditCalls.length = 0;
+run(G.refuseCrossOriginStrict, CROSS_FORM);
+eq("export refusal writes exactly one audit row", G.auditCalls.length, 1);
+eq("...under the db_export_blocked action", G.auditCalls[0] && G.auditCalls[0][1], "db_export_blocked");
+eq("...against the database entity", G.auditCalls[0] && G.auditCalls[0][2], "database");
+eq("...coalesced on the CROSS_SITE_REFUSED code", G.auditCalls[0] && G.auditCalls[0][5], "CROSS_SITE_REFUSED");
+ok("...and the row records the header that caused it",
+	/Sec-Fetch-Site=cross-site/.test(String(G.auditCalls[0] && G.auditCalls[0][4])));
+ok("...and the offending Origin", /Origin=https:\/\/evil\.example/.test(String(G.auditCalls[0] && G.auditCalls[0][4])));
+// A bookmark and a hostile page are different events and must not read alike.
+G.auditCalls.length = 0;
+run(G.refuseCrossOriginStrict, ADDRESS_BAR);
+ok("a refused no-initiator navigation is recorded as `none`, not as cross-site",
+	/Sec-Fetch-Site=none/.test(String(G.auditCalls[0] && G.auditCalls[0][4])));
+ok("...and an absent Origin is recorded as absent, not as empty",
+	/Origin=\(absent\)/.test(String(G.auditCalls[0] && G.auditCalls[0][4])));
+// ⚠️ Attacker-supplied headers land in an EVIDENCE table. Bounded and printable.
+G.auditCalls.length = 0;
+run(G.refuseCrossOriginStrict, { Origin: "https://evil.example/" + "A".repeat(4000) + "\r\n\u0007INJECTED", "Sec-Fetch-Site": "cross-site" });
+const auditedDetails = String(G.auditCalls[0] && G.auditCalls[0][4]);
+ok("a 4 KB Origin is clipped, not stored whole", auditedDetails.length < 500);
+ok("...and control characters cannot reach the audit row", !/[\x00-\x1F\x7F]/.test(auditedDetails));
+ok("...while the clip is marked, so a reader knows it was truncated", /\.\.\./.test(auditedDetails));
+// The other two tiers must stay silent — auditing every mount would bury this.
+G.auditCalls.length = 0;
+run(G.refuseCrossOrigin, CROSS_FORM);
+run(G.refuseCrossSite, CROSS_FORM);
+eq("the money and cost tiers deliberately write no audit row", G.auditCalls.length, 0);
 
 // Refusal shape — the client and the ops log both key on this.
 const refused = run(G.refuseCrossOrigin, CROSS_FORM);
@@ -176,7 +254,6 @@ ok("no query parameter reaches the alert decision",
 	!/reconcileRateCons\(\{\s*alert:\s*!?dryRun/.test(src));
 
 const mountCount = (name) => src.split("\n").filter((l) => /^app\.(get|post|put|delete|patch)\(/.test(l) && l.includes(name + ",")).length;
-eq("refuseCrossOrigin mount count", mountCount("refuseCrossOrigin"), 7);
 // ⚠️ Assert the ROUTES, not just a count. A bare count goes stale the moment a
 // new guarded route lands — this pin said 2 and broke when #250 correctly added
 // the onboarding-evidence GET, which reads signer IP/user-agent and is exactly
@@ -187,6 +264,72 @@ const mountedOn = (name) => src.split("\n")
 eq("refuseCrossSite is on exactly the cost/exposure GETs", mountedOn("refuseCrossSite").join(" "),
 	["/api/admin/fuel-gallons-recovery", "/api/admin/fuel-gallons-recovery/apply",
 	 "/api/admin/onboarding-evidence/:scope/:ownerId"].sort().join(" "));
+// ⚠️ ALL SEVEN GUARDED ROUTES, NAMED, IN ONE PLACE — the review's finding 5.
+// The count above was the only thing covering the database export, and a count
+// cannot say WHICH route lost its guard. `mountCount` is kept beside the list so
+// a route that gains a guard under some THIRD name (the exact thing that just
+// happened) shows up as a list/count disagreement rather than silently.
+//
+// The export moved off refuseCrossOrigin onto refuseCrossOriginStrict, so this
+// pin reads 6 + 1 rather than 7. That is not a route losing protection: strict
+// IS the money tier plus two more clauses. Both halves are asserted.
+eq("refuseCrossOrigin is on exactly the settlement writes and the reconcile pair",
+	mountedOn("refuseCrossOrigin").join(" "),
+	["/api/periods/:period/finalize", "/api/periods/:period/reopen",
+	 "/api/investor/payouts/:id/status", "/api/investor/payouts/:id/adjust",
+	 "/api/admin/ratecon-reconcile", "/api/admin/ratecon-reconcile/run"].sort().join(" "));
+eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 6);
+eq("refuseCrossOriginStrict is on exactly the full-database export",
+	mountedOn("refuseCrossOriginStrict").join(" "), "/api/db/download");
+eq("...and on nothing else", mountCount("refuseCrossOriginStrict"), 1);
+
+// ── 2b. the database export: the VERB is the control ────────────────────────
+// Finding 1 of the PR #264 review. As a GET, `Sec-Fetch-Site: none` was allowed
+// — and `none` is a bookmark, an address-bar paste, or a link opened from Slack
+// desktop / Outlook / Apple Mail / Teams, all of which SameSite=Lax attaches the
+// cookie to. Refusing `none` on a GET was not available either, because it was
+// also the route's ONLY legitimate browser shape (there is no UI caller). Lax
+// withholds the cookie from every cross-site POST, and no link can produce a
+// POST, so the method closes the class and frees `none` to be refused.
+const dbExportLine = src.split("\n").find((l) => l.startsWith("app.post(") && l.includes('"/api/db/download"'));
+ok("the database export is a POST", Boolean(dbExportLine));
+ok("...and no GET registration survives",
+	!src.split("\n").some((l) => l.startsWith("app.get(") && l.includes('"/api/db/download"')));
+ok("...carrying the strict tier", Boolean(dbExportLine) && dbExportLine.includes("refuseCrossOriginStrict"));
+ok("...with requireRole first, so a 403 never spends dbAdminLimiter",
+	Boolean(dbExportLine)
+		&& dbExportLine.indexOf("requireRole") < dbExportLine.indexOf("refuseCrossOriginStrict")
+		&& dbExportLine.indexOf("refuseCrossOriginStrict") < dbExportLine.indexOf("dbAdminLimiter"));
+// ⚠️ Without an explicit method guard a stray GET falls through to the SPA
+// catch-all at the bottom of server.js and is answered index.html + 200, which
+// reads as though the export were world-readable. Same shape as the guard on
+// POST /api/admin/routemate/sync-now.
+ok("a GET is answered 405, not by the SPA catch-all",
+	/app\.all\("\/api\/db\/download", \(req, res, next\) => \{\s*if \(req\.method === "POST"\) return next\(\);/.test(src));
+ok("...and the 405 advertises Allow: POST", /res\.set\("Allow", "POST"\);/.test(src));
+// The strict tier is constructed with all three tightenings, and the audit
+// action is the one PURGEABLE_REFUSAL_ACTIONS deliberately omits (kept forever).
+ok("strict tier declines the CORS-allowlist escape", /honorCorsAllowlist: false,/.test(src));
+ok("strict tier refuses no-initiator navigations", /allowNoInitiator: false,/.test(src));
+ok("strict tier audits its refusals as db_export_blocked",
+	/auditRefusal: \{ action: "db_export_blocked", entity: "database", entityId: "app\.db" \}/.test(src));
+ok("db_export_blocked is NOT purgeable — the attempt IS the evidence",
+	!/^\t"db_export_blocked",$/m.test(src));
+// Finding 4: the temp copy is a full unencrypted dump of every SSN and account
+// number, and db.backup() creates it 0644. On the Linux VPS os.tmpdir() is /tmp
+// (1777) with four non-root login accounts on the box.
+ok("the temp export file is created 0600 BEFORE the backup writes into it",
+	/fs\.closeSync\(fs\.openSync\(tmpPath, "wx", 0o600\)\);/.test(src));
+ok("...and chmodded again after it, in case the inode was recreated",
+	/db\.backup\(tmpPath\)\.then\(\(\) => \{\s*try \{ fs\.chmodSync\(tmpPath, 0o600\); \} catch \{\}/.test(src));
+// Finding 4b: the res.download callback covers every request-lifecycle outcome
+// (PR #264 measured it) but cannot cover process death, and `pm2 restart` is
+// step 4 of the documented deploy.
+ok("orphaned temp exports are swept at boot", /^purgeOrphanedDbExports\(\);$/m.test(src));
+ok("...with an age floor, so a sibling process's live export survives",
+	/const DB_EXPORT_TMP_MAX_AGE_MS = 60 \* 60 \* 1000;/.test(src));
+ok("...and lstat+isFile, so a planted symlink in a world-writable /tmp is skipped",
+	/const st = fs\.lstatSync\(p\);\s*\n\s*if \(!st\.isFile\(\)\) continue;/.test(src));
 
 // ⚠️ The non-browser integrations must stay untouched. They present no
 // Sec-Fetch-* and no Origin, so the guard would let them through anyway — but
@@ -210,7 +353,7 @@ function mutate(find, replace) {
 }
 
 // (a) drop the Origin fallback -> the pre-Sec-Fetch attack comes back.
-const noOriginLeg = mutate("if (origin && !originIsSelf(req, origin)) return refuse(res);", "");
+const noOriginLeg = mutate("if (origin && !originIsSelf(req, origin)) return refuse(req, res);", "");
 ok("MUTANT a: without the Origin leg, pre-Sec-Fetch CSRF succeeds", allows(noOriginLeg.refuseCrossOrigin, OLD_SAFARI_CROSS));
 ok("MUTANT a: without the Origin leg, Origin null succeeds", allows(noOriginLeg.refuseCrossOrigin, OLD_SAFARI_NULL));
 
@@ -218,11 +361,63 @@ ok("MUTANT a: without the Origin leg, Origin null succeeds", allows(noOriginLeg.
 const nullIsSelf = mutate("catch { return false; }", "catch { return true; }");
 ok("MUTANT b: fail-open URL parse admits Origin null", allows(nullIsSelf.refuseCrossOrigin, OLD_SAFARI_NULL));
 
-// (c) drop the allowlist leg -> the one real cross-origin client breaks. This
-//     is the mutant that proves the allowlist line is load-bearing and not
-//     tidy-up-able, i.e. it protects a LEGITIMATE caller, not an attacker.
-const noAllowlist = mutate("if (origin && DRIVER_MOBILE_ORIGINS.includes(origin)) return next();", "");
-ok("MUTANT c: without the allowlist, driver-mobile-view is refused", allows(noAllowlist.refuseCrossOrigin, DRIVER_MOBILE) === false);
+// (c) ⚠️ REWRITTEN. This used to delete the allowlist leg and assert the
+//     driver-mobile client broke — i.e. it proved the leg protected a
+//     LEGITIMATE caller. That claim is now false at every shipped mount: the leg
+//     ran BEFORE the Sec-Fetch-Site leg, so an allowlisted Origin carrying
+//     `Sec-Fetch-Site: cross-site` bypassed the tier outright, and none of the
+//     seven guarded routes has a cross-origin caller to protect (they are
+//     Super-Admin settlement, diagnostic and PII-export routes; the allowlist
+//     exists for a DRIVER app). Every tier now passes honorCorsAllowlist:false.
+//
+//     Deleting the leg from the source therefore changes NOTHING — which is
+//     exactly the shape of a decorative assertion. The honest discriminator is
+//     the option itself: build the same factory with the escape ON and require
+//     the decision to flip. That proves the OPTION is doing the work, and it
+//     keeps the capability tested for the day a cross-origin client returns.
+const allowlistHonoured = G.crossSiteGuard("same-origin", { honorCorsAllowlist: true });
+ok("MUTANT c control: with honorCorsAllowlist ON, driver-mobile is waved past the tier",
+	allows(allowlistHonoured, DRIVER_MOBILE));
+ok("MUTANT c: the SHIPPED tier refuses the same request", allows(G.refuseCrossOrigin, DRIVER_MOBILE) === false);
+ok("MUTANT c: and honouring the allowlist really is a BYPASS, not a tolerance",
+	allows(allowlistHonoured, { Origin: ALLOWLIST[0], "Sec-Fetch-Site": "cross-site" })
+	&& allows(allowlistHonoured, { Origin: ALLOWLIST[0], "Sec-Fetch-Site": "same-site" }));
+// The leg must still exist in source, and still be gated. Deleting the gate
+// republishes the bypass on all seven routes at once.
+ok("MUTANT c: the allowlist leg is present and gated on the option",
+	BLOCK.includes("if (honorCorsAllowlist && origin && DRIVER_MOBILE_ORIGINS.includes(origin)) return next();"));
+const allowlistUngated = mutate(
+	"if (honorCorsAllowlist && origin && DRIVER_MOBILE_ORIGINS.includes(origin)) return next();",
+	"if (origin && DRIVER_MOBILE_ORIGINS.includes(origin)) return next();");
+ok("MUTANT c: ungating the leg puts the bypass back on the money tier",
+	allows(allowlistUngated.refuseCrossOrigin, DRIVER_MOBILE));
+ok("MUTANT c: ...and on the database export", allows(allowlistUngated.refuseCrossOriginStrict, DRIVER_MOBILE));
+
+// (c2) allowNoInitiator — the finding-1 clause. Default ON, so the two tiers
+//      that must stay address-bar-reachable are unchanged; OFF only on the
+//      export, which has no browser caller left to break.
+const noInitiatorAllowed = G.crossSiteGuard("same-origin", { honorCorsAllowlist: false });
+ok("MUTANT c2 control: with allowNoInitiator defaulted ON, a bookmark is allowed",
+	allows(noInitiatorAllowed, ADDRESS_BAR));
+ok("MUTANT c2: the export tier refuses the identical request",
+	allows(G.refuseCrossOriginStrict, ADDRESS_BAR) === false);
+// Turning it back on in source is a one-word edit; this is the assertion that
+// notices. It also proves the refusal is the OPTION and not the same-origin
+// tier, since `none` is allowed by the same tier one line above.
+const noInitiatorMutant = mutate("allowNoInitiator: false,", "allowNoInitiator: true,");
+ok("MUTANT c2: flipping the option in source re-admits the bookmark/native-app link",
+	allows(noInitiatorMutant.refuseCrossOriginStrict, ADDRESS_BAR));
+// ⚠️ And it must NOT be implemented by demanding a Sec-Fetch-Site header, which
+// would refuse curl and every scripted caller — the one break that would matter.
+ok("MUTANT c2: refusing `none` did not also refuse header-less callers",
+	allows(G.refuseCrossOriginStrict, HEADERLESS));
+
+// (c3) the audit leg. Deleting it returns the route to the pre-fix state, where
+//      a refused export of the entire database left no trace at all.
+const noAudit = mutate("if (auditRefusal) {", "if (false) {");
+noAudit.auditCalls.length = 0;
+run(noAudit.refuseCrossOriginStrict, CROSS_FORM);
+eq("MUTANT c3: without the audit leg a refused export is invisible", noAudit.auditCalls.length, 0);
 
 // (d) the PRE-FIX guard: Sec-Fetch-Site only, tolerant of same-site, no Origin
 //     leg and no allowlist. This is literally what shipped before, and it is

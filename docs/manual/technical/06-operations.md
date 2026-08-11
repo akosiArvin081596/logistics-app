@@ -48,7 +48,7 @@ Errors that surface to users return generic 500 JSON; the diagnostic detail is i
 
 The SQLite database is the only mutable state the repo doesn't own. Take a snapshot of:
 
-- `app.db` — via `GET /api/db/download` (Super Admin) or `scp` directly from the VPS.
+- `app.db` — via `POST /api/db/download` (Super Admin) or `scp` directly from the VPS. It is a **POST**, and it cannot be fetched from the browser address bar; see "Database admin tools" below for the exact command.
 - `.env` — runtime secrets.
 - `service-account-key.json` — Google credentials.
 - `uploads/` — local copies of POD photos, signatures, receipts.
@@ -120,7 +120,23 @@ The Google Sheet is implicitly backed up by Google; you don't need to snapshot i
 
 ## Database admin tools
 
-`GET /api/db/tables` lists every table. `GET /api/db/query/:table` returns rows from a single table with optional `?where=` and `?limit=`. `GET /api/db/download` returns the entire `app.db` file. All three are Super Admin only.
+`GET /api/db/tables` lists every table. `GET /api/db/query/:table` returns rows from a single table with optional `?where=` and `?limit=`. `POST /api/db/download` returns the entire `app.db` file. All three are Super Admin only.
+
+**The export is a POST on purpose, and a GET to it returns 405.** It hands over every SSN, EIN and bank routing/account number in the system, unencrypted. `SameSite=Lax` — the session cookie's setting — withholds the cookie from every cross-site POST, but *not* from a top-level cross-site GET navigation, so while it was a GET one link a logged-in Super Admin followed from a chat message, an email or a bookmark ran a full ~313 MB backup and dropped a complete copy into their Downloads folder. Making it a POST removes that class outright, because a link cannot issue a POST. There is no UI button; use `curl`:
+
+```bash
+# 1. log in, keeping the session cookie
+curl -sS -c /tmp/logisx.jar -X POST https://<host>/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"<user>","password":"<password>"}'
+
+# 2. export (POST, not GET)
+curl -sS -b /tmp/logisx.jar -X POST https://<host>/api/db/download -o app.db
+
+rm -f /tmp/logisx.jar
+```
+
+The exported file is a full unencrypted copy of the PII inventory — treat it like the database itself, and delete it when you are done. Rate-limited to 10 requests / 15 min, and every export **and every refused cross-site attempt** writes an `audit_trail` row.
 
 For ad-hoc SQL beyond what `/api/db/query` exposes, `scp` the database off the VPS and open it in DB Browser for SQLite or `sqlite3` CLI locally — never write SQL directly against the production file.
 

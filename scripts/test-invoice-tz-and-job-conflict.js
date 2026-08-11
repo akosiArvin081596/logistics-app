@@ -239,13 +239,32 @@ if (CHILD) {
 }
 
 // ==================================================== 1. the db-download guard
-section("1. GET /api/db/download carries the money-tier CSRF guard");
+section("1. POST /api/db/download carries the export-tier CSRF guard");
 
+// ⚠️ THIS SECTION SAID "GET" WHEN #264 SHIPPED, AND THE VERB WAS THE BUG.
+// refuseCrossOrigin allows `Sec-Fetch-Site: none`, and `none` is what a browser
+// sends for a navigation with no initiator document — a bookmark, an address-bar
+// paste, or a link opened from Slack desktop / Outlook / Apple Mail / Teams.
+// SameSite=Lax attaches the session cookie to all of them. So the guard covered
+// the page-initiated link and NOT the two shapes an attacker would actually use.
+// It could not simply refuse `none` either, because with no UI caller anywhere
+// in client/ that was also the route's only legitimate browser shape. Lax
+// withholds the cookie from every cross-site POST and no link can produce one,
+// so the method is the control and the guard is now defence in depth.
+// The decision table for the guard itself lives in scripts/test-csrf-guard.js;
+// this pins the MOUNT, which no behavioural test of the middleware can see.
 const dbDownloadLine = SRC.split("\n").find(
-	(l) => l.startsWith("app.get(") && l.includes('"/api/db/download"'));
-check("route registered: GET /api/db/download", Boolean(dbDownloadLine), true);
-check("refuseCrossOrigin is mounted on it",
-	Boolean(dbDownloadLine) && dbDownloadLine.includes("refuseCrossOrigin"), true);
+	(l) => l.startsWith("app.post(") && l.includes('"/api/db/download"'));
+check("route registered: POST /api/db/download", Boolean(dbDownloadLine), true);
+check("no GET registration survives",
+	SRC.split("\n").some((l) => l.startsWith("app.get(") && l.includes('"/api/db/download"')), false);
+// Without an explicit method guard a stray GET falls through to the SPA
+// catch-all and is answered index.html + 200 — which reads as though the export
+// were world-readable. Mirrors POST /api/admin/routemate/sync-now.
+check("a GET is answered 405 rather than by the SPA catch-all",
+	/app\.all\("\/api\/db\/download", \(req, res, next\) => \{\s*if \(req\.method === "POST"\) return next\(\);/.test(SRC), true);
+check("refuseCrossOriginStrict is mounted on it",
+	Boolean(dbDownloadLine) && dbDownloadLine.includes("refuseCrossOriginStrict"), true);
 // The TIER matters, not merely "a guard": refuseCrossSite tolerates
 // Sec-Fetch-Site: same-site, so a sibling-subdomain XSS would still walk off with
 // the whole database. This asserts nobody downgrades it later.
@@ -253,21 +272,31 @@ check("...and it is NOT the looser cost tier",
 	Boolean(dbDownloadLine) && !/refuseCrossSite/.test(dbDownloadLine), true);
 check("requireRole precedes the guard (a 403 must not spend the limiter)",
 	Boolean(dbDownloadLine)
-		&& dbDownloadLine.indexOf("requireRole") < dbDownloadLine.indexOf("refuseCrossOrigin"), true);
+		&& dbDownloadLine.indexOf("requireRole") < dbDownloadLine.indexOf("refuseCrossOriginStrict"), true);
 check("the guard precedes dbAdminLimiter, matching the fuel-gallons convention",
 	Boolean(dbDownloadLine)
-		&& dbDownloadLine.indexOf("refuseCrossOrigin") < dbDownloadLine.indexOf("dbAdminLimiter"), true);
+		&& dbDownloadLine.indexOf("refuseCrossOriginStrict") < dbDownloadLine.indexOf("dbAdminLimiter"), true);
 // The temp copy is a full ~313 MB dump of every SSN and account number. res.download's
 // callback fires on EVERY terminal outcome including an aborted transfer (express
 // sendfile: onaborted/onerror/onend all route into it), so the unlink covers the
 // abort path — but only while it stays unconditional on the error argument.
-const dbDownloadBody = extractAt('\napp.get("/api/db/download"', "GET /api/db/download route");
+const dbDownloadBody = extractAt('\napp.post("/api/db/download"', "POST /api/db/download route");
 check("the temp copy is unlinked on completion AND on abort",
 	/res\.download\(tmpPath, "app\.db", \(\) => \{\s*try \{ fs\.unlinkSync\(tmpPath\); \} catch \{\}\s*\}\)/.test(dbDownloadBody), true);
 check("...and on a backup failure before any transfer starts",
 	/\.catch\(\(err\) => \{\s*try \{ fs\.unlinkSync\(tmpPath\); \} catch \{\}/.test(dbDownloadBody), true);
 check("the temp copy is written to os.tmpdir(), never the repo tree",
 	/path\.join\(os\.tmpdir\(\), `app_backup-/.test(dbDownloadBody), true);
+// ...and it is 0600 for the whole of its life, not just after the backup lands.
+// db.backup() creates its destination 0644 (measured); on the Linux VPS
+// os.tmpdir() is /tmp, mode 1777, with four non-root login accounts on the box —
+// so a chmod AFTER the backup would still publish the entire multi-second write
+// of every SSN, EIN and routing/account number. `wx` is O_CREAT|O_EXCL, which
+// also refuses to follow a symlink planted at that path.
+check("the temp copy is created 0600 before db.backup() writes into it",
+	/fs\.closeSync\(fs\.openSync\(tmpPath, "wx", 0o600\)\);/.test(dbDownloadBody), true);
+check("...and re-chmodded after it, in case a future backup recreates the inode",
+	/\.then\(\(\) => \{\s*try \{ fs\.chmodSync\(tmpPath, 0o600\); \} catch \{\}/.test(dbDownloadBody), true);
 // The other two /api/db/* routes are reads of bounded size and are deliberately
 // NOT given the guard — it is the COST, not the verb, that decides. Pinned so a
 // later "consistency" sweep is a deliberate choice rather than a drive-by.

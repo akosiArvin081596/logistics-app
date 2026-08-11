@@ -183,7 +183,7 @@ A flat list of every REST endpoint in `server.js`, grouped by domain. Each row s
 
 | Verb | Path | Role | Purpose |
 |---|---|---|---|
-| GET | `/api/db/download` | Super Admin | Download SQLite file. |
+| POST | `/api/db/download` | Super Admin | Export the SQLite file. **POST, not GET** — a GET returns 405. See Operations → Database admin tools for the `curl` recipe and why the verb is the control. |
 | GET | `/api/db/tables` | Super Admin | List tables. |
 | GET | `/api/db/query/:table` | Super Admin | Query a table. |
 
