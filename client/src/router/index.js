@@ -197,6 +197,12 @@ const routes = [
     meta: { noSidebar: true, forcedPasswordChange: true },
   },
   {
+    path: '/admin/data-issues',
+    name: 'admin-data-issues',
+    component: () => import('../views/DataIssuesView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/',
     redirect: '/login',
   },

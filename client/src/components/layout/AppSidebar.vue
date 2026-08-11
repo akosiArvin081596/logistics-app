@@ -139,6 +139,7 @@ const navConfig = {
     { to: '/admin/financials', icon: '&#128200;', label: 'Financials' },
     { to: '/admin/driver-pay-overrides', icon: '&#128197;', label: 'Driver Pay Overrides' },
     { to: '/admin/fleet-health', icon: '&#128666;', label: 'Fleet Health' },
+    { to: '/admin/data-issues', icon: '&#9888;', label: 'Data Issues' },
     { to: '/admin/tools', icon: '&#128295;', label: 'Data Tools' },
     { to: '/data', icon: '&#9776;', label: 'Data Manager' },
   ],
