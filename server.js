@@ -2830,7 +2830,15 @@ try { db.exec("ALTER TABLE invoices ADD COLUMN render_data TEXT DEFAULT '{}'"); 
 
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_driver ON invoices(driver)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_invoices_week ON invoices(week_start, week_end)`); } catch {}
-db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_driver_week ON invoices(driver, week_start)`);
+// Bootstrap only — a fresh install has no `deleted_at`/`is_manual` columns yet
+// (they are ALTERed in below), so the partial NOCASE form cannot be created
+// here. The migration further down is the authority and re-asserts the final
+// shape on every boot; this line is a no-op on any database that has run it,
+// because the name already exists. Wrapped like its two siblings above so a
+// pathological row can never turn the bootstrap into a boot crash.
+try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_driver_week ON invoices(driver, week_start)`); } catch (err) {
+	console.error("invoices driver/week bootstrap index skipped:", err.message);
+}
 
 // Invoice management suite (owner requests 2026-06-11) — all additive ALTERs,
 // idempotent via try-catch, backward compatible.
@@ -2845,21 +2853,109 @@ try { db.exec("ALTER TABLE invoices ADD COLUMN delete_reason TEXT DEFAULT ''"); 
 // list/submit/approve/PDF pipeline as generated weekly invoices.
 try { db.exec("ALTER TABLE invoices ADD COLUMN is_manual INTEGER DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE invoices ADD COLUMN created_by TEXT DEFAULT ''"); } catch {}
-// Re-scope the one-invoice-per-driver-week guarantee to LIVE generated weekly
-// invoices only: a soft-deleted row must not block a regenerate, and manual
-// invoices may coexist with a weekly invoice (or each other) for the same
-// payee/period. SQLite can't alter an index, so drop + recreate as a partial
-// index under the same name (the plain CREATE IF NOT EXISTS above stays a
-// no-op on later boots because the name already exists).
+// ---------------------------------------------------------------------------
+// idx_invoices_driver_week — the one-invoice-per-driver-week constraint.
+//
+// Two properties, applied together because they were introduced apart:
+//
+//  1. PARTIAL — scoped to LIVE GENERATED weekly invoices. A soft-deleted row
+//     must not block a regenerate, and manual invoices (is_manual = 1, free-text
+//     payee) may coexist with a weekly invoice, or each other, for the same
+//     payee/period.
+//
+//  2. NOCASE — `invoices.driver` is a money join key and every reader folds case
+//     (`driverOwnsInvoice()`, `normalizeDriverName()`, `LOWER(driver) = ?`).
+//     The index did not. That is the worst combination: the readers merge the
+//     spellings while the constraint permits them, so `"Shorn King"` and
+//     `"shorn king"` are two index entries and a SECOND live weekly invoice for
+//     one driver-week is structurally insertable. Production carries exactly one
+//     mixed-case row (invoice #40, PAID, inside two locked periods) beside 13
+//     lowercase rows for the same driver.
+//
+// ⚠️ THIS IS NOT A SUBSTITUTE FOR THE READER FIX, and adding it does not change
+// any query's semantics. In SQLite the collation used by `driver = ?` comes from
+// the COLUMN's declared collation, never from an index — an index only has to
+// have a compatible collation to be USABLE for that comparison. So the readers
+// still have to fold case themselves (they do, via `driverOwnsInvoice()`); this
+// is purely the WRITE-side constraint that stops the second row existing.
+//
+// ⚠️ THE MIGRATION SHAPE IS THE POINT. The previous version did
+// `DROP INDEX` then `CREATE UNIQUE INDEX` as two statements, not in a
+// transaction, inside a catch that only console.error'd and let boot continue —
+// so a failure landing between them left the table with NO UNIQUE INDEX AT ALL,
+// silently, which is strictly weaker than never migrating. Three rules follow:
+//
+//   (a) COLLISION PRE-FLIGHT FIRST. Fold-to-one-name duplicates already in the
+//       table would make the CREATE throw. Detect them, abort LOUDLY, and leave
+//       the existing index untouched — never "resolve" them: which spelling is
+//       the real driver is a business question, and both rows are money.
+//       Scoped to `deleted_at = '' AND is_manual = 0`, exactly the index's own
+//       predicate, so a soft-deleted or manual row can never block the upgrade.
+//   (b) CREATE THE REPLACEMENT UNDER A TEMPORARY NAME FIRST, verify, and only
+//       then drop the old one and re-create under the canonical name. SQLite
+//       cannot rename an index, so create-then-drop is the ONLY ordering under
+//       which the table is never left unprotected: the temp index covers exactly
+//       the same rows, so it holds the constraint across the window where the
+//       canonical name does not exist. It is dropped last, and if any step
+//       fails it is deliberately LEFT IN PLACE — a duplicate constraint is
+//       harmless, an absent one is the bug.
+//   (c) THE REBUILD PREDICATE MUST TEST BOTH PROPERTIES. It used to test only
+//       `/\bWHERE\b/`, which is true forever once the partial index exists —
+//       so this migration would have been dead on arrival, never firing on any
+//       database that had already been upgraded (i.e. all of them).
+// ---------------------------------------------------------------------------
+const INVOICE_WEEK_IDX = "idx_invoices_driver_week";
+const INVOICE_WEEK_IDX_TMP = "idx_invoices_driver_week_migrating";
+const INVOICE_WEEK_IDX_COLS = `invoices(driver COLLATE NOCASE, week_start) WHERE deleted_at = '' AND is_manual = 0`;
+function invoiceWeekIndexSql(name) {
+	return `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = '${name}'`;
+}
+function invoiceWeekIndexIsCurrent(name) {
+	const row = db.prepare(invoiceWeekIndexSql(name)).get();
+	const sql = row && row.sql ? row.sql : "";
+	// (c) BOTH properties, or the predicate is false-forever on one of them.
+	return /\bWHERE\b/i.test(sql) && /\bNOCASE\b/i.test(sql);
+}
 try {
-	const driverWeekIdx = db.prepare(
-		"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_invoices_driver_week'"
-	).get();
-	if (!driverWeekIdx || !/\bWHERE\b/i.test(driverWeekIdx.sql || "")) {
-		db.exec("DROP INDEX IF EXISTS idx_invoices_driver_week");
-		db.exec("CREATE UNIQUE INDEX idx_invoices_driver_week ON invoices(driver, week_start) WHERE deleted_at = '' AND is_manual = 0");
+	if (!invoiceWeekIndexIsCurrent(INVOICE_WEEK_IDX)) {
+		// (a) Pre-flight. LOWER() and COLLATE NOCASE fold the same set of
+		// characters in SQLite (ASCII A-Z only), so this counts exactly what the
+		// index would refuse.
+		const clashes = db.prepare(`
+			SELECT LOWER(driver) AS driver_folded, week_start, COUNT(*) AS n
+			FROM invoices
+			WHERE deleted_at = '' AND is_manual = 0
+			GROUP BY LOWER(driver), week_start
+			HAVING n > 1
+		`).all();
+		if (clashes.length) {
+			const named = clashes.map((c) => `${JSON.stringify(c.driver_folded)} week ${c.week_start} (${c.n} rows)`).join("; ");
+			console.error(
+				`invoices unique-index migration SKIPPED — ${clashes.length} driver-week collision${clashes.length === 1 ? "" : "s"} ` +
+				`would violate a case-insensitive ${INVOICE_WEEK_IDX}: ${named}. ` +
+				`The existing index is intact and unchanged. Soft-delete or correct the duplicate invoices, then restart. ` +
+				`Do NOT resolve these automatically — which spelling is the real driver is a business decision and both rows carry money.`
+			);
+		} else {
+			// (b) Temp first. IF NOT EXISTS so a run interrupted midway resumes
+			// cleanly rather than throwing on a leftover temp index.
+			db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${INVOICE_WEEK_IDX_TMP} ON ${INVOICE_WEEK_IDX_COLS}`);
+			if (!invoiceWeekIndexIsCurrent(INVOICE_WEEK_IDX_TMP)) {
+				throw new Error(`${INVOICE_WEEK_IDX_TMP} did not materialise — refusing to drop ${INVOICE_WEEK_IDX}`);
+			}
+			// From here the table is covered by the temp index no matter what.
+			db.exec(`DROP INDEX IF EXISTS ${INVOICE_WEEK_IDX}`);
+			db.exec(`CREATE UNIQUE INDEX ${INVOICE_WEEK_IDX} ON ${INVOICE_WEEK_IDX_COLS}`);
+			if (!invoiceWeekIndexIsCurrent(INVOICE_WEEK_IDX)) {
+				throw new Error(`${INVOICE_WEEK_IDX} did not materialise — leaving ${INVOICE_WEEK_IDX_TMP} in place`);
+			}
+			db.exec(`DROP INDEX IF EXISTS ${INVOICE_WEEK_IDX_TMP}`);
+			console.log(`Migrated ${INVOICE_WEEK_IDX}: now case-insensitive (driver COLLATE NOCASE, week_start) over live generated invoices`);
+		}
 	}
 } catch (err) {
+	// The temp index is intentionally NOT cleaned up here: if we failed after
+	// creating it, it is the only thing still enforcing the constraint.
 	console.error("invoices unique-index migration failed:", err.message);
 }
 
