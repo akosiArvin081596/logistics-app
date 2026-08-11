@@ -454,7 +454,6 @@
           maxlength="200"
           class="cancel-reason-input"
           placeholder="e.g. broker called it off"
-          @keyup.enter="runCancel"
         />
       </label>
     </ConfirmModal>
