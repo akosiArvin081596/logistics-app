@@ -690,6 +690,71 @@ check("refusal extraction picked up the 409 and its code selection", [
 	}
 }
 
+// ---------------------------------------------------------------------------
+// THE RECONCILER — GET /api/admin/orphaned-signed-artifacts
+// ---------------------------------------------------------------------------
+// The other end of the same feature: this cascade ARCHIVES a signed artifact
+// before destroying the row that authorizes it, and that route is how anyone
+// notices the copy left behind. It scans `uploads/` synchronously on the request
+// path and reports which unreferenced files carry an SSN or a bank account, and
+// it shipped with `requireRole("Super Admin")` and nothing else.
+//
+// Source-text assertions, in the style test-csrf-guard.js uses for the database
+// export ("requireRole first, so a 403 never spends dbAdminLimiter") — the
+// failure mode is a mount ORDER, which no behavioural test of the handler sees.
+{
+	const LS = SRC.split("\n");
+	const ROUTE = "/api/admin/orphaned-signed-artifacts";
+	const mount = LS.find((l) => l.startsWith("app.get(") && l.includes(`"${ROUTE}"`));
+	check("orphan scan: route registered on one line", Boolean(mount), true);
+	check("orphan scan: orphanScanLimiter is mounted",
+		Boolean(mount) && mount.includes("orphanScanLimiter"), true);
+	// ⚠️ THE ORDER IS THE POINT. Mounted limiter-first, an unauthenticated caller
+	// spends the whole 10-request budget on 403s and locks the Super Admin out of
+	// an admin-only route. Same ordering as fuelEventsLimiter, fuelGallonsLimiter,
+	// onboardingEvidenceLimiter and dbAdminLimiter.
+	check("orphan scan: requireRole precedes the limiter, so a 403 cannot spend the budget",
+		Boolean(mount) && mount.indexOf("requireRole") > -1
+			&& mount.indexOf("requireRole") < mount.indexOf("orphanScanLimiter"), true);
+
+	// A `const` middleware mounted above its own definition is a TDZ crash at
+	// require time — the whole app fails to boot, not just this route.
+	const defIdx = LS.findIndex((l) => l.startsWith("const orphanScanLimiter = rateLimit("));
+	const mountIdx = LS.indexOf(mount);
+	check("orphan scan: the limiter is defined ABOVE its mount (else the app cannot boot)",
+		defIdx > -1 && mountIdx > defIdx, true);
+
+	// Budget: the same shape as dbAdminLimiter, which it is modelled on.
+	const def = LS.slice(defIdx, defIdx + 6).join("\n");
+	check("orphan scan: 15-minute window", /windowMs:\s*15\s*\*\s*60\s*\*\s*1000/.test(def), true);
+	check("orphan scan: max 10, matching dbAdminLimiter", /max:\s*10\b/.test(def), true);
+
+	// -----------------------------------------------------------------------
+	// THE CROSS-SITE GUARD IS DELIBERATELY ABSENT — encoded as its TRIGGER.
+	// -----------------------------------------------------------------------
+	// Every route carrying refuseCrossSite has a side EFFECT that a top-level
+	// cross-site GET navigation can force while SameSite=Lax still sends the
+	// cookie: fuel-gallons-recovery bills Gemini, onboarding-evidence forges an
+	// audit_trail row, /api/db/download dumps 313 MB of plaintext PII. The
+	// adjacent fuel-events GET is explicitly DENIED the guard because ~140 ms of
+	// local CPU is not an effect — "it is the cost, not the verb, that decides".
+	// This route writes nothing at all, and CORS already withholds the body from
+	// the page that forced the navigation, so the limiter is the whole control.
+	//
+	// ⚠️ Asserted as the RULE, not the current state: the day this route starts
+	// writing an audit row (a defensible follow-up — it is why /api/db/* got
+	// theirs) it becomes the audit-row-injection shape onboarding-evidence is
+	// guarded for, and the guard must land in the same commit.
+	const end = LS.findIndex((l, i) => i > mountIdx && l === "});");
+	const handler = LS.slice(mountIdx, end + 1).join("\n");
+	// Guard against a vacuous pass: a slice that captured nothing would satisfy
+	// the rule below forever.
+	check("orphan scan: the handler body was actually located",
+		handler.includes("orphans.push(") && handler.includes("missingCount"), true);
+	check("orphan scan: writes no audit row, so refuseCrossSite is not yet earned — and if that changes, the guard must land with it",
+		!/\blogAudit\(/.test(handler) || mount.includes("refuseCrossSite"), true);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) {
 	console.log("\nFailures:");

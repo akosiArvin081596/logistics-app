@@ -9059,7 +9059,44 @@ app.post("/api/investor-applications/:id/restore", requireRole("Super Admin"), (
 // unreferenced while its id is perfectly alive.
 //
 // Read-only, and it reports metadata only — never file contents.
-app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), (req, res) => {
+//
+// ⚠️ IT DID ITS WHOLE SCAN ON THE REQUEST PATH WITH NO CAP. One call is a
+// `readdirSync` per scope, a `statSync` per PDF and an `existsSync` per row —
+// synchronous, so every one of them blocks the event loop for the entire
+// process, and the work grows with the orphan pile this route exists to measure
+// (88 files today; the mechanism that produced 54 of them is UNFIXED, per the
+// note above, so the next rollback or refresh adds more). It is also the
+// inventory listing of which unreferenced files carry an SSN or a bank account.
+// 10 / 15 min, matching dbAdminLimiter: the same class of read-only
+// reconnaissance over the same sensitive inventory, and a legitimate operator
+// runs a reconciliation a handful of times, not in a loop.
+//
+// ⚠️ requireRole BEFORE the limiter. Mounted the other way an unauthenticated
+// caller spends the whole budget on 403s and locks the Super Admin out of an
+// admin-only route — see the same ordering on fuelEventsLimiter,
+// fuelGallonsLimiter, onboardingEvidenceLimiter and dbAdminLimiter.
+//
+// ⚠️ DELIBERATELY NO refuseCrossSite, and the reason is the rule the guarded
+// routes already state: it is the EFFECT, not the sensitivity, that earns the
+// guard. Every route carrying it has a side effect a cross-site GET navigation
+// can force while SameSite=Lax still sends the cookie — fuel-gallons-recovery
+// fires up to 25 BILLED Gemini calls, onboarding-evidence forges an audit_trail
+// row per call, /api/db/download dumps 313 MB of plaintext PII — and the
+// adjacent fuel-events GET is explicitly denied it because ~140 ms of local CPU
+// is not an effect. This route writes nothing: no row, no audit line, no
+// spend, and CORS already withholds the response body from the page that forced
+// the navigation. The limiter is the right control for the scan cost.
+// ⚠️ THAT CHANGES THE DAY THIS ROUTE GAINS AN audit_trail ROW. A bulk read of
+// this inventory arguably deserves one (it is why /api/db/* got theirs), but an
+// audited GET is precisely the audit-row-injection shape onboarding-evidence
+// carries refuseCrossSite for — add the guard in the same commit as the row.
+const orphanScanLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 10,
+	message: { error: "Too many artifact reconciliation scans. Try again later." },
+	standardHeaders: true,
+});
+app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), orphanScanLimiter, (req, res) => {
 	try {
 		const scopes = [
 			{ scope: "driver", dir: "onboarding-signed", table: "onboarding_documents", owner: "user_id" },
