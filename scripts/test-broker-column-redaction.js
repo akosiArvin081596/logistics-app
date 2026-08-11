@@ -89,6 +89,32 @@ const G = new Function(
 	`const BROKER_WITHHELD_RE = ${reMatch[1]};\n${REAL.map(extract).join("\n")}\nreturn { ${REAL.join(", ")} };`
 )();
 
+// ------------------------------------------------------------- CLIENT MIRROR
+// BROKER_WITHHELD_RE is DUPLICATED in ActiveLoadsTab.vue, and the duplication is
+// deliberate: the dispatcher's edit form renders the withheld columns read-only
+// rather than as inputs that accept typing and silently round-trip to the stored
+// value, and it derives that set with the same regex instead of a hardcoded name
+// list — a hardcoded list is precisely how the reader and the writer came to
+// disagree about "Email" (see the header of this file).
+//
+// Both copies fail CLOSED, so the duplication itself is safe. What was not safe
+// is that nothing enforced the mirror: the two could drift apart silently, and
+// the client half is the one with no server-side backstop behind it. Narrowing
+// the client to literal column names is NOT the fix — that re-creates the
+// original data-loss bug, which is why both files carry a comment saying so.
+//
+// Extracted from source text exactly like the server's copy above, and compared
+// as a STRING: character-identical, not merely equivalent.
+//
+// ⚠️ The client declaration carries NO trailing semicolon (Vue SFC style) while
+// server.js does. Reusing the `;`-anchored pattern above matches nothing here and
+// would throw rather than assert, so this one anchors on end-of-line with the
+// semicolon optional.
+const CLIENT_MIRROR = path.join(__dirname, "..", "client", "src", "components", "dashboard", "ActiveLoadsTab.vue");
+const clientMatch = fs.readFileSync(CLIENT_MIRROR, "utf8").match(/^const BROKER_WITHHELD_RE = (\/.*\/[a-z]*);?\s*$/m);
+if (!clientMatch) throw new Error("BROKER_WITHHELD_RE not found in client/src/components/dashboard/ActiveLoadsTab.vue");
+check("client BROKER_WITHHELD_RE mirrors server.js character-for-character", clientMatch[1], reMatch[1]);
+
 // ---------------------------------------------------------------------------
 // THE FIXTURE — production's Job Tracking header row, verbatim and in order.
 // ---------------------------------------------------------------------------
