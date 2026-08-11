@@ -2907,6 +2907,23 @@ try { db.exec("ALTER TABLE invoices ADD COLUMN created_by TEXT DEFAULT ''"); } c
 const INVOICE_WEEK_IDX = "idx_invoices_driver_week";
 const INVOICE_WEEK_IDX_TMP = "idx_invoices_driver_week_migrating";
 const INVOICE_WEEK_IDX_COLS = `invoices(driver COLLATE NOCASE, week_start) WHERE deleted_at = '' AND is_manual = 0`;
+// ⚠️ IDENTIFIER INTERPOLATED INTO SQL — one of only two in this file, and this
+// is why it is safe. `name` is never caller-, request- or database-supplied: the
+// only two arguments this function is ever given are the module constants
+// INVOICE_WEEK_IDX and INVOICE_WEEK_IDX_TMP declared immediately above, both
+// hardcoded literals. It runs once at boot, before any listener exists.
+//
+// It is written this way because a bound parameter cannot carry an INDEX NAME in
+// the sibling CREATE/DROP statements, so the constants have to be interpolated
+// there regardless; matching that here keeps one spelling of the name.
+//
+// WHAT WOULD MAKE IT UNSAFE: passing anything derived from `req`, from a sheet,
+// or from a query result — including a name read back out of sqlite_master.
+// If this ever needs a dynamic name, whitelist it against those two constants
+// first (`if (name !== INVOICE_WEEK_IDX && name !== INVOICE_WEEK_IDX_TMP) throw`).
+// Note the VALUE half here could be parameterised (`name = ?`) even though the
+// DDL identifiers cannot — do that as well if the argument ever stops being a
+// constant.
 function invoiceWeekIndexSql(name) {
 	return `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = '${name}'`;
 }
@@ -2952,6 +2969,21 @@ try {
 			db.exec(`DROP INDEX IF EXISTS ${INVOICE_WEEK_IDX_TMP}`);
 			console.log(`Migrated ${INVOICE_WEEK_IDX}: now case-insensitive (driver COLLATE NOCASE, week_start) over live generated invoices`);
 		}
+	} else {
+		// (d) SWEEP THE TEMP INDEX ON THE ALREADY-CURRENT PATH. Every step above is
+		// resumable EXCEPT the last one: if that final DROP is the thing that fails
+		// (or the process dies between it and the line before), the canonical index
+		// is already current, so the next boot takes THIS branch, skips the whole
+		// block, and the temp index survives forever — never revisited by anything.
+		// Harmless (it is a duplicate of a constraint already enforced) but
+		// permanent, and it costs a second write on every invoice insert.
+		//
+		// Safe precisely because it is guarded by invoiceWeekIndexIsCurrent(): the
+		// canonical index has been verified NOCASE + partial, so it is holding the
+		// constraint on its own and the temp is pure redundancy. This is the one
+		// state in which dropping it cannot leave the table unprotected — which is
+		// why the failure path above still deliberately leaves it in place.
+		db.exec(`DROP INDEX IF EXISTS ${INVOICE_WEEK_IDX_TMP}`);
 	}
 } catch (err) {
 	// The temp index is intentionally NOT cleaned up here: if we failed after
@@ -9044,6 +9076,20 @@ app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), (req
 			// would be N lookups and, worse, would invite matching on something
 			// other than the URL.
 			let rows = [];
+			// ⚠️ IDENTIFIERS INTERPOLATED INTO SQL — the second and last of the two
+			// in this file, and safe for the same reason as invoiceWeekIndexSql().
+			// `s.table` and `s.owner` are read from the `scopes` array literal a few
+			// lines above, which is hardcoded in this handler: two fixed table names
+			// and two fixed column names. Nothing from `req` reaches this query — the
+			// route takes no parameters at all — so there is no input to inject with.
+			// A table name and a column name also cannot be bound as parameters in
+			// SQLite, so this could not be parameterised even if it were dynamic.
+			//
+			// WHAT WOULD MAKE IT UNSAFE: sourcing a scope from the request (say
+			// `?scope=` picking the table), from a config file, or from a
+			// sqlite_master listing. If scopes ever stop being literals, resolve them
+			// through a hardcoded allowlist map and interpolate only the matched
+			// constant — never the caller's string, even after "validation".
 			try {
 				rows = db.prepare(
 					`SELECT ${s.owner} AS owner_id, doc_key, COALESCE(signed_pdf_url, '') AS signed_pdf_url, signed
