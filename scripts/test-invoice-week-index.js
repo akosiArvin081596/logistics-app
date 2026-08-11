@@ -278,6 +278,74 @@ function insertRefused(db, driver, week, opts = {}) {
 	db.close();
 }
 
+// ---------------------------------------------------------------------------
+// (d) THE ORPHANED TEMP INDEX — the one state nothing ever revisited.
+//
+// Every step of the migration is resumable EXCEPT the last. If the final
+// `DROP INDEX ..._migrating` is what fails — or the process dies between the
+// canonical CREATE and that DROP — the canonical index is ALREADY current, so
+// the next boot's `invoiceWeekIndexIsCurrent()` check is true, the whole block
+// is skipped, and the temp index survives forever. The crash test above only
+// covers a crash BEFORE the canonical index exists, which the next boot repairs;
+// this is the half that repaired itself into a permanent leftover.
+//
+// Harmless in the sense that it duplicates a constraint already enforced — but
+// permanent, and it costs a second index write on every invoice insert.
+// ---------------------------------------------------------------------------
+const ORPHAN_COLS = `invoices(driver COLLATE NOCASE, week_start) WHERE deleted_at = '' AND is_manual = 0`;
+function orphanState() {
+	const db = scratch({ index: "none", rows: [{ driver: "shorn king", week_start: "2026-05-09" }] });
+	// The exact end state of a run that did everything except its final DROP.
+	db.exec(`CREATE UNIQUE INDEX idx_invoices_driver_week ON ${ORPHAN_COLS}`);
+	db.exec(`CREATE UNIQUE INDEX idx_invoices_driver_week_migrating ON ${ORPHAN_COLS}`);
+	return db;
+}
+
+{
+	const db = orphanState();
+	check("(d) setup: canonical is already current, temp is left over",
+		indexNames(db), ["idx_invoices_driver_week", "idx_invoices_driver_week_migrating"]);
+
+	const { threw, logs } = runMigration(db);
+	check("(d) the sweep does not throw", threw, null);
+	check("(d) the orphaned temp index is dropped", indexNames(db), ["idx_invoices_driver_week"]);
+	check("(d) the canonical index is untouched",
+		/NOCASE/i.test(indexSql(db, "idx_invoices_driver_week") || ""), true);
+	// The sweep must not weaken anything on its way past.
+	check("(d) the constraint still holds afterwards",
+		insertRefused(db, "Shorn King", "2026-05-09"), true);
+	check("(d) it is silent — a cleanup is not a migration", logs.length, 0);
+
+	const second = runMigration(db);
+	check("(d) a second boot is a no-op", indexNames(db), ["idx_invoices_driver_week"]);
+	check("(d) and stays silent", second.logs.length, 0);
+	db.close();
+}
+
+// MUTANT — the shipped code had no `else`, so the orphan was permanent.
+{
+	const elseAt = MIGRATION_SRC.indexOf("\n\t} else {\n");
+	const catchAt = MIGRATION_SRC.indexOf("\n} catch (err) {", elseAt);
+	check("(d) the no-sweep mutant found the else branch to remove",
+		elseAt > 0 && catchAt > elseAt, true);
+	const noSweep = MIGRATION_SRC.slice(0, elseAt) + "\n\t}" + MIGRATION_SRC.slice(catchAt);
+	// ⚠️ Count the DROP, don't grep for `} else {` — the clashes pre-flight has an
+	// `else` of its own (at two tabs), so a bare test for "no else" is false here
+	// even on a correctly mutated source and would silently pass a no-op mutant.
+	const drops = (s) => s.split("DROP INDEX IF EXISTS ${INVOICE_WEEK_IDX_TMP}").length - 1;
+	check("(d) the mutant removed exactly the sweep, leaving the in-migration DROP",
+		[drops(MIGRATION_SRC), drops(noSweep)], [2, 1]);
+	check("(d) the one-tab else branch is gone",
+		noSweep.includes("\n\t} else {\n"), false);
+
+	const db = orphanState();
+	const { threw } = runMigration(db, noSweep);
+	check("(d) mutant still boots cleanly — the leak is silent, which is the problem", threw, null);
+	check("(d) MUTANT REJECTED — without the sweep the temp index is permanent",
+		indexNames(db), ["idx_invoices_driver_week", "idx_invoices_driver_week_migrating"]);
+	db.close();
+}
+
 {
 	// Index missing entirely (a database that lost it to the old two-statement
 	// failure). The migration must rebuild rather than assume.
