@@ -25,7 +25,7 @@ Live in `scripts/`:
 
 | Script | Purpose |
 |---|---|
-| `reset-super-admin-password.js` | Reset the Super Admin password against the local SQLite DB. |
+| `reset-super-admin-password.js` | Reset the Super Admin password against a SQLite DB (defaults to the one beside the repo; pass a path to override). Reads the plaintext from **`NEW_PASSWORD`**, never argv, so it stays out of shell history — `NEW_PASSWORD='…' node scripts/reset-super-admin-password.js`. Minimum 16 chars; clears all `sessions` on success. Fixes a forgotten password only: it refuses when no `super_admin` row exists, so it is not a recovery path from a *zero*-Super-Admin state. |
 | `prepare-test-fixtures.js` | Set known passwords on the accounts that already own the test data, so `test-suite.js` can log in. Requires `--yes-local-db`; refuses deployed paths. Does NOT wipe — loads live in Google Sheets, so a truncate destroys the fixture chain. |
 | `seed-staging.js` | Seed a staging DB. |
 | `geocode-loads.js` | Backfill geocodes for rows in "Job Tracking". |
