@@ -334,10 +334,94 @@
       </div>
     </div>
 
+    <!-- Database Backup — the UI caller POST /api/db/download never had.
+         ⚠️ Super Admin ONLY, and the v-if is not decoration. The route is
+         requireRole("Super Admin") behind refuseCrossOriginStrict and
+         dbAdminLimiter, so the server is the authority; this gate exists so the
+         two agree, and so no other role is shown a control it cannot use. The
+         /admin/tools route is already meta.roles: ['Super Admin'], which makes
+         this the second of two independent client-side gates. -->
+    <div v-if="isSuperAdmin" class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <div class="section-dot" style="background: var(--danger);"></div>
+          Database Backup
+        </div>
+        <button
+          class="btn btn-danger btn-sm"
+          :disabled="dbExportBusy"
+          @click="dbExportConfirmOpen = true"
+        >{{ dbExportBusy ? 'Exporting…' : 'Download database backup' }}</button>
+      </div>
+      <div class="card-body">
+        <p class="rm-help">
+          Saves the whole SQLite database to your computer as a single file (~300&nbsp;MB) —
+          every table, including <strong>Social Security and EIN numbers and bank routing and
+          account numbers, in plain text</strong>. The file is not encrypted. Keep it wherever
+          you would keep payroll records, and delete it when you are done. Every export is
+          recorded on the audit trail.
+        </p>
+
+        <!-- Honest progress. The server runs a full db.backup() BEFORE it sends a
+             single byte, so there is a real stretch where nothing is downloading
+             and the UI would otherwise look hung — which is exactly when someone
+             clicks again. The two phases are named separately for that reason. -->
+        <div v-if="dbExportBusy" class="dbx-progress" role="status" aria-live="polite">
+          <div class="dbx-progress-label">
+            <span v-if="dbExportPhase === 'preparing'">Preparing the backup on the server…</span>
+            <span v-else-if="dbExportTotal">
+              Downloading — {{ fmtBytes(dbExportReceived) }} of {{ fmtBytes(dbExportTotal) }}
+            </span>
+            <span v-else>Downloading — {{ fmtBytes(dbExportReceived) }} so far</span>
+            <span v-if="dbExportPhase === 'downloading' && dbExportTotal" class="dbx-pct">{{ dbExportPct }}%</span>
+          </div>
+          <div
+            class="dbx-bar"
+            role="progressbar"
+            :aria-valuenow="dbExportTotal ? dbExportPct : undefined"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-valuetext="dbExportPhase === 'preparing' ? 'Preparing the backup on the server' : undefined"
+          >
+            <div
+              :class="['dbx-bar-fill', { indeterminate: !dbExportTotal || dbExportPhase === 'preparing' }]"
+              :style="dbExportTotal && dbExportPhase === 'downloading' ? { width: dbExportPct + '%' } : null"
+            ></div>
+          </div>
+          <p class="dbx-note">Keep this tab open until it finishes.</p>
+        </div>
+
+        <div v-else-if="dbExportError" class="dbx-msg dbx-msg-error" role="alert">
+          <strong>{{ dbExportErrorTitle }}</strong>
+          <span>{{ dbExportError }}</span>
+          <span v-if="dbExportHint" class="dbx-hint">{{ dbExportHint }}</span>
+        </div>
+
+        <div v-else-if="dbExportDone" class="dbx-msg dbx-msg-ok" role="status">
+          <strong>Saved {{ dbExportDone.name }}</strong>
+          <span>{{ fmtBytes(dbExportDone.bytes) }} written to your downloads folder.</span>
+        </div>
+      </div>
+    </div>
+
     <!-- Business Configuration (Investor Settings) -->
     <ConfigPanel
       :config="investorStore.config"
       @save="handleSaveConfig"
+    />
+
+    <!-- Confirm-gated on the "Mark Paid" precedent: this is the one control on
+         the page that puts every SSN, EIN and bank account in the system onto
+         somebody's laptop, so it says so in as many words before it runs. -->
+    <ConfirmModal
+      :open="dbExportConfirmOpen"
+      title="Download a full copy of the database?"
+      :message="DB_EXPORT_CONFIRM"
+      confirm-text="Download the backup"
+      cancel-text="Cancel"
+      danger
+      @cancel="dbExportConfirmOpen = false"
+      @confirm="startDbExport"
     />
   </div>
 </template>
@@ -346,13 +430,18 @@
 import { ref, computed, onMounted } from 'vue'
 import { useAdminToolsStore } from '../stores/adminTools'
 import { useInvestorStore } from '../stores/investor'
+import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useApi } from '../composables/useApi'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
+import ConfirmModal from '../components/shared/ConfirmModal.vue'
 
 const store = useAdminToolsStore()
 const investorStore = useInvestorStore()
+const auth = useAuthStore()
 const api = useApi()
+
+const isSuperAdmin = computed(() => auth.isSuperAdmin)
 
 const rmHealth = ref(null)
 const rmHealthLoading = ref(true)
@@ -586,6 +675,215 @@ async function fixName(oldName, newName) {
     // Surface the server's message — a 409 lock refusal and a PARTIAL_RENAME
     // split are very different events and must not read identically.
     toast(e.message || 'Failed to fix name', 'error')
+  }
+}
+
+// --- Database backup export ---------------------------------------------------
+//
+// POST /api/db/download had NO caller anywhere in client/ — admins reached it
+// from the address bar, and PR #267 deliberately took that away. `SameSite=Lax`
+// attaches the session cookie to a top-level cross-site GET *navigation*, and
+// `Sec-Fetch-Site: none` (a bookmark, an address-bar paste, a link opened from
+// Slack/Outlook/Mail/Teams) was indistinguishable from an admin's own bookmark —
+// so one link could land a ~313 MB unencrypted copy of every SSN, EIN and bank
+// account in the system in a Super Admin's Downloads folder. Making it a POST
+// closes that class at the cookie. This is the caller that gives the capability
+// back to the one shape a browser cannot be tricked into: a same-origin fetch
+// from a page the admin is already on.
+//
+// ⚠️ NEVER RETRY THIS AS A GET. A plain GET is answered 405 by the app.all guard
+// beside the route, and that guard exists because simply dropping the GET
+// registration would let the request fall through to the SPA catch-all and be
+// answered index.html + 200 — which reads as though the export were world
+// readable. A 405 here means this client regressed into a link; it is surfaced
+// as its own message rather than folded into a generic failure.
+const DB_EXPORT_CONFIRM = [
+  'This copies the entire database onto your computer as one unencrypted file (about 300 MB).',
+  '',
+  'It contains every Social Security and EIN number, and every bank routing and account number, in plain text — for every driver and every investor on the system.',
+  '',
+  'The export is recorded on the audit trail.',
+].join('\n')
+
+const dbExportConfirmOpen = ref(false)
+const dbExportBusy = ref(false)
+const dbExportPhase = ref('')        // '' | 'preparing' | 'downloading'
+const dbExportReceived = ref(0)
+const dbExportTotal = ref(0)
+const dbExportError = ref('')
+const dbExportErrorTitle = ref('')
+const dbExportHint = ref('')
+const dbExportDone = ref(null)       // { name, bytes }
+
+const dbExportPct = computed(() => {
+  if (!dbExportTotal.value) return 0
+  return Math.min(100, Math.round((dbExportReceived.value / dbExportTotal.value) * 100))
+})
+
+function fmtBytes(n) {
+  if (!Number.isFinite(n) || n <= 0) return '0 MB'
+  const mb = n / (1024 * 1024)
+  if (mb < 1) return `${Math.round(n / 1024)} KB`
+  if (mb < 1024) return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`
+  return `${(mb / 1024).toFixed(2)} GB`
+}
+
+// The server names the file (res.download(tmpPath, "app.db")), so read it back off
+// Content-Disposition rather than inventing one here — a filename that lives in two
+// places drifts. Readable at all only because this is a same-origin response; a
+// cross-origin one would need Access-Control-Expose-Headers, which is another
+// reason the request must stay same-origin.
+function filenameFromDisposition(header, fallback) {
+  if (!header) return fallback
+  // RFC 5987 `filename*=UTF-8''…` wins over plain `filename=` when both are sent.
+  const star = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(header)
+  if (star) {
+    try { return decodeURIComponent(star[1].trim().replace(/^"|"$/g, '')) } catch { /* fall through */ }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header)
+  const name = plain ? plain[1].trim() : ''
+  // Never let a header choose a path — only a leaf name reaches link.download.
+  return name ? name.replace(/[\\/]/g, '_') : fallback
+}
+
+// dbAdminLimiter is 10 per 15 minutes and sets Retry-After (seconds) plus draft-6
+// RateLimit-Reset on a 429. "Request failed (429)" tells an admin nothing they can
+// act on; the number of minutes is the entire actionable content of that response.
+function retryAfterMinutes(res) {
+  const raw = res.headers.get('Retry-After') || res.headers.get('RateLimit-Reset')
+  const secs = Number(raw)
+  // Retry-After may legally be an HTTP-date; express-rate-limit only ever emits
+  // seconds, so anything non-numeric falls back to the vaguer wording rather than
+  // rendering NaN.
+  if (!Number.isFinite(secs) || secs <= 0) return 0
+  return Math.max(1, Math.ceil(secs / 60))
+}
+
+function clearDbExportState() {
+  dbExportError.value = ''
+  dbExportErrorTitle.value = ''
+  dbExportHint.value = ''
+  dbExportDone.value = null
+  dbExportReceived.value = 0
+  dbExportTotal.value = 0
+}
+
+async function describeDbExportFailure(res) {
+  let data = {}
+  try { data = await res.json() } catch { data = {} }
+  const s = res.status
+
+  if (s === 429) {
+    const mins = retryAfterMinutes(res)
+    dbExportErrorTitle.value = 'Export limit reached.'
+    dbExportError.value = 'Database admin requests are capped at 10 every 15 minutes.'
+    dbExportHint.value = mins
+      ? `Try again in about ${mins} minute${mins === 1 ? '' : 's'}.`
+      : 'Try again shortly.'
+    return
+  }
+  if (s === 405) {
+    dbExportErrorTitle.value = 'The server refused the request method.'
+    dbExportError.value = 'The export accepts POST only, and this request was not one.'
+    dbExportHint.value = 'Report this — it means the export button has regressed into a plain link.'
+    return
+  }
+  if (s === 403) {
+    dbExportErrorTitle.value = 'Refused.'
+    dbExportError.value = data.error || 'The export is available to Super Admins, from this site only.'
+    dbExportHint.value = 'Open LogisX directly rather than through a link from another site, then try again.'
+    return
+  }
+  if (s === 401) {
+    dbExportErrorTitle.value = 'Your session has expired.'
+    dbExportError.value = data.error || 'Sign in again, then retry the export.'
+    return
+  }
+  dbExportErrorTitle.value = `The export failed (${s}).`
+  dbExportError.value = data.error || 'The server could not produce the backup.'
+  dbExportHint.value = ''
+}
+
+async function startDbExport() {
+  // Close the confirm and take the busy flag in the same synchronous tick, so
+  // there is no window in which a second Enter or click can queue a second
+  // 300 MB export. The trigger button is :disabled on the same flag, and the
+  // early return below is the third layer.
+  dbExportConfirmOpen.value = false
+  if (dbExportBusy.value) return
+  dbExportBusy.value = true
+  dbExportPhase.value = 'preparing'
+  clearDbExportState()
+
+  try {
+    // credentials: 'same-origin' — not 'include'. Both send the cookie for the
+    // request this app actually makes; 'include' would ALSO attach it to a
+    // cross-origin variant of this URL, which is the exact shape #267 removed.
+    // No body and no Content-Type: the handler reads neither, and a bodyless
+    // POST keeps the request as plain as it can be.
+    const res = await fetch('/api/db/download', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/octet-stream' },
+    })
+
+    if (!res.ok) {
+      await describeDbExportFailure(res)
+      return
+    }
+
+    dbExportPhase.value = 'downloading'
+    const declared = Number(res.headers.get('Content-Length'))
+    dbExportTotal.value = Number.isFinite(declared) && declared > 0 ? declared : 0
+    const name = filenameFromDisposition(res.headers.get('Content-Disposition'), 'app.db')
+
+    // Streamed rather than res.blob() purely so the byte counter is real. The
+    // memory cost is the same either way — the whole file lands in the tab before
+    // it can be handed to a download anchor, which is the price of being able to
+    // report a 429 as a 429 instead of navigating away and letting the browser
+    // render the error JSON as a page.
+    let blob
+    if (res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader()
+      const chunks = []
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        chunks.push(value)
+        dbExportReceived.value += value.byteLength
+      }
+      blob = new Blob(chunks, { type: res.headers.get('Content-Type') || 'application/octet-stream' })
+      chunks.length = 0   // the Blob owns a copy now; drop ours rather than hold 300 MB twice
+    } else {
+      blob = await res.blob()
+      dbExportReceived.value = blob.size
+    }
+
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = name
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    // Deliberately NOT revoked synchronously: on a file this size some browsers
+    // are still reading the blob when the click returns, and revoking under them
+    // truncates the save. The delay only postpones GC of a buffer that already
+    // exists.
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+
+    dbExportDone.value = { name, bytes: blob.size }
+    toast(`Database backup saved (${fmtBytes(blob.size)})`)
+  } catch (err) {
+    // fetch() rejects on a dropped connection, and reader.read() rejects if the
+    // transfer dies mid-stream. Both mean no usable file, so say that rather than
+    // leaving a half-finished progress bar on screen.
+    dbExportErrorTitle.value = 'The download did not complete.'
+    dbExportError.value = err?.message || 'The connection dropped before the file finished transferring.'
+    dbExportHint.value = 'Nothing was saved. Check your connection and try again.'
+  } finally {
+    dbExportBusy.value = false
+    dbExportPhase.value = ''
   }
 }
 </script>
@@ -1008,4 +1306,48 @@ async function fixName(oldName, newName) {
   font-family: 'JetBrains Mono', monospace;
   background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 0.72rem;
 }
+
+/* --- Database backup export --------------------------------------------- */
+.dbx-progress {
+  margin-top: 0.85rem;
+}
+.dbx-progress-label {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem;
+  font-size: 0.78rem; color: var(--text); margin-bottom: 0.4rem;
+}
+.dbx-pct {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.dbx-bar {
+  height: 6px; border-radius: 999px; background: var(--border); overflow: hidden;
+}
+.dbx-bar-fill {
+  height: 100%; border-radius: 999px; background: var(--accent);
+  transition: width 0.2s linear;
+}
+/* The server's db.backup() runs before a single byte is sent, so there is no
+   percentage to show yet — and a bar frozen at 0% reads as "stuck" rather than
+   "working". A sweep says the same thing honestly. */
+.dbx-bar-fill.indeterminate {
+  width: 35%; animation: dbx-sweep 1.3s ease-in-out infinite;
+}
+@keyframes dbx-sweep {
+  0%   { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dbx-bar-fill.indeterminate { animation: none; width: 100%; opacity: 0.45; }
+  .dbx-bar-fill { transition: none; }
+}
+.dbx-note {
+  margin-top: 0.4rem; font-size: 0.72rem; color: var(--text-dim);
+}
+.dbx-msg {
+  margin-top: 0.85rem; padding: 0.55rem 0.75rem; border-radius: 6px;
+  font-size: 0.78rem; display: flex; flex-direction: column; gap: 0.2rem;
+}
+.dbx-msg-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+.dbx-msg-ok { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+.dbx-hint { opacity: 0.85; }
 </style>
