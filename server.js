@@ -16278,7 +16278,106 @@ function userDeleteLockBlockers(user, cascadeName) {
 		}
 	}
 
+	// (4) invoices — the leg this guard missed entirely, and the driver-side twin
+	// of (2). The delete does NOT remove invoices (see the cascade below: they are
+	// issued documents and are deliberately retained), but it does STRAND them.
+	// `driverOwnsInvoice()` resolves ownership through the session's driverName,
+	// and `GET /api/invoices`'s non-Super-Admin branch scopes to
+	// `LOWER(driver) = <own name>` — so once the account is gone the rows sit in
+	// the table naming a person the app can no longer resolve. For a row already
+	// marked PAID that is the same event blocker (2) refuses: money left the bank
+	// against a document naming this driver, and the payee has to stay
+	// attributable.
+	//
+	// Same predicate as the rename planner (`invoiceRowPeriodLocked`) and the same
+	// three-way split by WHY the row is frozen, because the three have different
+	// remedies. Folding "already paid" into the finalized list would send an admin
+	// to reopen a month that is open — the exact mislabel namedLockedPeriods()
+	// exists to prevent. Live rows only: a soft-deleted invoice is already out of
+	// every list, so stranding it changes nothing.
+	if (cascadeName) {
+		const rows = db.prepare(
+			"SELECT id, invoice_number, week_start, week_end, COALESCE(paid_at, '') AS paid_at FROM invoices WHERE LOWER(driver) = ? AND deleted_at = ''"
+		).all(cascadeName);
+		const frozen = rows.filter(invoiceRowPeriodLocked);
+		const MONTH = /^\d{4}-\d{2}$/;
+		const monthLocked = (r) => {
+			const s = String(r.week_start || "").slice(0, 7), e = String(r.week_end || "").slice(0, 7);
+			return (MONTH.test(s) && isLocked(s)) || (MONTH.test(e) && isLocked(e));
+		};
+		const lockedByPeriod = frozen.filter(monthLocked);
+		const paidOnly = frozen.filter((r) => !monthLocked(r) && String(r.paid_at || "").trim());
+		const unresolvable = frozen.filter((r) => !monthLocked(r) && !String(r.paid_at || "").trim());
+		if (lockedByPeriod.length) blockers.push({
+			table: "invoices",
+			rows: lockedByPeriod.length,
+			paidRows: lockedByPeriod.filter((r) => String(r.paid_at || "").trim()).length,
+			periods: namedLockedPeriods(lockedByPeriod.map((r) => [String(r.week_end || "").slice(0, 7), String(r.week_start || "").slice(0, 7)])),
+			detail: `${lockedByPeriod.length} weekly invoice${lockedByPeriod.length === 1 ? "" : "s"} in a finalized month would be left naming a driver with no account`,
+		});
+		if (paidOnly.length) blockers.push({
+			table: "invoices",
+			rows: paidOnly.length,
+			paidRows: paidOnly.length,
+			periods: [],
+			detail: `${paidOnly.length} invoice${paidOnly.length === 1 ? "" : "s"} already marked PAID would be left unattributable — money moved against a document naming this driver`,
+		});
+		if (unresolvable.length) blockers.push({
+			table: "invoices",
+			rows: unresolvable.length,
+			periods: namedLockedPeriods(unresolvable.map(() => [])),
+			detail: `${unresolvable.length} invoice${unresolvable.length === 1 ? "" : "s"} carry a billing week the server cannot resolve to a month`,
+		});
+	}
+
 	return { unreadable: false, blockers };
+}
+
+// ============================================================
+// DELETING AN ONBOARDED DRIVER — the FK-bearing children
+// ============================================================
+// `db.pragma("foreign_keys = ON")` plus three FKs on users(id) —
+// `driver_onboarding`, `onboarding_documents` and `driver_payment_info` (the
+// ONLY three; verified by grepping REFERENCES users) — meant `DELETE FROM users`
+// raised `FOREIGN KEY constraint failed` for anyone who had ever been onboarded.
+// The whole cascade rolled back and the route answered a 500 `DELETE_ROLLED_BACK`
+// naming no cause, so the observable bug was not orphaning: ONBOARDED DRIVERS
+// WERE SIMPLY UNDELETABLE, with no message saying why.
+//
+// ⚠️ THE SIGNED PDFs ARE NOT UNLINKED, AND THE ROWS ARE NOT DELETED BLINDLY.
+// `onboarding_documents.signed = 1` is described a few lines from its own CREATE
+// as "a legal assertion — this person signed this contract, and we hold the
+// document". Deleting the row while leaving the file behind produces exactly the
+// orphan class that put 54 unreferenced W-9s and contractor agreements on
+// production disk, because `guardDriverSignedDoc()` resolves authority from the
+// ROW: no row, no reader, ever. So every signed artifact is COPIED into
+// `evidence-archive/signed-artifacts/` first — the same mechanism, and the same
+// out-of-the-web-root directory, that document regeneration already uses to stop
+// a re-render destroying its predecessor.
+//
+// ⚠️ A FAILED ARCHIVE REFUSES THE DELETE, it does not proceed best-effort. The
+// regenerate route makes the identical call (503 ARCHIVE_FAILED) for the
+// identical reason: a "best-effort" archive that silently no-ops leaves precisely
+// the behaviour this exists to prevent.
+function archiveUserSignedArtifacts(userId) {
+	const dir = path.join(__dirname, "uploads", "onboarding-signed");
+	const rows = db.prepare(
+		"SELECT doc_key, doc_name, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND signed = 1 AND COALESCE(signed_pdf_url, '') <> ''"
+	).all(userId);
+	const archived = [];
+	for (const r of rows) {
+		// ⚠️ basename ONLY. `signed_pdf_url` is a stored `/uploads/…` string, and
+		// joining it straight onto __dirname would let a row written by any past
+		// or future code path steer the read. The directory is ours, not the
+		// row's; the row only names a file inside it.
+		const file = path.basename(String(r.signed_pdf_url || ""));
+		if (!file || file === "." || file === "..") continue;
+		const rec = archiveSignedArtifact(path.join(dir, file));
+		// null = nothing worth keeping (no file, or a stub that never passed the
+		// artifact tests). That is not a failure: there is no evidence to lose.
+		if (rec) archived.push({ docKey: r.doc_key, ...rec });
+	}
+	return archived;
 }
 
 app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
@@ -16414,7 +16513,29 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// The Sheets sync is deliberately OUTSIDE and AFTER: it is a network call to
 	// Google, it must not be inside a write lock, and it must not run at all if
 	// the local delete rolled back.
+	// ⚠️ ARCHIVE BEFORE THE TRANSACTION, AND REFUSE IF IT FAILS. Two reasons for
+	// the ordering. (i) A DB rollback cannot un-copy a file, so doing it first
+	// means the worst case is a spare copy of evidence in an operator-only
+	// directory — never a deleted row whose artifact was not saved. (ii) It is a
+	// filesystem call, and a throw inside db.transaction() would be reported as
+	// DELETE_ROLLED_BACK, which names the wrong cause.
+	let archivedArtifacts = [];
+	try {
+		archivedArtifacts = archiveUserSignedArtifacts(id);
+	} catch (arcErr) {
+		logAudit(req, "delete_user", "user", id,
+			`REFUSED to delete ${user.username}: could not archive the signed onboarding artifacts (${arcErr.code || "ARCHIVE_FAILED"})`);
+		return res.status(503).json({
+			error: "The signed onboarding documents could not be archived, so nothing was deleted. The account is untouched.",
+			code: "ARCHIVE_FAILED",
+			// A code, never err.message — that string carries the server's absolute
+			// path on EACCES/ENOSPC. These responses name labels, not values.
+			detail: arcErr.code || "unknown",
+		});
+	}
+
 	const removed = {};
+	const detached = {};
 	try {
 		db.transaction(() => {
 			if (name) {
@@ -16425,10 +16546,48 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
 				removed.documents = db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name).changes;
 				removed.trucks_unassigned = db.prepare("UPDATE trucks SET assigned_driver = '' WHERE LOWER(assigned_driver) = ?").run(name).changes;
+				// DETACH, not delete. `trucks.assigned_driver` is cleared on the line
+				// above, so leaving the OPEN truck_assignments row would make the two
+				// halves of one fact disagree — and resolveTruckForDriverName() reads
+				// both, which is precisely the divergence it was written to close.
+				// Closing the row with an end_date is what assignDriverToTruck() itself
+				// does on a reassignment (same column, same ISO stamp), so the history
+				// this table exists for — and getInvestorDriverSet()'s leg 1b, which
+				// decides which drivers an investor's payout covers — is preserved.
+				// Deleting the rows would retroactively narrow that set and restate
+				// open months.
+				detached.truck_assignments_closed = db.prepare(
+					"UPDATE truck_assignments SET end_date = ? WHERE LOWER(driver_name) = ? AND end_date = ''"
+				).run(new Date().toISOString(), name).changes;
 			}
+			// ⚠️ THE THREE FK-BEARING CHILDREN — without these the DELETE below
+			// raises FOREIGN KEY constraint failed and an onboarded driver simply
+			// cannot be removed. They are keyed on users.id, not on the name string,
+			// so they are exact and cannot catch a second person who shares a name.
+			//
+			// These ARE deleted rather than detached, and that is forced rather than
+			// chosen: all three declare `user_id INTEGER NOT NULL`, so there is no
+			// null to detach to, and 0 is not a valid parent either. The evidence is
+			// preserved out of band instead — the signed PDFs were copied into
+			// evidence-archive above and the originals are deliberately left on disk.
+			// driver_payment_info additionally holds bank routing + account numbers,
+			// so removing it with the account is a reduction in the plaintext-PII
+			// inventory, not a loss.
+			removed.onboarding_documents = db.prepare("DELETE FROM onboarding_documents WHERE user_id = ?").run(id).changes;
+			removed.driver_onboarding = db.prepare("DELETE FROM driver_onboarding WHERE user_id = ?").run(id).changes;
+			removed.driver_payment_info = db.prepare("DELETE FROM driver_payment_info WHERE user_id = ?").run(id).changes;
 			if (user.role === "Investor") {
 				removed.trucks_reparented = db.prepare("UPDATE trucks SET owner_id = 0 WHERE owner_id = ?").run(id).changes;
 				removed.investor_config = db.prepare("DELETE FROM investor_config WHERE owner_id = ?").run(id).changes;
+				// `investors.user_id` is UNIQUE and nullable with NO foreign key, so
+				// the delete leaves it pointing at an id that no longer exists — a
+				// dangling pointer that the next account created with that id would
+				// silently inherit. NULL is the honest value and SQLite permits many
+				// of them under a UNIQUE index. The investor RECORD itself stays:
+				// carrier name, entity, tax classification and its `investor_payouts`
+				// history are the counterparty to settled money, and blocker (2)
+				// already refuses the delete outright when any of that is frozen.
+				detached.investors_unlinked = db.prepare("UPDATE investors SET user_id = NULL WHERE user_id = ?").run(id).changes;
 			}
 			db.prepare("DELETE FROM users WHERE id = ?").run(id);
 		})();
@@ -16437,6 +16596,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		return res.status(500).json({
 			error: "The delete could not be completed and was rolled back. Nothing was removed.",
 			code: "DELETE_ROLLED_BACK",
+			// The old response named no cause at all, which is how a FOREIGN KEY
+			// failure read as "the app is broken" rather than "this user is
+			// onboarded". SQLite's message is schema text, not user data.
+			detail: err.message,
 		});
 	}
 
@@ -16451,14 +16614,79 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	if (user.role === "Driver" && user.driver_name) {
 		syncDriverToCarrierSheet(user.driver_name, { action: "delete" });
 	}
+	// ============================================================
+	// WHAT IS DELIBERATELY LEFT BEHIND — reported, never silently dropped
+	// ============================================================
+	// Thirteen of the twenty DRIVER_RENAME_TARGETS are absent from the cascade,
+	// and for most of them absence is the RIGHT answer — but an admin cannot tell
+	// "we decided to keep this" from "we forgot", so the counts ship in the
+	// response and the audit line. Each is a per-table decision:
+	//
+	//  • invoices              — issued documents, some already PAID. Never
+	//                            deleted; frozen ones REFUSE the delete outright
+	//                            (blocker 4 above). What remains here is live
+	//                            invoices in open months, kept because a weekly
+	//                            pay document is a record, not session state.
+	//  • drivers_directory     — `pay_daily` / `pay_percentage` are settlement
+	//                            INPUTS: getDriverPayStructures() reads them and
+	//                            resolveDailyRate() falls back to the truck's rate
+	//                            without them, so deleting the row silently
+	//                            re-prices every still-open month this driver
+	//                            worked. A directory row with no user row is also
+	//                            an ordinary, documented state — that table has
+	//                            its own lifecycle.
+	//  • carrier_driver_history— getInvestorDriverSet() leg 3. Deleting it
+	//                            retroactively narrows which loads an investor's
+	//                            payout covers.
+	//  • job_applications      — its own soft-delete and its own route
+	//                            (DELETE /api/applications/:id). Bulk-matching it
+	//                            on `full_name` is the Deshorn/Shorn trap: two
+	//                            real people, one a substring of the other. An
+	//                            admin removes it deliberately, by id.
+	//  • load_ratings          — per-load feedback. Left for the same reason as
+	//                            the above: an irreversible delete needs a
+	//                            stronger reason than a harmless leave-behind.
+	//  • routemate_dvir /
+	//    routemate_hos_daily   — FMCSA-regulated inspection and duty-time records.
+	//                            Retention is not ours to decide.
+	//  • investor_payouts      — blocker (2) refuses the delete while any row is
+	//                            paid, finalized or in a locked month; anything
+	//                            still counted here is an open month, which the
+	//                            next reconcile recomputes.
+	//
+	// Read-only: this runs AFTER the delete, so `users` is already gone and these
+	// are pure counts.
+	const retained = {};
+	const countRetained = (label, sql, ...args) => {
+		try {
+			const n = db.prepare(sql).get(...args);
+			if (n && n.cnt > 0) retained[label] = n.cnt;
+		} catch { /* table absent on this database — nothing retained */ }
+	};
+	if (name) {
+		countRetained("invoices", "SELECT COUNT(*) AS cnt FROM invoices WHERE LOWER(driver) = ? AND deleted_at = ''", name);
+		countRetained("drivers_directory", "SELECT COUNT(*) AS cnt FROM drivers_directory WHERE LOWER(driver_name) = ?", name);
+		countRetained("carrier_driver_history", "SELECT COUNT(*) AS cnt FROM carrier_driver_history WHERE LOWER(driver_name) = ?", name);
+		countRetained("job_applications", "SELECT COUNT(*) AS cnt FROM job_applications WHERE LOWER(full_name) = ? AND deleted_at IS NULL", name);
+		countRetained("load_ratings", "SELECT COUNT(*) AS cnt FROM load_ratings WHERE LOWER(driver_name) = ?", name);
+		countRetained("routemate_dvir", "SELECT COUNT(*) AS cnt FROM routemate_dvir WHERE LOWER(driver_name) = ?", name);
+		countRetained("routemate_hos_daily", "SELECT COUNT(*) AS cnt FROM routemate_hos_daily WHERE LOWER(driver_name) = ?", name);
+	}
+	countRetained("investor_payouts", "SELECT COUNT(*) AS cnt FROM investor_payouts WHERE owner_id = ?", id);
+
 	// The most destructive action in the app previously left no trace at all.
 	// The per-table counts are the point: "deleted a user" does not tell a later
-	// reader that 40 receipts went with it.
+	// reader that 40 receipts went with it — nor that 13 invoices and a signed
+	// W-9's archive record did NOT go with it.
+	const tally = (obj) => Object.entries(obj).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ");
 	logAudit(req, "delete_user", "user", id,
 		`${user.role} ${user.username}${user.driver_name ? ` (${user.driver_name})` : ""} deleted; cascade: ` +
-		(Object.entries(removed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ") || "no rows"));
+		(tally(removed) || "no rows") +
+		(tally(detached) ? `; detached: ${tally(detached)}` : "") +
+		(archivedArtifacts.length ? `; signed artifacts archived: ${archivedArtifacts.map((a) => a.file).join(", ")}` : "") +
+		(tally(retained) ? `; retained (not deleted): ${tally(retained)}` : ""));
 	notifyChange("users");
-	res.json({ success: true, removed });
+	res.json({ success: true, removed, detached, retained, archivedArtifacts });
 });
 
 // List investor users (for owner dropdown)
