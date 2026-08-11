@@ -15087,12 +15087,26 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 //      could remove every account including their own.
 //   3. A restore, a botched refresh, or a hand-edit that truncates the table.
 //
-// And there is no way back. CLAUDE.md documents
-// `scripts/reset-super-admin-password.js`, but that file does not exist in this
-// repo — recovery from "no Super Admin" today means hand-editing app.db on the
-// VPS. So the failure is symmetric and both halves are severe: leave it open and
-// a stranger owns the fleet; close it wrongly and the owner is locked out of
-// their own system with no scripted way in.
+// And there is no way back THROUGH THE API. `scripts/reset-super-admin-password.js`
+// exists (running on production since 2026-04-13) and is a real recovery tool: it
+// takes the plaintext from the `NEW_PASSWORD` environment variable and never from
+// argv — so it stays out of shell history and out of `ps` — enforces a 16-character
+// minimum, verifies the bcrypt round-trip before it commits, refuses unless exactly
+// one row changed, and CLEARS `sessions`. That last step is what makes a reset an
+// actual revocation rather than a new password sitting beside a live 24 h cookie;
+// see purgeUserSessions() below, which exists for the same reason.
+//
+// ⚠️ BUT IT RESETS A PASSWORD — IT DOES NOT MINT AN ADMIN. It needs an existing
+// Super Admin row to act on, and a root shell on the VPS to run at all. Neither is
+// available in the state this route guards against: zero Super Admins, reached over
+// HTTP by someone who has only HTTP. So it answers "I lost the password", not "there
+// is no Super Admin" — and recovery from THAT is still hand-editing app.db, or
+// SETUP_RECOVERY_TOKEN below. The script's existence therefore takes nothing away
+// from the guards; do not read it as a safety net for this failure.
+//
+// So the failure is symmetric and both halves are severe: leave it open and a
+// stranger owns the fleet; close it wrongly and the owner is locked out of their own
+// system with no scripted way in.
 //
 // THE FIX HAS TWO HALVES, AND THE FIRST ONE IS THE IMPORTANT HALF.
 //
@@ -17031,11 +17045,20 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// and that refusal has a remedy (reopen the period). These two have none, and
 	// the state they prevent is terminal: with no Super Admin, POST /api/users
 	// requires a Super Admin, PUT /api/users/:id requires a Super Admin, and
-	// POST /api/auth/setup refuses because `users` is not empty. CLAUDE.md points
-	// at scripts/reset-super-admin-password.js for exactly this, but that file
-	// does not exist in the repo — the only way back is hand-editing app.db on the
-	// VPS. Production runs TWO Super Admin accounts (`super_admin`, `ford_seeman`),
-	// so this is two clicks away, not a theoretical.
+	// POST /api/auth/setup refuses because `users` is not empty.
+	//
+	// ⚠️ AND scripts/reset-super-admin-password.js DOES NOT COVER THIS, despite
+	// being the obvious place to look. It exists (on production since 2026-04-13)
+	// and it is sound — the new plaintext comes from the `NEW_PASSWORD` environment
+	// variable rather than argv, so it never reaches shell history or `ps`; it
+	// enforces a 16-character minimum, verifies the bcrypt round-trip before
+	// committing, refuses unless exactly one row changed, and clears `sessions` so
+	// the reset revokes the old cookies instead of merely re-keying the account.
+	// But it RESETS a Super Admin's password; it cannot CREATE one. With zero Super
+	// Admins there is no row for it to act on, and it needs a root shell on the VPS
+	// besides — so the only way back from the state these guards prevent is still
+	// hand-editing app.db. Production runs TWO Super Admin accounts (`super_admin`,
+	// `ford_seeman`), so this is two clicks away, not a theoretical.
 	//
 	// They are ordered before the period guard on purpose: when both apply, "you
 	// cannot delete the last administrator" is the answer that helps, and the
