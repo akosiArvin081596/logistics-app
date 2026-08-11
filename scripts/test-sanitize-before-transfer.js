@@ -33,6 +33,37 @@ const SCRIPT = path.join(__dirname, "refresh-env.js");
 const KEEP = process.argv.includes("--keep");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "logisx-sanitize-test."));
 
+// The node_modules directory this run will use — RESOLVED, never composed.
+//
+// This was `path.join(__dirname, "..", "node_modules")` at the symlink site,
+// which asserts a layout instead of asking Node where its modules actually come
+// from. That assertion is false in the ordinary case of a **git worktree**,
+// which has no node_modules of its own because dependencies live in the parent
+// checkout — so realpathSync threw ENOENT, a bare `catch {}` swallowed it, no
+// symlink was made, and the operator met the failure five lines later as
+// refresh-env.js's "better-sqlite3 not available — run this from the
+// application directory so node_modules resolves" (refresh-env.js:316). That
+// message names the wrong cause: the working directory was already correct.
+//
+// require.resolve() performs the same upward node_modules walk that the shipped
+// copy's own `require("better-sqlite3")` will perform, so what gets symlinked is
+// the tree that would genuinely have satisfied it. It probes better-sqlite3
+// specifically because that is the module refresh-env.js fails on first, and the
+// whole DIRECTORY is symlinked rather than the single package because bcryptjs
+// (refresh-env.js:322) is required immediately afterwards and has to resolve
+// from the same tree.
+//
+// ⚠️ In a nested git worktree this resolves the PARENT checkout's node_modules,
+// including its compiled better-sqlite3 binary. That is what makes this suite
+// runnable from a worktree at all, and it is correct while both checkouts want
+// the same version — but it does mean the suite can exercise a native build that
+// does not correspond to THIS worktree's package.json if the two ever diverge.
+// Re-run from the main checkout before trusting a result that hinges on it.
+const NODE_MODULES = (() => {
+	try { return path.resolve(path.dirname(require.resolve("better-sqlite3/package.json")), ".."); }
+	catch { return null; }
+})();
+
 // ---------------------------------------------------------------------------
 // Invented values. Every one is a documentation/reserved-range placeholder or a
 // deliberate impossibility — nothing here corresponds to a real person, account
@@ -71,6 +102,18 @@ function check(name, ok, detail = "") {
 	console.log(`  ${ok ? "[ok]  " : "[FAIL]"} ${name}${detail ? ` — ${detail}` : ""}`);
 }
 function section(n) { console.log(`\n${n}`); }
+
+// One exit path, so an early bail reports exactly like a full run. Sections 4-7
+// all read the emitted artifact, so without this a section-3 failure surfaces as
+// a raw ENOENT stack trace that buries the [FAIL] lines explaining why.
+function finish() {
+	console.log("\n" + "-".repeat(74));
+	console.log(`${pass + fail} assertions · ${fail} failed`);
+	console.log(fail === 0 ? "=== ALL CHECKS PASSED ===" : "=== FAILURES ABOVE ===");
+	if (KEEP) console.log(`\nscratch kept at ${ROOT}`);
+	else fs.rmSync(ROOT, { recursive: true, force: true });
+	process.exit(fail === 0 ? 0 : 1);
+}
 
 // Runs the real script. Returns {code, out} instead of throwing, because half
 // these cases are asserting that it REFUSES.
@@ -178,6 +221,21 @@ function writeEnv(dir, lines) {
 (function run_all() {
 	console.log(`sanitize-before-transfer — scratch root ${ROOT}\n`);
 
+	// PREFLIGHT — say so plainly, before anything looks like a test result.
+	// seedDatabase() require()s better-sqlite3 directly on its first line, so
+	// without it this suite died on a raw MODULE_NOT_FOUND stack trace three
+	// frames deep, which reads like a broken test rather than a missing install.
+	// Exits non-zero on purpose: a suite that cannot run has not passed, and a
+	// green exit here would let a CI box with no dependencies report success on
+	// the assertions that prove PII never leaves the VPS.
+	if (!NODE_MODULES) {
+		console.log("CANNOT RUN — better-sqlite3 does not resolve from this checkout.");
+		console.log("  Run `npm install` here, or in the parent checkout if this is a git worktree.");
+		console.log("  Nothing was tested. This is a missing dependency, not a failing assertion.");
+		fs.rmSync(ROOT, { recursive: true, force: true });
+		process.exit(1);
+	}
+
 	// --- fixture -----------------------------------------------------------
 	const vps = path.join(ROOT, "vps-backups");
 	const laptop = path.join(ROOT, "laptop-checkout");
@@ -251,8 +309,19 @@ function writeEnv(dir, lines) {
 		// node_modules beside it, run from there. This proves the resolution
 		// mechanism, not just the sanitizing.
 		fs.copyFileSync(SCRIPT, path.join(remoteTmp, "refresh-env.js"));
-		const nm = path.join(__dirname, "..", "node_modules");
-		try { fs.symlinkSync(fs.realpathSync(nm), path.join(remoteTmp, "node_modules"), "dir"); } catch {}
+
+		// NODE_MODULES is resolved, not composed — see the comment on its
+		// definition for why, and for the git-worktree caveat. The preflight has
+		// already established that it is non-null, so a failure here is a real
+		// symlink failure (EEXIST, EPERM, a read-only scratch dir) and is reported
+		// as itself rather than swallowed into the misleading "run this from the
+		// application directory" message the next check would otherwise print.
+		try {
+			fs.symlinkSync(NODE_MODULES, path.join(remoteTmp, "node_modules"), "dir");
+		} catch (e) {
+			console.log(`  [skip] no node_modules symlink — symlinking ${NODE_MODULES} failed: ${e.code || e.message}.`);
+			console.log("         The next check will report \"better-sqlite3 not available\"; the cause is THIS, not a wrong working directory.");
+		}
 		artifact = path.join(remoteTmp, "sanitized.db.gz");
 
 		// Invoked as the SHIPPED copy, from its own directory, with no NODE_PATH:
@@ -276,6 +345,15 @@ function writeEnv(dir, lines) {
 		}
 		const leftovers = fs.readdirSync(remoteTmp).filter((f) => /\.tmp$|\.partial$|-wal$|-shm$/.test(f));
 		check("no working copy left behind on the 'VPS'", leftovers.length === 0, leftovers.join(", "));
+	}
+
+	// Every section below reads the artifact section 3 emitted. If it is not
+	// there, stop and let the [FAIL] lines above be the last word — the previous
+	// shape threw a raw ENOENT here, which scrolled the real explanation off the
+	// screen and made a missing dependency look like a broken test.
+	if (!fs.existsSync(artifact)) {
+		console.log("\nNo artifact was emitted, so the remaining sections cannot run. See the failures above.");
+		finish();
 	}
 
 	// =======================================================================
@@ -389,10 +467,5 @@ function writeEnv(dir, lines) {
 	}
 
 	// =======================================================================
-	console.log("\n" + "-".repeat(74));
-	console.log(`${pass + fail} assertions · ${fail} failed`);
-	console.log(fail === 0 ? "=== ALL CHECKS PASSED ===" : "=== FAILURES ABOVE ===");
-	if (KEEP) console.log(`\nscratch kept at ${ROOT}`);
-	else fs.rmSync(ROOT, { recursive: true, force: true });
-	process.exit(fail === 0 ? 0 : 1);
+	finish();
 })();
