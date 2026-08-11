@@ -4101,6 +4101,51 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 		// `Load ID` is included for parity with from-ratecon even though Job
 		// Details has no such column today and both writers silently drop it — so
 		// that if the column is ever added, both paths fill it rather than one.
+		//
+		// ⚠️⚠️ `Details` HERE IS THE ROUTE, AND IT BELONGS TO THE **JOB DETAILS**
+		// TAB ONLY. Never let it reach Job Tracking. Read this before wiring any
+		// new node to this endpoint.
+		//
+		// BOTH tabs have a column called `Details` and they mean OPPOSITE things:
+		//   Job Details.Details  = the lane, "City, ST ZIP - City, ST ZIP".
+		//                          What rpm.details is, and what
+		//                          POST /api/loads/from-ratecon writes there too.
+		//   Job Tracking.Details = the COMMODITY, "Empty CHEP Pallets, 33,556.15
+		//                          lbs, 540 Units, 53' Dry Van Trailer Required".
+		//                          Dispatcher-visible in ActiveLoadsTab, written
+		//                          by n8n's `JOB DETAILS ENTRY` node.
+		//
+		// That collision — one key name, two meanings, one shared item — is the
+		// whole bug. `Update Job Tracking (Distance)` mapped `{{ $json.Details }}`
+		// into Job Tracking and so replaced the commodity with the route on every
+		// email-ingested load: 324 of 344 populated production rows, the original
+		// text unrecoverable. Proven on execution 2457, load 562787563.
+		//
+		// AND THE ITEM REACHES THAT NODE INTACT: `Update Job Details (Distance)`
+		// is mappingMode `autoMapInputData`, which passes the input item THROUGH
+		// rather than replacing it with the row it wrote (verified on 2457 — its
+		// output item was byte-identical to its input). So on the `Addresses
+		// Ready?` TRUE branch, `$json` at the Job Tracking node IS this response
+		// body. This endpoint is therefore the proximate source of that value,
+		// which is why the rule below is stated here and not only in n8n.
+		//
+		// ⚠️ The fix is NOT to drop or rename `Details`. `Update Job Details
+		// (Distance)` auto-maps top-level keys onto like-named columns, so
+		// removing it makes that node write an EMPTY STRING and blank the Job
+		// Details column outright — strictly worse than a wrong value, and the
+		// exact regression recorded from execution 2426. The correct Job Tracking
+		// value cannot come from here at all: the commodity is not in this
+		// request, and it must also be right on the `Addresses Ready?` FALSE
+		// branch, which never calls this endpoint. It comes from the node that
+		// wrote it — `{{ $('JOB DETAILS ENTRY').item.json['Details'] }}`, which
+		// is correct on BOTH branches and is the reference that node already
+		// uses for `Load ID`.
+		//
+		// `_meta` matches no column on either tab, so auto-map drops it — but it
+		// IS readable by an n8n expression on the true branch (see above), which
+		// is why `details_kind` is worth publishing: it lets a consumer tell a
+		// real lane from the "Distance unavailable" sentinel that a Maps outage
+		// produces, instead of writing that sentinel into a display column.
 		return res.json({
 			"Load ID": loadId,
 			Distance: `${rpm.distance_miles} Miles`,
@@ -4112,6 +4157,12 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 				distance_text: rpm.distance_text,
 				rate_per_mile: rpm.rate_per_mile,
 				details: rpm.details,
+				// What the `Details` key above actually holds, and which tab owns
+				// it. `route` on the happy path; `unavailable` when the Distance
+				// Matrix call failed and calculateRatePerMile() returned its
+				// "Distance unavailable" sentinel rather than a lane.
+				details_kind: measured ? "route" : "unavailable",
+				details_scope: "job_details",
 				payment: rpm.payment,
 				measured,
 				source: measured ? "google_distance_matrix" : "unavailable",

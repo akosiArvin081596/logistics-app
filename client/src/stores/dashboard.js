@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
+import { resolveLoadRoute } from '../lib/address'
 
 const api = useApi()
 
@@ -36,23 +37,24 @@ export const useDashboardStore = defineStore('dashboard', {
       }
     },
 
+    // `origin` / `destination` are not cosmetic here: the server builds the
+    // driver's "load assigned" notification body and the load-assigned socket
+    // payload out of them, so whatever this sends is what the driver reads.
+    //
+    // \u26a0\ufe0f It used to derive them by splitting the `Details` column on a hyphen.
+    // Two compounding faults: the origin/destination regexes were
+    // /origin|pickup.*city|\u2026/ and Job Tracking's columns are `Pickup Info` /
+    // `Pickup Address` / `Drop-off Address` \u2014 no "city" anywhere \u2014 so both
+    // lookups returned undefined and the `Details` fallback fired on EVERY
+    // dispatch. That was survivable only while n8n was overwriting `Details`
+    // with a route. On a load carrying its real commodity the driver was told
+    // his route was "12x32 DAIRY PURE WholeMilk, 43,764 lbs \u2192 1,575 Case(s)".
+    // resolveLoadRoute() reads the address columns the sheet actually has, and
+    // consults `Details` only when it is genuinely route-shaped.
     async assignDriver(rowIndex, driver, job, headers) {
       const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
-      const detailsCol = headers.find((h) => /details/i.test(h))
-      const originCol = headers.find((h) => /origin|pickup.*city|shipper.*city/i.test(h) && !/lat|lng|lon/i.test(h))
-      const destCol = headers.find((h) => /dest|drop.*city|receiver.*city|delivery.*city|consignee.*city/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h))
       const loadId = loadIdCol ? job[loadIdCol] || '' : ''
-
-      let origin = originCol ? job[originCol] || '' : ''
-      let destination = destCol ? job[destCol] || '' : ''
-      if (!origin && !destination && detailsCol) {
-        const details = (job[detailsCol] || '').trim()
-        const parts = details.split(/\s*[-\u2192]\s*/)
-        if (parts.length >= 2) {
-          origin = parts[0].trim()
-          destination = parts[1].trim()
-        }
-      }
+      const { origin, destination } = resolveLoadRoute(job, headers)
 
       await api.post('/api/dispatch', { rowIndex, driver, loadId, origin, destination })
     },

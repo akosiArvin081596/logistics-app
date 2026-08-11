@@ -59,6 +59,7 @@
 import { computed } from 'vue'
 import StatusBadge from '../shared/StatusBadge.vue'
 import { parseYmdLocal } from '../../utils/datetime'
+import { formatLoadRoute } from '../../lib/address.js'
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -76,25 +77,19 @@ function findCol(headers, regex) {
 
 const statusCol = computed(() => findCol(props.headers, /status/i))
 const loadIdCol = computed(() => findCol(props.headers, /load.?id|job.?id/i))
-const detailsCol = computed(() => findCol(props.headers, /details/i))
-const originCol = computed(() => (props.headers || []).find(h => /origin|pickup.*(city|info|address)|shipper.*(city|info)/i.test(h) && !/lat|lng|lon/i.test(h)) || null)
-const destCol = computed(() => (props.headers || []).find(h => /dest|drop.*(city|info|address)|receiver.*(city|info)|delivery.*(city|info)|consignee.*(city|info)/i.test(h) && !/lat|lng|lon|date|time|appt|eta/i.test(h)) || null)
 const pickupCol = computed(() => findCol(props.headers, /pickup.*date|pickup.*appoint/i))
 const delivCol = computed(() => findCol(props.headers, /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint|completion.*date/i))
 
 const status = computed(() => statusCol.value ? (props.load[statusCol.value] || '').trim() : '')
 const loadId = computed(() => loadIdCol.value ? props.load[loadIdCol.value] : '')
 
-const route = computed(() => {
-  if (detailsCol.value) {
-    const details = (props.load[detailsCol.value] || '').trim()
-    if (details) return details.replace(/\s*-\s*/, ' \u2192 ')
-  }
-  const o = originCol.value ? props.load[originCol.value] : ''
-  const d = destCol.value ? props.load[destCol.value] : ''
-  if (o || d) return `${o || '\u2014'} \u2192 ${d || '\u2014'}`
-  return ''
-})
+// The route line. `Details` is the COMMODITY column \u2014 it only ever looked like
+// a route because the n8n ingest was overwriting it with one. Preferring it
+// unconditionally showed the driver "Empty CHEP Pallets, 33,556.15 lbs, 540
+// Units" where his lane belongs. formatLoadRoute() reads the address columns
+// first and consults `Details` only when it is genuinely route-shaped, which is
+// what keeps the ~324 historical route-shaped rows rendering unchanged.
+const route = computed(() => formatLoadRoute(props.load, props.headers))
 
 const pickupDate = computed(() => pickupCol.value ? props.load[pickupCol.value] : '')
 const deliveryDate = computed(() => delivCol.value ? props.load[delivCol.value] : '')
