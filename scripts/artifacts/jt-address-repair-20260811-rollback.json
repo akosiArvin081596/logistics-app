@@ -1,0 +1,161 @@
+{
+  "generatedAt": "2026-08-11T12:36:36.200Z",
+  "mode": "applied",
+  "sheetId": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+  "sheetTab": "Job Tracking",
+  "lockedPeriods": [
+    "2025-05",
+    "2025-06",
+    "2025-07",
+    "2025-08",
+    "2025-09",
+    "2025-10",
+    "2025-11",
+    "2025-12",
+    "2026-01",
+    "2026-02",
+    "2026-03",
+    "2026-04",
+    "2026-05",
+    "2026-06",
+    "2026-07"
+  ],
+  "lockFreshness": {
+    "locked": [
+      "2025-05",
+      "2025-06",
+      "2025-07",
+      "2025-08",
+      "2025-09",
+      "2025-10",
+      "2025-11",
+      "2025-12",
+      "2026-01",
+      "2026-02",
+      "2026-03",
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07"
+    ],
+    "newest": "2026-07",
+    "expect": "2026-07",
+    "fresh": true
+  },
+  "rollback": [
+    {
+      "range": "Job Tracking!H409",
+      "loadId": "7083240",
+      "sheetRow": 409,
+      "restoreTo": "",
+      "wouldBecome": "3311 EAST LINCOLN WAY, AMES, IA 50010"
+    },
+    {
+      "range": "Job Tracking!K409",
+      "loadId": "7083240",
+      "sheetRow": 409,
+      "restoreTo": "",
+      "wouldBecome": "Suite 200 2930 114th Street, GRAND PRAIRIE, TX 75050"
+    },
+    {
+      "range": "Job Tracking!H411",
+      "loadId": "7086762",
+      "sheetRow": 411,
+      "restoreTo": "",
+      "wouldBecome": "3311 EAST LINCOLN WAY, AMES, IA 50010"
+    },
+    {
+      "range": "Job Tracking!K411",
+      "loadId": "7086762",
+      "sheetRow": 411,
+      "restoreTo": "",
+      "wouldBecome": "2930 114TH STREET, GRAND PRAIRIE, TX 75050"
+    }
+  ],
+  "plans": [
+    {
+      "sheetRow": 409,
+      "loadId": "7083240",
+      "status": "Delivered",
+      "payment": "$ 1,800.00",
+      "pickup": "",
+      "drop": "",
+      "assigned": "8/3/2026, 2:15:49 PM",
+      "assignedMonth": "2026-08",
+      "periods": [
+        "2026-08"
+      ],
+      "resolved": true,
+      "locked": [],
+      "writable": true,
+      "cancelled": false,
+      "completed": true,
+      "hasLocalRateConPdf": false,
+      "addressDamaged": true,
+      "flags": [
+        "both_addresses_empty"
+      ],
+      "decision": "repair",
+      "source": "Subject: Bison Transport Order #7083240",
+      "cells": [
+        {
+          "column": "Pickup Address",
+          "range": "Job Tracking!H409",
+          "before": "",
+          "after": "3311 EAST LINCOLN WAY, AMES, IA 50010"
+        },
+        {
+          "column": "Drop-off Address",
+          "range": "Job Tracking!K409",
+          "before": "",
+          "after": "Suite 200 2930 114th Street, GRAND PRAIRIE, TX 75050"
+        }
+      ]
+    },
+    {
+      "sheetRow": 411,
+      "loadId": "7086762",
+      "status": "Delivered",
+      "payment": "$ 1,800.00",
+      "pickup": "",
+      "drop": "",
+      "assigned": "8/3/2026, 10:38:19 PM",
+      "assignedMonth": "2026-08",
+      "periods": [
+        "2026-08"
+      ],
+      "resolved": true,
+      "locked": [],
+      "writable": true,
+      "cancelled": false,
+      "completed": true,
+      "hasLocalRateConPdf": false,
+      "addressDamaged": true,
+      "flags": [
+        "both_addresses_empty"
+      ],
+      "decision": "repair",
+      "source": "Subject: Bison Transport Order #7086762",
+      "cells": [
+        {
+          "column": "Pickup Address",
+          "range": "Job Tracking!H411",
+          "before": "",
+          "after": "3311 EAST LINCOLN WAY, AMES, IA 50010"
+        },
+        {
+          "column": "Drop-off Address",
+          "range": "Job Tracking!K411",
+          "before": "",
+          "after": "2930 114TH STREET, GRAND PRAIRIE, TX 75050"
+        }
+      ]
+    }
+  ],
+  "appliedAt": "2026-08-11T12:36:39.962Z",
+  "verification": {
+    "ok": 4,
+    "bad": 0,
+    "totalUpdatedCells": 4
+  }
+}
